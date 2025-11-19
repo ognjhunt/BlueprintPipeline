@@ -1,0 +1,16 @@
+# local scratch / caches
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+.mypy_cache/
+.hf-cache/
+hf-cache/
+
+# editor stuff
+.vscode/
+.idea/
+
+# if you later bring these in here and don’t want them
+work/
+src/

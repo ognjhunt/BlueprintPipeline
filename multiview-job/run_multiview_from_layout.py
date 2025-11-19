@@ -1,0 +1,325 @@
+import os
+import sys
+import json
+from pathlib import Path
+
+import cv2
+import numpy as np
+from PIL import Image
+from google import genai  # Google GenAI SDK
+
+
+def load_layout(layout_path: Path):
+    if not layout_path.is_file():
+        raise FileNotFoundError(f"scene_layout file not found: {layout_path}")
+    with layout_path.open("r") as f:
+        return json.load(f)
+
+
+def crop_object(image_bgr, bbox2d, polygon=None, margin_frac=0.05):
+    """
+    image_bgr: H x W x 3 (BGR, as loaded by OpenCV)
+    bbox2d: [cx, cy, w, h] in normalized coords [0,1]
+    polygon: optional list[[x,y], ...] in normalized coords [0,1] on the FULL image.
+    margin_frac: extra margin around bbox (fraction of image size)
+    Returns: (cropped BGR image, (x0,y0,x1,y1))
+    """
+    H, W, _ = image_bgr.shape
+
+    if polygon:
+        # Use polygon to define tighter crop and mask out everything else.
+        coords = np.array(polygon, dtype=np.float32)
+        xs = coords[:, 0] * W
+        ys = coords[:, 1] * H
+
+        min_x = xs.min()
+        max_x = xs.max()
+        min_y = ys.min()
+        max_y = ys.max()
+
+        x0 = int(np.clip(min_x - margin_frac * W, 0, W - 1))
+        x1 = int(np.clip(max_x + margin_frac * W, 0, W - 1))
+        y0 = int(np.clip(min_y - margin_frac * H, 0, H - 1))
+        y1 = int(np.clip(max_y + margin_frac * H, 0, H - 1))
+
+        if x1 <= x0 or y1 <= y0:
+            return None, (x0, y0, x1, y1)
+
+        crop = image_bgr[y0:y1, x0:x1].copy()
+
+        # Build a mask from the polygon in crop-local coordinates
+        poly_local = np.stack(
+            [xs - x0, ys - y0],
+            axis=-1,
+        ).astype(np.int32)
+
+        mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+        cv2.fillPoly(mask, [poly_local], 255)
+
+        # Put object on light gray background (so table/shelf/etc disappear)
+        background_val = 240
+        crop_masked = np.full_like(crop, background_val, dtype=np.uint8)
+        crop_masked[mask == 255] = crop[mask == 255]
+
+        return crop_masked, (x0, y0, x1, y1)
+
+    # Fallback: bbox-based crop as before
+    cx_n, cy_n, w_n, h_n = bbox2d
+
+    x_center = cx_n * W
+    y_center = cy_n * H
+    bw_px = w_n * W
+    bh_px = h_n * H
+
+    x0 = int(np.clip(x_center - bw_px / 2 - margin_frac * W, 0, W - 1))
+    x1 = int(np.clip(x_center + bw_px / 2 + margin_frac * W, 0, W - 1))
+    y0 = int(np.clip(y_center - bh_px / 2 - margin_frac * H, 0, H - 1))
+    y1 = int(np.clip(y_center + bh_px / 2 + margin_frac * H, 0, H - 1))
+
+    if x1 <= x0 or y1 <= y0:
+        return None, (x0, y0, x1, y1)
+
+    crop = image_bgr[y0:y1, x0:x1].copy()
+    return crop, (x0, y0, x1, y1)
+
+
+def create_gemini_client():
+    # GEMINI_API_KEY should be set in environment (or pass api_key explicitly)
+    client = genai.Client()
+    return client
+
+
+def extract_image_from_response(response):
+    """
+    Robustly extract a single image from a Gemini response.
+    Prefer candidates[...].content.parts.inline_data, fall back to response.parts.
+    """
+    # Preferred: candidates[...].content.parts
+    for cand in getattr(response, "candidates", []):
+        content = getattr(cand, "content", None)
+        if content is None:
+            continue
+        for part in getattr(content, "parts", []):
+            if getattr(part, "inline_data", None) is not None:
+                try:
+                    return part.as_image()
+                except AttributeError:
+                    pass
+
+    # Fallback: response.parts (older style)
+    for part in getattr(response, "parts", []):
+        if getattr(part, "inline_data", None) is not None:
+            try:
+                return part.as_image()
+            except AttributeError:
+                pass
+
+    return None
+
+
+def infer_object_phrase(client, crop_path: Path, class_name: str) -> str:
+    """
+    Ask Gemini to describe the *foreground movable object* in the crop as
+    a short noun phrase (e.g., 'tan ceramic jar', 'round wooden cutting board').
+    This lets us stop trusting raw YOLO class_name like 'table'.
+    """
+    image = Image.open(str(crop_path)).convert("RGB")
+
+    prompt = (
+        "You are labelling objects from indoor scenes for 3D modelling.\n"
+        "Look at the reference image and identify the SINGLE foreground movable object "
+        "(for example: 'tan ceramic jar', 'round wooden cutting board', "
+        "'small potted plant', 'metal cooking pot').\n"
+        "Prefer the smaller physical object (jar, pot, utensil, board, plant, lamp, etc.) "
+        "over large surfaces such as tables, shelves, countertops, cabinets, walls, or panels.\n"
+        "Respond with ONE short noun phrase (3–8 words) naming that object, and nothing else."
+    )
+
+    try:
+        resp = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[prompt, image],
+        )
+        phrase = getattr(resp, "text", "") or ""
+    except Exception as e:
+        print(f"[MULTIVIEW] WARNING: object phrase inference failed: {e}", file=sys.stderr)
+        phrase = ""
+
+    phrase = (phrase or "").strip()
+    if "\n" in phrase:
+        phrase = phrase.splitlines()[0].strip()
+    # Strip surrounding quotes if present
+    if len(phrase) > 2 and phrase[0] in "\"'" and phrase[-1] == phrase[0]:
+        phrase = phrase[1:-1].strip()
+
+    if not phrase:
+        phrase = class_name or "object"
+
+    print(f"[MULTIVIEW] Inferred object phrase: {phrase!r} (class_name={class_name!r})")
+    return phrase
+
+
+def generate_views_for_object(
+    client,
+    crop_path: Path,
+    object_phrase: str,
+    out_dir: Path,
+    views_per_object: int = 4,
+):
+    """
+    Calls Gemini 2.5 Flash Image to generate N views of the object.
+    Writes view_0.png ... view_(N-1).png into out_dir.
+    Each call requests ONE view only (no grids).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Different view descriptions per index
+    view_descriptions = [
+        "straight-on front view at eye level",
+        "three-quarter front-left view",
+        "three-quarter front-right view",
+        "slightly top-down front view",
+        "left side view",
+        "right side view",
+    ]
+
+    image = Image.open(str(crop_path)).convert("RGB")
+
+    for i in range(views_per_object):
+        desc = view_descriptions[i % len(view_descriptions)]
+        prompt = (
+            f"Using the reference image, recreate ONLY the {object_phrase} as a standalone object, "
+            f"shown from a {desc}.\n"
+            "The reference may include tables, shelves, countertops, walls, or panels behind the object, "
+            "but you must IGNORE and REMOVE all of those supporting surfaces.\n"
+            f"The {object_phrase} should appear by itself, with no table, shelf, counter, or wall visible.\n"
+            "Place it on a simple light-gray floor with a plain light-gray background. "
+            "Do not add any other props or extra objects. "
+            "Output exactly one image, not a grid or collage."
+        )
+
+        print(f"[MULTIVIEW] Calling Gemini for view {i} of {object_phrase!r} ...")
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-image",
+            contents=[prompt, image],
+        )
+
+        gen_img = extract_image_from_response(response)
+        if gen_img is None:
+            print(
+                f"[MULTIVIEW] WARNING: no image part returned for object '{object_phrase}', view {i}",
+                file=sys.stderr,
+            )
+            continue
+
+        out_path = out_dir / f"view_{i}.png"
+        gen_img.save(str(out_path))
+        print(f"[MULTIVIEW] Saved {out_path}")
+
+
+def main() -> None:
+    bucket = os.getenv("BUCKET", "")
+    scene_id = os.getenv("SCENE_ID", "")
+    layout_prefix = os.getenv("LAYOUT_PREFIX")           # e.g. scenes/<sceneId>/layout
+    seg_dataset_prefix = os.getenv("SEG_DATASET_PREFIX") # e.g. scenes/<sceneId>/seg/dataset
+    multiview_prefix = os.getenv("MULTIVIEW_PREFIX")     # e.g. scenes/<sceneId>/multiview
+    layout_file_name = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
+    views_per_object_env = os.getenv("VIEWS_PER_OBJECT", "4")
+
+    try:
+        views_per_object = int(views_per_object_env)
+    except ValueError:
+        views_per_object = 4
+
+    if not layout_prefix or not seg_dataset_prefix or not multiview_prefix:
+        print(
+            "[MULTIVIEW] LAYOUT_PREFIX, SEG_DATASET_PREFIX, and MULTIVIEW_PREFIX env vars are required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    root = Path("/mnt/gcs")
+    layout_dir = root / layout_prefix
+    seg_dataset_dir = root / seg_dataset_prefix
+    multiview_root = root / multiview_prefix
+
+    layout_path = layout_dir / layout_file_name
+    room_img_path = seg_dataset_dir / "valid" / "images" / "room.jpg"
+
+    print(f"[MULTIVIEW] Bucket: {bucket}")
+    print(f"[MULTIVIEW] Scene ID: {scene_id}")
+    print(f"[MULTIVIEW] Layout path: {layout_path}")
+    print(f"[MULTIVIEW] Room image path: {room_img_path}")
+    print(f"[MULTIVIEW] Multiview root: {multiview_root}")
+    print(f"[MULTIVIEW] Views per object: {views_per_object}")
+
+    if not layout_path.is_file():
+        print(f"[MULTIVIEW] ERROR: layout file not found: {layout_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if not room_img_path.is_file():
+        print(f"[MULTIVIEW] ERROR: room image not found: {room_img_path}", file=sys.stderr)
+        sys.exit(1)
+
+    multiview_root.mkdir(parents=True, exist_ok=True)
+
+    layout = load_layout(layout_path)
+    objects = layout.get("objects", [])
+    print(f"[MULTIVIEW] Layout has {len(objects)} objects")
+
+    if not objects:
+        print("[MULTIVIEW] No objects found in layout; nothing to do.")
+        return
+
+    # Load original image once (BGR)
+    image_bgr = cv2.imread(str(room_img_path))
+    if image_bgr is None:
+        print(f"[MULTIVIEW] ERROR: failed to load {room_img_path}", file=sys.stderr)
+        sys.exit(1)
+
+    H, W, _ = image_bgr.shape
+    print(f"[MULTIVIEW] Room image shape: {H}x{W}")
+
+    # Create Gemini client
+    client = create_gemini_client()
+
+    for obj in objects:
+        obj_id = obj.get("id")
+        class_name = obj.get("class_name", f"class_{obj.get('class_id', 0)}")
+        bbox2d = obj.get("bbox2d")
+        polygon = obj.get("polygon")  # normalized coords [N, 2]
+
+        if not bbox2d or len(bbox2d) != 4:
+            print(f"[MULTIVIEW] Skipping object {obj_id}: invalid bbox2d", file=sys.stderr)
+            continue
+
+        print(f"[MULTIVIEW] Processing object id={obj_id}, class_name={class_name!r}")
+
+        crop_bgr, box = crop_object(image_bgr, bbox2d, polygon=polygon)
+        if crop_bgr is None:
+            print(f"[MULTIVIEW] Skipping object {obj_id}: empty crop", file=sys.stderr)
+            continue
+
+        obj_dir = multiview_root / f"obj_{obj_id}"
+        obj_dir.mkdir(parents=True, exist_ok=True)
+        crop_path = obj_dir / "crop.png"
+        cv2.imwrite(str(crop_path), crop_bgr)
+        print(f"[MULTIVIEW] Saved crop to {crop_path}")
+
+        # Step 1: infer a good noun phrase for the foreground movable object
+        object_phrase = infer_object_phrase(client, crop_path, class_name)
+
+        # Step 2: generate isolated single-view renders
+        generate_views_for_object(
+            client=client,
+            crop_path=crop_path,
+            object_phrase=object_phrase,
+            out_dir=obj_dir,
+            views_per_object=views_per_object,
+        )
+
+    print("[MULTIVIEW] Done.")
+
+
+if __name__ == "__main__":
+    main()

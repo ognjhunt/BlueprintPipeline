@@ -1,0 +1,65 @@
+main:
+  params: [event]
+  steps:
+    # 1) Log event (handy while debugging)
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    # 2) Extract fields we care about
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "us-central1"
+        next: filter_dataset_yaml
+
+    # 3) Only continue if object is scenes/<sceneId>/seg/dataset/data.yaml
+    - filter_dataset_yaml:
+        switch:
+          - condition: ${text.match_regex(object, "(?i)^scenes/.+/seg/dataset/data\\.yaml$")}
+            next: derive
+        next: skip
+
+    # 4) Derive sceneId, datasetPrefix, outPrefix
+    #    object: scenes/<sceneId>/seg/dataset/data.yaml
+    - derive:
+        assign:
+          - parts: ${text.split(object, "/")}
+          - sceneId: ${parts[1]}
+          - datasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
+          - outPrefix: ${"scenes/" + sceneId + "/da3"}
+          - jobName: "scene-da3-job"
+        next: run_da3_job
+
+    # 5) Invoke Cloud Run job scene-da3-job with env overrides
+    - run_da3_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: DATASET_PREFIX
+                      value: ${datasetPrefix}
+                    - name: OUT_PREFIX
+                      value: ${outPrefix}
+        result: da3Exec
+        next: done
+
+    # 6) Return quick status
+    - done:
+        return: ${"scene-da3 started for " + object}
+
+    # 7) Skip non-matching objects
+    - skip:
+        return: ${"scene-da3 skip " + object}

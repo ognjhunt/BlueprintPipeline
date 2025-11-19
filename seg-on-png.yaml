@@ -1,0 +1,62 @@
+main:
+  params: [event]
+  steps:
+    # 1) Log the raw event (handy while debugging)
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    # 2) Extract bucket + object name
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "us-central1"
+        next: filter_by_extension
+
+    # 3) Only continue if object is under "scenes/" and ends with .png/.jpg/.jpeg
+    - filter_by_extension:
+        switch:
+          - condition: ${text.match_regex(object, "(?i)^scenes/.+\\.(png|jpg|jpeg)$")}
+            next: derive_prefixes
+        next: skip
+
+    # 4) Derive IMAGES_PREFIX and SEG_PREFIX from object path
+    #    object like: "scenes/<sceneId>/room.png"
+    #    imagesPrefix: "scenes/<sceneId>"
+    #    segPrefix:    "scenes/<sceneId>/seg"
+    - derive_prefixes:
+        assign:
+          - imagesPrefix: ${text.replace_all(object, "/[^/]+$", "")}
+          - segPrefix: ${imagesPrefix + "/seg"}
+        next: run_seg_job
+
+    # 5) Run the Cloud Run job gsam2-job with env overrides
+    - run_seg_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/gsam2-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: IMAGES_PREFIX
+                      value: ${imagesPrefix}
+                    - name: SEG_PREFIX
+                      value: ${segPrefix}
+        result: runResult
+        next: done
+
+    # 6) Return quick result
+    - done:
+        return: ${"started gsam2-job for " + object}
+
+    # 7) Skip non-image or non-scenes/ objects quietly
+    - skip:
+        return: ${"skipped object " + object}

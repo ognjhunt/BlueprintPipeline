@@ -1,0 +1,61 @@
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "us-central1"
+        next: filter_da3_geom
+
+    # Only handle scenes/.../da3/da3_geom.npz
+    - filter_da3_geom:
+        switch:
+          - condition: ${text.match_regex(object, "^scenes/.+/da3/da3_geom\\.npz$")}
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: ${text.split(object, "/")}
+          - sceneId: ${parts[1]}
+          - da3Prefix: ${"scenes/" + sceneId + "/da3"}
+          - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
+          - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
+          - jobName: "layout-job"
+        next: run_layout_job
+
+    - run_layout_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: DA3_PREFIX
+                      value: ${da3Prefix}
+                    - name: SEG_DATASET_PREFIX
+                      value: ${segDatasetPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+        result: layoutExec
+        next: done
+
+    - done:
+        return: ${"layout-job started for " + object}
+
+    - skip:
+        return: ${"layout skip " + object}
