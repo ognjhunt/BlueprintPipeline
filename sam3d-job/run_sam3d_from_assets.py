@@ -71,6 +71,67 @@ def save_basecolor_texture(texture: np.ndarray, out_path: Path) -> Optional[Path
         return None
 
 
+def getenv_bool(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
+
+def mesh_bounds(mesh) -> Optional[dict]:
+    """Return a simple bounding-box summary for a trimesh-like mesh."""
+
+    try:
+        bounds = getattr(mesh, "bounds", None)
+        if bounds is None:
+            return None
+        arr = np.asarray(bounds, dtype=np.float64)
+        if arr.shape != (2, 3):
+            return None
+        mn, mx = arr
+        size = mx - mn
+        center = (mx + mn) * 0.5
+        return {
+            "min": mn.tolist(),
+            "max": mx.tolist(),
+            "size": size.tolist(),
+            "center": center.tolist(),
+        }
+    except Exception as exc:  # pragma: no cover - best effort diagnostics
+        print(f"[SAM3D] WARNING: failed to compute mesh bounds: {exc}", file=sys.stderr)
+        return None
+
+
+def normalize_mesh_inplace(mesh, bounds: dict) -> Optional[dict]:
+    """
+    Normalize a mesh so its center is at the origin and the largest dimension is 1.
+
+    Returns a metadata dict describing the applied transform, or None if skipped.
+    """
+
+    size = np.array(bounds.get("size") or [], dtype=np.float64)
+    if size.size != 3:
+        return None
+
+    max_extent = float(size.max())
+    if max_extent <= 0:
+        return None
+
+    center = np.array(bounds.get("center"), dtype=np.float64)
+    if center.size != 3:
+        center = np.zeros(3, dtype=np.float64)
+
+    try:
+        mesh.apply_translation(-center)
+        mesh.apply_scale(1.0 / max_extent)
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        print(f"[SAM3D] WARNING: failed to normalize mesh: {exc}", file=sys.stderr)
+        return None
+
+    return {
+        "translation": (-center).tolist(),
+        "scale": 1.0 / max_extent,
+        "reference_extent": max_extent,
+    }
+
+
 def convert_glb_to_usdz(glb_path: Path, usdz_path: Path) -> bool:
     """Convert a GLB into USDZ using the usd_from_gltf CLI if available."""
 
@@ -173,6 +234,7 @@ def main() -> None:
     scene_id = os.getenv("SCENE_ID", "")
     assets_prefix = os.getenv("ASSETS_PREFIX")  # scenes/<sceneId>/assets
     sam3d_config_path = os.getenv("SAM3D_CONFIG_PATH")
+    normalize_meshes = getenv_bool("SAM3D_NORMALIZE_MESH", "0")
 
     if not assets_prefix:
         print("[SAM3D] ASSETS_PREFIX is required", file=sys.stderr)
@@ -222,6 +284,8 @@ def main() -> None:
     plan = json.loads(plan_path.read_text())
     objs = plan.get("objects", [])
     print(f"[SAM3D] Loaded plan with {len(objs)} objects")
+    if normalize_meshes:
+        print("[SAM3D] Mesh normalization enabled")
 
     for obj in objs:
         if obj.get("pipeline") != "sam3d":
@@ -251,6 +315,20 @@ def main() -> None:
 
         mesh = output.get("mesh")
         if mesh is not None and hasattr(mesh, "export"):
+            metadata = {}
+            original_bounds = mesh_bounds(mesh)
+            if original_bounds:
+                metadata["mesh_bounds"] = {"original": original_bounds}
+            if normalize_meshes and original_bounds:
+                norm_info = normalize_mesh_inplace(mesh, original_bounds)
+                if norm_info:
+                    metadata["normalized"] = True
+                    metadata["normalization"] = norm_info
+
+            export_bounds = mesh_bounds(mesh)
+            if export_bounds:
+                metadata.setdefault("mesh_bounds", {})["export"] = export_bounds
+
             mesh_glb_path = out_dir / "mesh.glb"
             mesh.export(str(mesh_glb_path))
             print(f"[SAM3D] Saved mesh for obj {oid}")
@@ -262,6 +340,11 @@ def main() -> None:
 
             texture = output.get("texture") or output.get("texture_image")
             save_basecolor_texture(texture, out_dir / "texture_0_basecolor.png")
+
+            if metadata:
+                metadata_path = out_dir / "metadata.json"
+                metadata_path.write_text(json.dumps(metadata, indent=2))
+                print(f"[SAM3D] Wrote mesh metadata -> {metadata_path}")
 
             usdz_path = out_dir / "model.usdz"
             convert_glb_to_usdz(model_glb_path, usdz_path)
