@@ -48,7 +48,7 @@ main:
     - run_seg_job:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/sam3-seg-job"}
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/seg-job"}
           body:
             overrides:
               containerOverrides:
@@ -69,9 +69,12 @@ main:
             bucket: ${bucket}
             object: ${datasetYaml}
           result: dataObj
-          next: run_da3_job
         except:
-          next: retry_data_yaml
+          as: e
+          steps:
+            - handle_data_error:
+                next: retry_data_yaml
+        next: run_da3_job
 
     - retry_data_yaml:
         switch:
@@ -119,9 +122,12 @@ main:
             bucket: ${bucket}
             object: ${da3Geom}
           result: da3Obj
-          next: run_layout_job
         except:
-          next: retry_da3_geom
+          as: e
+          steps:
+            - handle_da3_error:
+                next: retry_da3_geom
+        next: run_layout_job
 
     - retry_da3_geom:
         switch:
@@ -171,9 +177,12 @@ main:
             bucket: ${bucket}
             object: ${layoutJson}
           result: layoutObj
-          next: run_scale_job
         except:
-          next: retry_layout_json
+          as: e
+          steps:
+            - handle_layout_error:
+                next: retry_layout_json
+        next: run_scale_job
 
     - retry_layout_json:
         switch:
@@ -219,9 +228,12 @@ main:
             bucket: ${bucket}
             object: ${scaledLayout}
           result: scaledObj
-          next: run_multiview_job
         except:
-          next: retry_scaled_layout
+          as: e
+          steps:
+            - handle_scale_error:
+                next: retry_scaled_layout
+        next: run_multiview_job
 
     - retry_scaled_layout:
         switch:
@@ -270,16 +282,19 @@ main:
           args:
             bucket: ${bucket}
             prefix: ${multiviewPrefix + "/obj_"}
-            pageSize: 1
+            maxResults: 1
           result: mvList
-          next: check_multiview
         except:
-          next: retry_multiview
+          as: e
+          steps:
+            - handle_mv_error:
+                next: retry_multiview
+        next: check_multiview
 
     - check_multiview:
         switch:
           - condition: ${len(mvList.items or []) > 0}
-            next: run_assets_plan
+            next: run_sam3d
         next: retry_multiview
 
     - retry_multiview:
@@ -302,57 +317,8 @@ main:
     - fail_multiview:
         raise: ${"No multiview crops found under " + multiviewPrefix}
 
-    - run_assets_plan:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/assets-plan-job"}
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: LAYOUT_PREFIX
-                      value: ${layoutPrefix}
-                    - name: MULTIVIEW_PREFIX
-                      value: ${multiviewPrefix}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-        result: assetsExec
-        next: wait_for_scene_assets
-
-    - wait_for_scene_assets:
-        try:
-          call: googleapis.storage.v1.objects.get
-          args:
-            bucket: ${bucket}
-            object: ${assetsPrefix + "/scene_assets.json"}
-          result: assetsObj
-          next: run_sam3d
-        except:
-          next: retry_scene_assets
-
-    - retry_scene_assets:
-        switch:
-          - condition: ${assetsAttempts < 60}
-            next: bump_assets_attempt
-        next: fail_scene_assets
-
-    - bump_assets_attempt:
-        assign:
-          - assetsAttempts: ${assetsAttempts + 1}
-        next: sleep_scene_assets
-
-    - sleep_scene_assets:
-        call: sys.sleep
-        args:
-          seconds: 10
-        next: wait_for_scene_assets
-
-    - fail_scene_assets:
-        raise: ${"scene_assets.json not found at " + assetsPrefix + "/scene_assets.json"}
+    # Note: We skip assets-plan-job as it is not in your list of successfully deployed jobs.
+    # We jump straight to SAM3D assuming simple 1-to-1 asset recon.
 
     - run_sam3d:
         call: googleapis.run.v2.projects.locations.jobs.run
