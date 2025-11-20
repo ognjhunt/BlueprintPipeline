@@ -2,7 +2,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -56,7 +56,70 @@ def usd_for_camera(cam: Dict) -> List[str]:
     return lines
 
 
-def usd_for_object(obj: Dict, assets_prefix: str) -> List[str]:
+def safe_path_join(root: Path, rel: str) -> Path:
+    rel_path = rel.lstrip("/")
+    return root / rel_path
+
+
+def load_object_metadata(root: Path, obj: Dict, assets_prefix: str) -> Optional[dict]:
+    """
+    Load per-object metadata if present.
+
+    We first respect an explicit metadata_path on the object. Otherwise, we
+    infer the path next to the asset (e.g., static/obj_X/metadata.json).
+    """
+
+    metadata_rel = obj.get("metadata_path")
+    if metadata_rel:
+        candidate = safe_path_join(root, metadata_rel)
+        if candidate.is_file():
+            return json.loads(candidate.read_text())
+
+    asset_path = obj.get("asset_path")
+    if asset_path:
+        asset_dir = safe_path_join(root, asset_path).parent
+        candidate = asset_dir / "metadata.json"
+        if candidate.is_file():
+            return json.loads(candidate.read_text())
+
+    # Fall back to static/obj_{id}/metadata.json under the assets prefix.
+    oid = obj.get("id")
+    if oid is not None:
+        static_dir = safe_path_join(root, f"{assets_prefix}/static/obj_{oid}")
+        candidate = static_dir / "metadata.json"
+        if candidate.is_file():
+            return json.loads(candidate.read_text())
+
+    return None
+
+
+def alignment_from_metadata(metadata: dict) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Extract alignment information from metadata.
+
+    Returns translation (3,) and half extents (3,) if available.
+    """
+
+    if not metadata:
+        return None, None
+
+    mesh_bounds = metadata.get("mesh_bounds") or {}
+    export_bounds = mesh_bounds.get("export") or mesh_bounds.get("bounds") or mesh_bounds
+    center = export_bounds.get("center")
+    size = export_bounds.get("size")
+
+    translation = None
+    half_extents = None
+    if center is not None:
+        translation = -np.array(center, dtype=np.float64)
+
+    if size is not None:
+        half_extents = 0.5 * np.array(size, dtype=np.float64)
+
+    return translation, half_extents
+
+
+def usd_for_object(obj: Dict, assets_prefix: str, root: Path) -> List[str]:
     oid = obj.get("id")
     is_interactive = obj.get("type") == "interactive"
     asset_path = obj.get("asset_path")
@@ -67,20 +130,63 @@ def usd_for_object(obj: Dict, assets_prefix: str) -> List[str]:
         else:
             asset_path = f"{assets_prefix}/obj_{oid}/asset.glb"
     obb = obj.get("obb")
+    metadata = load_object_metadata(root, obj, assets_prefix)
+    translation, mesh_half_extents = alignment_from_metadata(metadata or {})
     lines = [f'    def Xform "obj_{oid}" {{']
     lines.append(f"      bool interactive = {'true' if is_interactive else 'false'}")
     lines.append(f"      string asset_path = \"{asset_path}\"")
     if is_interactive:
         manifest = obj.get("interactive_output") or f"{assets_prefix}/interactive/obj_{oid}"
         lines.append(f"      string urdf_manifest = \"{manifest}/interactive_manifest.json\"")
+    xform = np.eye(4, dtype=np.float64)
+    applied = False
+
+    # Start with mesh recentering in local space.
+    if translation is not None:
+        T_align = np.eye(4, dtype=np.float64)
+        T_align[:3, 3] = translation
+        xform = T_align @ xform
+        applied = True
+
+    # Then scale to match layout OBB extents if both are available.
+    obb_extents = None
+    if obb:
+        obb_extents = obb.get("extents")
+    if obb_extents is not None and mesh_half_extents is not None:
+        mesh_half_extents = np.where(mesh_half_extents == 0, 1.0, mesh_half_extents)
+        scale_vec = np.array(obb_extents, dtype=np.float64) / mesh_half_extents
+        S = np.eye(4, dtype=np.float64)
+        S[0, 0], S[1, 1], S[2, 2] = scale_vec
+        xform = S @ xform
+        applied = True
+
+    # Finally, place into world space via OBB pose.
     if obb:
         T = matrix_from_obb(obb)
         if T is not None:
-            lines.append(f"      matrix4d xformOp:transform = {fmt_matrix(T)}")
-            lines.append("      uniform token[] xformOpOrder = [\"xformOp:transform\"]")
+            xform = T @ xform
+            applied = True
         extents = obb.get("extents")
         if extents:
             lines.append(f"      double3 halfExtents = {fmt_vec(extents)}")
+        if applied:
+            lines.append(f"      matrix4d xformOp:transform = {fmt_matrix(xform)}")
+            lines.append("      uniform token[] xformOpOrder = [\"xformOp:transform\"]")
+
+    # If we applied any transforms but had no OBB pose, still emit the matrix.
+    if not obb and applied:
+        lines.append(f"      matrix4d xformOp:transform = {fmt_matrix(xform)}")
+        lines.append("      uniform token[] xformOpOrder = [\"xformOp:transform\"]")
+
+    if metadata:
+        mesh_bounds = metadata.get("mesh_bounds") or {}
+        export_bounds = mesh_bounds.get("export") or mesh_bounds.get("bounds") or mesh_bounds
+        center = export_bounds.get("center")
+        size = export_bounds.get("size")
+        if center:
+            lines.append(f"      double3 meshCenter = {fmt_vec(center)}")
+        if size:
+            lines.append(f"      double3 meshSize = {fmt_vec(size)}")
     if obj.get("class_name"):
         lines.append(f"      string className = \"{obj['class_name']}\"")
     if obj.get("pipeline"):
@@ -146,7 +252,7 @@ def main() -> None:
 
     lines.append("  def Scope \"Objects\" {")
     for obj in objects:
-        lines.extend(usd_for_object(obj, assets_prefix=assets_prefix))
+        lines.extend(usd_for_object(obj, assets_prefix=assets_prefix, root=root))
     lines.append("  }")
     lines.append("}")
 
