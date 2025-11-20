@@ -36,9 +36,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
 # ---------------------------
 # SAM3 + supporting Python deps
 # ---------------------------
-# 1) Install the sam3 package from PyPI to pull in its declared deps.
-#    (Package itself has some layout issues, but we use the source tree
-#    for code via PYTHONPATH, and keep this for dependency resolution.)
+# 1) Install the sam3 package from PyPI for its declared deps.
 RUN pip install --no-cache-dir --prefer-binary \
         sam3 \
         opencv-python-headless \
@@ -57,6 +55,11 @@ RUN git clone https://github.com/facebookresearch/sam3.git /opt/sam3
 # Runtime environment
 # ---------------------------
 ENV HF_HUB_DISABLE_TELEMETRY=1 \
+    # Disable the experimental Xet-based download backend & hf_transfer.
+    HF_HUB_DISABLE_XET=1 \
+    HUGGINGFACE_HUB_DISABLE_XET=1 \
+    HF_HUB_ENABLE_XET=0 \
+    HF_HUB_ENABLE_HF_TRANSFER=0 \
     HF_HOME=/mnt/gcs/hf-cache \
     TRANSFORMERS_CACHE=/mnt/gcs/hf-cache \
     TORCH_HOME=/tmp/torch-cache \

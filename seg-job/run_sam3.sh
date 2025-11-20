@@ -44,6 +44,16 @@ export IMAGES_PREFIX SEG_PREFIX BUCKET
 export HF_HOME="${HF_CACHE_DIR}"
 export TRANSFORMERS_CACHE="${HF_CACHE_DIR}"
 
+# Extra safety: disable Xet + hf_transfer in the runtime env as well.
+export HF_HUB_DISABLE_XET=1
+export HUGGINGFACE_HUB_DISABLE_XET=1
+export HF_HUB_ENABLE_XET=0
+export HF_HUB_ENABLE_HF_TRANSFER=0
+
+echo "[SAM3] HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET}"
+echo "[SAM3] HF_HUB_ENABLE_XET=${HF_HUB_ENABLE_XET}"
+echo "[SAM3] HF_HUB_ENABLE_HF_TRANSFER=${HF_HUB_ENABLE_HF_TRANSFER}"
+
 echo "[SAM3] About to run python /app/run_sam3_from_images.py"
 
 # Temporarily disable -e so we can capture Python's exit code
