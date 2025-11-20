@@ -20,7 +20,7 @@ def parse_interactive_ids(raw: str | None):
             pass
     return ids
 
-def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id: int):
+def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id: int, static_pipeline: str):
     text = (class_name or "").lower()
     if phrase:
         text += " " + phrase.lower()
@@ -28,7 +28,7 @@ def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id: 
         return "interactive", "physx"
     if any(k in text for k in INTERACTIVE_KEYWORDS):
         return "interactive", "physx"
-    return "static", "meshy"
+    return "static", static_pipeline
 
 def main():
     bucket = os.getenv("BUCKET", "")
@@ -38,6 +38,7 @@ def main():
     assets_prefix = os.getenv("ASSETS_PREFIX")       # scenes/<sceneId>/assets
     layout_file = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
     interactive_ids_env = os.getenv("INTERACTIVE_OBJECT_IDS", "")
+    static_pipeline = os.getenv("STATIC_ASSET_PIPELINE", "sam3d")
 
     if not (layout_prefix and multiview_prefix and assets_prefix):
         raise SystemExit("[ASSETS] LAYOUT_PREFIX, MULTIVIEW_PREFIX, ASSETS_PREFIX required")
@@ -55,6 +56,7 @@ def main():
     print(f"[ASSETS] Multiview root={multiview_root}")
     print(f"[ASSETS] Assets root={assets_root}")
     print(f"[ASSETS] interactive_ids={interactive_ids}")
+    print(f"[ASSETS] static_pipeline={static_pipeline}")
 
     with layout_path.open("r") as f:
         layout = json.load(f)
@@ -73,7 +75,7 @@ def main():
             print(f"[ASSETS] WARNING: missing crop for obj {oid} at {crop_path}")
             continue
 
-        obj_type, pipeline = classify_type(cls, phrase, interactive_ids, oid)
+        obj_type, pipeline = classify_type(cls, phrase, interactive_ids, oid, static_pipeline=static_pipeline)
 
         plan_objects.append({
             "id": oid,
@@ -82,6 +84,7 @@ def main():
             "pipeline": pipeline,
             "multiview_dir": f"{multiview_prefix}/obj_{oid}",
             "crop_path": f"{multiview_prefix}/obj_{oid}/crop.png",
+            "polygon": obj.get("polygon"),
         })
 
     assets_root.mkdir(parents=True, exist_ok=True)
