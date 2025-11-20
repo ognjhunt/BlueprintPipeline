@@ -39,6 +39,7 @@ def main():
     layout_file = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
     interactive_ids_env = os.getenv("INTERACTIVE_OBJECT_IDS", "")
     static_pipeline = os.getenv("STATIC_ASSET_PIPELINE", "sam3d")
+    physx_endpoint = os.getenv("PHYSX_ENDPOINT")
 
     if not (layout_prefix and multiview_prefix and assets_prefix):
         raise SystemExit("[ASSETS] LAYOUT_PREFIX, MULTIVIEW_PREFIX, ASSETS_PREFIX required")
@@ -57,6 +58,8 @@ def main():
     print(f"[ASSETS] Assets root={assets_root}")
     print(f"[ASSETS] interactive_ids={interactive_ids}")
     print(f"[ASSETS] static_pipeline={static_pipeline}")
+    if physx_endpoint:
+        print(f"[ASSETS] physx_endpoint={physx_endpoint}")
 
     with layout_path.open("r") as f:
         layout = json.load(f)
@@ -77,7 +80,7 @@ def main():
 
         obj_type, pipeline = classify_type(cls, phrase, interactive_ids, oid, static_pipeline=static_pipeline)
 
-        plan_objects.append({
+        entry = {
             "id": oid,
             "class_name": cls,
             "type": obj_type,
@@ -85,12 +88,23 @@ def main():
             "multiview_dir": f"{multiview_prefix}/obj_{oid}",
             "crop_path": f"{multiview_prefix}/obj_{oid}/crop.png",
             "polygon": obj.get("polygon"),
-        })
+        }
+        if obj_type == "interactive":
+            entry["interactive_output"] = f"{assets_prefix}/interactive/obj_{oid}"
+            if physx_endpoint:
+                entry["physx_endpoint"] = physx_endpoint
+        plan_objects.append(entry)
 
     assets_root.mkdir(parents=True, exist_ok=True)
     out_path = assets_root / "scene_assets.json"
+    plan = {
+        "scene_id": scene_id,
+        "objects": plan_objects,
+        "physx_endpoint": physx_endpoint,
+        "interactive_count": sum(1 for o in plan_objects if o["type"] == "interactive"),
+    }
     with out_path.open("w") as f:
-        json.dump({"scene_id": scene_id, "objects": plan_objects}, f, indent=2)
+        json.dump(plan, f, indent=2)
 
     print(f"[ASSETS] Wrote {out_path} with {len(plan_objects)} objects")
 
