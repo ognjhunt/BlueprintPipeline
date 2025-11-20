@@ -93,6 +93,8 @@ def main():
             entry["interactive_output"] = f"{assets_prefix}/interactive/obj_{oid}"
             if physx_endpoint:
                 entry["physx_endpoint"] = physx_endpoint
+        else:
+            entry["asset_path"] = f"{assets_prefix}/obj_{oid}/asset.glb"
         plan_objects.append(entry)
 
     assets_root.mkdir(parents=True, exist_ok=True)
