@@ -138,6 +138,13 @@ def main() -> None:
     images_out_dir = dataset_dir / "images"
     labels_out_dir = dataset_dir / "labels"
 
+    if images_dir.is_file():
+        images_dir = images_dir.parent
+        print(
+            f"[SAM3] IMAGES_PREFIX pointed to a file; using parent directory: {images_dir}",
+            file=sys.stderr,
+        )
+
     print(f"[SAM3] Bucket: {bucket}")
     print(f"[SAM3] Images dir: {images_dir}")
     print(f"[SAM3] Output dir: {out_dir}")
