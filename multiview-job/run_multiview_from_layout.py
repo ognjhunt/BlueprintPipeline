@@ -225,11 +225,17 @@ def main() -> None:
     multiview_prefix = os.getenv("MULTIVIEW_PREFIX")     # e.g. scenes/<sceneId>/multiview
     layout_file_name = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
     views_per_object_env = os.getenv("VIEWS_PER_OBJECT", "4")
+    enable_gemini_views_env = os.getenv("ENABLE_GEMINI_VIEWS", "false")
+
+    def _parse_bool(val: str) -> bool:
+        return val.strip().lower() in {"1", "true", "yes", "on"}
 
     try:
         views_per_object = int(views_per_object_env)
     except ValueError:
         views_per_object = 4
+
+    enable_gemini_views = _parse_bool(enable_gemini_views_env)
 
     if not layout_prefix or not seg_dataset_prefix or not multiview_prefix:
         print(
@@ -252,6 +258,7 @@ def main() -> None:
     print(f"[MULTIVIEW] Room image path: {room_img_path}")
     print(f"[MULTIVIEW] Multiview root: {multiview_root}")
     print(f"[MULTIVIEW] Views per object: {views_per_object}")
+    print(f"[MULTIVIEW] Gemini view generation enabled: {enable_gemini_views}")
 
     if not layout_path.is_file():
         print(f"[MULTIVIEW] ERROR: layout file not found: {layout_path}", file=sys.stderr)
@@ -280,8 +287,8 @@ def main() -> None:
     H, W, _ = image_bgr.shape
     print(f"[MULTIVIEW] Room image shape: {H}x{W}")
 
-    # Create Gemini client
-    client = create_gemini_client()
+    # Create Gemini client if view generation is enabled
+    client = create_gemini_client() if enable_gemini_views else None
 
     for obj in objects:
         obj_id = obj.get("id")
@@ -305,6 +312,13 @@ def main() -> None:
         crop_path = obj_dir / "crop.png"
         cv2.imwrite(str(crop_path), crop_bgr)
         print(f"[MULTIVIEW] Saved crop to {crop_path}")
+
+        if not enable_gemini_views:
+            print(
+                "[MULTIVIEW] Gemini view generation disabled; skipping view synthesis.",
+                file=sys.stderr,
+            )
+            continue
 
         # Step 1: infer a good noun phrase for the foreground movable object
         object_phrase = infer_object_phrase(client, crop_path, class_name)
