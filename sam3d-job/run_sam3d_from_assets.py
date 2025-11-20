@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
@@ -39,6 +41,52 @@ def load_rgba_with_mask(image_path: Path, polygon: Optional[list] = None) -> Tup
     rgb = np.array(image)
     mask = build_alpha_mask(rgb)
     return rgb, mask
+
+
+def save_basecolor_texture(texture: np.ndarray, out_path: Path) -> Optional[Path]:
+    """Persist a basecolor texture if the inference output provides one."""
+
+    if texture is None:
+        return None
+
+    try:
+        tex = np.asarray(texture)
+        if tex.dtype != np.uint8:
+            tex = np.clip(tex * 255.0, 0, 255).astype(np.uint8)
+        image = Image.fromarray(tex)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(out_path)
+        print(f"[SAM3D] Saved basecolor texture -> {out_path}")
+        return out_path
+    except Exception as e:  # pragma: no cover - best-effort export
+        print(f"[SAM3D] WARNING: failed to save texture {out_path.name}: {e}", file=sys.stderr)
+        return None
+
+
+def convert_glb_to_usdz(glb_path: Path, usdz_path: Path) -> bool:
+    """Convert a GLB into USDZ using the usd_from_gltf CLI if available."""
+
+    usd_from_gltf = shutil.which("usd_from_gltf")
+    if usd_from_gltf is None:
+        print("[SAM3D] WARNING: usd_from_gltf not available; skipping USDZ export", file=sys.stderr)
+        return False
+
+    usdz_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [usd_from_gltf, str(glb_path), "-o", str(usdz_path)]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        print(f"[SAM3D] Saved USDZ -> {usdz_path}")
+        return True
+    except subprocess.CalledProcessError as e:  # pragma: no cover - runtime dependency
+        print(
+            f"[SAM3D] WARNING: usd_from_gltf failed for {glb_path}: {e.stderr or e}",
+            file=sys.stderr,
+        )
+        return False
 
 
 def main() -> None:
@@ -119,8 +167,20 @@ def main() -> None:
 
         mesh = output.get("mesh")
         if mesh is not None and hasattr(mesh, "export"):
-            mesh.export(str(out_dir / "mesh.glb"))
+            mesh_glb_path = out_dir / "mesh.glb"
+            mesh.export(str(mesh_glb_path))
             print(f"[SAM3D] Saved mesh for obj {oid}")
+
+            model_glb_path = out_dir / "model.glb"
+            if not model_glb_path.exists():
+                shutil.copy(mesh_glb_path, model_glb_path)
+                print(f"[SAM3D] Saved mesh copy -> {model_glb_path.name}")
+
+            texture = output.get("texture") or output.get("texture_image")
+            save_basecolor_texture(texture, out_dir / "texture_0_basecolor.png")
+
+            usdz_path = out_dir / "model.usdz"
+            convert_glb_to_usdz(model_glb_path, usdz_path)
 
     print("[SAM3D] Done.")
 
