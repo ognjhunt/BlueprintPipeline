@@ -242,7 +242,7 @@ def main() -> None:
         rgb, mask = load_rgba_with_mask(crop_path)
         output = inference(rgb, mask, seed=42)
 
-        out_dir = assets_root / "static" / f"obj_{oid}"
+        out_dir = assets_root / f"obj_{oid}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         if "gs" in output:
@@ -255,16 +255,21 @@ def main() -> None:
             mesh.export(str(mesh_glb_path))
             print(f"[SAM3D] Saved mesh for obj {oid}")
 
+            asset_glb_path = out_dir / "asset.glb"
+            if not asset_glb_path.exists():
+                shutil.copy(mesh_glb_path, asset_glb_path)
+                print(f"[SAM3D] Saved mesh copy -> {asset_glb_path.name}")
+
             model_glb_path = out_dir / "model.glb"
             if not model_glb_path.exists():
-                shutil.copy(mesh_glb_path, model_glb_path)
+                shutil.copy(asset_glb_path, model_glb_path)
                 print(f"[SAM3D] Saved mesh copy -> {model_glb_path.name}")
 
             texture = output.get("texture") or output.get("texture_image")
             save_basecolor_texture(texture, out_dir / "texture_0_basecolor.png")
 
             usdz_path = out_dir / "model.usdz"
-            convert_glb_to_usdz(model_glb_path, usdz_path)
+            convert_glb_to_usdz(asset_glb_path, usdz_path)
 
     print("[SAM3D] Done.")
 
