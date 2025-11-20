@@ -18,21 +18,22 @@ main:
           - region: "us-central1"
         next: filter_by_extension
 
-    # 3) Only continue if object is under "scenes/" and ends with .png/.jpg/.jpeg
+    # 3) Only continue if object is under "scenes/<sceneId>/images/" and ends with .png/.jpg/.jpeg
     - filter_by_extension:
         switch:
-          - condition: ${text.match_regex(object, "(?i)^scenes/.+\\.(png|jpg|jpeg)$")}
+          - condition: ${text.match_regex(object, "(?i)^scenes/[^/]+/images/[^/]+\\.(png|jpg|jpeg)$")}
             next: derive_prefixes
         next: skip
 
     # 4) Derive IMAGES_PREFIX and SEG_PREFIX from object path
-    #    object like: "scenes/<sceneId>/room.png"
-    #    imagesPrefix: "scenes/<sceneId>"
+    #    object like: "scenes/<sceneId>/images/room.png"
+    #    imagesPrefix: "scenes/<sceneId>/images"
     #    segPrefix:    "scenes/<sceneId>/seg"
     - derive_prefixes:
         assign:
           - imagesPrefix: ${text.replace_all(object, "/[^/]+$", "")}
-          - segPrefix: ${imagesPrefix + "/seg"}
+          - sceneId: ${text.split(object, "/")[1]}
+          - segPrefix: ${"scenes/" + sceneId + "/seg"}
         next: run_seg_job
 
     # 5) Run the Cloud Run job sam3-seg-job with env overrides
