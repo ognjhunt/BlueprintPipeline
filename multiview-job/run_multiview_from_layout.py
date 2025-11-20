@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from google import genai  # Google GenAI SDK
+from google.genai import types
 
 
 def load_layout(layout_path: Path):
@@ -167,7 +168,7 @@ def generate_views_for_object(
     views_per_object: int = 4,
 ):
     """
-    Calls Gemini 2.5 Flash Image to generate N views of the object.
+    Calls Nano Banana Pro (Gemini 3.0 Pro Image Preview) to generate N views of the object.
     Writes view_0.png ... view_(N-1).png into out_dir.
     Each call requests ONE view only (no grids).
     """
@@ -200,8 +201,12 @@ def generate_views_for_object(
 
         print(f"[MULTIVIEW] Calling Gemini for view {i} of {object_phrase!r} ...")
         response = client.models.generate_content(
-            model="gemini-2.5-flash-image",
+            model="gemini-3.0-pro-image-preview",
             contents=[prompt, image],
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(image_size="1K"),
+            ),
         )
 
         gen_img = extract_image_from_response(response)
