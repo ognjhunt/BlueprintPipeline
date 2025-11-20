@@ -2,6 +2,7 @@ import os
 import sys
 import json
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -59,6 +60,96 @@ def backproject_depth_to_world(depth, conf, K, w2c, conf_thresh=0.6, max_points=
     return X_w.astype(np.float32)
 
 
+def fuse_multiview_point_clouds(depth_all, conf_all, intr_all, extr_all, conf_thresh=0.6, max_per_view=150000):
+    """
+    Backproject all DA3 frames and concatenate a fused cloud for layout/plane fitting.
+    """
+    fused = []
+    num_views = depth_all.shape[0]
+    for i in range(num_views):
+        pts = backproject_depth_to_world(
+            depth_all[i], conf_all[i], intr_all[i], extr_all[i], conf_thresh=conf_thresh, max_points=max_per_view
+        )
+        if pts.size:
+            fused.append(pts)
+            print(f"[LAYOUT] View {i}: kept {pts.shape[0]} pts")
+    if not fused:
+        return np.zeros((0, 3), dtype=np.float32)
+    return np.concatenate(fused, axis=0)
+
+
+def fit_plane_ransac(points: np.ndarray, num_iters: int = 200, threshold: float = 0.02) -> Tuple[np.ndarray, float]:
+    """
+    Very lightweight RANSAC plane fit. Returns (normal, d) with plane: n^T x + d = 0.
+    """
+    if points.shape[0] < 3:
+        return np.array([0, 1, 0], dtype=np.float32), 0.0
+
+    best_inliers = -1
+    best_plane = (np.array([0, 1, 0], dtype=np.float32), 0.0)
+
+    rng = np.random.default_rng(123)
+    for _ in range(num_iters):
+        idx = rng.choice(points.shape[0], size=3, replace=False)
+        p0, p1, p2 = points[idx]
+        v1 = p1 - p0
+        v2 = p2 - p0
+        n = np.cross(v1, v2)
+        norm = np.linalg.norm(n)
+        if norm < 1e-6:
+            continue
+        n = n / norm
+        d = -float(np.dot(n, p0))
+        # Count inliers
+        dist = np.abs(points @ n + d)
+        inliers = np.count_nonzero(dist < threshold)
+        if inliers > best_inliers:
+            best_inliers = inliers
+            best_plane = (n.astype(np.float32), d)
+
+    return best_plane
+
+
+def plane_to_extent(normal: np.ndarray, d: float, points: np.ndarray) -> Dict:
+    """
+    Project points onto plane to get a loose extent polygon for debugging/export.
+    """
+    if points.shape[0] == 0:
+        return {"equation": [float(x) for x in normal] + [float(d)], "bbox": None}
+
+    # Build orthonormal basis on plane
+    up = normal
+    # Choose arbitrary vector not parallel to up
+    ref = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    if np.abs(np.dot(ref, up)) > 0.99:
+        ref = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    axis1 = np.cross(up, ref)
+    axis1 /= (np.linalg.norm(axis1) + 1e-8)
+    axis2 = np.cross(up, axis1)
+
+    projected = np.stack([points @ axis1, points @ axis2], axis=-1)
+    mins = projected.min(axis=0)
+    maxs = projected.max(axis=0)
+
+    corners = np.array(
+        [
+            mins,
+            [maxs[0], mins[1]],
+            maxs,
+            [mins[0], maxs[1]],
+        ]
+    )
+    # Lift corners back to 3D plane
+    center = (projected.mean(axis=0) @ np.stack([axis1, axis2], axis=0)).T
+    origin = center - up * (np.dot(center, up) + d)
+    verts = origin + corners @ np.stack([axis1, axis2], axis=0)
+
+    return {
+        "equation": [float(x) for x in normal] + [float(d)],
+        "bbox": verts.tolist(),
+    }
+
+
 def parse_yolo_labels(label_path: Path, class_names=None):
     """
     Parse YOLO *segmentation* label file:
@@ -113,48 +204,96 @@ def parse_yolo_labels(label_path: Path, class_names=None):
     return objects
 
 
-def estimate_object_centers3d(objects, depth, conf, K, w2c, img_w, img_h):
+def gather_object_points(
+    polygon: List[List[float]],
+    depth_all: np.ndarray,
+    conf_all: np.ndarray,
+    intr_all: np.ndarray,
+    extr_all: np.ndarray,
+    margin_frac: float = 0.02,
+    conf_thresh: float = 0.6,
+    max_points_per_view: int = 50000,
+) -> np.ndarray:
     """
-    For each bbox, sample depth at bbox center and backproject to world.
+    Collect fused 3D points for an object polygon across all views.
+    Uses polygon AABB per-view for speed; keeps points above conf_thresh.
     """
-    centers = []
-    H, W = depth.shape
-    fx = float(K[0, 0])
-    fy = float(K[1, 1])
-    cx0 = float(K[0, 2])
-    cy0 = float(K[1, 2])
+    pts_all = []
+    num_views = depth_all.shape[0]
+    coords = np.array(polygon, dtype=np.float32)
+    for i in range(num_views):
+        depth = depth_all[i]
+        conf = conf_all[i]
+        K = intr_all[i]
+        w2c = extr_all[i]
+        H, W = depth.shape
+        xs = coords[:, 0] * W
+        ys = coords[:, 1] * H
+        x0 = max(0, int(xs.min() - margin_frac * W))
+        x1 = min(W - 1, int(xs.max() + margin_frac * W))
+        y0 = max(0, int(ys.min() - margin_frac * H))
+        y1 = min(H - 1, int(ys.max() + margin_frac * H))
 
-    R = w2c[:, :3]  # 3x3
-    t = w2c[:, 3]   # 3
-    Rt = R.T
+        region_depth = depth[y0:y1, x0:x1]
+        region_conf = conf[y0:y1, x0:x1]
+        mask = (region_depth > 0.0) & (region_conf >= conf_thresh)
+        ys_mask, xs_mask = np.nonzero(mask)
+        num = xs_mask.size
+        if num == 0:
+            continue
+        if num > max_points_per_view:
+            rng = np.random.default_rng(7)
+            idx = rng.choice(num, size=max_points_per_view, replace=False)
+            xs_mask = xs_mask[idx]
+            ys_mask = ys_mask[idx]
 
-    for obj in objects:
-        cx_n, cy_n, bw_n, bh_n = obj["bbox2d"]
-        # Convert normalized [0,1] to pixel coords
-        px = cx_n * img_w
-        py = cy_n * img_h
+        z = region_depth[ys_mask, xs_mask]
+        xs_global = xs_mask + x0
+        ys_global = ys_mask + y0
 
-        # Clamp to valid indices
-        ix = int(np.clip(px, 0, W - 1))
-        iy = int(np.clip(py, 0, H - 1))
+        fx = float(K[0, 0])
+        fy = float(K[1, 1])
+        cx = float(K[0, 2])
+        cy = float(K[1, 2])
 
-        z = float(depth[iy, ix])
-        c = float(conf[iy, ix])
+        x_cam = (xs_global.astype(np.float32) - cx) * z / fx
+        y_cam = (ys_global.astype(np.float32) - cy) * z / fy
+        z_cam = z
+        X_cam = np.stack([x_cam, y_cam, z_cam], axis=-1)
 
-        if z <= 0.0 or c <= 0.0:
-            obj_center = None
-        else:
-            x_cam = (px - cx0) * z / fx
-            y_cam = (py - cy0) * z / fy
-            X_cam = np.array([x_cam, y_cam, z], dtype=np.float32)
+        R = w2c[:, :3]
+        t = w2c[:, 3]
+        Rt = R.T
+        X_w = (Rt @ (X_cam - t[None, :]).T).T
+        pts_all.append(X_w.astype(np.float32))
 
-            # X_w = R^T (X_c - t)
-            X_w = Rt @ (X_cam - t)
-            obj_center = X_w.tolist()
+    if not pts_all:
+        return np.zeros((0, 3), dtype=np.float32)
+    return np.concatenate(pts_all, axis=0)
 
-        centers.append(obj_center)
 
-    return centers
+def compute_obb_from_points(points: np.ndarray) -> Dict:
+    """Fit an oriented bounding box using PCA."""
+    if points.shape[0] < 4:
+        return None
+    mean = points.mean(axis=0)
+    centered = points - mean[None, :]
+    cov = centered.T @ centered / max(points.shape[0] - 1, 1)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    axes = eigvecs[:, order]
+    # Project points to eigenbasis
+    proj = centered @ axes
+    mins = proj.min(axis=0)
+    maxs = proj.max(axis=0)
+    extents = (maxs - mins) / 2.0
+    center_local = (maxs + mins) / 2.0
+    center_world = mean + axes @ center_local
+    return {
+        "center": center_world.astype(np.float32).tolist(),
+        "extents": extents.astype(np.float32).tolist(),
+        "R": axes.astype(np.float32).tolist(),
+    }
 
 
 def main() -> None:
@@ -204,50 +343,95 @@ def main() -> None:
 
     # ---- Load DA3 geometry ----
     depth_all, conf_all, extr_all, intr_all, image_paths = load_da3_geom(geom_path)
+    num_views = depth_all.shape[0]
+    H, W = depth_all[0].shape
+    print(f"[LAYOUT] Loaded {num_views} DA3 frames with shape {depth_all[0].shape}")
 
-    if depth_all.shape[0] != 1:
-        print(
-            f"[LAYOUT] WARNING: multiple frames in da3_geom ({depth_all.shape[0]}). Using first.",
-            file=sys.stderr,
-        )
-
-    depth = depth_all[0]       # H x W
-    conf = conf_all[0]         # H x W
-    w2c = extr_all[0]          # 3 x 4
-    K = intr_all[0]            # 3 x 3
-
-    H, W = depth.shape
-    print(f"[LAYOUT] Depth shape: {depth.shape}, Intrinsics: {K}, w2c: {w2c}")
-
-    # ---- Build room point cloud and fit AABB ----
-    pts_world = backproject_depth_to_world(depth, conf, K, w2c, conf_thresh=0.6, max_points=500000)
+    # ---- Build fused room point cloud ----
+    pts_world = fuse_multiview_point_clouds(depth_all, conf_all, intr_all, extr_all, conf_thresh=0.6, max_per_view=200000)
     if pts_world.shape[0] == 0:
         print("[LAYOUT] ERROR: No valid depth points; cannot compute layout.", file=sys.stderr)
         sys.exit(1)
 
     mins = pts_world.min(axis=0).tolist()
     maxs = pts_world.max(axis=0).tolist()
-    print(f"[LAYOUT] Room AABB min={mins}, max={maxs}")
+    print(f"[LAYOUT] Room fused AABB min={mins}, max={maxs}")
 
-    room_box = {"min": mins, "max": maxs}
+    room_box = {"min": mins, "max": maxs, "num_points": int(pts_world.shape[0])}
 
-    # ---- Load YOLO labels and estimate object centers ----
-    # For now, keep class_id -> "class_<id>" (class_names=None)
+    # ---- Plane detection (floor/ceiling/walls) ----
+    y_vals = pts_world[:, 1]
+    floor_candidates = pts_world[y_vals <= np.percentile(y_vals, 20)]
+    ceiling_candidates = pts_world[y_vals >= np.percentile(y_vals, 80)]
+
+    floor_n, floor_d = fit_plane_ransac(floor_candidates, num_iters=300, threshold=0.03)
+    if floor_n[1] < 0:
+        floor_n = -floor_n
+        floor_d = -floor_d
+
+    ceiling_n, ceiling_d = fit_plane_ransac(ceiling_candidates, num_iters=300, threshold=0.03)
+    if ceiling_n[1] < 0:
+        ceiling_n = -ceiling_n
+        ceiling_d = -ceiling_d
+
+    off_floor = np.abs(pts_world @ floor_n + floor_d) > 0.2
+    vertical_points = pts_world[off_floor]
+    walls = []
+    remaining = vertical_points
+    for _ in range(2):
+        if remaining.shape[0] < 200:
+            break
+        n, d = fit_plane_ransac(remaining, num_iters=250, threshold=0.05)
+        if np.abs(np.dot(n, floor_n)) > 0.5:
+            remaining = remaining[1:]
+            continue
+        dist = np.abs(remaining @ n + d)
+        inliers = dist < 0.05
+        walls.append(plane_to_extent(n, d, remaining[inliers]))
+        remaining = remaining[~inliers]
+
+    room_planes = {
+        "floor": plane_to_extent(floor_n, floor_d, floor_candidates),
+        "ceiling": plane_to_extent(ceiling_n, ceiling_d, ceiling_candidates),
+        "walls": walls,
+    }
+
+    # ---- Load YOLO labels and fit per-object OBBs from fused depth ----
     objects = parse_yolo_labels(room_label_path, class_names=None)
-    centers = estimate_object_centers3d(objects, depth, conf, K, w2c, img_w=W, img_h=H)
+    print(f"[LAYOUT] Parsed {len(objects)} YOLO objects")
 
-    for obj, c in zip(objects, centers):
-        obj["center3d"] = c
+    for obj in objects:
+        poly = obj.get("polygon") or []
+        pts_obj = gather_object_points(poly, depth_all, conf_all, intr_all, extr_all)
+        obb = compute_obb_from_points(pts_obj) if pts_obj.size else None
+        center = obb.get("center") if obb else None
+        obj["center3d"] = center
+        obj["obb"] = obb
+        obj["points_used"] = int(pts_obj.shape[0])
+
+    # ---- Cameras ----
+    cameras = []
+    for i in range(num_views):
+        cameras.append(
+            {
+                "id": i,
+                "intrinsics": intr_all[i].tolist(),
+                "extrinsics": extr_all[i].tolist(),
+                "image_path": str(image_paths[i]),
+            }
+        )
 
     # ---- Build layout JSON ----
     layout = {
         "scene_id": scene_id,
-        "camera": {
-            "intrinsics": K.tolist(),
-            "extrinsics": w2c.tolist(),
+        "camera": {  # legacy single-view fields kept for downstream compatibility
+            "intrinsics": intr_all[0].tolist(),
+            "extrinsics": extr_all[0].tolist(),
             "image_paths": image_paths.tolist(),
         },
+        "camera_trajectory": cameras,
         "room_box": room_box,
+        "room_planes": room_planes,
         "objects": objects,
     }
 

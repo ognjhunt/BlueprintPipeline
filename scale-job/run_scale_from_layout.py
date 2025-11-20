@@ -2,7 +2,7 @@ import os
 import sys
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -27,6 +27,24 @@ CLASS_PRIORS: Dict[str, float] = {
 }
 
 
+def load_metric_metadata(layout_dir: Path) -> Tuple[dict, Optional[Path]]:
+    """
+    Look for user-provided metric cues. Default path is layout_dir/metric_metadata.json,
+    but METRIC_METADATA_PATH can override it.
+    """
+    override = os.getenv("METRIC_METADATA_PATH")
+    candidate = Path(override) if override else layout_dir / "metric_metadata.json"
+    if not candidate.is_file():
+        return {}, None
+    try:
+        with candidate.open("r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}, candidate
+    except Exception as e:
+        print(f"[SCALE] WARNING: failed to read metric metadata at {candidate}: {e}", file=sys.stderr)
+        return {}, candidate
+
+
 def normalize_class_name(name: str) -> str:
     return name.strip().lower()
 
@@ -41,6 +59,63 @@ def get_prior_for_class(name: str) -> Optional[float]:
         if k in key:
             return v
     return None
+
+
+def gather_reference_scales(metadata: dict, objects: List[dict]) -> Tuple[List[float], List[dict]]:
+    """
+    Turn explicit references into scale samples. Supports:
+      - scale_factors: list[float]
+      - known_heights: list[{object_id, height_m}]
+    """
+    scales: List[float] = []
+    samples: List[dict] = []
+
+    for s in metadata.get("scale_factors", []):
+        try:
+            sf = float(s)
+        except (TypeError, ValueError):
+            continue
+        if sf <= 0:
+            continue
+        scales.append(sf)
+        samples.append({"source": "explicit_factor", "scale_sample": sf})
+
+    for entry in metadata.get("known_heights", []):
+        if not isinstance(entry, dict):
+            continue
+        obj_id = entry.get("object_id")
+        height_m = entry.get("height_m")
+        if obj_id is None or height_m is None:
+            continue
+        try:
+            height_m = float(height_m)
+        except (TypeError, ValueError):
+            continue
+        match = next((o for o in objects if o.get("id") == obj_id), None)
+        if not match:
+            continue
+        obb = match.get("obb")
+        if not isinstance(obb, dict):
+            continue
+        extents = obb.get("extents")
+        if not isinstance(extents, list) or len(extents) != 3:
+            continue
+        measured_h = 2.0 * float(extents[1])
+        if measured_h <= 1e-6:
+            continue
+        s = height_m / measured_h
+        scales.append(s)
+        samples.append(
+            {
+                "source": "known_height",
+                "object_id": obj_id,
+                "height_m": height_m,
+                "measured_h_units": measured_h,
+                "scale_sample": s,
+            }
+        )
+
+    return scales, samples
 
 
 def main() -> None:
@@ -75,9 +150,17 @@ def main() -> None:
 
     print(f"[SCALE] Found {len(objects)} objects in layout")
 
-    # Collect scale samples from class priors
+    metric_metadata, metadata_path = load_metric_metadata(layout_dir)
+    if metadata_path:
+        print(f"[SCALE] Found metric metadata at {metadata_path}")
+
+    # Collect scale samples from explicit references then class priors
     scales: List[float] = []
     used_samples: List[dict] = []
+
+    ref_scales, ref_samples = gather_reference_scales(metric_metadata, objects)
+    scales.extend(ref_scales)
+    used_samples.extend(ref_samples)
 
     # We assume Y-axis (index 1) is "up" in world frame
     UP_AXIS = 1
@@ -103,6 +186,7 @@ def main() -> None:
         scales.append(s)
         used_samples.append(
             {
+                "source": "class_prior",
                 "class_name": name,
                 "prior_h_m": prior_h,
                 "measured_h_units": measured_h,
@@ -117,6 +201,7 @@ def main() -> None:
         layout["scale"]["factor"] = S
         layout["scale"]["n_samples"] = 0
         layout["scale"]["priors_used"] = []
+        layout["scale"]["reference_samples"] = []
         layout["scale"]["source"] = "none"
         layout["scale"]["up_axis"] = "y"
 
@@ -125,14 +210,25 @@ def main() -> None:
         with scaled_path.open("w") as f:
             json.dump(layout, f, indent=2)
 
-        print("[SCALE] No class priors available; wrote scene_layout_scaled.json with factor=1.0")
+        print("[SCALE] No scale cues available; wrote scene_layout_scaled.json with factor=1.0")
         return
 
     # Compute global scale factor as median for robustness
     scales_arr = np.array(scales, dtype=np.float32)
     S = float(np.median(scales_arr))
 
-    print(f"[SCALE] Using global scale factor S={S:.4f} from {len(scales)} samples")
+    source_flags = {
+        "reference": len(ref_scales) > 0,
+        "prior": len(scales) > len(ref_scales),
+    }
+    if source_flags["reference"] and source_flags["prior"]:
+        source_label = "blend"
+    elif source_flags["reference"]:
+        source_label = "reference"
+    else:
+        source_label = "class_priors"
+
+    print(f"[SCALE] Using global scale factor S={S:.4f} from {len(scales)} samples (source={source_label})")
 
     # Scale room_box
     if room_box is not None:
@@ -185,9 +281,12 @@ def main() -> None:
     layout.setdefault("scale", {})
     layout["scale"]["factor"] = S
     layout["scale"]["n_samples"] = len(scales)
-    layout["scale"]["priors_used"] = used_samples
-    layout["scale"]["source"] = "class_priors"
+    layout["scale"]["priors_used"] = [s for s in used_samples if s.get("source") == "class_prior"]
+    layout["scale"]["reference_samples"] = [s for s in used_samples if s.get("source") != "class_prior"]
+    layout["scale"]["source"] = source_label
     layout["scale"]["up_axis"] = "y"
+    if metadata_path:
+        layout["scale"]["metadata_path"] = str(metadata_path)
 
     scaled_path = layout_dir / "scene_layout_scaled.json"
     with scaled_path.open("w") as f:
