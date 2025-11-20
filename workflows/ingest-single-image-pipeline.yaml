@@ -16,10 +16,10 @@ main:
           - region: "us-central1"
         next: filter_image
 
-    # Kick off only when a single RGB lands under scenes/<sceneId>/
+    # Kick off only when a single RGB lands under scenes/<sceneId>/images/
     - filter_image:
         switch:
-          - condition: ${text.match_regex(object, "(?i)^scenes/.+\\.(png|jpg|jpeg)$")}
+          - condition: ${text.match_regex(object, "(?i)^scenes/[^/]+/images/[^/]+\\.(png|jpg|jpeg)$")}
             next: derive
         next: skip
 
@@ -28,7 +28,7 @@ main:
           - parts: ${text.split(object, "/")}
           - sceneId: ${parts[1]}
           - imagesPrefix: ${text.replace_all(object, "/[^/]+$", "")}
-          - segPrefix: ${imagesPrefix + "/seg"}
+          - segPrefix: ${"scenes/" + sceneId + "/seg"}
           - datasetYaml: ${segPrefix + "/dataset/data.yaml"}
           - da3Geom: ${"scenes/" + sceneId + "/da3/da3_geom.npz"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
