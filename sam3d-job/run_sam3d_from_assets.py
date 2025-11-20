@@ -9,9 +9,17 @@ from typing import Optional, Tuple
 import numpy as np
 from PIL import Image
 
+SAM3D_REPO_ROOT = Path(os.getenv("SAM3D_REPO_ROOT", Path("/app/sam3d-objects")))
+SAM3D_CHECKPOINT_ROOT = Path(
+    os.getenv("SAM3D_CHECKPOINT_ROOT", SAM3D_REPO_ROOT / "checkpoints")
+)
+SAM3D_HF_REPO = os.getenv("SAM3D_HF_REPO", "facebook/sam-3d-objects")
+SAM3D_HF_REVISION = os.getenv("SAM3D_HF_REVISION")
+
 # SAM 3D Objects inference utilities live under notebook/
 NOTEBOOK_ROOTS = [
     Path(__file__).parent / "notebook",
+    SAM3D_REPO_ROOT / "notebook",
     Path("/workspace/sam3d-objects/notebook"),
 ]
 for nb_root in NOTEBOOK_ROOTS:
@@ -89,6 +97,77 @@ def convert_glb_to_usdz(glb_path: Path, usdz_path: Path) -> bool:
         return False
 
 
+def download_sam3d_checkpoints(target_root: Path) -> Optional[Path]:
+    """Fetch checkpoints from Hugging Face if they are not already present."""
+
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as exc:  # pragma: no cover - optional dependency
+        print(
+            f"[SAM3D] WARNING: huggingface_hub not available, cannot download checkpoints ({exc})",
+            file=sys.stderr,
+        )
+        return None
+
+    allow_patterns = ["checkpoints/hf/**"]
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        local_path = snapshot_download(
+            repo_id=SAM3D_HF_REPO,
+            repo_type="model",
+            revision=SAM3D_HF_REVISION,
+            allow_patterns=allow_patterns,
+            local_dir=target_root.parent,
+            local_dir_use_symlinks=False,
+        )
+        config_path = Path(local_path) / "checkpoints/hf/pipeline.yaml"
+        if config_path.is_file():
+            print(
+                f"[SAM3D] Downloaded SAM 3D checkpoints from {SAM3D_HF_REPO} -> {config_path.parent}"
+            )
+            return config_path
+
+        print(
+            f"[SAM3D] WARNING: Download finished but pipeline.yaml not found under {config_path.parent}",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        print(
+            f"[SAM3D] WARNING: Failed to download checkpoints from {SAM3D_HF_REPO}: {exc}",
+            file=sys.stderr,
+        )
+
+    return None
+
+
+def validate_checkpoint_bundle(config_path: Path) -> bool:
+    """Ensure the pipeline config and nearby weights are present."""
+
+    if not config_path.is_file():
+        print(
+            f"[SAM3D] ERROR: pipeline config is missing: {config_path}", file=sys.stderr
+        )
+        return False
+
+    weights_dir = config_path.parent
+    weight_files = sorted(weights_dir.glob("*.ckpt")) + sorted(
+        weights_dir.glob("*.safetensors")
+    )
+    if not weight_files:
+        print(
+            f"[SAM3D] ERROR: no weight files found next to {config_path}. "
+            "Download checkpoints with HUGGINGFACE_TOKEN/HF_TOKEN set or provide a custom SAM3D_CONFIG_PATH.",
+            file=sys.stderr,
+        )
+        return False
+
+    print(
+        f"[SAM3D] Found {len(weight_files)} checkpoint files under {weights_dir}"
+    )
+    return True
+
+
 def main() -> None:
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
@@ -117,17 +196,22 @@ def main() -> None:
         if candidate.is_file():
             config_path = candidate
     if config_path is None:
-        default_cfg = Path("/mnt/gcs/sam3d/checkpoints/hf/pipeline.yaml")
+        default_cfg = SAM3D_CHECKPOINT_ROOT / "hf/pipeline.yaml"
+        legacy_cfg = Path("/mnt/gcs/sam3d/checkpoints/hf/pipeline.yaml")
         fallback_cfg = Path("/workspace/sam3d-objects/checkpoints/hf/pipeline.yaml")
-        if default_cfg.is_file():
-            config_path = default_cfg
-        elif fallback_cfg.is_file():
-            config_path = fallback_cfg
+        for candidate in (default_cfg, legacy_cfg, fallback_cfg):
+            if candidate.is_file():
+                config_path = candidate
+                break
 
     if config_path is None or not config_path.is_file():
+        print("[SAM3D] No local pipeline.yaml found; attempting download from Hugging Face")
+        config_path = download_sam3d_checkpoints(SAM3D_CHECKPOINT_ROOT)
+
+    if config_path is None or not validate_checkpoint_bundle(config_path):
         print(
-            "[SAM3D] ERROR: SAM 3D config not found. Set SAM3D_CONFIG_PATH or "
-            "sync checkpoints under /mnt/gcs/sam3d/checkpoints/hf/pipeline.yaml",
+            "[SAM3D] ERROR: SAM 3D checkpoints unavailable. Set SAM3D_CONFIG_PATH to a valid pipeline.yaml, "
+            "or ensure HUGGINGFACE_TOKEN/HF_TOKEN is set so checkpoints can be downloaded.",
             file=sys.stderr,
         )
         sys.exit(1)
