@@ -1,0 +1,60 @@
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "us-central1"
+        next: filter_scene_assets
+
+    - filter_scene_assets:
+        switch:
+          - condition: ${text.match_regex(object, "^scenes/.+/assets/scene_assets\\.json$")}
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: ${text.split(object, "/")}
+          - sceneId: ${parts[1]}
+          - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
+          - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
+          - usdPrefix: ${"scenes/" + sceneId + "/usd"}
+          - jobName: "usd-assembly-job"
+        next: run_job
+
+    - run_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: USD_PREFIX
+                      value: ${usdPrefix}
+        result: usdExec
+        next: done
+
+    - done:
+        return: ${"usd-assembly-job started for " + object}
+
+    - skip:
+        return: ${"usd assembly skip " + object}
