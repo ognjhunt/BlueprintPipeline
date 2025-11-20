@@ -17,6 +17,12 @@ if [[ -n "${HUGGINGFACE_TOKEN}" ]]; then
   export HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_TOKEN}"
 fi
 
+if [[ -f "${IMAGES_DIR}" ]]; then
+  echo "[SAM3] IMAGES_DIR points to a file; using its parent directory instead"
+  IMAGES_DIR="$(dirname "${IMAGES_DIR}")"
+  IMAGES_PREFIX="${IMAGES_PREFIX%/*}"
+fi
+
 echo "[SAM3] BUCKET=${BUCKET}"
 echo "[SAM3] IMAGES_DIR=${IMAGES_DIR}"
 echo "[SAM3] OUT_DIR=${OUT_DIR}"
