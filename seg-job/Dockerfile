@@ -1,6 +1,8 @@
 FROM nvidia/cuda:12.6.2-cudnn-runtime-ubuntu22.04
 
-# System deps
+# ---------------------------
+# System dependencies
+# ---------------------------
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     software-properties-common \
     git \
@@ -9,7 +11,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libglib2.0-0 libgl1 libsm6 libxext6 libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Note: python3.12-distutils is not needed/available for 3.12 on this PPA
+# ---------------------------
+# Python 3.12
+# ---------------------------
 RUN add-apt-repository ppa:deadsnakes/ppa -y && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -21,30 +25,43 @@ RUN add-apt-repository ppa:deadsnakes/ppa -y && \
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
     python -m ensurepip --upgrade
 
-# Install PyTorch with CUDA 12.6 wheels (GPU-enabled)
+# ---------------------------
+# PyTorch (match SAM3 docs: torch 2.7.0 + CUDA 12.6)
+# ---------------------------
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir --prefer-binary \
-    torch==2.5.1 torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu124
-# Note: Using torch 2.5.1+cu124 as 2.7.0+cu126 is not a standard stable release yet in common indices,
-# or check https://download.pytorch.org/whl/cu126 availability.
-# If you strictly need "2.7.0", ensure the index-url actually has it.
-# For safety, 2.5.1 is the current stable high-version.
+        torch==2.7.0 torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu126
 
-# Install SAM 3 + utilities
+# ---------------------------
+# SAM3 + supporting Python deps
+# ---------------------------
+# 1) Install the sam3 package from PyPI to pull in its declared deps.
+#    (Package itself has some layout issues, but we use the source tree
+#    for code via PYTHONPATH, and keep this for dependency resolution.)
 RUN pip install --no-cache-dir --prefer-binary \
-    git+https://github.com/facebookresearch/sam3.git \
-    opencv-python-headless \
-    Pillow \
-    numpy \
-    PyYAML
+        sam3 \
+        opencv-python-headless \
+        Pillow \
+        numpy \
+        PyYAML \
+        decord \
+        psutil
 
-# HF / Torch caches under /mnt/gcs so they persist across runs
+# 2) Clone the official SAM3 repo and make it importable directly.
+#    This works around the 'No module named sam3.sam' packaging bug by
+#    letting Python import from the source tree instead of the incomplete wheel.
+RUN git clone https://github.com/facebookresearch/sam3.git /opt/sam3
+
+# ---------------------------
+# Runtime environment
+# ---------------------------
 ENV HF_HUB_DISABLE_TELEMETRY=1 \
     HF_HOME=/mnt/gcs/hf-cache \
     TRANSFORMERS_CACHE=/mnt/gcs/hf-cache \
     TORCH_HOME=/tmp/torch-cache \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH="/opt/sam3:${PYTHONPATH}"
 
 WORKDIR /app
 

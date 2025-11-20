@@ -10,8 +10,16 @@ import numpy as np
 import torch
 from PIL import Image
 
-from sam3.model.sam3_image_processor import Sam3Processor
-from sam3.model_builder import build_sam3_image_model
+# Wrap SAM3 imports so we get a clear error if the package layout is broken.
+try:
+    from sam3.model.sam3_image_processor import Sam3Processor
+    from sam3.model_builder import build_sam3_image_model
+except ModuleNotFoundError as e:
+    print(f"[SAM3] FATAL: could not import SAM3 package: {e}", file=sys.stderr)
+    import traceback
+
+    traceback.print_exc()
+    sys.exit(1)
 
 
 def parse_prompts() -> List[str]:
@@ -155,9 +163,22 @@ def main() -> None:
             f"[SAM3] ERROR: images directory does not exist: {images_dir}",
             file=sys.stderr,
         )
+        # Helpful debug listing
+        try:
+            for p in sorted(root.glob("**/*")):
+                print(f"[SAM3] FS: {p}")
+        except Exception as e:
+            print(f"[SAM3] WARNING: failed to walk /mnt/gcs: {e}", file=sys.stderr)
         sys.exit(1)
 
+    print(f"[SAM3] Listing images in {images_dir}")
     image_paths = list_images(images_dir)
+    print(f"[SAM3] Found {len(image_paths)} image(s)")
+
+    if image_paths:
+        sample_names = [p.name for p in image_paths[:10]]
+        print(f"[SAM3] Sample image names: {sample_names}")
+
     if not image_paths:
         print(f"[SAM3] ERROR: no .png/.jpg/.jpeg images found in {images_dir}", file=sys.stderr)
         sys.exit(1)
@@ -169,13 +190,16 @@ def main() -> None:
     print(f"[SAM3] Using prompts: {prompts}")
     class_to_id = {c: i for i, c in enumerate(prompts)}
 
+    print("[SAM3] Building SAM3 model...")
     model = build_sam3_image_model()
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[SAM3] Using device: {device}")
     model.to(device)
 
     processor = Sam3Processor(model, device=device)
     conf_thresh = float(os.environ.get("SAM3_CONFIDENCE", "0.15"))
     processor.set_confidence_threshold(conf_thresh)
+    print(f"[SAM3] Confidence threshold set to {conf_thresh}")
 
     data_yaml = {
         "path": str(out_dir / "dataset"),
@@ -188,6 +212,7 @@ def main() -> None:
     (out_dir / "dataset").mkdir(parents=True, exist_ok=True)
     with (out_dir / "dataset" / "data.yaml").open("w") as f:
         f.write(json.dumps(data_yaml, indent=2))
+    print(f"[SAM3] Wrote data.yaml to {out_dir / 'dataset' / 'data.yaml'}")
 
     for img_path in copied_images:
         print(f"[SAM3] Processing {img_path.name}")
@@ -231,4 +256,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+
+        print(f"[SAM3] FATAL: unhandled exception: {e}", file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)
