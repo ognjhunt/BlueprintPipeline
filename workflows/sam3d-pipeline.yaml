@@ -1,0 +1,55 @@
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "us-central1"
+        next: filter_scene_assets
+
+    # Trigger on scene_assets.json emitted by the asset planner
+    - filter_scene_assets:
+        switch:
+          - condition: ${text.match_regex(object, "^scenes/.+/assets/scene_assets\\.json$")}
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: ${text.split(object, "/")}
+          - sceneId: ${parts[1]}
+          - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
+          - jobName: "sam3d-job"
+        next: run_sam3d
+
+    - run_sam3d:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+        result: sam3dExec
+        next: done
+
+    - done:
+        return: ${"sam3d-job started for " + object}
+
+    - skip:
+        return: ${"sam3d skip " + object}

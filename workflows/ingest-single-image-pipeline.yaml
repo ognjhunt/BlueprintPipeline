@@ -1,0 +1,378 @@
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "us-central1"
+        next: filter_image
+
+    # Kick off only when a single RGB lands under scenes/<sceneId>/
+    - filter_image:
+        switch:
+          - condition: ${text.match_regex(object, "(?i)^scenes/.+\\.(png|jpg|jpeg)$")}
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: ${text.split(object, "/")}
+          - sceneId: ${parts[1]}
+          - imagesPrefix: ${text.replace_all(object, "/[^/]+$", "")}
+          - segPrefix: ${imagesPrefix + "/seg"}
+          - datasetYaml: ${segPrefix + "/dataset/data.yaml"}
+          - da3Geom: ${"scenes/" + sceneId + "/da3/da3_geom.npz"}
+          - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
+          - layoutJson: ${layoutPrefix + "/scene_layout.json"}
+          - scaledLayout: ${layoutPrefix + "/scene_layout_scaled.json"}
+          - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
+          - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
+          - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
+          - dataAttempts: 0
+          - da3Attempts: 0
+          - layoutAttempts: 0
+          - scaledAttempts: 0
+          - multiviewAttempts: 0
+          - assetsAttempts: 0
+        next: run_seg_job
+
+    - run_seg_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/sam3-seg-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: IMAGES_PREFIX
+                      value: ${imagesPrefix}
+                    - name: SEG_PREFIX
+                      value: ${segPrefix}
+        result: segExec
+        next: wait_for_data_yaml
+
+    - wait_for_data_yaml:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${datasetYaml}
+          result: dataObj
+          next: run_da3_job
+        except:
+          next: retry_data_yaml
+
+    - retry_data_yaml:
+        switch:
+          - condition: ${dataAttempts < 60}
+            next: bump_data_attempt
+        next: fail_data_yaml
+
+    - bump_data_attempt:
+        assign:
+          - dataAttempts: ${dataAttempts + 1}
+        next: sleep_data_yaml
+
+    - sleep_data_yaml:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_data_yaml
+
+    - fail_data_yaml:
+        raise: ${"data.yaml not found at " + datasetYaml}
+
+    - run_da3_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/scene-da3-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: DATASET_PREFIX
+                      value: ${segDatasetPrefix}
+                    - name: OUT_PREFIX
+                      value: ${"scenes/" + sceneId + "/da3"}
+        result: da3Exec
+        next: wait_for_da3_geom
+
+    - wait_for_da3_geom:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${da3Geom}
+          result: da3Obj
+          next: run_layout_job
+        except:
+          next: retry_da3_geom
+
+    - retry_da3_geom:
+        switch:
+          - condition: ${da3Attempts < 60}
+            next: bump_da3_attempt
+        next: fail_da3_geom
+
+    - bump_da3_attempt:
+        assign:
+          - da3Attempts: ${da3Attempts + 1}
+        next: sleep_da3_geom
+
+    - sleep_da3_geom:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_da3_geom
+
+    - fail_da3_geom:
+        raise: ${"da3_geom.npz not found at " + da3Geom}
+
+    - run_layout_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/layout-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: DA3_PREFIX
+                      value: ${"scenes/" + sceneId + "/da3"}
+                    - name: SEG_DATASET_PREFIX
+                      value: ${segDatasetPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+        result: layoutExec
+        next: wait_for_layout_json
+
+    - wait_for_layout_json:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${layoutJson}
+          result: layoutObj
+          next: run_scale_job
+        except:
+          next: retry_layout_json
+
+    - retry_layout_json:
+        switch:
+          - condition: ${layoutAttempts < 60}
+            next: bump_layout_attempt
+        next: fail_layout_json
+
+    - bump_layout_attempt:
+        assign:
+          - layoutAttempts: ${layoutAttempts + 1}
+        next: sleep_layout_json
+
+    - sleep_layout_json:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_layout_json
+
+    - fail_layout_json:
+        raise: ${"scene_layout.json not found at " + layoutJson}
+
+    - run_scale_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/scale-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+        result: scaleExec
+        next: wait_for_scaled_layout
+
+    - wait_for_scaled_layout:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${scaledLayout}
+          result: scaledObj
+          next: run_multiview_job
+        except:
+          next: retry_scaled_layout
+
+    - retry_scaled_layout:
+        switch:
+          - condition: ${scaledAttempts < 60}
+            next: bump_scaled_attempt
+        next: fail_scaled_layout
+
+    - bump_scaled_attempt:
+        assign:
+          - scaledAttempts: ${scaledAttempts + 1}
+        next: sleep_scaled_layout
+
+    - sleep_scaled_layout:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_scaled_layout
+
+    - fail_scaled_layout:
+        raise: ${"scene_layout_scaled.json not found at " + scaledLayout}
+
+    - run_multiview_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/multiview-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: SEG_DATASET_PREFIX
+                      value: ${segDatasetPrefix}
+                    - name: MULTIVIEW_PREFIX
+                      value: ${multiviewPrefix}
+        result: mvExec
+        next: wait_for_multiview
+
+    - wait_for_multiview:
+        try:
+          call: googleapis.storage.v1.objects.list
+          args:
+            bucket: ${bucket}
+            prefix: ${multiviewPrefix + "/obj_"}
+            pageSize: 1
+          result: mvList
+          next: check_multiview
+        except:
+          next: retry_multiview
+
+    - check_multiview:
+        switch:
+          - condition: ${len(mvList.items or []) > 0}
+            next: run_assets_plan
+        next: retry_multiview
+
+    - retry_multiview:
+        switch:
+          - condition: ${multiviewAttempts < 60}
+            next: bump_multiview_attempt
+        next: fail_multiview
+
+    - bump_multiview_attempt:
+        assign:
+          - multiviewAttempts: ${multiviewAttempts + 1}
+        next: sleep_multiview
+
+    - sleep_multiview:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_multiview
+
+    - fail_multiview:
+        raise: ${"No multiview crops found under " + multiviewPrefix}
+
+    - run_assets_plan:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/assets-plan-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: MULTIVIEW_PREFIX
+                      value: ${multiviewPrefix}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+        result: assetsExec
+        next: wait_for_scene_assets
+
+    - wait_for_scene_assets:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${assetsPrefix + "/scene_assets.json"}
+          result: assetsObj
+          next: run_sam3d
+        except:
+          next: retry_scene_assets
+
+    - retry_scene_assets:
+        switch:
+          - condition: ${assetsAttempts < 60}
+            next: bump_assets_attempt
+        next: fail_scene_assets
+
+    - bump_assets_attempt:
+        assign:
+          - assetsAttempts: ${assetsAttempts + 1}
+        next: sleep_scene_assets
+
+    - sleep_scene_assets:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_scene_assets
+
+    - fail_scene_assets:
+        raise: ${"scene_assets.json not found at " + assetsPrefix + "/scene_assets.json"}
+
+    - run_sam3d:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/sam3d-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+        result: sam3dExec
+        next: done
+
+    - done:
+        return: ${"full pipeline started from " + object}
+
+    - skip:
+        return: ${"ingest skip " + object}
