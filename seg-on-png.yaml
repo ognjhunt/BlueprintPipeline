@@ -35,11 +35,11 @@ main:
           - segPrefix: ${imagesPrefix + "/seg"}
         next: run_seg_job
 
-    # 5) Run the Cloud Run job gsam2-job with env overrides
+    # 5) Run the Cloud Run job sam3-seg-job with env overrides
     - run_seg_job:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/gsam2-job"}
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/sam3-seg-job"}
           body:
             overrides:
               containerOverrides:
@@ -55,7 +55,7 @@ main:
 
     # 6) Return quick result
     - done:
-        return: ${"started gsam2-job for " + object}
+        return: ${"started sam3-seg-job for " + object}
 
     # 7) Skip non-image or non-scenes/ objects quietly
     - skip:
