@@ -30,7 +30,8 @@ RUN pip install --no-cache-dir --prefer-binary \
     opencv-python-headless \
     Pillow \
     numpy \
-    PyYAML
+    PyYAML \
+    usd-core==24.05
 
 # Keep a local checkout for configs/notebooks
 RUN git clone https://github.com/facebookresearch/sam-3d-objects.git /workspace/sam3d-objects || true
