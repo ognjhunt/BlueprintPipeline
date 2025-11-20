@@ -26,6 +26,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
     --index-url https://download.pytorch.org/whl/cu126
 
 RUN pip install --no-cache-dir --prefer-binary \
+    huggingface_hub \
     git+https://github.com/facebookresearch/sam-3d-objects.git \
     opencv-python-headless \
     Pillow \
@@ -33,11 +34,15 @@ RUN pip install --no-cache-dir --prefer-binary \
     PyYAML \
     usd-core==24.05
 
+ENV SAM3D_REPO_ROOT=/app/sam3d-objects \
+    SAM3D_CHECKPOINT_ROOT=/app/sam3d-assets/checkpoints
+
 # Keep a local checkout for configs/notebooks
-RUN git clone https://github.com/facebookresearch/sam-3d-objects.git /workspace/sam3d-objects || true
-RUN if [ -f /workspace/sam3d-objects/requirements.inference.txt ]; then \
-      pip install --no-cache-dir -r /workspace/sam3d-objects/requirements.inference.txt; \
+RUN git clone https://github.com/facebookresearch/sam-3d-objects.git ${SAM3D_REPO_ROOT} || true
+RUN if [ -f ${SAM3D_REPO_ROOT}/requirements.inference.txt ]; then \
+      pip install --no-cache-dir -r ${SAM3D_REPO_ROOT}/requirements.inference.txt; \
     fi
+RUN mkdir -p ${SAM3D_CHECKPOINT_ROOT}
 
 ENV HF_HUB_DISABLE_TELEMETRY=1 \
     HF_HOME=/mnt/gcs/hf-cache \
