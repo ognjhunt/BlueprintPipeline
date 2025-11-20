@@ -271,6 +271,10 @@ def main() -> None:
     objects = scene_assets.get("objects", [])
     interactive = [o for o in objects if o.get("type") == "interactive"]
 
+    if not endpoint and interactive:
+        print("[PHYSX] ERROR: PHYSX_ENDPOINT is required for interactive assets", file=sys.stderr)
+        sys.exit(1)
+
     print(f"[PHYSX] Bucket={bucket} Scene={scene_id}")
     print(f"[PHYSX] multiview_root={multiview_root}")
     print(f"[PHYSX] assets_root={assets_root}")

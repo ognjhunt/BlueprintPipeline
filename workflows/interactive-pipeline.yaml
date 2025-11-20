@@ -29,6 +29,7 @@ main:
           - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
+          - physxEndpoint: ${sys.get_env("PHYSX_ENDPOINT")}
           - jobName: "interactive-job"
         next: run_job
 
@@ -50,6 +51,8 @@ main:
                       value: ${assetsPrefix}
                     - name: LAYOUT_PREFIX
                       value: ${layoutPrefix}
+                    - name: PHYSX_ENDPOINT
+                      value: ${physxEndpoint}
         result: interactiveExec
         next: done
 
