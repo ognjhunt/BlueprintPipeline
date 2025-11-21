@@ -2,6 +2,7 @@ import os
 import sys
 import json
 from pathlib import Path
+from typing import Dict, Optional
 
 import cv2
 import numpy as np
@@ -122,6 +123,70 @@ def create_gemini_client():
     return client
 
 
+def load_inventory_metadata(seg_dataset_dir: Path) -> Dict[str, Dict]:
+    """Load Gemini inventory metadata saved by the segmentation step.
+
+    The inventory.json file lives one directory above the dataset folder
+    (seg/inventory.json). We return a mapping from object id -> metadata dict.
+    """
+
+    inventory_path = seg_dataset_dir.parent / "inventory.json"
+    if not inventory_path.is_file():
+        print(f"[MULTIVIEW] No inventory.json found at {inventory_path}; using basic prompts")
+        return {}
+
+    try:
+        with inventory_path.open("r") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[MULTIVIEW] WARNING: failed to read {inventory_path}: {e}", file=sys.stderr)
+        return {}
+
+    objects = data.get("objects")
+    if not isinstance(objects, list):
+        print(f"[MULTIVIEW] WARNING: inventory.json missing 'objects' list")
+        return {}
+
+    mapping: Dict[str, Dict] = {}
+    for item in objects:
+        oid = str(item.get("id") or "").strip()
+        if not oid:
+            continue
+        mapping[oid] = item
+
+    print(f"[MULTIVIEW] Loaded {len(mapping)} object entries from inventory.json")
+    return mapping
+
+
+def build_object_context(object_phrase: str, metadata: Optional[Dict]) -> str:
+    """Return a rich, human-readable description block for prompts."""
+
+    lines = []
+    if metadata:
+        oid = metadata.get("id")
+        category = metadata.get("category")
+        desc = metadata.get("short_description") or metadata.get("description")
+        approx_loc = metadata.get("approx_location") or metadata.get("location")
+        relationships = metadata.get("relationships") or []
+
+        if oid:
+            lines.append(f"* **ID:** `{oid}`")
+        if category:
+            lines.append(f"* **Category:** {category}")
+        if desc:
+            lines.append(f"* **Short description:** {desc}")
+        if approx_loc:
+            lines.append(f"* **Location in source image:** {approx_loc}")
+        if relationships:
+            rel_list = ", ".join(map(str, relationships))
+            lines.append(f"* **Relationships:** {rel_list}")
+
+    if not lines:
+        lines.append(f"* **Object:** {object_phrase or 'object'}")
+
+    return "\n".join(lines)
+
+
 def extract_image_from_response(response):
     """
     Robustly extract a single image from a Gemini response.
@@ -198,6 +263,7 @@ def generate_views_for_object(
     object_phrase: str,
     out_dir: Path,
     views_per_object: int = 4,
+    object_metadata: Optional[Dict] = None,
 ):
     """
     Calls Nano Banana Pro (Gemini 3.0 Pro Image Preview) to generate N views of the object.
@@ -217,18 +283,52 @@ def generate_views_for_object(
     ]
 
     image = Image.open(str(crop_path)).convert("RGB")
+    context_block = build_object_context(object_phrase, object_metadata)
+
+    front_view_prompt = (
+        "You are given a cropped reference image (isolated object on neutral background).\n"
+        "Use that crop as a guide to reconstruct the complete object as a standalone asset.\n\n"
+        "Object details:\n"
+        f"{context_block}\n\n"
+        "Reconstruction requirements:\n"
+        "1. Shape & proportions\n"
+        "   * Infer a plausible full 3D form consistent with the visible silhouette.\n"
+        "   * Keep the relative scale suggested by the crop (no exaggerated stretching).\n"
+        "2. Material & surface\n"
+        "   * Preserve the material type, color palette, and wear visible in the crop.\n"
+        "   * Carry over fine surface details (texture, scuffs, glaze/finish).\n"
+        "3. Lighting & realism\n"
+        "   * Use soft, neutral lighting that reveals form without harsh shadows.\n"
+        "4. Camera & framing\n"
+        "   * Render ONE centered, straight-on front view (orthographic-style).\n"
+        "   * Show the full object with a small margin; do not crop any part.\n"
+        "5. Background & isolation\n"
+        "   * The object must appear alone on a transparent background (alpha).\n"
+        "   * Remove every shelf, table, wall, or prop from the scene.\n"
+        "6. Consistency with source image\n"
+        "   * Do not invent new accessories or patterns beyond what the crop implies.\n"
+        "   * Complete hidden areas plausibly so the final render matches the same object.\n\n"
+        "Output: one high-resolution PNG render of the reconstructed object (front view, transparent background)."
+    )
 
     for i in range(views_per_object):
         desc = view_descriptions[i % len(view_descriptions)]
-        prompt = (
-            f"Using the reference image, recreate ONLY the {object_phrase} as a standalone object, "
-            f"shown from a {desc}.\n"
-            "Frame the shot close to the camera so the entire object fills most of the image while remaining fully visible.\n"
-            "Remove every background element: no tables, shelves, counters, floors, walls, or props.\n"
-            "Render the object against a transparent background (alpha), with no shadows or ground plane.\n"
-            "Keep the object front-facing and centered.\n"
-            "Output exactly one image (PNG preferred), not a grid or collage."
-        )
+
+        if i == 0:
+            prompt = front_view_prompt
+        else:
+            prompt = (
+                "You are given a cropped reference image (isolated object on neutral background).\n"
+                "Recreate only the described object as a standalone render from the specified view angle.\n\n"
+                "Object details:\n"
+                f"{context_block}\n\n"
+                f"View to render: {desc}.\n"
+                "Rules:\n"
+                "- Keep the full object visible with a slight margin; do not crop.\n"
+                "- Match material, color, and texture cues from the crop; do not add new parts.\n"
+                "- Remove all background, shelves, floors, and shadows; use a transparent background (alpha).\n"
+                "- Output exactly one PNG image (no grids).\n"
+            )
 
         print(f"[MULTIVIEW] Calling Gemini for view {i} of {object_phrase!r} ...")
         response = client.models.generate_content(
@@ -316,6 +416,8 @@ def main() -> None:
     objects = layout.get("objects", [])
     print(f"[MULTIVIEW] Layout has {len(objects)} objects")
 
+    inventory_metadata = load_inventory_metadata(seg_dataset_dir)
+
     if not objects:
         print("[MULTIVIEW] No objects found in layout; nothing to do.")
         return
@@ -387,6 +489,11 @@ def main() -> None:
         # Step 1: infer a good noun phrase for the foreground movable object
         object_phrase = infer_object_phrase(client, crop_path, class_name)
 
+        # Optional: enrich prompt with Gemini inventory metadata if available
+        object_meta = None
+        if inventory_metadata:
+            object_meta = inventory_metadata.get(str(obj_id)) or inventory_metadata.get(str(obj.get("id")))
+
         # Step 2: generate isolated single-view renders
         generate_views_for_object(
             client=client,
@@ -394,6 +501,7 @@ def main() -> None:
             object_phrase=object_phrase,
             out_dir=obj_dir,
             views_per_object=views_per_object,
+            object_metadata=object_meta,
         )
 
     print("[MULTIVIEW] Done.")
