@@ -29,6 +29,7 @@ except Exception as e:  # pragma: no cover - import-time failure only logged at 
 # Prompt handling
 # -----------------------------------------------------------------------------
 
+
 def _read_max_prompts() -> int:
     """Maximum number of text prompts to apply per image."""
     raw = os.environ.get("SAM3_MAX_PROMPTS", "24").strip()
@@ -157,11 +158,27 @@ def build_scene_inventory_with_gemini(
         raise RuntimeError(
             "No GEMINI_API_KEY / GOOGLE_API_KEY found; cannot build inventory without Gemini"
         )
-    model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-3.0-pro")
+
+    # Use Gemini 3 Pro Preview by default. The correct model ID is
+    # "gemini-3-pro-preview" for the Gemini API. :contentReference[oaicite:4]{index=4}
+    model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-3-pro-preview")
+
+    # Thinking level: "low" or "high". Gemini 3 Pro defaults to high if unset. :contentReference[oaicite:5]{index=5}
+    thinking_level_env = os.environ.get("GEMINI_THINKING_LEVEL", "high").strip().lower()
+    thinking_level = thinking_level_env if thinking_level_env in ("low", "high") else "high"
+
+    # Optional grounding with Google Search (for more factual / up-to-date inventories).
+    enable_search = os.environ.get("GEMINI_ENABLE_SEARCH", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
     try:
         # New official SDK: pip install google-genai
         from google import genai  # type: ignore[import]
+        from google.genai import types  # type: ignore[import]
     except Exception as e:
         raise RuntimeError(f"Gemini SDK (google-genai) not available: {e}")
 
@@ -169,6 +186,20 @@ def build_scene_inventory_with_gemini(
         client = genai.Client(api_key=api_key)
     except Exception as e:
         raise RuntimeError(f"Failed to create Gemini client: {e}")
+
+    # Build GenerateContentConfig with thinking + optional Google Search tool. :contentReference[oaicite:6]{index=6}
+    tools = None
+    if enable_search:
+        tools = [types.Tool(google_search=types.GoogleSearch())]
+        print("[SAM3] Gemini Google Search grounding: ENABLED", file=sys.stderr)
+    else:
+        print("[SAM3] Gemini Google Search grounding: DISABLED", file=sys.stderr)
+
+    generate_content_config = types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
+        tools=tools,
+        response_mime_type="application/json",
+    )
 
     # Craft a strict, machine-parsable instruction to force a complete inventory.
     base_hint = ", ".join(prompt_hints)
@@ -193,17 +224,21 @@ def build_scene_inventory_with_gemini(
         "6. Use coarse locations such as front left, middle center, back right.\n"
         "7. Only describe what is visible in the single image; do not invent hidden objects.\n"
         f"{hint_line}"
-        "Output format (strict JSON only):\\n"
+        "Output format (strict JSON only):\n"
         '{"objects": [{"id": "sofa_1", "category": "sofa", "short_description": "...", '
         '"approx_location": "...", "relationships": ["..."]}]}\n'
         "Use valid JSON with double quotes and no trailing commas."
     )
 
     try:
-        print(f"[SAM3] Calling Gemini model '{model_id}' to build scene inventory...")
+        print(
+            f"[SAM3] Calling Gemini model '{model_id}' to build scene inventory "
+            f"(thinking_level={thinking_level}, search_enabled={enable_search})..."
+        )
         response = client.models.generate_content(
             model=model_id,
             contents=[image, instruction],
+            config=generate_content_config,
         )
         text = getattr(response, "text", None)
         if not text:
