@@ -84,6 +84,38 @@ def crop_object(image_bgr, bbox2d, polygon=None, margin_frac=0.05):
     return crop, (x0, y0, x1, y1)
 
 
+def summarize_crop_strength(image_shape, bbox2d, crop_box):
+    """Return a simple description of how aggressive the crop is.
+
+    Strength is reported as:
+      * multiplier vs. the raw bbox area (1.0 = exact bbox, >1 includes margin)
+      * percentage of the full image covered by the crop
+    """
+
+    H, W = image_shape[:2]
+    cx_n, cy_n, w_n, h_n = bbox2d
+
+    bbox_w_px = w_n * W
+    bbox_h_px = h_n * H
+    bbox_area = max(bbox_w_px * bbox_h_px, 1.0)
+
+    x0, y0, x1, y1 = crop_box
+    crop_w = max(float(x1 - x0), 1.0)
+    crop_h = max(float(y1 - y0), 1.0)
+    crop_area = crop_w * crop_h
+
+    strength = crop_area / bbox_area
+    image_fraction = crop_area / float(max(W * H, 1))
+
+    return {
+        "bbox_px": [bbox_w_px, bbox_h_px],
+        "crop_px": [crop_w, crop_h],
+        "crop_box": [x0, y0, x1, y1],
+        "strength_vs_bbox": strength,
+        "image_fraction": image_fraction,
+    }
+
+
 def create_gemini_client():
     # GEMINI_API_KEY should be set in environment (or pass api_key explicitly)
     client = genai.Client()
@@ -176,9 +208,9 @@ def generate_views_for_object(
 
     # Different view descriptions per index
     view_descriptions = [
-        "straight-on front view at eye level",
-        "three-quarter front-left view",
-        "three-quarter front-right view",
+        "tight, centered, straight-on front view close to the camera",
+        "three-quarter front-left hero angle",
+        "three-quarter front-right hero angle",
         "slightly top-down front view",
         "left side view",
         "right side view",
@@ -191,12 +223,11 @@ def generate_views_for_object(
         prompt = (
             f"Using the reference image, recreate ONLY the {object_phrase} as a standalone object, "
             f"shown from a {desc}.\n"
-            "The reference may include tables, shelves, countertops, walls, or panels behind the object, "
-            "but you must IGNORE and REMOVE all of those supporting surfaces.\n"
-            f"The {object_phrase} should appear by itself, with no table, shelf, counter, or wall visible.\n"
-            "Place it on a simple light-gray floor with a plain light-gray background. "
-            "Do not add any other props or extra objects. "
-            "Output exactly one image, not a grid or collage."
+            "Frame the shot close to the camera so the entire object fills most of the image while remaining fully visible.\n"
+            "Remove every background element: no tables, shelves, counters, floors, walls, or props.\n"
+            "Render the object against a transparent background (alpha), with no shadows or ground plane.\n"
+            "Keep the object front-facing and centered.\n"
+            "Output exactly one image (PNG preferred), not a grid or collage."
         )
 
         print(f"[MULTIVIEW] Calling Gemini for view {i} of {object_phrase!r} ...")
@@ -229,8 +260,9 @@ def main() -> None:
     seg_dataset_prefix = os.getenv("SEG_DATASET_PREFIX") # e.g. scenes/<sceneId>/seg/dataset
     multiview_prefix = os.getenv("MULTIVIEW_PREFIX")     # e.g. scenes/<sceneId>/multiview
     layout_file_name = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
-    views_per_object_env = os.getenv("VIEWS_PER_OBJECT", "4")
-    enable_gemini_views_env = os.getenv("ENABLE_GEMINI_VIEWS", "false")
+    views_per_object_env = os.getenv("VIEWS_PER_OBJECT", "1")
+    enable_gemini_views_env = os.getenv("ENABLE_GEMINI_VIEWS", "true")
+    crop_margin_env = os.getenv("CROP_MARGIN_FRAC", "0.05")
 
     def _parse_bool(val: str) -> bool:
         return val.strip().lower() in {"1", "true", "yes", "on"}
@@ -238,9 +270,13 @@ def main() -> None:
     try:
         views_per_object = int(views_per_object_env)
     except ValueError:
-        views_per_object = 4
+        views_per_object = 1
 
     enable_gemini_views = _parse_bool(enable_gemini_views_env)
+    try:
+        crop_margin_frac = float(crop_margin_env)
+    except ValueError:
+        crop_margin_frac = 0.05
 
     if not layout_prefix or not seg_dataset_prefix or not multiview_prefix:
         print(
@@ -264,6 +300,7 @@ def main() -> None:
     print(f"[MULTIVIEW] Multiview root: {multiview_root}")
     print(f"[MULTIVIEW] Views per object: {views_per_object}")
     print(f"[MULTIVIEW] Gemini view generation enabled: {enable_gemini_views}")
+    print(f"[MULTIVIEW] Crop margin fraction: {crop_margin_frac:.3f}")
 
     if not layout_path.is_file():
         print(f"[MULTIVIEW] ERROR: layout file not found: {layout_path}", file=sys.stderr)
@@ -307,7 +344,9 @@ def main() -> None:
 
         print(f"[MULTIVIEW] Processing object id={obj_id}, class_name={class_name!r}")
 
-        crop_bgr, box = crop_object(image_bgr, bbox2d, polygon=polygon)
+        crop_bgr, box = crop_object(
+            image_bgr, bbox2d, polygon=polygon, margin_frac=crop_margin_frac
+        )
         if crop_bgr is None:
             print(f"[MULTIVIEW] Skipping object {obj_id}: empty crop", file=sys.stderr)
             continue
@@ -316,6 +355,26 @@ def main() -> None:
         obj_dir.mkdir(parents=True, exist_ok=True)
         crop_path = obj_dir / "crop.png"
         cv2.imwrite(str(crop_path), crop_bgr)
+
+        strength = summarize_crop_strength(image_bgr.shape, bbox2d, box)
+        strength_msg = (
+            f"[MULTIVIEW] Crop strength for obj {obj_id}: "
+            f"{strength['strength_vs_bbox']:.2f}x bbox area, "
+            f"{strength['image_fraction']*100:.2f}% of full image"
+        )
+        print(strength_msg)
+
+        meta = {
+            "object_id": obj_id,
+            "class_name": class_name,
+            "crop_margin_frac": crop_margin_frac,
+            "crop_strength": strength,
+            "source_bbox2d": bbox2d,
+        }
+        meta_path = obj_dir / "crop_meta.json"
+        with meta_path.open("w") as f:
+            json.dump(meta, f, indent=2)
+
         print(f"[MULTIVIEW] Saved crop to {crop_path}")
 
         if not enable_gemini_views:
