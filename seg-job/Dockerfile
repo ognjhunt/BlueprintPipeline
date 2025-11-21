@@ -36,7 +36,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
 # ---------------------------
 # SAM3 + supporting Python deps
 # ---------------------------
-# 1) Install the sam3 package from PyPI for its declared deps.
+# Core scientific + HF stack. Note: we do NOT install transformers here.
 RUN pip install --no-cache-dir --prefer-binary \
         sam3 \
         opencv-python-headless \
@@ -44,18 +44,25 @@ RUN pip install --no-cache-dir --prefer-binary \
         numpy \
         PyYAML \
         decord \
-        psutil
+        psutil \
+        huggingface_hub \
+        accelerate \
+        safetensors
 
-# 2) Clone the official SAM3 repo and make it importable directly.
-#    This works around the 'No module named sam3.sam' packaging bug by
-#    letting Python import from the source tree instead of the incomplete wheel.
+# Install Transformers from GitHub main so Sam3Model / Sam3Processor are available.
+# Docs: the SAM3 page is on "main" and explicitly says to install from source.:contentReference[oaicite:2]{index=2}
+RUN pip install --no-cache-dir --prefer-binary \
+        "git+https://github.com/huggingface/transformers.git@main"
+
+# ---------------------------
+# (Optional) SAM3 research repo clone
+# ---------------------------
 RUN git clone https://github.com/facebookresearch/sam3.git /opt/sam3
 
 # ---------------------------
 # Runtime environment
 # ---------------------------
 ENV HF_HUB_DISABLE_TELEMETRY=1 \
-    # Disable the experimental Xet-based download backend & hf_transfer.
     HF_HUB_DISABLE_XET=1 \
     HUGGINGFACE_HUB_DISABLE_XET=1 \
     HF_HUB_ENABLE_XET=0 \
