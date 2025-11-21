@@ -29,62 +29,6 @@ except Exception as e:  # pragma: no cover - import-time failure only logged at 
 # Prompt handling
 # -----------------------------------------------------------------------------
 
-# A general-purpose fallback vocabulary that works reasonably across
-# living rooms, bedrooms, offices, and warehouses. This is only used
-# if no SAM3_PROMPTS env var is provided and Gemini is unavailable.
-DEFAULT_BASE_PROMPTS: List[str] = [
-    # Room / structural surfaces
-    "wall",
-    "floor",
-    "ceiling",
-    "window",
-    "door",
-    # Seating & tables
-    "sofa",
-    "armchair",
-    "chair",
-    "office chair",
-    "round ottoman",
-    "stool",
-    "bench",
-    "coffee table",
-    "side table",
-    "desk",
-    "dining table",
-    "workbench",
-    # Storage & surfaces
-    "cabinet",
-    "wardrobe",
-    "bookshelf",
-    "shelving unit",
-    "sideboard cabinet",
-    "countertop",
-    "kitchen island",
-    # Sleeping
-    "bed",
-    "nightstand",
-    "dresser",
-    # Decor & fixtures
-    "lamp",
-    "floor lamp",
-    "table lamp",
-    "rug",
-    "carpet",
-    "pillow",
-    "blanket",
-    "mirror",
-    "wall art",
-    "plant",
-    # Warehouse / industrial
-    "box",
-    "crate",
-    "pallet",
-    "pallet rack",
-    "warehouse rack",
-    "forklift",
-]
-
-
 def _read_max_prompts() -> int:
     """Maximum number of text prompts to apply per image."""
     raw = os.environ.get("SAM3_MAX_PROMPTS", "24").strip()
@@ -95,10 +39,9 @@ def _read_max_prompts() -> int:
         return 24
 
 
-def read_base_prompts_from_env() -> List[str]:
+def read_prompt_hints_from_env() -> List[str]:
     """
-    Read the base prompt vocabulary from SAM3_PROMPTS, or fall back to a
-    generic set that works across many scene types.
+    Read optional prompt hints from SAM3_PROMPTS to seed Gemini.
 
     The final list is:
       * lowercased
@@ -108,13 +51,11 @@ def read_base_prompts_from_env() -> List[str]:
     max_prompts = _read_max_prompts()
     raw = os.environ.get("SAM3_PROMPTS", "").strip()
 
+    tokens: List[str] = []
     if raw:
         # User-provided prompts (comma-separated).
         tokens = [p.strip() for p in raw.split(",") if p.strip()]
-        print(f"[SAM3] Using SAM3_PROMPTS from environment ({len(tokens)} raw items)")
-    else:
-        tokens = list(DEFAULT_BASE_PROMPTS)
-        print(f"[SAM3] Using built-in default prompts ({len(tokens)} candidates)")
+        print(f"[SAM3] Using SAM3_PROMPTS from environment ({len(tokens)} raw items) as Gemini hints")
 
     seen = set()
     prompts: List[str] = []
@@ -127,7 +68,7 @@ def read_base_prompts_from_env() -> List[str]:
         if len(prompts) >= max_prompts:
             break
 
-    print(f"[SAM3] Base prompts after normalization: {prompts}")
+    print(f"[SAM3] Prompt hints after normalization: {prompts}")
     return prompts
 
 
@@ -158,24 +99,21 @@ def _extract_json_blob(text: str) -> str:
 
 
 def build_scene_prompts_with_gemini(
-    image: Image.Image, base_prompts: List[str]
+    image: Image.Image, prompt_hints: List[str]
 ) -> List[str]:
     """
-    Optional step: use Gemini to analyze the scene and propose a small set of
-    segmentation categories that fit THIS particular image (room, warehouse,
-    office, bedroom, etc.).
+    Use Gemini to analyze the scene and propose a small set of segmentation
+    categories that fit THIS particular image (room, warehouse, office,
+    bedroom, etc.).
 
-    If anything goes wrong (no key, import error, bad JSON, etc.), we just
-    fall back to base_prompts.
+    If anything goes wrong (no key, import error, bad JSON, etc.), an
+    exception is raised and segmentation should be skipped.
     """
     api_key = _gemini_api_key()
     if not api_key:
-        print(
-            "[SAM3] No GEMINI_API_KEY / GOOGLE_API_KEY found; "
-            "skipping Gemini-based prompt generation.",
-            file=sys.stderr,
+        raise RuntimeError(
+            "No GEMINI_API_KEY / GOOGLE_API_KEY found; cannot build prompts without Gemini"
         )
-        return base_prompts
 
     max_prompts = _read_max_prompts()
     model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-3.0-pro")
@@ -184,25 +122,22 @@ def build_scene_prompts_with_gemini(
         # New official SDK: pip install google-genai
         from google import genai  # type: ignore[import]
     except Exception as e:
-        print(
-            f"[SAM3] Gemini SDK (google-genai) not available: {e}; "
-            "falling back to base prompts.",
-            file=sys.stderr,
-        )
-        return base_prompts
+        raise RuntimeError(f"Gemini SDK (google-genai) not available: {e}")
 
     try:
         client = genai.Client(api_key=api_key)
     except Exception as e:
-        print(
-            f"[SAM3] Failed to create Gemini client: {e}; "
-            "falling back to base prompts.",
-            file=sys.stderr,
-        )
-        return base_prompts
+        raise RuntimeError(f"Failed to create Gemini client: {e}")
 
     # Craft an instruction that keeps the response machine-parseable.
-    base_hint = ", ".join(base_prompts)
+    base_hint = ", ".join(prompt_hints)
+    if base_hint:
+        hint_line = (
+            "4. Prefer categories from this candidate list when they match the image: "
+            f"{base_hint}. You may also add new categories if needed.\n"
+        )
+    else:
+        hint_line = "4. Choose categories directly from what you observe in the image.\n"
     instruction = (
         "You are helping choose text labels for an open-vocabulary segmentation model.\n"
         "You will be shown exactly one RGB image of a scene (for example a living room, "
@@ -215,8 +150,7 @@ def build_scene_prompts_with_gemini(
         "3. Focus on large / important items (furniture, machinery, doors, windows, "
         "walls, floors, ceiling, shelves, pallets, vehicles, big boxes). Ignore tiny "
         "decorations unless they are central to the scene.\n"
-        "4. Prefer categories from this candidate list when they match the image: "
-        f"{base_hint}. You may also add new categories if needed.\n"
+        f"{hint_line}"
         "5. Return ONLY a single JSON object with this exact shape and nothing else:\n"
         '{\"categories\": [\"label1\", \"label2\", ...]}\n\n'
         "Rules for labels:\n"
@@ -234,31 +168,16 @@ def build_scene_prompts_with_gemini(
         )
         text = getattr(response, "text", None)
         if not text:
-            print(
-                "[SAM3] Gemini returned empty response text; "
-                "falling back to base prompts.",
-                file=sys.stderr,
-            )
-            return base_prompts
+            raise RuntimeError("Gemini returned empty response text")
     except Exception as e:
-        print(
-            f"[SAM3] Gemini generate_content failed: {e}; "
-            "falling back to base prompts.",
-            file=sys.stderr,
-        )
-        return base_prompts
+        raise RuntimeError(f"Gemini generate_content failed: {e}")
 
     try:
         blob = _extract_json_blob(text)
         data = json.loads(blob)
         raw_categories = data.get("categories") or data.get("objects") or data.get("labels") or []
     except Exception as e:
-        print(
-            f"[SAM3] Failed to parse JSON from Gemini response: {e}; "
-            "falling back to base prompts.",
-            file=sys.stderr,
-        )
-        return base_prompts
+        raise RuntimeError(f"Failed to parse JSON from Gemini response: {e}")
 
     seen = set()
     prompts: List[str] = []
@@ -272,11 +191,7 @@ def build_scene_prompts_with_gemini(
             break
 
     if not prompts:
-        print(
-            "[SAM3] Gemini produced no usable categories; using base prompts instead.",
-            file=sys.stderr,
-        )
-        return base_prompts
+        raise RuntimeError("Gemini produced no usable categories")
 
     print(f"[SAM3] Gemini scene prompts: {prompts}")
     return prompts
@@ -475,23 +390,28 @@ def main() -> None:
     print(f"[SAM3] Copied {len(copied_images)} images into {images_out_dir}")
 
     # ------------------------------------------------------------------
-    # Build prompts: env / defaults, optionally refined by Gemini.
+    # Build prompts: Gemini-only. Segmentation will abort if Gemini fails.
     # ------------------------------------------------------------------
-    base_prompts = read_base_prompts_from_env()
-    prompts = base_prompts
+    prompt_hints = read_prompt_hints_from_env()
 
-    if copied_images:
-        try:
-            # Use the first image as a representative scene for dynamic prompts.
-            scene_image = Image.open(copied_images[0]).convert("RGB")
-            prompts = build_scene_prompts_with_gemini(scene_image, base_prompts)
-        except Exception as e:
-            print(
-                f"[SAM3] WARNING: Gemini-based prompt generation failed unexpectedly: {e}; "
-                "using base prompts.",
-                file=sys.stderr,
-            )
-            prompts = base_prompts
+    if not copied_images:
+        print("[SAM3] ERROR: no images available to seed Gemini prompt generation", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        # Use the first image as a representative scene for dynamic prompts.
+        scene_image = Image.open(copied_images[0]).convert("RGB")
+        prompts = build_scene_prompts_with_gemini(scene_image, prompt_hints)
+    except Exception as e:
+        print(
+            f"[SAM3] ERROR: Gemini-based prompt generation failed: {e}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not prompts:
+        print("[SAM3] ERROR: Gemini returned an empty prompt list", file=sys.stderr)
+        sys.exit(1)
 
     print(f"[SAM3] Final prompts for this run ({len(prompts)}): {prompts}")
     class_to_id = {c: i for i, c in enumerate(prompts)}
