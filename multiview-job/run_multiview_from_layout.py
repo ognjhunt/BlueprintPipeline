@@ -235,7 +235,7 @@ def infer_object_phrase(client, crop_path: Path, class_name: str) -> str:
 
     try:
         resp = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3-pro-preview",
             contents=[prompt, image],
         )
         phrase = getattr(resp, "text", "") or ""
@@ -332,7 +332,7 @@ def generate_views_for_object(
 
         print(f"[MULTIVIEW] Calling Gemini for view {i} of {object_phrase!r} ...")
         response = client.models.generate_content(
-            model="gemini-3.0-pro-image-preview",
+            model="gemini-3-pro-image-preview",
             contents=[prompt, image],
             config=types.GenerateContentConfig(
                 response_modalities=["IMAGE"],
