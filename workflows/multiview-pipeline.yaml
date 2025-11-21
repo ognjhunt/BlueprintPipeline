@@ -51,6 +51,10 @@ main:
                       value: ${segDatasetPrefix}
                     - name: MULTIVIEW_PREFIX
                       value: ${multiviewPrefix}
+                    - name: ENABLE_GEMINI_VIEWS
+                      value: "true"
+                    - name: VIEWS_PER_OBJECT
+                      value: "1"
         result: mvExec
         next: done
 
