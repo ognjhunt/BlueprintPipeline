@@ -478,27 +478,68 @@ def main() -> None:
         print("[SAM3] ERROR: Gemini returned an empty object inventory", file=sys.stderr)
         sys.exit(1)
 
-    # Derive the category prompts directly from Gemini's detected objects.
-    seen_categories = set()
-    prompts: List[str] = []
-    for obj in inventory_objects:
-        name = str(obj.get("category") or "").strip().lower()
-        if not name or name in seen_categories:
-            continue
-        seen_categories.add(name)
-        prompts.append(name)
-        if len(prompts) >= max_prompts:
-            print(
-                f"[SAM3] Reached SAM3_MAX_PROMPTS limit ({max_prompts}); ignoring remaining categories",
-                file=sys.stderr,
-            )
-            break
+    # Build prompts either per-object (default) or category-only (legacy mode).
+    use_category_only = os.environ.get("SAM3_CATEGORY_ONLY_PROMPTS", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
-    if not prompts:
-        print("[SAM3] ERROR: Gemini inventory produced no usable categories", file=sys.stderr)
+    prompt_mode = "category" if use_category_only else "object"
+    class_names: List[str] = []
+    prompt_texts: List[str] = []
+
+    if use_category_only:
+        seen_categories = set()
+        for obj in inventory_objects:
+            name = str(obj.get("category") or "").strip().lower()
+            if not name or name in seen_categories:
+                continue
+            seen_categories.add(name)
+            class_names.append(name)
+            prompt_texts.append(name)
+            if len(class_names) >= max_prompts:
+                print(
+                    f"[SAM3] Reached SAM3_MAX_PROMPTS limit ({max_prompts}); ignoring remaining categories",
+                    file=sys.stderr,
+                )
+                break
+    else:
+        for obj in inventory_objects:
+            obj_id = str(obj.get("id") or "").strip()
+            category = str(obj.get("category") or "").strip().lower()
+            description = str(obj.get("short_description") or "").strip()
+            location = str(obj.get("approx_location") or "").strip()
+
+            if not obj_id or not category:
+                continue
+
+            prompt_parts = [f"object id: {obj_id}", f"category: {category}"]
+            if description:
+                prompt_parts.append(f"description: {description}")
+            if location:
+                prompt_parts.append(f"approximate location: {location}")
+
+            prompt_text = ", ".join(prompt_parts)
+            class_names.append(obj_id)
+            prompt_texts.append(prompt_text)
+            if len(class_names) >= max_prompts:
+                print(
+                    f"[SAM3] Reached SAM3_MAX_PROMPTS limit ({max_prompts}); ignoring remaining objects",
+                    file=sys.stderr,
+                )
+                break
+
+    if not prompt_texts or not class_names:
+        print(
+            "[SAM3] ERROR: Gemini inventory produced no usable prompts/classes",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     inventory_path = out_dir / "inventory.json"
+    id_to_class_index = {name: idx for idx, name in enumerate(class_names)}
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         with inventory_path.open("w") as f:
@@ -506,7 +547,10 @@ def main() -> None:
                 {
                     "source_image": copied_images[0].name,
                     "objects": inventory_objects,
-                    "categories": prompts,
+                    "prompt_mode": prompt_mode,
+                    "class_names": class_names,
+                    "prompts": prompt_texts,
+                    "id_to_class_index": id_to_class_index,
                 },
                 f,
                 indent=2,
@@ -515,8 +559,9 @@ def main() -> None:
     except Exception as e:
         print(f"[SAM3] WARNING: failed to save inventory JSON: {e}", file=sys.stderr)
 
-    print(f"[SAM3] Final prompts for this run ({len(prompts)}): {prompts}")
-    class_to_id = {c: i for i, c in enumerate(prompts)}
+    print(f"[SAM3] Prompt mode: {prompt_mode}")
+    print(f"[SAM3] Final prompts for this run ({len(prompt_texts)}): {prompt_texts}")
+    class_to_id = id_to_class_index
 
     print("[SAM3] Building SAM3 model (Transformers)...")
     model, processor, device = build_sam3_model_and_processor()
@@ -538,8 +583,8 @@ def main() -> None:
         "train": "valid/images",
         "val": "valid/images",
         "test": "valid/images",
-        "nc": len(prompts),
-        "names": prompts,
+        "nc": len(class_names),
+        "names": class_names,
     }
     (out_dir / "dataset").mkdir(parents=True, exist_ok=True)
     with (out_dir / "dataset" / "data.yaml").open("w") as f:
@@ -553,7 +598,7 @@ def main() -> None:
 
         detections: List[Tuple[int, List[np.ndarray]]] = []
 
-        for prompt in prompts:
+        for class_name, prompt in zip(class_names, prompt_texts):
             # Run SAM3 for a single text prompt on this image.
             inputs = processor(images=image, text=prompt, return_tensors="pt")
             inputs = inputs.to(device=device, dtype=model_dtype)
@@ -586,7 +631,7 @@ def main() -> None:
                     mask_bin = mask
                 polys = mask_to_polygons(mask_bin)
                 if polys:
-                    detections.append((class_to_id[prompt], polys))
+                    detections.append((class_to_id[class_name], polys))
 
         if not detections:
             print(f"[SAM3] WARNING: no detections for {img_path.name}", file=sys.stderr)
