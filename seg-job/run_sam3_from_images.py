@@ -4,7 +4,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import cv2
 import numpy as np
@@ -98,24 +98,65 @@ def _extract_json_blob(text: str) -> str:
     return text
 
 
-def build_scene_prompts_with_gemini(
-    image: Image.Image, prompt_hints: List[str]
-) -> List[str]:
-    """
-    Use Gemini to analyze the scene and propose a small set of segmentation
-    categories that fit THIS particular image (room, warehouse, office,
-    bedroom, etc.).
+def _normalize_inventory_objects(raw_objects: Any) -> List[Dict[str, Any]]:
+    """Validate and normalize Gemini's inventory list."""
 
-    If anything goes wrong (no key, import error, bad JSON, etc.), an
-    exception is raised and segmentation should be skipped.
+    normalized: List[Dict[str, Any]] = []
+
+    if not isinstance(raw_objects, list):
+        return normalized
+
+    seen_ids = set()
+    for idx, item in enumerate(raw_objects):
+        if not isinstance(item, dict):
+            continue
+
+        category = str(item.get("category") or item.get("label") or "").strip()
+        if not category:
+            continue
+
+        obj_id = str(item.get("id") or f"obj_{idx + 1}").strip()
+        if not obj_id:
+            obj_id = f"obj_{idx + 1}"
+        if obj_id in seen_ids:
+            obj_id = f"{obj_id}_{idx + 1}"
+        seen_ids.add(obj_id)
+
+        relationships_raw = item.get("relationships")
+        relationships: List[str] = []
+        if isinstance(relationships_raw, list):
+            relationships = [str(r).strip() for r in relationships_raw if str(r).strip()]
+
+        normalized.append(
+            {
+                "id": obj_id,
+                "category": category,
+                "short_description": str(item.get("short_description") or item.get("description") or "").strip(),
+                "approx_location": str(item.get("approx_location") or item.get("location") or "").strip(),
+                "relationships": relationships,
+            }
+        )
+
+    return normalized
+
+
+def build_scene_inventory_with_gemini(
+    image: Image.Image, prompt_hints: List[str]
+) -> List[Dict[str, Any]]:
+    """
+    Use Gemini to produce a full, structured object inventory for the scene.
+
+    The prompt is intentionally strict: Gemini must enumerate every distinct
+    visible object as structured JSON (id, category, short description,
+    location, relationships). The returned list is normalized and filtered to
+    include only entries with a category so we can pass those categories
+    directly to SAM 3 for segmentation.
     """
     api_key = _gemini_api_key()
     if not api_key:
         raise RuntimeError(
-            "No GEMINI_API_KEY / GOOGLE_API_KEY found; cannot build prompts without Gemini"
+            "No GEMINI_API_KEY / GOOGLE_API_KEY found; cannot build inventory without Gemini"
         )
-
-    max_prompts = _read_max_prompts()
     model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-3.0-pro")
 
     try:
@@ -129,39 +170,37 @@ def build_scene_prompts_with_gemini(
     except Exception as e:
         raise RuntimeError(f"Failed to create Gemini client: {e}")
 
-    # Craft an instruction that keeps the response machine-parseable.
+    # Craft a strict, machine-parsable instruction to force a complete inventory.
     base_hint = ", ".join(prompt_hints)
     if base_hint:
         hint_line = (
-            "4. Prefer categories from this candidate list when they match the image: "
-            f"{base_hint}. You may also add new categories if needed.\n"
+            "Optional candidate objects to double-check (only include if visible): "
+            f"{base_hint}.\n"
         )
     else:
-        hint_line = "4. Choose categories directly from what you observe in the image.\n"
+        hint_line = ""
+
     instruction = (
-        "You are helping choose text labels for an open-vocabulary segmentation model.\n"
-        "You will be shown exactly one RGB image of a scene (for example a living room, "
-        "bedroom, office, meeting room, warehouse, factory floor, corridor, or lobby).\n\n"
-        "Tasks:\n"
-        "1. Look at all visible objects and large surfaces.\n"
-        "2. Choose at most 25 distinct object / surface CATEGORY NAMES that would be "
-        "useful to segment (for example: sofa, armchair, round ottoman, coffee table, "
-        "office chair, desk, monitor, forklift, pallet rack, crate, box, wall, floor, ceiling).\n"
-        "3. Focus on large / important items (furniture, machinery, doors, windows, "
-        "walls, floors, ceiling, shelves, pallets, vehicles, big boxes). Ignore tiny "
-        "decorations unless they are central to the scene.\n"
+        "You are an expert visual scene annotator for robotics and 3D simulation.\n"
+        "You will be given ONE RGB image.\n"
+        "Return a complete inventory of every distinct physical object a human can reasonably identify in the image.\n"
+        "Requirements:\n"
+        "1. Treat each separate physical object as its own item (e.g., two sofas -> sofa_1, sofa_2).\n"
+        "2. Do not skip clearly visible small objects (books, vases, remotes, decorative bowls, small boxes).\n"
+        "3. Do not use 'etc.' or similar shortcuts; enumerate everything visible.\n"
+        "4. For each object include fields: id, category, short_description, approx_location, relationships (list).\n"
+        "5. Use lowercase snake_case ids with category + index starting at 1 (sofa_1, armchair_2, round_ottoman_3).\n"
+        "6. Use coarse locations such as front left, middle center, back right.\n"
+        "7. Only describe what is visible in the single image; do not invent hidden objects.\n"
         f"{hint_line}"
-        "5. Return ONLY a single JSON object with this exact shape and nothing else:\n"
-        '{\"categories\": [\"label1\", \"label2\", ...]}\n\n'
-        "Rules for labels:\n"
-        "- Use lowercase English.\n"
-        "- Use singular nouns or very short noun phrases (e.g. \"sofa\", \"coffee table\").\n"
-        "- Do not include duplicates.\n"
-        "- Do not include free-form explanations, Markdown, or extra keys."
+        "Output format (strict JSON only):\\n"
+        '{"objects": [{"id": "sofa_1", "category": "sofa", "short_description": "...", '
+        '"approx_location": "...", "relationships": ["..."]}]}\n'
+        "Use valid JSON with double quotes and no trailing commas."
     )
 
     try:
-        print(f"[SAM3] Calling Gemini model '{model_id}' to build scene prompts...")
+        print(f"[SAM3] Calling Gemini model '{model_id}' to build scene inventory...")
         response = client.models.generate_content(
             model=model_id,
             contents=[image, instruction],
@@ -175,26 +214,15 @@ def build_scene_prompts_with_gemini(
     try:
         blob = _extract_json_blob(text)
         data = json.loads(blob)
-        raw_categories = data.get("categories") or data.get("objects") or data.get("labels") or []
     except Exception as e:
         raise RuntimeError(f"Failed to parse JSON from Gemini response: {e}")
 
-    seen = set()
-    prompts: List[str] = []
-    for item in raw_categories:
-        name = str(item).strip().lower()
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        prompts.append(name)
-        if len(prompts) >= max_prompts:
-            break
+    objects = _normalize_inventory_objects(data.get("objects"))
+    if not objects:
+        raise RuntimeError("Gemini produced no usable object inventory")
 
-    if not prompts:
-        raise RuntimeError("Gemini produced no usable categories")
-
-    print(f"[SAM3] Gemini scene prompts: {prompts}")
-    return prompts
+    print(f"[SAM3] Gemini inventory objects: {len(objects)} detected")
+    return objects
 
 
 # -----------------------------------------------------------------------------
@@ -390,8 +418,10 @@ def main() -> None:
     print(f"[SAM3] Copied {len(copied_images)} images into {images_out_dir}")
 
     # ------------------------------------------------------------------
-    # Build prompts: Gemini-only. Segmentation will abort if Gemini fails.
+    # Build prompts from a Gemini-generated object inventory.
+    # Segmentation will abort if Gemini fails.
     # ------------------------------------------------------------------
+    max_prompts = _read_max_prompts()
     prompt_hints = read_prompt_hints_from_env()
 
     if not copied_images:
@@ -401,17 +431,54 @@ def main() -> None:
     try:
         # Use the first image as a representative scene for dynamic prompts.
         scene_image = Image.open(copied_images[0]).convert("RGB")
-        prompts = build_scene_prompts_with_gemini(scene_image, prompt_hints)
+        inventory_objects = build_scene_inventory_with_gemini(scene_image, prompt_hints)
     except Exception as e:
         print(
-            f"[SAM3] ERROR: Gemini-based prompt generation failed: {e}",
+            f"[SAM3] ERROR: Gemini-based inventory generation failed: {e}",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    if not prompts:
-        print("[SAM3] ERROR: Gemini returned an empty prompt list", file=sys.stderr)
+    if not inventory_objects:
+        print("[SAM3] ERROR: Gemini returned an empty object inventory", file=sys.stderr)
         sys.exit(1)
+
+    # Derive the category prompts directly from Gemini's detected objects.
+    seen_categories = set()
+    prompts: List[str] = []
+    for obj in inventory_objects:
+        name = str(obj.get("category") or "").strip().lower()
+        if not name or name in seen_categories:
+            continue
+        seen_categories.add(name)
+        prompts.append(name)
+        if len(prompts) >= max_prompts:
+            print(
+                f"[SAM3] Reached SAM3_MAX_PROMPTS limit ({max_prompts}); ignoring remaining categories",
+                file=sys.stderr,
+            )
+            break
+
+    if not prompts:
+        print("[SAM3] ERROR: Gemini inventory produced no usable categories", file=sys.stderr)
+        sys.exit(1)
+
+    inventory_path = out_dir / "inventory.json"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with inventory_path.open("w") as f:
+            json.dump(
+                {
+                    "source_image": copied_images[0].name,
+                    "objects": inventory_objects,
+                    "categories": prompts,
+                },
+                f,
+                indent=2,
+            )
+        print(f"[SAM3] Saved Gemini inventory to {inventory_path}")
+    except Exception as e:
+        print(f"[SAM3] WARNING: failed to save inventory JSON: {e}", file=sys.stderr)
 
     print(f"[SAM3] Final prompts for this run ({len(prompts)}): {prompts}")
     class_to_id = {c: i for i, c in enumerate(prompts)}
