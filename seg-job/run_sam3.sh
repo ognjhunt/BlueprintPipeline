@@ -29,7 +29,7 @@ echo "[SAM3] IMAGES_DIR=${IMAGES_DIR}"
 echo "[SAM3] OUT_DIR=${OUT_DIR}"
 echo "[SAM3] HF_HOME=${HF_CACHE_DIR}"
 echo "[SAM3] SAM3_PROMPTS=${SAM3_PROMPTS:-<default>}"
-echo "[SAM3] SAM3_CONFIDENCE=${SAM3_CONFIDENCE:-0.15}"
+echo "[SAM3] SAM3_CONFIDENCE=${SAM3_CONFIDENCE:-0.30}"
 
 if [[ ! -d "${IMAGES_DIR}" ]]; then
   echo "[SAM3] ERROR: Images directory not found: ${IMAGES_DIR}"
