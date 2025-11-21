@@ -36,7 +36,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
 # ---------------------------
 # SAM3 + supporting Python deps
 # ---------------------------
-# Core scientific + HF stack. Note: we do NOT install transformers here.
+# Core scientific + HF stack.
 RUN pip install --no-cache-dir --prefer-binary \
         sam3 \
         opencv-python-headless \
@@ -47,10 +47,11 @@ RUN pip install --no-cache-dir --prefer-binary \
         psutil \
         huggingface_hub \
         accelerate \
-        safetensors
+        safetensors \
+        google-genai
 
 # Install Transformers from GitHub main so Sam3Model / Sam3Processor are available.
-# Docs: the SAM3 page is on "main" and explicitly says to install from source.:contentReference[oaicite:2]{index=2}
+# Docs: SAM3 page currently lives on the Transformers "main" branch.
 RUN pip install --no-cache-dir --prefer-binary \
         "git+https://github.com/huggingface/transformers.git@main"
 

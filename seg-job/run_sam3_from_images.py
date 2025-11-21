@@ -24,34 +24,266 @@ except Exception as e:  # pragma: no cover - import-time failure only logged at 
     )
     raise
 
+# -----------------------------------------------------------------------------
+# Prompt handling
+# -----------------------------------------------------------------------------
 
-def parse_prompts() -> List[str]:
+# A general-purpose fallback vocabulary that works reasonably across
+# living rooms, bedrooms, offices, and warehouses. This is only used
+# if no SAM3_PROMPTS env var is provided and Gemini is unavailable.
+DEFAULT_BASE_PROMPTS: List[str] = [
+    # Room / structural surfaces
+    "wall",
+    "floor",
+    "ceiling",
+    "window",
+    "door",
+    # Seating & tables
+    "sofa",
+    "armchair",
+    "chair",
+    "office chair",
+    "round ottoman",
+    "stool",
+    "bench",
+    "coffee table",
+    "side table",
+    "desk",
+    "dining table",
+    "workbench",
+    # Storage & surfaces
+    "cabinet",
+    "wardrobe",
+    "bookshelf",
+    "shelving unit",
+    "sideboard cabinet",
+    "countertop",
+    "kitchen island",
+    # Sleeping
+    "bed",
+    "nightstand",
+    "dresser",
+    # Decor & fixtures
+    "lamp",
+    "floor lamp",
+    "table lamp",
+    "rug",
+    "carpet",
+    "pillow",
+    "blanket",
+    "mirror",
+    "wall art",
+    "plant",
+    # Warehouse / industrial
+    "box",
+    "crate",
+    "pallet",
+    "pallet rack",
+    "warehouse rack",
+    "forklift",
+]
+
+
+def _read_max_prompts() -> int:
+    """Maximum number of text prompts to apply per image."""
+    raw = os.environ.get("SAM3_MAX_PROMPTS", "24").strip()
+    try:
+        value = int(raw)
+        return max(1, min(value, 64))
+    except Exception:
+        return 24
+
+
+def read_base_prompts_from_env() -> List[str]:
+    """
+    Read the base prompt vocabulary from SAM3_PROMPTS, or fall back to a
+    generic set that works across many scene types.
+
+    The final list is:
+      * lowercased
+      * de-duplicated while preserving order
+      * truncated to SAM3_MAX_PROMPTS (default 24)
+    """
+    max_prompts = _read_max_prompts()
     raw = os.environ.get("SAM3_PROMPTS", "").strip()
+
     if raw:
-        prompts = [p.strip() for p in raw.split(",") if p.strip()]
+        # User-provided prompts (comma-separated).
+        tokens = [p.strip() for p in raw.split(",") if p.strip()]
+        print(f"[SAM3] Using SAM3_PROMPTS from environment ({len(tokens)} raw items)")
     else:
-        prompts = [
-            "object",
-            "furniture",
-            "chair",
-            "table",
-            "sofa",
-            "couch",
-            "bed",
-            "cabinet",
-            "drawer",
-            "door",
-            "window",
-            "appliance",
-            "lamp",
-            "plant",
-            "robot",
-            "person",
-            "floor",
-            "ceiling",
-            "wall",
-        ]
+        tokens = list(DEFAULT_BASE_PROMPTS)
+        print(f"[SAM3] Using built-in default prompts ({len(tokens)} candidates)")
+
+    seen = set()
+    prompts: List[str] = []
+    for t in tokens:
+        name = t.lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        prompts.append(name)
+        if len(prompts) >= max_prompts:
+            break
+
+    print(f"[SAM3] Base prompts after normalization: {prompts}")
     return prompts
+
+
+def _gemini_api_key() -> str:
+    """
+    Look for a Gemini API key in a couple of common env vars.
+    We do NOT prompt interactively; Cloud Run / your orchestrator should
+    inject this as a secret or env var.
+    """
+    return (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GOOGLE_GENAI_API_KEY")
+        or ""
+    )
+
+
+def _extract_json_blob(text: str) -> str:
+    """
+    Try to pull out the JSON object from a free-form LLM response.
+    If we can't find a {...} block, just return the raw text.
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
+
+def build_scene_prompts_with_gemini(
+    image: Image.Image, base_prompts: List[str]
+) -> List[str]:
+    """
+    Optional step: use Gemini to analyze the scene and propose a small set of
+    segmentation categories that fit THIS particular image (room, warehouse,
+    office, bedroom, etc.).
+
+    If anything goes wrong (no key, import error, bad JSON, etc.), we just
+    fall back to base_prompts.
+    """
+    api_key = _gemini_api_key()
+    if not api_key:
+        print(
+            "[SAM3] No GEMINI_API_KEY / GOOGLE_API_KEY found; "
+            "skipping Gemini-based prompt generation.",
+            file=sys.stderr,
+        )
+        return base_prompts
+
+    max_prompts = _read_max_prompts()
+    model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-3.0-pro")
+
+    try:
+        # New official SDK: pip install google-genai
+        from google import genai  # type: ignore[import]
+    except Exception as e:
+        print(
+            f"[SAM3] Gemini SDK (google-genai) not available: {e}; "
+            "falling back to base prompts.",
+            file=sys.stderr,
+        )
+        return base_prompts
+
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        print(
+            f"[SAM3] Failed to create Gemini client: {e}; "
+            "falling back to base prompts.",
+            file=sys.stderr,
+        )
+        return base_prompts
+
+    # Craft an instruction that keeps the response machine-parseable.
+    base_hint = ", ".join(base_prompts)
+    instruction = (
+        "You are helping choose text labels for an open-vocabulary segmentation model.\n"
+        "You will be shown exactly one RGB image of a scene (for example a living room, "
+        "bedroom, office, meeting room, warehouse, factory floor, corridor, or lobby).\n\n"
+        "Tasks:\n"
+        "1. Look at all visible objects and large surfaces.\n"
+        "2. Choose at most 25 distinct object / surface CATEGORY NAMES that would be "
+        "useful to segment (for example: sofa, armchair, round ottoman, coffee table, "
+        "office chair, desk, monitor, forklift, pallet rack, crate, box, wall, floor, ceiling).\n"
+        "3. Focus on large / important items (furniture, machinery, doors, windows, "
+        "walls, floors, ceiling, shelves, pallets, vehicles, big boxes). Ignore tiny "
+        "decorations unless they are central to the scene.\n"
+        "4. Prefer categories from this candidate list when they match the image: "
+        f"{base_hint}. You may also add new categories if needed.\n"
+        "5. Return ONLY a single JSON object with this exact shape and nothing else:\n"
+        '{\"categories\": [\"label1\", \"label2\", ...]}\n\n'
+        "Rules for labels:\n"
+        "- Use lowercase English.\n"
+        "- Use singular nouns or very short noun phrases (e.g. \"sofa\", \"coffee table\").\n"
+        "- Do not include duplicates.\n"
+        "- Do not include free-form explanations, Markdown, or extra keys."
+    )
+
+    try:
+        print(f"[SAM3] Calling Gemini model '{model_id}' to build scene prompts...")
+        response = client.models.generate_content(
+            model=model_id,
+            contents=[image, instruction],
+        )
+        text = getattr(response, "text", None)
+        if not text:
+            print(
+                "[SAM3] Gemini returned empty response text; "
+                "falling back to base prompts.",
+                file=sys.stderr,
+            )
+            return base_prompts
+    except Exception as e:
+        print(
+            f"[SAM3] Gemini generate_content failed: {e}; "
+            "falling back to base prompts.",
+            file=sys.stderr,
+        )
+        return base_prompts
+
+    try:
+        blob = _extract_json_blob(text)
+        data = json.loads(blob)
+        raw_categories = data.get("categories") or data.get("objects") or data.get("labels") or []
+    except Exception as e:
+        print(
+            f"[SAM3] Failed to parse JSON from Gemini response: {e}; "
+            "falling back to base prompts.",
+            file=sys.stderr,
+        )
+        return base_prompts
+
+    seen = set()
+    prompts: List[str] = []
+    for item in raw_categories:
+        name = str(item).strip().lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        prompts.append(name)
+        if len(prompts) >= max_prompts:
+            break
+
+    if not prompts:
+        print(
+            "[SAM3] Gemini produced no usable categories; using base prompts instead.",
+            file=sys.stderr,
+        )
+        return base_prompts
+
+    print(f"[SAM3] Gemini scene prompts: {prompts}")
+    return prompts
+
+
+# -----------------------------------------------------------------------------
+# Image listing + polygon helpers
+# -----------------------------------------------------------------------------
 
 
 def list_images(images_dir: Path) -> List[Path]:
@@ -155,7 +387,7 @@ def build_sam3_model_and_processor():
     # Follow the official Transformers example:
     #   model = Sam3Model.from_pretrained("facebook/sam3").to(device)
     #   processor = Sam3Processor.from_pretrained("facebook/sam3")
-    # which uses the default (float32) dtype and avoids bf16/float32 mismatch.
+    # which uses the default checkpoint dtype (often bfloat16 on GPU).
     processor = Sam3Processor.from_pretrained(model_id)
     model = Sam3Model.from_pretrained(model_id).to(device)
     model.eval()
@@ -227,12 +459,39 @@ def main() -> None:
     copied_images = copy_images(image_paths, images_out_dir)
     print(f"[SAM3] Copied {len(copied_images)} images into {images_out_dir}")
 
-    prompts = parse_prompts()
-    print(f"[SAM3] Using prompts: {prompts}")
+    # ------------------------------------------------------------------
+    # Build prompts: env / defaults, optionally refined by Gemini.
+    # ------------------------------------------------------------------
+    base_prompts = read_base_prompts_from_env()
+    prompts = base_prompts
+
+    if copied_images:
+        try:
+            # Use the first image as a representative scene for dynamic prompts.
+            scene_image = Image.open(copied_images[0]).convert("RGB")
+            prompts = build_scene_prompts_with_gemini(scene_image, base_prompts)
+        except Exception as e:
+            print(
+                f"[SAM3] WARNING: Gemini-based prompt generation failed unexpectedly: {e}; "
+                "using base prompts.",
+                file=sys.stderr,
+            )
+            prompts = base_prompts
+
+    print(f"[SAM3] Final prompts for this run ({len(prompts)}): {prompts}")
     class_to_id = {c: i for i, c in enumerate(prompts)}
 
     print("[SAM3] Building SAM3 model (Transformers)...")
     model, processor, device = build_sam3_model_and_processor()
+
+    # Whatever dtype the checkpoint uses (float32 or bfloat16), we will
+    # cast our inputs to match, to avoid "FloatTensor vs CUDABFloat16Type"
+    # runtime errors.
+    try:
+        model_dtype = next(model.parameters()).dtype
+    except StopIteration:
+        model_dtype = torch.float32
+    print(f"[SAM3] Model dtype: {model_dtype}")
 
     conf_thresh = float(os.environ.get("SAM3_CONFIDENCE", "0.15"))
     print(f"[SAM3] Confidence threshold set to {conf_thresh}")
@@ -259,7 +518,8 @@ def main() -> None:
 
         for prompt in prompts:
             # Run SAM3 for a single text prompt on this image.
-            inputs = processor(images=image, text=prompt, return_tensors="pt").to(device)
+            inputs = processor(images=image, text=prompt, return_tensors="pt")
+            inputs = inputs.to(device=device, dtype=model_dtype)
 
             with torch.no_grad():
                 outputs = model(**inputs)
