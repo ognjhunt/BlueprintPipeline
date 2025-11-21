@@ -273,6 +273,10 @@ main:
                       value: ${segDatasetPrefix}
                     - name: MULTIVIEW_PREFIX
                       value: ${multiviewPrefix}
+                    - name: ENABLE_GEMINI_VIEWS
+                      value: "true"
+                    - name: VIEWS_PER_OBJECT
+                      value: "1"
         result: mvExec
         next: wait_for_multiview
 
@@ -334,6 +338,10 @@ main:
                       value: ${sceneId}
                     - name: ASSETS_PREFIX
                       value: ${assetsPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: MULTIVIEW_PREFIX
+                      value: ${multiviewPrefix}
         result: sam3dExec
         next: done
 
