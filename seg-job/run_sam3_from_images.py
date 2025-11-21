@@ -4,7 +4,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import cv2
 import numpy as np
@@ -282,6 +282,148 @@ def build_scene_prompts_with_gemini(
     return prompts
 
 
+def _normalize_object_label(name: str) -> str:
+    """
+    Normalize an object label from Gemini into a short, lowercase noun phrase.
+
+    This trims whitespace, removes trailing punctuation, and collapses repeated
+    spaces so the labels can be used directly as SAM3 text prompts.
+    """
+
+    normalized = " ".join(name.strip().strip(",.;:").lower().split())
+    return normalized
+
+
+def detect_scene_objects_with_gemini(
+    image: Image.Image, base_prompts: List[str]
+) -> Tuple[List[str], List[Dict[str, int]]]:
+    """
+    Use Gemini to enumerate the exact objects visible in the scene.
+
+    Returns a tuple of:
+      * prompts: unique, normalized object labels to feed directly into SAM3
+      * summary: list of {name, count} entries suitable for logging or export
+
+    If Gemini is unavailable or produces unusable output, both lists are empty
+    and the caller should fall back to another prompt source.
+    """
+
+    api_key = _gemini_api_key()
+    if not api_key:
+        print(
+            "[SAM3] No Gemini API key found; skipping Gemini object detection.",
+            file=sys.stderr,
+        )
+        return [], []
+
+    try:
+        from google import genai  # type: ignore[import]
+    except Exception as e:  # pragma: no cover - import-time failure only logged
+        print(
+            f"[SAM3] Gemini SDK (google-genai) unavailable: {e}; "
+            "falling back to other prompts.",
+            file=sys.stderr,
+        )
+        return [], []
+
+    # Prefer a dedicated detection model ID if provided, otherwise reuse the
+    # general GEMINI_MODEL_ID knob and default to the latest Pro vision model.
+    model_id = (
+        os.environ.get("GEMINI_DETECT_MODEL_ID")
+        or os.environ.get("GEMINI_MODEL_ID")
+        or "gemini-3.0-pro"
+    )
+
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:  # pragma: no cover - client init errors logged
+        print(
+            f"[SAM3] Failed to create Gemini client: {e}; "
+            "skipping Gemini object detection.",
+            file=sys.stderr,
+        )
+        return [], []
+
+    base_hint = ", ".join(base_prompts)
+    instruction = (
+        "You are labeling objects for segmentation.\n"
+        "Tasks:\n"
+        "1. Look carefully at the single RGB image provided.\n"
+        "2. List EVERY distinct object CATEGORY that is clearly visible with high confidence\n"
+        "   (furniture, fixtures, windows, doors, rugs, pillows, decor).\n"
+        "3. For each category, include how many instances are visible.\n"
+        "4. Only output categories you can see directly; do NOT guess or use 'etc.'.\n"
+        "5. Prefer categories from this list when relevant: "
+        f"{base_hint}.\n"
+        "6. Return ONLY JSON matching: {\"objects\": [{\"name\": "
+        "\"category\", \"count\": <int>}, ...]} with lowercase English names."
+    )
+
+    try:
+        print(
+            f"[SAM3] Calling Gemini model '{model_id}' for explicit object detections..."
+        )
+        response = client.models.generate_content(model=model_id, contents=[image, instruction])
+        text = getattr(response, "text", None)
+        if not text:
+            print(
+                "[SAM3] Gemini object detection returned empty text; skipping.",
+                file=sys.stderr,
+            )
+            return [], []
+    except Exception as e:  # pragma: no cover - API failures logged at runtime
+        print(
+            f"[SAM3] Gemini object detection failed: {e}; skipping.",
+            file=sys.stderr,
+        )
+        return [], []
+
+    try:
+        blob = _extract_json_blob(text)
+        data = json.loads(blob)
+        raw_objects = data.get("objects") or data.get("categories") or []
+    except Exception as e:
+        print(
+            f"[SAM3] Failed to parse Gemini object JSON: {e}; skipping.",
+            file=sys.stderr,
+        )
+        return [], []
+
+    counts: Dict[str, int] = {}
+    for item in raw_objects:
+        if isinstance(item, str):
+            name = _normalize_object_label(item)
+            count = 1
+        elif isinstance(item, dict):
+            name = _normalize_object_label(
+                str(item.get("name") or item.get("label") or item.get("category") or "")
+            )
+            try:
+                count = int(item.get("count") or item.get("quantity") or 1)
+            except Exception:
+                count = 1
+        else:
+            continue
+
+        if not name:
+            continue
+
+        counts[name] = counts.get(name, 0) + max(count, 1)
+
+    prompts = list(counts.keys())
+    summary = [{"name": name, "count": count} for name, count in counts.items()]
+
+    if not prompts:
+        print(
+            "[SAM3] Gemini returned no usable object categories; skipping.",
+            file=sys.stderr,
+        )
+        return [], []
+
+    print(f"[SAM3] Gemini object categories for SAM3 prompts: {prompts}")
+    return prompts, summary
+
+
 # -----------------------------------------------------------------------------
 # Image listing + polygon helpers
 # -----------------------------------------------------------------------------
@@ -475,16 +617,34 @@ def main() -> None:
     print(f"[SAM3] Copied {len(copied_images)} images into {images_out_dir}")
 
     # ------------------------------------------------------------------
-    # Build prompts: env / defaults, optionally refined by Gemini.
+    # Build prompts: prefer explicit Gemini object detections; otherwise fall
+    # back to Gemini prompt synthesis or the static vocab.
     # ------------------------------------------------------------------
     base_prompts = read_base_prompts_from_env()
     prompts = base_prompts
+    gemini_objects: List[str] = []
+    gemini_summary: List[Dict[str, int]] = []
 
     if copied_images:
         try:
             # Use the first image as a representative scene for dynamic prompts.
             scene_image = Image.open(copied_images[0]).convert("RGB")
-            prompts = build_scene_prompts_with_gemini(scene_image, base_prompts)
+            gemini_objects, gemini_summary = detect_scene_objects_with_gemini(
+                scene_image, base_prompts
+            )
+
+            if gemini_objects:
+                prompts = gemini_objects
+                summary_path = out_dir / "dataset" / "gemini_objects.json"
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                with summary_path.open("w") as f:
+                    json.dump({"objects": gemini_summary}, f, indent=2)
+                print(
+                    f"[SAM3] Wrote Gemini object detections to {summary_path}; "
+                    "SAM3 will only segment these categories."
+                )
+            else:
+                prompts = build_scene_prompts_with_gemini(scene_image, base_prompts)
         except Exception as e:
             print(
                 f"[SAM3] WARNING: Gemini-based prompt generation failed unexpectedly: {e}; "
