@@ -4,7 +4,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -38,6 +38,38 @@ def _read_max_prompts() -> int:
         return max(1, min(value, 64))
     except Exception:
         return 24
+
+
+def _read_max_masks_per_prompt() -> int:
+    """Maximum number of masks to keep per prompt per image.
+
+    Defaults to 1 (highest-scoring mask only). Values are clamped to the
+    inclusive range [1, 32].
+    """
+
+    raw = os.environ.get("SAM3_MAX_MASKS_PER_PROMPT", "1").strip()
+    try:
+        value = int(raw)
+        return max(1, min(value, 32))
+    except Exception:
+        return 1
+
+
+def _read_nms_iou_threshold() -> float:
+    """IoU threshold for optional mask-level NMS.
+
+    A value <= 0 disables NMS; otherwise, overlapping masks with IoU greater
+    than this threshold will be suppressed.
+    """
+
+    raw = os.environ.get("SAM3_MASK_NMS_IOU", "0.0").strip()
+    try:
+        value = float(raw)
+        if value <= 0:
+            return 0.0
+        return min(value, 1.0)
+    except Exception:
+        return 0.0
 
 
 def read_prompt_hints_from_env() -> List[str]:
@@ -298,6 +330,67 @@ def mask_to_polygons(
     return polys
 
 
+def _mask_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
+    """Compute IoU between two binary masks."""
+
+    inter = np.logical_and(mask_a > 0, mask_b > 0).sum()
+    union = np.logical_or(mask_a > 0, mask_b > 0).sum()
+    if union == 0:
+        return 0.0
+    return float(inter) / float(union)
+
+
+def filter_masks_with_scores(
+    masks: torch.Tensor,
+    scores: Optional[torch.Tensor],
+    max_masks: int,
+    nms_iou_threshold: float,
+) -> Tuple[List[np.ndarray], Dict[str, int]]:
+    """Select the top masks per prompt with optional NMS suppression."""
+
+    mask_np = masks.detach().cpu().numpy()
+    if scores is not None:
+        scores_np = scores.detach().cpu().numpy().reshape(-1)
+    else:
+        scores_np = np.ones((mask_np.shape[0],), dtype=np.float32)
+
+    if scores_np.shape[0] != mask_np.shape[0]:
+        # Fallback: align lengths defensively.
+        min_len = min(scores_np.shape[0], mask_np.shape[0])
+        scores_np = scores_np[:min_len]
+        mask_np = mask_np[:min_len]
+
+    order = np.argsort(-scores_np)
+
+    kept_masks: List[np.ndarray] = []
+    dropped_nms = 0
+    dropped_overflow = 0
+
+    for idx in order:
+        mask = mask_np[idx]
+        mask_bin = (mask > 0.5).astype(np.uint8) if mask.dtype != np.uint8 else mask
+
+        if nms_iou_threshold > 0:
+            overlaps = any(_mask_iou(mask_bin, km) > nms_iou_threshold for km in kept_masks)
+            if overlaps:
+                dropped_nms += 1
+                continue
+
+        if len(kept_masks) >= max_masks:
+            dropped_overflow += 1
+            continue
+
+        kept_masks.append(mask_bin)
+
+    stats = {
+        "total": int(mask_np.shape[0]),
+        "kept": len(kept_masks),
+        "dropped_nms": dropped_nms,
+        "dropped_overflow": dropped_overflow,
+    }
+    return kept_masks, stats
+
+
 def polygon_to_yolo_line(class_id: int, poly: np.ndarray, width: int, height: int) -> str:
     xs = np.clip(poly[:, 0], 0, width - 1)
     ys = np.clip(poly[:, 1], 0, height - 1)
@@ -533,6 +626,14 @@ def main() -> None:
     conf_thresh = float(os.environ.get("SAM3_CONFIDENCE", "0.30"))
     print(f"[SAM3] Confidence threshold set to {conf_thresh}")
 
+    max_masks_per_prompt = _read_max_masks_per_prompt()
+    nms_iou_threshold = _read_nms_iou_threshold()
+    print(
+        "[SAM3] Mask filtering:",
+        f"max_masks_per_prompt={max_masks_per_prompt}",
+        f"nms_iou_threshold={nms_iou_threshold}",
+    )
+
     data_yaml = {
         "path": str(out_dir / "dataset"),
         "train": "valid/images",
@@ -573,17 +674,26 @@ def main() -> None:
 
             results = results_list[0]
             masks = results.get("masks")
+            scores = results.get("scores")
 
             if masks is None or masks.shape[0] == 0:
                 continue
 
-            masks_np = masks.detach().cpu().numpy()
-            for mask in masks_np:
-                # Ensure binary mask
-                if mask.dtype != np.uint8:
-                    mask_bin = (mask > 0.5).astype(np.uint8)
-                else:
-                    mask_bin = mask
+            kept_masks, mask_stats = filter_masks_with_scores(
+                masks=masks,
+                scores=scores,
+                max_masks=max_masks_per_prompt,
+                nms_iou_threshold=nms_iou_threshold,
+            )
+            dropped_other = mask_stats["total"] - mask_stats["kept"] - mask_stats["dropped_nms"] - mask_stats["dropped_overflow"]
+            print(
+                f"[SAM3] Prompt '{prompt}': kept {mask_stats['kept']} / {mask_stats['total']}"
+                f" masks (dropped_nms={mask_stats['dropped_nms']},"
+                f" dropped_overflow={mask_stats['dropped_overflow']},"
+                f" dropped_other={dropped_other})"
+            )
+
+            for mask_bin in kept_masks:
                 polys = mask_to_polygons(mask_bin)
                 if polys:
                     detections.append((class_to_id[prompt], polys))
