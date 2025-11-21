@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import shutil
 import sys
@@ -294,9 +295,23 @@ def list_images(images_dir: Path) -> List[Path]:
     return sorted(set(paths))
 
 
-def mask_to_polygons(mask: np.ndarray, min_area: int = 25) -> List[np.ndarray]:
+def mask_to_polygons(
+    mask: np.ndarray, min_area_px: int = 150, min_area_pct: float = 0.0005
+) -> List[np.ndarray]:
+    """Convert a binary mask to polygons with dynamic area filtering.
+
+    The minimum area is the larger of a fixed pixel floor (``min_area_px``)
+    and a percentage of the image area (``min_area_pct``).
+    """
+
     mask_u8 = mask.astype(np.uint8)
     contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    img_h, img_w = mask_u8.shape[:2]
+    image_area = img_h * img_w
+    dynamic_min_area = int(math.ceil(min_area_pct * image_area)) if image_area else 0
+    min_area = max(min_area_px, dynamic_min_area)
+
     polys: List[np.ndarray] = []
     for c in contours:
         if cv2.contourArea(c) < min_area:
@@ -493,7 +508,7 @@ def main() -> None:
         model_dtype = torch.float32
     print(f"[SAM3] Model dtype: {model_dtype}")
 
-    conf_thresh = float(os.environ.get("SAM3_CONFIDENCE", "0.15"))
+    conf_thresh = float(os.environ.get("SAM3_CONFIDENCE", "0.30"))
     print(f"[SAM3] Confidence threshold set to {conf_thresh}")
 
     data_yaml = {
