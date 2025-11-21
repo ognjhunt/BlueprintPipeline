@@ -10,16 +10,19 @@ import numpy as np
 import torch
 from PIL import Image
 
-# Wrap SAM3 imports so we get a clear error if the package layout is broken.
-try:
-    from sam3.model.sam3_image_processor import Sam3Processor
-    from sam3.model_builder import build_sam3_image_model
-except ModuleNotFoundError as e:
-    print(f"[SAM3] FATAL: could not import SAM3 package: {e}", file=sys.stderr)
-    import traceback
+# -----------------------------------------------------------------------------
+# SAM3 via Hugging Face Transformers
+# -----------------------------------------------------------------------------
 
-    traceback.print_exc()
-    sys.exit(1)
+try:
+    # Uses the official SAM3 integration in Hugging Face Transformers.
+    from transformers import Sam3Model, Sam3Processor  # type: ignore[import]
+except Exception as e:  # pragma: no cover - import-time failure only logged at runtime
+    print(
+        f"[SAM3] FATAL: could not import Transformers SAM3 classes: {e}",
+        file=sys.stderr,
+    )
+    raise
 
 
 def parse_prompts() -> List[str]:
@@ -123,6 +126,44 @@ def export_room_alias(image_path: Path, label_path: Path, images_dir: Path, labe
         print(f"[SAM3] WARNING: failed to export room alias: {e}", file=sys.stderr)
 
 
+def build_sam3_model_and_processor():
+    """
+    Build SAM3 image model + processor via Hugging Face Transformers.
+
+    This uses the gated `facebook/sam3` checkpoint, so you must:
+      * Have been granted access to the model on Hugging Face
+      * Provide a valid token in one of:
+          - HUGGINGFACE_HUB_TOKEN
+          - HF_TOKEN
+          - HUGGINGFACE_TOKEN
+    """
+    model_id = os.environ.get("SAM3_MODEL_ID", "facebook/sam3")
+
+    # Respect HF token env vars; Transformers + huggingface_hub will pick them up.
+    token = (
+        os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGINGFACE_TOKEN")
+    )
+    if token:
+        os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", token)
+
+    print(f"[SAM3] Loading SAM3 model from Hugging Face repo: {model_id}")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[SAM3] Using device: {device}")
+
+    # Follow the official Transformers example:
+    #   model = Sam3Model.from_pretrained("facebook/sam3").to(device)
+    #   processor = Sam3Processor.from_pretrained("facebook/sam3")
+    # which uses the default (float32) dtype and avoids bf16/float32 mismatch.
+    processor = Sam3Processor.from_pretrained(model_id)
+    model = Sam3Model.from_pretrained(model_id).to(device)
+    model.eval()
+
+    print("[SAM3] SAM3 model and processor loaded.")
+    return model, processor, device
+
+
 def main() -> None:
     images_prefix = os.environ.get("IMAGES_PREFIX")
     seg_prefix = os.environ.get("SEG_PREFIX")
@@ -190,15 +231,10 @@ def main() -> None:
     print(f"[SAM3] Using prompts: {prompts}")
     class_to_id = {c: i for i, c in enumerate(prompts)}
 
-    print("[SAM3] Building SAM3 model...")
-    model = build_sam3_image_model()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[SAM3] Using device: {device}")
-    model.to(device)
+    print("[SAM3] Building SAM3 model (Transformers)...")
+    model, processor, device = build_sam3_model_and_processor()
 
-    processor = Sam3Processor(model, device=device)
     conf_thresh = float(os.environ.get("SAM3_CONFIDENCE", "0.15"))
-    processor.set_confidence_threshold(conf_thresh)
     print(f"[SAM3] Confidence threshold set to {conf_thresh}")
 
     data_yaml = {
@@ -217,32 +253,52 @@ def main() -> None:
     for img_path in copied_images:
         print(f"[SAM3] Processing {img_path.name}")
         image = Image.open(img_path).convert("RGB")
-        state = processor.set_image(image)
+        img_w, img_h = image.size
 
         detections: List[Tuple[int, List[np.ndarray]]] = []
-        for prompt in prompts:
-            state = processor.set_text_prompt(prompt, state)
-            masks = state.get("masks")
-            boxes = state.get("boxes")
-            scores = state.get("scores")
 
-            if masks is None or boxes is None or scores is None:
+        for prompt in prompts:
+            # Run SAM3 for a single text prompt on this image.
+            inputs = processor(images=image, text=prompt, return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                outputs = model(**inputs)
+
+            # Post-process to instance masks at the original image resolution.
+            results_list = processor.post_process_instance_segmentation(
+                outputs,
+                threshold=conf_thresh,
+                mask_threshold=conf_thresh,
+                target_sizes=inputs.get("original_sizes").tolist(),
+            )
+            if not results_list:
                 continue
 
-            masks_np = masks.squeeze(1).detach().cpu().numpy()
-            for mask in masks_np:
-                polys = mask_to_polygons(mask)
-                detections.append((class_to_id[prompt], polys))
+            results = results_list[0]
+            masks = results.get("masks")
 
-            processor.reset_all_prompts(state)
+            if masks is None or masks.shape[0] == 0:
+                continue
+
+            masks_np = masks.detach().cpu().numpy()
+            for mask in masks_np:
+                # Ensure binary mask
+                if mask.dtype != np.uint8:
+                    mask_bin = (mask > 0.5).astype(np.uint8)
+                else:
+                    mask_bin = mask
+                polys = mask_to_polygons(mask_bin)
+                if polys:
+                    detections.append((class_to_id[prompt], polys))
 
         if not detections:
             print(f"[SAM3] WARNING: no detections for {img_path.name}", file=sys.stderr)
 
         label_path = labels_out_dir / f"{img_path.stem}.txt"
-        write_labels(label_path, detections, img_w=image.width, img_h=image.height)
+        write_labels(label_path, detections, img_w=img_w, img_h=img_h)
         print(f"[SAM3] Wrote labels to {label_path}")
 
+    # Export canonical room.jpg / room.txt alias using the first image, if labels exist.
     first_image = copied_images[0]
     first_label = labels_out_dir / f"{first_image.stem}.txt"
     if first_label.is_file():
@@ -258,7 +314,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:
+    except Exception as e:  # pragma: no cover - top-level safety net
         import traceback
 
         print(f"[SAM3] FATAL: unhandled exception: {e}", file=sys.stderr)
