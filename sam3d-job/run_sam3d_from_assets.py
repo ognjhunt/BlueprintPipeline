@@ -51,6 +51,100 @@ def load_rgba_with_mask(image_path: Path, polygon: Optional[list] = None) -> Tup
     return rgb, mask
 
 
+def maybe_build_asset_plan(
+    assets_root: Path,
+    layout_prefix: Optional[str],
+    multiview_prefix: Optional[str],
+    scene_id: str,
+    layout_file_name: str = "scene_layout_scaled.json",
+) -> Optional[Path]:
+    """Best-effort builder for scene_assets.json if none exists yet."""
+
+    plan_path = assets_root / "scene_assets.json"
+    if plan_path.is_file():
+        return plan_path
+
+    if not (layout_prefix and multiview_prefix):
+        print(
+            "[SAM3D] No scene_assets.json present and LAYOUT_PREFIX/MULTIVIEW_PREFIX missing; "
+            "cannot auto-build asset plan.",
+            file=sys.stderr,
+        )
+        return None
+
+    root = Path("/mnt/gcs")
+    layout_path = root / layout_prefix / layout_file_name
+    multiview_root = root / multiview_prefix
+
+    if not layout_path.is_file():
+        print(f"[SAM3D] Cannot build asset plan; missing layout at {layout_path}", file=sys.stderr)
+        return None
+
+    if not multiview_root.is_dir():
+        print(
+            f"[SAM3D] Cannot build asset plan; multiview root missing at {multiview_root}",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        layout = json.loads(layout_path.read_text())
+    except Exception as exc:  # pragma: no cover - runtime helper
+        print(f"[SAM3D] Failed to load layout for asset plan: {exc}", file=sys.stderr)
+        return None
+
+    objects = layout.get("objects", [])
+    entries = []
+
+    for obj in objects:
+        oid = obj.get("id")
+        cls = obj.get("class_name", f"class_{obj.get('class_id', 0)}")
+        if oid is None:
+            continue
+
+        mv_dir = multiview_root / f"obj_{oid}"
+        crop_path = mv_dir / "crop.png"
+        preferred_view = mv_dir / "view_0.png"
+
+        if not (preferred_view.is_file() or crop_path.is_file()):
+            print(
+                f"[SAM3D] Skipping obj {oid}: no crop/view found under {mv_dir}",
+                file=sys.stderr,
+            )
+            continue
+
+        entry = {
+            "id": oid,
+            "class_name": cls,
+            "type": "static",
+            "pipeline": "sam3d",
+            "multiview_dir": f"{multiview_prefix}/obj_{oid}",
+            "crop_path": f"{multiview_prefix}/obj_{oid}/crop.png",
+            "polygon": obj.get("polygon"),
+        }
+        if preferred_view.is_file():
+            entry["preferred_view"] = f"{multiview_prefix}/obj_{oid}/view_0.png"
+
+        entries.append(entry)
+
+    if not entries:
+        print(
+            "[SAM3D] Asset plan auto-build produced zero entries; cannot continue.",
+            file=sys.stderr,
+        )
+        return None
+
+    assets_root.mkdir(parents=True, exist_ok=True)
+    plan = {
+        "scene_id": scene_id,
+        "objects": entries,
+    }
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(json.dumps(plan, indent=2))
+    print(f"[SAM3D] Auto-built scene_assets.json with {len(entries)} object(s) -> {plan_path}")
+    return plan_path
+
+
 def save_basecolor_texture(texture: np.ndarray, out_path: Path) -> Optional[Path]:
     """Persist a basecolor texture if the inference output provides one."""
 
@@ -234,6 +328,9 @@ def main() -> None:
     scene_id = os.getenv("SCENE_ID", "")
     assets_prefix = os.getenv("ASSETS_PREFIX")  # scenes/<sceneId>/assets
     sam3d_config_path = os.getenv("SAM3D_CONFIG_PATH")
+    layout_prefix = os.getenv("LAYOUT_PREFIX")
+    multiview_prefix = os.getenv("MULTIVIEW_PREFIX")
+    layout_file_name = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
     normalize_meshes = getenv_bool("SAM3D_NORMALIZE_MESH", "0")
 
     if not assets_prefix:
@@ -242,14 +339,23 @@ def main() -> None:
 
     root = Path("/mnt/gcs")
     assets_root = root / assets_prefix
-    plan_path = assets_root / "scene_assets.json"
+    plan_path = maybe_build_asset_plan(
+        assets_root,
+        layout_prefix=layout_prefix,
+        multiview_prefix=multiview_prefix,
+        scene_id=scene_id,
+        layout_file_name=layout_file_name,
+    )
 
     print(f"[SAM3D] Bucket={bucket}")
     print(f"[SAM3D] Scene={scene_id}")
     print(f"[SAM3D] Assets root={assets_root}")
 
-    if not plan_path.is_file():
-        print(f"[SAM3D] ERROR: assets plan not found: {plan_path}", file=sys.stderr)
+    if plan_path is None or not plan_path.is_file():
+        print(
+            f"[SAM3D] ERROR: assets plan not found or failed to build: {plan_path}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     config_path = None
@@ -293,13 +399,20 @@ def main() -> None:
 
         oid = obj.get("id")
         crop_rel = obj.get("crop_path")
-        if not crop_rel:
-            print(f"[SAM3D] WARNING: object {oid} missing crop_path", file=sys.stderr)
-            continue
+        preferred_rel = obj.get("preferred_view")
+        mv_rel = obj.get("multiview_dir")
 
-        crop_path = root / crop_rel
-        if not crop_path.is_file():
-            print(f"[SAM3D] WARNING: crop not found for obj {oid}: {crop_path}", file=sys.stderr)
+        candidate_paths = []
+        if preferred_rel:
+            candidate_paths.append(root / preferred_rel)
+        if mv_rel:
+            candidate_paths.append(root / mv_rel / "view_0.png")
+        if crop_rel:
+            candidate_paths.append(root / crop_rel)
+
+        crop_path = next((p for p in candidate_paths if p.is_file()), None)
+        if crop_path is None:
+            print(f"[SAM3D] WARNING: no crop or Gemini view found for obj {oid}", file=sys.stderr)
             continue
 
         print(f"[SAM3D] Reconstructing object {oid} from {crop_path}")
