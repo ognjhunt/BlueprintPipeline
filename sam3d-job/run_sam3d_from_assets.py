@@ -16,6 +16,21 @@ SAM3D_CHECKPOINT_ROOT = Path(
 SAM3D_HF_REPO = os.getenv("SAM3D_HF_REPO", "facebook/sam-3d-objects")
 SAM3D_HF_REVISION = os.getenv("SAM3D_HF_REVISION")
 
+# ---------------------------------------------------------------------------
+# Ensure upstream SAM 3D notebook code (inference.py) sees a CONDA-like env.
+# That file does:
+#     os.environ["CUDA_HOME"] = os.environ["CONDA_PREFIX"]
+# which raises KeyError if CONDA_PREFIX is unset. We are NOT using conda,
+# so we synthesize a sensible default based on CUDA_HOME or /usr/local/cuda.
+# ---------------------------------------------------------------------------
+if "CONDA_PREFIX" not in os.environ:
+    # Prefer an existing CUDA_HOME if present, otherwise default to /usr/local/cuda
+    cuda_home_default = os.environ.get("CUDA_HOME", "/usr/local/cuda")
+    # Ensure CUDA_HOME is set to something coherent
+    os.environ.setdefault("CUDA_HOME", cuda_home_default)
+    # Make CONDA_PREFIX match CUDA_HOME so inference.py's assignment is safe
+    os.environ["CONDA_PREFIX"] = os.environ["CUDA_HOME"]
+
 # SAM 3D Objects inference utilities live under notebook/
 NOTEBOOK_ROOTS = [
     Path(__file__).parent / "notebook",
