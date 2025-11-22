@@ -63,7 +63,7 @@ main:
                     value: ${imagesPrefix}
                   - name: SEG_PREFIX
                     value: ${segPrefix}
-          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/seg.json"} }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/seg.json"}}
         result: segResult
         next: handle_seg_result
 
@@ -126,7 +126,7 @@ main:
                     value: ${segDatasetPrefix}
                   - name: OUT_PREFIX
                     value: ${"scenes/" + sceneId + "/da3"}
-          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/scene-da3.json"} }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/scene-da3.json"}}
         result: da3Result
         next: handle_da3_result
 
@@ -191,7 +191,7 @@ main:
                     value: ${segDatasetPrefix}
                   - name: LAYOUT_PREFIX
                     value: ${layoutPrefix}
-          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/layout.json"} }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/layout.json"}}
         result: layoutResult
         next: handle_layout_result
 
@@ -252,7 +252,7 @@ main:
                     value: ${sceneId}
                   - name: LAYOUT_PREFIX
                     value: ${layoutPrefix}
-          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/scale.json"} }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/scale.json"}}
         result: scaleResult
         next: handle_scale_result
 
@@ -321,7 +321,7 @@ main:
                     value: "true"
                   - name: VIEWS_PER_OBJECT
                     value: "1"
-          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/multiview.json"} }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/multiview.json"}}
         result: mvResult
         next: handle_multiview_result
 
@@ -396,7 +396,7 @@ main:
                     value: ${layoutPrefix}
                   - name: MULTIVIEW_PREFIX
                     value: ${multiviewPrefix}
-          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/sam3d.json"} }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/sam3d.json"}}
         result: sam3dResult
         next: handle_sam3d_result
 
