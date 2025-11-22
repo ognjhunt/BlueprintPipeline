@@ -164,8 +164,35 @@ def main() -> None:
     print(f"[OBJECTS] Seg dataset dir: {seg_dataset_dir}")
     print(f"[OBJECTS] Layout dir: {layout_dir}")
 
-    geom_path = da3_dir / "da3_geom.npz"
     layout_path = layout_dir / "scene_layout.json"
+    expected_outputs = [layout_path]
+    print("[OBJECTS] Expected outputs:")
+    for p in expected_outputs:
+        print(f"  - {p}")
+
+    existing_outputs = []
+    if layout_path.is_file():
+        try:
+            with layout_path.open("r") as f:
+                existing_layout = json.load(f)
+            objs = existing_layout.get("objects", [])
+            if objs:
+                existing_outputs.append(
+                    f"{layout_path} (objects already present: {len(objs)})"
+                )
+        except Exception as e:
+            print(
+                f"[OBJECTS] WARNING: failed to inspect existing layout at {layout_path}: {e}",
+                file=sys.stderr,
+            )
+
+    if len(existing_outputs) == len(expected_outputs):
+        print("[OBJECTS] All expected outputs already exist; skipping objects step.")
+        for entry in existing_outputs:
+            print(f"[OBJECTS]   • {entry}")
+        return
+
+    geom_path = da3_dir / "da3_geom.npz"
     data_yaml_path = seg_dataset_dir / "data.yaml"
     valid_images_dir = seg_dataset_dir / "valid" / "images"
     valid_labels_dir = seg_dataset_dir / "valid" / "labels"

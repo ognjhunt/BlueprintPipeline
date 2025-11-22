@@ -135,6 +135,34 @@ def main() -> None:
     print(f"[SCALE] Scene ID: {scene_id}")
     print(f"[SCALE] Layout dir: {layout_dir}")
 
+    scaled_path = layout_dir / "scene_layout_scaled.json"
+    expected_outputs = [scaled_path]
+    print("[SCALE] Expected outputs:")
+    for p in expected_outputs:
+        print(f"  - {p}")
+
+    existing_outputs = []
+    if scaled_path.is_file():
+        try:
+            with scaled_path.open("r") as f:
+                scaled_layout = json.load(f)
+            factor = scaled_layout.get("scale", {}).get("factor")
+            if factor is not None:
+                existing_outputs.append(f"{scaled_path} (scale factor={factor})")
+            else:
+                existing_outputs.append(str(scaled_path))
+        except Exception as e:
+            print(
+                f"[SCALE] WARNING: failed to inspect existing scaled layout at {scaled_path}: {e}",
+                file=sys.stderr,
+            )
+
+    if len(existing_outputs) == len(expected_outputs):
+        print("[SCALE] All expected outputs already exist; skipping scale step.")
+        for entry in existing_outputs:
+            print(f"[SCALE]   • {entry}")
+        return
+
     if not layout_path.is_file():
         print(f"[SCALE] ERROR: scene_layout.json not found at {layout_path}", file=sys.stderr)
         sys.exit(1)
