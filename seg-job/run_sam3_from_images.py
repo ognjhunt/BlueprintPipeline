@@ -692,6 +692,11 @@ def main() -> None:
         f.write(json.dumps(data_yaml, indent=2))
     print(f"[SAM3] Wrote data.yaml to {out_dir / 'dataset' / 'data.yaml'}")
 
+    tokenizer_max_len = None
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None:
+        tokenizer_max_len = getattr(tokenizer, "model_max_length", None)
+
     for img_path in copied_images:
         print(f"[SAM3] Processing {img_path.name}")
         image = Image.open(img_path).convert("RGB")
@@ -701,7 +706,26 @@ def main() -> None:
 
         for class_name, prompt in zip(class_names, prompt_texts):
             # Run SAM3 for a single text prompt on this image.
-            inputs = processor(images=image, text=prompt, return_tensors="pt")
+            truncation_args = {}
+            if tokenizer_max_len:
+                prompt_tokens = tokenizer(prompt, add_special_tokens=False)
+                if len(prompt_tokens.get("input_ids", [])) > tokenizer_max_len:
+                    print(
+                        f"[SAM3] WARNING: prompt '{prompt}' exceeds tokenizer max length "
+                        f"({tokenizer_max_len} tokens); truncating",
+                        file=sys.stderr,
+                    )
+                truncation_args = {
+                    "truncation": True,
+                    "max_length": tokenizer_max_len,
+                }
+
+            inputs = processor(
+                images=image,
+                text=prompt,
+                return_tensors="pt",
+                **truncation_args,
+            )
             inputs = inputs.to(device=device, dtype=model_dtype)
 
             with torch.no_grad():
