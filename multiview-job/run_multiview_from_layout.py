@@ -262,25 +262,14 @@ def generate_views_for_object(
     crop_path: Path,
     object_phrase: str,
     out_dir: Path,
-    views_per_object: int = 4,
+    views_per_object: int = 1,
     object_metadata: Optional[Dict] = None,
 ):
     """
-    Calls Nano Banana Pro (Gemini 3.0 Pro Image Preview) to generate N views of the object.
-    Writes view_0.png ... view_(N-1).png into out_dir.
-    Each call requests ONE view only (no grids).
+    Calls Nano Banana Pro (Gemini 3.0 Pro Image Preview) to generate a single front view
+    of the object and saves it to out_dir.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Different view descriptions per index
-    view_descriptions = [
-        "tight, centered, straight-on front view close to the camera",
-        "three-quarter front-left hero angle",
-        "three-quarter front-right hero angle",
-        "slightly top-down front view",
-        "left side view",
-        "right side view",
-    ]
 
     image = Image.open(str(crop_path)).convert("RGB")
     context_block = build_object_context(object_phrase, object_metadata)
@@ -311,29 +300,12 @@ def generate_views_for_object(
         "Output: one high-resolution PNG render of the reconstructed object (front view, transparent background)."
     )
 
+    views_per_object = max(1, views_per_object)
     for i in range(views_per_object):
-        desc = view_descriptions[i % len(view_descriptions)]
-
-        if i == 0:
-            prompt = front_view_prompt
-        else:
-            prompt = (
-                "You are given a cropped reference image (isolated object on neutral background).\n"
-                "Recreate only the described object as a standalone render from the specified view angle.\n\n"
-                "Object details:\n"
-                f"{context_block}\n\n"
-                f"View to render: {desc}.\n"
-                "Rules:\n"
-                "- Keep the full object visible with a slight margin; do not crop.\n"
-                "- Match material, color, and texture cues from the crop; do not add new parts.\n"
-                "- Remove all background, shelves, floors, and shadows; use a transparent background (alpha).\n"
-                "- Output exactly one PNG image (no grids).\n"
-            )
-
-        print(f"[MULTIVIEW] Calling Gemini for view {i} of {object_phrase!r} ...")
+        print(f"[MULTIVIEW] Calling Gemini for front view of {object_phrase!r} ...")
         response = client.models.generate_content(
             model="gemini-3-pro-image-preview",
-            contents=[prompt, image],
+            contents=[front_view_prompt, image],
             config=types.GenerateContentConfig(
                 response_modalities=["IMAGE"],
                 image_config=types.ImageConfig(image_size="2K"),
@@ -370,6 +342,13 @@ def main() -> None:
     try:
         views_per_object = int(views_per_object_env)
     except ValueError:
+        views_per_object = 1
+
+    if views_per_object != 1:
+        print(
+            "[MULTIVIEW] Only a single front view is supported; overriding VIEWS_PER_OBJECT to 1",
+            file=sys.stderr,
+        )
         views_per_object = 1
 
     enable_gemini_views = _parse_bool(enable_gemini_views_env)
