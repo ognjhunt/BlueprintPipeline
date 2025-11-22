@@ -55,6 +55,14 @@ main:
                     value: ${segDatasetPrefix}
                   - name: LAYOUT_PREFIX
                     value: ${layoutPrefix}
+          dedupeContext: ${
+            {
+              "eventId": event.id,
+              "eventType": event.type,
+              "metageneration": event.data.metageneration,
+              "dedupeToken": locksPrefix + "/layout.json"
+            }
+          }
         result: layoutResult
         next: handle_layout_result
 
@@ -75,12 +83,19 @@ main:
 
 subworkflows:
   run_job_with_lock:
-    params: [bucket, lockObject, projectId, region, jobName, overrides, maxAttempts]
+    params: [bucket, lockObject, projectId, region, jobName, overrides, dedupeContext, maxAttempts]
     steps:
       - init:
           assign:
             - attempts: 0
             - resolvedMaxAttempts: ${maxAttempts or 60}
+            - resolvedDedupeContext: ${dedupeContext or {"eventId": "", "eventType": "", "metageneration": "", "dedupeToken": lockObject}}
+
+      - log_dedupe_context:
+          call: sys.log
+          args:
+            text: ${"Dedupe context for " + jobName + ": eventId=" + resolvedDedupeContext.eventId + ", eventType=" + resolvedDedupeContext.eventType + ", metageneration=" + resolvedDedupeContext.metageneration + ", dedupeToken=" + resolvedDedupeContext.dedupeToken}
+            severity: "INFO"
 
       - check_lock:
           try:
@@ -101,6 +116,12 @@ subworkflows:
                     media:
                       string: ${text.encode_to_base64(text.stringify({"createdAt": sys.now(), "job": jobName}))}
                       contentType: "application/json"
+
+      - log_job_launch:
+          call: sys.log
+          args:
+            text: ${"Launching job " + jobName + " with dedupeToken=" + resolvedDedupeContext.dedupeToken}
+            severity: "INFO"
 
       - start_job:
           call: googleapis.run.v2.projects.locations.jobs.run
@@ -159,5 +180,11 @@ subworkflows:
             finalState: ${execStatus.state}
 
       - locked:
+          steps:
+            - log_duplicate_skip:
+                call: sys.log
+                args:
+                  text: ${"Duplicate detected for dedupeToken=" + resolvedDedupeContext.dedupeToken + "; skipping eventId=" + resolvedDedupeContext.eventId}
+                  severity: "INFO"
           return:
             skipped: true
