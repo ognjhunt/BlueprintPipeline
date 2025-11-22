@@ -136,7 +136,8 @@ def main() -> None:
     print(f"[SCALE] Layout dir: {layout_dir}")
 
     scaled_path = layout_dir / "scene_layout_scaled.json"
-    expected_outputs = [scaled_path]
+    done_marker_path = layout_dir / "scene_layout_scaled.done"
+    expected_outputs = [scaled_path, done_marker_path]
     print("[SCALE] Expected outputs:")
     for p in expected_outputs:
         print(f"  - {p}")
@@ -156,6 +157,9 @@ def main() -> None:
                 f"[SCALE] WARNING: failed to inspect existing scaled layout at {scaled_path}: {e}",
                 file=sys.stderr,
             )
+
+    if done_marker_path.is_file():
+        existing_outputs.append(str(done_marker_path))
 
     if len(existing_outputs) == len(expected_outputs):
         print("[SCALE] All expected outputs already exist; skipping scale step.")
@@ -238,6 +242,11 @@ def main() -> None:
         with scaled_path.open("w") as f:
             json.dump(layout, f, indent=2)
 
+        try:
+            done_marker_path.write_text("ok\n")
+        except Exception as e:
+            print(f"[SCALE] WARNING: failed to write done marker at {done_marker_path}: {e}", file=sys.stderr)
+
         print("[SCALE] No scale cues available; wrote scene_layout_scaled.json with factor=1.0")
         return
 
@@ -319,6 +328,11 @@ def main() -> None:
     scaled_path = layout_dir / "scene_layout_scaled.json"
     with scaled_path.open("w") as f:
         json.dump(layout, f, indent=2)
+
+    try:
+        done_marker_path.write_text("ok\n")
+    except Exception as e:
+        print(f"[SCALE] WARNING: failed to write done marker at {done_marker_path}: {e}", file=sys.stderr)
 
     print(f"[SCALE] Wrote scaled layout to {scaled_path}")
     print("[SCALE] Done.")
