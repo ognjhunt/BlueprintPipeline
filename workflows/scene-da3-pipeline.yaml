@@ -57,7 +57,7 @@ main:
                     value: ${datasetPrefix}
                   - name: OUT_PREFIX
                     value: ${outPrefix}
-          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/scene-da3.json"}}
+          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/scene-da3.json"} }
         result: da3Result
         next: handle_da3_result
 
