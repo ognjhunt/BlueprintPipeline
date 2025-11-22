@@ -55,14 +55,7 @@ main:
                     value: ${layoutPrefix}
                   - name: MULTIVIEW_PREFIX
                     value: ${multiviewPrefix}
-          dedupeContext: ${
-            {
-              "eventId": event.id,
-              "eventType": event.type,
-              "metageneration": event.data.metageneration,
-              "dedupeToken": locksPrefix + "/sam3d.json"
-            }
-          }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/sam3d.json"}}
         result: sam3dResult
         next: handle_sam3d_result
 
