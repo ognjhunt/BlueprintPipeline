@@ -33,10 +33,10 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir --prefer-binary \
     torch==2.5.1 torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu124
-# Note: Using stable torch 2.5.1+cu124, which is compatible with CUDA 12.x.
+# Using stable torch 2.5.1+cu124, compatible with CUDA 12.x.
 
 # Core runtime deps (WITHOUT sam-3d-objects yet)
-# Fix: usd-core version – valid PyPI versions start at 24.8
+# Note: usd-core valid versions start at 24.8
 RUN pip install --no-cache-dir --prefer-binary \
     huggingface_hub \
     opencv-python-headless \
@@ -58,7 +58,6 @@ RUN git clone https://github.com/facebookresearch/sam-3d-objects.git ${SAM3D_REP
 
 # Work around PyTorch cpp_extension bug when building CUDA extensions (gsplat, kaolin, etc.)
 # in an environment with no visible GPU during docker build.
-# Without this, torch.utils.cpp_extension._get_cuda_arch_flags can raise IndexError (arch_list[-1]).
 ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6"
 
 # Install inference requirements, but strip out auto-gptq (not needed for inference and
@@ -75,15 +74,18 @@ RUN if [ -f "${SAM3D_REPO_ROOT}/requirements.inference.txt" ]; then \
 
 RUN mkdir -p ${SAM3D_CHECKPOINT_ROOT}
 
+# Runtime env defaults
 ENV HF_HUB_DISABLE_TELEMETRY=1 \
     HF_HOME=/mnt/gcs/hf-cache \
     TRANSFORMERS_CACHE=/mnt/gcs/hf-cache \
     TORCH_HOME=/tmp/torch-cache \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    CUDA_HOME=/usr/local/cuda \
+    CONDA_PREFIX=/usr/local/cuda
 
 WORKDIR /app
 
-# These scripts stay exactly as you posted them
+# Job entry scripts
 COPY run_sam3d_from_assets.py /app/run_sam3d_from_assets.py
 COPY run_sam3d.sh /app/run_sam3d.sh
 
