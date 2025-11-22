@@ -30,32 +30,134 @@ main:
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
+          - locksPrefix: ${"scenes/" + sceneId + "/_locks"}
           - jobName: "sam3d-job"
         next: run_sam3d
 
     - run_sam3d:
-        call: googleapis.run.v2.projects.locations.jobs.run
+        call: run_job_with_lock
         args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: LAYOUT_PREFIX
-                      value: ${layoutPrefix}
-                    - name: MULTIVIEW_PREFIX
-                      value: ${multiviewPrefix}
-        result: sam3dExec
+          bucket: ${bucket}
+          projectId: ${projectId}
+          region: ${region}
+          jobName: ${jobName}
+          lockObject: ${locksPrefix + "/sam3d.json"}
+          overrides:
+            containerOverrides:
+              - env:
+                  - name: BUCKET
+                    value: ${bucket}
+                  - name: SCENE_ID
+                    value: ${sceneId}
+                  - name: ASSETS_PREFIX
+                    value: ${assetsPrefix}
+                  - name: LAYOUT_PREFIX
+                    value: ${layoutPrefix}
+                  - name: MULTIVIEW_PREFIX
+                    value: ${multiviewPrefix}
+        result: sam3dResult
+        next: handle_sam3d_result
+
+    - handle_sam3d_result:
+        switch:
+          - condition: ${sam3dResult.skipped}
+            next: done_locked
         next: done
 
     - done:
         return: ${"sam3d-job started for " + object}
 
+    - done_locked:
+        return: ${"sam3d-job locked for " + object}
+
     - skip:
         return: ${"sam3d skip " + object}
+
+subworkflows:
+  run_job_with_lock:
+    params: [bucket, lockObject, projectId, region, jobName, overrides, maxAttempts]
+    steps:
+      - init:
+          assign:
+            - attempts: 0
+            - resolvedMaxAttempts: ${maxAttempts or 60}
+
+      - check_lock:
+          try:
+            call: googleapis.storage.v1.objects.get
+            args:
+              bucket: ${bucket}
+              object: ${lockObject}
+            result: existingLock
+            next: locked
+          except:
+            as: e
+            steps:
+              - create_lock:
+                  call: googleapis.storage.v1.objects.insert
+                  args:
+                    bucket: ${bucket}
+                    name: ${lockObject}
+                    media:
+                      string: ${text.encode_to_base64(text.stringify({"createdAt": sys.now(), "job": jobName}))}
+                      contentType: "application/json"
+
+      - start_job:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+            body:
+              overrides: ${overrides}
+          result: execution
+
+      - poll_execution:
+          call: googleapis.run.v2.projects.locations.executions.get
+          args:
+            name: ${execution.name}
+          result: execStatus
+          next: check_state
+
+      - check_state:
+          switch:
+            - condition: ${execStatus.state in ["SUCCEEDED", "FAILED", "CANCELLED"]}
+              next: clear_lock
+            - condition: ${attempts >= resolvedMaxAttempts}
+              next: clear_lock
+          next: bump_attempts
+
+      - bump_attempts:
+          assign:
+            - attempts: ${attempts + 1}
+          next: sleep_execution
+
+      - sleep_execution:
+          call: sys.sleep
+          args:
+            seconds: 10
+          next: poll_execution
+
+      - clear_lock:
+          try:
+            call: googleapis.storage.v1.objects.delete
+            args:
+              bucket: ${bucket}
+              object: ${lockObject}
+          except:
+            as: deleteErr
+            steps:
+              - log_delete_err:
+                  call: sys.log
+                  args:
+                    text: ${"Failed to delete lock " + lockObject + ": " + deleteErr.message}
+                    severity: "WARNING"
+          next: return_result
+
+      - return_result:
+          return:
+            skipped: false
+            execution: ${execution}
+            finalState: ${execStatus.state}
+
+      - locked:
+          return:
+            skipped: true
