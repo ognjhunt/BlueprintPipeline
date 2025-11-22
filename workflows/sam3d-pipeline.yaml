@@ -27,6 +27,8 @@ main:
         assign:
           - parts: ${text.split(object, "/")}
           - sceneId: ${parts[1]}
+          - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
+          - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
           - jobName: "sam3d-job"
         next: run_sam3d
@@ -45,6 +47,10 @@ main:
                       value: ${sceneId}
                     - name: ASSETS_PREFIX
                       value: ${assetsPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: MULTIVIEW_PREFIX
+                      value: ${multiviewPrefix}
         result: sam3dExec
         next: done
 
