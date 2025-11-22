@@ -21,6 +21,8 @@ main:
         switch:
           - condition: ${text.match_regex(object, "^scenes/.+/layout/scene_layout_scaled\\.json$")}
             next: derive
+          - condition: ${text.match_regex(object, "^scenes/.+/layout/scene_layout_scaled\\.done$")}
+            next: derive
         next: skip
 
     - derive:
@@ -32,9 +34,39 @@ main:
           - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - locksPrefix: ${"scenes/" + sceneId + "/_locks"}
+          - doneObject: ${"scenes/" + sceneId + "/layout/scene_layout_scaled.done"}
           - jobName: "multiview-job"
           - multiviewAttempts: 0
-        next: run_multiview
+        next: gate_multiview_launch
+
+    - gate_multiview_launch:
+        switch:
+          - condition: ${object == doneObject}
+            next: handle_done_marker_event
+        next: handle_scaled_event
+
+    - handle_done_marker_event:
+        switch:
+          - condition: ${event.data.metageneration == "1"}
+            next: run_multiview
+        next: skip
+
+    - handle_scaled_event:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${doneObject}
+          result: existingDone
+          next: skip
+        except:
+          as: e
+          steps:
+            - require_metageneration_one:
+                switch:
+                  - condition: ${event.data.metageneration == "1"}
+                    next: run_multiview
+                next: skip
 
     - run_multiview:
         call: run_job_with_lock
