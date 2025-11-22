@@ -54,7 +54,11 @@ main:
                     value: ${assetsPrefix}
                   - name: USD_PREFIX
                     value: ${usdPrefix}
-          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/usd-assembly.json"}}
+          dedupeContext:
+            eventId: ${event.id}
+            eventType: ${event.type}
+            metageneration: ${event.data.metageneration}
+            dedupeToken: ${locksPrefix + "/usd-assembly.json"}
         result: usdResult
         next: handle_usd_result
 
@@ -81,12 +85,15 @@ subworkflows:
           assign:
             - attempts: 0
             - resolvedMaxAttempts: ${maxAttempts or 60}
-            - resolvedDedupeContext: ${dedupeContext or {"eventId": "", "eventType": "", "metageneration": "", "dedupeToken": lockObject}}
+            - resolvedDedupeContext: ${dedupeContext}
+            - lockInfo:
+                createdAt: ${sys.now()}
+                job: ${jobName}
 
       - log_dedupe_context:
           call: sys.log
           args:
-            text: ${"Dedupe context for " + jobName + ": eventId=" + resolvedDedupeContext.eventId + ", eventType=" + resolvedDedupeContext.eventType + ", metageneration=" + resolvedDedupeContext.metageneration + ", dedupeToken=" + resolvedDedupeContext.dedupeToken}
+            text: '${"Dedupe context for " + jobName + ": eventId=" + resolvedDedupeContext.eventId + ", eventType=" + resolvedDedupeContext.eventType + ", metageneration=" + resolvedDedupeContext.metageneration + ", dedupeToken=" + resolvedDedupeContext.dedupeToken}'
             severity: "INFO"
 
       - check_lock:
@@ -106,13 +113,13 @@ subworkflows:
                     bucket: ${bucket}
                     name: ${lockObject}
                     media:
-                      string: ${text.encode_to_base64(text.stringify({"createdAt": sys.now(), "job": jobName}))}
+                      string: ${text.encode_to_base64(text.stringify(lockInfo))}
                       contentType: "application/json"
 
       - log_job_launch:
           call: sys.log
           args:
-            text: ${"Launching job " + jobName + " with dedupeToken=" + resolvedDedupeContext.dedupeToken}
+            text: '${"Launching job " + jobName + " with dedupeToken=" + resolvedDedupeContext.dedupeToken}'
             severity: "INFO"
 
       - start_job:
@@ -161,7 +168,7 @@ subworkflows:
               - log_delete_err:
                   call: sys.log
                   args:
-                    text: ${"Failed to delete lock " + lockObject + ": " + deleteErr.message}
+                    text: '${"Failed to delete lock " + lockObject + ": " + deleteErr.message}'
                     severity: "WARNING"
           next: return_result
 
@@ -176,7 +183,7 @@ subworkflows:
             - log_duplicate_skip:
                 call: sys.log
                 args:
-                  text: ${"Duplicate detected for dedupeToken=" + resolvedDedupeContext.dedupeToken + "; skipping eventId=" + resolvedDedupeContext.eventId}
+                  text: '${"Duplicate detected for dedupeToken=" + resolvedDedupeContext.dedupeToken + "; skipping eventId=" + resolvedDedupeContext.eventId}'
                   severity: "INFO"
           return:
             skipped: true
