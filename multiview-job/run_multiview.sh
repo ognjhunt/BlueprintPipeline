@@ -31,6 +31,19 @@ fi
 
 mkdir -p "${MULTIVIEW_DIR}"
 
+shopt -s nullglob
+echo "[MULTIVIEW] Existing multiview object directories:" 
+existing_mv_dirs=("${MULTIVIEW_DIR}"/obj_*)
+if (( ${#existing_mv_dirs[@]} > 0 )); then
+  for d in "${existing_mv_dirs[@]}"; do
+    echo "  - ${d}"
+  done
+  echo "[MULTIVIEW] Found existing multiview outputs; skipping run_multiview_from_layout.py"
+  exit 0
+else
+  echo "  (none found)"
+fi
+
 # Export for Python
 export LAYOUT_PREFIX SEG_DATASET_PREFIX MULTIVIEW_PREFIX BUCKET SCENE_ID
 # Optional: LAYOUT_FILE_NAME (defaults to scene_layout_scaled.json) and VIEWS_PER_OBJECT
