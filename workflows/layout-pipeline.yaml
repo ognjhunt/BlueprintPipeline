@@ -89,7 +89,6 @@ run_job_with_lock:
           - lockInfo:
               createdAt: ${sys.now()}
               job: ${jobName}
-          - existingLock: null
 
     - log_dedupe_context:
         call: sys.log
@@ -99,11 +98,14 @@ run_job_with_lock:
 
     - check_lock:
         try:
-          call: googleapis.storage.v1.objects.get
-          args:
-            bucket: ${bucket}
-            object: ${lockObject}
-          result: existingLock
+          steps:
+            - get_lock:
+                call: googleapis.storage.v1.objects.get
+                args:
+                  bucket: ${bucket}
+                  object: ${lockObject}
+                result: existingLock
+                next: locked_log
         except:
           as: e
           steps:
@@ -115,13 +117,7 @@ run_job_with_lock:
                   media:
                     string: ${text.encode_to_base64(text.stringify(lockInfo))}
                     contentType: "application/json"
-        next: check_lock_result
-
-    - check_lock_result:
-        switch:
-          - condition: ${existingLock != null}
-            next: locked
-        next: log_job_launch
+                next: log_job_launch
 
     - log_job_launch:
         call: sys.log
@@ -185,12 +181,13 @@ run_job_with_lock:
           execution: ${execution}
           finalState: ${execStatus.state}
 
-    - locked:
-        steps:
-          - log_duplicate_skip:
-              call: sys.log
-              args:
-                text: '${"Duplicate detected for dedupeToken=" + resolvedDedupeContext.dedupeToken + "; skipping eventId=" + resolvedDedupeContext.eventId}'
-                severity: "INFO"
+    - locked_log:
+        call: sys.log
+        args:
+          text: '${"Duplicate detected for dedupeToken=" + resolvedDedupeContext.dedupeToken + "; skipping eventId=" + resolvedDedupeContext.eventId}'
+          severity: "INFO"
+        next: locked_return
+
+    - locked_return:
         return:
           skipped: true
