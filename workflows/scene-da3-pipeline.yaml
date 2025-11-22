@@ -33,33 +33,135 @@ main:
           - sceneId: ${parts[1]}
           - datasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - outPrefix: ${"scenes/" + sceneId + "/da3"}
+          - locksPrefix: ${"scenes/" + sceneId + "/_locks"}
           - jobName: "scene-da3-job"
         next: run_da3_job
 
     # 5) Invoke Cloud Run job scene-da3-job with env overrides
     - run_da3_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
+        call: run_job_with_lock
         args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: DATASET_PREFIX
-                      value: ${datasetPrefix}
-                    - name: OUT_PREFIX
-                      value: ${outPrefix}
-        result: da3Exec
+          bucket: ${bucket}
+          projectId: ${projectId}
+          region: ${region}
+          jobName: ${jobName}
+          lockObject: ${locksPrefix + "/scene-da3.json"}
+          overrides:
+            containerOverrides:
+              - env:
+                  - name: BUCKET
+                    value: ${bucket}
+                  - name: SCENE_ID
+                    value: ${sceneId}
+                  - name: DATASET_PREFIX
+                    value: ${datasetPrefix}
+                  - name: OUT_PREFIX
+                    value: ${outPrefix}
+        result: da3Result
+        next: handle_da3_result
+
+    - handle_da3_result:
+        switch:
+          - condition: ${da3Result.skipped}
+            next: done_locked
         next: done
 
     # 6) Return quick status
     - done:
         return: ${"scene-da3 started for " + object}
 
+    - done_locked:
+        return: ${"scene-da3 locked for " + object}
+
     # 7) Skip non-matching objects
     - skip:
         return: ${"scene-da3 skip " + object}
+
+subworkflows:
+  run_job_with_lock:
+    params: [bucket, lockObject, projectId, region, jobName, overrides, maxAttempts]
+    steps:
+      - init:
+          assign:
+            - attempts: 0
+            - resolvedMaxAttempts: ${maxAttempts or 60}
+
+      - check_lock:
+          try:
+            call: googleapis.storage.v1.objects.get
+            args:
+              bucket: ${bucket}
+              object: ${lockObject}
+            result: existingLock
+            next: locked
+          except:
+            as: e
+            steps:
+              - create_lock:
+                  call: googleapis.storage.v1.objects.insert
+                  args:
+                    bucket: ${bucket}
+                    name: ${lockObject}
+                    media:
+                      string: ${text.encode_to_base64(text.stringify({"createdAt": sys.now(), "job": jobName}))}
+                      contentType: "application/json"
+
+      - start_job:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+            body:
+              overrides: ${overrides}
+          result: execution
+
+      - poll_execution:
+          call: googleapis.run.v2.projects.locations.executions.get
+          args:
+            name: ${execution.name}
+          result: execStatus
+          next: check_state
+
+      - check_state:
+          switch:
+            - condition: ${execStatus.state in ["SUCCEEDED", "FAILED", "CANCELLED"]}
+              next: clear_lock
+            - condition: ${attempts >= resolvedMaxAttempts}
+              next: clear_lock
+          next: bump_attempts
+
+      - bump_attempts:
+          assign:
+            - attempts: ${attempts + 1}
+          next: sleep_execution
+
+      - sleep_execution:
+          call: sys.sleep
+          args:
+            seconds: 10
+          next: poll_execution
+
+      - clear_lock:
+          try:
+            call: googleapis.storage.v1.objects.delete
+            args:
+              bucket: ${bucket}
+              object: ${lockObject}
+          except:
+            as: deleteErr
+            steps:
+              - log_delete_err:
+                  call: sys.log
+                  args:
+                    text: ${"Failed to delete lock " + lockObject + ": " + deleteErr.message}
+                    severity: "WARNING"
+          next: return_result
+
+      - return_result:
+          return:
+            skipped: false
+            execution: ${execution}
+            finalState: ${execStatus.state}
+
+      - locked:
+          return:
+            skipped: true
