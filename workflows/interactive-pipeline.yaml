@@ -57,14 +57,7 @@ main:
                     value: ${layoutPrefix}
                   - name: PHYSX_ENDPOINT
                     value: ${physxEndpoint}
-          dedupeContext: ${
-            {
-              "eventId": event.id,
-              "eventType": event.type,
-              "metageneration": event.data.metageneration,
-              "dedupeToken": locksPrefix + "/interactive.json"
-            }
-          }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/interactive.json"}}
         result: interactiveResult
         next: handle_result
 
