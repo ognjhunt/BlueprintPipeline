@@ -55,7 +55,7 @@ main:
                     value: ${segDatasetPrefix}
                   - name: LAYOUT_PREFIX
                     value: ${layoutPrefix}
-          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/layout.json"} }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/layout.json"}}
         result: layoutResult
         next: handle_layout_result
 

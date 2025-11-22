@@ -93,7 +93,7 @@ main:
                     value: "true"
                   - name: VIEWS_PER_OBJECT
                     value: "1"
-          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/multiview.json"} }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/multiview.json"}}
         result: mvResult
         next: handle_mv_result
 
@@ -165,7 +165,7 @@ main:
                     value: ${multiviewPrefix}
                   - name: ASSETS_PREFIX
                     value: ${assetsPrefix}
-          dedupeContext: ${ {"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/assets-plan.json"} }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/assets-plan.json"}}
         result: assetsPlanResult
         next: handle_assets_plan_result
 
