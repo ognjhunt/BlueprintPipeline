@@ -55,7 +55,11 @@ main:
                     value: ${sceneId}
                   - name: LAYOUT_PREFIX
                     value: ${layoutPrefix}
-          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/scale.json"}}
+          dedupeContext:
+            eventId: ${event.id}
+            eventType: ${event.type}
+            metageneration: ${event.data.metageneration}
+            dedupeToken: ${locksPrefix + "/scale.json"}
         result: scaleResult
         next: handle_scale_result
 
@@ -82,12 +86,16 @@ subworkflows:
           assign:
             - attempts: 0
             - resolvedMaxAttempts: ${maxAttempts or 60}
-            - resolvedDedupeContext: ${dedupeContext or {"eventId": "", "eventType": "", "metageneration": "", "dedupeToken": lockObject}}
+            - resolvedDedupeContext:
+                eventId: ${(dedupeContext and dedupeContext.eventId) or ""}
+                eventType: ${(dedupeContext and dedupeContext.eventType) or ""}
+                metageneration: ${(dedupeContext and dedupeContext.metageneration) or ""}
+                dedupeToken: ${(dedupeContext and dedupeContext.dedupeToken) or lockObject}
 
       - log_dedupe_context:
           call: sys.log
           args:
-            text: ${"Dedupe context for " + jobName + ": eventId=" + resolvedDedupeContext.eventId + ", eventType=" + resolvedDedupeContext.eventType + ", metageneration=" + resolvedDedupeContext.metageneration + ", dedupeToken=" + resolvedDedupeContext.dedupeToken}
+            text: '${"Dedupe context for " + jobName + ":eventId=" + resolvedDedupeContext.eventId + ", eventType=" + resolvedDedupeContext.eventType + ", metageneration=" + resolvedDedupeContext.metageneration + ", dedupeToken=" + resolvedDedupeContext.dedupeToken}'
             severity: "INFO"
 
       - check_lock:
@@ -107,7 +115,7 @@ subworkflows:
                     bucket: ${bucket}
                     name: ${lockObject}
                     media:
-                      string: ${text.encode_to_base64(text.stringify({"createdAt": sys.now(), "job": jobName}))}
+                      string: ${text.encode_to_base64(text.stringify({"createdAt":sys.now(),"job":jobName}))}
                       contentType: "application/json"
 
       - log_job_launch:
@@ -162,7 +170,7 @@ subworkflows:
               - log_delete_err:
                   call: sys.log
                   args:
-                    text: ${"Failed to delete lock " + lockObject + ": " + deleteErr.message}
+                    text: ${"Failed to delete lock " + lockObject + ":" + deleteErr.message}
                     severity: "WARNING"
           next: return_result
 
