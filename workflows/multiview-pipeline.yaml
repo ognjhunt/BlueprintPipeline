@@ -16,7 +16,7 @@ main:
           - region: "us-central1"
         next: filter_scaled_layout
 
-    # Only handle scenes/.../layout/scene_layout_scaled.json
+    # Only handle scenes/.../layout/scene_layout_scaled.json or .done
     - filter_scaled_layout:
         switch:
           - condition: ${text.match_regex(object, "^scenes/.+/layout/scene_layout_scaled\\.json$")}
@@ -51,13 +51,18 @@ main:
             next: run_multiview
         next: skip
 
+    # If .done already exists, skip.
+    # If it doesn't exist, and this is metageneration 1, run multiview.
     - handle_scaled_event:
         try:
-          call: googleapis.storage.v1.objects.get
-          args:
-            bucket: ${bucket}
-            object: ${doneObject}
-          result: existingDone
+          steps:
+            - get_done_marker:
+                call: googleapis.storage.v1.objects.get
+                args:
+                  bucket: ${bucket}
+                  object: ${doneObject}
+                result: existingDone
+                next: skip
         except:
           as: e
           steps:
@@ -66,7 +71,6 @@ main:
                   - condition: ${event.data.metageneration == "1"}
                     next: run_multiview
                 next: skip
-        next: skip
 
     - run_multiview:
         call: run_job_with_lock
@@ -203,7 +207,6 @@ run_job_with_lock:
           - lockInfo:
               createdAt: ${sys.now()}
               job: ${jobName}
-          - existingLock: null
 
     - log_dedupe_context:
         call: sys.log
@@ -213,11 +216,14 @@ run_job_with_lock:
 
     - check_lock:
         try:
-          call: googleapis.storage.v1.objects.get
-          args:
-            bucket: ${bucket}
-            object: ${lockObject}
-          result: existingLock
+          steps:
+            - get_lock:
+                call: googleapis.storage.v1.objects.get
+                args:
+                  bucket: ${bucket}
+                  object: ${lockObject}
+                result: existingLock
+                next: locked_log
         except:
           as: e
           steps:
@@ -229,13 +235,7 @@ run_job_with_lock:
                   media:
                     string: ${text.encode_to_base64(text.stringify(lockInfo))}
                     contentType: "application/json"
-        next: check_lock_result
-
-    - check_lock_result:
-        switch:
-          - condition: ${existingLock != null}
-            next: locked
-        next: log_job_launch
+                next: log_job_launch
 
     - log_job_launch:
         call: sys.log
@@ -299,12 +299,13 @@ run_job_with_lock:
           execution: ${execution}
           finalState: ${execStatus.state}
 
-    - locked:
-        steps:
-          - log_duplicate_skip:
-              call: sys.log
-              args:
-                text: '${"Duplicate detected for dedupeToken=" + resolvedDedupeContext.dedupeToken + "; skipping eventId=" + resolvedDedupeContext.eventId}'
-                severity: "INFO"
+    - locked_log:
+        call: sys.log
+        args:
+          text: '${"Duplicate detected for dedupeToken=" + resolvedDedupeContext.dedupeToken + "; skipping eventId=" + resolvedDedupeContext.eventId}'
+          severity: "INFO"
+        next: locked_return
+
+    - locked_return:
         return:
           skipped: true
