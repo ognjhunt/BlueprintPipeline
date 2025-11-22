@@ -6,7 +6,13 @@ main:
         args:
           text: ${event}
           severity: "INFO"
-        next: extract
+        next: check_event
+
+    - check_event:
+        switch:
+          - condition: ${event.type == "google.cloud.storage.object.v1.finalized" && event.data.metageneration == "1"}
+            next: extract
+        next: skip
 
     - extract:
         assign:
