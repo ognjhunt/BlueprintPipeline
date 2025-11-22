@@ -192,10 +192,10 @@ def build_scene_inventory_with_gemini(
         )
 
     # Use Gemini 3 Pro Preview by default. The correct model ID is
-    # "gemini-3-pro-preview" for the Gemini API. :contentReference[oaicite:4]{index=4}
+    # "gemini-3-pro-preview" for the Gemini API.
     model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-3-pro-preview")
 
-    # Thinking level: "low" or "high". Gemini 3 Pro defaults to high if unset. :contentReference[oaicite:5]{index=5}
+    # Thinking level: "low" or "high". Gemini 3 Pro defaults to high if unset.
     thinking_level_env = os.environ.get("GEMINI_THINKING_LEVEL", "high").strip().lower()
     thinking_level = thinking_level_env if thinking_level_env in ("low", "high") else "high"
 
@@ -219,7 +219,7 @@ def build_scene_inventory_with_gemini(
     except Exception as e:
         raise RuntimeError(f"Failed to create Gemini client: {e}")
 
-    # Build GenerateContentConfig with thinking + optional Google Search tool. :contentReference[oaicite:6]{index=6}
+    # Build GenerateContentConfig with thinking + optional Google Search tool.
     tools = None
     if enable_search:
         tools = [types.Tool(google_search=types.GoogleSearch())]
@@ -668,6 +668,28 @@ def main() -> None:
         model_dtype = torch.float32
     print(f"[SAM3] Model dtype: {model_dtype}")
 
+    # Inspect the text encoder's maximum supported sequence length so we can
+    # truncate prompts before they hit CLIP's positional embedding limit.
+    max_text_positions: Optional[int] = None
+    try:
+        text_encoder = getattr(model, "text_encoder", None)
+        if text_encoder is not None and hasattr(text_encoder, "config"):
+            max_text_positions = getattr(text_encoder.config, "max_position_embeddings", None)
+        if isinstance(max_text_positions, int) and max_text_positions > 0:
+            print(f"[SAM3] Text encoder max_position_embeddings={max_text_positions}")
+        else:
+            max_text_positions = None
+            print(
+                "[SAM3] WARNING: could not determine text encoder max_position_embeddings; "
+                "text prompts will not be truncated automatically."
+            )
+    except Exception as e:
+        max_text_positions = None
+        print(
+            f"[SAM3] WARNING: failed to inspect text encoder max_position_embeddings: {e}",
+            file=sys.stderr,
+        )
+
     conf_thresh = float(os.environ.get("SAM3_CONFIDENCE", "0.30"))
     print(f"[SAM3] Confidence threshold set to {conf_thresh}")
 
@@ -692,11 +714,6 @@ def main() -> None:
         f.write(json.dumps(data_yaml, indent=2))
     print(f"[SAM3] Wrote data.yaml to {out_dir / 'dataset' / 'data.yaml'}")
 
-    tokenizer_max_len = None
-    tokenizer = getattr(processor, "tokenizer", None)
-    if tokenizer is not None:
-        tokenizer_max_len = getattr(tokenizer, "model_max_length", None)
-
     for img_path in copied_images:
         print(f"[SAM3] Processing {img_path.name}")
         image = Image.open(img_path).convert("RGB")
@@ -706,26 +723,27 @@ def main() -> None:
 
         for class_name, prompt in zip(class_names, prompt_texts):
             # Run SAM3 for a single text prompt on this image.
-            truncation_args = {}
-            if tokenizer_max_len:
-                prompt_tokens = tokenizer(prompt, add_special_tokens=False)
-                if len(prompt_tokens.get("input_ids", [])) > tokenizer_max_len:
-                    print(
-                        f"[SAM3] WARNING: prompt '{prompt}' exceeds tokenizer max length "
-                        f"({tokenizer_max_len} tokens); truncating",
-                        file=sys.stderr,
-                    )
-                truncation_args = {
-                    "truncation": True,
-                    "max_length": tokenizer_max_len,
-                }
+            inputs = processor(images=image, text=prompt, return_tensors="pt")
 
-            inputs = processor(
-                images=image,
-                text=prompt,
-                return_tensors="pt",
-                **truncation_args,
-            )
+            # Truncate text token sequences so they respect the CLIP text encoder's
+            # max_position_embeddings. Without this, long natural-language prompts
+            # can produce sequences (e.g. length 34) that exceed the 32-position
+            # embedding limit and trigger:
+            #   ValueError: Sequence length must be less than max_position_embeddings
+            if max_text_positions is not None and "input_ids" in inputs:
+                input_ids = inputs["input_ids"]
+                if hasattr(input_ids, "shape") and input_ids.shape[-1] > max_text_positions:
+                    orig_len = int(input_ids.shape[-1])
+                    inputs["input_ids"] = input_ids[..., :max_text_positions]
+                    if "attention_mask" in inputs:
+                        inputs["attention_mask"] = inputs["attention_mask"][..., :max_text_positions]
+                    if "position_ids" in inputs:
+                        inputs["position_ids"] = inputs["position_ids"][..., :max_text_positions]
+                    print(
+                        f"[SAM3] Truncated text tokens for class '{class_name}' "
+                        f"from length {orig_len} to {max_text_positions}"
+                    )
+
             inputs = inputs.to(device=device, dtype=model_dtype)
 
             with torch.no_grad():
