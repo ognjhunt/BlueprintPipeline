@@ -55,14 +55,7 @@ main:
                     value: ${sceneId}
                   - name: LAYOUT_PREFIX
                     value: ${layoutPrefix}
-          dedupeContext: ${
-            {
-              "eventId": event.id,
-              "eventType": event.type,
-              "metageneration": event.data.metageneration,
-              "dedupeToken": locksPrefix + "/scale.json"
-            }
-          }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/scale.json"}}
         result: scaleResult
         next: handle_scale_result
 

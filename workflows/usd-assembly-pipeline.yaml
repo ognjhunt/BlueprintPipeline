@@ -54,14 +54,7 @@ main:
                     value: ${assetsPrefix}
                   - name: USD_PREFIX
                     value: ${usdPrefix}
-          dedupeContext: ${
-            {
-              "eventId": event.id,
-              "eventType": event.type,
-              "metageneration": event.data.metageneration,
-              "dedupeToken": locksPrefix + "/usd-assembly.json"
-            }
-          }
+          dedupeContext: ${{"eventId": event.id, "eventType": event.type, "metageneration": event.data.metageneration, "dedupeToken": locksPrefix + "/usd-assembly.json"}}
         result: usdResult
         next: handle_usd_result
 
