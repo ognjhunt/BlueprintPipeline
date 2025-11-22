@@ -8,11 +8,11 @@ main:
           severity: "INFO"
         next: check_event
 
-      - check_event:
-          switch:
-            - condition: ${event.type == "google.cloud.storage.object.v1.finalized" and event.data.metageneration == "1"}
-              next: extract
-          next: skip
+    - check_event:
+        switch:
+          - condition: ${event.type == "google.cloud.storage.object.v1.finalized" and event.data.metageneration == "1"}
+            next: extract
+        next: skip
 
     - extract:
         assign:
@@ -79,7 +79,7 @@ main:
         return: ${"scale skip " + object}
 
 subworkflows:
-  run_job_with_lock:
+  - name: run_job_with_lock
     params: [bucket, lockObject, projectId, region, jobName, overrides, dedupeContext, maxAttempts]
     steps:
       - init:

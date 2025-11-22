@@ -79,7 +79,7 @@ main:
         return: ${"layout skip " + object}
 
 subworkflows:
-  run_job_with_lock:
+  - name: run_job_with_lock
     params: [bucket, lockObject, projectId, region, jobName, overrides, dedupeContext, maxAttempts]
     steps:
       - init:
