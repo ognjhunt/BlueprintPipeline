@@ -29,169 +29,35 @@ main:
           - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
-          - locksPrefix: ${"scenes/" + sceneId + "/_locks"}
           - physxEndpoint: ${sys.get_env("PHYSX_ENDPOINT")}
           - jobName: "interactive-job"
         next: run_job
 
     - run_job:
-        call: run_job_with_lock
+        call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          bucket: ${bucket}
-          projectId: ${projectId}
-          region: ${region}
-          jobName: ${jobName}
-          lockObject: ${locksPrefix + "/interactive.json"}
-          overrides:
-            containerOverrides:
-              - env:
-                  - name: BUCKET
-                    value: ${bucket}
-                  - name: SCENE_ID
-                    value: ${sceneId}
-                  - name: MULTIVIEW_PREFIX
-                    value: ${multiviewPrefix}
-                  - name: ASSETS_PREFIX
-                    value: ${assetsPrefix}
-                  - name: LAYOUT_PREFIX
-                    value: ${layoutPrefix}
-                  - name: PHYSX_ENDPOINT
-                    value: ${physxEndpoint}
-          dedupeContext:
-            eventId: ${event.id}
-            eventType: ${event.type}
-            metageneration: ${event.data.metageneration}
-            dedupeToken: ${locksPrefix + "/interactive.json"}
-        result: interactiveResult
-        next: handle_result
-
-    - handle_result:
-        switch:
-          - condition: ${interactiveResult.skipped}
-            next: done_locked
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: MULTIVIEW_PREFIX
+                      value: ${multiviewPrefix}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: PHYSX_ENDPOINT
+                      value: ${physxEndpoint}
+        result: interactiveExec
         next: done
 
     - done:
         return: ${"interactive-job started for " + object}
 
-    - done_locked:
-        return: ${"interactive-job locked for " + object}
-
     - skip:
         return: ${"interactive skip " + object}
-
-run_job_with_lock:
-  params: [bucket, lockObject, projectId, region, jobName, overrides, dedupeContext, maxAttempts]
-  steps:
-    - init:
-        assign:
-          - attempts: 0
-          - resolvedMaxAttempts: ${maxAttempts or 60}
-          - resolvedDedupeContext: ${dedupeContext}
-          - lockInfo:
-              createdAt: ${sys.now()}
-              job: ${jobName}
-
-    - log_dedupe_context:
-        call: sys.log
-        args:
-          text: '${"Dedupe context for " + jobName + ": eventId=" + resolvedDedupeContext.eventId + ", eventType=" + resolvedDedupeContext.eventType + ", metageneration=" + resolvedDedupeContext.metageneration + ", dedupeToken=" + resolvedDedupeContext.dedupeToken}'
-          severity: "INFO"
-
-    # If lock exists -> jump to locked_log.
-    # If 404 -> create lock then continue to log_job_launch.
-    - check_lock:
-        try:
-          steps:
-            - get_lock:
-                call: googleapis.storage.v1.objects.get
-                args:
-                  bucket: ${bucket}
-                  object: ${lockObject}
-                result: existingLock
-                next: locked_log
-        except:
-          as: e
-          steps:
-            - create_lock:
-                call: googleapis.storage.v1.objects.insert
-                args:
-                  bucket: ${bucket}
-                  name: ${lockObject}
-                  media:
-                    string: ${text.encode_to_base64(text.stringify(lockInfo))}
-                    contentType: "application/json"
-                next: log_job_launch
-
-    - log_job_launch:
-        call: sys.log
-        args:
-          text: '${"Launching job " + jobName + " with dedupeToken=" + resolvedDedupeContext.dedupeToken}'
-          severity: "INFO"
-
-    - start_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
-          body:
-            overrides: ${overrides}
-        result: execution
-
-    - poll_execution:
-        call: googleapis.run.v2.projects.locations.executions.get
-        args:
-          name: ${execution.name}
-        result: execStatus
-        next: check_state
-
-    - check_state:
-        switch:
-          - condition: ${execStatus.state in ["SUCCEEDED", "FAILED", "CANCELLED"]}
-            next: clear_lock
-          - condition: ${attempts >= resolvedMaxAttempts}
-            next: clear_lock
-        next: bump_attempts
-
-    - bump_attempts:
-        assign:
-          - attempts: ${attempts + 1}
-        next: sleep_execution
-
-    - sleep_execution:
-        call: sys.sleep
-        args:
-          seconds: 10
-        next: poll_execution
-
-    - clear_lock:
-        try:
-          call: googleapis.storage.v1.objects.delete
-          args:
-            bucket: ${bucket}
-            object: ${lockObject}
-        except:
-          as: deleteErr
-          steps:
-            - log_delete_err:
-                call: sys.log
-                args:
-                  text: '${"Failed to delete lock " + lockObject + ": " + deleteErr.message}'
-                  severity: "WARNING"
-        next: return_result
-
-    - return_result:
-        return:
-          skipped: false
-          execution: ${execution}
-          finalState: ${execStatus.state}
-
-    - locked_log:
-        call: sys.log
-        args:
-          text: '${"Duplicate detected for dedupeToken=" + resolvedDedupeContext.dedupeToken + "; skipping eventId=" + resolvedDedupeContext.eventId}'
-          severity: "INFO"
-        next: locked_return
-
-    - locked_return:
-        return:
-          skipped: true

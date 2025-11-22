@@ -37,7 +37,6 @@ main:
           - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
-          - locksPrefix: ${"scenes/" + sceneId + "/_locks"}
           - dataAttempts: 0
           - da3Attempts: 0
           - layoutAttempts: 0
@@ -47,34 +46,20 @@ main:
         next: run_seg_job
 
     - run_seg_job:
-        call: run_job_with_lock
+        call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          bucket: ${bucket}
-          projectId: ${projectId}
-          region: ${region}
-          jobName: "seg-job"
-          lockObject: ${locksPrefix + "/seg.json"}
-          overrides:
-            containerOverrides:
-              - env:
-                  - name: BUCKET
-                    value: ${bucket}
-                  - name: IMAGES_PREFIX
-                    value: ${imagesPrefix}
-                  - name: SEG_PREFIX
-                    value: ${segPrefix}
-          dedupeContext:
-            eventId: ${event.id}
-            eventType: ${event.type}
-            metageneration: ${event.data.metageneration}
-            dedupeToken: ${locksPrefix + "/seg.json"}
-        result: segResult
-        next: handle_seg_result
-
-    - handle_seg_result:
-        switch:
-          - condition: ${segResult.skipped}
-            next: done_locked
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/seg-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: IMAGES_PREFIX
+                      value: ${imagesPrefix}
+                    - name: SEG_PREFIX
+                      value: ${segPrefix}
+        result: segExec
         next: wait_for_data_yaml
 
     - wait_for_data_yaml:
@@ -112,36 +97,22 @@ main:
         raise: ${"data.yaml not found at " + datasetYaml}
 
     - run_da3_job:
-        call: run_job_with_lock
+        call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          bucket: ${bucket}
-          projectId: ${projectId}
-          region: ${region}
-          jobName: "scene-da3-job"
-          lockObject: ${locksPrefix + "/scene-da3.json"}
-          overrides:
-            containerOverrides:
-              - env:
-                  - name: BUCKET
-                    value: ${bucket}
-                  - name: SCENE_ID
-                    value: ${sceneId}
-                  - name: DATASET_PREFIX
-                    value: ${segDatasetPrefix}
-                  - name: OUT_PREFIX
-                    value: ${"scenes/" + sceneId + "/da3"}
-          dedupeContext:
-            eventId: ${event.id}
-            eventType: ${event.type}
-            metageneration: ${event.data.metageneration}
-            dedupeToken: ${locksPrefix + "/scene-da3.json"}
-        result: da3Result
-        next: handle_da3_result
-
-    - handle_da3_result:
-        switch:
-          - condition: ${da3Result.skipped}
-            next: done_locked
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/scene-da3-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: DATASET_PREFIX
+                      value: ${segDatasetPrefix}
+                    - name: OUT_PREFIX
+                      value: ${"scenes/" + sceneId + "/da3"}
+        result: da3Exec
         next: wait_for_da3_geom
 
     - wait_for_da3_geom:
@@ -179,38 +150,24 @@ main:
         raise: ${"da3_geom.npz not found at " + da3Geom}
 
     - run_layout_job:
-        call: run_job_with_lock
+        call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          bucket: ${bucket}
-          projectId: ${projectId}
-          region: ${region}
-          jobName: "layout-job"
-          lockObject: ${locksPrefix + "/layout.json"}
-          overrides:
-            containerOverrides:
-              - env:
-                  - name: BUCKET
-                    value: ${bucket}
-                  - name: SCENE_ID
-                    value: ${sceneId}
-                  - name: DA3_PREFIX
-                    value: ${"scenes/" + sceneId + "/da3"}
-                  - name: SEG_DATASET_PREFIX
-                    value: ${segDatasetPrefix}
-                  - name: LAYOUT_PREFIX
-                    value: ${layoutPrefix}
-          dedupeContext:
-            eventId: ${event.id}
-            eventType: ${event.type}
-            metageneration: ${event.data.metageneration}
-            dedupeToken: ${locksPrefix + "/layout.json"}
-        result: layoutResult
-        next: handle_layout_result
-
-    - handle_layout_result:
-        switch:
-          - condition: ${layoutResult.skipped}
-            next: done_locked
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/layout-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: DA3_PREFIX
+                      value: ${"scenes/" + sceneId + "/da3"}
+                    - name: SEG_DATASET_PREFIX
+                      value: ${segDatasetPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+        result: layoutExec
         next: wait_for_layout_json
 
     - wait_for_layout_json:
@@ -248,34 +205,20 @@ main:
         raise: ${"scene_layout.json not found at " + layoutJson}
 
     - run_scale_job:
-        call: run_job_with_lock
+        call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          bucket: ${bucket}
-          projectId: ${projectId}
-          region: ${region}
-          jobName: "scale-job"
-          lockObject: ${locksPrefix + "/scale.json"}
-          overrides:
-            containerOverrides:
-              - env:
-                  - name: BUCKET
-                    value: ${bucket}
-                  - name: SCENE_ID
-                    value: ${sceneId}
-                  - name: LAYOUT_PREFIX
-                    value: ${layoutPrefix}
-          dedupeContext:
-            eventId: ${event.id}
-            eventType: ${event.type}
-            metageneration: ${event.data.metageneration}
-            dedupeToken: ${locksPrefix + "/scale.json"}
-        result: scaleResult
-        next: handle_scale_result
-
-    - handle_scale_result:
-        switch:
-          - condition: ${scaleResult.skipped}
-            next: done_locked
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/scale-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+        result: scaleExec
         next: wait_for_scaled_layout
 
     - wait_for_scaled_layout:
@@ -313,42 +256,28 @@ main:
         raise: ${"scene_layout_scaled.json not found at " + scaledLayout}
 
     - run_multiview_job:
-        call: run_job_with_lock
+        call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          bucket: ${bucket}
-          projectId: ${projectId}
-          region: ${region}
-          jobName: "multiview-job"
-          lockObject: ${locksPrefix + "/multiview.json"}
-          overrides:
-            containerOverrides:
-              - env:
-                  - name: BUCKET
-                    value: ${bucket}
-                  - name: SCENE_ID
-                    value: ${sceneId}
-                  - name: LAYOUT_PREFIX
-                    value: ${layoutPrefix}
-                  - name: SEG_DATASET_PREFIX
-                    value: ${segDatasetPrefix}
-                  - name: MULTIVIEW_PREFIX
-                    value: ${multiviewPrefix}
-                  - name: ENABLE_GEMINI_VIEWS
-                    value: "true"
-                  - name: VIEWS_PER_OBJECT
-                    value: "1"
-          dedupeContext:
-            eventId: ${event.id}
-            eventType: ${event.type}
-            metageneration: ${event.data.metageneration}
-            dedupeToken: ${locksPrefix + "/multiview.json"}
-        result: mvResult
-        next: handle_multiview_result
-
-    - handle_multiview_result:
-        switch:
-          - condition: ${mvResult.skipped}
-            next: done_locked
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/multiview-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: SEG_DATASET_PREFIX
+                      value: ${segDatasetPrefix}
+                    - name: MULTIVIEW_PREFIX
+                      value: ${multiviewPrefix}
+                    - name: ENABLE_GEMINI_VIEWS
+                      value: "true"
+                    - name: VIEWS_PER_OBJECT
+                      value: "1"
+        result: mvExec
         next: wait_for_multiview
 
     - wait_for_multiview:
@@ -396,156 +325,28 @@ main:
     # We jump straight to SAM3D assuming simple 1-to-1 asset recon.
 
     - run_sam3d:
-        call: run_job_with_lock
+        call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          bucket: ${bucket}
-          projectId: ${projectId}
-          region: ${region}
-          jobName: "sam3d-job"
-          lockObject: ${locksPrefix + "/sam3d.json"}
-          overrides:
-            containerOverrides:
-              - env:
-                  - name: BUCKET
-                    value: ${bucket}
-                  - name: SCENE_ID
-                    value: ${sceneId}
-                  - name: ASSETS_PREFIX
-                    value: ${assetsPrefix}
-                  - name: LAYOUT_PREFIX
-                    value: ${layoutPrefix}
-                  - name: MULTIVIEW_PREFIX
-                    value: ${multiviewPrefix}
-          dedupeContext:
-            eventId: ${event.id}
-            eventType: ${event.type}
-            metageneration: ${event.data.metageneration}
-            dedupeToken: ${locksPrefix + "/sam3d.json"}
-        result: sam3dResult
-        next: handle_sam3d_result
-
-    - handle_sam3d_result:
-        switch:
-          - condition: ${sam3dResult.skipped}
-            next: done_locked
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/sam3d-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: MULTIVIEW_PREFIX
+                      value: ${multiviewPrefix}
+        result: sam3dExec
         next: done
 
     - done:
         return: ${"full pipeline started from " + object}
 
-    - done_locked:
-        return: ${"ingest locked for " + object}
-
     - skip:
         return: ${"ingest skip " + object}
-
-subworkflows:
-  run_job_with_lock:
-    params: [bucket, lockObject, projectId, region, jobName, overrides, dedupeContext, maxAttempts]
-    steps:
-      - init:
-          assign:
-            - attempts: 0
-            - resolvedMaxAttempts: ${maxAttempts or 60}
-            - resolvedDedupeContext: ${dedupeContext}
-            - lockInfo:
-                createdAt: ${sys.now()}
-                job: ${jobName}
-
-      - log_dedupe_context:
-          call: sys.log
-          args:
-            text: '${"Dedupe context for " + jobName + ": eventId=" + resolvedDedupeContext.eventId + ", eventType=" + resolvedDedupeContext.eventType + ", metageneration=" + resolvedDedupeContext.metageneration + ", dedupeToken=" + resolvedDedupeContext.dedupeToken}'
-            severity: "INFO"
-
-      - check_lock:
-          try:
-            call: googleapis.storage.v1.objects.get
-            args:
-              bucket: ${bucket}
-              object: ${lockObject}
-            result: existingLock
-            next: locked
-          except:
-            as: e
-            steps:
-              - create_lock:
-                  call: googleapis.storage.v1.objects.insert
-                  args:
-                    bucket: ${bucket}
-                    name: ${lockObject}
-                    media:
-                      string: ${text.encode_to_base64(text.stringify(lockInfo))}
-                      contentType: "application/json"
-
-      - log_job_launch:
-          call: sys.log
-          args:
-            text: '${"Launching job " + jobName + " with dedupeToken=" + resolvedDedupeContext.dedupeToken}'
-            severity: "INFO"
-
-      - start_job:
-          call: googleapis.run.v2.projects.locations.jobs.run
-          args:
-            name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
-            body:
-              overrides: ${overrides}
-          result: execution
-
-      - poll_execution:
-          call: googleapis.run.v2.projects.locations.executions.get
-          args:
-            name: ${execution.name}
-          result: execStatus
-          next: check_state
-
-      - check_state:
-          switch:
-            - condition: ${execStatus.state in ["SUCCEEDED", "FAILED", "CANCELLED"]}
-              next: clear_lock
-            - condition: ${attempts >= resolvedMaxAttempts}
-              next: clear_lock
-          next: bump_attempts
-
-      - bump_attempts:
-          assign:
-            - attempts: ${attempts + 1}
-          next: sleep_execution
-
-      - sleep_execution:
-          call: sys.sleep
-          args:
-            seconds: 10
-          next: poll_execution
-
-      - clear_lock:
-          try:
-            call: googleapis.storage.v1.objects.delete
-            args:
-              bucket: ${bucket}
-              object: ${lockObject}
-          except:
-            as: deleteErr
-            steps:
-              - log_delete_err:
-                  call: sys.log
-                  args:
-                    text: '${"Failed to delete lock " + lockObject + ": " + deleteErr.message}'
-                    severity: "WARNING"
-          next: return_result
-
-      - return_result:
-          return:
-            skipped: false
-            execution: ${execution}
-            finalState: ${execStatus.state}
-
-      - locked:
-          steps:
-            - log_duplicate_skip:
-                call: sys.log
-                args:
-                  text: '${"Duplicate detected for dedupeToken=" + resolvedDedupeContext.dedupeToken + "; skipping eventId=" + resolvedDedupeContext.eventId}'
-                  severity: "INFO"
-          return:
-            skipped: true
