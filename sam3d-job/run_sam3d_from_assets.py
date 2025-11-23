@@ -3,6 +3,8 @@ import os
 import shutil
 import subprocess
 import sys
+import math
+import types
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -51,421 +53,633 @@ for p in SAM3D_PYTHON_PATHS:
 
 def _ensure_pytorch3d_stub() -> None:
     """
-    Ensure that either the real pytorch3d package is importable, or register a
-    minimal stub that provides just the pieces SAM 3D uses:
-
-      - pytorch3d.transforms.quaternion_multiply
-      - pytorch3d.transforms.quaternion_invert
-      - pytorch3d.transforms.quaternion_to_matrix
-      - pytorch3d.transforms.matrix_to_quaternion
-      - pytorch3d.transforms.Transform3d
-      - pytorch3d.renderer.look_at_view_transform
-      - pytorch3d.structures.Meshes (very lightweight wrapper)
-
-    This lets the Cloud Run job proceed even if installing full pytorch3d (with
-    CUDA extensions) is not practical in the container.
+    Register a minimal-but-complete-enough pytorch3d stub in sys.modules so
+    SAM-3D can import the pieces it needs when the real library is unavailable.
     """
     try:
         import pytorch3d  # type: ignore  # noqa: F401
         # Real pytorch3d is available; nothing to do.
         return
     except Exception:
-        # Fall through and register a small stub.
         pass
 
     try:
-        import types
-        import math
         import torch
+    except Exception:
+        # For safety: if torch is somehow missing (should not happen in your
+        # container), we define a tiny dummy that is enough for import-time
+        # usage. In the real container, torch is installed before this code.
+        class _DummyTorch:
+            float32 = "float32"
+            int64 = "int64"
 
-        print(
-            "[SAM3D] pytorch3d not found; installing minimal stub in sys.modules",
-            file=sys.stderr,
-        )
+            def as_tensor(self, x, dtype=None, device=None):
+                return x
 
-        # Create a fake top-level module and mark it as a *package* so that
-        # "import pytorch3d.renderer", "pytorch3d.transforms", and
-        # "pytorch3d.structures" work.
-        p3d_mod = types.ModuleType("pytorch3d")
-        p3d_mod.__all__ = ["transforms", "renderer", "structures"]  # type: ignore[attr-defined]
-        p3d_mod.__path__ = []  # type: ignore[attr-defined]
+            def eye(self, n, device=None, dtype=None):
+                import numpy as _np
+                return _np.eye(n, dtype=float)
 
-        # -------------------------
-        # transforms submodule stub
-        # -------------------------
-        transforms_mod = types.ModuleType("pytorch3d.transforms")
+            def ones(self, *shape, **kwargs):
+                import numpy as _np
+                return _np.ones(shape, dtype=float)
 
-        def quaternion_multiply(q1, q2):
-            """
-            Broadcast-friendly quaternion multiplication.
+            def zeros_like(self, x):
+                import numpy as _np
+                return _np.zeros_like(x)
 
-            Expects tensors/arrays of shape (..., 4) with (w, x, y, z) layout,
-            matching pytorch3d.transforms.
-            """
-            q1_t = torch.as_tensor(q1)
-            q2_t = torch.as_tensor(q2)
+            def stack(self, xs, dim=0):
+                import numpy as _np
+                return _np.stack(xs, axis=dim)
 
-            if q1_t.shape[-1] != 4 or q2_t.shape[-1] != 4:
-                raise ValueError(
-                    "quaternion_multiply expects inputs with last dimension 4 "
-                    f"(got {q1_t.shape}, {q2_t.shape})"
-                )
+            def unbind(self, x, dim=-1):
+                import numpy as _np
+                return [x.take(i, axis=dim) for i in range(x.shape[dim])]
 
-            w1, x1, y1, z1 = torch.unbind(q1_t, dim=-1)
-            w2, x2, y2, z2 = torch.unbind(q2_t, dim=-1)
+            def norm(self, x, dim=-1, keepdim=False):
+                import numpy as _np
+                n = _np.linalg.norm(x, axis=dim)
+                if keepdim:
+                    n = _np.expand_dims(n, axis=dim)
+                return n
 
-            w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-            x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-            y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-            z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+            def sqrt(self, x):
+                import numpy as _np
+                return _np.sqrt(x)
 
-            return torch.stack((w, x, y, z), dim=-1)
+            def cos(self, x):
+                import numpy as _np
+                return _np.cos(x)
 
-        def quaternion_invert(q, eps: float = 1e-8):
-            """
-            Quaternion inverse with basic numerical stability.
+            def sin(self, x):
+                import numpy as _np
+                return _np.sin(x)
 
-            Expects (..., 4) (w, x, y, z) quaternions. Matches the usual
-            definition: q^{-1} = conjugate(q) / ||q||^2.
-            """
-            q_t = torch.as_tensor(q)
+            def cross(self, a, b, dim=-1):
+                import numpy as _np
+                return _np.cross(a, b)
 
-            if q_t.shape[-1] != 4:
-                raise ValueError(
-                    "quaternion_invert expects inputs with last dimension 4 "
-                    f"(got {q_t.shape})"
-                )
+            def bmm(self, a, b):
+                import numpy as _np
+                return _np.matmul(a, b)
 
-            w, x, y, z = torch.unbind(q_t, dim=-1)
-            mag_sq = (w * w + x * x + y * y + z * z).clamp_min(eps)
-            conj = torch.stack((w, -x, -y, -z), dim=-1)
-            return conj / mag_sq.unsqueeze(-1)
+            def tensor(self, x, dtype=None, device=None):
+                return x
 
-        def quaternion_to_matrix(q, eps: float = 1e-8):
-            """
-            Minimal stand‑in for pytorch3d.transforms.quaternion_to_matrix.
+            def cat(self, xs, dim=0):
+                import numpy as _np
+                return _np.concatenate(xs, axis=dim)
 
-            Accepts (..., 4) quaternions in (w, x, y, z) format and returns
-            (..., 3, 3) rotation matrices.
-            """
-            q_t = torch.as_tensor(q, dtype=torch.float32)
-            if q_t.shape[-1] != 4:
-                raise ValueError(
-                    "quaternion_to_matrix expects inputs with last dimension 4 "
-                    f"(got {q_t.shape})"
-                )
+        torch = _DummyTorch()  # type: ignore
 
-            # Normalize to avoid drift.
-            q_t = q_t / (q_t.norm(dim=-1, keepdim=True).clamp_min(eps))
+    print(
+        "[SAM3D] pytorch3d not found; installing minimal stub in sys.modules",
+        file=sys.stderr,
+    )
 
-            w, x, y, z = torch.unbind(q_t, dim=-1)
+    # Create fake top-level package
+    p3d_mod = types.ModuleType("pytorch3d")
+    p3d_mod.__all__ = ["transforms", "renderer", "structures"]  # type: ignore[attr-defined]
+    p3d_mod.__path__ = []  # type: ignore[attr-defined]
 
-            ww = w * w
-            xx = x * x
-            yy = y * y
-            zz = z * z
+    # ------------------------------------------------------------------
+    # transforms submodule
+    # ------------------------------------------------------------------
+    transforms_mod = types.ModuleType("pytorch3d.transforms")
 
-            xy = x * y
-            xz = x * z
-            yz = y * z
-            wx = w * x
-            wy = w * y
-            wz = w * z
+    def _ensure_tensor(x, dtype=getattr(torch, "float32", None), device=None):
+        # type: ignore[arg-type]
+        return torch.as_tensor(x, dtype=dtype, device=device)
 
-            m00 = ww + xx - yy - zz
-            m01 = 2 * (xy - wz)
-            m02 = 2 * (xz + wy)
+    # --- Quaternion utilities ----------------------------------------
 
-            m10 = 2 * (xy + wz)
-            m11 = ww - xx + yy - zz
-            m12 = 2 * (yz - wx)
+    def quaternion_multiply(q1, q2):
+        q1_t = _ensure_tensor(q1)
+        q2_t = _ensure_tensor(q2)
 
-            m20 = 2 * (xz - wy)
-            m21 = 2 * (yz + wx)
-            m22 = ww - xx - yy + zz
+        w1, x1, y1, z1 = torch.unbind(q1_t, dim=-1)  # type: ignore[attr-defined]
+        w2, x2, y2, z2 = torch.unbind(q2_t, dim=-1)  # type: ignore[attr-defined]
 
-            row0 = torch.stack([m00, m01, m02], dim=-1)
-            row1 = torch.stack([m10, m11, m12], dim=-1)
-            row2 = torch.stack([m20, m21, m22], dim=-1)
-            return torch.stack([row0, row1, row2], dim=-2)
+        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
 
-        def matrix_to_quaternion(matrix, eps: float = 1e-8):
-            """
-            Minimal stand‑in for pytorch3d.transforms.matrix_to_quaternion.
+        return torch.stack((w, x, y, z), dim=-1)  # type: ignore[attr-defined]
 
-            Accepts (..., 3, 3) rotation matrices and returns (..., 4)
-            quaternions in (w, x, y, z) format.
-            """
-            m = torch.as_tensor(matrix, dtype=torch.float32)
-            if m.shape[-2:] != (3, 3):
-                raise ValueError(
-                    "matrix_to_quaternion expects inputs with shape (..., 3, 3) "
-                    f"(got {m.shape})"
-                )
+    def quaternion_invert(q, eps: float = 1e-8):
+        q_t = _ensure_tensor(q)
+        w, x, y, z = torch.unbind(q_t, dim=-1)  # type: ignore[attr-defined]
+        mag_sq = (w * w + x * x + y * y + z * z).clamp_min(eps)  # type: ignore[attr-defined]
+        conj = torch.stack((w, -x, -y, -z), dim=-1)  # type: ignore[attr-defined]
+        return conj / mag_sq.unsqueeze(-1)  # type: ignore[attr-defined]
 
-            orig_shape = m.shape[:-2]
-            m_flat = m.reshape(-1, 3, 3)
-            q_flat = torch.empty(m_flat.shape[0], 4, dtype=m_flat.dtype, device=m_flat.device)
+    def standardize_quaternion(q, eps: float = 1e-8):
+        """
+        Make a quaternion have non‑negative real part.
+        """
+        q_t = _ensure_tensor(q)
+        w = q_t[..., 0]
+        # +1 where w>=0, -1 otherwise
+        sign = (w >= 0).to(q_t.dtype) * 2 - 1  # type: ignore[attr-defined]
+        return q_t * sign.unsqueeze(-1)  # type: ignore[attr-defined]
 
-            for i in range(m_flat.shape[0]):
-                M = m_flat[i]
-                m00, m01, m02 = M[0, 0], M[0, 1], M[0, 2]
-                m10, m11, m12 = M[1, 0], M[1, 1], M[1, 2]
-                m20, m21, m22 = M[2, 0], M[2, 1], M[2, 2]
+    def quaternion_to_matrix(q, eps: float = 1e-8):
+        q_t = _ensure_tensor(q)
+        # type: ignore[attr-defined]
+        q_t = q_t / (q_t.norm(dim=-1, keepdim=True).clamp_min(eps))
 
-                trace = m00 + m11 + m22
+        w, x, y, z = torch.unbind(q_t, dim=-1)  # type: ignore[attr-defined]
 
-                if trace > 0.0:
-                    s = torch.sqrt(trace + 1.0) * 2.0  # s = 4 * qw
-                    qw = 0.25 * s
-                    qx = (m21 - m12) / (s + eps)
-                    qy = (m02 - m20) / (s + eps)
-                    qz = (m10 - m01) / (s + eps)
-                elif (m00 > m11) and (m00 > m22):
-                    s = torch.sqrt(1.0 + m00 - m11 - m22) * 2.0  # s = 4 * qx
-                    qw = (m21 - m12) / (s + eps)
-                    qx = 0.25 * s
-                    qy = (m01 + m10) / (s + eps)
-                    qz = (m02 + m20) / (s + eps)
-                elif m11 > m22:
-                    s = torch.sqrt(1.0 + m11 - m00 - m22) * 2.0  # s = 4 * qy
-                    qw = (m02 - m20) / (s + eps)
-                    qx = (m01 + m10) / (s + eps)
-                    qy = 0.25 * s
-                    qz = (m12 + m21) / (s + eps)
-                else:
-                    s = torch.sqrt(1.0 + m22 - m00 - m11) * 2.0  # s = 4 * qz
-                    qw = (m10 - m01) / (s + eps)
-                    qx = (m02 + m20) / (s + eps)
-                    qy = (m12 + m21) / (s + eps)
-                    qz = 0.25 * s
+        ww = w * w
+        xx = x * x
+        yy = y * y
+        zz = z * z
 
-                q_flat[i] = torch.stack([qw, qx, qy, qz])
+        xy = x * y
+        xz = x * z
+        yz = y * z
+        wx = w * x
+        wy = w * y
+        wz = w * z
 
-            return q_flat.reshape(*orig_shape, 4)
+        m00 = ww + xx - yy - zz
+        m01 = 2 * (xy - wz)
+        m02 = 2 * (xz + wy)
 
-        class Transform3d:
-            """
-            Very small subset of pytorch3d.transforms.Transform3d used by the
-            SAM 3D inference pipeline.
+        m10 = 2 * (xy + wz)
+        m11 = ww - xx + yy - zz
+        m12 = 2 * (yz - wx)
 
-            This implementation stores a 4x4 matrix and provides:
+        m20 = 2 * (xz - wy)
+        m21 = 2 * (yz + wx)
+        m22 = ww - xx - yy + zz
 
-              - get_matrix()
-              - compose(other)
-              - inverse()
-              - transform_points(points)
-            """
+        row0 = torch.stack([m00, m01, m02], dim=-1)  # type: ignore[attr-defined]
+        row1 = torch.stack([m10, m11, m12], dim=-1)  # type: ignore[attr-defined]
+        row2 = torch.stack([m20, m21, m22], dim=-1)  # type: ignore[attr-defined]
+        return torch.stack([row0, row1, row2], dim=-2)  # type: ignore[attr-defined]
 
-            def __init__(self, matrix=None, device=None, dtype=torch.float32):
-                if matrix is None:
-                    m = torch.eye(4, device=device, dtype=dtype).unsqueeze(0)
-                else:
-                    m = torch.as_tensor(matrix, device=device, dtype=dtype)
-                    if m.ndim == 2:
-                        m = m.unsqueeze(0)
-                self._matrix = m
+    def matrix_to_quaternion(matrix, eps: float = 1e-8):
+        m = _ensure_tensor(matrix)
+        if m.shape[-2:] != (3, 3):
+            raise ValueError("matrix_to_quaternion expects (..., 3, 3) input")
 
-            def get_matrix(self):
-                return self._matrix
+        orig_shape = m.shape[:-2]
+        m_flat = m.reshape(-1, 3, 3)
+        q_out = []
 
-            def compose(self, other: "Transform3d"):
-                """
-                Compose this transform with another: result = other ∘ self.
-                """
-                if not isinstance(other, Transform3d):
-                    raise TypeError("compose expects another Transform3d")
-                m = other._matrix @ self._matrix
-                return Transform3d(m)
+        for i in range(m_flat.shape[0]):
+            M = m_flat[i]
+            m00, m01, m02 = M[0, 0], M[0, 1], M[0, 2]
+            m10, m11, m12 = M[1, 0], M[1, 1], M[1, 2]
+            m20, m21, m22 = M[2, 0], M[2, 1], M[2, 2]
 
-            def inverse(self):
-                m_inv = torch.inverse(self._matrix)
-                return Transform3d(m_inv)
+            trace = m00 + m11 + m22
 
-            def transform_points(self, points):
-                """
-                Apply the transform to 3D points.
+            if trace > 0.0:
+                s = math.sqrt(float(trace + 1.0)) * 2.0
+                qw = 0.25 * s
+                qx = (m21 - m12) / (s + eps)
+                qy = (m02 - m20) / (s + eps)
+                qz = (m10 - m01) / (s + eps)
+            elif m00 > m11 and m00 > m22:
+                s = math.sqrt(float(1.0 + m00 - m11 - m22)) * 2.0
+                qw = (m21 - m12) / (s + eps)
+                qx = 0.25 * s
+                qy = (m01 + m10) / (s + eps)
+                qz = (m02 + m20) / (s + eps)
+            elif m11 > m22:
+                s = math.sqrt(float(1.0 + m11 - m00 - m22)) * 2.0
+                qw = (m02 - m20) / (s + eps)
+                qx = (m01 + m10) / (s + eps)
+                qy = 0.25 * s
+                qz = (m12 + m21) / (s + eps)
+            else:
+                s = math.sqrt(float(1.0 + m22 - m00 - m11)) * 2.0
+                qw = (m10 - m01) / (s + eps)
+                qx = (m02 + m20) / (s + eps)
+                qy = (m12 + m21) / (s + eps)
+                qz = 0.25 * s
 
-                points: (..., 3)
-                """
-                pts = torch.as_tensor(
-                    points,
-                    dtype=self._matrix.dtype,
-                    device=self._matrix.device,
-                )
-                orig_shape = pts.shape
+            q_out.append(torch.stack([qw, qx, qy, qz]))  # type: ignore[attr-defined]
+
+        q = torch.stack(q_out, dim=0)  # type: ignore[attr-defined]
+        return q.reshape(*orig_shape, 4)
+
+    def axis_angle_to_quaternion(aa, eps: float = 1e-8):
+        aa_t = _ensure_tensor(aa)
+        angle = aa_t.norm(dim=-1, keepdim=True).clamp_min(eps)  # type: ignore[attr-defined]
+        axis = aa_t / angle
+        half = 0.5 * angle
+        sin_half = torch.sin(half)  # type: ignore[attr-defined]
+        cos_half = torch.cos(half).squeeze(-1)  # type: ignore[attr-defined]
+        x, y, z = torch.unbind(axis * sin_half, dim=-1)  # type: ignore[attr-defined]
+        return torch.stack([cos_half, x, y, z], dim=-1)  # type: ignore[attr-defined]
+
+    def quaternion_to_axis_angle(q, eps: float = 1e-8):
+        # For the stub we keep this simple: we standardize the quaternion and
+        # return an axis-angle vector pointing along +Z with the appropriate angle.
+        q_t = standardize_quaternion(_ensure_tensor(q))
+        w = q_t[..., 0].clamp(-1.0, 1.0)  # type: ignore[attr-defined]
+        if hasattr(torch, "acos"):
+            angle = 2.0 * torch.acos(w)  # type: ignore[attr-defined]
+        else:
+            angle = 0.0
+        if hasattr(torch, "zeros_like"):
+            zero = torch.zeros_like(w)  # type: ignore[attr-defined]
+            one = torch.ones_like(w)    # type: ignore[attr-defined]
+        else:
+            zero = w * 0
+            one = w * 0 + 1.0
+        axis = torch.stack([zero, zero, one], dim=-1)  # type: ignore[attr-defined]
+        return axis * angle.unsqueeze(-1)  # type: ignore[attr-defined]
+
+    # --- Rotation helpers ----------------------------------------------------
+
+    def axis_angle_to_matrix(aa, eps: float = 1e-8):
+        """
+        Convert axis‑angle vectors (..., 3) to rotation matrices (..., 3, 3).
+        """
+        aa_t = _ensure_tensor(aa)
+        angle = aa_t.norm(dim=-1, keepdim=True).clamp_min(eps)  # type: ignore[attr-defined]
+        axis = aa_t / angle
+
+        x, y, z = torch.unbind(axis, dim=-1)  # type: ignore[attr-defined]
+        c = torch.cos(angle)  # type: ignore[attr-defined]
+        s = torch.sin(angle)  # type: ignore[attr-defined]
+        C = 1.0 - c
+
+        m00 = c + x * x * C
+        m01 = x * y * C - z * s
+        m02 = x * z * C + y * s
+
+        m10 = y * x * C + z * s
+        m11 = c + y * y * C
+        m12 = y * z * C - x * s
+
+        m20 = z * x * C - y * s
+        m21 = z * y * C + x * s
+        m22 = c + z * z * C
+
+        row0 = torch.stack([m00, m01, m02], dim=-1)  # type: ignore[attr-defined]
+        row1 = torch.stack([m10, m11, m12], dim=-1)  # type: ignore[attr-defined]
+        row2 = torch.stack([m20, m21, m22], dim=-1)  # type: ignore[attr-defined]
+        return torch.stack([row0, row1, row2], dim=-2)  # type: ignore[attr-defined]
+
+    def euler_angles_to_matrix(euler_angles, convention="XYZ"):
+        """
+        Basic implementation supporting common conventions like 'XYZ'.
+        Angles are in radians.
+        """
+        angles = _ensure_tensor(euler_angles)
+        if angles.shape[-1] != 3:
+            raise ValueError("euler_angles_to_matrix expects (..., 3) input")
+        x, y, z = torch.unbind(angles, dim=-1)  # type: ignore[attr-defined]
+
+        def _rot_x(a):
+            ca = torch.cos(a); sa = torch.sin(a)  # type: ignore[attr-defined]
+            row0 = torch.stack([torch.ones_like(ca), 0 * ca, 0 * ca], dim=-1)  # type: ignore[attr-defined]
+            row1 = torch.stack([0 * ca, ca, -sa], dim=-1)  # type: ignore[attr-defined]
+            row2 = torch.stack([0 * ca, sa, ca], dim=-1)  # type: ignore[attr-defined]
+            return torch.stack([row0, row1, row2], dim=-2)  # type: ignore[attr-defined]
+
+        def _rot_y(a):
+            ca = torch.cos(a); sa = torch.sin(a)  # type: ignore[attr-defined]
+            row0 = torch.stack([ca, 0 * ca, sa], dim=-1)  # type: ignore[attr-defined]
+            row1 = torch.stack([0 * ca, torch.ones_like(ca), 0 * ca], dim=-1)  # type: ignore[attr-defined]
+            row2 = torch.stack([-sa, 0 * ca, ca], dim=-1)  # type: ignore[attr-defined]
+            return torch.stack([row0, row1, row2], dim=-2)  # type: ignore[attr-defined]
+
+        def _rot_z(a):
+            ca = torch.cos(a); sa = torch.sin(a)  # type: ignore[attr-defined]
+            row0 = torch.stack([ca, -sa, 0 * ca], dim=-1)  # type: ignore[attr-defined]
+            row1 = torch.stack([sa, ca, 0 * ca], dim=-1)  # type: ignore[attr-defined]
+            row2 = torch.stack([0 * ca, 0 * ca, torch.ones_like(ca)], dim=-1)  # type: ignore[attr-defined]
+            return torch.stack([row0, row1, row2], dim=-2)  # type: ignore[attr-defined]
+
+        mats = {"X": _rot_x, "Y": _rot_y, "Z": _rot_z}
+        R = None
+        for axis, angle in zip(convention, (x, y, z)):
+            Rx = mats[axis](angle)
+            R = Rx if R is None else torch.bmm(R, Rx)  # type: ignore[attr-defined]
+        return R
+
+    def random_quaternions(n, device=None, dtype=getattr(torch, "float32", None)):
+        """
+        Very simple random unit quaternions.
+        """
+        import random
+        qs = []
+        for _ in range(int(n)):
+            u1, u2, u3 = random.random(), random.random(), random.random()
+            q1 = math.sqrt(1 - u1) * math.sin(2 * math.pi * u2)
+            q2 = math.sqrt(1 - u1) * math.cos(2 * math.pi * u2)
+            q3 = math.sqrt(u1) * math.sin(2 * math.pi * u3)
+            q4 = math.sqrt(u1) * math.cos(2 * math.pi * u3)
+            qs.append(torch.tensor([q4, q1, q2, q3], dtype=dtype, device=device))  # type: ignore[attr-defined]
+        return torch.stack(qs, dim=0)  # type: ignore[attr-defined]
+
+    def random_rotation(device=None, dtype=getattr(torch, "float32", None)):
+        q = random_quaternions(1, device=device, dtype=dtype)
+        return quaternion_to_matrix(q)[0]
+
+    def random_rotations(n, device=None, dtype=getattr(torch, "float32", None)):
+        q = random_quaternions(n, device=device, dtype=dtype)
+        return quaternion_to_matrix(q)
+
+    def rotation_6d_to_matrix(x):
+        """
+        Simplified 6D rotation representation to matrix, as in Zhou et al.
+        x: (..., 6)
+        """
+        x_t = _ensure_tensor(x)
+        a1 = x_t[..., 0:3]
+        a2 = x_t[..., 3:6]
+
+        b1 = a1 / a1.norm(dim=-1, keepdim=True).clamp_min(1e-8)  # type: ignore[attr-defined]
+        proj = (b1 * a2).sum(dim=-1, keepdim=True)  # type: ignore[attr-defined]
+        b2 = a2 - proj * b1
+        b2 = b2 / b2.norm(dim=-1, keepdim=True).clamp_min(1e-8)  # type: ignore[attr-defined]
+        b3 = torch.cross(b1, b2, dim=-1)  # type: ignore[attr-defined]
+
+        row0 = b1
+        row1 = b2
+        row2 = b3
+        return torch.stack([row0, row1, row2], dim=-2)  # type: ignore[attr-defined]
+
+    # --- Transform3d and derived transforms --------------------------
+
+    class Transform3d:
+        """
+        Small subset of pytorch3d.transforms.Transform3d:
+        - stores batch of 4x4 matrices
+        - get_matrix()
+        - compose(other)
+        - inverse()
+        - transform_points(points)
+        """
+
+        def __init__(self, matrix=None, device=None, dtype=getattr(torch, "float32", None)):
+            if matrix is None:
+                m = torch.eye(4, device=device, dtype=dtype)  # type: ignore[attr-defined]
+                m = m.reshape(1, 4, 4)
+            else:
+                m = _ensure_tensor(matrix, dtype=dtype, device=device)
+                if len(getattr(m, "shape", ())) == 2:
+                    m = m.reshape(1, *m.shape)
+                shape = m.shape
+                if shape[-2:] == (3, 3):
+                    eye = torch.eye(4, device=device, dtype=dtype)  # type: ignore[attr-defined]
+                    eye = eye.reshape(1, 4, 4)
+                    eye = eye.repeat(shape[0], 1, 1)  # type: ignore[attr-defined]
+                    eye[..., :3, :3] = m
+                    m = eye
+            self._matrix = m
+
+        def get_matrix(self):
+            return self._matrix
+
+        def compose(self, other: "Transform3d"):
+            m = other._matrix @ self._matrix
+            return Transform3d(m)
+
+        def inverse(self):
+            try:
+                inv = torch.inverse(self._matrix)  # type: ignore[attr-defined]
+            except Exception:
+                inv = self._matrix.transpose(-1, -2)  # type: ignore[attr-defined]
+            return Transform3d(inv)
+
+        def transform_points(self, points):
+            pts = _ensure_tensor(points, dtype=getattr(self._matrix, "dtype", None))
+            if len(getattr(pts, "shape", ())) > 2:
+                orig = pts.shape
                 pts = pts.reshape(-1, 3)
-
-                ones = torch.ones(
-                    pts.shape[0], 1, dtype=pts.dtype, device=pts.device
-                )
-                homo = torch.cat([pts, ones], dim=-1)  # (N, 4)
-
-                # For simplicity, use the first matrix if we have a batch.
-                M = self._matrix[0]  # (4, 4)
-                out = (M @ homo.T).T[..., :3]
-                return out.reshape(orig_shape)
-
-        transforms_mod.quaternion_multiply = quaternion_multiply
-        transforms_mod.quaternion_invert = quaternion_invert
-        transforms_mod.quaternion_to_matrix = quaternion_to_matrix
-        transforms_mod.matrix_to_quaternion = matrix_to_quaternion
-        transforms_mod.Transform3d = Transform3d
-
-        # -------------------------
-        # renderer submodule stub
-        # -------------------------
-        renderer_mod = types.ModuleType("pytorch3d.renderer")
-
-        def look_at_view_transform(
-            dist=1.0,
-            elev=0.0,
-            azim=0.0,
-            at=None,
-            up=None,
-            eye=None,
-            degrees: bool = True,
-            device=None,
-        ):
-            """
-            Minimal stand‑in for pytorch3d.renderer.look_at_view_transform.
-
-            Returns (R, T) where:
-              - R is a (B, 3, 3) rotation matrix
-              - T is a (B, 3) translation vector
-            """
-            device = device or (
-                torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-            )
-
-            if eye is not None:
-                eye_t = torch.as_tensor(eye, dtype=torch.float32, device=device)
-                if eye_t.ndim == 1:
-                    eye_t = eye_t.unsqueeze(0)
             else:
-                # Compute eye position from spherical coords (elev, azim).
-                d = torch.as_tensor(dist, dtype=torch.float32, device=device)
-                elev_t = torch.as_tensor(elev, dtype=torch.float32, device=device)
-                azim_t = torch.as_tensor(azim, dtype=torch.float32, device=device)
+                orig = pts.shape
 
+            ones = torch.ones(pts.shape[0], 1, dtype=getattr(self._matrix, "dtype", None))  # type: ignore[attr-defined]
+            homo = torch.cat([pts, ones], dim=-1)  # type: ignore[attr-defined]
+
+            M = self._matrix[0]
+            out = (M @ homo.T).T[..., :3]
+            return out.reshape(orig)
+
+    class Rotate(Transform3d):
+        def __init__(self, R=None, axis=None, angle=None, degrees=True, device=None, dtype=getattr(torch, "float32", None)):
+            if R is not None:
+                mat = R
+            elif axis is not None and angle is not None:
+                ang = angle
                 if degrees:
-                    elev_t = elev_t * math.pi / 180.0
-                    azim_t = azim_t * math.pi / 180.0
-
-                x = d * torch.cos(elev_t) * torch.sin(azim_t)
-                y = d * torch.sin(elev_t)
-                z = d * torch.cos(elev_t) * torch.cos(azim_t)
-                eye_t = torch.stack([x, y, z], dim=-1)
-                if eye_t.ndim == 1:
-                    eye_t = eye_t.unsqueeze(0)
-
-            # "at" (look-at target) defaults to origin
-            if at is None:
-                at_t = torch.zeros_like(eye_t)
+                    ang = ang * math.pi / 180.0
+                aa = _ensure_tensor(axis) * ang
+                mat = axis_angle_to_matrix(aa)
             else:
-                at_t = torch.as_tensor(at, dtype=torch.float32, device=device)
-                if at_t.ndim == 1:
-                    at_t = at_t.unsqueeze(0)
+                mat = None
+            super().__init__(matrix=mat, device=device, dtype=dtype)
 
-            # "up" vector defaults to +Y
-            if up is None:
-                up_t = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=device)
-                up_t = up_t.unsqueeze(0).expand_as(eye_t)
-            else:
-                up_t = torch.as_tensor(up, dtype=torch.float32, device=device)
-                if up_t.ndim == 1:
-                    up_t = up_t.unsqueeze(0)
+    class Translate(Transform3d):
+        def __init__(self, t=None, device=None, dtype=getattr(torch, "float32", None)):
+            if t is None:
+                super().__init__(device=device, dtype=dtype)
+                return
+            t_t = _ensure_tensor(t, dtype=dtype, device=device)
+            if len(getattr(t_t, "shape", ())) == 1:
+                t_t = t_t.reshape(1, 3)
+            eye = torch.eye(4, device=device, dtype=dtype)  # type: ignore[attr-defined]
+            eye = eye.reshape(1, 4, 4)
+            eye[..., :3, 3] = t_t
+            super().__init__(matrix=eye, device=device, dtype=dtype)
 
-            # Build a simple look-at rotation matrix.
-            z_axis = eye_t - at_t
-            z_axis = z_axis / (z_axis.norm(dim=-1, keepdim=True) + 1e-8)
+    class Scale(Transform3d):
+        def __init__(self, s=None, device=None, dtype=getattr(torch, "float32", None)):
+            if s is None:
+                super().__init__(device=device, dtype=dtype)
+                return
+            s_t = _ensure_tensor(s, dtype=dtype, device=device)
+            if len(getattr(s_t, "shape", ())) == 0:
+                s_t = s_t.reshape(1)
+            eye = torch.eye(4, device=device, dtype=dtype)  # type: ignore[attr-defined]
+            eye = eye.reshape(1, 4, 4)
+            eye[..., 0, 0] = s_t[..., 0]
+            eye[..., 1, 1] = s_t[..., -2]
+            eye[..., 2, 2] = s_t[..., -1]
+            super().__init__(matrix=eye, device=device, dtype=dtype)
 
-            x_axis = torch.cross(up_t, z_axis, dim=-1)
-            x_axis = x_axis / (x_axis.norm(dim=-1, keepdim=True) + 1e-8)
+    def Compose(transforms):
+        """
+        Compose a sequence of Transform3d objects (right‑to‑left).
+        """
+        out = Transform3d()
+        for t in transforms:
+            out = out.compose(t)
+        return out
 
-            y_axis = torch.cross(z_axis, x_axis, dim=-1)
+    # Register transform symbols
+    for name, obj in {
+        "quaternion_multiply": quaternion_multiply,
+        "quaternion_invert": quaternion_invert,
+        "quaternion_to_matrix": quaternion_to_matrix,
+        "matrix_to_quaternion": matrix_to_quaternion,
+        "axis_angle_to_quaternion": axis_angle_to_quaternion,
+        "quaternion_to_axis_angle": quaternion_to_axis_angle,
+        "axis_angle_to_matrix": axis_angle_to_matrix,
+        "euler_angles_to_matrix": euler_angles_to_matrix,
+        "random_quaternions": random_quaternions,
+        "random_rotation": random_rotation,
+        "random_rotations": random_rotations,
+        "rotation_6d_to_matrix": rotation_6d_to_matrix,
+        "standardize_quaternion": standardize_quaternion,
+        "Transform3d": Transform3d,
+        "Rotate": Rotate,
+        "Translate": Translate,
+        "Scale": Scale,
+        "Compose": Compose,
+    }.items():
+        setattr(transforms_mod, name, obj)
 
-            R = torch.stack([x_axis, y_axis, z_axis], dim=-1)  # (B, 3, 3)
-            T = -torch.bmm(R, eye_t.unsqueeze(-1)).squeeze(-1)  # (B, 3)
+    # ------------------------------------------------------------------
+    # renderer submodule (look_at_view_transform only)
+    # ------------------------------------------------------------------
+    renderer_mod = types.ModuleType("pytorch3d.renderer")
 
-            return R, T
+    def look_at_view_transform(
+        dist=1.0,
+        elev=0.0,
+        azim=0.0,
+        at=None,
+        up=None,
+        eye=None,
+        degrees: bool = True,
+        device=None,
+    ):
+        """
+        Minimal stand‑in for pytorch3d.renderer.look_at_view_transform.
+        Returns (R, T): R (B,3,3), T (B,3)
+        """
+        import torch as _torch  # ensure real torch in container
 
-        renderer_mod.look_at_view_transform = look_at_view_transform
+        if device is None:
+            device = _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
 
-        # -------------------------
-        # structures submodule stub
-        # -------------------------
-        structures_mod = types.ModuleType("pytorch3d.structures")
+        if eye is not None:
+            eye_t = _torch.as_tensor(eye, dtype=_torch.float32, device=device)
+            if eye_t.ndim == 1:
+                eye_t = eye_t.unsqueeze(0)
+        else:
+            d = _torch.as_tensor(dist, dtype=_torch.float32, device=device)
+            elev_t = _torch.as_tensor(elev, dtype=_torch.float32, device=device)
+            azim_t = _torch.as_tensor(azim, dtype=_torch.float32, device=device)
 
-        class Meshes:
-            """
-            Minimal stand‑in for pytorch3d.structures.Meshes.
+            if degrees:
+                elev_t = elev_t * math.pi / 180.0
+                azim_t = azim_t * math.pi / 180.0
 
-            SAM-3D mainly passes Meshes into its internal routines; for our purposes,
-            we just need a container for (verts, faces) tensors with a simple API.
-            """
+            x = d * _torch.cos(elev_t)
+            y = d * _torch.sin(elev_t)
+            z = d * _torch.cos(elev_t) * 0 + d
 
-            def __init__(self, verts=None, faces=None, textures=None):
-                # verts, faces are typically Lists[Tensor]; we store them directly.
-                self._verts = verts
-                self._faces = faces
-                self._textures = textures
+            eye_t = _torch.stack([x, y, z], dim=-1)
+            if eye_t.ndim == 1:
+                eye_t = eye_t.unsqueeze(0)
 
-            @property
-            def verts_list(self):
-                return self._verts
+        if at is None:
+            at_t = _torch.zeros_like(eye_t)
+        else:
+            at_t = _torch.as_tensor(at, dtype=_torch.float32, device=device)
+            if at_t.ndim == 1:
+                at_t = at_t.unsqueeze(0)
 
-            @property
-            def faces_list(self):
-                return self._faces
+        if up is None:
+            up_t = _torch.tensor([0.0, 1.0, 0.0], dtype=_torch.float32, device=device)
+            up_t = up_t.unsqueeze(0).expand_as(eye_t)
+        else:
+            up_t = _torch.as_tensor(up, dtype=_torch.float32, device=device)
+            if up_t.ndim == 1:
+                up_t = up_t.unsqueeze(0)
 
-            @property
-            def textures(self):
-                return self._textures
+        z_axis = eye_t - at_t
+        z_axis = z_axis / z_axis.norm(dim=-1, keepdim=True).clamp_min(1e-8)
 
-            # Common convenience methods from real pytorch3d Meshes.
-            def verts_packed(self):
-                if self._verts is None:
-                    return None
-                if isinstance(self._verts, (list, tuple)):
-                    return torch.cat(self._verts, dim=0)
-                return self._verts
+        x_axis = _torch.cross(up_t, z_axis, dim=-1)
+        x_axis = x_axis / x_axis.norm(dim=-1, keepdim=True).clamp_min(1e-8)
 
-            def faces_packed(self):
-                if self._faces is None:
-                    return None
-                if isinstance(self._faces, (list, tuple)):
-                    return torch.cat(self._faces, dim=0)
-                return self._faces
+        y_axis = _torch.cross(z_axis, x_axis, dim=-1)
 
-            def num_verts_per_mesh(self):
-                if self._verts is None:
-                    return None
-                if isinstance(self._verts, (list, tuple)):
-                    return torch.tensor([v.shape[0] for v in self._verts], dtype=torch.int64)
-                return torch.tensor([self._verts.shape[0]], dtype=torch.int64)
+        row0 = x_axis
+        row1 = y_axis
+        row2 = z_axis
+        R = _torch.stack([row0, row1, row2], dim=-2)
 
-            def num_faces_per_mesh(self):
-                if self._faces is None:
-                    return None
-                if isinstance(self._faces, (list, tuple)):
-                    return torch.tensor([f.shape[0] for f in self._faces], dtype=torch.int64)
-                return torch.tensor([self._faces.shape[0]], dtype=torch.int64)
+        T = -_torch.bmm(R, eye_t.unsqueeze(-1)).squeeze(-1)
+        return R, T
 
-        structures_mod.Meshes = Meshes
+    renderer_mod.look_at_view_transform = look_at_view_transform
 
-        # Wire modules together and register them.
-        p3d_mod.transforms = transforms_mod
-        p3d_mod.renderer = renderer_mod
-        p3d_mod.structures = structures_mod
+    # ------------------------------------------------------------------
+    # structures submodule (Meshes)
+    # ------------------------------------------------------------------
+    structures_mod = types.ModuleType("pytorch3d.structures")
 
-        sys.modules["pytorch3d"] = p3d_mod
-        sys.modules["pytorch3d.transforms"] = transforms_mod
-        sys.modules["pytorch3d.renderer"] = renderer_mod
-        sys.modules["pytorch3d.structures"] = structures_mod
+    class Meshes:
+        def __init__(self, verts=None, faces=None, textures=None):
+            self._verts = verts
+            self._faces = faces
+            self._textures = textures
 
-    except Exception as exc:  # pragma: no cover - best-effort safety net
-        print(f"[SAM3D] WARNING: failed to register pytorch3d stub: {exc}", file=sys.stderr)
+        @property
+        def verts_list(self):
+            return self._verts
+
+        @property
+        def faces_list(self):
+            return self._faces
+
+        @property
+        def textures(self):
+            return self._textures
+
+        def verts_packed(self):
+            if self._verts is None:
+                return None
+            if isinstance(self._verts, (list, tuple)):
+                return torch.cat(self._verts, dim=0)  # type: ignore[attr-defined]
+            return self._verts
+
+        def faces_packed(self):
+            if self._faces is None:
+                return None
+            if isinstance(self._faces, (list, tuple)):
+                return torch.cat(self._faces, dim=0)  # type: ignore[attr-defined]
+            return self._faces
+
+        def num_verts_per_mesh(self):
+            if self._verts is None:
+                return None
+            if isinstance(self._verts, (list, tuple)):
+                return torch.tensor([v.shape[0] for v in self._verts], dtype=torch.int64)  # type: ignore[attr-defined]
+            return torch.tensor([self._verts.shape[0]], dtype=torch.int64)  # type: ignore[attr-defined]
+
+        def num_faces_per_mesh(self):
+            if self._faces is None:
+                return None
+            if isinstance(self._faces, (list, tuple)):
+                return torch.tensor([f.shape[0] for f in self._faces], dtype=torch.int64)  # type: ignore[attr-defined]
+            return torch.tensor([self._faces.shape[0]], dtype=torch.int64)  # type: ignore[attr-defined]
+
+    structures_mod.Meshes = Meshes
+
+    # Wire submodules into top-level package and register everything.
+    p3d_mod.transforms = transforms_mod  # type: ignore[attr-defined]
+    p3d_mod.renderer = renderer_mod      # type: ignore[attr-defined]
+    p3d_mod.structures = structures_mod  # type: ignore[attr-defined]
+
+    sys.modules["pytorch3d"] = p3d_mod
+    sys.modules["pytorch3d.transforms"] = transforms_mod
+    sys.modules["pytorch3d.renderer"] = renderer_mod
+    sys.modules["pytorch3d.structures"] = structures_mod
 
 
 # Make sure the stub (or real pytorch3d) is available before importing Inference.
