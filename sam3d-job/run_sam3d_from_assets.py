@@ -31,15 +31,119 @@ if "CONDA_PREFIX" not in os.environ:
     # Make CONDA_PREFIX match CUDA_HOME so inference.py's assignment is safe
     os.environ["CONDA_PREFIX"] = os.environ["CUDA_HOME"]
 
-# SAM 3D Objects inference utilities live under notebook/
-NOTEBOOK_ROOTS = [
-    Path(__file__).parent / "notebook",
-    SAM3D_REPO_ROOT / "notebook",
+# ---------------------------------------------------------------------------
+# Make the cloned SAM 3D repo importable.
+#
+# - inference.py lives under   <repo_root>/notebook
+#
+# We add BOTH the repo root and the notebook folder to sys.path so that:
+#   from inference import Inference   -> finds notebook/inference.py
+# ---------------------------------------------------------------------------
+SAM3D_PYTHON_PATHS = [
+    SAM3D_REPO_ROOT,                      # e.g. /app/sam3d-objects
+    SAM3D_REPO_ROOT / "notebook",         # e.g. /app/sam3d-objects/notebook (inference.py)
+    Path("/workspace/sam3d-objects"),
     Path("/workspace/sam3d-objects/notebook"),
+    Path(__file__).parent / "notebook",
 ]
-for nb_root in NOTEBOOK_ROOTS:
-    if nb_root.is_dir():
-        sys.path.append(str(nb_root))
+
+for p in SAM3D_PYTHON_PATHS:
+    if p.is_dir():
+        sys.path.append(str(p))
+
+
+def _ensure_pytorch3d_stub() -> None:
+    """
+    Ensure that either the real pytorch3d package is importable, or register a
+    minimal stub that provides the quaternion helpers used by
+    notebook/inference.py.
+
+    This lets the Cloud Run job proceed even if installing full pytorch3d (with
+    CUDA extensions) is not practical in the container.
+    """
+    try:
+        # If pytorch3d is installed in the image, just use it.
+        import pytorch3d  # type: ignore  # noqa: F401
+        return
+    except Exception:
+        # Fall through and register a small stub.
+        pass
+
+    try:
+        import types
+        import torch
+
+        print(
+            "[SAM3D] pytorch3d not found; installing minimal quaternion stub in sys.modules",
+            file=sys.stderr,
+        )
+
+        # Create a fake top-level module and a transforms submodule.
+        p3d_mod = types.ModuleType("pytorch3d")
+        transforms_mod = types.ModuleType("pytorch3d.transforms")
+
+        def quaternion_multiply(q1, q2):
+            """
+            Broadcast-friendly quaternion multiplication.
+
+            Expects tensors/arrays of shape (..., 4) with (w, x, y, z) layout,
+            matching pytorch3d.transforms.
+            """
+            q1_t = torch.as_tensor(q1)
+            q2_t = torch.as_tensor(q2)
+
+            if q1_t.shape[-1] != 4 or q2_t.shape[-1] != 4:
+                raise ValueError(
+                    "quaternion_multiply expects inputs with last dimension 4 "
+                    f"(got {q1_t.shape}, {q2_t.shape})"
+                )
+
+            w1, x1, y1, z1 = torch.unbind(q1_t, dim=-1)
+            w2, x2, y2, z2 = torch.unbind(q2_t, dim=-1)
+
+            w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+            x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+            y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+            z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+
+            return torch.stack((w, x, y, z), dim=-1)
+
+        def quaternion_invert(q, eps: float = 1e-8):
+            """
+            Quaternion inverse with basic numerical stability.
+
+            Expects (..., 4) (w, x, y, z) quaternions. Matches the usual
+            definition: q^{-1} = conjugate(q) / ||q||^2.
+            """
+            q_t = torch.as_tensor(q)
+
+            if q_t.shape[-1] != 4:
+                raise ValueError(
+                    "quaternion_invert expects inputs with last dimension 4 "
+                    f"(got {q_t.shape})"
+                )
+
+            w, x, y, z = torch.unbind(q_t, dim=-1)
+            mag_sq = (w * w + x * x + y * y + z * z).clamp_min(eps)
+            conj = torch.stack((w, -x, -y, -z), dim=-1)
+            return conj / mag_sq.unsqueeze(-1)
+
+        transforms_mod.quaternion_multiply = quaternion_multiply
+        transforms_mod.quaternion_invert = quaternion_invert
+
+        p3d_mod.transforms = transforms_mod
+
+        # Register both the package and the submodule so that
+        # `from pytorch3d.transforms import ...` works.
+        sys.modules["pytorch3d"] = p3d_mod
+        sys.modules["pytorch3d.transforms"] = transforms_mod
+
+    except Exception as exc:  # pragma: no cover - best-effort safety net
+        print(f"[SAM3D] WARNING: failed to register pytorch3d stub: {exc}", file=sys.stderr)
+
+
+# Make sure the stub (or real pytorch3d) is available before importing Inference.
+_ensure_pytorch3d_stub()
 
 try:
     from inference import Inference
