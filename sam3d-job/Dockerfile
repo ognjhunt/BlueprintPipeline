@@ -1,6 +1,6 @@
 FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04
 
-# System deps for Python + vision libs + building CUDA extensions
+# System deps for Python + vision libs + building CUDA/C++ extensions
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     software-properties-common \
     git \
@@ -37,13 +37,11 @@ RUN pip install --no-cache-dir --prefer-binary \
 
 # -------------------------------------------------------------------
 # Core runtime deps (WITHOUT sam-3d-objects yet)
-# Note: usd-core valid versions start at 24.8
-# We ALSO install hydra-core + omegaconf so notebook/inference.py can import them.
-#
-# We need:
-#   - utils3d (imported by the notebook code)
-#   - timm  (Vision Transformer blocks)
-#   - open3d + trimesh for 3D geometry utilities used in inference_utils.py
+# - usd-core >= 24.8
+# - hydra-core + omegaconf for notebook/inference.py
+# - utils3d (imported by notebook)
+# - timm (Vision Transformer blocks)
+# - open3d + trimesh for geometry ops used in inference_utils.py
 #
 # We still install utils3d with --no-deps so that we control the open3d
 # version explicitly via the main pip install line.
@@ -64,14 +62,12 @@ RUN pip install --no-cache-dir --prefer-binary \
     && pip install --no-cache-dir --prefer-binary --no-deps \
       "utils3d==0.1.3"
 
-# -------------------------------------------------------------------
-# Install real PyTorch3D so that sam3d_objects can import
-#   from pytorch3d.structures import Meshes
-# and other submodules (ops, loss, utils, etc.).
-# This builds against the torch 2.5.1 + cu124 we installed above.
-# -------------------------------------------------------------------
-RUN pip install --no-cache-dir --prefer-binary \
-    "git+https://github.com/facebookresearch/pytorch3d.git@stable"
+# NOTE: We intentionally DO NOT install real pytorch3d here.
+# Instead we provide a minimal stub in run_sam3d_from_assets.py
+# that implements the pieces SAM-3D needs:
+#   - pytorch3d.transforms.*
+#   - pytorch3d.renderer.look_at_view_transform
+#   - pytorch3d.structures.Meshes
 
 # Install sam-3d-objects *without* pulling in its dependencies such as auto-gptq.
 # We manage important deps ourselves in this venv.
@@ -86,7 +82,8 @@ RUN git clone https://github.com/facebookresearch/sam-3d-objects.git ${SAM3D_REP
 
 # Work around PyTorch cpp_extension bug when building CUDA extensions (gsplat, kaolin, etc.)
 # in an environment with no visible GPU during docker build.
-ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6"
+# Include common archs plus 8.9 for NVIDIA L4.
+ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9"
 
 # Install inference requirements, but strip out auto-gptq (not needed for inference and
 # expensive to build). Use --no-build-isolation so packages like gsplat can see torch
