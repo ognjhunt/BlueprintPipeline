@@ -24,11 +24,8 @@ SAM3D_HF_REVISION = os.getenv("SAM3D_HF_REVISION")
 # so we synthesize a sensible default based on CUDA_HOME or /usr/local/cuda.
 # ---------------------------------------------------------------------------
 if "CONDA_PREFIX" not in os.environ:
-    # Prefer an existing CUDA_HOME if present, otherwise default to /usr/local/cuda
     cuda_home_default = os.environ.get("CUDA_HOME", "/usr/local/cuda")
-    # Ensure CUDA_HOME is set to something coherent
     os.environ.setdefault("CUDA_HOME", cuda_home_default)
-    # Make CONDA_PREFIX match CUDA_HOME so inference.py's assignment is safe
     os.environ["CONDA_PREFIX"] = os.environ["CUDA_HOME"]
 
 # ---------------------------------------------------------------------------
@@ -59,8 +56,11 @@ def _ensure_pytorch3d_stub() -> None:
 
       - pytorch3d.transforms.quaternion_multiply
       - pytorch3d.transforms.quaternion_invert
+      - pytorch3d.transforms.quaternion_to_matrix
+      - pytorch3d.transforms.matrix_to_quaternion
       - pytorch3d.transforms.Transform3d
       - pytorch3d.renderer.look_at_view_transform
+      - pytorch3d.structures.Meshes (very lightweight wrapper)
 
     This lets the Cloud Run job proceed even if installing full pytorch3d (with
     CUDA extensions) is not practical in the container.
@@ -84,9 +84,10 @@ def _ensure_pytorch3d_stub() -> None:
         )
 
         # Create a fake top-level module and mark it as a *package* so that
-        # "import pytorch3d.renderer" and "import pytorch3d.transforms" work.
+        # "import pytorch3d.renderer", "pytorch3d.transforms", and
+        # "pytorch3d.structures" work.
         p3d_mod = types.ModuleType("pytorch3d")
-        p3d_mod.__all__ = ["transforms", "renderer"]  # type: ignore[attr-defined]
+        p3d_mod.__all__ = ["transforms", "renderer", "structures"]  # type: ignore[attr-defined]
         p3d_mod.__path__ = []  # type: ignore[attr-defined]
 
         # -------------------------
@@ -139,6 +140,109 @@ def _ensure_pytorch3d_stub() -> None:
             mag_sq = (w * w + x * x + y * y + z * z).clamp_min(eps)
             conj = torch.stack((w, -x, -y, -z), dim=-1)
             return conj / mag_sq.unsqueeze(-1)
+
+        def quaternion_to_matrix(q, eps: float = 1e-8):
+            """
+            Minimal stand‑in for pytorch3d.transforms.quaternion_to_matrix.
+
+            Accepts (..., 4) quaternions in (w, x, y, z) format and returns
+            (..., 3, 3) rotation matrices.
+            """
+            q_t = torch.as_tensor(q, dtype=torch.float32)
+            if q_t.shape[-1] != 4:
+                raise ValueError(
+                    "quaternion_to_matrix expects inputs with last dimension 4 "
+                    f"(got {q_t.shape})"
+                )
+
+            # Normalize to avoid drift.
+            q_t = q_t / (q_t.norm(dim=-1, keepdim=True).clamp_min(eps))
+
+            w, x, y, z = torch.unbind(q_t, dim=-1)
+
+            ww = w * w
+            xx = x * x
+            yy = y * y
+            zz = z * z
+
+            xy = x * y
+            xz = x * z
+            yz = y * z
+            wx = w * x
+            wy = w * y
+            wz = w * z
+
+            m00 = ww + xx - yy - zz
+            m01 = 2 * (xy - wz)
+            m02 = 2 * (xz + wy)
+
+            m10 = 2 * (xy + wz)
+            m11 = ww - xx + yy - zz
+            m12 = 2 * (yz - wx)
+
+            m20 = 2 * (xz - wy)
+            m21 = 2 * (yz + wx)
+            m22 = ww - xx - yy + zz
+
+            row0 = torch.stack([m00, m01, m02], dim=-1)
+            row1 = torch.stack([m10, m11, m12], dim=-1)
+            row2 = torch.stack([m20, m21, m22], dim=-1)
+            return torch.stack([row0, row1, row2], dim=-2)
+
+        def matrix_to_quaternion(matrix, eps: float = 1e-8):
+            """
+            Minimal stand‑in for pytorch3d.transforms.matrix_to_quaternion.
+
+            Accepts (..., 3, 3) rotation matrices and returns (..., 4)
+            quaternions in (w, x, y, z) format.
+            """
+            m = torch.as_tensor(matrix, dtype=torch.float32)
+            if m.shape[-2:] != (3, 3):
+                raise ValueError(
+                    "matrix_to_quaternion expects inputs with shape (..., 3, 3) "
+                    f"(got {m.shape})"
+                )
+
+            orig_shape = m.shape[:-2]
+            m_flat = m.reshape(-1, 3, 3)
+            q_flat = torch.empty(m_flat.shape[0], 4, dtype=m_flat.dtype, device=m_flat.device)
+
+            for i in range(m_flat.shape[0]):
+                M = m_flat[i]
+                m00, m01, m02 = M[0, 0], M[0, 1], M[0, 2]
+                m10, m11, m12 = M[1, 0], M[1, 1], M[1, 2]
+                m20, m21, m22 = M[2, 0], M[2, 1], M[2, 2]
+
+                trace = m00 + m11 + m22
+
+                if trace > 0.0:
+                    s = torch.sqrt(trace + 1.0) * 2.0  # s = 4 * qw
+                    qw = 0.25 * s
+                    qx = (m21 - m12) / (s + eps)
+                    qy = (m02 - m20) / (s + eps)
+                    qz = (m10 - m01) / (s + eps)
+                elif (m00 > m11) and (m00 > m22):
+                    s = torch.sqrt(1.0 + m00 - m11 - m22) * 2.0  # s = 4 * qx
+                    qw = (m21 - m12) / (s + eps)
+                    qx = 0.25 * s
+                    qy = (m01 + m10) / (s + eps)
+                    qz = (m02 + m20) / (s + eps)
+                elif m11 > m22:
+                    s = torch.sqrt(1.0 + m11 - m00 - m22) * 2.0  # s = 4 * qy
+                    qw = (m02 - m20) / (s + eps)
+                    qx = (m01 + m10) / (s + eps)
+                    qy = 0.25 * s
+                    qz = (m12 + m21) / (s + eps)
+                else:
+                    s = torch.sqrt(1.0 + m22 - m00 - m11) * 2.0  # s = 4 * qz
+                    qw = (m10 - m01) / (s + eps)
+                    qx = (m02 + m20) / (s + eps)
+                    qy = (m12 + m21) / (s + eps)
+                    qz = 0.25 * s
+
+                q_flat[i] = torch.stack([qw, qx, qy, qz])
+
+            return q_flat.reshape(*orig_shape, 4)
 
         class Transform3d:
             """
@@ -204,6 +308,8 @@ def _ensure_pytorch3d_stub() -> None:
 
         transforms_mod.quaternion_multiply = quaternion_multiply
         transforms_mod.quaternion_invert = quaternion_invert
+        transforms_mod.quaternion_to_matrix = quaternion_to_matrix
+        transforms_mod.matrix_to_quaternion = matrix_to_quaternion
         transforms_mod.Transform3d = Transform3d
 
         # -------------------------
@@ -225,14 +331,12 @@ def _ensure_pytorch3d_stub() -> None:
             Minimal stand‑in for pytorch3d.renderer.look_at_view_transform.
 
             Returns (R, T) where:
-              - R is a (1, 3, 3) rotation matrix
-              - T is a (1, 3) translation vector
-
-            For now we implement a simple "camera at distance dist looking at origin"
-            parameterization. It won't match the real implementation exactly but is
-            sufficient to keep the pipeline running.
+              - R is a (B, 3, 3) rotation matrix
+              - T is a (B, 3) translation vector
             """
-            device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+            device = device or (
+                torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+            )
 
             if eye is not None:
                 eye_t = torch.as_tensor(eye, dtype=torch.float32, device=device)
@@ -248,7 +352,6 @@ def _ensure_pytorch3d_stub() -> None:
                     elev_t = elev_t * math.pi / 180.0
                     azim_t = azim_t * math.pi / 180.0
 
-                # Simple spherical -> Cartesian, looking at origin.
                 x = d * torch.cos(elev_t) * torch.sin(azim_t)
                 y = d * torch.sin(elev_t)
                 z = d * torch.cos(elev_t) * torch.cos(azim_t)
@@ -289,13 +392,77 @@ def _ensure_pytorch3d_stub() -> None:
 
         renderer_mod.look_at_view_transform = look_at_view_transform
 
+        # -------------------------
+        # structures submodule stub
+        # -------------------------
+        structures_mod = types.ModuleType("pytorch3d.structures")
+
+        class Meshes:
+            """
+            Minimal stand‑in for pytorch3d.structures.Meshes.
+
+            SAM-3D mainly passes Meshes into its internal routines; for our purposes,
+            we just need a container for (verts, faces) tensors with a simple API.
+            """
+
+            def __init__(self, verts=None, faces=None, textures=None):
+                # verts, faces are typically Lists[Tensor]; we store them directly.
+                self._verts = verts
+                self._faces = faces
+                self._textures = textures
+
+            @property
+            def verts_list(self):
+                return self._verts
+
+            @property
+            def faces_list(self):
+                return self._faces
+
+            @property
+            def textures(self):
+                return self._textures
+
+            # Common convenience methods from real pytorch3d Meshes.
+            def verts_packed(self):
+                if self._verts is None:
+                    return None
+                if isinstance(self._verts, (list, tuple)):
+                    return torch.cat(self._verts, dim=0)
+                return self._verts
+
+            def faces_packed(self):
+                if self._faces is None:
+                    return None
+                if isinstance(self._faces, (list, tuple)):
+                    return torch.cat(self._faces, dim=0)
+                return self._faces
+
+            def num_verts_per_mesh(self):
+                if self._verts is None:
+                    return None
+                if isinstance(self._verts, (list, tuple)):
+                    return torch.tensor([v.shape[0] for v in self._verts], dtype=torch.int64)
+                return torch.tensor([self._verts.shape[0]], dtype=torch.int64)
+
+            def num_faces_per_mesh(self):
+                if self._faces is None:
+                    return None
+                if isinstance(self._faces, (list, tuple)):
+                    return torch.tensor([f.shape[0] for f in self._faces], dtype=torch.int64)
+                return torch.tensor([self._faces.shape[0]], dtype=torch.int64)
+
+        structures_mod.Meshes = Meshes
+
         # Wire modules together and register them.
         p3d_mod.transforms = transforms_mod
         p3d_mod.renderer = renderer_mod
+        p3d_mod.structures = structures_mod
 
         sys.modules["pytorch3d"] = p3d_mod
         sys.modules["pytorch3d.transforms"] = transforms_mod
         sys.modules["pytorch3d.renderer"] = renderer_mod
+        sys.modules["pytorch3d.structures"] = structures_mod
 
     except Exception as exc:  # pragma: no cover - best-effort safety net
         print(f"[SAM3D] WARNING: failed to register pytorch3d stub: {exc}", file=sys.stderr)
