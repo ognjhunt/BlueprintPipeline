@@ -40,13 +40,13 @@ RUN pip install --no-cache-dir --prefer-binary \
 # Note: usd-core valid versions start at 24.8
 # We ALSO install hydra-core + omegaconf so notebook/inference.py can import them.
 #
-# IMPORTANT: we DO need the PyPI "utils3d" package because notebook/inference.py
-# does `import utils3d`, but that package depends on open3d and pip's resolver
-# will fail if it tries to satisfy that dependency in this environment.
+# We need:
+#   - utils3d (imported by the notebook code)
+#   - timm  (Vision Transformer blocks)
+#   - open3d + trimesh for 3D geometry utilities used in inference_utils.py
 #
-# To avoid the build failure while still satisfying the import, we:
-#   - install our base deps normally
-#   - then install utils3d with `--no-deps` so pip does NOT try to install open3d
+# We still install utils3d with --no-deps so that we control the open3d
+# version explicitly via the main pip install line.
 # -------------------------------------------------------------------
 RUN pip install --no-cache-dir --prefer-binary \
       huggingface_hub \
@@ -57,8 +57,21 @@ RUN pip install --no-cache-dir --prefer-binary \
       "usd-core>=24.8" \
       hydra-core \
       omegaconf \
+      "loguru==0.7.2" \
+      "timm==1.0.22" \
+      "open3d>=0.18.0" \
+      "trimesh" \
     && pip install --no-cache-dir --prefer-binary --no-deps \
       "utils3d==0.1.3"
+
+# -------------------------------------------------------------------
+# Install real PyTorch3D so that sam3d_objects can import
+#   from pytorch3d.structures import Meshes
+# and other submodules (ops, loss, utils, etc.).
+# This builds against the torch 2.5.1 + cu124 we installed above.
+# -------------------------------------------------------------------
+RUN pip install --no-cache-dir --prefer-binary \
+    "git+https://github.com/facebookresearch/pytorch3d.git@stable"
 
 # Install sam-3d-objects *without* pulling in its dependencies such as auto-gptq.
 # We manage important deps ourselves in this venv.

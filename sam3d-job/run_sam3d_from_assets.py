@@ -55,15 +55,19 @@ for p in SAM3D_PYTHON_PATHS:
 def _ensure_pytorch3d_stub() -> None:
     """
     Ensure that either the real pytorch3d package is importable, or register a
-    minimal stub that provides the quaternion helpers used by
-    notebook/inference.py.
+    minimal stub that provides just the pieces SAM 3D uses:
+
+      - pytorch3d.transforms.quaternion_multiply
+      - pytorch3d.transforms.quaternion_invert
+      - pytorch3d.transforms.Transform3d
+      - pytorch3d.renderer.look_at_view_transform
 
     This lets the Cloud Run job proceed even if installing full pytorch3d (with
     CUDA extensions) is not practical in the container.
     """
     try:
-        # If pytorch3d is installed in the image, just use it.
         import pytorch3d  # type: ignore  # noqa: F401
+        # Real pytorch3d is available; nothing to do.
         return
     except Exception:
         # Fall through and register a small stub.
@@ -71,15 +75,23 @@ def _ensure_pytorch3d_stub() -> None:
 
     try:
         import types
+        import math
         import torch
 
         print(
-            "[SAM3D] pytorch3d not found; installing minimal quaternion stub in sys.modules",
+            "[SAM3D] pytorch3d not found; installing minimal stub in sys.modules",
             file=sys.stderr,
         )
 
-        # Create a fake top-level module and a transforms submodule.
+        # Create a fake top-level module and mark it as a *package* so that
+        # "import pytorch3d.renderer" and "import pytorch3d.transforms" work.
         p3d_mod = types.ModuleType("pytorch3d")
+        p3d_mod.__all__ = ["transforms", "renderer"]  # type: ignore[attr-defined]
+        p3d_mod.__path__ = []  # type: ignore[attr-defined]
+
+        # -------------------------
+        # transforms submodule stub
+        # -------------------------
         transforms_mod = types.ModuleType("pytorch3d.transforms")
 
         def quaternion_multiply(q1, q2):
@@ -128,15 +140,162 @@ def _ensure_pytorch3d_stub() -> None:
             conj = torch.stack((w, -x, -y, -z), dim=-1)
             return conj / mag_sq.unsqueeze(-1)
 
+        class Transform3d:
+            """
+            Very small subset of pytorch3d.transforms.Transform3d used by the
+            SAM 3D inference pipeline.
+
+            This implementation stores a 4x4 matrix and provides:
+
+              - get_matrix()
+              - compose(other)
+              - inverse()
+              - transform_points(points)
+            """
+
+            def __init__(self, matrix=None, device=None, dtype=torch.float32):
+                if matrix is None:
+                    m = torch.eye(4, device=device, dtype=dtype).unsqueeze(0)
+                else:
+                    m = torch.as_tensor(matrix, device=device, dtype=dtype)
+                    if m.ndim == 2:
+                        m = m.unsqueeze(0)
+                self._matrix = m
+
+            def get_matrix(self):
+                return self._matrix
+
+            def compose(self, other: "Transform3d"):
+                """
+                Compose this transform with another: result = other ∘ self.
+                """
+                if not isinstance(other, Transform3d):
+                    raise TypeError("compose expects another Transform3d")
+                m = other._matrix @ self._matrix
+                return Transform3d(m)
+
+            def inverse(self):
+                m_inv = torch.inverse(self._matrix)
+                return Transform3d(m_inv)
+
+            def transform_points(self, points):
+                """
+                Apply the transform to 3D points.
+
+                points: (..., 3)
+                """
+                pts = torch.as_tensor(
+                    points,
+                    dtype=self._matrix.dtype,
+                    device=self._matrix.device,
+                )
+                orig_shape = pts.shape
+                pts = pts.reshape(-1, 3)
+
+                ones = torch.ones(
+                    pts.shape[0], 1, dtype=pts.dtype, device=pts.device
+                )
+                homo = torch.cat([pts, ones], dim=-1)  # (N, 4)
+
+                # For simplicity, use the first matrix if we have a batch.
+                M = self._matrix[0]  # (4, 4)
+                out = (M @ homo.T).T[..., :3]
+                return out.reshape(orig_shape)
+
         transforms_mod.quaternion_multiply = quaternion_multiply
         transforms_mod.quaternion_invert = quaternion_invert
+        transforms_mod.Transform3d = Transform3d
 
+        # -------------------------
+        # renderer submodule stub
+        # -------------------------
+        renderer_mod = types.ModuleType("pytorch3d.renderer")
+
+        def look_at_view_transform(
+            dist=1.0,
+            elev=0.0,
+            azim=0.0,
+            at=None,
+            up=None,
+            eye=None,
+            degrees: bool = True,
+            device=None,
+        ):
+            """
+            Minimal stand‑in for pytorch3d.renderer.look_at_view_transform.
+
+            Returns (R, T) where:
+              - R is a (1, 3, 3) rotation matrix
+              - T is a (1, 3) translation vector
+
+            For now we implement a simple "camera at distance dist looking at origin"
+            parameterization. It won't match the real implementation exactly but is
+            sufficient to keep the pipeline running.
+            """
+            device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+
+            if eye is not None:
+                eye_t = torch.as_tensor(eye, dtype=torch.float32, device=device)
+                if eye_t.ndim == 1:
+                    eye_t = eye_t.unsqueeze(0)
+            else:
+                # Compute eye position from spherical coords (elev, azim).
+                d = torch.as_tensor(dist, dtype=torch.float32, device=device)
+                elev_t = torch.as_tensor(elev, dtype=torch.float32, device=device)
+                azim_t = torch.as_tensor(azim, dtype=torch.float32, device=device)
+
+                if degrees:
+                    elev_t = elev_t * math.pi / 180.0
+                    azim_t = azim_t * math.pi / 180.0
+
+                # Simple spherical -> Cartesian, looking at origin.
+                x = d * torch.cos(elev_t) * torch.sin(azim_t)
+                y = d * torch.sin(elev_t)
+                z = d * torch.cos(elev_t) * torch.cos(azim_t)
+                eye_t = torch.stack([x, y, z], dim=-1)
+                if eye_t.ndim == 1:
+                    eye_t = eye_t.unsqueeze(0)
+
+            # "at" (look-at target) defaults to origin
+            if at is None:
+                at_t = torch.zeros_like(eye_t)
+            else:
+                at_t = torch.as_tensor(at, dtype=torch.float32, device=device)
+                if at_t.ndim == 1:
+                    at_t = at_t.unsqueeze(0)
+
+            # "up" vector defaults to +Y
+            if up is None:
+                up_t = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=device)
+                up_t = up_t.unsqueeze(0).expand_as(eye_t)
+            else:
+                up_t = torch.as_tensor(up, dtype=torch.float32, device=device)
+                if up_t.ndim == 1:
+                    up_t = up_t.unsqueeze(0)
+
+            # Build a simple look-at rotation matrix.
+            z_axis = eye_t - at_t
+            z_axis = z_axis / (z_axis.norm(dim=-1, keepdim=True) + 1e-8)
+
+            x_axis = torch.cross(up_t, z_axis, dim=-1)
+            x_axis = x_axis / (x_axis.norm(dim=-1, keepdim=True) + 1e-8)
+
+            y_axis = torch.cross(z_axis, x_axis, dim=-1)
+
+            R = torch.stack([x_axis, y_axis, z_axis], dim=-1)  # (B, 3, 3)
+            T = -torch.bmm(R, eye_t.unsqueeze(-1)).squeeze(-1)  # (B, 3)
+
+            return R, T
+
+        renderer_mod.look_at_view_transform = look_at_view_transform
+
+        # Wire modules together and register them.
         p3d_mod.transforms = transforms_mod
+        p3d_mod.renderer = renderer_mod
 
-        # Register both the package and the submodule so that
-        # `from pytorch3d.transforms import ...` works.
         sys.modules["pytorch3d"] = p3d_mod
         sys.modules["pytorch3d.transforms"] = transforms_mod
+        sys.modules["pytorch3d.renderer"] = renderer_mod
 
     except Exception as exc:  # pragma: no cover - best-effort safety net
         print(f"[SAM3D] WARNING: failed to register pytorch3d stub: {exc}", file=sys.stderr)
