@@ -35,15 +35,30 @@ RUN pip install --no-cache-dir --prefer-binary \
     --index-url https://download.pytorch.org/whl/cu124
 # Using stable torch 2.5.1+cu124, compatible with CUDA 12.x.
 
+# -------------------------------------------------------------------
 # Core runtime deps (WITHOUT sam-3d-objects yet)
 # Note: usd-core valid versions start at 24.8
+# We ALSO install hydra-core + omegaconf so notebook/inference.py can import them.
+#
+# IMPORTANT: we DO need the PyPI "utils3d" package because notebook/inference.py
+# does `import utils3d`, but that package depends on open3d and pip's resolver
+# will fail if it tries to satisfy that dependency in this environment.
+#
+# To avoid the build failure while still satisfying the import, we:
+#   - install our base deps normally
+#   - then install utils3d with `--no-deps` so pip does NOT try to install open3d
+# -------------------------------------------------------------------
 RUN pip install --no-cache-dir --prefer-binary \
-    huggingface_hub \
-    opencv-python-headless \
-    Pillow \
-    numpy \
-    PyYAML \
-    "usd-core>=24.8"
+      huggingface_hub \
+      opencv-python-headless \
+      Pillow \
+      numpy \
+      PyYAML \
+      "usd-core>=24.8" \
+      hydra-core \
+      omegaconf \
+    && pip install --no-cache-dir --prefer-binary --no-deps \
+      "utils3d==0.1.3"
 
 # Install sam-3d-objects *without* pulling in its dependencies such as auto-gptq.
 # We manage important deps ourselves in this venv.
