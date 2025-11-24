@@ -72,12 +72,8 @@ RUN pip install --no-cache-dir --prefer-binary \
     && pip install --no-cache-dir --prefer-binary --no-deps \
       "utils3d==0.1.3"
 
-# NOTE: Previously we tried to avoid installing real pytorch3d and
-# provided a minimal stub in run_sam3d_from_assets.py. We keep the stub
-# as a fallback, but we now install the real library as the repo expects.
-
-# Install sam-3d-objects *without* pulling in its dependencies such as auto-gptq.
-# We manage important deps ourselves in this venv.
+# Install sam-3d-objects *without* pulling in its deps (auto-gptq, etc).
+# We manage the most important deps ourselves in this venv.
 RUN pip install --no-cache-dir --prefer-binary --no-deps \
     git+https://github.com/facebookresearch/sam-3d-objects.git
 
@@ -115,6 +111,9 @@ RUN pip install --no-cache-dir --prefer-binary psutil
 RUN pip install --no-cache-dir --prefer-binary --no-build-isolation \
       "flash_attn==2.8.3" \
       "pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@75ebeeaea0908c5527e7b1e305fbc7681382db47"
+
+# NEW: Install PyTorch Lightning that sam-3d-objects expects (for sam3d_objects.model.io)
+RUN pip install --no-cache-dir --prefer-binary "lightning==2.3.3"
 
 # Apply upstream Hydra patch (doc/setup.md: ./patching/hydra)
 # This ensures our hydra-core behaves the way the repo expects.
