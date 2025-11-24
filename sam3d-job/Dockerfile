@@ -43,7 +43,7 @@ RUN pip install --no-cache-dir --prefer-binary \
 # - utils3d (imported by notebook)
 # - timm (Vision Transformer blocks)
 # - open3d + trimesh for geometry ops used in inference_utils.py
-# - optree (required by sam3d_objects.data.utils)
+# - optree + astor for sam3d_objects.data.utils
 #
 # We still install utils3d with --no-deps so that we control the open3d
 # version explicitly via the main pip install line.
@@ -62,6 +62,7 @@ RUN pip install --no-cache-dir --prefer-binary \
       "open3d>=0.18.0" \
       "trimesh" \
       "optree" \
+      "astor" \
     && pip install --no-cache-dir --prefer-binary --no-deps \
       "utils3d==0.1.3"
 
@@ -98,6 +99,12 @@ RUN if [ -f "${SAM3D_REPO_ROOT}/requirements.inference.txt" ]; then \
       pip install --no-cache-dir --prefer-binary --no-build-isolation \
         -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu124.html \
         -r /tmp/requirements.inference.no-autogptq.txt; \
+    fi
+
+# Apply upstream Hydra patch (doc/setup.md: ./patching/hydra)
+# This ensures our hydra-core behaves the way the repo expects.
+RUN if [ -f "${SAM3D_REPO_ROOT}/patching/hydra" ]; then \
+      cd ${SAM3D_REPO_ROOT} && ./patching/hydra; \
     fi
 
 RUN mkdir -p ${SAM3D_CHECKPOINT_ROOT}
