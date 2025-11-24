@@ -6,6 +6,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     git \
     ca-certificates \
     build-essential \
+    cmake \
     libglib2.0-0 libgl1 libsm6 libxext6 libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -42,6 +43,7 @@ RUN pip install --no-cache-dir --prefer-binary \
 # - utils3d (imported by notebook)
 # - timm (Vision Transformer blocks)
 # - open3d + trimesh for geometry ops used in inference_utils.py
+# - optree (required by sam3d_objects.data.utils)
 #
 # We still install utils3d with --no-deps so that we control the open3d
 # version explicitly via the main pip install line.
@@ -59,6 +61,7 @@ RUN pip install --no-cache-dir --prefer-binary \
       "timm==1.0.22" \
       "open3d>=0.18.0" \
       "trimesh" \
+      "optree" \
     && pip install --no-cache-dir --prefer-binary --no-deps \
       "utils3d==0.1.3"
 
