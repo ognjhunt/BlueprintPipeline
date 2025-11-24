@@ -36,6 +36,10 @@ RUN pip install --no-cache-dir --prefer-binary \
     --index-url https://download.pytorch.org/whl/cu124
 # Using stable torch 2.5.1+cu124, compatible with CUDA 12.x.
 
+# Extra indexes for GPU-heavy deps (flash-attn, etc.)
+# This mirrors the upstream setup.md, but uses cu124 instead of cu121.
+ENV PIP_EXTRA_INDEX_URL="https://pypi.ngc.nvidia.com https://download.pytorch.org/whl/cu124"
+
 # -------------------------------------------------------------------
 # Core runtime deps (WITHOUT sam-3d-objects yet)
 # - usd-core >= 24.8
@@ -44,6 +48,7 @@ RUN pip install --no-cache-dir --prefer-binary \
 # - timm (Vision Transformer blocks)
 # - open3d + trimesh for geometry ops used in inference_utils.py
 # - optree + astor for sam3d_objects.data.utils
+# - scipy for layout_post_optimization_utils.py
 #
 # We still install utils3d with --no-deps so that we control the open3d
 # version explicitly via the main pip install line.
@@ -53,6 +58,7 @@ RUN pip install --no-cache-dir --prefer-binary \
       opencv-python-headless \
       Pillow \
       numpy \
+      scipy \
       PyYAML \
       "usd-core>=24.8" \
       hydra-core \
@@ -66,12 +72,9 @@ RUN pip install --no-cache-dir --prefer-binary \
     && pip install --no-cache-dir --prefer-binary --no-deps \
       "utils3d==0.1.3"
 
-# NOTE: We intentionally DO NOT install real pytorch3d here.
-# Instead we provide a minimal stub in run_sam3d_from_assets.py
-# that implements the pieces SAM-3D needs:
-#   - pytorch3d.transforms.*
-#   - pytorch3d.renderer.look_at_view_transform
-#   - pytorch3d.structures.Meshes
+# NOTE: Previously we tried to avoid installing real pytorch3d and
+# provided a minimal stub in run_sam3d_from_assets.py. We keep the stub
+# as a fallback, but we now install the real library as the repo expects.
 
 # Install sam-3d-objects *without* pulling in its dependencies such as auto-gptq.
 # We manage important deps ourselves in this venv.
@@ -84,7 +87,7 @@ ENV SAM3D_REPO_ROOT=/app/sam3d-objects \
 # Keep a local checkout for configs/notebooks (separate from the pip-installed package)
 RUN git clone https://github.com/facebookresearch/sam-3d-objects.git ${SAM3D_REPO_ROOT} || true
 
-# Work around PyTorch cpp_extension bug when building CUDA extensions (gsplat, kaolin, etc.)
+# Work around PyTorch cpp_extension bug when building CUDA extensions (gsplat, kaolin, pytorch3d, etc.)
 # in an environment with no visible GPU during docker build.
 # Include common archs plus 8.9 for NVIDIA L4.
 ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9"
@@ -100,6 +103,12 @@ RUN if [ -f "${SAM3D_REPO_ROOT}/requirements.inference.txt" ]; then \
         -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu124.html \
         -r /tmp/requirements.inference.no-autogptq.txt; \
     fi
+
+# Install the p3d extra: real Pytorch3D and FlashAttention.
+# This mirrors requirements.p3d.txt in the repo.
+RUN pip install --no-cache-dir --prefer-binary \
+      "flash_attn==2.8.3" \
+      "pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@75ebeeaea0908c5527e7b1e305fbc7681382db47"
 
 # Apply upstream Hydra patch (doc/setup.md: ./patching/hydra)
 # This ensures our hydra-core behaves the way the repo expects.
