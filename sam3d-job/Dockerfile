@@ -112,6 +112,12 @@ RUN pip install --no-cache-dir --prefer-binary --no-build-isolation \
       "flash_attn==2.8.3" \
       "pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@75ebeeaea0908c5527e7b1e305fbc7681382db47"
 
+# NEW: install spconv (sparse conv backend) that sam3d's TDFY backbone expects.
+# Replace "spconv-cu121==2.3.6" with whatever exact package/version you found
+# in the repo's env file or docs.
+RUN pip install --no-cache-dir --prefer-binary \
+      "spconv-cu121==2.3.6"
+
 # NEW: Install PyTorch Lightning that sam-3d-objects expects (for sam3d_objects.model.io)
 RUN pip install --no-cache-dir --prefer-binary "lightning==2.3.3"
 
