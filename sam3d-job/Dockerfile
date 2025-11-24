@@ -105,8 +105,9 @@ RUN if [ -f "${SAM3D_REPO_ROOT}/requirements.inference.txt" ]; then \
     fi
 
 # Install the p3d extra: real Pytorch3D and FlashAttention.
-# This mirrors requirements.p3d.txt in the repo.
-RUN pip install --no-cache-dir --prefer-binary \
+# NOTE: we must disable build isolation so pytorch3d can import torch
+# from the existing /opt/venv during its setup.
+RUN pip install --no-cache-dir --prefer-binary --no-build-isolation \
       "flash_attn==2.8.3" \
       "pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@75ebeeaea0908c5527e7b1e305fbc7681382db47"
 
