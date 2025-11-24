@@ -104,6 +104,11 @@ RUN if [ -f "${SAM3D_REPO_ROOT}/requirements.inference.txt" ]; then \
         -r /tmp/requirements.inference.no-autogptq.txt; \
     fi
 
+# flash_attn's setup.py imports psutil at build-time when we use
+# --no-build-isolation, but it doesn't declare it as a build dependency.
+# Pre-install it so metadata generation doesn't crash.
+RUN pip install --no-cache-dir --prefer-binary psutil
+
 # Install the p3d extra: real Pytorch3D and FlashAttention.
 # NOTE: we must disable build isolation so pytorch3d can import torch
 # from the existing /opt/venv during its setup.
