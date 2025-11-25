@@ -1,17 +1,23 @@
 FROM python:3.10-slim
 
-# Minimal system tools for HTTP + ZIP handling
-RUN apt-get update && apt-get install -y \
-    curl \
-    unzip \
+# Basic build tools for trimesh (via numpy); keep it minimal.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Everything we need is from the Python stdlib, so no extra pip deps.
-COPY run_interactive_assets.py /app/run_interactive_assets.py
-COPY run_interactive.sh /app/run_interactive.sh
+# Install just what we need to run a tiny HTTP service and build a cube GLB.
+RUN pip install --no-cache-dir \
+    flask \
+    trimesh \
+    numpy
 
-RUN chmod +x /app/run_interactive.sh
+# Our service implementation
+COPY physx_service.py /app/physx_service.py
 
-ENTRYPOINT ["/app/run_interactive.sh"]
+# Cloud Run expects the server to listen on this port
+ENV PORT=8080
+
+# Start the Flask app
+CMD ["python", "physx_service.py"]
