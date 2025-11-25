@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Install system dependencies for basic file operations if needed
+# Minimal system tools for HTTP + ZIP handling
 RUN apt-get update && apt-get install -y \
     curl \
     unzip \
@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Everything we need is from the Python stdlib, so no extra pip deps.
 COPY run_interactive_assets.py /app/run_interactive_assets.py
 COPY run_interactive.sh /app/run_interactive.sh
 
