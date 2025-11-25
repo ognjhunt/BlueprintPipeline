@@ -15,7 +15,7 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # --- PyTorch 2.5.1 + CUDA 12.4 -------------------------------------
-# Matches Hunyuan3D 2.1 recommendations.
+# Matches Hunyuan3D 2.1 recommendations. :contentReference[oaicite:1]{index=1}
 RUN pip install --no-cache-dir --prefer-binary \
     torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
     --index-url https://download.pytorch.org/whl/cu124
@@ -37,7 +37,7 @@ WORKDIR ${HUNYUAN_REPO_ROOT}
 #   - onnxruntime==1.16.3 (old pin, no longer published for some platforms)
 #
 # We drop JUST those lines, then install a CURRENT onnxruntime explicitly
-# so rembg/background removal still works.
+# so rembg/background removal still works. :contentReference[oaicite:2]{index=2}
 RUN sed -e '/^bpy==/d' -e '/^onnxruntime==/d' requirements.txt > /tmp/requirements.no_bpy_onnx.txt \
  && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.no_bpy_onnx.txt \
  && pip install --no-cache-dir --prefer-binary "onnxruntime>=1.17.0"
@@ -69,7 +69,7 @@ PY
 
 # --- Build custom rasterizer + inpainting extension -----------------
 # IMPORTANT: --no-build-isolation lets setup.py see torch from /opt/venv,
-# avoiding "ModuleNotFoundError: No module named 'torch'" during build.
+# avoiding "ModuleNotFoundError: No module named 'torch'" during build. :contentReference[oaicite:3]{index=3}
 RUN cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/custom_rasterizer && \
     pip install --no-cache-dir --prefer-binary --no-build-isolation -e . && \
     cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/DifferentiableRenderer && \

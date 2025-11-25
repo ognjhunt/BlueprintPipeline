@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import json
 import os
 import shutil
@@ -132,7 +134,7 @@ def main() -> None:
     conf.multiview_cfg_path = str(
         HUNYUAN_REPO_ROOT / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml"
     )
-    # This matches examples which use a custom pipeline name under hy3dpaint
+    # This matches examples which use a custom pipeline name under hy3dpaint :contentReference[oaicite:4]{index=4}
     conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
     paint_pipeline = Hunyuan3DPaintPipeline(conf)
     print("[HUNYUAN] Paint pipeline loaded")
@@ -157,9 +159,11 @@ def main() -> None:
         print(f"[HUNYUAN] Generating mesh for obj {oid} from {image_path}")
 
         # Load and pre-process reference image (RGBA + optional background removal)
-        image = Image.open(image_path).convert("RGBA")
+        image = Image.open(image_path)
         if image.mode == "RGB":
             image = rembg(image)
+        if image.mode != "RGBA":
+            image = image.convert("RGBA")
 
         # --- Shape generation ---------------------------------------
         meshes = pipeline_shapegen(image=image, num_inference_steps=num_steps)
@@ -197,7 +201,7 @@ def main() -> None:
             mesh_path=str(mesh_glb_path),
             image_path=str(image_path),
             output_mesh_path=str(model_obj_path),
-            save_glb=False,   # <--- NO Blender-based GLB export
+            save_glb=False,   # NO Blender-based GLB export
         )
 
         # Hunyuan returns the OBJ path; ensure we have it
@@ -207,7 +211,7 @@ def main() -> None:
         # --- Convert OBJ -> GLB without Blender (using trimesh) -----
         try:
             # Using scene mode to keep materials/textures if present
-            scene = trimesh.load(str(textured_obj_path), force='scene')
+            scene = trimesh.load(str(textured_obj_path), force="scene")
             scene.export(str(model_glb_path))
             print(f"[HUNYUAN] Converted OBJ -> GLB for obj {oid} -> {model_glb_path}")
         except Exception as e:
