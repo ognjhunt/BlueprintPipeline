@@ -15,7 +15,7 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # --- PyTorch 2.5.1 + CUDA 12.4 -------------------------------------
-# Matches Hunyuan3D 2.1 recommendations. 
+# Matches Hunyuan3D 2.1 recommendations.
 RUN pip install --no-cache-dir --prefer-binary \
     torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
     --index-url https://download.pytorch.org/whl/cu124
@@ -34,16 +34,38 @@ WORKDIR ${HUNYUAN_REPO_ROOT}
 # --- Install Python deps for Hunyuan3D-2.1 --------------------------
 # Upstream requirements.txt pins:
 #   - bpy==4.0        (Blender; not usable in Cloud Run)
-#   - onnxruntime==1.16.3 (old pin, no longer published for some platforms) 
+#   - onnxruntime==1.16.3 (old pin, no longer published for some platforms)
 #
 # We drop JUST those lines, then install a CURRENT onnxruntime explicitly
-# so rembg/background removal still works. 
+# so rembg/background removal still works.
 RUN sed -e '/^bpy==/d' -e '/^onnxruntime==/d' requirements.txt > /tmp/requirements.no_bpy_onnx.txt \
  && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.no_bpy_onnx.txt \
  && pip install --no-cache-dir --prefer-binary "onnxruntime>=1.17.0"
 
 # Optional: usd-core for GLB -> USDZ conversion (usd_from_gltf CLI)
 RUN pip install --no-cache-dir --prefer-binary "usd-core>=24.8"
+
+# --- Patch mesh_utils to make Blender optional ----------------------
+# Hunyuan's mesh_utils.py imports bpy at top-level, which crashes if Blender
+# is not installed. Here we rewrite that import into a try/except so the
+# module can be imported without bpy, and GLB export is simply disabled.
+RUN python - << 'PY'
+from pathlib import Path
+
+path = Path("hy3dpaint/DifferentiableRenderer/mesh_utils.py")
+text = path.read_text()
+
+if "import bpy" in text and "Bpy IO CAN NOT BE Imported!!! GLB export is disabled (no Blender)." not in text:
+    text = text.replace(
+        "import bpy",
+        "try:\\n"
+        "    import bpy\\n"
+        "except Exception:\\n"
+        "    bpy = None\\n"
+        "    print('Bpy IO CAN NOT BE Imported!!! GLB export is disabled (no Blender).', flush=True)"
+    )
+    path.write_text(text)
+PY
 
 # --- Build custom rasterizer + inpainting extension -----------------
 # IMPORTANT: --no-build-isolation lets setup.py see torch from /opt/venv,

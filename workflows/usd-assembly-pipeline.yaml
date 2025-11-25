@@ -29,13 +29,31 @@ main:
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
           - usdPrefix: ${"scenes/" + sceneId + "/usd"}
-          - jobName: "usd-assembly-job"
-        next: run_job
+          - simJobName: "simready-job"
+          - usdJobName: "usd-assembly-job"
+        next: run_simready_job
 
-    - run_job:
+    - run_simready_job:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + simJobName}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+        result: simExec
+        next: run_usd_job
+
+    - run_usd_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + usdJobName}
           body:
             overrides:
               containerOverrides:
@@ -54,7 +72,7 @@ main:
         next: done
 
     - done:
-        return: ${"usd-assembly-job started for " + object}
+        return: ${"simready + usd-assembly jobs started for " + object}
 
     - skip:
         return: ${"usd assembly skip " + object}

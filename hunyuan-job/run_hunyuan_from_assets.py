@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, List
 
 from PIL import Image
+import trimesh  # for OBJ -> GLB without Blender
 
 # Root where GCS is mounted in the container
 GCS_ROOT = Path("/mnt/gcs")
@@ -190,18 +191,30 @@ def main() -> None:
         model_obj_path = out_dir / "model.obj"
         model_glb_path = out_dir / "model.glb"
 
+        # IMPORTANT: disable Hunyuan's internal GLB export (uses Blender/bpy),
+        # we will convert OBJ -> GLB ourselves using trimesh.
         textured_obj_path = paint_pipeline(
             mesh_path=str(mesh_glb_path),
             image_path=str(image_path),
             output_mesh_path=str(model_obj_path),
-            save_glb=True,
+            save_glb=False,   # <--- NO Blender-based GLB export
         )
 
-        # Hunyuan saves a GLB next to the OBJ; make sure we know where it is
-        if not model_glb_path.is_file():
-            candidate = Path(str(textured_obj_path).replace(".obj", ".glb"))
-            if candidate.is_file():
-                model_glb_path = candidate
+        # Hunyuan returns the OBJ path; ensure we have it
+        if textured_obj_path is None:
+            textured_obj_path = model_obj_path
+
+        # --- Convert OBJ -> GLB without Blender (using trimesh) -----
+        try:
+            # Using scene mode to keep materials/textures if present
+            scene = trimesh.load(str(textured_obj_path), force='scene')
+            scene.export(str(model_glb_path))
+            print(f"[HUNYUAN] Converted OBJ -> GLB for obj {oid} -> {model_glb_path}")
+        except Exception as e:
+            print(
+                f"[HUNYUAN] WARNING: failed to convert OBJ to GLB for obj {oid}: {e}",
+                file=sys.stderr,
+            )
 
         if model_glb_path.is_file():
             print(f"[HUNYUAN] Saved textured model.glb for obj {oid} -> {model_glb_path}")
