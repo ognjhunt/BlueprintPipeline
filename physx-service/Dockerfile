@@ -1,18 +1,23 @@
-# physx-service/Dockerfile
 FROM python:3.10-slim
 
-RUN apt-get update && apt-get install -y \
-    build-essential \
+# Basic build tools for trimesh (via numpy); keep it minimal.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install FastAPI + Uvicorn
-RUN pip install --no-cache-dir fastapi uvicorn[standard]
+# Install just what we need to run a tiny HTTP service and build a cube GLB.
+RUN pip install --no-cache-dir \
+    flask \
+    trimesh \
+    numpy
 
-COPY main.py /app/main.py
+# Our service implementation
+COPY physx_service.py /app/physx_service.py
 
-# Cloud Run listens on $PORT; default to 8080.
+# Cloud Run expects the server to listen on this port
 ENV PORT=8080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Start the Flask app
+CMD ["python", "physx_service.py"]
