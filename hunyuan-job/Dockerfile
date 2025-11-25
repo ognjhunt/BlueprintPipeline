@@ -14,7 +14,7 @@ ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# --- PyTorch 2.5.1 + CUDA 12.4 (as recommended by Hunyuan) ---------
+# --- PyTorch 2.5.1 + CUDA 12.4 -------------------------------------
 RUN pip install --no-cache-dir --prefer-binary \
     torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
     --index-url https://download.pytorch.org/whl/cu124
@@ -27,8 +27,11 @@ RUN git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git ${HUNYUAN_REP
 WORKDIR ${HUNYUAN_REPO_ROOT}
 
 # --- Install Python deps for Hunyuan3D-2.1 --------------------------
-# requirements.txt includes an extra index for Blender bpy wheels.
-RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+# requirements.txt pulls in Blender's bpy and onnxruntime, which are
+# currently not installable in this environment and are not needed
+# for the shape + texture pipelines we use.
+RUN sed -e '/^bpy==/d' -e '/^onnxruntime==/d' requirements.txt > /tmp/requirements.no_bpy_onnx.txt \
+ && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.no_bpy_onnx.txt
 
 # Optional: usd-core for GLB -> USDZ conversion (usd_from_gltf CLI)
 RUN pip install --no-cache-dir --prefer-binary "usd-core>=24.8"
