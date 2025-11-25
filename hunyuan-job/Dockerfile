@@ -15,7 +15,7 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # --- PyTorch 2.5.1 + CUDA 12.4 -------------------------------------
-# Matches Hunyuan3D 2.1 recommendations.
+# Matches Hunyuan3D 2.1 recommendations. 
 RUN pip install --no-cache-dir --prefer-binary \
     torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
     --index-url https://download.pytorch.org/whl/cu124
@@ -32,18 +32,22 @@ RUN git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git ${HUNYUAN_REP
 WORKDIR ${HUNYUAN_REPO_ROOT}
 
 # --- Install Python deps for Hunyuan3D-2.1 --------------------------
-# requirements.txt pulls in Blender's bpy and onnxruntime, which are
-# not installable in Cloud Run and are not needed for our shape+texture
-# pipeline. We drop just those lines and keep the rest.
+# Upstream requirements.txt pins:
+#   - bpy==4.0        (Blender; not usable in Cloud Run)
+#   - onnxruntime==1.16.3 (old pin, no longer published for some platforms) 
+#
+# We drop JUST those lines, then install a CURRENT onnxruntime explicitly
+# so rembg/background removal still works. 
 RUN sed -e '/^bpy==/d' -e '/^onnxruntime==/d' requirements.txt > /tmp/requirements.no_bpy_onnx.txt \
- && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.no_bpy_onnx.txt
+ && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.no_bpy_onnx.txt \
+ && pip install --no-cache-dir --prefer-binary "onnxruntime>=1.17.0"
 
 # Optional: usd-core for GLB -> USDZ conversion (usd_from_gltf CLI)
 RUN pip install --no-cache-dir --prefer-binary "usd-core>=24.8"
 
 # --- Build custom rasterizer + inpainting extension -----------------
-# IMPORTANT FIX: --no-build-isolation lets setup.py see the torch we
-# installed earlier, avoiding "ModuleNotFoundError: No module named 'torch'".
+# IMPORTANT: --no-build-isolation lets setup.py see torch from /opt/venv,
+# avoiding "ModuleNotFoundError: No module named 'torch'" during build.
 RUN cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/custom_rasterizer && \
     pip install --no-cache-dir --prefer-binary --no-build-isolation -e . && \
     cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/DifferentiableRenderer && \
