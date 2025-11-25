@@ -1,0 +1,67 @@
+FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04
+
+# --- System deps ----------------------------------------------------
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    python3 python3-venv python3-dev \
+    git wget curl \
+    build-essential cmake ninja-build \
+    libglib2.0-0 libgl1 libsm6 libxext6 libxrender1 libegl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Python venv (Python 3.10 from Ubuntu 22.04) --------------------
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# --- PyTorch 2.5.1 + CUDA 12.4 (as recommended by Hunyuan) ---------
+RUN pip install --no-cache-dir --prefer-binary \
+    torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# --- Clone Hunyuan3D-2.1 -------------------------------------------
+ENV HUNYUAN_REPO_ROOT=/app/Hunyuan3D-2.1
+
+RUN git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git ${HUNYUAN_REPO_ROOT} || true
+
+WORKDIR ${HUNYUAN_REPO_ROOT}
+
+# --- Install Python deps for Hunyuan3D-2.1 --------------------------
+# requirements.txt includes an extra index for Blender bpy wheels.
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+
+# Optional: usd-core for GLB -> USDZ conversion (usd_from_gltf CLI)
+RUN pip install --no-cache-dir --prefer-binary "usd-core>=24.8"
+
+# --- Build custom rasterizer + inpainting extension -----------------
+RUN cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/custom_rasterizer && \
+    pip install --no-cache-dir -e . && \
+    cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/DifferentiableRenderer && \
+    bash compile_mesh_painter.sh
+
+# --- Download RealESRGAN weights for super-res in paint pipeline ----
+RUN mkdir -p ${HUNYUAN_REPO_ROOT}/hy3dpaint/ckpt && \
+    wget -q https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth \
+         -O ${HUNYUAN_REPO_ROOT}/hy3dpaint/ckpt/RealESRGAN_x4plus.pth
+
+# --- Common runtime env ---------------------------------------------
+ENV HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HOME=/mnt/gcs/hf-cache \
+    TRANSFORMERS_CACHE=/mnt/gcs/hf-cache \
+    TORCH_HOME=/tmp/torch-cache \
+    CUDA_HOME=/usr/local/cuda \
+    CONDA_PREFIX=/usr/local/cuda \
+    HUNYUAN_MODEL_PATH="tencent/Hunyuan3D-2.1"
+
+# Make sure Python can see the Hunyuan packages
+ENV PYTHONPATH="${HUNYUAN_REPO_ROOT}:${HUNYUAN_REPO_ROOT}/hy3dshape:${HUNYUAN_REPO_ROOT}/hy3dpaint:${PYTHONPATH}"
+
+WORKDIR /app
+
+# --- Job entry scripts ----------------------------------------------
+COPY run_hunyuan_from_assets.py /app/run_hunyuan_from_assets.py
+COPY run_hunyuan.sh /app/run_hunyuan.sh
+
+RUN chmod +x /app/run_hunyuan.sh
+
+ENTRYPOINT ["/app/run_hunyuan.sh"]
