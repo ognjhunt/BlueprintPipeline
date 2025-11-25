@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Set
 
 from PIL import Image
 import trimesh  # for OBJ -> GLB without Blender
@@ -21,6 +21,33 @@ HUNYUAN_REPO_ROOT = Path(os.getenv("HUNYUAN_REPO_ROOT", "/app/Hunyuan3D-2.1"))
 sys.path.insert(0, str(HUNYUAN_REPO_ROOT))
 sys.path.insert(0, str(HUNYUAN_REPO_ROOT / "hy3dshape"))
 sys.path.insert(0, str(HUNYUAN_REPO_ROOT / "hy3dpaint"))
+
+# -------------------------------------------------------------------
+# Torchvision compatibility shim (fixes basicsr/RealESRGAN imports)
+# This uses Tencent's official torchvision_fix.py from the repo.
+# -------------------------------------------------------------------
+try:
+    from torchvision_fix import apply_fix as _torchvision_apply_fix  # type: ignore
+except Exception as e:
+    print(
+        f"[HUNYUAN] WARNING: torchvision_fix not available ({e}); "
+        f"RealESRGAN/basicsr may fail with functional_tensor import errors.",
+        file=sys.stderr,
+    )
+else:
+    try:
+        if _torchvision_apply_fix():
+            print("[HUNYUAN] Torchvision functional_tensor compatibility fix applied")
+        else:
+            print(
+                "[HUNYUAN] WARNING: torchvision_fix.apply_fix() reported failure",
+                file=sys.stderr,
+            )
+    except Exception as e:
+        print(
+            f"[HUNYUAN] WARNING: error while applying torchvision_fix: {e}",
+            file=sys.stderr,
+        )
 
 from hy3dshape.rembg import BackgroundRemover
 from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
@@ -120,53 +147,64 @@ def main() -> None:
     objects = plan.get("objects", [])
     print(f"[HUNYUAN] Loaded plan with {len(objects)} objects")
 
-    # --- Load Hunyuan pipelines once --------------------------------
+    # Focus only on static objects with IDs
+    static_objects: List[dict] = [
+        obj for obj in objects
+        if obj.get("type") == "static" and obj.get("id") is not None
+    ]
+    print(f"[HUNYUAN] Found {len(static_objects)} static objects to process")
+
+    if not static_objects:
+        print("[HUNYUAN] No static objects to process; exiting.")
+        return
+
+    # ------------------------------------------------------------------
+    # Stage 1: Shape generation (image -> mesh.glb for each static obj)
+    # ------------------------------------------------------------------
     print("[HUNYUAN] Loading shape-generation pipeline...")
     pipeline_shapegen = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(model_path)
     print("[HUNYUAN] Shape pipeline loaded")
 
-    print("[HUNYUAN] Configuring texture (paint) pipeline...")
-    conf = Hunyuan3DPaintConfig(max_num_view=max_num_view, resolution=resolution)
-    # Make sure paths are correct inside the cloned repo
-    conf.realesrgan_ckpt_path = str(
-        HUNYUAN_REPO_ROOT / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth"
-    )
-    conf.multiview_cfg_path = str(
-        HUNYUAN_REPO_ROOT / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml"
-    )
-    # This matches examples which use a custom pipeline name under hy3dpaint :contentReference[oaicite:4]{index=4}
-    conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
-    paint_pipeline = Hunyuan3DPaintPipeline(conf)
-    print("[HUNYUAN] Paint pipeline loaded")
-
-    # Background remover for RGB images
     rembg = BackgroundRemover()
+    successful_obj_ids: Set[str] = set()
 
-    # --- Process each static object ---------------------------------
-    for obj in objects:
-        if obj.get("type") != "static":
-            continue
-
-        oid = obj.get("id")
-        if oid is None:
-            continue
+    for obj in static_objects:
+        oid = obj["id"]
 
         image_path = pick_reference_image(GCS_ROOT, obj)
         if image_path is None:
-            print(f"[HUNYUAN] WARNING: no reference image found for obj {oid}", file=sys.stderr)
+            print(
+                f"[HUNYUAN] WARNING: no reference image found for obj {oid} (shape stage)",
+                file=sys.stderr,
+            )
             continue
 
-        print(f"[HUNYUAN] Generating mesh for obj {oid} from {image_path}")
+        print(f"[HUNYUAN] [Shape] Generating mesh for obj {oid} from {image_path}")
 
-        # Load and pre-process reference image (RGBA + optional background removal)
-        image = Image.open(image_path)
+        try:
+            image = Image.open(image_path)
+        except Exception as e:
+            print(
+                f"[HUNYUAN] ERROR: failed to open image for obj {oid}: {e}",
+                file=sys.stderr,
+            )
+            continue
+
+        # RGBA + optional background removal
         if image.mode == "RGB":
             image = rembg(image)
         if image.mode != "RGBA":
             image = image.convert("RGBA")
 
         # --- Shape generation ---------------------------------------
-        meshes = pipeline_shapegen(image=image, num_inference_steps=num_steps)
+        try:
+            meshes = pipeline_shapegen(image=image, num_inference_steps=num_steps)
+        except Exception as e:
+            print(
+                f"[HUNYUAN] ERROR: shape pipeline failed for obj {oid}: {e}",
+                file=sys.stderr,
+            )
+            continue
 
         # Handle both [mesh] and [[mesh]] styles robustly
         if isinstance(meshes, list):
@@ -179,30 +217,111 @@ def main() -> None:
             mesh = meshes
 
         if mesh is None:
-            print(f"[HUNYUAN] ERROR: shape pipeline returned no mesh for obj {oid}", file=sys.stderr)
+            print(
+                f"[HUNYUAN] ERROR: shape pipeline returned no mesh for obj {oid}",
+                file=sys.stderr,
+            )
             continue
 
         out_dir = assets_root / f"obj_{oid}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         mesh_glb_path = out_dir / "mesh.glb"
-        mesh.export(str(mesh_glb_path))
-        print(f"[HUNYUAN] Saved mesh.glb for obj {oid} -> {mesh_glb_path}")
+        try:
+            mesh.export(str(mesh_glb_path))
+        except Exception as e:
+            print(
+                f"[HUNYUAN] ERROR: failed to export mesh.glb for obj {oid}: {e}",
+                file=sys.stderr,
+            )
+            continue
 
-        # --- Texture generation (paint) ------------------------------
-        print(f"[HUNYUAN] Texturing mesh for obj {oid}")
+        print(f"[HUNYUAN] Saved mesh.glb for obj {oid} -> {mesh_glb_path}")
+        successful_obj_ids.add(oid)
+
+    print(
+        f"[HUNYUAN] Shape generation finished. "
+        f"{len(successful_obj_ids)}/{len(static_objects)} static objects succeeded."
+    )
+
+    # Free shape pipeline GPU memory before loading the paint model
+    try:
+        import torch
+    except ImportError:
+        torch = None  # type: ignore[assignment]
+
+    del pipeline_shapegen
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("[HUNYUAN] Cleared CUDA cache after shape generation")
+
+    # ------------------------------------------------------------------
+    # Stage 2: Texture generation (mesh.glb -> textured model.glb/usdz)
+    # ------------------------------------------------------------------
+    print("[HUNYUAN] Configuring texture (paint) pipeline...")
+    conf = Hunyuan3DPaintConfig(max_num_view=max_num_view, resolution=resolution)
+    # Make sure paths are correct inside the cloned repo
+    conf.realesrgan_ckpt_path = str(
+        HUNYUAN_REPO_ROOT / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth"
+    )
+    conf.multiview_cfg_path = str(
+        HUNYUAN_REPO_ROOT / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml"
+    )
+    # This matches examples which use a custom pipeline name under hy3dpaint
+    conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
+
+    paint_pipeline = Hunyuan3DPaintPipeline(conf)
+    print("[HUNYUAN] Paint pipeline loaded")
+
+    for obj in static_objects:
+        oid = obj["id"]
+        if oid not in successful_obj_ids:
+            print(
+                f"[HUNYUAN] Skipping texture for obj {oid} "
+                f"(no mesh.glb from shape stage)",
+                file=sys.stderr,
+            )
+            continue
+
+        image_path = pick_reference_image(GCS_ROOT, obj)
+        if image_path is None:
+            print(
+                f"[HUNYUAN] WARNING: no reference image found for obj {oid} "
+                f"during texture stage",
+                file=sys.stderr,
+            )
+            continue
+
+        out_dir = assets_root / f"obj_{oid}"
+        mesh_glb_path = out_dir / "mesh.glb"
+
+        if not mesh_glb_path.is_file():
+            print(
+                f"[HUNYUAN] WARNING: mesh.glb missing for obj {oid} at {mesh_glb_path}",
+                file=sys.stderr,
+            )
+            continue
+
+        print(f"[HUNYUAN] [Texture] Texturing mesh for obj {oid}")
 
         model_obj_path = out_dir / "model.obj"
         model_glb_path = out_dir / "model.glb"
 
         # IMPORTANT: disable Hunyuan's internal GLB export (uses Blender/bpy),
-        # we will convert OBJ -> GLB ourselves using trimesh.
-        textured_obj_path = paint_pipeline(
-            mesh_path=str(mesh_glb_path),
-            image_path=str(image_path),
-            output_mesh_path=str(model_obj_path),
-            save_glb=False,   # NO Blender-based GLB export
-        )
+        # we convert OBJ -> GLB ourselves using trimesh.
+        try:
+            textured_obj_path = paint_pipeline(
+                mesh_path=str(mesh_glb_path),
+                image_path=str(image_path),
+                output_mesh_path=str(model_obj_path),
+                save_glb=False,   # NO Blender-based GLB export
+            )
+        except Exception as e:
+            print(
+                f"[HUNYUAN] ERROR: paint pipeline failed for obj {oid}: {e}",
+                file=sys.stderr,
+            )
+            continue
 
         # Hunyuan returns the OBJ path; ensure we have it
         if textured_obj_path is None:
@@ -221,9 +340,14 @@ def main() -> None:
             )
 
         if model_glb_path.is_file():
-            print(f"[HUNYUAN] Saved textured model.glb for obj {oid} -> {model_glb_path}")
+            print(
+                f"[HUNYUAN] Saved textured model.glb for obj {oid} -> {model_glb_path}"
+            )
         else:
-            print(f"[HUNYUAN] WARNING: textured GLB not found for obj {oid}", file=sys.stderr)
+            print(
+                f"[HUNYUAN] WARNING: textured GLB not found for obj {oid}",
+                file=sys.stderr,
+            )
 
         # Keep SAM3D-style naming: asset.glb as an alias for model.glb
         asset_glb_path = out_dir / "asset.glb"
