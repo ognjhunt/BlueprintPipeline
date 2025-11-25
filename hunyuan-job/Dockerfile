@@ -15,9 +15,14 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # --- PyTorch 2.5.1 + CUDA 12.4 -------------------------------------
+# Matches Hunyuan3D 2.1 recommendations.
 RUN pip install --no-cache-dir --prefer-binary \
     torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
     --index-url https://download.pytorch.org/whl/cu124
+
+# Help CUDA extensions (like custom_rasterizer) compile without a GPU
+# visible at build time (L4 / A100-ish archs).
+ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9"
 
 # --- Clone Hunyuan3D-2.1 -------------------------------------------
 ENV HUNYUAN_REPO_ROOT=/app/Hunyuan3D-2.1
@@ -28,8 +33,8 @@ WORKDIR ${HUNYUAN_REPO_ROOT}
 
 # --- Install Python deps for Hunyuan3D-2.1 --------------------------
 # requirements.txt pulls in Blender's bpy and onnxruntime, which are
-# currently not installable in this environment and are not needed
-# for the shape + texture pipelines we use.
+# not installable in Cloud Run and are not needed for our shape+texture
+# pipeline. We drop just those lines and keep the rest.
 RUN sed -e '/^bpy==/d' -e '/^onnxruntime==/d' requirements.txt > /tmp/requirements.no_bpy_onnx.txt \
  && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.no_bpy_onnx.txt
 
@@ -37,8 +42,10 @@ RUN sed -e '/^bpy==/d' -e '/^onnxruntime==/d' requirements.txt > /tmp/requiremen
 RUN pip install --no-cache-dir --prefer-binary "usd-core>=24.8"
 
 # --- Build custom rasterizer + inpainting extension -----------------
+# IMPORTANT FIX: --no-build-isolation lets setup.py see the torch we
+# installed earlier, avoiding "ModuleNotFoundError: No module named 'torch'".
 RUN cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/custom_rasterizer && \
-    pip install --no-cache-dir -e . && \
+    pip install --no-cache-dir --prefer-binary --no-build-isolation -e . && \
     cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/DifferentiableRenderer && \
     bash compile_mesh_painter.sh
 
