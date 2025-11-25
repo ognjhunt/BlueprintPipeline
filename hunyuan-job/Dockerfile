@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04
 
 # --- System deps ----------------------------------------------------
@@ -15,7 +16,7 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # --- PyTorch 2.5.1 + CUDA 12.4 -------------------------------------
-# Matches Hunyuan3D 2.1 recommendations. :contentReference[oaicite:1]{index=1}
+# Matches Hunyuan3D 2.1 recommendations.
 RUN pip install --no-cache-dir --prefer-binary \
     torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
     --index-url https://download.pytorch.org/whl/cu124
@@ -37,7 +38,7 @@ WORKDIR ${HUNYUAN_REPO_ROOT}
 #   - onnxruntime==1.16.3 (old pin, no longer published for some platforms)
 #
 # We drop JUST those lines, then install a CURRENT onnxruntime explicitly
-# so rembg/background removal still works. :contentReference[oaicite:2]{index=2}
+# so rembg/background removal still works.
 RUN sed -e '/^bpy==/d' -e '/^onnxruntime==/d' requirements.txt > /tmp/requirements.no_bpy_onnx.txt \
  && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.no_bpy_onnx.txt \
  && pip install --no-cache-dir --prefer-binary "onnxruntime>=1.17.0"
@@ -49,27 +50,17 @@ RUN pip install --no-cache-dir --prefer-binary "usd-core>=24.8"
 # Hunyuan's mesh_utils.py imports bpy at top-level, which crashes if Blender
 # is not installed. Here we rewrite that import into a try/except so the
 # module can be imported without bpy, and GLB export is simply disabled.
-RUN python - << 'PY'
-from pathlib import Path
-
-path = Path("hy3dpaint/DifferentiableRenderer/mesh_utils.py")
-text = path.read_text()
-
-if "import bpy" in text and "Bpy IO CAN NOT BE Imported!!! GLB export is disabled (no Blender)." not in text:
-    text = text.replace(
-        "import bpy",
-        "try:\\n"
-        "    import bpy\\n"
-        "except Exception:\\n"
-        "    bpy = None\\n"
-        "    print('Bpy IO CAN NOT BE Imported!!! GLB export is disabled (no Blender).', flush=True)"
-    )
-    path.write_text(text)
-PY
+# FIXED: Used 'python -c' instead of heredoc to prevent Docker parser errors.
+RUN python3 -c "from pathlib import Path; \
+    p = Path('hy3dpaint/DifferentiableRenderer/mesh_utils.py'); \
+    txt = p.read_text(); \
+    repl = 'try:\n    import bpy\nexcept Exception:\n    bpy = None\n    print(\"No Blender, GLB export disabled.\", flush=True)'; \
+    txt = txt.replace('import bpy', repl); \
+    p.write_text(txt)"
 
 # --- Build custom rasterizer + inpainting extension -----------------
 # IMPORTANT: --no-build-isolation lets setup.py see torch from /opt/venv,
-# avoiding "ModuleNotFoundError: No module named 'torch'" during build. :contentReference[oaicite:3]{index=3}
+# avoiding "ModuleNotFoundError: No module named 'torch'" during build.
 RUN cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/custom_rasterizer && \
     pip install --no-cache-dir --prefer-binary --no-build-isolation -e . && \
     cd ${HUNYUAN_REPO_ROOT}/hy3dpaint/DifferentiableRenderer && \
