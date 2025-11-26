@@ -4,16 +4,17 @@
 FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04
 
 # ---------------------------------------------------------
-# System deps (enough to build the usual CUDA/PyTorch wheels)
+# System deps
 # ---------------------------------------------------------
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-venv python3-dev \
     git wget curl \
-    build-essential pkg-config \
+    build-essential cmake ninja-build pkg-config \
     ffmpeg \
-    libgl1 \
-    ninja-build \
+    libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
+
+ENV CUDA_HOME=/usr/local/cuda
 
 # ---------------------------------------------------------
 # Python venv + tooling
@@ -21,19 +22,18 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
-RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel packaging
 
 # ---------------------------------------------------------
-# 1) Install PyTorch *first*
-#    We use a combo known to work well with TRELLIS in
-#    containerized setups: torch 2.5.0 + cu124 wheels.
+# 1) Install PyTorch (GPU build) FIRST
+#    Torch 2.5.0 + cu124, per official index. :contentReference[oaicite:5]{index=5}
 # ---------------------------------------------------------
 RUN pip install --no-cache-dir \
     torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
     --index-url https://download.pytorch.org/whl/cu124
 
 # ---------------------------------------------------------
-# 2) Clone PhysX-Anything (with submodules: TRELLIS, etc.)
+# 2) Clone PhysX-Anything (with submodules)
 # ---------------------------------------------------------
 ENV PHYSX_ROOT=/opt/physx_anything
 WORKDIR /opt
@@ -44,77 +44,55 @@ RUN git clone --recurse-submodules \
 WORKDIR ${PHYSX_ROOT}
 
 # ---------------------------------------------------------
-# 3) Heavy CUDA stack: Kaolin + TRELLIS setup.sh
+# 3) Kaolin from NVIDIA S3 for torch 2.5.0 + cu124
+#    (0.15.0 does NOT exist for this combo; use 0.17.0). :contentReference[oaicite:6]{index=6}
 # ---------------------------------------------------------
-# Kaolin 0.15.0 from NVIDIA's wheel index for torch-2.5.0/cu121.
-# This fixes the "No matching distribution found for kaolin==0.15.0"
-# error you hit when relying on plain PyPI.
 RUN pip install --no-cache-dir \
-    "kaolin==0.15.0" \
-    -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.0_cu121.html
-
-# Use TRELLIS / PhysX setup.sh to install:
-#   - xformers
-#   - flash-attn
-#   - diffoctreerast
-#   - spconv (+ cumm, pccm)
-#   - mip-splatting (diff-gaussian-rasterization + simple-knn)
-#   - kaolin bits
-#   - nvdiffrast
-# We *do not* pass --new-env so it installs into the current venv.
-RUN bash -lc ". ./setup.sh --basic --xformers --flash-attn --diffoctreerast \
-                         --spconv --mipgaussian --kaolin --nvdiffrast"
+    "kaolin==0.17.0" \
+    -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.0_cu124.html
 
 # ---------------------------------------------------------
-# 4) Light-weight Python deps from patched requirements
-#    (strip cluster-local wheels + heavy CUDA extensions)
+# 4) Patch requirements.txt IN PLACE so any internal
+#    'pip install -r requirements.txt' sees a sane file
 # ---------------------------------------------------------
 COPY patch_requirements.py /tmp/patch_requirements.py
-
-# Write a cleaned-up requirements file alongside the original.
-RUN python /tmp/patch_requirements.py requirements.txt requirements.patched.txt
-
-# Install only the "safe" / generic deps (numpy, pandas, mmcv, etc.)
-RUN pip install --no-cache-dir -r requirements.patched.txt
+RUN python /tmp/patch_requirements.py requirements.txt
 
 # ---------------------------------------------------------
-# 5) Extra CUDA ops that TRELLIS doesn't manage
+# 5) Use setup.sh to install the heavy CUDA stack
+#    as recommended by the PhysX-Anything/TRELLIS docs. :contentReference[oaicite:7]{index=7}
 # ---------------------------------------------------------
-# chamferdist needs torch available during its build, so we
-# disable build isolation.
-RUN pip install --no-cache-dir --no-build-isolation chamferdist==1.0.3
+SHELL ["/bin/bash", "-lc"]
 
-# CARAFE
-RUN pip install --no-cache-dir --no-build-isolation --no-deps \
-    "carafe @ git+https://github.com/myownskyW7/CARAFE.git@aae89996131bcdb63d673c11db381bface05e751"
-
-# CuVoxelization
-RUN pip install --no-cache-dir --no-build-isolation --no-deps \
-    "CuVoxelization @ git+https://github.com/lzhnb/CuVoxelization.git"
-
-# EMD from MSN repo
-RUN pip install --no-cache-dir --no-build-isolation --no-deps \
-    "git+https://github.com/Colin97/MSN-Point-Cloud-Completion.git#subdirectory=emd"
-
-# PointNet2 ops
-RUN pip install --no-cache-dir --no-build-isolation --no-deps \
-    "git+https://github.com/erikwijmans/Pointnet2_PyTorch.git#egg=pointnet2_ops&subdirectory=pointnet2_ops_lib"
+RUN . ./setup.sh \
+      --basic \
+      --xformers \
+      --flash-attn \
+      --diffoctreerast \
+      --spconv \
+      --mipgaussian \
+      --kaolin \
+      --nvdiffrast
 
 # ---------------------------------------------------------
-# 6) Download PhysX-Anything/TRELLIS checkpoints
+# 6) Qwen2.5 deps (as in PhysX-Anything README) :contentReference[oaicite:8]{index=8}
 # ---------------------------------------------------------
-RUN python download.py
+RUN pip install --no-cache-dir \
+      'transformers==4.50.0' \
+      qwen-vl-utils \
+      'accelerate>=0.26.0'
+
+# Optionally download model weights (if the repo provides this script).
+RUN if [ -f download.py ]; then python download.py; fi
 
 # ---------------------------------------------------------
 # 7) Your Flask wrapper service
 # ---------------------------------------------------------
 WORKDIR /app
-
 RUN pip install --no-cache-dir flask
 
 COPY run_physx_anything_pipeline.py ${PHYSX_ROOT}/run_physx_anything_pipeline.py
 COPY physx_service.py /app/physx_service.py
 
 ENV PORT=8080
-
 CMD ["python", "physx_service.py"]
