@@ -4,11 +4,15 @@
 FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04
 
 # --- System deps ----------------------------------------------------
-# Minimal but enough to build common Python wheels (torch, CUDA extensions, etc.)
+# Minimal but enough to build common Python wheels (torch, CUDA extensions,
+# PyAV/FFmpeg, etc.)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-venv python3-dev \
     git wget curl \
-    build-essential \
+    build-essential pkg-config \
+    ffmpeg \
+    libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
+    libswresample-dev libswscale-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Python venv ----------------------------------------------------
@@ -20,8 +24,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # -------------------------------------------------------------------
 # Install PyTorch FIRST so any CUDA extensions (CARAFE, CuVoxelization,
-# mip-splatting / diff-gaussian-rasterization, etc.) that import torch
-# in setup.py have it available.
+# chamferdist, etc.) that import torch in setup.py have it available.
 # -------------------------------------------------------------------
 RUN pip install --no-cache-dir torch torchvision torchaudio
 
@@ -42,7 +45,10 @@ COPY patch_requirements.py /tmp/patch_requirements.py
 RUN python /tmp/patch_requirements.py requirements.txt
 
 # 3) Install Python dependencies from the (patched) requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+#    IMPORTANT: we disable build isolation so that packages like
+#    chamferdist, which expect torch to already be installed, can
+#    import torch during their build step.
+RUN pip install --no-cache-dir --no-build-isolation -r requirements.txt
 
 # 3b) Manually install CARAFE at the commit used by PhysX-Anything.
 # We do this *after* torch is installed, and with build isolation
