@@ -78,7 +78,8 @@ ENV HF_HUB_DISABLE_TELEMETRY=1 \
     TORCH_HOME=/tmp/torch-cache \
     CUDA_HOME=/usr/local/cuda \
     CONDA_PREFIX=/usr/local/cuda \
-    HUNYUAN_MODEL_PATH="tencent/Hunyuan3D-2.1"
+    HUNYUAN_MODEL_PATH="tencent/Hunyuan3D-2.1" \
+    PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # Make sure Python can see the Hunyuan packages
 ENV PYTHONPATH="${HUNYUAN_REPO_ROOT}:${HUNYUAN_REPO_ROOT}/hy3dshape:${HUNYUAN_REPO_ROOT}/hy3dpaint:${PYTHONPATH}"
