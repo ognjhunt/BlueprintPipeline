@@ -160,103 +160,145 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # Stage 1: Shape generation (image -> mesh.glb for each static obj)
+    # BUT: we SKIP objects that already have a valid mesh.glb on GCS.
     # ------------------------------------------------------------------
-    print("[HUNYUAN] Loading shape-generation pipeline...")
-    pipeline_shapegen = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(model_path)
-    print("[HUNYUAN] Shape pipeline loaded")
-
-    rembg = BackgroundRemover()
     successful_obj_ids: Set[str] = set()
+    objects_needing_shape: List[dict] = []
 
     for obj in static_objects:
         oid = obj["id"]
-
-        image_path = pick_reference_image(GCS_ROOT, obj)
-        if image_path is None:
-            print(
-                f"[HUNYUAN] WARNING: no reference image found for obj {oid} (shape stage)",
-                file=sys.stderr,
-            )
-            continue
-
-        print(f"[HUNYUAN] [Shape] Generating mesh for obj {oid} from {image_path}")
-
-        try:
-            image = Image.open(image_path)
-        except Exception as e:
-            print(
-                f"[HUNYUAN] ERROR: failed to open image for obj {oid}: {e}",
-                file=sys.stderr,
-            )
-            continue
-
-        # RGBA + optional background removal
-        if image.mode == "RGB":
-            image = rembg(image)
-        if image.mode != "RGBA":
-            image = image.convert("RGBA")
-
-        # --- Shape generation ---------------------------------------
-        try:
-            meshes = pipeline_shapegen(image=image, num_inference_steps=num_steps)
-        except Exception as e:
-            print(
-                f"[HUNYUAN] ERROR: shape pipeline failed for obj {oid}: {e}",
-                file=sys.stderr,
-            )
-            continue
-
-        # Handle both [mesh] and [[mesh]] styles robustly
-        if isinstance(meshes, list):
-            first = meshes[0] if meshes else None
-            if isinstance(first, list):
-                mesh = first[0] if first else None
-            else:
-                mesh = first
-        else:
-            mesh = meshes
-
-        if mesh is None:
-            print(
-                f"[HUNYUAN] ERROR: shape pipeline returned no mesh for obj {oid}",
-                file=sys.stderr,
-            )
-            continue
-
         out_dir = assets_root / f"obj_{oid}"
-        out_dir.mkdir(parents=True, exist_ok=True)
-
         mesh_glb_path = out_dir / "mesh.glb"
-        try:
-            mesh.export(str(mesh_glb_path))
-        except Exception as e:
+
+        size = 0
+        if mesh_glb_path.is_file():
+            try:
+                size = mesh_glb_path.stat().st_size
+            except OSError:
+                size = 0
+
+        if size > 1024:
+            # Treat an existing non-trivial mesh.glb as "shape done"
             print(
-                f"[HUNYUAN] ERROR: failed to export mesh.glb for obj {oid}: {e}",
-                file=sys.stderr,
+                f"[HUNYUAN] mesh.glb already exists for obj {oid} "
+                f"({size} bytes); skipping shape generation for this object."
             )
-            continue
+            successful_obj_ids.add(oid)
+        else:
+            objects_needing_shape.append(obj)
 
-        print(f"[HUNYUAN] Saved mesh.glb for obj {oid} -> {mesh_glb_path}")
-        successful_obj_ids.add(oid)
+    if objects_needing_shape:
+        print(
+            f"[HUNYUAN] {len(objects_needing_shape)} objects need shape generation; "
+            f"loading shape-generation pipeline..."
+        )
+        pipeline_shapegen = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(model_path)
+        print("[HUNYUAN] Shape pipeline loaded")
 
-    print(
-        f"[HUNYUAN] Shape generation finished. "
-        f"{len(successful_obj_ids)}/{len(static_objects)} static objects succeeded."
-    )
+        rembg = BackgroundRemover()
 
-    # Free shape pipeline GPU memory before loading the paint model
-    try:
-        import torch
-    except ImportError:
-        torch = None  # type: ignore[assignment]
+        for obj in objects_needing_shape:
+            oid = obj["id"]
 
-    del pipeline_shapegen
-    if torch is not None and torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        print("[HUNYUAN] Cleared CUDA cache after shape generation")
+            image_path = pick_reference_image(GCS_ROOT, obj)
+            if image_path is None:
+                print(
+                    f"[HUNYUAN] WARNING: no reference image found for obj {oid} "
+                    f"(shape stage)",
+                    file=sys.stderr,
+                )
+                continue
+
+            print(f"[HUNYUAN] [Shape] Generating mesh for obj {oid} from {image_path}")
+
+            try:
+                image = Image.open(image_path)
+            except Exception as e:
+                print(
+                    f"[HUNYUAN] ERROR: failed to open image for obj {oid}: {e}",
+                    file=sys.stderr,
+                )
+                continue
+
+            # RGBA + optional background removal
+            if image.mode == "RGB":
+                image = rembg(image)
+            if image.mode != "RGBA":
+                image = image.convert("RGBA")
+
+            # --- Shape generation ---------------------------------------
+            try:
+                meshes = pipeline_shapegen(image=image, num_inference_steps=num_steps)
+            except Exception as e:
+                print(
+                    f"[HUNYUAN] ERROR: shape pipeline failed for obj {oid}: {e}",
+                    file=sys.stderr,
+                )
+                continue
+
+            # Handle both [mesh] and [[mesh]] styles robustly
+            if isinstance(meshes, list):
+                first = meshes[0] if meshes else None
+                if isinstance(first, list):
+                    mesh = first[0] if first else None
+                else:
+                    mesh = first
+            else:
+                mesh = meshes
+
+            if mesh is None:
+                print(
+                    f"[HUNYUAN] ERROR: shape pipeline returned no mesh for obj {oid}",
+                    file=sys.stderr,
+                )
+                continue
+
+            out_dir = assets_root / f"obj_{oid}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            mesh_glb_path = out_dir / "mesh.glb"
+            try:
+                mesh.export(str(mesh_glb_path))
+            except Exception as e:
+                print(
+                    f"[HUNYUAN] ERROR: failed to export mesh.glb for obj {oid}: {e}",
+                    file=sys.stderr,
+                )
+                continue
+
+            print(f"[HUNYUAN] Saved mesh.glb for obj {oid} -> {mesh_glb_path}")
+            successful_obj_ids.add(oid)
+
+        print(
+            f"[HUNYUAN] Shape generation finished. "
+            f"{len(successful_obj_ids)}/{len(static_objects)} static objects now have meshes."
+        )
+
+        # Free shape pipeline GPU memory before loading the paint model
+        try:
+            import torch
+        except ImportError:
+            torch = None  # type: ignore[assignment]
+
+        # Only delete / clear cache if we actually created the pipeline
+        if "pipeline_shapegen" in locals():
+            del pipeline_shapegen
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print("[HUNYUAN] Cleared CUDA cache after shape generation")
+    else:
+        print(
+            "[HUNYUAN] All static objects already have mesh.glb; "
+            "skipping shape-generation stage."
+        )
+
+    if not successful_obj_ids:
+        print("[HUNYUAN] No meshes were generated or found; skipping texture stage.")
+        return
 
     # ------------------------------------------------------------------
     # Stage 2: Texture generation (mesh.glb -> textured model.glb/usdz)
+    # This stage can be skipped per object if asset.glb already exists.
     # ------------------------------------------------------------------
     print("[HUNYUAN] Configuring texture (paint) pipeline...")
     conf = Hunyuan3DPaintConfig(max_num_view=max_num_view, resolution=resolution)
@@ -276,12 +318,11 @@ def main() -> None:
         paint_pipeline = Hunyuan3DPaintPipeline(conf)
         print("[HUNYUAN] Paint pipeline loaded")
     except ModuleNotFoundError as e:
-        # This is where the 'diffusers_modules.local.modules' error happens
+        # This is where the 'diffusers_modules.local.modules' error used to happen
         print(
             "[HUNYUAN] ERROR: texture pipeline requires custom diffusers dynamic "
-            "modules ('diffusers_modules.local.*') that are not available in this "
-            "Cloud Run environment. Skipping texture stage; meshes will remain "
-            "untextured.",
+            "modules ('diffusers_modules.local.*') that are not available or failed "
+            "to import. Skipping texture stage; meshes will remain untextured.",
             file=sys.stderr,
         )
     except Exception as e:
@@ -318,21 +359,30 @@ def main() -> None:
             )
             continue
 
+        out_dir = assets_root / f"obj_{oid}"
+        mesh_glb_path = out_dir / "mesh.glb"
+        asset_glb_path = out_dir / "asset.glb"
+
+        # If we already have a final asset.glb, don't redo texture
+        if asset_glb_path.is_file():
+            print(
+                f"[HUNYUAN] asset.glb already exists for obj {oid}; "
+                f"skipping texture stage for this object."
+            )
+            continue
+
+        if not mesh_glb_path.is_file():
+            print(
+                f"[HUNYUAN] WARNING: mesh.glb missing for obj {oid} at {mesh_glb_path}",
+                file=sys.stderr,
+            )
+            continue
+
         image_path = pick_reference_image(GCS_ROOT, obj)
         if image_path is None:
             print(
                 f"[HUNYUAN] WARNING: no reference image found for obj {oid} "
                 f"during texture stage",
-                file=sys.stderr,
-            )
-            continue
-
-        out_dir = assets_root / f"obj_{oid}"
-        mesh_glb_path = out_dir / "mesh.glb"
-
-        if not mesh_glb_path.is_file():
-            print(
-                f"[HUNYUAN] WARNING: mesh.glb missing for obj {oid} at {mesh_glb_path}",
                 file=sys.stderr,
             )
             continue
@@ -385,7 +435,6 @@ def main() -> None:
             )
 
         # Keep SAM3D-style naming: asset.glb as an alias for model.glb
-        asset_glb_path = out_dir / "asset.glb"
         if model_glb_path.is_file() and not asset_glb_path.exists():
             shutil.copy(model_glb_path, asset_glb_path)
             print(f"[HUNYUAN] Copied model.glb -> asset.glb for obj {oid}")
