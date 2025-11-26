@@ -15,7 +15,14 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# Upgrade packaging tools
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# -------------------------------------------------------------------
+# Install PyTorch FIRST so any CUDA extensions (CARAFE, mmcv ops, etc.)
+# that import torch in setup.py have it available.:contentReference[oaicite:3]{index=3}
+# -------------------------------------------------------------------
+RUN pip install --no-cache-dir torch torchvision torchaudio
 
 # -------------------------------------------------------------------
 # Install PhysX-Anything into /opt/physx_anything
@@ -35,6 +42,12 @@ RUN python /tmp/patch_requirements.py requirements.txt
 
 # 3) Install Python dependencies from the (patched) requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+
+# 3b) Manually install CARAFE at the commit used by PhysX-Anything.
+# We do this *after* torch is installed, and with build isolation
+# disabled, because CARAFE's setup.py imports torch.:contentReference[oaicite:4]{index=4}
+RUN pip install --no-cache-dir --no-build-isolation --no-deps \
+    "carafe @ git+https://github.com/myownskyW7/CARAFE.git@aae89996131bcdb63d673c11db381bface05e751"
 
 # 4) Download pretrained weights
 RUN python download.py
