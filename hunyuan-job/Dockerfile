@@ -41,7 +41,8 @@ WORKDIR ${HUNYUAN_REPO_ROOT}
 # so rembg/background removal still works.
 RUN sed -e '/^bpy==/d' -e '/^onnxruntime==/d' requirements.txt > /tmp/requirements.no_bpy_onnx.txt \
  && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.no_bpy_onnx.txt \
- && pip install --no-cache-dir --prefer-binary "onnxruntime>=1.17.0"
+ && pip install --no-cache-dir --prefer-binary "onnxruntime>=1.17.0" \
+ && pip install --no-cache-dir --prefer-binary "trimesh"
 
 # Optional: usd-core for GLB -> USDZ conversion (usd_from_gltf CLI)
 RUN pip install --no-cache-dir --prefer-binary "usd-core>=24.8"
@@ -50,11 +51,10 @@ RUN pip install --no-cache-dir --prefer-binary "usd-core>=24.8"
 # Hunyuan's mesh_utils.py imports bpy at top-level, which crashes if Blender
 # is not installed. Here we rewrite that import into a try/except so the
 # module can be imported without bpy, and GLB export is simply disabled.
-# FIXED: Used 'python -c' instead of heredoc to prevent Docker parser errors.
 RUN python3 -c "from pathlib import Path; \
     p = Path('hy3dpaint/DifferentiableRenderer/mesh_utils.py'); \
     txt = p.read_text(); \
-    repl = 'try:\n    import bpy\nexcept Exception:\n    bpy = None\n    print(\"No Blender, GLB export disabled.\", flush=True)'; \
+    repl = 'try:\\n    import bpy\\nexcept Exception:\\n    bpy = None\\n    print(\"No Blender, GLB export disabled.\", flush=True)'; \
     txt = txt.replace('import bpy', repl); \
     p.write_text(txt)"
 

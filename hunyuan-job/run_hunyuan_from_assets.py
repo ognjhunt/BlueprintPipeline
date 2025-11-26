@@ -270,9 +270,44 @@ def main() -> None:
     # This matches examples which use a custom pipeline name under hy3dpaint
     conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
 
-    paint_pipeline = Hunyuan3DPaintPipeline(conf)
-    print("[HUNYUAN] Paint pipeline loaded")
+    # --- SAFE INITIALIZATION WITH FALLBACK --------------------------
+    paint_pipeline = None
+    try:
+        paint_pipeline = Hunyuan3DPaintPipeline(conf)
+        print("[HUNYUAN] Paint pipeline loaded")
+    except ModuleNotFoundError as e:
+        # This is where the 'diffusers_modules.local.modules' error happens
+        print(
+            "[HUNYUAN] ERROR: texture pipeline requires custom diffusers dynamic "
+            "modules ('diffusers_modules.local.*') that are not available in this "
+            "Cloud Run environment. Skipping texture stage; meshes will remain "
+            "untextured.",
+            file=sys.stderr,
+        )
+    except Exception as e:
+        print(
+            f"[HUNYUAN] ERROR: failed to initialize paint pipeline: {e}. "
+            "Skipping texture stage; meshes will remain untextured.",
+            file=sys.stderr,
+        )
 
+    if paint_pipeline is None:
+        # Fallback: at least ensure asset.glb exists for each successful object
+        for obj in static_objects:
+            oid = obj["id"]
+            if oid not in successful_obj_ids:
+                continue
+            out_dir = assets_root / f"obj_{oid}"
+            mesh_glb_path = out_dir / "mesh.glb"
+            asset_glb_path = out_dir / "asset.glb"
+            if mesh_glb_path.is_file() and not asset_glb_path.exists():
+                shutil.copy(mesh_glb_path, asset_glb_path)
+                print(f"[HUNYUAN] (fallback) Copied mesh.glb -> asset.glb for obj {oid}")
+
+        print("[HUNYUAN] Done (shape-only; texture stage skipped).")
+        return
+
+    # --- FULL TEXTURE LOOP (only runs if paint_pipeline loaded) -----
     for obj in static_objects:
         oid = obj["id"]
         if oid not in successful_obj_ids:
