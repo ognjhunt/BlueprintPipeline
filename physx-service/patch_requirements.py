@@ -1,239 +1,162 @@
 #!/usr/bin/env python3
 """
-Patch PhysX-Anything requirements.txt so it can be installed inside
-a clean Docker image (no access to the original /mnt/... or /croot/...
-cluster paths).
+Patch a cluster-exported requirements.txt into something that can be
+installed inside a clean Docker image.
 
-We do a few things:
+Usage:
+    python patch_requirements.py requirements.txt requirements.patched.txt
 
-  * Rewrite local wheel files (file:///.../*.whl) into normal
-    "package==version" pins so pip can fetch them from PyPI.
-
-  * Strip out CUDA / custom extensions that expect a pre-existing local
-    checkout (CARAFE, CuVoxelization, mip-splatting / diff-gaussian-
-    rasterization / simple-knn, diffoctreerast, emd, pointnet2_ops, etc.). 
-    We install the ones we actually need manually in the Dockerfile after 
-    torch is available.
-
-  * Comment out any other bare filesystem paths or file:// URIs so pip
-    doesn't explode on missing /mnt/..., /croot/..., /tmp/extensions/...
-    dirs or conda build caches.
-
-  * Comment out any torch / torchvision / torchaudio entries in
-    requirements.txt, since we install a specific CUDA 12 build of
-    PyTorch explicitly in the Dockerfile.
-
-  * Comment out chamferdist, whose build scripts import torch; we
-    install it manually later with build isolation disabled so it can
-    see the already-installed torch.
+If only one argument is given, it patches the file in place.
 """
 
-import os
 import sys
 from pathlib import Path
 
 
-def patch_requirements(req_file: str) -> None:
-    req = Path(req_file)
-    if not req.is_file():
-        raise SystemExit(f"requirements.txt not found: {req_file}")
+# Packages we install explicitly in the Dockerfile / via setup.sh
+TORCH_PKGS = (
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "triton",
+)
 
-    lines = req.read_text().splitlines()
-    new_lines = []
+# Heavy CUDA / geometry packages handled either by setup.sh or
+# manually in the Dockerfile.
+HEAVY_MANUAL = (
+    "chamferdist",
+    "emd",
+    "pointnet2_ops",
+    "pointnet2",
+    "flash-attn",
+    "flash_attn",
+    "kaolin",
+    "nvdiffrast",
+    "diffoctreerast",
+    "spconv",
+    "spconv-cu",
+    "mip-splatting",
+    "diff-gaussian-rasterization",
+    "simple-knn",
+    "tiny-cuda-nn",
+    "tinycudann",
+    "xformers",
+    "cumm",
+    "cumm-cu",
+    "pccm",
+)
+
+# Split CUDA meta-wheels that came from the original torch install.
+NVIDIA_META = (
+    "nvidia-cublas-cu11",
+    "nvidia-cublas-cu12",
+    "nvidia-cuda-cupti-cu11",
+    "nvidia-cuda-cupti-cu12",
+    "nvidia-cuda-nvrtc-cu11",
+    "nvidia-cuda-nvrtc-cu12",
+    "nvidia-cuda-runtime-cu11",
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cudnn-cu11",
+    "nvidia-cudnn-cu12",
+    "nvidia-cufft-cu11",
+    "nvidia-cufft-cu12",
+    "nvidia-curand-cu11",
+    "nvidia-curand-cu12",
+    "nvidia-cusolver-cu11",
+    "nvidia-cusolver-cu12",
+    "nvidia-cusparse-cu11",
+    "nvidia-cusparse-cu12",
+    "nvidia-nccl-cu11",
+    "nvidia-nccl-cu12",
+    "nvidia-nvjitlink-cu12",
+    "nvidia-nvtx-cu11",
+    "nvidia-nvtx-cu12",
+)
+
+
+def _matches_pkg(line: str, name: str) -> bool:
+    """
+    Return True if `line` looks like it starts with the given package name,
+    followed by a typical requirement separator (=, <, >, space, [ , @) or EOL.
+    """
+    s = line.strip().lower()
+    if not s:
+        return False
+
+    if not s.startswith(name):
+        return False
+
+    after = s[len(name):len(name) + 1]
+    return (not after) or (after in ("=", "<", ">", " ", "[", "@"))
+
+
+def patch_requirements(src: str, dst: str) -> None:
+    src_path = Path(src)
+    if not src_path.is_file():
+        raise SystemExit(f"requirements file not found: {src}")
+
+    lines = src_path.read_text().splitlines()
+    out_lines = []
 
     for line in lines:
         stripped = line.strip()
+        lower = stripped.lower()
 
-        # Keep comments and blank lines as-is
+        # Keep comments and blank lines verbatim
         if not stripped or stripped.startswith("#"):
-            new_lines.append(line)
+            out_lines.append(line)
             continue
 
-        # Pip options (e.g. "-f https://...") - leave them alone
+        # Pass through pip options (-f, -i, --find-links, etc.)
         if stripped.startswith("-"):
-            new_lines.append(line)
+            out_lines.append(line)
             continue
 
-        lowered = stripped.lower()
-
-        # ------------------------------------------------------------
-        # 0) Core torch packages
-        #
-        # We install torch / torchvision / torchaudio explicitly in the
-        # Dockerfile (with CUDA 12.x builds), so we do *not* want any
-        # pinned versions from the upstream requirements to overwrite
-        # them. Comment those lines out here.
-        # ------------------------------------------------------------
-        handled_torch = False
-        for base in ("torch", "torchvision", "torchaudio"):
-            if lowered.startswith(base):
-                # character right after the base name, if any
-                next_ch = lowered[len(base):len(base) + 1]
-                if not next_ch or next_ch in (" ", "=", "<", ">", "!", "[", "@"):
-                    print(
-                        f"[PATCH-REQ] Commenting out {base} dependency "
-                        f"(installed explicitly in Dockerfile): {stripped!r}"
-                    )
-                    new_lines.append(
-                        f"# commented-out {base} (installed explicitly in Dockerfile): {line}"
-                    )
-                    handled_torch = True
-                    break
-        if handled_torch:
+        # 1) Torch stack is installed in the Dockerfile
+        if any(_matches_pkg(stripped, p) for p in TORCH_PKGS):
+            out_lines.append(f"# patched-out (torch stack handled in Dockerfile): {line}")
             continue
 
-        # ------------------------------------------------------------
-        # 1) Specific Custom CUDA Extensions (Manual Install)
-        #
-        # These packages often fail to build via pip requirements because:
-        # a) They need torch installed first (no build isolation).
-        # b) They are local paths (emd==0.0.0).
-        # c) They need git clones.
-        #
-        # We filter them here and install them manually in the Dockerfile.
-        # ------------------------------------------------------------
-        manual_pkgs = [
-            "chamferdist",
-            "emd",  # 'emd==0.0.0' is a local build, not PyPI
-            "pointnet2_ops", # Often fails build if torch version mismatches
-            "pointnet2",
-        ]
-        
-        handled_manual = False
-        for pkg in manual_pkgs:
-            # Check if line starts with pkg name followed by a separator or version char
-            if lowered.startswith(pkg):
-                next_char = lowered[len(pkg):len(pkg)+1]
-                if not next_char or next_char in ("=", "<", ">", " ", "@"):
-                    print(
-                        f"[PATCH-REQ] Commenting out {pkg} dependency "
-                        f"(installed manually/fixed in Dockerfile): {stripped!r}"
-                    )
-                    new_lines.append(
-                        f"# commented-out {pkg} (handled manually): {line}"
-                    )
-                    handled_manual = True
-                    break
-        if handled_manual:
+        # 2) CUDA-heavy packages handled by setup.sh or Dockerfile
+        if any(_matches_pkg(stripped, p) for p in HEAVY_MANUAL):
+            out_lines.append(f"# patched-out (handled by setup.sh / manual install): {line}")
             continue
 
-        # ------------------------------------------------------------
-        # 2) CARAFE git dependency
-        # ------------------------------------------------------------
-        if "github.com/myownskyw7/carafe" in lowered:
-            print(
-                f"[PATCH-REQ] Commenting out CARAFE git dependency "
-                f"(installed manually in Dockerfile): {stripped!r}"
-            )
-            new_lines.append(
-                f"# commented-out CARAFE (installed manually in Dockerfile): {line}"
-            )
+        # 3) NVIDIA meta CUDA wheels from original torch install
+        if any(_matches_pkg(stripped, p) for p in NVIDIA_META):
+            out_lines.append(f"# patched-out (redundant CUDA meta-wheel): {line}")
             continue
 
-        # ------------------------------------------------------------
-        # 3) CuVoxelization local path
-        # ------------------------------------------------------------
-        if "cuvoxelization" in lowered or "cuvoxel" in lowered:
-            print(
-                f"[PATCH-REQ] Commenting out CuVoxelization local path "
-                f"(installed manually in Dockerfile): {stripped!r}"
-            )
-            new_lines.append(
-                f"# commented-out CuVoxelization (installed manually in Dockerfile): {line}"
-            )
+        # 4) Cluster-local wheels / conda cache paths
+        #    We *do not* try to infer versions from these filenames anymore,
+        #    to avoid InvalidVersion errors like 'v2.2.1-2-g1505ef3-master'.
+        if "file://" in lower or "croot/" in lower or "/mnt/" in lower:
+            out_lines.append(f"# patched-out (unusable file:// / cluster wheel): {line}")
             continue
 
-        # ------------------------------------------------------------
-        # 4) Mip-splatting / diff-gaussian-rasterization / simple-knn /
-        #    diffoctreerast and any other /tmp/extensions/... local deps
-        # ------------------------------------------------------------
-        if (
-            any(
-                key in lowered
-                for key in (
-                    "diff-gaussian-rasterization",
-                    "simple-knn",
-                    "mip-splatting",
-                    "diffoctreerast",
-                )
-            )
-            or "file:///tmp/extensions/" in lowered
-            or "/tmp/extensions/" in lowered
-        ):
-            print(
-                "[PATCH-REQ] Commenting out mip-splatting / diff-gaussian-rasterization / "
-                f"diffoctreerast local dependency (handled manually or not available "
-                f"in Docker): {stripped!r}"
-            )
-            new_lines.append(
-                "# commented-out mip-splatting / diff-gaussian-rasterization / diffoctreerast "
-                f"(installed manually or not available in Docker): {line}"
-            )
+        if ".whl" in lower and ("/" in lower or "\\" in lower):
+            out_lines.append(f"# patched-out (unusable wheel path inside Docker): {line}")
             continue
 
-        # ------------------------------------------------------------
-        # 5) Local wheel files from /mnt/... or /croot/... -> pkg==version
-        # ------------------------------------------------------------
-        if ".whl" in stripped and (
-            "mnt/" in lowered
-            or "croot/" in lowered
-            or stripped.startswith("/")
-            or "file://" in lowered
-        ):
-            fname = os.path.basename(stripped.split("#", 1)[0])
-            if fname.endswith(".whl"):
-                fname = fname[:-4]
-
-            parts = fname.split("-")
-            if len(parts) >= 2:
-                pkg = parts[0]
-                ver = parts[1]
-                print(f"[PATCH-REQ] Rewriting {stripped!r} -> {pkg}=={ver}")
-                new_lines.append(f"{pkg}=={ver}")
-                continue
-            else:
-                print(
-                    f"[PATCH-REQ] Could not parse wheel {stripped!r}, commenting it out"
-                )
-                new_lines.append(f"# commented-out wheel path: {line}")
-                continue
-
-        # ------------------------------------------------------------
-        # 6) Generic local file:// URIs (e.g., mpi4py @ file:///croot/...)
-        # ------------------------------------------------------------
-        if "file://" in lowered:
-            print(
-                "[PATCH-REQ] Commenting out local file:// dependency "
-                f"(not available in Docker): {stripped!r}"
-            )
-            new_lines.append(
-                f"# commented-out file:// dependency (not available in Docker): {line}"
-            )
+        # 5) Any other bare filesystem path that is not 'pkg @ url'
+        if ("/" in stripped or "\\" in stripped) and "@" not in stripped \
+           and "http://" not in lower and "https://" not in lower and "git+" not in lower:
+            out_lines.append(f"# patched-out (bare filesystem path): {line}")
             continue
 
-        # ------------------------------------------------------------
-        # 7) Any other bare filesystem path is unusable inside Docker.
-        # ------------------------------------------------------------
-        looks_like_path = ("/" in stripped or "\\" in stripped)
-        has_urlish = any(proto in lowered for proto in ("http://", "https://", "git+"))
-        has_at = "@" in stripped  # "pkg @ url" style
-        if looks_like_path and not has_urlish and not has_at:
-            print(
-                f"[PATCH-REQ] Commenting out unsupported local path dependency: {stripped!r}"
-            )
-            new_lines.append(f"# commented-out local path dep: {line}")
-            continue
+        # Default: keep the requirement line as-is
+        out_lines.append(line)
 
-        # Default: keep requirement line unchanged
-        new_lines.append(line)
-
-    req.write_text("\n".join(new_lines) + "\n")
-    print(f"[PATCH-REQ] Successfully patched {req_file}")
+    dst_path = Path(dst)
+    dst_path.write_text("\n".join(out_lines) + "\n")
+    print(f"[PATCH-REQ] wrote patched requirements to {dst_path}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: patch_requirements.py <requirements.txt>")
-        sys.exit(1)
+    if not (2 <= len(sys.argv) <= 3):
+        print("Usage: patch_requirements.py <input-req> [<output-req>]")
+        raise SystemExit(1)
 
-    patch_requirements(sys.argv[1])
+    src = sys.argv[1]
+    dst = sys.argv[2] if len(sys.argv) == 3 else src
+    patch_requirements(src, dst)

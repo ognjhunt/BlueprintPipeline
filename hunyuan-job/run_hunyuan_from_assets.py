@@ -11,6 +11,9 @@ from typing import Optional, List, Set
 from PIL import Image
 import trimesh  # for OBJ -> GLB without Blender
 
+# Encourage PyTorch to use expandable segments to reduce fragmentation
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 # Root where GCS is mounted in the container
 GCS_ROOT = Path("/mnt/gcs")
 
@@ -122,10 +125,19 @@ def main() -> None:
     scene_id = os.getenv("SCENE_ID", "")
     assets_prefix = os.getenv("ASSETS_PREFIX")  # scenes/<sceneId>/assets
 
+    # ------------------------------------------------------------------
     # Quality knobs (can be overridden with env vars if needed)
-    num_steps = int(os.getenv("HUNYUAN_NUM_STEPS", "75"))        # shape steps (default in code is 50)
-    max_num_view = int(os.getenv("HUNYUAN_MAX_NUM_VIEW", "9"))   # docs say 6–9
-    resolution = int(os.getenv("HUNYUAN_RESOLUTION", "768"))     # docs say 512 or 768
+    # Defaults chosen to fit within a single L4 (24GB) GPU.
+    # ------------------------------------------------------------------
+    num_steps = int(os.getenv("HUNYUAN_NUM_STEPS", "50"))        # shape steps; 50 is usually enough
+    max_num_view = int(os.getenv("HUNYUAN_MAX_NUM_VIEW", "6"))   # docs say 6–9; 6 is lighter on VRAM
+    resolution = int(os.getenv("HUNYUAN_RESOLUTION", "512"))     # 512 or 768; 512 is lighter on VRAM
+
+    # Texture sizes inside the paint pipeline (these default to 2048 / 4096
+    # in the repo and are quite heavy). We drop them for Cloud Run.
+    render_size = int(os.getenv("HUNYUAN_RENDER_SIZE", "1024"))
+    texture_size = int(os.getenv("HUNYUAN_TEXTURE_SIZE", "2048"))
+
     model_path = os.getenv("HUNYUAN_MODEL_PATH", "tencent/Hunyuan3D-2.1")
 
     if not assets_prefix:
@@ -141,7 +153,11 @@ def main() -> None:
     print(f"[HUNYUAN] Scene={scene_id}")
     print(f"[HUNYUAN] Assets root={assets_root}")
     print(f"[HUNYUAN] Using model: {model_path}")
-    print(f"[HUNYUAN] num_steps={num_steps}, max_num_view={max_num_view}, resolution={resolution}")
+    print(
+        f"[HUNYUAN] num_steps={num_steps}, "
+        f"max_num_view={max_num_view}, resolution={resolution}, "
+        f"render_size={render_size}, texture_size={texture_size}"
+    )
 
     plan = json.loads(plan_path.read_text())
     objects = plan.get("objects", [])
@@ -280,7 +296,6 @@ def main() -> None:
         except ImportError:
             torch = None  # type: ignore[assignment]
 
-        # Only delete / clear cache if we actually created the pipeline
         if "pipeline_shapegen" in locals():
             del pipeline_shapegen
             if torch is not None and torch.cuda.is_available():
@@ -302,6 +317,9 @@ def main() -> None:
     # ------------------------------------------------------------------
     print("[HUNYUAN] Configuring texture (paint) pipeline...")
     conf = Hunyuan3DPaintConfig(max_num_view=max_num_view, resolution=resolution)
+    # Override default high-res texture sizes to keep VRAM under control.
+    conf.render_size = render_size
+    conf.texture_size = texture_size
     # Make sure paths are correct inside the cloned repo
     conf.realesrgan_ckpt_path = str(
         HUNYUAN_REPO_ROOT / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth"
