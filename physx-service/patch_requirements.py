@@ -8,10 +8,11 @@ We do three main things:
   * Rewrite local wheel files (file:///mnt/.../*.whl) into normal
     "package==version" pins so pip can fetch them from PyPI.
 
-  * Strip out CUDA extensions that expect a pre-existing local checkout
-    (CARAFE, CuVoxelization, mip-splatting / diff-gaussian-rasterization,
-    simple-knn, etc.). We install the ones we actually need manually in
-    the Dockerfile after torch is available.
+  * Strip out CUDA / custom extensions that expect a pre-existing local
+    checkout (CARAFE, CuVoxelization, mip-splatting / diff-gaussian-
+    rasterization / simple-knn, diffoctreerast, etc.). We install the
+    ones we actually need manually in the Dockerfile after torch is
+    available.
 
   * Comment out any other bare filesystem paths so pip doesn't explode
     on missing /mnt/..., /tmp/extensions/..., or ./submodules/... dirs.
@@ -85,30 +86,38 @@ def patch_requirements(req_file: str) -> None:
             continue
 
         # ------------------------------------------------------------
-        # 3) Mip-splatting / diff-gaussian-rasterization / simple-knn
+        # 3) Mip-splatting / diff-gaussian-rasterization / simple-knn /
+        #    diffoctreerast and any other /tmp/extensions/... local deps
         #
-        # These are usually referenced via local paths like:
-        #   tmp/extensions/mip-splatting/submodules/diff-gaussian-rasterization
-        #   extensions/mip-splatting/submodules/simple-knn
+        # These are referenced via local paths like:
+        #   diff_gaussian_rasterization @ file:///tmp/extensions/mip-splatting/...
+        #   simple-knn @ file:///tmp/extensions/mip-splatting/...
+        #   diffoctreerast @ file:///tmp/extensions/diffoctreerast
         #
-        # They rely on a separate git checkout. We comment these out and
-        # install the needed pieces manually in the Dockerfile.
+        # They rely on separate git checkouts. We comment these out and
+        # install only what we actually want manually in the Dockerfile.
         # ------------------------------------------------------------
-        if any(
-            key in lowered
-            for key in (
-                "diff-gaussian-rasterization",
-                "mip-splatting",
-                "simple-knn",
+        if (
+            any(
+                key in lowered
+                for key in (
+                    "diff-gaussian-rasterization",
+                    "mip-splatting",
+                    "simple-knn",
+                    "diffoctreerast",
+                )
             )
+            or "file:///tmp/extensions/" in lowered
+            or "/tmp/extensions/" in lowered
         ):
             print(
-                "[PATCH-REQ] Commenting out mip-splatting / diff-gaussian-rasterization "
-                f"local dependency (handled manually in Dockerfile): {stripped!r}"
+                "[PATCH-REQ] Commenting out mip-splatting / diff-gaussian-rasterization / "
+                f"diffoctreerast local dependency (handled manually or not available "
+                f"in Docker): {stripped!r}"
             )
             new_lines.append(
-                "# commented-out mip-splatting / diff-gaussian-rasterization "
-                f"(installed manually in Dockerfile): {line}"
+                "# commented-out mip-splatting / diff-gaussian-rasterization / diffoctreerast "
+                f"(installed manually or not available in Docker): {line}"
             )
             continue
 
@@ -147,7 +156,7 @@ def patch_requirements(req_file: str) -> None:
         # This is the generic catch-all for lines that are *pure paths*:
         #   ./extensions/...
         #   extensions/mip-splatting/submodules/diff-gaussian-rasterization
-        #   /tmp/extensions/...
+        #   /some/absolute/path
         #
         # If the line contains a path separator but *not* an explicit
         # VCS / URL / "pkg @ url" spec, we treat it as a local path and
