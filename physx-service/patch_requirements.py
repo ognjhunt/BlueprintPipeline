@@ -11,9 +11,9 @@ We do a few things:
 
   * Strip out CUDA / custom extensions that expect a pre-existing local
     checkout (CARAFE, CuVoxelization, mip-splatting / diff-gaussian-
-    rasterization / simple-knn, diffoctreerast, etc.). We install the
-    ones we actually need manually in the Dockerfile after torch is
-    available.
+    rasterization / simple-knn, diffoctreerast, emd, pointnet2_ops, etc.). 
+    We install the ones we actually need manually in the Dockerfile after 
+    torch is available.
 
   * Comment out any other bare filesystem paths or file:// URIs so pip
     doesn't explode on missing /mnt/..., /croot/..., /tmp/extensions/...
@@ -22,6 +22,10 @@ We do a few things:
   * Comment out any torch / torchvision / torchaudio entries in
     requirements.txt, since we install a specific CUDA 12 build of
     PyTorch explicitly in the Dockerfile.
+
+  * Comment out chamferdist, whose build scripts import torch; we
+    install it manually later with build isolation disabled so it can
+    see the already-installed torch.
 """
 
 import os
@@ -79,14 +83,42 @@ def patch_requirements(req_file: str) -> None:
             continue
 
         # ------------------------------------------------------------
-        # 1) CARAFE git dependency
+        # 1) Specific Custom CUDA Extensions (Manual Install)
         #
-        # Example:
-        #   carafe @ git+https://github.com/myownskyW7/CARAFE.git@<commit>
+        # These packages often fail to build via pip requirements because:
+        # a) They need torch installed first (no build isolation).
+        # b) They are local paths (emd==0.0.0).
+        # c) They need git clones.
         #
-        # CARAFE's setup imports torch; with build isolation pip creates
-        # a fresh env that does NOT yet have torch -> ModuleNotFoundError.
-        # We comment it out here and install it manually in the Dockerfile.
+        # We filter them here and install them manually in the Dockerfile.
+        # ------------------------------------------------------------
+        manual_pkgs = [
+            "chamferdist",
+            "emd",  # 'emd==0.0.0' is a local build, not PyPI
+            "pointnet2_ops", # Often fails build if torch version mismatches
+            "pointnet2",
+        ]
+        
+        handled_manual = False
+        for pkg in manual_pkgs:
+            # Check if line starts with pkg name followed by a separator or version char
+            if lowered.startswith(pkg):
+                next_char = lowered[len(pkg):len(pkg)+1]
+                if not next_char or next_char in ("=", "<", ">", " ", "@"):
+                    print(
+                        f"[PATCH-REQ] Commenting out {pkg} dependency "
+                        f"(installed manually/fixed in Dockerfile): {stripped!r}"
+                    )
+                    new_lines.append(
+                        f"# commented-out {pkg} (handled manually): {line}"
+                    )
+                    handled_manual = True
+                    break
+        if handled_manual:
+            continue
+
+        # ------------------------------------------------------------
+        # 2) CARAFE git dependency
         # ------------------------------------------------------------
         if "github.com/myownskyw7/carafe" in lowered:
             print(
@@ -99,13 +131,7 @@ def patch_requirements(req_file: str) -> None:
             continue
 
         # ------------------------------------------------------------
-        # 2) CuVoxelization local path
-        #
-        # Example:
-        #   cuvoxel @ file:///mnt/.../CuVoxelization
-        #
-        # That path doesn't exist in Docker. We comment it out and
-        # install CuVoxelization from its public GitHub repo manually.
+        # 3) CuVoxelization local path
         # ------------------------------------------------------------
         if "cuvoxelization" in lowered or "cuvoxel" in lowered:
             print(
@@ -118,16 +144,8 @@ def patch_requirements(req_file: str) -> None:
             continue
 
         # ------------------------------------------------------------
-        # 3) Mip-splatting / diff-gaussian-rasterization / simple-knn /
+        # 4) Mip-splatting / diff-gaussian-rasterization / simple-knn /
         #    diffoctreerast and any other /tmp/extensions/... local deps
-        #
-        # Examples:
-        #   diff_gaussian_rasterization @ file:///tmp/extensions/mip-splatting/...
-        #   simple-knn @ file:///tmp/extensions/mip-splatting/...
-        #   diffoctreerast @ file:///tmp/extensions/diffoctreerast
-        #
-        # They rely on separate git checkouts. We comment these out and
-        # install only what we actually want manually in the Dockerfile.
         # ------------------------------------------------------------
         if (
             any(
@@ -154,13 +172,7 @@ def patch_requirements(req_file: str) -> None:
             continue
 
         # ------------------------------------------------------------
-        # 4) Local wheel files from /mnt/... or /croot/... -> pkg==version
-        #
-        # Example:
-        #   boto3 @ file:///mnt/.../boto3-1.34.2-py3-none-any.whl#sha256=...
-        #   mmcv  @ file:///mnt/.../mmcv-2.2.0-cp310-cp310-manylinux1_x86_64.whl#...
-        #
-        # We rewrite these into simple "package==version" pins.
+        # 5) Local wheel files from /mnt/... or /croot/... -> pkg==version
         # ------------------------------------------------------------
         if ".whl" in stripped and (
             "mnt/" in lowered
@@ -187,17 +199,7 @@ def patch_requirements(req_file: str) -> None:
                 continue
 
         # ------------------------------------------------------------
-        # 4b) Generic local file:// URIs (e.g., mpi4py @ file:///croot/...)
-        #
-        # When you export requirements from a conda environment, you
-        # often get entries like:
-        #
-        #   mpi4py @ file:///croot/mpi4py_1671223370575/work
-        #
-        # Those local build caches obviously do not exist inside Docker,
-        # so we comment them out here. If any of them are truly needed
-        # at runtime, they should be installed explicitly in the
-        # Dockerfile instead.
+        # 6) Generic local file:// URIs (e.g., mpi4py @ file:///croot/...)
         # ------------------------------------------------------------
         if "file://" in lowered:
             print(
@@ -210,15 +212,7 @@ def patch_requirements(req_file: str) -> None:
             continue
 
         # ------------------------------------------------------------
-        # 5) Any other bare filesystem path is unusable inside Docker.
-        #
-        # Generic catch-all for lines that are *pure paths*:
-        #   ./extensions/...
-        #   extensions/mip-splatting/submodules/diff-gaussian-rasterization
-        #   /some/absolute/path
-        #
-        # If the line contains a path separator but *not* an explicit
-        # VCS / URL / "pkg @ url" spec, we treat it as a local path.
+        # 7) Any other bare filesystem path is unusable inside Docker.
         # ------------------------------------------------------------
         looks_like_path = ("/" in stripped or "\\" in stripped)
         has_urlish = any(proto in lowered for proto in ("http://", "https://", "git+"))
