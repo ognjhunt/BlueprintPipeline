@@ -6,6 +6,7 @@ FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04
 # --- System deps ----------------------------------------------------
 # Minimal but enough to build common Python wheels (torch, CUDA extensions,
 # PyAV/FFmpeg, etc.)
+# Added libgl1 for OpenCV support.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-venv python3-dev \
     git wget curl \
@@ -13,6 +14,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ffmpeg \
     libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev \
     libswresample-dev libswscale-dev \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Python venv ----------------------------------------------------
@@ -45,10 +47,14 @@ COPY patch_requirements.py /tmp/patch_requirements.py
 RUN python /tmp/patch_requirements.py requirements.txt
 
 # 3) Install Python dependencies from the (patched) requirements.txt
-#    IMPORTANT: we disable build isolation so that packages like
-#    chamferdist, which expect torch to already be installed, can
-#    import torch during their build step.
-RUN pip install --no-cache-dir --no-build-isolation -r requirements.txt
+#    IMPORTANT: we now let pip use its default build isolation so that
+#    PEP 517 projects like pynim (PyNanoInstantMeshes) can automatically
+#    pull their build backends (scikit-build-core, etc.).
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 3a) Manually install chamferdist, which needs torch available during
+#     its build, so we install it separately with build isolation off.
+RUN pip install --no-cache-dir --no-build-isolation chamferdist==1.0.3
 
 # 3b) Manually install CARAFE at the commit used by PhysX-Anything.
 # We do this *after* torch is installed, and with build isolation
@@ -57,12 +63,21 @@ RUN pip install --no-cache-dir --no-build-isolation --no-deps \
     "carafe @ git+https://github.com/myownskyW7/CARAFE.git@aae89996131bcdb63d673c11db381bface05e751"
 
 # 3c) Manually install CuVoxelization (CUDA voxelization ops) from GitHub.
-# Same story: setup.py depends on torch, so we disable build isolation and
-# skip dependency resolution (torch is already installed).
 RUN pip install --no-cache-dir --no-build-isolation --no-deps \
     "CuVoxelization @ git+https://github.com/lzhnb/CuVoxelization.git"
 
-# 3d) Manually install Mip-Splatting's Gaussian rasterization extensions.
+# 3d) Manually install EMD (Earth Mover's Distance).
+# The requirements had 'emd==0.0.0' which is a local build.
+# We install the standard CUDA implementation used in 3D research (MSN fork).
+RUN pip install --no-cache-dir --no-build-isolation --no-deps \
+    "git+https://github.com/Colin97/MSN-Point-Cloud-Completion.git#subdirectory=emd"
+
+# 3e) Manually install Pointnet2 Ops.
+# This often fails in requirements due to strict torch version matching.
+RUN pip install --no-cache-dir --no-build-isolation --no-deps \
+    "git+https://github.com/erikwijmans/Pointnet2_PyTorch.git#egg=pointnet2_ops&subdirectory=pointnet2_ops_lib"
+
+# 3f) Manually install Mip-Splatting's Gaussian rasterization extensions.
 # PhysX-Anything's requirements reference local paths under
 # tmp/extensions/mip-splatting/submodules/..., which do not exist inside
 # Docker. We clone the official repo and install the two submodules that
