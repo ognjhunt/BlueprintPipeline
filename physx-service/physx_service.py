@@ -1,5 +1,4 @@
 import base64
-import io
 import os
 import subprocess
 import sys
@@ -10,26 +9,21 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# Where your PhysX-Anything code lives inside the container.
-# You will set this in the Dockerfile or as an env var.
+# Where the PhysX-Anything repo is installed.
 PHYSX_ROOT = Path(os.environ.get("PHYSX_ROOT", "/opt/physx_anything"))
 
-# Script that runs the full PhysX-Anything pipeline.
-# You will implement this (or adjust the path) based on the repo’s docs.
+# Our small driver script that orchestrates 1_vlm_demo.py → 4_simready_gen.py
 PHYSX_ENTRY = PHYSX_ROOT / "run_physx_anything_pipeline.py"
 
 
 class PhysxError(RuntimeError):
-    pass
+    """Raised when the PhysX-Anything pipeline fails."""
 
 
 def run_physx_anything(image_bytes: bytes) -> Tuple[bytes, bytes]:
     """
     Given raw PNG/JPEG bytes, run the PhysX-Anything pipeline and
     return (mesh_glb_bytes, urdf_bytes).
-
-    You MUST fill in the command that actually runs the pipeline,
-    based on the official PhysX-Anything repo instructions.
     """
     if not PHYSX_ENTRY.is_file():
         raise PhysxError(f"PhysX entry script not found at {PHYSX_ENTRY}")
@@ -38,7 +32,7 @@ def run_physx_anything(image_bytes: bytes) -> Tuple[bytes, bytes]:
     tmp_root = Path("/tmp/physx_anything")
     tmp_root.mkdir(parents=True, exist_ok=True)
 
-    # Use the PID as a simple per-request subdir to avoid collisions.
+    # Use PID to avoid collisions between concurrent requests.
     req_dir = tmp_root / f"req_{os.getpid()}"
     in_dir = req_dir / "input"
     out_dir = req_dir / "output"
@@ -49,18 +43,7 @@ def run_physx_anything(image_bytes: bytes) -> Tuple[bytes, bytes]:
     input_path = in_dir / "input.png"
     input_path.write_bytes(image_bytes)
 
-    # 3) Run the pipeline
-    #
-    # >>> IMPORTANT <<<
-    # Replace the command list below with the actual command(s)
-    # PhysX-Anything uses on your machine. Example pattern:
-    #
-    #   python run_physx_anything_pipeline.py \
-    #      --input_image /path/to/input.png \
-    #      --output_dir /path/to/output
-    #
-    # You may need additional flags for category, seed, etc.
-    #
+    # 3) Run the driver script
     cmd: List[str] = [
         sys.executable,
         str(PHYSX_ENTRY),
@@ -85,20 +68,14 @@ def run_physx_anything(image_bytes: bytes) -> Tuple[bytes, bytes]:
             f"PhysX-Anything pipeline failed with code {e.returncode}: {e.stdout}"
         ) from e
 
-    # 4) Find GLB and URDF in out_dir
-    def find_first(patterns: List[str]) -> Optional[Path]:
-        for pattern in patterns:
-            for p in out_dir.rglob(pattern):
-                return p
-        return None
+    # 4) Read mesh + URDF from out_dir
+    mesh_path = out_dir / "part.glb"
+    urdf_path = out_dir / "part.urdf"
 
-    mesh_path = find_first(["*.glb", "*.gltf"])
-    urdf_path = find_first(["*.urdf"])
-
-    if mesh_path is None or urdf_path is None:
+    if not mesh_path.is_file() or not urdf_path.is_file():
         raise PhysxError(
-            f"Could not find both mesh and URDF in {out_dir} "
-            f"(mesh={mesh_path}, urdf={urdf_path})"
+            f"Expected part.glb and part.urdf in {out_dir}, "
+            f"found mesh={mesh_path.is_file()}, urdf={urdf_path.is_file()}"
         )
 
     mesh_bytes = mesh_path.read_bytes()
@@ -141,6 +118,9 @@ def handle_request():
           "placeholder": false,
           "generator": "physx-anything"
         }
+
+    If anything fails inside the PhysX pipeline, we return HTTP 500 and
+    interactive-job will fall back to placeholder assets.
     """
     data = request.get_json(force=True, silent=True) or {}
     img_b64 = data.get("image_base64")
@@ -157,8 +137,6 @@ def handle_request():
         mesh_bytes, urdf_bytes = run_physx_anything(image_bytes)
     except PhysxError as e:
         app.logger.error("[PHYSX-SERVICE] %s", e)
-        # You can choose to return 500 here and let interactive-job
-        # fall back to placeholders, or return placeholder directly.
         return jsonify({"error": str(e)}), 500
 
     resp = encode_assets(mesh_bytes, urdf_bytes)
