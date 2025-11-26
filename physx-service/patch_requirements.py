@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-Patch PhysX-Anything requirements.txt to replace local cluster wheel paths
-with standard PyPI package specifications, and to move the CARAFE git
-dependency out of the requirements file (we install it manually in the
-Dockerfile after torch is available).
+Patch PhysX-Anything requirements.txt to make it installable in a clean
+Docker environment (no access to the original /mnt/... cluster paths).
+
+We do three main things:
+
+  * Rewrite local wheel files (file:///mnt/.../*.whl) into normal
+    "package==version" pins so pip can fetch them from PyPI.
+
+  * Strip out CUDA extensions that expect a pre-existing local checkout
+    (CARAFE, CuVoxelization, mip-splatting / diff-gaussian-rasterization,
+    simple-knn, etc.). We install the ones we actually need manually in
+    the Dockerfile after torch is available.
+
+  * Comment out any other bare filesystem paths so pip doesn't explode
+    on missing /mnt/..., /tmp/extensions/..., or ./submodules/... dirs.
 """
 
 import os
@@ -12,11 +23,6 @@ from pathlib import Path
 
 
 def patch_requirements(req_file: str) -> None:
-    """
-    Rewrites requirements.txt to replace absolute paths to .whl files
-    with standard package==version specifications and comments out
-    the CARAFE git dependency (installed separately).
-    """
     req = Path(req_file)
     if not req.is_file():
         raise SystemExit(f"requirements.txt not found: {req_file}")
@@ -32,31 +38,95 @@ def patch_requirements(req_file: str) -> None:
             new_lines.append(line)
             continue
 
+        # Pip options (e.g. "-f https://...") - leave them alone
+        if stripped.startswith("-"):
+            new_lines.append(line)
+            continue
+
+        lowered = stripped.lower()
+
         # ------------------------------------------------------------
-        # Special-case: CARAFE git dependency.
-        # Example (from upstream requirements.txt):
-        #   carafe@ git+https://github.com/myownskyW7/CARAFE.git@aae8999...
-        # CARAFE's setup imports torch, so we must install it after torch
-        # is present. We comment it out here and install it manually in
-        # the Dockerfile.
+        # 1) CARAFE git dependency
+        #
+        # Upstream example:
+        #   carafe @ git+https://github.com/myownskyW7/CARAFE.git@<commit>
+        #
+        # CARAFE's setup imports torch; with build isolation pip creates
+        # a fresh env that does NOT yet have torch -> ModuleNotFoundError.
+        # We comment it out here and install it manually in the Dockerfile.
         # ------------------------------------------------------------
-        if stripped.startswith("carafe@ git+https://github.com/myownskyW7/CARAFE.git") or \
-           stripped.startswith("carafe @ git+https://github.com/myownskyW7/CARAFE.git"):
-            print(f"[PATCH-REQ] Commenting out CARAFE line (installed manually in Dockerfile): {stripped!r}")
-            new_lines.append(f"# commented-out (installed manually in Dockerfile): {line}")
+        if "github.com/myownskyw7/carafe" in lowered:
+            print(
+                f"[PATCH-REQ] Commenting out CARAFE git dependency "
+                f"(installed manually in Dockerfile): {stripped!r}"
+            )
+            new_lines.append(
+                f"# commented-out CARAFE (installed manually in Dockerfile): {line}"
+            )
             continue
 
         # ------------------------------------------------------------
-        # Local wheel paths (e.g. file:///mnt/.../mmcv-2.2.0-....whl)
-        # Rewrite to pkg==version so pip can fetch from PyPI.
+        # 2) CuVoxelization local path
+        #
+        # Upstream contains something like:
+        #   cuvoxel @ file:///mnt/.../CuVoxelization
+        #
+        # That path doesn't exist in Docker. We comment it out and
+        # install CuVoxelization from its public GitHub repo manually.
         # ------------------------------------------------------------
-        if ".whl" in stripped and (stripped.startswith("/") or "mnt/" in stripped):
-            fname = os.path.basename(stripped)
+        if "cuvoxelization" in lowered or "cuvoxel" in lowered:
+            print(
+                f"[PATCH-REQ] Commenting out CuVoxelization local path "
+                f"(installed manually in Dockerfile): {stripped!r}"
+            )
+            new_lines.append(
+                f"# commented-out CuVoxelization (installed manually in Dockerfile): {line}"
+            )
+            continue
+
+        # ------------------------------------------------------------
+        # 3) Mip-splatting / diff-gaussian-rasterization / simple-knn
+        #
+        # These are usually referenced via local paths like:
+        #   tmp/extensions/mip-splatting/submodules/diff-gaussian-rasterization
+        #   extensions/mip-splatting/submodules/simple-knn
+        #
+        # They rely on a separate git checkout. We comment these out and
+        # install the needed pieces manually in the Dockerfile.
+        # ------------------------------------------------------------
+        if any(
+            key in lowered
+            for key in (
+                "diff-gaussian-rasterization",
+                "mip-splatting",
+                "simple-knn",
+            )
+        ):
+            print(
+                "[PATCH-REQ] Commenting out mip-splatting / diff-gaussian-rasterization "
+                f"local dependency (handled manually in Dockerfile): {stripped!r}"
+            )
+            new_lines.append(
+                "# commented-out mip-splatting / diff-gaussian-rasterization "
+                f"(installed manually in Dockerfile): {line}"
+            )
+            continue
+
+        # ------------------------------------------------------------
+        # 4) Local wheel files from /mnt/... etc -> pkg==version
+        #
+        # Example upstream lines:
+        #   boto3 @ file:///mnt/.../boto3-1.34.2-py3-none-any.whl#sha256=...
+        #   mmcv  @ file:///mnt/.../mmcv-2.2.0-cp310-cp310-manylinux1_x86_64.whl#...
+        #
+        # We rewrite these into simple "package==version" pins so pip
+        # can install them from PyPI.
+        # ------------------------------------------------------------
+        if ".whl" in stripped and ("mnt/" in stripped or stripped.startswith("/")):
+            fname = os.path.basename(stripped.split("#", 1)[0])
             if fname.endswith(".whl"):
-                # Remove .whl extension
                 fname = fname[:-4]
 
-            # Parse wheel filename: package-version-pyver-abi-platform
             parts = fname.split("-")
             if len(parts) >= 2:
                 pkg = parts[0]
@@ -65,15 +135,37 @@ def patch_requirements(req_file: str) -> None:
                 new_lines.append(f"{pkg}=={ver}")
                 continue
             else:
-                # Fallback: comment out the line if we can't parse it
-                print(f"[PATCH-REQ] Could not parse wheel {stripped!r}, commenting it out")
-                new_lines.append(f"# commented-out: {line}")
+                print(
+                    f"[PATCH-REQ] Could not parse wheel {stripped!r}, commenting it out"
+                )
+                new_lines.append(f"# commented-out wheel path: {line}")
                 continue
 
-        # Default: keep the line unchanged
+        # ------------------------------------------------------------
+        # 5) Any other bare filesystem path is unusable inside Docker.
+        #
+        # This is the generic catch-all for lines that are *pure paths*:
+        #   ./extensions/...
+        #   extensions/mip-splatting/submodules/diff-gaussian-rasterization
+        #   /tmp/extensions/...
+        #
+        # If the line contains a path separator but *not* an explicit
+        # VCS / URL / "pkg @ url" spec, we treat it as a local path and
+        # comment it out.
+        # ------------------------------------------------------------
+        looks_like_path = ("/" in stripped or "\\" in stripped)
+        has_urlish = any(proto in lowered for proto in ("http://", "https://", "git+"))
+        has_at = "@" in stripped  # "pkg @ url" style
+        if looks_like_path and not has_urlish and not has_at:
+            print(
+                f"[PATCH-REQ] Commenting out unsupported local path dependency: {stripped!r}"
+            )
+            new_lines.append(f"# commented-out local path dep: {line}")
+            continue
+
+        # Default: keep requirement line unchanged
         new_lines.append(line)
 
-    # Write patched requirements back
     req.write_text("\n".join(new_lines) + "\n")
     print(f"[PATCH-REQ] Successfully patched {req_file}")
 

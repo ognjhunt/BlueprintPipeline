@@ -4,7 +4,7 @@
 FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04
 
 # --- System deps ----------------------------------------------------
-# Minimal but enough to build common Python wheels (torch, etc.)
+# Minimal but enough to build common Python wheels (torch, CUDA extensions, etc.)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-venv python3-dev \
     git wget curl \
@@ -19,8 +19,9 @@ ENV PATH="/opt/venv/bin:${PATH}"
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # -------------------------------------------------------------------
-# Install PyTorch FIRST so any CUDA extensions (CARAFE, mmcv ops, etc.)
-# that import torch in setup.py have it available.:contentReference[oaicite:3]{index=3}
+# Install PyTorch FIRST so any CUDA extensions (CARAFE, CuVoxelization,
+# mip-splatting / diff-gaussian-rasterization, etc.) that import torch
+# in setup.py have it available.
 # -------------------------------------------------------------------
 RUN pip install --no-cache-dir torch torchvision torchaudio
 
@@ -45,9 +46,27 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 3b) Manually install CARAFE at the commit used by PhysX-Anything.
 # We do this *after* torch is installed, and with build isolation
-# disabled, because CARAFE's setup.py imports torch.:contentReference[oaicite:4]{index=4}
+# disabled, because CARAFE's setup.py imports torch.
 RUN pip install --no-cache-dir --no-build-isolation --no-deps \
     "carafe @ git+https://github.com/myownskyW7/CARAFE.git@aae89996131bcdb63d673c11db381bface05e751"
+
+# 3c) Manually install CuVoxelization (CUDA voxelization ops) from GitHub.
+# Same story: setup.py depends on torch, so we disable build isolation and
+# skip dependency resolution (torch is already installed).
+RUN pip install --no-cache-dir --no-build-isolation --no-deps \
+    "CuVoxelization @ git+https://github.com/lzhnb/CuVoxelization.git"
+
+# 3d) Manually install Mip-Splatting's Gaussian rasterization extensions.
+# PhysX-Anything's requirements reference local paths under
+# tmp/extensions/mip-splatting/submodules/..., which do not exist inside
+# Docker. We clone the official repo and install the two submodules that
+# Trellis / Mip-Splatting normally use: diff-gaussian-rasterization and
+# simple-knn.
+RUN mkdir -p /tmp/extensions && \
+    git clone --recurse-submodules https://github.com/autonomousvision/mip-splatting.git /tmp/extensions/mip-splatting && \
+    pip install --no-cache-dir --no-build-isolation --no-deps \
+      /tmp/extensions/mip-splatting/submodules/diff-gaussian-rasterization \
+      /tmp/extensions/mip-splatting/submodules/simple-knn
 
 # 4) Download pretrained weights
 RUN python download.py
