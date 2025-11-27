@@ -278,6 +278,9 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any]) 
     mass = float(physics.get("mass_kg", 1.0))
     dynamic = bool(physics.get("dynamic", True))
 
+    # Build the token string separately to avoid backslashes inside the f-string
+    enabled_token = "true" if dynamic else "false"
+
     lines: List[str] = []
     lines.append("#usda 1.0")
     lines.append("(\n    metersPerUnit = 1\n    kilogramsPerUnit = 1\n)")
@@ -288,7 +291,7 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any]) 
     lines.append("{")
     lines.append(f"    float physics:mass = {mass:.6f}")
     # Simple flag; Isaac Sim will respect this for dynamic bodies.
-    lines.append(f'    token physics:rigidBodyEnabled = {"\"true\"" if dynamic else "\"false\""}')
+    lines.append(f'    token physics:rigidBodyEnabled = "{enabled_token}"')
     lines.append("")
     lines.append('    def Xform "Visual" {')
     lines.append(f"        rel references = @{asset_rel}@")
@@ -327,8 +330,10 @@ def main() -> None:
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
         print("[SIMREADY] Gemini client initialized")
     else:
-        print("[SIMREADY] GEMINI_API_KEY not set or google-genai unavailable; using heuristic defaults only",
-              file=sys.stderr)
+        print(
+            "[SIMREADY] GEMINI_API_KEY not set or google-genai unavailable; using heuristic defaults only",
+            file=sys.stderr,
+        )
 
     simready_paths: Dict[Any, str] = {}
 
@@ -381,8 +386,10 @@ def main() -> None:
         scene_assets_path.write_text(json.dumps(scene_assets, indent=2), encoding="utf-8")
         print(f"[SIMREADY] Updated {scene_assets_path} with simready_usd paths")
     else:
-        print("[SIMREADY] No simready assets were created; scene_assets.json left unchanged",
-              file=sys.stderr)
+        print(
+            "[SIMREADY] No simready assets were created; scene_assets.json left unchanged",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
