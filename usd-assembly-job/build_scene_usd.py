@@ -175,20 +175,19 @@ def choose_visual_asset_for_display(
 ) -> Optional[str]:
     """
     Choose a geometry file that usdview/OpenUSD can actually display for this
-    object and return a path that is *relative to the usd/ directory*.
+    object and return a path that is relative to the usd/ directory.
 
     Preference:
-      1) USD-family files if you ever generate them (model.usda/usd/usdz/usdc)
+      1) USD-family files if they exist (model.usda/usd/usdz/usdc)
       2) OBJ meshes (white_mesh_remesh.obj, model.obj, mesh.obj)
 
-    Example returned path:
-      "../assets/obj_11/white_mesh_remesh.obj"
+    Returned example: "../assets/obj_11/white_mesh_remesh.obj"
     """
     # Filesystem location of this object's assets.
     obj_dir = root / assets_prefix / f"obj_{oid}"
 
     candidate_names = [
-        # USD-family (if present in future)
+        # USD-family
         "model.usda",
         "model.usd",
         "model.usdc",
@@ -337,13 +336,16 @@ def usd_for_object(obj: Dict, assets_prefix: str, usd_prefix: str, root: Path) -
 
     # --------------------------------------------------------------
     # Visual geometry reference for usdview / Hydra.
-    # This does NOT affect your physics pipeline; it's just to
-    # make the objects render nicely in viewers.
+    # This does not affect your physics; it's just for visualization.
     # --------------------------------------------------------------
     visual_rel = choose_visual_asset_for_display(root, assets_prefix, usd_prefix, oid)
     if visual_rel is not None:
-        lines.append('      def Xform "Geom" {')
-        lines.append(f"        rel references = @{visual_rel}@")
+        # references is prim metadata, not a relationship, so we put it
+        # in the prim's metadata list, not as "rel references".
+        lines.append(f'      def Xform "Geom" (')
+        lines.append(f"          references = @{visual_rel}@")
+        lines.append("      )")
+        lines.append("      {")
         lines.append("      }")
 
     lines.append("    }")
@@ -425,7 +427,14 @@ def main() -> None:
     # Objects.
     lines.append("  def Scope \"Objects\" {")
     for obj in objects:
-        lines.extend(usd_for_object(obj, assets_prefix=assets_prefix, usd_prefix=usd_prefix, root=root))
+        lines.extend(
+            usd_for_object(
+                obj,
+                assets_prefix=assets_prefix,
+                usd_prefix=usd_prefix,
+                root=root,
+            )
+        )
     lines.append("  }")
 
     lines.append("}")
