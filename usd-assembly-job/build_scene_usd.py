@@ -2,7 +2,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -49,7 +49,7 @@ def fmt_matrix(m: np.ndarray) -> str:
        (0.000000, 0.000000, 0.000000, 1.000000))
     """
     m = np.array(m, dtype=np.float64).reshape(4, 4)
-    row_strs = []
+    row_strs: List[str] = []
     for row in m:
         row_strs.append("(" + ", ".join(f"{float(v):.6f}" for v in row) + ")")
     return "(" + ", ".join(row_strs) + ")"
@@ -167,13 +167,57 @@ def alignment_from_metadata(metadata: dict) -> Tuple[Optional[np.ndarray], Optio
     return translation, half_extents
 
 
-def usd_for_object(obj: Dict, assets_prefix: str, root: Path) -> List[str]:
+def choose_visual_asset_for_display(
+    root: Path,
+    assets_prefix: str,
+    usd_prefix: str,
+    oid: Any,
+) -> Optional[str]:
+    """
+    Choose a geometry file that usdview/OpenUSD can actually display for this
+    object and return a path that is *relative to the usd/ directory*.
+
+    Preference:
+      1) USD-family files if you ever generate them (model.usda/usd/usdz/usdc)
+      2) OBJ meshes (white_mesh_remesh.obj, model.obj, mesh.obj)
+
+    Example returned path:
+      "../assets/obj_11/white_mesh_remesh.obj"
+    """
+    # Filesystem location of this object's assets.
+    obj_dir = root / assets_prefix / f"obj_{oid}"
+
+    candidate_names = [
+        # USD-family (if present in future)
+        "model.usda",
+        "model.usd",
+        "model.usdc",
+        "model.usdz",
+        # OBJ meshes – currently present in your pipeline
+        "white_mesh_remesh.obj",
+        "model.obj",
+        "mesh.obj",
+    ]
+
+    stage_dir = root / usd_prefix
+
+    for name in candidate_names:
+        candidate = obj_dir / name
+        if candidate.is_file():
+            rel = os.path.relpath(candidate, stage_dir)
+            rel = rel.replace("\\", "/")
+            return rel
+
+    return None
+
+
+def usd_for_object(obj: Dict, assets_prefix: str, usd_prefix: str, root: Path) -> List[str]:
     """
     Emit a single Object prim under World.Objects.
 
     Handles both:
       - interactive objects (URDF-based) and
-      - static meshes (GLB / USDZ from SAM3D or Hunyuan).
+      - static meshes (GLB / USDZ / OBJ from SAM3D or Hunyuan).
     """
     oid = obj.get("id")
     is_interactive = obj.get("type") == "interactive"
@@ -291,6 +335,17 @@ def usd_for_object(obj: Dict, assets_prefix: str, root: Path) -> List[str]:
     if obj.get("pipeline"):
         lines.append(f"      string pipeline = \"{obj['pipeline']}\"")
 
+    # --------------------------------------------------------------
+    # Visual geometry reference for usdview / Hydra.
+    # This does NOT affect your physics pipeline; it's just to
+    # make the objects render nicely in viewers.
+    # --------------------------------------------------------------
+    visual_rel = choose_visual_asset_for_display(root, assets_prefix, usd_prefix, oid)
+    if visual_rel is not None:
+        lines.append('      def Xform "Geom" {')
+        lines.append(f"        rel references = @{visual_rel}@")
+        lines.append("      }")
+
     lines.append("    }")
     return lines
 
@@ -341,7 +396,7 @@ def main() -> None:
     # into the scene_assets objects.
     layout_objects = {o.get("id"): o for o in layout.get("objects", [])}
 
-    objects = []
+    objects: List[Dict] = []
     for obj in scene_assets.get("objects", []):
         merged = dict(obj)
         layout_obj = layout_objects.get(obj.get("id"))
@@ -370,7 +425,7 @@ def main() -> None:
     # Objects.
     lines.append("  def Scope \"Objects\" {")
     for obj in objects:
-        lines.extend(usd_for_object(obj, assets_prefix=assets_prefix, root=root))
+        lines.extend(usd_for_object(obj, assets_prefix=assets_prefix, usd_prefix=usd_prefix, root=root))
     lines.append("  }")
 
     lines.append("}")
