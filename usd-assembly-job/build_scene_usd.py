@@ -39,8 +39,20 @@ def matrix_from_obb(obb: Dict) -> Optional[np.ndarray]:
 
 
 def fmt_matrix(m: np.ndarray) -> str:
-    flat = m.reshape(-1)
-    return "(" + ", ".join(f"{v:.6f}" for v in flat) + ")"
+    """
+    Format a 4x4 numpy matrix as a USD matrix4d value.
+
+    Example output:
+      ((1.000000, 0.000000, 0.000000, 0.000000),
+       (0.000000, 1.000000, 0.000000, 0.000000),
+       (0.000000, 0.000000, 1.000000, 0.000000),
+       (0.000000, 0.000000, 0.000000, 1.000000))
+    """
+    m = np.array(m, dtype=np.float64).reshape(4, 4)
+    row_strs = []
+    for row in m:
+        row_strs.append("(" + ", ".join(f"{float(v):.6f}" for v in row) + ")")
+    return "(" + ", ".join(row_strs) + ")"
 
 
 def fmt_vec(v: List[float]) -> str:
