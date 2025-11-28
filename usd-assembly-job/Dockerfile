@@ -2,26 +2,37 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Python deps:
+# --- System deps (git so we can clone gltf2usd) ---
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# --- Python deps ---
 #  - numpy: used by build_scene_usd.py
-#  - usd-core: pxr.Usd / UsdGeom / UsdUtils bindings
-#  - pygltflib: can convert .glb -> .gltf (glb2gltf)
-#  - Pillow: required by gltf2usd for texture work 
+#  - usd-core: pxr.Usd / UsdGeom / UsdUtils bindings (OpenUSD)
+#  - pygltflib: used to convert .glb -> .gltf
+#  - Pillow: used by gltf2usd for texture handling
 RUN pip install --no-cache-dir \
     numpy \
     usd-core \
     pygltflib \
     Pillow
 
-# Your USD assembly scripts
+# --- Clone gltf2usd, but DO NOT install its pinned requirements ---
+# Repo: https://github.com/kcoley/gltf2usd
+# We rely on the modern numpy/Pillow we just installed instead of the
+# very old versions in requirements.txt (which are hard to build on py3.10).
+RUN git clone https://github.com/kcoley/gltf2usd.git /app/gltf2usd
+
+# --- Shim module to satisfy gltf2usd's "import gltf2usdUtils" ---
+# This file lives in *your* repo and is copied into the cloned gltf2usd
+# Source tree so that gltf2loader.py can import it successfully.
+COPY gltf2usdUtils.py /app/gltf2usd/Source/gltf2usdUtils.py
+
+# --- Your USD assembly scripts ---
 COPY build_scene_usd.py /app/build_scene_usd.py
 COPY convert_glb_to_usd_and_rewire.py /app/convert_glb_to_usd_and_rewire.py
 COPY run_usd.sh /app/run_usd.sh
 
-# Third-party converter script (vendored from GitHub)
-COPY third_party/gltf2usd.py /app/third_party/gltf2usd.py
-
-# GLB -> USDZ wrapper that our Python script calls
+# --- GLB -> USDZ wrapper that we call from convert_glb_to_usd_and_rewire.py ---
 COPY glb_to_usdz.sh /usr/local/bin/glb_to_usdz
 
 RUN chmod +x /app/run_usd.sh /usr/local/bin/glb_to_usdz

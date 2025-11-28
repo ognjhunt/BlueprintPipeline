@@ -179,23 +179,24 @@ def choose_visual_asset_for_display(
 
     Preference:
       1) USD-family files if they exist (model.usda/usd/usdz/usdc)
-      2) OBJ meshes (white_mesh_remesh.obj, model.obj, mesh.obj)
 
-    Returned example: "../assets/obj_11/white_mesh_remesh.obj"
+    NOTE: We *intentionally* do NOT fall back to OBJ here, because the
+    usd-core wheel used in this job does not ship an OBJ file-format
+    plugin and USD will spam warnings when opening the stage.
+    The GLB->USDZ job will generate USDZ and rewire references later.
+
+    Returned example: "../assets/obj_11/model.usdz"
     """
     # Filesystem location of this object's assets.
     obj_dir = root / assets_prefix / f"obj_{oid}"
 
     candidate_names = [
         # USD-family
+        "asset.usdz",
         "model.usda",
         "model.usd",
         "model.usdc",
         "model.usdz",
-        # OBJ meshes – currently present in your pipeline
-        "white_mesh_remesh.obj",
-        "model.obj",
-        "mesh.obj",
     ]
 
     stage_dir = root / usd_prefix
