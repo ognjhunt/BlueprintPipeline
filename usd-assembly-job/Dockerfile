@@ -20,8 +20,6 @@ RUN pip install --no-cache-dir \
 # Repo: https://github.com/kcoley/gltf2usd
 # We rely on the modern numpy/Pillow we just installed instead of the
 # very old versions in requirements.txt (which are hard to build on py3.10).
-# NOTE: The current version of gltf2usd already handles external image file references,
-# so we no longer need the patch that was previously applied.
 RUN git clone https://github.com/kcoley/gltf2usd.git /app/gltf2usd
 
 # --- Shims to make gltf2usd work under Python 3 ---
@@ -43,6 +41,13 @@ RUN find /app/gltf2usd -name "*.py" -type f -exec sed -i \
     -e 's/type(\([^)]*\)) == unicode/type(\1) == str/g' \
     -e 's/type(\([^)]*\)) is unicode/type(\1) is str/g' \
     {} +
+
+# 4) Apply patches to fix compatibility issues with modern USD API and image handling
+COPY gltfimage_fix.patch /tmp/gltfimage_fix.patch
+COPY usd_material_api_fix.patch /tmp/usd_material_api_fix.patch
+RUN cd /app/gltf2usd && \
+    git apply /tmp/gltfimage_fix.patch && \
+    git apply /tmp/usd_material_api_fix.patch
 
 # --- Your USD assembly scripts ---
 COPY build_scene_usd.py /app/build_scene_usd.py
