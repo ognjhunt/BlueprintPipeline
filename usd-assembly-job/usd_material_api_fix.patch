@@ -18,7 +18,7 @@ index 4ed537d..09404f2 100644
              if AlphaMode(alpha_mode) == AlphaMode.BLEND:
                  print("Blend mode detected!")
 -                self._opacity.ConnectToSource(texture_shader, 'a')
-+            self._opacity.ConnectToSource(texture_shader.GetOutput('a'))
++                self._opacity.ConnectToSource(texture_shader.GetOutput('a'))
                  self._opacity.Set(defaultAlpha)
  
              if AlphaMode(alpha_mode) == AlphaMode.MASK:
