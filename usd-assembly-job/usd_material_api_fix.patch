@@ -1,37 +1,42 @@
+diff --git a/Source/_gltf2usd/usd_material.py b/Source/_gltf2usd/usd_material.py
+index 4ed537d..09404f2 100644
 --- a/Source/_gltf2usd/usd_material.py
 +++ b/Source/_gltf2usd/usd_material.py
-@@ -247,7 +247,7 @@
-         else:
-             opacity_threshold = None
-         texture_shader = self._create_texture_shader(color_texture_image, Usd.Shade.UsdUVTexture, color_scale)
--        self._diffuse_color.ConnectToSource(texture_shader, 'rgb')
-+        self._diffuse_color.ConnectToSource(texture_shader.GetOutput('rgb'))
-         if opacity_threshold is not None:
-             self._opacity.Set(opacity_threshold)
-         elif color_texture_has_alpha:
-@@ -256,7 +256,7 @@
-                 opacity_shader = self._create_texture_shader(color_texture_image, Usd.Shade.UsdUVTexture)
-             else:
-                 opacity_shader = texture_shader
--            self._opacity.ConnectToSource(opacity_shader, 'a')
-+            self._opacity.ConnectToSource(opacity_shader.GetOutput('a'))
-         else:
-             self._opacity.Set(1.0)
-
-@@ -272,13 +272,13 @@
-         if normal_texture_image:
-             normal_scale = gltf_material.normal_scale()
-             texture_shader = self._create_texture_shader(normal_texture_image, Usd.Shade.UsdUVTexture, normal_scale)
--            self._normal.ConnectToSource(texture_shader, 'rgb')
-+            self._normal.ConnectToSource(texture_shader.GetOutput('rgb'))
-
-     def _set_pbr_metallic_roughness(self, gltf_material):
-         if gltf_material.has_pbr_metallic_roughness():
-             pbr_metallic_roughness = gltf_material.pbr_metallic_roughness()
-             texture_shader = self._create_texture_shader(pbr_metallic_roughness.metallic_roughness_texture_image(), Usd.Shade.UsdUVTexture)
--            self._metallic.ConnectToSource(texture_shader, 'b')
--            self._roughness.ConnectToSource(texture_shader, 'g')
-+            self._metallic.ConnectToSource(texture_shader.GetOutput('b'))
-+            self._roughness.ConnectToSource(texture_shader.GetOutput('g'))
-
-     def _set_khr_material_pbr_specular_glossiness(self, gltf_material):
+@@ -180,8 +180,8 @@ class USDPreviewSurface(object):
+             texture_shader = usd_uv_texture.get_shader()
+             texture_shader.CreateOutput('rgb', Sdf.ValueTypeNames.Float3)
+             texture_shader.CreateOutput('a', Sdf.ValueTypeNames.Float)
+-            self._diffuse_color.ConnectToSource(texture_shader, 'rgb')
+-            self._opacity.ConnectToSource(texture_shader, 'a')
++            self._diffuse_color.ConnectToSource(texture_shader.GetOutput('rgb'))
++            self._opacity.ConnectToSource(texture_shader.GetOutput('a'))
+ 
+     def _set_pbr_specular_glossiness_specular(self, pbr_specular_glossiness):
+         specular_glossiness_texture = pbr_specular_glossiness.get_specular_glossiness_texture()
+@@ -256,7 +256,7 @@ class USDPreviewSurface(object):
+ 
+             if AlphaMode(alpha_mode) == AlphaMode.BLEND:
+                 print("Blend mode detected!")
+-                self._opacity.ConnectToSource(texture_shader, 'a')
++            self._opacity.ConnectToSource(texture_shader.GetOutput('a'))
+                 self._opacity.Set(defaultAlpha)
+ 
+             if AlphaMode(alpha_mode) == AlphaMode.MASK:
+@@ -286,7 +286,7 @@ class USDPreviewSurface(object):
+             usd_uv_texture._fallback.Set(scale_factor)
+             texture_shader = usd_uv_texture.get_shader()
+             texture_shader.CreateOutput('r', Sdf.ValueTypeNames.Float)
+-            self._metallic.ConnectToSource(texture_shader, 'r')
++            self._metallic.ConnectToSource(texture_shader.GetOutput('r'))
+ 
+     def _set_pbr_roughness(self, pbr_metallic_roughness):
+         metallic_roughness_texture = pbr_metallic_roughness.get_metallic_roughness_texture()
+@@ -308,7 +308,7 @@ class USDPreviewSurface(object):
+             usd_uv_texture._fallback.Set(scale_factor)
+             texture_shader = usd_uv_texture.get_shader()
+             texture_shader.CreateOutput('r', Sdf.ValueTypeNames.Float)
+-            self._roughness.ConnectToSource(texture_shader, 'r')
++            self._roughness.ConnectToSource(texture_shader.GetOutput('r'))
+ 
+     def export_to_stage(self, usd_material):
+         """Converts a glTF material to a usd preview surface
