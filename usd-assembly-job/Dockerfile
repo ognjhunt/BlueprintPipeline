@@ -3,10 +3,10 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Install system dependencies
-# - libgl1-mesa-glx: Required by some image processing libraries
+# - libgl1: Required by some image processing libraries (replaces libgl1-mesa-glx in newer Debian)
 # - libglib2.0-0: Required by various Python packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
