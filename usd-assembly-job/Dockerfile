@@ -33,7 +33,15 @@ COPY gltf2usdUtils.py /app/gltf2usd/Source/gltf2usdUtils.py
 #    `from sets import Set` in gltf2/gltf2/Skin.py works on Python 3.
 COPY sets.py /app/gltf2usd/Source/sets.py
 
-# 3) Fix Python 2 'unicode' references in gltf2usd for Python 3 compatibility.
+# 3) Apply patches to fix compatibility issues with modern USD API and image handling
+#    IMPORTANT: Apply these patches BEFORE the unicode replacement to avoid conflicts
+COPY gltfimage_fix.patch /tmp/gltfimage_fix.patch
+COPY usd_material_api_fix.patch /tmp/usd_material_api_fix.patch
+RUN cd /app/gltf2usd && \
+    git apply /tmp/gltfimage_fix.patch && \
+    git apply /tmp/usd_material_api_fix.patch
+
+# 4) Fix Python 2 'unicode' references in gltf2usd for Python 3 compatibility.
 #    In Python 3, 'unicode' doesn't exist - it's just 'str'.
 #    We use sed to replace all instances of 'unicode' checks with 'str'.
 RUN find /app/gltf2usd -name "*.py" -type f -exec sed -i \
@@ -41,13 +49,6 @@ RUN find /app/gltf2usd -name "*.py" -type f -exec sed -i \
     -e 's/type(\([^)]*\)) == unicode/type(\1) == str/g' \
     -e 's/type(\([^)]*\)) is unicode/type(\1) is str/g' \
     {} +
-
-# 4) Apply patches to fix compatibility issues with modern USD API and image handling
-COPY gltfimage_fix.patch /tmp/gltfimage_fix.patch
-COPY usd_material_api_fix.patch /tmp/usd_material_api_fix.patch
-RUN cd /app/gltf2usd && \
-    git apply /tmp/gltfimage_fix.patch && \
-    git apply /tmp/usd_material_api_fix.patch
 
 # --- Your USD assembly scripts ---
 COPY build_scene_usd.py /app/build_scene_usd.py
