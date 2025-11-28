@@ -20,11 +20,9 @@ RUN pip install --no-cache-dir \
 # Repo: https://github.com/kcoley/gltf2usd
 # We rely on the modern numpy/Pillow we just installed instead of the
 # very old versions in requirements.txt (which are hard to build on py3.10).
+# NOTE: The current version of gltf2usd already handles external image file references,
+# so we no longer need the patch that was previously applied.
 RUN git clone https://github.com/kcoley/gltf2usd.git /app/gltf2usd
-
-# --- Apply patch to fix GLTFImage.py to handle both data URIs and file paths ---
-COPY gltfimage_fix.patch /tmp/gltfimage_fix.patch
-RUN cd /app/gltf2usd && git apply /tmp/gltfimage_fix.patch && rm /tmp/gltfimage_fix.patch
 
 # --- Shims to make gltf2usd work under Python 3 ---
 
