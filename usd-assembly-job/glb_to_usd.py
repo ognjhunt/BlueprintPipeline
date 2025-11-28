@@ -373,8 +373,9 @@ class USDBuilder:
         # Create the mesh
         usd_mesh = UsdGeom.Mesh.Define(self.stage, prim_path)
 
-        # Set points
-        points = [Gf.Vec3f(*p) for p in positions]
+        # Set points - CRITICAL FIX: Convert numpy array to Python list to get native float types
+        # The USD Gf.Vec3f constructor requires Python floats, not numpy.float32
+        points = [Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in positions]
         usd_mesh.CreatePointsAttr(points)
 
         # Get and set indices
@@ -396,19 +397,19 @@ class USDBuilder:
             face_counts = [3] * num_faces
             usd_mesh.CreateFaceVertexCountsAttr(Vt.IntArray(face_counts))
 
-        # Set normals
+        # Set normals - CRITICAL FIX: Convert to native Python floats
         if attrs.NORMAL is not None:
             normals = self.reader.get_accessor_data(attrs.NORMAL)
-            normal_vecs = [Gf.Vec3f(*n) for n in normals]
+            normal_vecs = [Gf.Vec3f(float(n[0]), float(n[1]), float(n[2])) for n in normals]
             usd_mesh.CreateNormalsAttr(normal_vecs)
             usd_mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
 
-        # Set UVs (texture coordinates)
+        # Set UVs (texture coordinates) - CRITICAL FIX: Convert to native Python floats
         if attrs.TEXCOORD_0 is not None:
             uvs = self.reader.get_accessor_data(attrs.TEXCOORD_0)
             # Flip V coordinate (glTF uses top-left origin, USD uses bottom-left)
             uvs[:, 1] = 1.0 - uvs[:, 1]
-            uv_vecs = [Gf.Vec2f(*uv) for uv in uvs]
+            uv_vecs = [Gf.Vec2f(float(uv[0]), float(uv[1])) for uv in uvs]
 
             # Create primvar for UVs
             primvar_api = UsdGeom.PrimvarsAPI(usd_mesh)
@@ -417,19 +418,12 @@ class USDBuilder:
             )
             uv_primvar.Set(uv_vecs)
 
-        # Set vertex colors if present
+        # Set vertex colors if present - CRITICAL FIX: Convert to native Python floats
         if attrs.COLOR_0 is not None:
             colors = self.reader.get_accessor_data(attrs.COLOR_0)
             # Handle both RGB and RGBA
-            if colors.shape[1] == 3:
-                color_vecs = [Gf.Vec3f(*c) for c in colors]
-                primvar_api = UsdGeom.PrimvarsAPI(usd_mesh)
-                color_primvar = primvar_api.CreatePrimvar(
-                    "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.vertex
-                )
-                color_primvar.Set(color_vecs)
-            elif colors.shape[1] == 4:
-                color_vecs = [Gf.Vec3f(*c[:3]) for c in colors]
+            if colors.shape[1] >= 3:
+                color_vecs = [Gf.Vec3f(float(c[0]), float(c[1]), float(c[2])) for c in colors]
                 primvar_api = UsdGeom.PrimvarsAPI(usd_mesh)
                 color_primvar = primvar_api.CreatePrimvar(
                     "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.vertex
@@ -474,15 +468,15 @@ class USDBuilder:
         # Get PBR metallic-roughness properties
         pbr = material.pbrMetallicRoughness
         if pbr:
-            # Base color
+            # Base color - CRITICAL FIX: Convert to native Python floats
             if pbr.baseColorFactor:
-                color = pbr.baseColorFactor[:3]
+                color = [float(c) for c in pbr.baseColorFactor[:3]]
                 shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
                     Gf.Vec3f(*color)
                 )
                 if len(pbr.baseColorFactor) > 3:
                     shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(
-                        pbr.baseColorFactor[3]
+                        float(pbr.baseColorFactor[3])
                     )
 
             # Base color texture
@@ -496,18 +490,19 @@ class USDBuilder:
                         tex_shader.ConnectableAPI(), "rgb"
                     )
 
-            # Metallic
-            metallic = pbr.metallicFactor if pbr.metallicFactor is not None else 1.0
+            # Metallic - CRITICAL FIX: Convert to native Python float
+            metallic = float(pbr.metallicFactor) if pbr.metallicFactor is not None else 1.0
             shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(metallic)
 
-            # Roughness
-            roughness = pbr.roughnessFactor if pbr.roughnessFactor is not None else 1.0
+            # Roughness - CRITICAL FIX: Convert to native Python float
+            roughness = float(pbr.roughnessFactor) if pbr.roughnessFactor is not None else 1.0
             shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(roughness)
 
-        # Emissive
+        # Emissive - CRITICAL FIX: Convert to native Python floats
         if material.emissiveFactor:
+            emissive = [float(e) for e in material.emissiveFactor]
             shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(
-                Gf.Vec3f(*material.emissiveFactor)
+                Gf.Vec3f(*emissive)
             )
 
         # Connect shader to material surface output
