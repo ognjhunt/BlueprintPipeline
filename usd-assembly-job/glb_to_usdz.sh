@@ -32,9 +32,21 @@ PY
 
 # 2) Convert GLTF -> USDZ using kcoley/gltf2usd
 GLTF="${GLB%.glb}.gltf"
-GLTF2USD_PY="/app/gltf2usd/Source/gltf2usd.py"
+GLTF2USD_ROOT="/app/gltf2usd/Source"
 
 echo "[glb_to_usdz] Running gltf2usd on ${GLTF}"
-python "${GLTF2USD_PY}" \
-  -g "${GLTF}" \
-  -o "${USDZ}"
+
+# Ensure Python can find:
+#   - the top-level gltf2usd modules (Source)
+#   - the internal "_gltf2usd" package (Source/_gltf2usd)
+#   - the legacy-style "gltf2" modules (Source/_gltf2usd/gltf2) that use
+#     Python 2-style imports like "from Skin import Skin"
+export PYTHONPATH="${GLTF2USD_ROOT}:${GLTF2USD_ROOT}/_gltf2usd:${GLTF2USD_ROOT}/_gltf2usd/gltf2:${PYTHONPATH:-}"
+
+# Run from inside the Source directory so relative imports behave as expected
+(
+  cd "${GLTF2USD_ROOT}"
+  python gltf2usd.py \
+    -g "${GLTF}" \
+    -o "${USDZ}"
+)
