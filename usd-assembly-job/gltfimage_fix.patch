@@ -1,0 +1,42 @@
+--- a/Source/_gltf2usd/gltf2/GLTFImage.py
++++ b/Source/_gltf2usd/gltf2/GLTFImage.py
+@@ -1,6 +1,7 @@
+ from __future__ import print_function
+ import base64
+ import os
++from pathlib import Path
+
+ class GLTFImage(object):
+     def __init__(self, image_entry, image_index, gltf_loader, optimize_textures, generate_texture_transform_texture):
+@@ -26,8 +27,29 @@
+             image_name = buffer.get('name', 'image_' + str(image_index))
+
+         if 'uri' in buffer:
+-            img_base64 = buffer['uri'].split(',')[1]
+-            self.image_data = base64.b64decode(img_base64)
++            uri = buffer['uri']
++
++            # Check if this is a data URI (base64-encoded) or a file path
++            if uri.startswith('data:'):
++                # Data URI format: data:image/png;base64,<base64-data>
++                if ',' in uri:
++                    img_base64 = uri.split(',')[1]
++                    self.image_data = base64.b64decode(img_base64)
++                else:
++                    raise ValueError(f"Invalid data URI format for image {image_index}: {uri}")
++            else:
++                # File path URI - load the image from the file system
++                gltf_dir = Path(gltf_loader.gltf_file).parent
++                image_path = gltf_dir / uri
++
++                if not image_path.exists():
++                    raise FileNotFoundError(
++                        f"Image file not found for image {image_index}: {image_path}\n"
++                        f"Referenced from GLTF: {gltf_loader.gltf_file}"
++                    )
++
++                with open(image_path, 'rb') as f:
++                    self.image_data = f.read()
+         else:
+             buffer_view_index = buffer.get('bufferView')
+             buffer_view = gltf_loader.json_data.get('bufferViews')[buffer_view_index]
