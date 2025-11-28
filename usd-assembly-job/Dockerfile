@@ -22,10 +22,16 @@ RUN pip install --no-cache-dir \
 # very old versions in requirements.txt (which are hard to build on py3.10).
 RUN git clone https://github.com/kcoley/gltf2usd.git /app/gltf2usd
 
-# --- Shim module to satisfy gltf2usd's "import gltf2usdUtils" ---
-# This file lives in *your* repo and is copied into the cloned gltf2usd
-# Source tree so that gltf2loader.py can import it successfully.
+# --- Shims to make gltf2usd work under Python 3 ---
+
+# 1) Shim module to satisfy gltf2usd's "import gltf2usdUtils"
+#    This file lives in *your* repo and is copied into the cloned gltf2usd
+#    Source tree so that gltf2loader.py can import it successfully.
 COPY gltf2usdUtils.py /app/gltf2usd/Source/gltf2usdUtils.py
+
+# 2) Shim for the old Python 2 stdlib "sets" module so that
+#    `from sets import Set` in gltf2/gltf2/Skin.py works on Python 3.
+COPY sets.py /app/gltf2usd/Source/sets.py
 
 # --- Your USD assembly scripts ---
 COPY build_scene_usd.py /app/build_scene_usd.py
