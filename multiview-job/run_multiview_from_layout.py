@@ -400,13 +400,44 @@ def main() -> None:
     multiview_root.mkdir(parents=True, exist_ok=True)
 
     layout = load_layout(layout_path)
-    objects = layout.get("objects", [])
-    print(f"[MULTIVIEW] Layout has {len(objects)} objects")
+    all_objects = layout.get("objects", [])
+    print(f"[MULTIVIEW] Layout has {len(all_objects)} objects")
 
     inventory_metadata = load_inventory_metadata(seg_dataset_dir)
 
+    # Filter objects based on inventory metadata
+    # Only process objects marked as separate assets in the inventory
+    objects = []
+    skipped_count = 0
+
+    for obj in all_objects:
+        obj_id = str(obj.get("id", ""))
+        meta = inventory_metadata.get(obj_id)
+
+        if meta:
+            # Check if object should be a separate asset
+            if meta.get("must_be_separate_asset", False):
+                objects.append(obj)
+            else:
+                skipped_count += 1
+                sim_role = meta.get("sim_role", "unknown")
+                print(
+                    f"[MULTIVIEW] Skipping object '{obj_id}' (sim_role={sim_role}, not a separate asset)",
+                    file=sys.stderr
+                )
+        else:
+            # No inventory metadata - process by default for backward compatibility
+            print(
+                f"[MULTIVIEW] WARNING: No inventory metadata for '{obj_id}', processing anyway",
+                file=sys.stderr
+            )
+            objects.append(obj)
+
+    print(f"[MULTIVIEW] Objects to process: {len(objects)}")
+    print(f"[MULTIVIEW] Objects skipped (not separate assets): {skipped_count}")
+
     if not objects:
-        print("[MULTIVIEW] No objects found in layout; nothing to do.")
+        print("[MULTIVIEW] No objects to process; nothing to do.")
         return
 
     # Load original image once (BGR)
@@ -453,6 +484,7 @@ def main() -> None:
         )
         print(strength_msg)
 
+        # Build metadata
         meta = {
             "object_id": obj_id,
             "class_name": class_name,
@@ -460,6 +492,14 @@ def main() -> None:
             "crop_strength": strength,
             "source_bbox2d": bbox2d,
         }
+
+        # Include inventory metadata if available
+        if object_meta:
+            meta["sim_role"] = object_meta.get("sim_role")
+            meta["must_be_separate_asset"] = object_meta.get("must_be_separate_asset", False)
+            if "parent_id" in object_meta:
+                meta["parent_id"] = object_meta.get("parent_id")
+
         meta_path = obj_dir / "crop_meta.json"
         with meta_path.open("w") as f:
             json.dump(meta, f, indent=2)
