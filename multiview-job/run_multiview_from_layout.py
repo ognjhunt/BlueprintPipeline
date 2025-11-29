@@ -237,6 +237,11 @@ def infer_object_phrase(client, crop_path: Path, class_name: str) -> str:
         resp = client.models.generate_content(
             model="gemini-3-pro-preview",
             contents=[prompt, image],
+            config=types.GenerateContentConfig(
+                grounding=types.GroundingConfig(
+                    google_search=types.GoogleSearch()
+                ),
+            ),
         )
         phrase = getattr(resp, "text", "") or ""
     except Exception as e:
@@ -309,6 +314,9 @@ def generate_views_for_object(
             config=types.GenerateContentConfig(
                 response_modalities=["IMAGE"],
                 image_config=types.ImageConfig(image_size="2K"),
+                grounding=types.GroundingConfig(
+                    google_search=types.GoogleSearch()
+                ),
             ),
         )
 
