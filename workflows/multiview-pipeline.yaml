@@ -29,6 +29,7 @@ main:
           - sceneId: ${parts[1]}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
+          - segPrefix: ${"scenes/" + sceneId + "/seg"}
           - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - jobName: "multiview-job"
@@ -49,6 +50,8 @@ main:
                       value: ${sceneId}
                     - name: LAYOUT_PREFIX
                       value: ${layoutPrefix}
+                    - name: SEG_PREFIX
+                      value: ${segPrefix}
                     - name: SEG_DATASET_PREFIX
                       value: ${segDatasetPrefix}
                     - name: MULTIVIEW_PREFIX
