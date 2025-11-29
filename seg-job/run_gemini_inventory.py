@@ -176,6 +176,9 @@ def analyze_scene_with_gemini(client, image: Image.Image) -> Dict[str, Any]:
             config=types.GenerateContentConfig(
                 temperature=0.1,  # Low temperature for more consistent, factual output
                 response_mime_type="application/json",
+                grounding=types.GroundingConfig(
+                    google_search=types.GoogleSearch()
+                ),
             ),
         )
 

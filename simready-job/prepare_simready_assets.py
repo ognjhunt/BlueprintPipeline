@@ -643,6 +643,13 @@ def call_gemini_for_object(
             "response_mime_type": "application/json",
         }
 
+        # Enable grounding for Gemini 3.x models
+        if model_name.startswith("gemini-3"):
+            if hasattr(types, "GroundingConfig") and hasattr(types, "GoogleSearch"):
+                cfg_kwargs["grounding"] = types.GroundingConfig(
+                    google_search=types.GoogleSearch()
+                )
+
         # Only use thinking_config when the SDK exposes it
         if hasattr(types, "ThinkingConfig"):
             ThinkingConfig = getattr(types, "ThinkingConfig")
