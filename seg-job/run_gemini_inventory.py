@@ -44,85 +44,143 @@ def load_scene_image(images_dir: Path) -> tuple[Path, Image.Image]:
 
 
 def generate_inventory_prompt() -> str:
-    """Generate the Gemini prompt for scene inventory analysis."""
-    return """You are analyzing an interior scene photograph to create a comprehensive object inventory for 3D scene reconstruction.
+    """Generate the Gemini prompt for scene inventory analysis (simulation-aware)."""
+    return """You are analyzing an interior scene photograph to create an object inventory for a ROBOTICS SIMULATION (Isaac Sim / USD-style).
+
+We do NOT want every tiny part. We want a compact set of SIMULATION-LEVEL objects.
 
 ## Task
-Analyze the provided image and identify EVERY distinct object, furniture piece, fixture, and architectural element visible in the scene.
+
+Analyze the image and identify a SMALL set of objects that matter for simulation:
+
+1. Large static structures the robot may collide with:
+   - walls, floor, ceiling, room shell
+   - large built-in cabinet runs
+   - continuous countertops
+   - door + frame, window + frame + blinds
+
+2. Large appliances:
+   - refrigerator, oven, stove, dishwasher, microwave, etc.
+
+3. Articulated parts that may move:
+   - fridge door, oven door, hinged doors, drawers, cabinet doors the robot might open.
+
+4. Manipulable objects:
+   - items a robot arm could pick up, move, or push:
+     dishes, glasses, bowls, mugs, plants, kettles, jars, utensils, tools, boxes, etc.
+
+Do NOT split small sub-parts (handles, baseboards, individual hinges, trim pieces) into separate objects unless they must be separately simulated.
 
 ## Output Format
-Provide your response as a JSON object with the following structure:
 
-```json
+Return ONLY this JSON:
+
 {
   "scene_type": "kitchen" | "bedroom" | "living_room" | "bathroom" | "office" | "other",
   "objects": [
     {
-      "id": "unique_identifier",
+      "id": "string_snake_case_id",
       "category": "furniture" | "appliance" | "fixture" | "kitchenware" | "decor" | "plant" | "architectural_element" | "other",
-      "short_description": "Brief description (5-15 words)",
-      "approx_location": "front left" | "top center" | "bottom right" | etc.,
-      "relationships": ["above refrigerator_1", "left of window_1", "on counter_1", ...]
+      "sim_role": "scene_shell" | "static_furniture_block" | "appliance" | "articulated_base" | "articulated_part" | "manipulable_object" | "ignore_for_sim",
+      "must_be_separate_asset": true | false,
+      "short_description": "5-15 word description",
+      "approx_location": "top left" | "middle center" | "bottom right" | etc.,
+      "relationships": ["above X", "on Y", "left of Z", ...],
+      "parent_id": "id_of_parent_if_articulated_part_or_nested",
+      "grouping_hint": "optional free-text note about what visual parts are included in this object"
     }
   ]
 }
-```
 
-## Guidelines
+## Granularity Rules
 
-### Object Identification
-- Identify EVERY visible object, including:
-  - Major furniture (cabinets, counters, tables, chairs, shelves)
-  - Appliances (refrigerators, ovens, microwaves, dishwashers)
-  - Fixtures (lights, faucets, sinks, windows, doors)
-  - Smaller items (jars, plants, utensils, decorative objects)
-  - Architectural elements (walls, floors, ceilings, windows, doors)
-- Each distinct item gets its own entry (e.g., multiple mugs = mug_1, mug_2, etc.)
+- Aim for roughly **10–30 objects total**, not dozens of tiny parts.
+- Merge visually connected cabinetry and counters into 1–3 blocks:
+  - e.g., "base_cabinets_and_counter", "upper_cabinets_main".
+- Treat the following as part of their parent object **not separate assets**:
+  - baseboards, toe kicks, small trim, backsplash tiles
+  - door and cabinet handles
+  - faucet knobs, hinges, small mounting hardware
+- For a window with a blind, you may represent it as one object: "window_block".
+- For sets of small identical items (3 wine glasses on a shelf), do this:
+  - If the robot might pick them individually: create several objects with ids glass_1, glass_2, etc., sim_role="manipulable_object".
+  - If they are just decorative clutter: create ONE object (e.g., "glass_set_1") with sim_role="ignore_for_sim" or "decor" and must_be_separate_asset=false.
 
-### ID Assignment
-- Use descriptive lowercase IDs: "refrigerator_1", "cabinet_2", "plant_pot_1"
+## Articulation
+
+If an object obviously has a moving part (door, drawer):
+
+- Create one object for the main body:
+  - sim_role = "articulated_base"
+- Create one object per moving part:
+  - sim_role = "articulated_part"
+  - parent_id = id of the base object
+- Only do this when the movement is reasonably clear from the image (e.g., cabinet doors, oven door).
+
+## Simulation Asset Flag
+
+Set "must_be_separate_asset" to:
+
+- true:
+  - manipulable_object
+  - appliance the robot might collide with directly
+  - articulated_base and articulated_part
+- false:
+  - scene_shell
+  - most static_furniture_block
+  - ignore_for_sim / clutter-only decor
+
+## sim_role Values
+
+Use these sim_role values appropriately:
+
+- **scene_shell**: walls, floor, ceiling, baseboard, large architectural bits
+- **static_furniture_block**: base-cabinet+counter block, upper-cabinet block, big shelf walls, etc.
+- **appliance**: fridge, oven, microwave, dishwasher body
+- **articulated_base**: the main body of an articulated object (fridge, oven, door frame)
+- **articulated_part**: doors, drawers, handles you actually want to simulate as joints (with parent_id)
+- **manipulable_object**: anything likely to be picked/placed or pushed (kettle, plant, dishes, utensils, jars)
+- **ignore_for_sim**: things you don't care about at all (ceiling lights, tiny trim, text labels)
+
+## ID Assignment
+
+- Use descriptive lowercase snake_case IDs: "refrigerator_1", "base_cabinets_and_counter", "plant_pot_1"
 - For multiples of the same type, use sequential numbers
 - IDs should be stable and meaningful
 
-### Categories
-Use these categories appropriately:
-- **furniture**: Cabinets, shelves, counters, tables, chairs, drawers
-- **appliance**: Refrigerators, ovens, stoves, dishwashers, kettles, toasters
-- **fixture**: Lights, faucets, sinks, windows, doors, blinds, handles
-- **kitchenware**: Pots, pans, utensils, dishes, jars, cutting boards
-- **decor**: Decorative items, picture frames, vases, canisters
-- **plant**: Living plants
-- **architectural_element**: Walls, floors, ceilings, backsplashes
-- **other**: Anything that doesn't fit the above
+## Descriptions
 
-### Descriptions
 - Keep descriptions concise but informative (5-15 words)
 - Include material, color, and distinguishing features
 - Examples:
+  - "L-shaped white base cabinets with wooden countertop"
   - "Tall white built-in refrigerator with flat panel doors"
-  - "Round black metal faucet with single handle"
-  - "Small green succulent in white ceramic pot"
+  - "Stainless steel electric kettle"
 
-### Approximate Location
+## Approximate Location
+
 Use a simple grid system:
-- Horizontal: left, center, right (or "front left", "back right" for depth)
+- Horizontal: left, center, right
 - Vertical: top, middle, bottom
 - Examples: "top left", "middle center", "bottom right"
 
-### Relationships
+## Relationships
+
 List spatial relationships to other objects using their IDs:
-- Position: "above cabinet_1", "below shelf_2", "left of window_1", "right of door_1"
-- Containment: "inside cabinet_3", "on counter_1", "in sink_1"
-- Support: "supports plant_1", "holds utensils"
-- Examples: ["above refrigerator_1", "below cabinet_5", "left of oven_1"]
+- Position: "above X", "below Y", "left of Z", "right of W"
+- Containment: "inside X", "on Y", "in Z"
+- Attachment: "attached_to X"
+- Examples: ["above refrigerator_1", "below upper_cabinets_main", "on base_cabinets_and_counter"]
 
 ## Quality Requirements
-- **Completeness**: Include every visible object - nothing should be missed
-- **Accuracy**: Descriptions must match what's actually visible
-- **Consistency**: Use consistent naming and relationship format
-- **Granularity**: Individual items get individual entries (not "3 mugs" → use "mug_1", "mug_2", "mug_3")
+
+- Prefer simulation-level objects over tiny parts
+- Be consistent with ids and sim_role values
+- Keep descriptions informative but concise
+- Aim for 10-30 objects total (not 60+)
 
 ## Output
+
 Return ONLY the JSON object, with no additional text or markdown formatting.
 """
 
@@ -159,6 +217,41 @@ def parse_gemini_inventory(response) -> Dict[str, Any]:
         raise ValueError("Inventory missing 'objects' field")
     if not isinstance(inventory["objects"], list):
         raise ValueError("'objects' field must be a list")
+
+    # Validate and log new simulation fields
+    objects = inventory.get("objects", [])
+    objects_with_sim_fields = 0
+    separate_assets = 0
+
+    valid_sim_roles = {
+        "scene_shell", "static_furniture_block", "appliance",
+        "articulated_base", "articulated_part", "manipulable_object", "ignore_for_sim"
+    }
+
+    for obj in objects:
+        # Check for new sim_role field
+        if "sim_role" in obj:
+            objects_with_sim_fields += 1
+            sim_role = obj.get("sim_role")
+            if sim_role not in valid_sim_roles:
+                print(
+                    f"[GEMINI-INV] WARNING: Object '{obj.get('id', 'unknown')}' has invalid sim_role: '{sim_role}'",
+                    file=sys.stderr
+                )
+
+        # Count separate assets
+        if obj.get("must_be_separate_asset", False):
+            separate_assets += 1
+
+        # Validate articulated_part has parent_id
+        if obj.get("sim_role") == "articulated_part" and not obj.get("parent_id"):
+            print(
+                f"[GEMINI-INV] WARNING: Articulated part '{obj.get('id', 'unknown')}' missing parent_id",
+                file=sys.stderr
+            )
+
+    print(f"[GEMINI-INV] Objects with sim_role field: {objects_with_sim_fields}/{len(objects)}")
+    print(f"[GEMINI-INV] Objects marked as separate assets: {separate_assets}/{len(objects)}")
 
     return inventory
 
