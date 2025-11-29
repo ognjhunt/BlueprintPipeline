@@ -14,8 +14,9 @@ RUN pip install --no-cache-dir --prefer-binary \
     pillow \
     google-genai
 
-# Job scripts
+# Job scripts (keep old script for backward compatibility)
 COPY run_multiview_from_layout.py /app/run_multiview_from_layout.py
+COPY run_multiview_gemini_generative.py /app/run_multiview_gemini_generative.py
 COPY run_multiview.sh /app/run_multiview.sh
 
 RUN chmod +x /app/run_multiview.sh
