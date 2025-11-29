@@ -39,8 +39,6 @@ def load_inventory(inventory_path: Path) -> Dict[str, Any]:
 
 def build_object_details_block(obj: Dict[str, Any]) -> str:
     """Format object details for the prompt."""
-    lines = []
-
     # Use proper JSON formatting for the object details
     obj_json = {
         "id": obj.get("id"),
@@ -49,6 +47,14 @@ def build_object_details_block(obj: Dict[str, Any]) -> str:
         "approx_location": obj.get("approx_location"),
         "relationships": obj.get("relationships", [])
     }
+
+    # Include new simulation fields if present
+    if "sim_role" in obj:
+        obj_json["sim_role"] = obj.get("sim_role")
+    if "parent_id" in obj:
+        obj_json["parent_id"] = obj.get("parent_id")
+    if "grouping_hint" in obj:
+        obj_json["grouping_hint"] = obj.get("grouping_hint")
 
     return json.dumps(obj_json, indent=4)
 
@@ -258,9 +264,16 @@ def generate_isolated_object(
             "object_id": obj_id,
             "short_description": obj_desc,
             "category": target_obj.get("category"),
+            "sim_role": target_obj.get("sim_role"),
+            "must_be_separate_asset": target_obj.get("must_be_separate_asset", False),
             "generation_method": "gemini-generative",
             "model": "gemini-3-pro-image-preview"
         }
+
+        # Include parent_id if present (for articulated parts)
+        if "parent_id" in target_obj:
+            meta["parent_id"] = target_obj.get("parent_id")
+
         meta_path = output_dir / "generation_meta.json"
         with meta_path.open("w") as f:
             json.dump(meta, f, indent=2)
@@ -322,10 +335,19 @@ def main():
 
     # Load inventory
     inventory = load_inventory(inventory_path)
-    objects = inventory.get("objects", [])
+    all_objects = inventory.get("objects", [])
+
+    # Filter to only process objects marked as separate assets
+    objects = [
+        obj for obj in all_objects
+        if obj.get("must_be_separate_asset", False)
+    ]
+
+    print(f"[MULTIVIEW-GEN] Total objects in inventory: {len(all_objects)}")
+    print(f"[MULTIVIEW-GEN] Objects marked as separate assets: {len(objects)}")
 
     if not objects:
-        print("[MULTIVIEW-GEN] No objects in inventory; nothing to do.")
+        print("[MULTIVIEW-GEN] No objects marked as separate assets; nothing to do.")
         return
 
     # Load scene image
