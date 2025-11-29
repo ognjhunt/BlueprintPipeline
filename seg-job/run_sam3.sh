@@ -55,11 +55,11 @@ echo "[SAM3] HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET}"
 echo "[SAM3] HF_HUB_ENABLE_XET=${HF_HUB_ENABLE_XET}"
 echo "[SAM3] HF_HUB_ENABLE_HF_TRANSFER=${HF_HUB_ENABLE_HF_TRANSFER}"
 
-echo "[SAM3] About to run python /app/run_sam3_from_images.py"
+echo "[SAM3] About to run python /app/run_gemini_inventory.py"
 
 # Temporarily disable -e so we can capture Python's exit code
 set +e
-python /app/run_sam3_from_images.py
+python /app/run_gemini_inventory.py
 status=$?
 set -e
 
