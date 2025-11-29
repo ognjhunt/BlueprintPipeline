@@ -174,11 +174,11 @@ def analyze_scene_with_gemini(client, image: Image.Image) -> Dict[str, Any]:
             model="gemini-3-pro-preview",
             contents=[prompt, image],
             config=types.GenerateContentConfig(
-                temperature=0.1,  # Low temperature for more consistent, factual output
+                # Using default temperature=1.0 as recommended for Gemini 3
                 response_mime_type="application/json",
-                grounding=types.GroundingConfig(
-                    google_search=types.GoogleSearch()
-                ),
+                tools=[
+                    types.Tool(googleSearch=types.GoogleSearch()),
+                ],
             ),
         )
 
