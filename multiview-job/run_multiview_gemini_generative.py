@@ -230,9 +230,9 @@ def generate_isolated_object(
                 response_modalities=["IMAGE"],
                 image_config=types.ImageConfig(image_size="2K"),
                 temperature=0.3,  # Slightly higher for creative reconstruction
-                grounding=types.GroundingConfig(
-                    google_search=types.GoogleSearch()
-                ),
+                tools=[
+                    types.Tool(googleSearch=types.GoogleSearch()),
+                ],
             ),
         )
 
