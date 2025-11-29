@@ -1,0 +1,15 @@
+# Blueprint Pipeline Terraform Variables
+# Copy this file to terraform.tfvars and update with your values
+
+# GCP Project ID (default should be correct)
+project_id = "blueprint-8c1ca"
+
+# GCP Region for workflows and jobs
+region = "us-central1"
+
+# REQUIRED: GCS bucket name where pipeline data is stored
+# This is the bucket that contains your scenes/*/assets/scene_assets.json files
+bucket_name = "YOUR_BUCKET_NAME_HERE"
+
+# Service account for Eventarc triggers (default should be correct)
+service_account_email = "744608654760-compute@developer.gserviceaccount.com"
