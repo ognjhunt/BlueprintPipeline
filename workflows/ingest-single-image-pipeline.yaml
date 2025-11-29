@@ -59,6 +59,12 @@ main:
                       value: ${imagesPrefix}
                     - name: SEG_PREFIX
                       value: ${segPrefix}
+                    - name: SAM3_CONFIDENCE
+                      value: "0.60"
+                    - name: GEMINI_GROUNDING_ENABLED
+                      value: "true"
+                    - name: GEMINI_STRUCTURED_OUTPUT
+                      value: "true"
         result: segExec
         next: wait_for_data_yaml
 
