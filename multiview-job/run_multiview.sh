@@ -44,7 +44,13 @@ fi
 # Export for Python
 export SEG_PREFIX MULTIVIEW_PREFIX BUCKET SCENE_ID
 
+echo "[MULTIVIEW] Generating layout from inventory for SAM3D..."
+python /app/generate_layout_from_inventory.py
+
 echo "[MULTIVIEW] Running Gemini generative multiview generation..."
 python /app/run_multiview_gemini_generative.py
+
+echo "[MULTIVIEW] Running scene background generation..."
+python /app/run_generate_scene_background.py
 
 echo "[MULTIVIEW] Done run_multiview.sh"
