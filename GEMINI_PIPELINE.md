@@ -98,35 +98,53 @@ Image Upload
 
 ### 2. Multiview Job (`multiview-job`)
 
-**Purpose**: Generate isolated, studio-quality renders of each object using Gemini's generative capabilities
+**Purpose**: Generate isolated, studio-quality renders of each object AND the scene background using Gemini's generative capabilities
 
 **Input**:
 - Scene image: `scenes/<sceneId>/seg/dataset/valid/images/room.jpg`
 - Inventory: `scenes/<sceneId>/seg/inventory.json`
 
 **Process**:
-- For each object in the inventory:
-  1. Build a detailed reconstruction prompt with:
-     - Target object details
-     - Complete scene context (all objects to exclude)
-     - Reconstruction requirements
-  2. Call `gemini-3-pro-image-preview` with:
-     - Full scene image (not cropped)
-     - Reconstruction prompt
-     - Request for IMAGE output at 2K resolution
-  3. Save the generated isolated object image
+
+1. **Generate Layout JSON** (for SAM3D discovery):
+   - Creates `scenes/<sceneId>/seg/scene_layout_scaled.json`
+   - Includes all objects marked as `must_be_separate_asset: true`
+   - Includes special `scene_background` object for static elements
+
+2. **Generate Individual Object Renders**:
+   - For each object marked as `must_be_separate_asset: true`:
+     1. Build a detailed reconstruction prompt with:
+        - Target object details
+        - Complete scene context (all objects to exclude)
+        - Reconstruction requirements
+     2. Call `gemini-3-pro-image-preview` with:
+        - Full scene image (not cropped)
+        - Reconstruction prompt
+        - Request for IMAGE output at 2K resolution
+     3. Save the generated isolated object image
+
+3. **Generate Scene Background**:
+   - Creates a background image with all separate asset objects removed
+   - Preserves static elements: walls, floor, ceiling, built-in furniture
+   - Uses inpainting to fill spaces where objects were removed
+   - Saves to `scenes/<sceneId>/multiview/obj_scene_background/view_0.png`
 
 **Output**:
-- `scenes/<sceneId>/multiview/obj_<id>/view_0.png` - Isolated object render
-- `scenes/<sceneId>/multiview/obj_<id>/generation_meta.json` - Metadata
+- `scenes/<sceneId>/multiview/obj_<id>/view_0.png` - Isolated object renders
+- `scenes/<sceneId>/multiview/obj_<id>/generation_meta.json` - Object metadata
+- `scenes/<sceneId>/multiview/obj_scene_background/view_0.png` - Scene background render
+- `scenes/<sceneId>/multiview/obj_scene_background/generation_meta.json` - Background metadata
+- `scenes/<sceneId>/seg/scene_layout_scaled.json` - Layout for SAM3D processing
 
 **Key Files**:
 - `multiview-job/run_multiview_gemini_generative.py` - Generative multiview script
+- `multiview-job/run_generate_scene_background.py` - Background generation script
+- `multiview-job/generate_layout_from_inventory.py` - Layout generation from inventory
 - `prompts/object_reconstruction_prompt.md` - Prompt template documentation
 
 **Prompt Strategy**:
 
-The prompt instructs Gemini to:
+For individual objects, the prompt instructs Gemini to:
 1. **Isolate** the target object completely (transparent background)
 2. **Exclude** all other scene elements and objects
 3. **Reconstruct** hidden/occluded parts plausibly
@@ -134,21 +152,98 @@ The prompt instructs Gemini to:
 5. **Render** in orthographic front view with studio lighting
 6. **Output** high-resolution PNG with alpha transparency
 
+For scene background, the prompt instructs Gemini to:
+1. **Remove** all separate asset objects (appliances, movable items, articulated parts)
+2. **Preserve** static elements (walls, floor, ceiling, built-in furniture frames)
+3. **Inpaint** removed areas naturally to match surroundings
+4. **Reveal** surfaces that were occluded by removed objects
+5. **Maintain** original lighting, perspective, and materials
+6. **Output** high-resolution RGB image (same view as input)
+
 **Example Output**:
-- Input: Kitchen scene with refrigerator among other objects
-- Output: Isolated white refrigerator on transparent background, complete with reconstructed sides/back
+- **Individual Object**: Kitchen scene with refrigerator → Isolated white refrigerator on transparent background
+- **Scene Background**: Kitchen scene → Same kitchen view but with refrigerator, kettle, plants removed, showing countertop and walls underneath
+
+---
+
+## Object Classification and Processing
+
+### How Objects Are Classified
+
+During inventory generation (seg-job), Gemini assigns each object two key fields:
+
+1. **`sim_role`**: Simulation role in the scene
+   - `scene_shell`: Walls, floor, ceiling, architectural elements
+   - `static_furniture_block`: Merged cabinet runs, countertops, built-in furniture
+   - `appliance`: Large appliances (refrigerator body, oven body, dishwasher)
+   - `articulated_base`: Main body of articulated objects (cabinet frame, appliance body)
+   - `articulated_part`: Moving parts (cabinet doors, refrigerator doors, oven door, drawers)
+   - `manipulable_object`: Items robots can pick up (dishes, plants, kettles, utensils)
+   - `ignore_for_sim`: Decorative clutter not needed for simulation
+
+2. **`must_be_separate_asset`**: Whether to create a separate 3D model
+   - `true`: Create individual 3D model (manipulable objects, articulated parts, appliances)
+   - `false`: Include in scene background mesh (walls, floors, static furniture blocks)
+
+### Processing Pipeline by Object Type
+
+| Object Type | Example | `must_be_separate_asset` | Processing |
+|-------------|---------|--------------------------|------------|
+| **Manipulable Objects** | Electric kettle, plant pot, bowl | `true` | Individual 3D model |
+| **Articulated Base** | Cabinet frame, refrigerator body | `true` | Individual 3D model |
+| **Articulated Part** | Cabinet door, oven door, drawer | `true` | Individual 3D model with `parent_id` |
+| **Appliance** | Stovetop (if fixed) | `true` | Individual 3D model |
+| **Scene Shell** | Walls, floor, ceiling | `false` | Included in scene background mesh |
+| **Static Furniture** | Countertop, cabinet box (if not articulated) | `false` | Included in scene background mesh |
+| **Ignore for Sim** | Small decorative items | `false` | Included in scene background mesh |
+
+### Cabinet Example
+
+For a kitchen with upper and lower cabinets:
+
+**If cabinets have visible doors/drawers:**
+- Cabinet frame/box: `sim_role: "articulated_base"`, `must_be_separate_asset: true` → Individual 3D model
+- Cabinet doors: `sim_role: "articulated_part"`, `must_be_separate_asset: true`, `parent_id: "cabinet_frame"` → Individual 3D models
+- Countertop: Often merged with base cabinet or separate depending on simulation needs
+
+**If cabinets are closed/static:**
+- Cabinet block: `sim_role: "static_furniture_block"`, `must_be_separate_asset: false` → Included in background mesh
+- Countertop: Merged with cabinet block → Included in background mesh
+
+### Complete Scene Reconstruction
+
+The final scene consists of:
+
+1. **Individual 3D Assets** (generated by SAM3D):
+   - All objects with `must_be_separate_asset: true`
+   - Typically 10-30 objects per scene
+   - Can be manipulated, moved, or articulated in simulation
+
+2. **Scene Background Mesh** (generated by SAM3D from background render):
+   - Single merged mesh of all static elements
+   - Walls, floor, ceiling, built-in furniture
+   - Provides collision geometry and visual context
+   - Cannot be manipulated in simulation
+
+This approach provides a complete scene reconstruction suitable for robotics simulation, with both:
+- **Static environment** for navigation and collision
+- **Interactive objects** for manipulation tasks
 
 ---
 
 ### 3. SAM3D Job (`sam3d-job`)
 
-**Purpose**: Convert isolated object renders into 3D models (unchanged from original pipeline)
+**Purpose**: Convert isolated object renders AND scene background into 3D models
 
 **Input**:
 - Object renders: `scenes/<sceneId>/multiview/obj_*/view_0.png`
+- Scene background render: `scenes/<sceneId>/multiview/obj_scene_background/view_0.png`
+- Layout: `scenes/<sceneId>/seg/scene_layout_scaled.json`
 
 **Output**:
-- 3D models: `scenes/<sceneId>/assets/obj_*/model.glb`, `model.usdz`, etc.
+- Individual object 3D models: `scenes/<sceneId>/assets/obj_*/model.glb`, `model.usdz`
+- Scene background 3D model: `scenes/<sceneId>/assets/obj_scene_background/model.glb`, `model.usdz`
+- Scene assets manifest: `scenes/<sceneId>/assets/scene_assets.json`
 
 ---
 

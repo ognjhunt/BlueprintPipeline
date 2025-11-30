@@ -167,6 +167,8 @@ main:
                       value: ${assetsPrefix}
                     - name: MULTIVIEW_PREFIX
                       value: ${multiviewPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${segPrefix}
         result: sam3dExec
         next: done
 

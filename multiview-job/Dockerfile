@@ -17,6 +17,8 @@ RUN pip install --no-cache-dir --prefer-binary \
 # Job scripts (keep old script for backward compatibility)
 COPY run_multiview_from_layout.py /app/run_multiview_from_layout.py
 COPY run_multiview_gemini_generative.py /app/run_multiview_gemini_generative.py
+COPY run_generate_scene_background.py /app/run_generate_scene_background.py
+COPY generate_layout_from_inventory.py /app/generate_layout_from_inventory.py
 COPY run_multiview.sh /app/run_multiview.sh
 
 RUN chmod +x /app/run_multiview.sh
