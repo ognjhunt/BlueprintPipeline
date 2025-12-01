@@ -73,12 +73,23 @@ def main():
         phrase = obj.get("object_phrase")  # optional future field
 
         mv_dir = multiview_root / f"obj_{oid}"
+
+        # Support both crop.png (from crop-based multiview) and view_0.png (from gemini-generative multiview)
         crop_path = mv_dir / "crop.png"
-        if not crop_path.is_file():
-            print(f"[ASSETS] WARNING: missing crop for obj {oid} at {crop_path}")
+        view_path = mv_dir / "view_0.png"
+
+        if crop_path.is_file():
+            image_path = crop_path
+        elif view_path.is_file():
+            image_path = view_path
+        else:
+            print(f"[ASSETS] WARNING: missing crop.png or view_0.png for obj {oid} in {mv_dir}")
             continue
 
         obj_type, pipeline = classify_type(cls, phrase, interactive_ids, oid, static_pipeline=static_pipeline)
+
+        # Use the relative path for the image that was found
+        image_filename = image_path.name
 
         entry = {
             "id": oid,
@@ -86,7 +97,7 @@ def main():
             "type": obj_type,
             "pipeline": pipeline,
             "multiview_dir": f"{multiview_prefix}/obj_{oid}",
-            "crop_path": f"{multiview_prefix}/obj_{oid}/crop.png",
+            "crop_path": f"{multiview_prefix}/obj_{oid}/{image_filename}",
             "polygon": obj.get("polygon"),
         }
         if obj_type == "interactive":
