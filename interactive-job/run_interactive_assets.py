@@ -259,12 +259,21 @@ def process_interactive_object(
     obj_id = obj.get("id")
     crop_rel = obj.get("crop_path")
 
-    # Default crop location from multiview
-    crop_path = multiview_root / f"obj_{obj_id}" / "crop.png"
-    # If the assets plan already has an absolute crop path (relative to /mnt/gcs),
-    # prefer that.
+    # If the assets plan already has a crop path (relative to /mnt/gcs), use that
     if crop_rel:
         crop_path = Path("/mnt/gcs") / crop_rel
+    else:
+        # Default crop location from multiview - check both crop.png and view_0.png
+        obj_dir = multiview_root / f"obj_{obj_id}"
+        crop_png = obj_dir / "crop.png"
+        view_png = obj_dir / "view_0.png"
+
+        if crop_png.is_file():
+            crop_path = crop_png
+        elif view_png.is_file():
+            crop_path = view_png
+        else:
+            crop_path = crop_png  # Use default for error messaging
 
     output_dir = assets_root / "interactive" / f"obj_{obj_id}"
     ensure_dir(output_dir)
