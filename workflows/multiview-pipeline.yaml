@@ -123,10 +123,52 @@ main:
                     - name: ASSETS_PREFIX
                       value: ${assetsPrefix}
         result: assetsPlanExec
+        next: wait_for_assets_plan
+
+    - wait_for_assets_plan:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${assetsPlanExec.name}
+        result: assetsPlanStatus
+        next: check_assets_plan_status
+
+    - check_assets_plan_status:
+        switch:
+          - condition: ${assetsPlanStatus.completionTime != null}
+            next: verify_assets_file
+          - condition: ${assetsPlanStatus.failedCount != null and assetsPlanStatus.failedCount > 0}
+            next: assets_plan_failed
+        next: wait_assets_plan_poll
+
+    - wait_assets_plan_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_assets_plan
+
+    - assets_plan_failed:
+        raise: ${"Assets-plan job FAILED for scene " + sceneId}
+
+    - verify_assets_file:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${assetsPrefix + "/scene_assets.json"}
+          result: assetsFileCheck
+        except:
+          as: e
+          steps:
+            - log_verification_error:
+                call: sys.log
+                args:
+                  text: ${"scene_assets.json not found despite job completion - retrying"}
+                  severity: "WARNING"
+                next: wait_assets_plan_poll
         next: done
 
     - done:
-        return: ${"assets-plan-job started for " + object}
+        return: ${"assets-plan-job completed successfully for " + object}
 
     - skip:
         return: ${"multiview skip " + object}
