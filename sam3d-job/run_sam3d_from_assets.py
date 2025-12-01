@@ -763,11 +763,16 @@ def maybe_build_asset_plan(
 
         mv_dir = multiview_root / f"obj_{oid}"
         crop_path = mv_dir / "crop.png"
-        preferred_view = mv_dir / "view_0.png"
+        view_path = mv_dir / "view_0.png"
 
-        if not (preferred_view.is_file() or crop_path.is_file()):
+        # Determine which image file exists
+        if crop_path.is_file():
+            image_filename = "crop.png"
+        elif view_path.is_file():
+            image_filename = "view_0.png"
+        else:
             print(
-                f"[SAM3D] Skipping obj {oid}: no crop/view found under {mv_dir}",
+                f"[SAM3D] Skipping obj {oid}: no crop.png or view_0.png found in {mv_dir}",
                 file=sys.stderr,
             )
             continue
@@ -778,11 +783,9 @@ def maybe_build_asset_plan(
             "type": "static",
             "pipeline": "sam3d",
             "multiview_dir": f"{multiview_prefix}/obj_{oid}",
-            "crop_path": f"{multiview_prefix}/obj_{oid}/crop.png",
+            "crop_path": f"{multiview_prefix}/obj_{oid}/{image_filename}",
             "polygon": obj.get("polygon"),
         }
-        if preferred_view.is_file():
-            entry["preferred_view"] = f"{multiview_prefix}/obj_{oid}/view_0.png"
 
         entries.append(entry)
 
