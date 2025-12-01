@@ -31,6 +31,29 @@ main:
           - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "layout-job"
+          - layoutOutputPath: ${"scenes/" + sceneId + "/layout/scene_layout.json"}
+        next: check_if_done
+
+    # Check if the output already exists to avoid duplicate processing
+    - check_if_done:
+        try:
+          steps:
+            - get_layout_output:
+                call: googleapis.storage.v1.objects.get
+                args:
+                  bucket: ${bucket}
+                  object: ${layoutOutputPath}
+                result: layoutOutputObject
+            - skip_already_done:
+                return: ${"layout-job already completed for " + object + " (found scene_layout.json)"}
+        except:
+          as: e
+          steps:
+            - check_not_found:
+                switch:
+                  - condition: ${e.code == 404}
+                    next: run_layout_job
+                raise: ${e}
         next: run_layout_job
 
     - run_layout_job:
