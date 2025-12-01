@@ -47,27 +47,43 @@ def generate_inventory_prompt() -> str:
     """Generate the Gemini prompt for scene inventory analysis (simulation-aware)."""
     return """You are analyzing an interior scene photograph to create an object inventory for a ROBOTICS SIMULATION (Isaac Sim / USD-style).
 
-We do NOT want every tiny part. We want a compact set of SIMULATION-LEVEL objects.
+This inventory will be used to generate 3D assets for robotic training, where robots need to:
+- Navigate through the space
+- Open doors and drawers
+- Manipulate objects
+- Interact with articulated furniture and appliances
+
+## CRITICAL REQUIREMENT FOR ROBOTIC TRAINING
+
+**ALWAYS SEPARATE ARTICULATED COMPONENTS:**
+- Every cabinet door, drawer, appliance door MUST be a separate object
+- Cabinet frames and doors are NEVER merged together
+- Each moving part gets its own object for physics simulation
 
 ## Task
 
-Analyze the image and identify a SMALL set of objects that matter for simulation:
+Analyze the image and identify objects that matter for simulation:
 
-1. Large static structures the robot may collide with:
+1. **Large static structures** (stay in background shell):
    - walls, floor, ceiling, room shell
-   - large built-in cabinet runs
-   - continuous countertops
-   - door + frame, window + frame + blinds
+   - countertops (if not articulated)
+   - fixed shelving
+   - backsplash, baseboards
 
-2. Large appliances:
-   - refrigerator, oven, stove, dishwasher, microwave, etc.
+2. **Articulated furniture** (EACH COMPONENT SEPARATE):
+   - Cabinet frame → articulated_base
+   - Each cabinet door → articulated_part
+   - Each drawer front → articulated_part
+   - Refrigerator body → articulated_base
+   - Refrigerator door(s) → articulated_part
+   - Oven body → articulated_base
+   - Oven door → articulated_part
 
-3. Articulated parts that may move:
-   - fridge door, oven door, hinged doors, drawers, cabinet doors the robot might open.
+3. **Appliances** (without visible articulation):
+   - stovetop, dishwasher body, microwave body (if doors not visible)
 
-4. Manipulable objects:
-   - items a robot arm could pick up, move, or push:
-     dishes, glasses, bowls, mugs, plants, kettles, jars, utensils, tools, boxes, etc.
+4. **Manipulable objects** (robot can pick up):
+   - dishes, glasses, bowls, mugs, plants, kettles, jars, utensils, tools, boxes, etc.
 
 Do NOT split small sub-parts (handles, baseboards, individual hinges, trim pieces) into separate objects unless they must be separately simulated.
 
@@ -94,53 +110,116 @@ Return ONLY this JSON:
 
 ## Granularity Rules
 
-- Aim for roughly **10–30 objects total**, not dozens of tiny parts.
-- Merge visually connected cabinetry and counters into 1–3 blocks:
-  - e.g., "base_cabinets_and_counter", "upper_cabinets_main".
+- Aim for roughly **10–40 objects total**, not dozens of tiny parts.
+- **CRITICAL FOR ARTICULATED FURNITURE:**
+  - **DO NOT merge cabinets, drawers, or furniture with visible doors/drawers into blocks**
+  - Each cabinet frame, door, and drawer MUST be a separate object for articulation
+  - Examples:
+    - Upper cabinet with door → TWO objects: cabinet frame (articulated_base) + door (articulated_part)
+    - Drawer unit with 4 drawers → FIVE objects: frame (articulated_base) + 4 drawer fronts (articulated_part)
+    - Base cabinets with 2 doors and 3 drawers → SIX objects: frame + 2 doors + 3 drawers
+  - **ONLY merge cabinetry if it has NO visible doors/drawers** (e.g., solid toe kick, fixed panels)
+- Countertops:
+  - If countertop is separate from cabinets → separate object with sim_role="static_furniture_block", must_be_separate_asset=false
+  - If countertop is integrated with closed cabinets → can merge with cabinet block
 - Treat the following as part of their parent object **not separate assets**:
   - baseboards, toe kicks, small trim, backsplash tiles
-  - door and cabinet handles
+  - door and cabinet handles (the handle itself, but the door IS a separate asset)
   - faucet knobs, hinges, small mounting hardware
 - For a window with a blind, you may represent it as one object: "window_block".
 - For sets of small identical items (3 wine glasses on a shelf), do this:
   - If the robot might pick them individually: create several objects with ids glass_1, glass_2, etc., sim_role="manipulable_object".
   - If they are just decorative clutter: create ONE object (e.g., "glass_set_1") with sim_role="ignore_for_sim" or "decor" and must_be_separate_asset=false.
 
-## Articulation
+## Articulation (CRITICAL FOR ROBOTIC TRAINING)
 
-If an object obviously has a moving part (door, drawer):
+**ALWAYS identify and separate articulated components for robotic training:**
 
-- Create one object for the main body:
-  - sim_role = "articulated_base"
-- Create one object per moving part:
-  - sim_role = "articulated_part"
-  - parent_id = id of the base object
-- Only do this when the movement is reasonably clear from the image (e.g., cabinet doors, oven door).
+For ANY furniture or appliance with visible doors, drawers, or moving parts:
 
-## Simulation Asset Flag
+1. **Create the base/frame object:**
+   - sim_role = "articulated_base"
+   - must_be_separate_asset = true
+   - This is the fixed part (cabinet box, refrigerator body, oven body, etc.)
 
-Set "must_be_separate_asset" to:
+2. **Create separate objects for EACH moving part:**
+   - sim_role = "articulated_part"
+   - must_be_separate_asset = true
+   - parent_id = id of the base object
+   - One object per door, drawer, or moving component
 
-- true:
-  - manipulable_object
-  - appliance the robot might collide with directly
-  - articulated_base and articulated_part
-- false:
-  - scene_shell
-  - most static_furniture_block
-  - ignore_for_sim / clutter-only decor
+**Common articulated objects to identify:**
+- **Cabinet doors**: Each hinged door is a separate articulated_part
+- **Drawers**: Each drawer front is a separate articulated_part
+- **Refrigerator**: Body is articulated_base, each door/freezer door is articulated_part
+- **Oven**: Body is articulated_base, oven door is articulated_part
+- **Dishwasher**: Body is articulated_base, door is articulated_part
+- **Microwave**: Body is articulated_base, door is articulated_part
+
+**Examples:**
+- Kitchen with upper cabinet (2 doors), lower cabinet (1 door + 2 drawers):
+  - upper_cabinet_frame (articulated_base, must_be_separate_asset=true)
+  - upper_cabinet_door_left (articulated_part, must_be_separate_asset=true, parent_id="upper_cabinet_frame")
+  - upper_cabinet_door_right (articulated_part, must_be_separate_asset=true, parent_id="upper_cabinet_frame")
+  - lower_cabinet_frame (articulated_base, must_be_separate_asset=true)
+  - lower_cabinet_door (articulated_part, must_be_separate_asset=true, parent_id="lower_cabinet_frame")
+  - drawer_1 (articulated_part, must_be_separate_asset=true, parent_id="lower_cabinet_frame")
+  - drawer_2 (articulated_part, must_be_separate_asset=true, parent_id="lower_cabinet_frame")
+
+**Do NOT create articulated objects for:**
+- Handles, knobs, hinges (these are part of the door/drawer object)
+- Fixed panels or closed cabinetry with no visible access
+
+## Simulation Asset Flag (CRITICAL)
+
+Set "must_be_separate_asset" based on whether the object needs individual 3D model generation:
+
+**must_be_separate_asset = true (will be removed from scene shell and get individual 3D model):**
+- ALL manipulable_object (items robots can pick up)
+- ALL appliance bodies (refrigerator, oven, microwave, dishwasher)
+- ALL articulated_base (cabinet frames, appliance bodies with doors)
+- ALL articulated_part (every door, drawer, moving component)
+
+**must_be_separate_asset = false (will remain in static scene shell background):**
+- ALL scene_shell (walls, floor, ceiling, baseboards)
+- MOST static_furniture_block (countertops, fixed shelving, solid panels)
+- ALL ignore_for_sim / decorative clutter
+
+**REMEMBER:** If a cabinet has doors or drawers visible, the frame AND each door/drawer MUST have must_be_separate_asset=true
 
 ## sim_role Values
 
 Use these sim_role values appropriately:
 
-- **scene_shell**: walls, floor, ceiling, baseboard, large architectural bits
-- **static_furniture_block**: base-cabinet+counter block, upper-cabinet block, big shelf walls, etc.
-- **appliance**: fridge, oven, microwave, dishwasher body
-- **articulated_base**: the main body of an articulated object (fridge, oven, door frame)
-- **articulated_part**: doors, drawers, handles you actually want to simulate as joints (with parent_id)
-- **manipulable_object**: anything likely to be picked/placed or pushed (kettle, plant, dishes, utensils, jars)
-- **ignore_for_sim**: things you don't care about at all (ceiling lights, tiny trim, text labels)
+- **scene_shell**: walls, floor, ceiling, baseboards, large architectural elements
+  - Always must_be_separate_asset=false (stays in background shell)
+
+- **static_furniture_block**: ONLY for furniture with NO moving parts
+  - Examples: solid countertops, fixed shelving, solid panels, open shelves
+  - Usually must_be_separate_asset=false (stays in background shell)
+  - DO NOT use for cabinets with doors/drawers
+
+- **appliance**: Large appliance bodies (when they DON'T have visible doors/drawers)
+  - Examples: stovetop, built-in microwave (if door not visible)
+  - Usually must_be_separate_asset=true
+
+- **articulated_base**: Main body/frame of furniture or appliances WITH moving parts
+  - Examples: cabinet frame (when it has doors/drawers), refrigerator body, oven body
+  - ALWAYS must_be_separate_asset=true
+  - Child objects will reference this as parent_id
+
+- **articulated_part**: Every door, drawer, or moving component
+  - Examples: cabinet door, drawer front, refrigerator door, oven door, freezer door
+  - ALWAYS must_be_separate_asset=true
+  - ALWAYS has parent_id pointing to the articulated_base
+
+- **manipulable_object**: Items robots can pick up, move, or push
+  - Examples: kettle, plant, dishes, utensils, jars, bowls, mugs, boxes
+  - ALWAYS must_be_separate_asset=true
+
+- **ignore_for_sim**: Decorative elements not needed for simulation
+  - Examples: ceiling lights, tiny trim, text labels, small decorative items
+  - Always must_be_separate_asset=false (stays in background shell)
 
 ## ID Assignment
 
@@ -177,7 +256,117 @@ List spatial relationships to other objects using their IDs:
 - Prefer simulation-level objects over tiny parts
 - Be consistent with ids and sim_role values
 - Keep descriptions informative but concise
-- Aim for 10-30 objects total (not 60+)
+- Aim for 10-40 objects total for typical rooms
+- ALWAYS separate articulated components (cabinet frames, doors, drawers)
+
+## Example Output for Kitchen Scene
+
+For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers), refrigerator, oven, and countertop:
+
+```json
+{
+  "scene_type": "kitchen",
+  "objects": [
+    {
+      "id": "walls",
+      "sim_role": "scene_shell",
+      "must_be_separate_asset": false,
+      "short_description": "Kitchen walls with white paint"
+    },
+    {
+      "id": "floor",
+      "sim_role": "scene_shell",
+      "must_be_separate_asset": false,
+      "short_description": "Light wood laminate flooring"
+    },
+    {
+      "id": "countertop",
+      "sim_role": "static_furniture_block",
+      "must_be_separate_asset": false,
+      "short_description": "L-shaped wooden countertop surface"
+    },
+    {
+      "id": "upper_cabinet_left_frame",
+      "sim_role": "articulated_base",
+      "must_be_separate_asset": true,
+      "short_description": "White upper cabinet frame with two door openings"
+    },
+    {
+      "id": "upper_cabinet_left_door_1",
+      "sim_role": "articulated_part",
+      "must_be_separate_asset": true,
+      "parent_id": "upper_cabinet_left_frame",
+      "short_description": "Left hinged white cabinet door with black handle"
+    },
+    {
+      "id": "upper_cabinet_left_door_2",
+      "sim_role": "articulated_part",
+      "must_be_separate_asset": true,
+      "parent_id": "upper_cabinet_left_frame",
+      "short_description": "Right hinged white cabinet door with black handle"
+    },
+    {
+      "id": "lower_cabinet_frame",
+      "sim_role": "articulated_base",
+      "must_be_separate_asset": true,
+      "short_description": "White lower cabinet frame with drawer and door openings"
+    },
+    {
+      "id": "drawer_1",
+      "sim_role": "articulated_part",
+      "must_be_separate_asset": true,
+      "parent_id": "lower_cabinet_frame",
+      "short_description": "Top drawer with white front and black handle"
+    },
+    {
+      "id": "drawer_2",
+      "sim_role": "articulated_part",
+      "must_be_separate_asset": true,
+      "parent_id": "lower_cabinet_frame",
+      "short_description": "Middle drawer with white front and black handle"
+    },
+    {
+      "id": "drawer_3",
+      "sim_role": "articulated_part",
+      "must_be_separate_asset": true,
+      "parent_id": "lower_cabinet_frame",
+      "short_description": "Bottom drawer with white front and black handle"
+    },
+    {
+      "id": "refrigerator_body",
+      "sim_role": "articulated_base",
+      "must_be_separate_asset": true,
+      "short_description": "Tall white refrigerator body frame"
+    },
+    {
+      "id": "refrigerator_door",
+      "sim_role": "articulated_part",
+      "must_be_separate_asset": true,
+      "parent_id": "refrigerator_body",
+      "short_description": "White refrigerator door with flat panel"
+    },
+    {
+      "id": "oven_body",
+      "sim_role": "articulated_base",
+      "must_be_separate_asset": true,
+      "short_description": "Black built-in oven body"
+    },
+    {
+      "id": "oven_door",
+      "sim_role": "articulated_part",
+      "must_be_separate_asset": true,
+      "parent_id": "oven_body",
+      "short_description": "Black oven door with glass window"
+    },
+    {
+      "id": "kettle_1",
+      "sim_role": "manipulable_object",
+      "must_be_separate_asset": true,
+      "short_description": "Stainless steel electric kettle on countertop"
+    }
+  ]
+}
+```
 
 ## Output
 
