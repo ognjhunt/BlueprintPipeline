@@ -31,6 +31,34 @@ main:
           - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "objects-job"
+        next: check_if_done
+
+    # Check if the output already exists to avoid duplicate processing
+    - check_if_done:
+        try:
+          steps:
+            - read_layout:
+                call: http.get
+                args:
+                  url: ${"https://storage.googleapis.com/storage/v1/b/" + bucket + "/o/" + text.url_encode(object) + "?alt=media"}
+                  auth:
+                    type: OAuth2
+                result: layoutResponse
+            - parse_layout:
+                assign:
+                  - layoutData: ${json.decode(text.decode(layoutResponse.body))}
+            - check_has_objects:
+                switch:
+                  - condition: ${len(layoutData.objects) > 0}
+                    return: ${"objects-job already completed for " + object + " (objects already present)"}
+        except:
+          as: e
+          steps:
+            - log_check_error:
+                call: sys.log
+                args:
+                  text: ${"Failed to check if objects already exist: " + e.message + ". Proceeding with job."}
+                  severity: "WARNING"
         next: run_objects_job
 
     - run_objects_job:
