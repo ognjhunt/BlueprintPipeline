@@ -29,6 +29,29 @@ main:
           - sceneId: ${parts[1]}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "scale-job"
+          - doneMarkerPath: ${"scenes/" + sceneId + "/layout/scene_layout_scaled.done"}
+        next: check_if_done
+
+    # Check if the output already exists to avoid duplicate processing
+    - check_if_done:
+        try:
+          steps:
+            - get_done_marker:
+                call: googleapis.storage.v1.objects.get
+                args:
+                  bucket: ${bucket}
+                  object: ${doneMarkerPath}
+                result: doneMarkerObject
+            - skip_already_done:
+                return: ${"scale-job already completed for " + object + " (found done marker)"}
+        except:
+          as: e
+          steps:
+            - check_not_found:
+                switch:
+                  - condition: ${e.code == 404}
+                    next: run_scale_job
+                raise: ${e}
         next: run_scale_job
 
     - run_scale_job:
