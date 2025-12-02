@@ -55,4 +55,7 @@ python /app/run_multiview_gemini_generative.py
 echo "[MULTIVIEW] Running scene background generation..."
 python /app/run_generate_scene_background.py
 
+echo "[MULTIVIEW] Updating layout/scene_layout_scaled.json with detected objects..."
+python /app/update_layout_with_objects.py
+
 echo "[MULTIVIEW] Done run_multiview.sh"
