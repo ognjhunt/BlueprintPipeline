@@ -23,15 +23,19 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def check_service_health(endpoint: str) -> bool:
+def check_service_health(endpoint: str, timeout: int = 30) -> bool:
     """
     Check if the PhysX service is healthy by calling its health endpoint.
     Returns True if the service responds, False otherwise.
+
+    Args:
+        endpoint: The PhysX service endpoint URL
+        timeout: Timeout in seconds for the health check (default: 30s for cold starts)
     """
     try:
         # Most services have a GET / for healthcheck
         req = urllib.request.Request(endpoint, method="GET")
-        with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
             if resp.status == 200:
                 print(f"[PHYSX] Service health check OK: {endpoint}")
                 return True
@@ -47,7 +51,7 @@ def check_service_health(endpoint: str) -> bool:
         return False
 
 
-def call_physx_anything(endpoint: str, crop_path: Path, max_retries: int = 2) -> Optional[dict]:
+def call_physx_anything(endpoint: str, crop_path: Path, max_retries: int = 3) -> Optional[dict]:
     """
     Post the crop image to the PhysX-Anything service with retry logic.
 
@@ -69,7 +73,7 @@ def call_physx_anything(endpoint: str, crop_path: Path, max_retries: int = 2) ->
     Args:
         endpoint: The PhysX service endpoint URL
         crop_path: Path to the crop image
-        max_retries: Maximum number of retries for transient failures (default: 2)
+        max_retries: Maximum number of retries for transient failures (default: 3)
     """
     with crop_path.open("rb") as f:
         payload = base64.b64encode(f.read()).decode("utf-8")
@@ -88,7 +92,9 @@ def call_physx_anything(endpoint: str, crop_path: Path, max_retries: int = 2) ->
             else:
                 print(f"[PHYSX] POST {endpoint} with crop {crop_path}")
 
-            with urllib.request.urlopen(req, timeout=300) as resp:  # nosec B310 - 5 min timeout for cold start
+            # Longer timeout on first attempt for cold start (10 min), then 5 min for retries
+            timeout = 600 if attempt == 0 else 300
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
                 print(f"[PHYSX] Response status: {resp.status} for {crop_path}")
                 text = resp.read().decode("utf-8", errors="replace")
                 try:
@@ -102,12 +108,16 @@ def call_physx_anything(endpoint: str, crop_path: Path, max_retries: int = 2) ->
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")[:500]
             print(f"[PHYSX] ERROR: HTTP {e.code} from {endpoint}: {error_body}", file=sys.stderr)
-            # Don't retry 4xx errors (client errors)
-            if 400 <= e.code < 500:
+            # Don't retry 4xx errors (client errors) except 429 (rate limit)
+            if 400 <= e.code < 500 and e.code != 429:
                 return None
-            # Retry 5xx errors (server errors)
+            # Retry 5xx errors (server errors) and 429 with exponential backoff
             if attempt < max_retries:
-                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                # Longer backoff for 503 (service unavailable) - likely cold start
+                if e.code == 503:
+                    wait_time = min(10 * (2 ** attempt), 60)  # 10s, 20s, 40s, max 60s
+                else:
+                    wait_time = 2 ** attempt  # 1s, 2s, 4s, 8s
                 print(f"[PHYSX] Retrying after {wait_time}s due to HTTP {e.code}...", file=sys.stderr)
                 time.sleep(wait_time)
                 continue
@@ -452,13 +462,24 @@ def main() -> None:
     print(f"[PHYSX] interactive count={len(interactive)}")
 
     # Check if PhysX service is available before processing
+    # Make warmup requests to wake up the service if it's cold starting
     if endpoint and interactive:
-        print(f"[PHYSX] Checking service health...")
-        check_service_health(endpoint)
+        print(f"[PHYSX] Checking service health (timeout=30s)...")
+        service_healthy = check_service_health(endpoint, timeout=30)
+        if not service_healthy:
+            print(f"[PHYSX] Service not healthy, giving it 60s to cold start...", file=sys.stderr)
+            time.sleep(60)
+            # Try one more time with longer timeout
+            print(f"[PHYSX] Retrying health check (timeout=60s)...")
+            check_service_health(endpoint, timeout=60)
 
     # Process objects in parallel for faster execution
-    results = []
-    max_workers = min(len(interactive), 8) if interactive else 1
+    # Allow configuration via env var to reduce concurrency if needed
+    max_workers_env = os.getenv("PHYSX_MAX_WORKERS")
+    if max_workers_env:
+        max_workers = min(int(max_workers_env), len(interactive)) if interactive else 1
+    else:
+        max_workers = min(len(interactive), 4) if interactive else 1  # Reduced from 8 to 4 to avoid overwhelming service
 
     if len(interactive) <= 1:
         # Sequential processing for single object

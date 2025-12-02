@@ -50,7 +50,8 @@ def main() -> None:
 
     # Copy the image into demo_dir (the VLM script expects a directory)
     target_img = demo_dir / input_image.name
-    shutil.copy2(input_image, target_img)
+    # Use copy() instead of copy2() to avoid metadata preservation issues in containers
+    shutil.copy(input_image, target_img)
     print(f"[PHYSX-PIPELINE] Copied input image -> {target_img}")
 
     # ------------------------------------------------------------------
@@ -129,8 +130,9 @@ def main() -> None:
 
     out_mesh = output_dir / "part.glb"
     out_urdf = output_dir / "part.urdf"
-    shutil.copy2(mesh_path, out_mesh)
-    shutil.copy2(urdf_path, out_urdf)
+    # Use copy() instead of copy2() to avoid metadata preservation issues in containers
+    shutil.copy(mesh_path, out_mesh)
+    shutil.copy(urdf_path, out_urdf)
 
     print(f"[PHYSX-PIPELINE] Exported mesh -> {out_mesh}")
     print(f"[PHYSX-PIPELINE] Exported URDF -> {out_urdf}")
