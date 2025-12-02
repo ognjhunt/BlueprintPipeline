@@ -30,6 +30,54 @@ def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id: 
         return "interactive", "physx"
     return "static", static_pipeline
 
+
+def infer_objects_from_multiview(multiview_root: Path, multiview_prefix: str):
+    """
+    Build object entries by scanning multiview outputs when the layout is empty.
+
+    We look for directories named `obj_*` (except `obj_scene_background`) and use
+    their generation metadata when available.
+    """
+
+    inferred_objects = []
+
+    for mv_dir in sorted(multiview_root.glob("obj_*")):
+        if not mv_dir.is_dir():
+            continue
+
+        obj_stub = mv_dir.name.removeprefix("obj_")
+        if obj_stub == "scene_background":
+            continue
+
+        meta_path = mv_dir / "generation_meta.json"
+        obj_id = obj_stub
+        class_name = obj_stub
+        phrase = None
+
+        if meta_path.is_file():
+            try:
+                with meta_path.open("r") as f:
+                    meta = json.load(f)
+                obj_id = meta.get("object_id", obj_id)
+                class_name = meta.get("category") or meta.get("class_name") or class_name
+                phrase = meta.get("short_description")
+            except Exception as e:  # pragma: no cover - defensive logging
+                print(f"[ASSETS] WARNING: Failed to read {meta_path}: {e}; using defaults")
+
+        # Mirror the layout object structure enough for downstream logic
+        inferred_objects.append({
+            "id": obj_id,
+            "class_name": class_name,
+            "object_phrase": phrase,
+        })
+
+    if inferred_objects:
+        print(f"[ASSETS] Inferred {len(inferred_objects)} objects from multiview outputs under {multiview_prefix}")
+    else:
+        print(f"[ASSETS] No multiview objects found under {multiview_prefix}; keeping plan empty")
+
+    return inferred_objects
+
 def main():
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
@@ -89,7 +137,10 @@ def main():
     with layout_path.open("r") as f:
         layout = json.load(f)
 
-    objects = layout.get("objects", [])
+    objects = layout.get("objects") or []
+    if not objects:
+        print("[ASSETS] Layout contains 0 objects; attempting to infer from multiview outputs")
+        objects = infer_objects_from_multiview(multiview_root, multiview_prefix)
     plan_objects = []
 
     for obj in objects:
