@@ -3,6 +3,8 @@ import json
 import os
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,9 +23,33 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def call_physx_anything(endpoint: str, crop_path: Path) -> Optional[dict]:
+def check_service_health(endpoint: str) -> bool:
     """
-    Post the crop image to the PhysX-Anything service.
+    Check if the PhysX service is healthy by calling its health endpoint.
+    Returns True if the service responds, False otherwise.
+    """
+    try:
+        # Most services have a GET / for healthcheck
+        req = urllib.request.Request(endpoint, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310
+            if resp.status == 200:
+                print(f"[PHYSX] Service health check OK: {endpoint}")
+                return True
+            print(f"[PHYSX] Service health check returned status {resp.status}", file=sys.stderr)
+            return False
+    except Exception as e:  # noqa: BLE001
+        print(f"[PHYSX] Service health check FAILED for {endpoint}: {e}", file=sys.stderr)
+        print(
+            f"[PHYSX] WARNING: PhysX service may be cold starting or unavailable. "
+            f"Requests may timeout or fail.",
+            file=sys.stderr,
+        )
+        return False
+
+
+def call_physx_anything(endpoint: str, crop_path: Path, max_retries: int = 2) -> Optional[dict]:
+    """
+    Post the crop image to the PhysX-Anything service with retry logic.
 
     Request:
         POST endpoint
@@ -39,28 +65,76 @@ def call_physx_anything(endpoint: str, crop_path: Path) -> Optional[dict]:
           "urdf_base64": "...",
           ...
         }
+
+    Args:
+        endpoint: The PhysX service endpoint URL
+        crop_path: Path to the crop image
+        max_retries: Maximum number of retries for transient failures (default: 2)
     """
-    try:
-        with crop_path.open("rb") as f:
-            payload = base64.b64encode(f.read()).decode("utf-8")
-        body = json.dumps({"image_base64": payload}).encode("utf-8")
-        req = urllib.request.Request(
-            endpoint,
-            data=body,
-            headers={"Content-Type": "application/json"},
-        )
-        print(f"[PHYSX] POST {endpoint} with crop {crop_path}")
-        with urllib.request.urlopen(req, timeout=60) as resp:  # nosec B310
-            text = resp.read().decode("utf-8", errors="replace")
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                print(f"[PHYSX] WARNING: non-JSON response from endpoint: {text[:200]}...", file=sys.stderr)
+    with crop_path.open("rb") as f:
+        payload = base64.b64encode(f.read()).decode("utf-8")
+    body = json.dumps({"image_base64": payload}).encode("utf-8")
+
+    for attempt in range(max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+
+            if attempt > 0:
+                print(f"[PHYSX] Retry {attempt}/{max_retries}: POST {endpoint} with crop {crop_path}")
+            else:
+                print(f"[PHYSX] POST {endpoint} with crop {crop_path}")
+
+            with urllib.request.urlopen(req, timeout=300) as resp:  # nosec B310 - 5 min timeout for cold start
+                print(f"[PHYSX] Response status: {resp.status} for {crop_path}")
+                text = resp.read().decode("utf-8", errors="replace")
+                try:
+                    data = json.loads(text)
+                    print(f"[PHYSX] Success on attempt {attempt + 1} for {crop_path}")
+                    return data
+                except json.JSONDecodeError:
+                    print(f"[PHYSX] WARNING: non-JSON response from endpoint: {text[:200]}...", file=sys.stderr)
+                    return None
+
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")[:500]
+            print(f"[PHYSX] ERROR: HTTP {e.code} from {endpoint}: {error_body}", file=sys.stderr)
+            # Don't retry 4xx errors (client errors)
+            if 400 <= e.code < 500:
                 return None
-            return data
-    except Exception as e:  # noqa: BLE001
-        print(f"[PHYSX] WARNING: failed to query endpoint {endpoint}: {e}", file=sys.stderr)
-        return None
+            # Retry 5xx errors (server errors)
+            if attempt < max_retries:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                print(f"[PHYSX] Retrying after {wait_time}s due to HTTP {e.code}...", file=sys.stderr)
+                time.sleep(wait_time)
+                continue
+            return None
+
+        except urllib.error.URLError as e:
+            print(f"[PHYSX] ERROR: Network error for {endpoint}: {e.reason}", file=sys.stderr)
+            # Retry network errors (timeouts, connection refused, etc.)
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                print(f"[PHYSX] Retrying after {wait_time}s due to network error...", file=sys.stderr)
+                time.sleep(wait_time)
+                continue
+            return None
+
+        except Exception as e:  # noqa: BLE001
+            print(f"[PHYSX] ERROR: Unexpected error for {endpoint}: {type(e).__name__}: {e}", file=sys.stderr)
+            # Retry unexpected errors
+            if attempt < max_retries:
+                wait_time = 2 ** attempt
+                print(f"[PHYSX] Retrying after {wait_time}s due to unexpected error...", file=sys.stderr)
+                time.sleep(wait_time)
+                continue
+            return None
+
+    # Should never reach here, but just in case
+    return None
 
 
 def download_file(url: str, out_path: Path) -> bool:
@@ -376,6 +450,11 @@ def main() -> None:
         print(f"[PHYSX] layout_root={layout_root}")
     print(f"[PHYSX] endpoint={endpoint}")
     print(f"[PHYSX] interactive count={len(interactive)}")
+
+    # Check if PhysX service is available before processing
+    if endpoint and interactive:
+        print(f"[PHYSX] Checking service health...")
+        check_service_health(endpoint)
 
     # Process objects in parallel for faster execution
     results = []
