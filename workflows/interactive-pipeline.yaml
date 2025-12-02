@@ -33,6 +33,7 @@ main:
           # NOTE: set PHYSX_ENDPOINT as an environment variable on this workflow.
           - physxEndpoint: ${sys.get_env("PHYSX_ENDPOINT")}
           - jobName: "interactive-job"
+          - simreadyJobName: "simready-job"
         next: run_job
 
     - run_job:
@@ -56,10 +57,100 @@ main:
                     - name: PHYSX_ENDPOINT
                       value: ${physxEndpoint}
         result: interactiveExec
+        next: wait_for_interactive
+
+    - wait_for_interactive:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${interactiveExec.name}
+        result: interactiveStatus
+        next: check_interactive_status
+
+    - check_interactive_status:
+        switch:
+          - condition: ${interactiveStatus.completionTime != null}
+            next: log_interactive_complete
+          - condition: ${interactiveStatus.failedCount != null and interactiveStatus.failedCount > 0}
+            next: interactive_failed
+        next: wait_interactive_poll
+
+    - wait_interactive_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_interactive
+
+    - log_interactive_complete:
+        call: sys.log
+        args:
+          text: ${"Interactive job completed for scene " + sceneId + ", starting simready"}
+          severity: "INFO"
+        next: run_simready_job
+
+    - interactive_failed:
+        call: sys.log
+        args:
+          text: ${"Interactive job FAILED for scene " + sceneId}
+          severity: "ERROR"
+        next: done_failed
+
+    - run_simready_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + simreadyJobName}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+        result: simreadyExec
+        next: wait_for_simready
+
+    - wait_for_simready:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${simreadyExec.name}
+        result: simreadyStatus
+        next: check_simready_status
+
+    - check_simready_status:
+        switch:
+          - condition: ${simreadyStatus.completionTime != null}
+            next: log_simready_complete
+          - condition: ${simreadyStatus.failedCount != null and simreadyStatus.failedCount > 0}
+            next: simready_failed
+        next: wait_simready_poll
+
+    - wait_simready_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_simready
+
+    - log_simready_complete:
+        call: sys.log
+        args:
+          text: ${"Simready job completed for scene " + sceneId}
+          severity: "INFO"
         next: done
 
+    - simready_failed:
+        call: sys.log
+        args:
+          text: ${"Simready job FAILED for scene " + sceneId}
+          severity: "ERROR"
+        next: done_failed
+
     - done:
-        return: ${"interactive-job started for " + object}
+        return: ${"Interactive + simready pipeline completed for " + object}
+
+    - done_failed:
+        return: ${"Interactive + simready pipeline failed for " + object}
 
     - skip:
         return: ${"interactive skip " + object}
