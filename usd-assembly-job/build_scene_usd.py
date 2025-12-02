@@ -184,14 +184,29 @@ def resolve_usdz_asset_path(
     """
     Find the USDZ asset for an object and return a path relative to the USD output dir.
 
-    Checks for:
-      1. Existing USDZ next to specified asset_path
-      2. Standard location: assets_prefix/obj_{id}/model.usdz
-      3. Alternative names: asset.usdz
+    Checks for (in priority order):
+      1. simready.usda (physics-enabled asset created by simready-job)
+      2. Existing USDZ next to specified asset_path
+      3. Standard location: assets_prefix/obj_{id}/model.usdz
+      4. Alternative names: asset.usdz, model.usda, model.usd, model.usdc
 
     Returns path relative to usd_prefix, or None if not found.
     """
     stage_dir = root / usd_prefix
+
+    # Check 0: HIGHEST PRIORITY - simready.usda with physics properties
+    obj_dir = root / assets_prefix / f"obj_{oid}"
+    simready_path = obj_dir / "simready.usda"
+    if simready_path.is_file():
+        rel = os.path.relpath(simready_path, stage_dir)
+        return rel.replace("\\", "/")
+
+    # Also check legacy location
+    legacy_obj_dir = root / assets_prefix / "static" / f"obj_{oid}"
+    legacy_simready_path = legacy_obj_dir / "simready.usda"
+    if legacy_simready_path.is_file():
+        rel = os.path.relpath(legacy_simready_path, stage_dir)
+        return rel.replace("\\", "/")
 
     # Check 1: USDZ next to specified asset_path
     if asset_path:
@@ -202,8 +217,6 @@ def resolve_usdz_asset_path(
             return rel.replace("\\", "/")
 
     # Check 2: Standard obj_N directory
-    obj_dir = root / assets_prefix / f"obj_{oid}"
-
     candidate_names = [
         "model.usdz",
         "asset.usdz",
@@ -454,7 +467,12 @@ class SceneBuilder:
             geom_xform = UsdGeom.Xform.Define(self.stage, geom_path)
             geom_prim = geom_xform.GetPrim()
             geom_prim.GetReferences().AddReference(usdz_rel)
-            print(f"[USD] obj_{oid}: referenced {usdz_rel}")
+
+            # Log with indication if using physics-enabled simready asset
+            if "simready.usda" in usdz_rel:
+                print(f"[USD] obj_{oid}: referenced {usdz_rel} [PHYSICS-ENABLED]")
+            else:
+                print(f"[USD] obj_{oid}: referenced {usdz_rel}")
         else:
             # No USDZ found - record pending conversion info
             if asset_path and (asset_path.endswith(".glb") or asset_path.endswith(".gltf")):

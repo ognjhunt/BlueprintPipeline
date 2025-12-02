@@ -608,6 +608,11 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    # Write completion marker for workflow coordination
+    marker_path = assets_root / ".simready_complete"
+    marker_path.write_text(f"completed at {os.getenv('K_REVISION', 'unknown')}\n")
+    print(f"[SIMREADY] Wrote completion marker: {marker_path}")
+
 
 if __name__ == "__main__":
     main()

@@ -71,6 +71,18 @@ def find_glb_assets(
         if is_interactive:
             continue
 
+        # Skip if object has simready.usda (physics-enabled asset)
+        obj_dir = root / assets_prefix / f"obj_{oid}"
+        simready_path = obj_dir / "simready.usda"
+        legacy_simready_path = root / assets_prefix / "static" / f"obj_{oid}" / "simready.usda"
+
+        if simready_path.exists():
+            print(f"[INFO] Using simready.usda for obj_{oid} (skipping GLB conversion)")
+            continue
+        if legacy_simready_path.exists():
+            print(f"[INFO] Using simready.usda for obj_{oid} (skipping GLB conversion)")
+            continue
+
         # Determine asset path
         asset_path = obj.get("asset_path")
         if not asset_path:
