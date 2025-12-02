@@ -716,6 +716,7 @@ def maybe_build_asset_plan(
     multiview_prefix: Optional[str],
     scene_id: str,
     layout_file_name: str = "scene_layout_scaled.json",
+    seg_prefix: Optional[str] = None,
 ) -> Optional[Path]:
     """Best-effort builder for scene_assets.json if none exists yet."""
 
@@ -723,16 +724,38 @@ def maybe_build_asset_plan(
     if plan_path.is_file():
         return plan_path
 
-    if not (layout_prefix and multiview_prefix):
+    if not multiview_prefix:
         print(
-            "[SAM3D] No scene_assets.json present and LAYOUT_PREFIX/MULTIVIEW_PREFIX missing; "
+            "[SAM3D] No scene_assets.json present and MULTIVIEW_PREFIX missing; "
             "cannot auto-build asset plan.",
             file=sys.stderr,
         )
         return None
 
     root = Path("/mnt/gcs")
-    layout_path = root / layout_prefix / layout_file_name
+
+    # Try to find layout file in multiple locations
+    layout_path = None
+    search_paths = []
+
+    if layout_prefix:
+        candidate = root / layout_prefix / layout_file_name
+        search_paths.append(candidate)
+        if candidate.is_file():
+            layout_path = candidate
+
+    if layout_path is None and seg_prefix:
+        candidate = root / seg_prefix / layout_file_name
+        search_paths.append(candidate)
+        if candidate.is_file():
+            layout_path = candidate
+
+    if not layout_path:
+        print("[SAM3D] Cannot build asset plan; missing layout in any of these locations:", file=sys.stderr)
+        for p in search_paths:
+            print(f"[SAM3D]   - {p}", file=sys.stderr)
+        return None
+
     multiview_root = root / multiview_prefix
 
     if not layout_path.is_file():
@@ -991,6 +1014,7 @@ def main() -> None:
     assets_prefix = os.getenv("ASSETS_PREFIX")  # scenes/<sceneId>/assets
     sam3d_config_path = os.getenv("SAM3D_CONFIG_PATH")
     layout_prefix = os.getenv("LAYOUT_PREFIX")
+    seg_prefix = os.getenv("SEG_PREFIX")  # scenes/<sceneId>/seg (for Gemini pipeline)
     multiview_prefix = os.getenv("MULTIVIEW_PREFIX")
     layout_file_name = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
     normalize_meshes = getenv_bool("SAM3D_NORMALIZE_MESH", "0")
@@ -1007,6 +1031,7 @@ def main() -> None:
         multiview_prefix=multiview_prefix,
         scene_id=scene_id,
         layout_file_name=layout_file_name,
+        seg_prefix=seg_prefix,
     )
 
     print(f"[SAM3D] Bucket={bucket}")
