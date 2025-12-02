@@ -32,7 +32,6 @@ main:
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "layout-job"
           - layoutOutputPath: ${"scenes/" + sceneId + "/layout/scene_layout.json"}
-          - lockPath: ${"scenes/" + sceneId + "/layout/.processing_lock"}
         next: check_if_done
 
     # Check if the output already exists to avoid duplicate processing
@@ -53,56 +52,10 @@ main:
             - check_not_found:
                 switch:
                   - condition: ${e.code == 404}
-                    next: try_acquire_lock
+                    next: run_layout_job
+                next: rethrow_error
+            - rethrow_error:
                 raise: ${e}
-        next: try_acquire_lock
-
-    # Try to acquire a processing lock to prevent concurrent runs
-    - try_acquire_lock:
-        try:
-          steps:
-            - check_existing_lock:
-                call: googleapis.storage.v1.objects.get
-                args:
-                  bucket: ${bucket}
-                  object: ${lockPath}
-                result: existingLock
-            - skip_locked:
-                return: ${"layout-job already processing for " + object + " (lock exists)"}
-        except:
-          as: e
-          steps:
-            - check_lock_not_found:
-                switch:
-                  - condition: ${e.code == 404}
-                    next: create_lock
-                raise: ${e}
-        next: skip
-
-    # Create lock file to claim this processing task
-    - create_lock:
-        try:
-          steps:
-            - write_lock:
-                call: http.post
-                args:
-                  url: ${"https://storage.googleapis.com/upload/storage/v1/b/" + bucket + "/o?uploadType=media&name=" + text.url_encode(lockPath) + "&ifGenerationMatch=0"}
-                  auth:
-                    type: OAuth2
-                  headers:
-                    Content-Type: "application/json"
-                  body: ${"processing"}
-                result: lockObject
-        except:
-          as: e
-          steps:
-            - log_lock_race:
-                call: sys.log
-                args:
-                  text: ${"Failed to acquire lock (likely race condition): " + e.message}
-                  severity: "WARNING"
-                return: ${"layout-job lock acquisition failed for " + object}
-        next: run_layout_job
 
     - run_layout_job:
         call: googleapis.run.v2.projects.locations.jobs.run
