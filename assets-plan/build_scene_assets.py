@@ -1,4 +1,4 @@
-import os, json
+import os, json, sys
 from pathlib import Path
 
 INTERACTIVE_KEYWORDS = {
@@ -36,18 +36,43 @@ def main():
     layout_prefix = os.getenv("LAYOUT_PREFIX")       # scenes/<sceneId>/layout
     multiview_prefix = os.getenv("MULTIVIEW_PREFIX") # scenes/<sceneId>/multiview
     assets_prefix = os.getenv("ASSETS_PREFIX")       # scenes/<sceneId>/assets
+    seg_prefix = os.getenv("SEG_PREFIX")             # scenes/<sceneId>/seg (optional, for Gemini pipeline)
     layout_file = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
     interactive_ids_env = os.getenv("INTERACTIVE_OBJECT_IDS", "")
     static_pipeline = os.getenv("STATIC_ASSET_PIPELINE", "sam3d")
     physx_endpoint = os.getenv("PHYSX_ENDPOINT")
 
-    if not (layout_prefix and multiview_prefix and assets_prefix):
-        raise SystemExit("[ASSETS] LAYOUT_PREFIX, MULTIVIEW_PREFIX, ASSETS_PREFIX required")
+    if not (multiview_prefix and assets_prefix):
+        raise SystemExit("[ASSETS] MULTIVIEW_PREFIX, ASSETS_PREFIX required")
 
     interactive_ids = parse_interactive_ids(interactive_ids_env)
 
     root = Path("/mnt/gcs")
-    layout_path = root / layout_prefix / layout_file
+
+    # Try to find layout file in multiple locations
+    # 1. LAYOUT_PREFIX (standard pipeline)
+    # 2. SEG_PREFIX (Gemini pipeline)
+    layout_path = None
+    search_paths = []
+
+    if layout_prefix:
+        candidate = root / layout_prefix / layout_file
+        search_paths.append(candidate)
+        if candidate.is_file():
+            layout_path = candidate
+
+    if layout_path is None and seg_prefix:
+        candidate = root / seg_prefix / layout_file
+        search_paths.append(candidate)
+        if candidate.is_file():
+            layout_path = candidate
+
+    if layout_path is None:
+        print(f"[ASSETS] ERROR: Could not find {layout_file} in any of these locations:", file=sys.stderr)
+        for p in search_paths:
+            print(f"[ASSETS]   - {p}", file=sys.stderr)
+        raise SystemExit("[ASSETS] Layout file not found")
+
     multiview_root = root / multiview_prefix
     assets_root = root / assets_prefix
 

@@ -150,7 +150,63 @@ main:
     - fail_multiview:
         raise: ${"No multiview objects found under " + multiviewPrefix}
 
-    # Step 3: Generate 3D models using SAM3D
+    # Step 3: Create assets plan
+    - run_assets_plan:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/assets-plan-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: SEG_PREFIX
+                      value: ${segPrefix}
+                    - name: MULTIVIEW_PREFIX
+                      value: ${multiviewPrefix}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+        result: assetsPlanExec
+        next: wait_for_assets_plan
+
+    - wait_for_assets_plan:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${assetsPrefix + "/scene_assets.json"}
+          result: assetsObj
+        except:
+          as: e
+          steps:
+            - handle_assets_error:
+                next: retry_assets_plan
+        next: run_sam3d
+
+    - retry_assets_plan:
+        switch:
+          - condition: ${assetsAttempts < 60}
+            next: bump_assets_attempt
+        next: fail_assets_plan
+
+    - bump_assets_attempt:
+        assign:
+          - assetsAttempts: ${assetsAttempts + 1}
+        next: sleep_assets_plan
+
+    - sleep_assets_plan:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_assets_plan
+
+    - fail_assets_plan:
+        raise: ${"scene_assets.json not found at " + assetsPrefix + "/scene_assets.json"}
+
+    # Step 4: Generate 3D models using SAM3D
     - run_sam3d:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
@@ -167,7 +223,7 @@ main:
                       value: ${assetsPrefix}
                     - name: MULTIVIEW_PREFIX
                       value: ${multiviewPrefix}
-                    - name: LAYOUT_PREFIX
+                    - name: SEG_PREFIX
                       value: ${segPrefix}
         result: sam3dExec
         next: done
