@@ -138,6 +138,19 @@ CATEGORY_KEYWORDS: List[Tuple[str, str]] = [
     ("bottle", "bottle"),
     ("jar", "bottle"),
     ("vase", "vase"),
+    # cutlery
+    ("spoon", "spoon"),
+    ("teaspoon", "spoon"),
+    ("tablespoon", "spoon"),
+    ("fork", "fork"),
+    ("knife", "knife"),
+    ("butter knife", "knife"),
+    ("spatula", "spatula"),
+    # appliances
+    ("microwave", "microwave"),
+    ("toaster", "appliance"),
+    ("blender", "appliance"),
+    ("coffee maker", "appliance"),
     # electronics / devices
     ("laptop", "laptop"),
     ("notebook computer", "laptop"),
@@ -406,6 +419,60 @@ CATEGORY_PRIORS: Dict[str, Dict[str, Any]] = {
         "collision_shape": "mesh",
         "material_name": "plant",
     },
+    "spoon": {
+        "density_kg_per_m3": 600.0,
+        "mass_range_kg": (0.02, 0.08),
+        "friction": 0.4,
+        "restitution": 0.15,
+        "dynamic": True,
+        "collision_shape": "mesh",
+        "material_name": "stainless_steel",
+    },
+    "fork": {
+        "density_kg_per_m3": 650.0,
+        "mass_range_kg": (0.025, 0.09),
+        "friction": 0.4,
+        "restitution": 0.15,
+        "dynamic": True,
+        "collision_shape": "mesh",
+        "material_name": "stainless_steel",
+    },
+    "knife": {
+        "density_kg_per_m3": 700.0,
+        "mass_range_kg": (0.03, 0.12),
+        "friction": 0.35,
+        "restitution": 0.15,
+        "dynamic": True,
+        "collision_shape": "mesh",
+        "material_name": "stainless_steel",
+    },
+    "spatula": {
+        "density_kg_per_m3": 500.0,
+        "mass_range_kg": (0.05, 0.15),
+        "friction": 0.5,
+        "restitution": 0.1,
+        "dynamic": True,
+        "collision_shape": "mesh",
+        "material_name": "metal_plastic",
+    },
+    "microwave": {
+        "density_kg_per_m3": 100.0,
+        "mass_range_kg": (10.0, 25.0),
+        "friction": 0.6,
+        "restitution": 0.05,
+        "dynamic": True,
+        "collision_shape": "box",
+        "material_name": "metal_plastic",
+    },
+    "appliance": {
+        "density_kg_per_m3": 120.0,
+        "mass_range_kg": (1.0, 15.0),
+        "friction": 0.6,
+        "restitution": 0.05,
+        "dynamic": True,
+        "collision_shape": "box",
+        "material_name": "metal_plastic",
+    },
     "large_furniture": {
         "density_kg_per_m3": 40.0,
         "mass_range_kg": (20.0, 150.0),
@@ -572,16 +639,25 @@ You are helping configure 3D assets for robotics training in NVIDIA Isaac Sim / 
 Given object metadata and a heuristic physics estimate, refine the physics so
 the object behaves as realistically as possible in the real world.
 
+IMPORTANT: Use your knowledge and grounding capabilities to provide accurate, real-world
+physics parameters for each specific object type. Every object should have realistic,
+distinct properties appropriate to its category and material composition:
+- A spoon and fork should have similar but subtly different properties (mass, material)
+- A microwave should be significantly heavier with metal/plastic properties
+- A blanket should have low mass, high friction, fabric properties
+- Consider the actual real-world physics of each object type
+
 The simulation uses:
 - meters for linear distance
 - kilograms for mass
 - rigid bodies only (no joints in this step)
 
 Key goals:
-- Mass should be in a realistic range for the object's category and size
-  (small hat < 0.3 kg, typical sofa ~20–80 kg, mug ~0.25–0.8 kg, etc.).
-- Friction should be consistent with the material: fabric/rubber > 1, wood ~0.8,
-  ceramic/glass/plastic ~0.4–0.8.
+- Mass should be in a realistic range for the object's category and size based on
+  real-world examples (small hat < 0.3 kg, typical sofa ~20–80 kg, mug ~0.25–0.8 kg,
+  spoon ~0.03 kg, fork ~0.04 kg, microwave ~15-20 kg, blanket ~1-2 kg, etc.).
+- Friction should be consistent with the actual material composition:
+  fabric/rubber > 1, wood ~0.8, ceramic/glass/plastic ~0.4–0.8, metal ~0.3–0.6.
 - Restitution (bounciness) is usually low (0–0.3) for household objects.
 - collisionShape should be "box" for boxy furniture, "mesh" for irregular shapes,
   or "sphere"/"capsule" when that is a good fit.
@@ -596,10 +672,10 @@ Fields:
 - collisionShape: "box", "sphere", "capsule", or "mesh".
 - restitution: 0 (no bounce) to 1 (very bouncy).
 - friction: 0 (very slippery) to 2 (very sticky).
-- mass_kg: positive float in kilograms.
+- mass_kg: positive float in kilograms (use real-world values for this specific object type).
 - density_kg_per_m3: effective bulk density (mass / bounding-box volume).
-- material_name: short label like "wood", "metal", "plastic", "rubber", "fabric".
-- notes: very short explanation of your choices.
+- material_name: short label like "wood", "metal", "plastic", "rubber", "fabric", "ceramic", "stainless_steel".
+- notes: very short explanation of your choices and any real-world considerations.
 
 Here is the metadata and base estimate for this object:
 
@@ -635,16 +711,17 @@ def call_gemini_for_object(
     prompt = make_gemini_prompt(oid, obj, metadata, base_cfg)
 
     try:
-        # Decide which model we're calling
-        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+        # Decide which model we're calling - default to Gemini 3.0 Pro for realistic simready
+        model_name = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
 
         # Build a GenerateContentConfig that works for both 2.5 and 3.x
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
         }
 
-        # Enable grounding for Gemini 3.x models
-        if model_name.startswith("gemini-3"):
+        # Enable grounding for Gemini 3.x models (default: enabled)
+        grounding_enabled = os.getenv("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
+        if model_name.startswith("gemini-3") and grounding_enabled:
             if hasattr(types, "GroundingConfig") and hasattr(types, "GoogleSearch"):
                 cfg_kwargs["grounding"] = types.GroundingConfig(
                     google_search=types.GoogleSearch()
