@@ -1,11 +1,11 @@
 # usd-assembly-pipeline.yaml
 #
 # Google Cloud Workflows pipeline that:
-#   1. Triggers on scene_assets.json upload
-#   2. Runs simready-job to prepare assets for simulation
+#   1. Triggers on completion marker files from hunyuan-job or interactive-job
+#   2. Waits for BOTH jobs to complete
 #   3. Runs usd-assembly-job to convert GLB->USDZ and build scene.usda
 #
-# Trigger: Cloud Storage object finalized event for scene_assets.json
+# Trigger: Cloud Storage object finalized event for .hunyuan_complete or .interactive_complete
 
 main:
   params: [event]
@@ -23,11 +23,11 @@ main:
           - object: ${event.data.name}
           - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - region: "us-central1"
-        next: filter_scene_assets
+        next: filter_completion_markers
 
-    - filter_scene_assets:
+    - filter_completion_markers:
         switch:
-          - condition: ${text.match_regex(object, "^scenes/.+/assets/scene_assets\\.json$")}
+          - condition: ${text.match_regex(object, "^scenes/.+/assets/\\.(?:hunyuan|interactive)_complete$")}
             next: derive
         next: skip
 
@@ -38,76 +38,60 @@ main:
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
           - usdPrefix: ${"scenes/" + sceneId + "/usd"}
-          - simJobName: "simready-job"
           - usdJobName: "usd-assembly-job"
+          - hunyuanMarker: ${assetsPrefix + "/.hunyuan_complete"}
+          - interactiveMarker: ${assetsPrefix + "/.interactive_complete"}
         next: log_start
 
     - log_start:
         call: sys.log
         args:
-          text: ${"Starting pipeline for scene " + sceneId}
+          text: ${"USD assembly triggered for scene " + sceneId + " - checking for completion markers"}
           severity: "INFO"
-        next: run_simready_job
+        next: check_hunyuan_marker
 
-    - run_simready_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + simJobName}
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-        result: simExec
-        next: wait_for_simready
+    - check_hunyuan_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${hunyuanMarker}
+          result: hunyuanExists
+          next: check_interactive_marker
+        except:
+          as: e
+          steps:
+            - log_waiting:
+                call: sys.log
+                args:
+                  text: ${"Waiting for hunyuan completion marker for scene " + sceneId}
+                  severity: "INFO"
+                next: skip_not_ready
 
-    - wait_for_simready:
-        call: googleapis.run.v2.projects.locations.jobs.executions.get
-        args:
-          name: ${simExec.name}
-        result: simStatus
-        next: check_simready_status
+    - check_interactive_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${interactiveMarker}
+          result: interactiveExists
+          next: log_both_ready
+        except:
+          as: e
+          steps:
+            - log_waiting_interactive:
+                call: sys.log
+                args:
+                  text: ${"Waiting for interactive completion marker for scene " + sceneId}
+                  severity: "INFO"
+                next: skip_not_ready
 
-    - check_simready_status:
-        switch:
-          - condition: ${simStatus.completionTime != null}
-            next: log_simready_complete
-          - condition: ${simStatus.failedCount != null and simStatus.failedCount > 0}
-            next: simready_failed
-        next: wait_simready_poll
-
-    - wait_simready_poll:
-        call: sys.sleep
-        args:
-          seconds: 10
-        next: wait_for_simready
-
-    - log_simready_complete:
+    - log_both_ready:
         call: sys.log
         args:
-          text: ${"Simready job completed for scene " + sceneId}
+          text: ${"Both asset jobs complete for scene " + sceneId + " - proceeding with USD assembly"}
           severity: "INFO"
         next: run_usd_job
-
-    - simready_failed:
-        assign:
-          - errorMsg: ${"Simready job FAILED for scene " + sceneId}
-        next: log_simready_error
-
-    - log_simready_error:
-        call: sys.log
-        args:
-          text: ${errorMsg}
-          severity: "ERROR"
-        next: raise_simready_error
-
-    - raise_simready_error:
-        raise: ${errorMsg}
 
     - run_usd_job:
         call: googleapis.run.v2.projects.locations.jobs.run
@@ -177,11 +161,16 @@ main:
         return:
           status: "SUCCESS"
           scene_id: ${sceneId}
-          message: ${"Pipeline completed successfully for scene " + sceneId}
-          simready_execution: ${simExec.name}
+          message: ${"USD assembly completed successfully for scene " + sceneId}
           usd_execution: ${usdExec.name}
+
+    - skip_not_ready:
+        return:
+          status: "WAITING"
+          scene_id: ${sceneId}
+          message: ${"Waiting for all asset generation jobs to complete for scene " + sceneId}
 
     - skip:
         return:
           status: "SKIPPED"
-          message: ${"Not a scene_assets.json file: " + object}
+          message: ${"Not a completion marker file: " + object}
