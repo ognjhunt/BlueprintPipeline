@@ -416,6 +416,11 @@ def main() -> None:
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"[PHYSX] Wrote summary to {out_path}")
 
+    # Write completion marker for workflow coordination
+    marker_path = assets_root / ".interactive_complete"
+    marker_path.write_text(f"completed at {os.getenv('K_REVISION', 'unknown')}\n")
+    print(f"[PHYSX] Wrote completion marker: {marker_path}")
+
 
 if __name__ == "__main__":
     main()
