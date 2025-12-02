@@ -19,6 +19,7 @@ COPY run_multiview_from_layout.py /app/run_multiview_from_layout.py
 COPY run_multiview_gemini_generative.py /app/run_multiview_gemini_generative.py
 COPY run_generate_scene_background.py /app/run_generate_scene_background.py
 COPY generate_layout_from_inventory.py /app/generate_layout_from_inventory.py
+COPY update_layout_with_objects.py /app/update_layout_with_objects.py
 COPY run_multiview.sh /app/run_multiview.sh
 
 RUN chmod +x /app/run_multiview.sh
