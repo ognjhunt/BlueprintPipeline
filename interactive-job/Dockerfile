@@ -13,11 +13,9 @@ RUN pip install --no-cache-dir \
     trimesh \
     numpy
 
-# Our service implementation
+# Copy both the orchestrator and the service (for reference)
+COPY run_interactive_assets.py /app/run_interactive_assets.py
 COPY physx_service.py /app/physx_service.py
 
-# Cloud Run expects the server to listen on this port
-ENV PORT=8080
-
-# Start the Flask app
-CMD ["python", "physx_service.py"]
+# Run the actual job orchestrator
+CMD ["python", "run_interactive_assets.py"]
