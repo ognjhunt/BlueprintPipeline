@@ -17,12 +17,13 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
 WORKDIR /app
 RUN git clone https://github.com/ByteDance-Seed/Depth-Anything-3.git /app/Depth-Anything-3
 
-# Install PyTorch (cu121) + huggingface_hub (pinned) + Depth Anything 3
+# Install PyTorch (cu121) + huggingface_hub (pinned) + Depth Anything 3 + GCS client
 WORKDIR /app/Depth-Anything-3
 RUN pip install --no-cache-dir --prefer-binary \
       torch==2.2.1 torchvision==0.17.1 \
       --index-url https://download.pytorch.org/whl/cu121 && \
     pip install --no-cache-dir --prefer-binary "huggingface_hub==0.33.5" && \
+    pip install --no-cache-dir --prefer-binary "google-cloud-storage>=2.0.0" && \
     pip install --no-cache-dir --prefer-binary -e .
 
 # Hugging Face env:
