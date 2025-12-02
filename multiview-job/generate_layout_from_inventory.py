@@ -81,10 +81,19 @@ def main():
     inventory_path = seg_dir / "inventory.json"
     layout_output_path = seg_dir / "scene_layout_scaled.json"
 
-    # Check if layout already exists
+    # Check if layout already exists and has objects
     if layout_output_path.exists():
-        print(f"[LAYOUT-GEN] Layout already exists at {layout_output_path}, skipping generation")
-        return
+        try:
+            with layout_output_path.open("r") as f:
+                existing_layout = json.load(f)
+            existing_objects = existing_layout.get("objects", [])
+            if existing_objects:
+                print(f"[LAYOUT-GEN] Layout already exists at {layout_output_path} with {len(existing_objects)} objects, skipping generation")
+                return
+            else:
+                print(f"[LAYOUT-GEN] Layout exists but has no objects, regenerating from inventory")
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"[LAYOUT-GEN] Error reading existing layout: {e}, regenerating from inventory")
 
     # Load inventory
     if not inventory_path.exists():
