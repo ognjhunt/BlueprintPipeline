@@ -5,6 +5,7 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -376,9 +377,35 @@ def main() -> None:
     print(f"[PHYSX] endpoint={endpoint}")
     print(f"[PHYSX] interactive count={len(interactive)}")
 
+    # Process objects in parallel for faster execution
     results = []
-    for obj in interactive:
-        results.append(process_interactive_object(obj, multiview_root, assets_root, endpoint))
+    max_workers = min(len(interactive), 8) if interactive else 1
+
+    if len(interactive) <= 1:
+        # Sequential processing for single object
+        for obj in interactive:
+            results.append(process_interactive_object(obj, multiview_root, assets_root, endpoint))
+    else:
+        # Parallel processing for multiple objects
+        print(f"[PHYSX] Processing {len(interactive)} objects with {max_workers} workers")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(process_interactive_object, obj, multiview_root, assets_root, endpoint): obj
+                for obj in interactive
+            }
+            for future in as_completed(futures):
+                obj = futures[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    print(f"[PHYSX] Completed obj_{obj.get('id')}")
+                except Exception as e:
+                    print(f"[PHYSX] ERROR processing obj_{obj.get('id')}: {e}", file=sys.stderr)
+                    results.append({
+                        "id": obj.get("id"),
+                        "status": "error",
+                        "error": str(e),
+                    })
 
     summary = {
         "scene_id": scene_id,
