@@ -84,467 +84,27 @@ def extract_mesh_size_from_metadata(metadata: Optional[dict]) -> Optional[List[f
     return None
 
 
-# ---------- Category heuristics ----------
+# ---------- Generic fallback (used only when Gemini fails) ----------
 
-# Tokens -> canonical category label
-CATEGORY_KEYWORDS: List[Tuple[str, str]] = [
-    # furniture
-    ("sectional", "sofa"),
-    ("loveseat", "sofa"),
-    ("sofa", "sofa"),
-    ("couch", "sofa"),
-    ("armchair", "chair"),
-    ("dining chair", "chair"),
-    ("office chair", "chair"),
-    ("stool", "chair"),
-    ("bench", "chair"),
-    ("chair", "chair"),
-    ("coffee table", "table"),
-    ("end table", "table"),
-    ("side table", "table"),
-    ("nightstand", "table"),
-    ("desk", "table"),
-    ("table", "table"),
-    ("bed", "bed"),
-    ("headboard", "bed"),
-    ("dresser", "cabinet"),
-    ("cabinet", "cabinet"),
-    ("shelf", "shelf"),
-    ("bookcase", "shelf"),
-    # soft goods / clothing
-    ("throw pillow", "pillow"),
-    ("pillow", "pillow"),
-    ("cushion", "pillow"),
-    ("blanket", "textile"),
-    ("comforter", "textile"),
-    ("duvet", "textile"),
-    ("towel", "textile"),
-    ("curtain", "textile"),
-    ("sheet", "textile"),
-    ("hat", "hat"),
-    ("beanie", "hat"),
-    ("cap", "hat"),
-    ("shoe", "shoe"),
-    ("sneaker", "shoe"),
-    ("boot", "shoe"),
-    # containers / kitchen
-    ("mug", "mug"),
-    ("coffee cup", "mug"),
-    ("teacup", "mug"),
-    ("cup", "mug"),
-    ("bowl", "bowl"),
-    ("plate", "plate"),
-    ("dish", "plate"),
-    ("bottle", "bottle"),
-    ("jar", "bottle"),
-    ("vase", "vase"),
-    # cutlery
-    ("spoon", "spoon"),
-    ("teaspoon", "spoon"),
-    ("tablespoon", "spoon"),
-    ("fork", "fork"),
-    ("knife", "knife"),
-    ("butter knife", "knife"),
-    ("spatula", "spatula"),
-    # appliances
-    ("microwave", "microwave"),
-    ("toaster", "appliance"),
-    ("blender", "appliance"),
-    ("coffee maker", "appliance"),
-    # electronics / devices
-    ("laptop", "laptop"),
-    ("notebook computer", "laptop"),
-    ("monitor", "monitor"),
-    ("tv", "monitor"),
-    ("television", "monitor"),
-    ("keyboard", "keyboard"),
-    ("mouse", "mouse"),
-    ("phone", "phone"),
-    ("smartphone", "phone"),
-    ("tablet", "tablet"),
-    # misc small stuff
-    ("book", "book"),
-    ("box", "box"),
-    ("basket", "basket"),
-    ("backpack", "bag"),
-    ("handbag", "bag"),
-    ("bag", "bag"),
-    ("plant", "plant"),
-]
-
-# Per-category "effective" priors in terms of the object's *bounding box* volume.
-# These are NOT true material densities; they are tuned so that a typical real-world
-# object with a reasonably scaled bounding box lands in the right ballpark for mass.
-CATEGORY_PRIORS: Dict[str, Dict[str, Any]] = {
-    "generic": {
-        "density_kg_per_m3": 400.0,
-        "mass_range_kg": (0.1, 10.0),
-        "friction": 0.9,
-        "restitution": 0.2,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "generic",
-    },
-    "sofa": {
-        "density_kg_per_m3": 30.0,
-        "mass_range_kg": (20.0, 80.0),
-        "friction": 0.9,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "upholstery",
-    },
-    "chair": {
-        "density_kg_per_m3": 50.0,
-        "mass_range_kg": (5.0, 25.0),
-        "friction": 0.9,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "wood_fabric",
-    },
-    "table": {
-        "density_kg_per_m3": 70.0,
-        "mass_range_kg": (10.0, 40.0),
-        "friction": 0.8,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "wood",
-    },
-    "bed": {
-        "density_kg_per_m3": 40.0,
-        "mass_range_kg": (25.0, 100.0),
-        "friction": 0.9,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "mattress",
-    },
-    "cabinet": {
-        "density_kg_per_m3": 120.0,
-        "mass_range_kg": (20.0, 80.0),
-        "friction": 0.7,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "wood",
-    },
-    "shelf": {
-        "density_kg_per_m3": 80.0,
-        "mass_range_kg": (10.0, 60.0),
-        "friction": 0.7,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "wood",
-    },
-    "pillow": {
-        "density_kg_per_m3": 10.0,
-        "mass_range_kg": (0.2, 2.0),
-        "friction": 1.2,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "fabric",
-    },
-    "textile": {
-        "density_kg_per_m3": 5.0,
-        "mass_range_kg": (0.2, 3.0),
-        "friction": 1.3,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "fabric",
-    },
-    "hat": {
-        "density_kg_per_m3": 8.0,
-        "mass_range_kg": (0.05, 0.3),
-        "friction": 1.2,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "fabric",
-    },
-    "shoe": {
-        "density_kg_per_m3": 80.0,
-        "mass_range_kg": (0.2, 1.5),
-        "friction": 1.1,
-        "restitution": 0.15,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "rubber",
-    },
-    "mug": {
-        "density_kg_per_m3": 300.0,
-        "mass_range_kg": (0.25, 0.8),
-        "friction": 0.6,
-        "restitution": 0.2,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "ceramic",
-    },
-    "bowl": {
-        "density_kg_per_m3": 250.0,
-        "mass_range_kg": (0.2, 1.0),
-        "friction": 0.6,
-        "restitution": 0.2,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "ceramic",
-    },
-    "plate": {
-        "density_kg_per_m3": 250.0,
-        "mass_range_kg": (0.2, 1.0),
-        "friction": 0.6,
-        "restitution": 0.15,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "ceramic",
-    },
-    "bottle": {
-        "density_kg_per_m3": 80.0,
-        "mass_range_kg": (0.1, 1.5),
-        "friction": 0.5,
-        "restitution": 0.25,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "plastic_glass",
-    },
-    "vase": {
-        "density_kg_per_m3": 150.0,
-        "mass_range_kg": (0.5, 5.0),
-        "friction": 0.5,
-        "restitution": 0.25,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "ceramic_glass",
-    },
-    "laptop": {
-        "density_kg_per_m3": 200.0,
-        "mass_range_kg": (1.0, 3.0),
-        "friction": 0.5,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "metal_plastic",
-    },
-    "monitor": {
-        "density_kg_per_m3": 150.0,
-        "mass_range_kg": (2.0, 10.0),
-        "friction": 0.5,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "glass_plastic",
-    },
-    "keyboard": {
-        "density_kg_per_m3": 150.0,
-        "mass_range_kg": (0.3, 1.5),
-        "friction": 0.7,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "plastic",
-    },
-    "mouse": {
-        "density_kg_per_m3": 200.0,
-        "mass_range_kg": (0.05, 0.3),
-        "friction": 0.5,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "plastic",
-    },
-    "phone": {
-        "density_kg_per_m3": 300.0,
-        "mass_range_kg": (0.1, 0.4),
-        "friction": 0.7,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "glass_plastic",
-    },
-    "tablet": {
-        "density_kg_per_m3": 250.0,
-        "mass_range_kg": (0.3, 1.0),
-        "friction": 0.7,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "glass_plastic",
-    },
-    "book": {
-        "density_kg_per_m3": 300.0,
-        "mass_range_kg": (0.2, 2.0),
-        "friction": 0.9,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "paper",
-    },
-    "box": {
-        "density_kg_per_m3": 60.0,
-        "mass_range_kg": (0.1, 10.0),
-        "friction": 0.8,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "cardboard",
-    },
-    "basket": {
-        "density_kg_per_m3": 40.0,
-        "mass_range_kg": (0.1, 5.0),
-        "friction": 0.9,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "wicker",
-    },
-    "bag": {
-        "density_kg_per_m3": 30.0,
-        "mass_range_kg": (0.1, 3.0),
-        "friction": 1.0,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "fabric",
-    },
-    "plant": {
-        "density_kg_per_m3": 60.0,
-        "mass_range_kg": (0.2, 10.0),
-        "friction": 0.8,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "plant",
-    },
-    "spoon": {
-        "density_kg_per_m3": 600.0,
-        "mass_range_kg": (0.02, 0.08),
-        "friction": 0.4,
-        "restitution": 0.15,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "stainless_steel",
-    },
-    "fork": {
-        "density_kg_per_m3": 650.0,
-        "mass_range_kg": (0.025, 0.09),
-        "friction": 0.4,
-        "restitution": 0.15,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "stainless_steel",
-    },
-    "knife": {
-        "density_kg_per_m3": 700.0,
-        "mass_range_kg": (0.03, 0.12),
-        "friction": 0.35,
-        "restitution": 0.15,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "stainless_steel",
-    },
-    "spatula": {
-        "density_kg_per_m3": 500.0,
-        "mass_range_kg": (0.05, 0.15),
-        "friction": 0.5,
-        "restitution": 0.1,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "metal_plastic",
-    },
-    "microwave": {
-        "density_kg_per_m3": 100.0,
-        "mass_range_kg": (10.0, 25.0),
-        "friction": 0.6,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "metal_plastic",
-    },
-    "appliance": {
-        "density_kg_per_m3": 120.0,
-        "mass_range_kg": (1.0, 15.0),
-        "friction": 0.6,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "metal_plastic",
-    },
-    "large_furniture": {
-        "density_kg_per_m3": 40.0,
-        "mass_range_kg": (20.0, 150.0),
-        "friction": 0.8,
-        "restitution": 0.05,
-        "dynamic": True,
-        "collision_shape": "box",
-        "material_name": "wood",
-    },
-    "small_object": {
-        "density_kg_per_m3": 200.0,
-        "mass_range_kg": (0.05, 1.0),
-        "friction": 0.7,
-        "restitution": 0.2,
-        "dynamic": True,
-        "collision_shape": "mesh",
-        "material_name": "generic_small",
-    },
+# Minimal generic fallback with very wide safety bounds
+GENERIC_FALLBACK: Dict[str, Any] = {
+    "density_kg_per_m3": 400.0,
+    "mass_range_kg": (0.001, 500.0),  # Very wide range: 1g to 500kg
+    "friction": 0.7,
+    "restitution": 0.2,
+    "dynamic": True,
+    "collision_shape": "mesh",
+    "material_name": "generic",
 }
-
-
-def classify_category(obj: Dict[str, Any], metadata: Optional[dict]) -> str:
-    """
-    Try to map the object to a semantic category like 'sofa', 'hat', 'mug', etc.,
-    based on class_name / label text and (optionally) approximate size.
-    """
-    text_bits: List[str] = []
-    for key in ("class_name", "category", "label", "name"):
-        val = obj.get(key)
-        if isinstance(val, str):
-            text_bits.append(val.lower())
-
-    if metadata:
-        for key in ("class_name", "category", "label", "name"):
-            val = metadata.get(key)
-            if isinstance(val, str):
-                text_bits.append(val.lower())
-
-    blob = " ".join(text_bits)
-
-    for token, cat in CATEGORY_KEYWORDS:
-        if token in blob:
-            return cat
-
-    # Fall back to a size-based guess if we have bounds.
-    size = extract_mesh_size_from_metadata(metadata)
-    if size:
-        max_dim = max(size)
-        if max_dim > 1.5:
-            return "large_furniture"
-        if max_dim < 0.3:
-            return "small_object"
-
-    return "generic"
-
-
-def get_category_prior(category: str) -> Dict[str, Any]:
-    return CATEGORY_PRIORS.get(category, CATEGORY_PRIORS["generic"])
 
 
 # ---------- Physics config (default + Gemini) ----------
 
 def estimate_default_physics(obj: Dict[str, Any], metadata: Optional[dict]) -> Dict[str, Any]:
     """
-    Heuristic base estimate for physics that is then refined by Gemini.
-    We combine:
-      - the object's approximate bounding box volume
-      - a category-specific effective density and mass range
+    Minimal fallback physics estimate used only when Gemini is unavailable or fails.
+    This provides a simple baseline that Gemini will completely override.
     """
-    category = classify_category(obj, metadata)
-    prior = get_category_prior(category)
-
     size = extract_mesh_size_from_metadata(metadata)
     volume = None
     if size:
@@ -554,27 +114,25 @@ def estimate_default_physics(obj: Dict[str, Any], metadata: Optional[dict]) -> D
         except Exception:
             volume = None
 
-    rho = float(prior.get("density_kg_per_m3", 400.0))
-    mass_min, mass_max = prior.get("mass_range_kg", (0.1, 10.0))
+    rho = float(GENERIC_FALLBACK.get("density_kg_per_m3", 400.0))
     mass: float
     if volume is not None:
         mass_est = volume * rho
-        # Clip to reasonable range for this category
-        mass = float(np.clip(mass_est, mass_min, mass_max))
+        # Use very wide safety bounds
+        mass = float(np.clip(mass_est, 0.001, 500.0))
     else:
-        # If we know nothing about volume, use the middle of the prior range.
-        mass = float(0.5 * (mass_min + mass_max))
+        # If we know nothing about volume, default to 1kg
+        mass = 1.0
 
-    dynamic = bool(prior.get("dynamic", True))
-    friction = float(prior.get("friction", 0.9))
-    restitution = float(prior.get("restitution", 0.2))
-    collision_shape = str(prior.get("collision_shape", "mesh"))
-    material_name = str(prior.get("material_name", "generic"))
+    dynamic = bool(GENERIC_FALLBACK.get("dynamic", True))
+    friction = float(GENERIC_FALLBACK.get("friction", 0.7))
+    restitution = float(GENERIC_FALLBACK.get("restitution", 0.2))
+    collision_shape = str(GENERIC_FALLBACK.get("collision_shape", "mesh"))
+    material_name = str(GENERIC_FALLBACK.get("material_name", "generic"))
 
-    note_parts = [f"category={category}", f"rho={rho:.2f} kg/m^3"]
+    note_parts = [f"fallback estimate", f"rho={rho:.2f} kg/m^3"]
     if volume is not None:
         note_parts.append(f"volume={volume:.4f} m^3")
-    note_parts.append(f"mass_range=[{mass_min:.2f},{mass_max:.2f}]")
     notes = "; ".join(note_parts)
 
     return {
@@ -596,11 +154,8 @@ def make_gemini_prompt(
     base_cfg: Dict[str, Any],
 ) -> str:
     """
-    Prompt Gemini with:
-      - semantic info (class_name, type, pipeline)
-      - approximate geometric info (obb extents, mesh size / volume)
-      - our heuristic base physics estimate
-    and ask it to refine the physics parameters.
+    Prompt Gemini to estimate realistic physics parameters based on object metadata.
+    Uses real-world examples to guide the model but doesn't constrain output.
     """
     size = extract_mesh_size_from_metadata(metadata)
     volume = None
@@ -619,67 +174,116 @@ def make_gemini_prompt(
         "obb_extents": (obj.get("obb") or {}).get("extents"),
         "mesh_size_m": size,
         "approx_volume_m3": volume,
-        "base_physics_estimate": base_cfg,
     }
 
     skeleton = {
-        "dynamic": base_cfg.get("dynamic", True),
-        "collisionShape": base_cfg.get("collisionShape", "mesh"),
-        "restitution": base_cfg.get("restitution", 0.2),
-        "friction": base_cfg.get("friction", 0.9),
-        "mass_kg": base_cfg.get("mass_kg", 1.0),
-        "density_kg_per_m3": base_cfg.get("density_kg_per_m3", 400.0),
-        "material_name": base_cfg.get("material_name", "generic"),
+        "dynamic": True,
+        "collisionShape": "mesh",
+        "restitution": 0.2,
+        "friction": 0.7,
+        "mass_kg": 1.0,
+        "density_kg_per_m3": 400.0,
+        "material_name": "generic",
         "notes": "",
     }
 
     prompt = f"""
 You are helping configure 3D assets for robotics training in NVIDIA Isaac Sim / USD.
 
-Given object metadata and a heuristic physics estimate, refine the physics so
-the object behaves as realistically as possible in the real world.
-
-IMPORTANT: Use your knowledge and grounding capabilities to provide accurate, real-world
-physics parameters for each specific object type. Every object should have realistic,
-distinct properties appropriate to its category and material composition:
-- A spoon and fork should have similar but subtly different properties (mass, material)
-- A microwave should be significantly heavier with metal/plastic properties
-- A blanket should have low mass, high friction, fabric properties
-- Consider the actual real-world physics of each object type
+Your task is to estimate REALISTIC physics parameters for this object based on its type,
+name, and dimensions. Use your knowledge and grounding capabilities to look up real-world
+physics properties for the specific object.
 
 The simulation uses:
 - meters for linear distance
 - kilograms for mass
 - rigid bodies only (no joints in this step)
 
-Key goals:
-- Mass should be in a realistic range for the object's category and size based on
-  real-world examples (small hat < 0.3 kg, typical sofa ~20–80 kg, mug ~0.25–0.8 kg,
-  spoon ~0.03 kg, fork ~0.04 kg, microwave ~15-20 kg, blanket ~1-2 kg, etc.).
-- Friction should be consistent with the actual material composition:
-  fabric/rubber > 1, wood ~0.8, ceramic/glass/plastic ~0.4–0.8, metal ~0.3–0.6.
-- Restitution (bounciness) is usually low (0–0.3) for household objects.
-- collisionShape should be "box" for boxy furniture, "mesh" for irregular shapes,
-  or "sphere"/"capsule" when that is a good fit.
-- dynamic is true for things that should move (almost everything except walls/floors).
+CRITICAL: Provide accurate real-world physics for THIS SPECIFIC OBJECT TYPE.
+Do NOT use generic values. Research and apply realistic properties.
 
-Return ONLY valid JSON (no comments, no extra text) that matches this structure:
+## Examples of Real-World Physics (for reference):
 
-{skeleton!r}
+**Utensils:**
+- Spoon (tablespoon): ~0.02-0.04 kg, stainless steel, friction ~0.4
+- Fork (dinner fork): ~0.03-0.05 kg, stainless steel, friction ~0.4
+- Knife (dinner knife): ~0.04-0.08 kg, stainless steel, friction ~0.35
+- Spatula: ~0.05-0.15 kg, metal/plastic, friction ~0.5
 
-Fields:
-- dynamic: true if the object should move under physics.
-- collisionShape: "box", "sphere", "capsule", or "mesh".
-- restitution: 0 (no bounce) to 1 (very bouncy).
-- friction: 0 (very slippery) to 2 (very sticky).
-- mass_kg: positive float in kilograms (use real-world values for this specific object type).
-- density_kg_per_m3: effective bulk density (mass / bounding-box volume).
-- material_name: short label like "wood", "metal", "plastic", "rubber", "fabric", "ceramic", "stainless_steel".
-- notes: very short explanation of your choices and any real-world considerations.
+**Kitchen Items:**
+- Mug (ceramic): ~0.25-0.4 kg, ceramic, friction ~0.6
+- Plate (dinner): ~0.3-0.6 kg, ceramic, friction ~0.6
+- Bowl: ~0.2-0.5 kg, ceramic/glass, friction ~0.6
+- Microwave: ~12-20 kg, metal/plastic, friction ~0.6
 
-Here is the metadata and base estimate for this object:
+**Textiles:**
+- Blanket (throw): ~0.5-2 kg, fabric, friction ~1.3
+- Towel: ~0.2-0.6 kg, fabric, friction ~1.2
+- Pillow: ~0.3-1 kg, fabric, friction ~1.2
+
+**Furniture:**
+- Chair (dining): ~5-15 kg, wood, friction ~0.8
+- Sofa: ~30-80 kg, upholstery, friction ~0.9
+- Table (coffee): ~10-30 kg, wood, friction ~0.8
+
+**Electronics:**
+- Laptop: ~1-3 kg, metal/plastic, friction ~0.5
+- Phone: ~0.15-0.25 kg, glass/metal, friction ~0.6
+- Tablet: ~0.3-0.7 kg, glass/metal, friction ~0.6
+
+**Small Items:**
+- Book: ~0.3-1 kg, paper, friction ~0.9
+- Hat: ~0.05-0.2 kg, fabric, friction ~1.2
+- Shoe: ~0.3-0.8 kg, rubber/leather, friction ~1.1
+
+## Physics Parameters Guide:
+
+**Mass (mass_kg):**
+- Use real-world mass for this specific object type
+- Consider the object's size and typical materials
+- Range: 0.001 kg (very light) to 500 kg (very heavy furniture/appliances)
+
+**Friction:**
+- Rubber/fabric: 1.0-1.5 (high grip)
+- Wood: 0.7-0.9
+- Ceramic/glass: 0.5-0.7
+- Metal (steel): 0.3-0.6
+- Plastic: 0.4-0.7
+- Range: 0.0 (ice-like) to 2.0 (maximum)
+
+**Restitution (bounciness):**
+- Most household objects: 0.05-0.2 (minimal bounce)
+- Rubber balls: 0.7-0.9
+- Range: 0.0 (no bounce) to 1.0 (perfect bounce)
+
+**Collision Shape:**
+- "box": for rectangular furniture, books, boxes
+- "mesh": for irregular shapes, utensils, complex objects (default)
+- "sphere": for balls
+- "capsule": for cylindrical objects
+
+**Material Name:**
+- Use descriptive names: "stainless_steel", "ceramic", "fabric", "wood",
+  "plastic", "glass", "rubber", "metal_plastic", "upholstery", etc.
+
+**Density (density_kg_per_m3):**
+- Calculate as: mass_kg / bounding_box_volume_m3
+- This is effective bulk density (includes air gaps)
+
+**Dynamic:**
+- true for movable objects (almost everything)
+- false only for fixed architectural elements (walls, floors)
+
+Return ONLY valid JSON (no markdown, no comments, no extra text) that matches this structure:
+
+{json.dumps(skeleton, indent=2)}
+
+Here is the object metadata:
 
 {json.dumps(minimal, indent=2)}
+
+Estimate realistic physics parameters for this specific object based on its name, type,
+and size. Use your knowledge and grounding to provide accurate real-world values.
 """
     return prompt
 
@@ -695,18 +299,13 @@ def call_gemini_for_object(
     metadata: Optional[dict],
 ) -> Dict[str, Any]:
     """
-    Ask Gemini to refine a heuristic physics estimate. We always start from
-    category-based priors, then let Gemini adjust within reasonable bounds.
+    Ask Gemini to estimate realistic physics parameters for the object.
+    No category constraints - Gemini has full control over all physics parameters.
     """
     base_cfg = estimate_default_physics(obj, metadata)
 
     if client is None:
         return base_cfg
-
-    # Determine category + prior so we can clamp Gemini's suggestions.
-    category = classify_category(obj, metadata)
-    prior = get_category_prior(category)
-    mass_min, mass_max = prior.get("mass_range_kg", (0.1, 10.0))
 
     prompt = make_gemini_prompt(oid, obj, metadata, base_cfg)
 
@@ -764,10 +363,10 @@ def call_gemini_for_object(
         if not isinstance(data, dict):
             raise ValueError("Gemini response was not a JSON object")
 
-        # Merge onto defaults; ignore unknown keys, and clamp to safe ranges.
+        # Merge Gemini's response onto fallback defaults
         merged = dict(base_cfg)
 
-        # Helper to clamp floats safely
+        # Helper to safely extract and validate floats with WIDE safety bounds
         def _get_clamped(key: str, default: float, lo: float, hi: float) -> float:
             try:
                 val = float(data.get(key, default))
@@ -781,24 +380,25 @@ def call_gemini_for_object(
         if "collisionShape" in data and isinstance(data["collisionShape"], str):
             merged["collisionShape"] = data["collisionShape"]
 
-        # Friction/restitution
+        # Friction/restitution: keep reasonable physics bounds
         merged["friction"] = _get_clamped(
-            "friction", merged.get("friction", 0.9), 0.0, 2.0
+            "friction", merged.get("friction", 0.7), 0.0, 2.0
         )
         merged["restitution"] = _get_clamped(
             "restitution", merged.get("restitution", 0.2), 0.0, 1.0
         )
 
-        # Mass + density
+        # Mass: Use WIDE safety bounds - let Gemini determine realistic values
+        # Only prevent obviously broken values (< 1g or > 1000kg)
         mass_default = float(merged.get("mass_kg", 1.0))
         merged["mass_kg"] = _get_clamped(
-            "mass_kg", mass_default, float(mass_min), float(mass_max)
+            "mass_kg", mass_default, 0.001, 1000.0
         )
 
-        # density_kg_per_m3 should be positive but not absurd
+        # Density: Accept wide range, just prevent unrealistic extremes
         try:
             rho_val = float(data.get("density_kg_per_m3", merged.get("density_kg_per_m3", 400.0)))
-            if rho_val > 0.0 and rho_val < 5000.0:
+            if rho_val > 0.0 and rho_val < 10000.0:  # Up to dense metals
                 merged["density_kg_per_m3"] = rho_val
         except Exception:
             pass
@@ -809,11 +409,8 @@ def call_gemini_for_object(
         if "notes" in data and isinstance(data["notes"], str):
             merged["notes"] = data["notes"]
 
-        # Append a short note that we clamped mass to priors.
-        merged["notes"] = (
-            merged.get("notes", "")
-            + f" | gemini_refined category={category}, mass_range=[{mass_min},{mass_max}]"
-        ).strip()
+        # Mark that Gemini estimated this
+        merged["notes"] = (merged.get("notes", "") + " | gemini_estimated").strip()
 
         return merged
 
