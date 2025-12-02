@@ -28,6 +28,14 @@ fi
 
 mkdir -p "${MULTIVIEW_DIR}"
 
+# Export for Python
+export SEG_PREFIX MULTIVIEW_PREFIX BUCKET SCENE_ID
+
+# Always generate layout from inventory first, even if multiview outputs exist
+# This ensures scene_layout_scaled.json is always up-to-date with detected objects
+echo "[MULTIVIEW] Generating layout from inventory for SAM3D..."
+python /app/generate_layout_from_inventory.py
+
 shopt -s nullglob
 echo "[MULTIVIEW] Existing multiview object directories:"
 existing_mv_dirs=("${MULTIVIEW_DIR}"/obj_*)
@@ -35,17 +43,11 @@ if (( ${#existing_mv_dirs[@]} > 0 )); then
   for d in "${existing_mv_dirs[@]}"; do
     echo "  - ${d}"
   done
-  echo "[MULTIVIEW] Found existing multiview outputs; skipping generation"
+  echo "[MULTIVIEW] Found existing multiview outputs; skipping render generation"
   exit 0
 else
   echo "  (none found)"
 fi
-
-# Export for Python
-export SEG_PREFIX MULTIVIEW_PREFIX BUCKET SCENE_ID
-
-echo "[MULTIVIEW] Generating layout from inventory for SAM3D..."
-python /app/generate_layout_from_inventory.py
 
 echo "[MULTIVIEW] Running Gemini generative multiview generation..."
 python /app/run_multiview_gemini_generative.py
