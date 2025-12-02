@@ -62,26 +62,117 @@ def getenv_bool(name: str, default: str = "0") -> bool:
 
 
 def convert_glb_to_usdz(glb_path: Path, usdz_path: Path) -> bool:
-    """Convert a GLB into USDZ using the usd_from_gltf CLI if available."""
-    usd_from_gltf = shutil.which("usd_from_gltf")
-    if usd_from_gltf is None:
-        print("[HUNYUAN] usd_from_gltf not found; skipping USDZ export", file=sys.stderr)
+    """
+    Convert a GLB into USDZ using USD Python API.
+
+    Note: usd-core provides Python bindings (pxr module) but not a usd_from_gltf CLI.
+    We use the USD Python API to perform the conversion.
+    """
+    # Check if USDZ export is disabled via environment variable
+    if not getenv_bool("ENABLE_USDZ_EXPORT", "1"):
+        print("[HUNYUAN] USDZ export disabled via ENABLE_USDZ_EXPORT=0", file=sys.stderr)
         return False
 
-    usdz_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [usd_from_gltf, str(glb_path), "-o", str(usdz_path)]
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        if result.stdout:
-            print(result.stdout)
-        if result.stderr:
-            print(result.stderr, file=sys.stderr)
-        print(f"[HUNYUAN] Saved USDZ -> {usdz_path}")
-        return True
-    except subprocess.CalledProcessError as e:
+        from pxr import Usd, UsdGeom, Gf, UsdUtils
+    except ImportError as e:
         print(
-            f"[HUNYUAN] WARNING: usd_from_gltf failed for {glb_path}: {e.stderr or e}",
-            file=sys.stderr,
+            f"[HUNYUAN] USD Python bindings (pxr) not available: {e}; skipping USDZ export. "
+            f"To enable USDZ export, ensure usd-core is installed: pip install usd-core",
+            file=sys.stderr
+        )
+        return False
+
+    try:
+        usdz_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create a temporary USDC file first
+        usdc_path = usdz_path.with_suffix('.usdc')
+
+        # Import GLB using USD's importer
+        # Note: USD has limited GLB support; this creates a basic conversion
+        stage = Usd.Stage.CreateNew(str(usdc_path))
+
+        # Try to use trimesh as an intermediate step for better conversion
+        try:
+            mesh_data = trimesh.load(str(glb_path), force='scene')
+
+            # Create root xform
+            root_xform = UsdGeom.Xform.Define(stage, '/Model')
+
+            # Handle both single meshes and scenes with multiple meshes
+            if hasattr(mesh_data, 'geometry'):
+                # It's a scene with multiple geometries
+                for idx, (name, geometry) in enumerate(mesh_data.geometry.items()):
+                    if hasattr(geometry, 'vertices') and hasattr(geometry, 'faces'):
+                        mesh_prim = UsdGeom.Mesh.Define(stage, f'/Model/mesh_{idx}')
+
+                        # Set vertices
+                        vertices = Gf.Vec3fArray([Gf.Vec3f(*v) for v in geometry.vertices])
+                        mesh_prim.CreatePointsAttr().Set(vertices)
+
+                        # Set face indices
+                        faces = geometry.faces.flatten().tolist()
+                        mesh_prim.CreateFaceVertexIndicesAttr().Set(faces)
+
+                        # Set face vertex counts (triangles)
+                        face_counts = [3] * len(geometry.faces)
+                        mesh_prim.CreateFaceVertexCountsAttr().Set(face_counts)
+            else:
+                # Single mesh
+                if hasattr(mesh_data, 'vertices') and hasattr(mesh_data, 'faces'):
+                    mesh_prim = UsdGeom.Mesh.Define(stage, '/Model/mesh')
+
+                    vertices = Gf.Vec3fArray([Gf.Vec3f(*v) for v in mesh_data.vertices])
+                    mesh_prim.CreatePointsAttr().Set(vertices)
+
+                    faces = mesh_data.faces.flatten().tolist()
+                    mesh_prim.CreateFaceVertexIndicesAttr().Set(faces)
+
+                    face_counts = [3] * len(mesh_data.faces)
+                    mesh_prim.CreateFaceVertexCountsAttr().Set(face_counts)
+
+            # Save the stage
+            stage.GetRootLayer().Save()
+
+            # Package into USDZ using usdzip
+            # Check if usdzip is available
+            usdzip = shutil.which('usdzip')
+            if usdzip:
+                subprocess.run(
+                    [usdzip, str(usdz_path), str(usdc_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True
+                )
+                print(f"[HUNYUAN] Saved USDZ -> {usdz_path}")
+                return True
+            else:
+                # If usdzip not available, just keep the USDC file
+                print(
+                    f"[HUNYUAN] usdzip not found, saved as USDC instead -> {usdc_path}",
+                    file=sys.stderr
+                )
+                return False
+
+        except Exception as e:
+            print(
+                f"[HUNYUAN] WARNING: GLB to USDZ conversion failed for {glb_path}: {e}",
+                file=sys.stderr
+            )
+            return False
+        finally:
+            # Clean up intermediate USDC file if USDZ was created
+            if usdz_path.exists() and usdc_path.exists():
+                try:
+                    usdc_path.unlink()
+                except Exception:
+                    pass
+
+    except Exception as e:
+        print(
+            f"[HUNYUAN] WARNING: USDZ conversion failed for {glb_path}: {e}",
+            file=sys.stderr
         )
         return False
 
@@ -129,14 +220,22 @@ def main() -> None:
     # Quality knobs (can be overridden with env vars if needed)
     # Defaults chosen to fit within a single L4 (24GB) GPU.
     # ------------------------------------------------------------------
+    # Shape generation settings:
     num_steps = int(os.getenv("HUNYUAN_NUM_STEPS", "50"))        # shape steps; 50 is usually enough
     max_num_view = int(os.getenv("HUNYUAN_MAX_NUM_VIEW", "6"))   # docs say 6–9; 6 is lighter on VRAM
     resolution = int(os.getenv("HUNYUAN_RESOLUTION", "512"))     # 512 or 768; 512 is lighter on VRAM
 
     # Texture sizes inside the paint pipeline (these default to 2048 / 4096
     # in the repo and are quite heavy). We drop them for Cloud Run.
+    # PERFORMANCE TIP: Reduce these values for faster processing:
+    #   - render_size: 512 (fast) | 1024 (balanced) | 2048 (slow but high quality)
+    #   - texture_size: 1024 (fast) | 2048 (balanced) | 4096 (slow but high quality)
     render_size = int(os.getenv("HUNYUAN_RENDER_SIZE", "1024"))
     texture_size = int(os.getenv("HUNYUAN_TEXTURE_SIZE", "2048"))
+
+    # Performance settings:
+    skip_existing_assets = getenv_bool("SKIP_EXISTING_ASSETS", "1")  # Skip objects with existing asset.glb
+    enable_usdz = getenv_bool("ENABLE_USDZ_EXPORT", "1")              # Enable USDZ conversion
 
     model_path = os.getenv("HUNYUAN_MODEL_PATH", "tencent/Hunyuan3D-2.1")
 
@@ -154,9 +253,13 @@ def main() -> None:
     print(f"[HUNYUAN] Assets root={assets_root}")
     print(f"[HUNYUAN] Using model: {model_path}")
     print(
-        f"[HUNYUAN] num_steps={num_steps}, "
-        f"max_num_view={max_num_view}, resolution={resolution}, "
-        f"render_size={render_size}, texture_size={texture_size}"
+        f"[HUNYUAN] Shape: num_steps={num_steps}, max_num_view={max_num_view}, resolution={resolution}"
+    )
+    print(
+        f"[HUNYUAN] Texture: render_size={render_size}, texture_size={texture_size}"
+    )
+    print(
+        f"[HUNYUAN] Performance: skip_existing={skip_existing_assets}, enable_usdz={enable_usdz}"
     )
 
     plan = json.loads(plan_path.read_text())
