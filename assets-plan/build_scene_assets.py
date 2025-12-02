@@ -20,7 +20,12 @@ def parse_interactive_ids(raw: str | None):
             pass
     return ids
 
-def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id: int, static_pipeline: str):
+def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id: int, static_pipeline: str, sim_role: str | None = None):
+    # First check sim_role (most authoritative)
+    if sim_role in ("articulated_furniture", "articulated_appliance", "manipulable_object"):
+        return "interactive", "physx"
+
+    # Fallback to manual interactive_ids
     text = (class_name or "").lower()
     if phrase:
         text += " " + phrase.lower()
@@ -54,6 +59,7 @@ def infer_objects_from_multiview(multiview_root: Path, multiview_prefix: str):
         class_name = obj_stub
         phrase = None
 
+        sim_role = None
         if meta_path.is_file():
             try:
                 with meta_path.open("r") as f:
@@ -61,6 +67,7 @@ def infer_objects_from_multiview(multiview_root: Path, multiview_prefix: str):
                 obj_id = meta.get("object_id", obj_id)
                 class_name = meta.get("category") or meta.get("class_name") or class_name
                 phrase = meta.get("short_description")
+                sim_role = meta.get("sim_role")
             except Exception as e:  # pragma: no cover - defensive logging
                 print(f"[ASSETS] WARNING: Failed to read {meta_path}: {e}; using defaults")
 
@@ -69,6 +76,7 @@ def infer_objects_from_multiview(multiview_root: Path, multiview_prefix: str):
             "id": obj_id,
             "class_name": class_name,
             "object_phrase": phrase,
+            "sim_role": sim_role,
         })
 
     if inferred_objects:
@@ -147,6 +155,7 @@ def main():
         oid = obj.get("id")
         cls = obj.get("class_name", f"class_{obj.get('class_id', 0)}")
         phrase = obj.get("object_phrase")  # optional future field
+        sim_role = obj.get("sim_role")  # from Gemini inventory
 
         mv_dir = multiview_root / f"obj_{oid}"
 
@@ -162,7 +171,7 @@ def main():
             print(f"[ASSETS] WARNING: missing crop.png or view_0.png for obj {oid} in {mv_dir}")
             continue
 
-        obj_type, pipeline = classify_type(cls, phrase, interactive_ids, oid, static_pipeline=static_pipeline)
+        obj_type, pipeline = classify_type(cls, phrase, interactive_ids, oid, static_pipeline=static_pipeline, sim_role=sim_role)
 
         # Use the relative path for the image that was found
         image_filename = image_path.name
