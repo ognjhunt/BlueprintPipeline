@@ -1,9 +1,11 @@
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import torch
+from google.cloud import storage
 
 from depth_anything_3.api import DepthAnything3
 
@@ -116,20 +118,46 @@ def main() -> None:
         print(f"[DA3] WARNING: failed to save cameras_da3.npz: {e}", file=sys.stderr)
 
     # Save depth + confidence + cameras in a single bundle for later steps
+    # IMPORTANT: Write to temp file first, then upload atomically to avoid
+    # multiple GCS events that would trigger duplicate layout-jobs
     geom_path = out_dir / "da3_geom.npz"
     try:
-        np.savez_compressed(
-            geom_path,
-            depth=depth,
-            conf=conf,
-            extrinsics=extrinsics,
-            intrinsics=intrinsics,
-            image_paths=np.array(image_paths, dtype="U"),
-        )
-        print(
-            f"[DA3] Saved geometry bundle to {geom_path} "
-            f"(depth {depth.shape}, conf {conf.shape})"
-        )
+        # Write to local temp file first
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.npz') as tmp_file:
+            tmp_path = tmp_file.name
+            np.savez_compressed(
+                tmp_path,
+                depth=depth,
+                conf=conf,
+                extrinsics=extrinsics,
+                intrinsics=intrinsics,
+                image_paths=np.array(image_paths, dtype="U"),
+            )
+
+        # Upload atomically to GCS (single event)
+        if bucket and out_prefix:
+            try:
+                storage_client = storage.Client()
+                bucket_obj = storage_client.bucket(bucket)
+                blob_path = f"{out_prefix}/da3_geom.npz"
+                blob = bucket_obj.blob(blob_path)
+                blob.upload_from_filename(tmp_path)
+                print(
+                    f"[DA3] Uploaded geometry bundle to gs://{bucket}/{blob_path} "
+                    f"(depth {depth.shape}, conf {conf.shape})"
+                )
+            finally:
+                # Clean up temp file
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+        else:
+            # Fallback: move to GCS FUSE mount if bucket info not available
+            import shutil
+            shutil.move(tmp_path, geom_path)
+            print(
+                f"[DA3] Saved geometry bundle to {geom_path} "
+                f"(depth {depth.shape}, conf {conf.shape})"
+            )
     except Exception as e:
         print(f"[DA3] WARNING: failed to save da3_geom.npz: {e}", file=sys.stderr)
 
