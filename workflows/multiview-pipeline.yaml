@@ -118,6 +118,8 @@ main:
                       value: ${sceneId}
                     - name: LAYOUT_PREFIX
                       value: ${layoutPrefix}
+                    - name: SEG_PREFIX
+                      value: ${segPrefix}
                     - name: MULTIVIEW_PREFIX
                       value: ${multiviewPrefix}
                     - name: ASSETS_PREFIX
