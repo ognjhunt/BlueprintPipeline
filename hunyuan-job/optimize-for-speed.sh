@@ -32,25 +32,18 @@ gcloud run jobs update "${JOB_NAME}" \
 echo "✓ Texture quality reduced"
 echo ""
 
-echo "Step 3: Disabling USDZ export (saves 5-10 minutes)..."
-gcloud run jobs update "${JOB_NAME}" \
-  --region="${REGION}" \
-  --project="${PROJECT_ID}" \
-  --update-env-vars="ENABLE_USDZ_EXPORT=0"
-
-echo "✓ USDZ export disabled"
-echo ""
-
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "✅ All optimizations applied!"
+echo "✅ Optimizations applied!"
 echo ""
-echo "Expected performance:"
+echo "Expected performance (with USDZ export enabled):"
 echo "  Before: 65-75 minutes (times out) ❌"
-echo "  After:  35-50 minutes (completes) ✅"
+echo "  After:  45-55 minutes (completes) ✅"
+echo ""
+echo "Note: USDZ export is still enabled (adds ~10 minutes)"
 echo ""
 echo "To verify configuration:"
 echo "  gcloud run jobs describe ${JOB_NAME} --region=${REGION} --project=${PROJECT_ID}"
 echo ""
-echo "To re-enable USDZ export if needed:"
-echo "  gcloud run jobs update ${JOB_NAME} --region=${REGION} --update-env-vars=ENABLE_USDZ_EXPORT=1"
+echo "If you need even faster processing and don't need USDZ:"
+echo "  gcloud run jobs update ${JOB_NAME} --region=${REGION} --update-env-vars=ENABLE_USDZ_EXPORT=0"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
