@@ -86,7 +86,12 @@ RUN pip install --no-cache-dir \
 RUN if [ -f download.py ]; then python download.py; fi
 
 # ---------------------------------------------------------
-# 7) Your Flask wrapper service
+# 7) Install additional dependencies that PhysX-Anything needs
+# ---------------------------------------------------------
+RUN pip install --no-cache-dir ipdb
+
+# ---------------------------------------------------------
+# 8) Your Flask wrapper service
 # ---------------------------------------------------------
 WORKDIR /app
 RUN pip install --no-cache-dir flask
