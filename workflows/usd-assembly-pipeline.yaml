@@ -21,32 +21,32 @@ main:
         assign:
           - bucket: ${event.data.bucket}
           - object: ${event.data.name}
-          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: "us-central1"
         next: filter_completion_markers
 
     - filter_completion_markers:
         switch:
-          - condition: ${text.match_regex(object, "^scenes/.+/assets/\\.(?:hunyuan|interactive)_complete$")}
+          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.(?:hunyuan|interactive)_complete$")}'
             next: derive
         next: skip
 
     - derive:
         assign:
-          - parts: ${text.split(object, "/")}
+          - parts: '${text.split(object, "/")}'
           - sceneId: ${parts[1]}
-          - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
-          - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
-          - usdPrefix: ${"scenes/" + sceneId + "/usd"}
+          - layoutPrefix: '${"scenes/" + sceneId + "/layout"}'
+          - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
+          - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - usdJobName: "usd-assembly-job"
-          - hunyuanMarker: ${assetsPrefix + "/.hunyuan_complete"}
-          - interactiveMarker: ${assetsPrefix + "/.interactive_complete"}
+          - hunyuanMarker: '${assetsPrefix + "/.hunyuan_complete"}'
+          - interactiveMarker: '${assetsPrefix + "/.interactive_complete"}'
         next: log_start
 
     - log_start:
         call: sys.log
         args:
-          text: ${"USD assembly triggered for scene " + sceneId + " - checking for completion markers"}
+          text: '${"USD assembly triggered for scene " + sceneId + " - checking for completion markers"}'
           severity: "INFO"
         next: check_hunyuan_marker
 
@@ -57,16 +57,16 @@ main:
             bucket: ${bucket}
             object: ${hunyuanMarker}
           result: hunyuanExists
-          next: check_interactive_marker
         except:
           as: e
           steps:
             - log_waiting:
                 call: sys.log
                 args:
-                  text: ${"Waiting for hunyuan completion marker for scene " + sceneId}
+                  text: '${"Waiting for hunyuan completion marker for scene " + sceneId}'
                   severity: "INFO"
                 next: skip_not_ready
+        next: check_interactive_marker
 
     - check_interactive_marker:
         try:
@@ -75,28 +75,28 @@ main:
             bucket: ${bucket}
             object: ${interactiveMarker}
           result: interactiveExists
-          next: log_both_ready
         except:
           as: e
           steps:
             - log_waiting_interactive:
                 call: sys.log
                 args:
-                  text: ${"Waiting for interactive completion marker for scene " + sceneId}
+                  text: '${"Waiting for interactive completion marker for scene " + sceneId}'
                   severity: "INFO"
                 next: skip_not_ready
+        next: log_both_ready
 
     - log_both_ready:
         call: sys.log
         args:
-          text: ${"Both asset jobs complete for scene " + sceneId + " - proceeding with USD assembly"}
+          text: '${"Both asset jobs complete for scene " + sceneId + " - proceeding with USD assembly"}'
           severity: "INFO"
         next: run_usd_job
 
     - run_usd_job:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + usdJobName}
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + usdJobName}'
           body:
             overrides:
               containerOverrides:
@@ -138,13 +138,13 @@ main:
     - log_usd_complete:
         call: sys.log
         args:
-          text: ${"USD assembly completed for scene " + sceneId}
+          text: '${"USD assembly completed for scene " + sceneId}'
           severity: "INFO"
         next: done
 
     - usd_failed:
         assign:
-          - errorMsg: ${"USD assembly job FAILED for scene " + sceneId}
+          - errorMsg: '${"USD assembly job FAILED for scene " + sceneId}'
         next: log_usd_error
 
     - log_usd_error:
@@ -161,16 +161,16 @@ main:
         return:
           status: "SUCCESS"
           scene_id: ${sceneId}
-          message: ${"USD assembly completed successfully for scene " + sceneId}
+          message: '${"USD assembly completed successfully for scene " + sceneId}'
           usd_execution: ${usdExec.name}
 
     - skip_not_ready:
         return:
           status: "WAITING"
           scene_id: ${sceneId}
-          message: ${"Waiting for all asset generation jobs to complete for scene " + sceneId}
+          message: '${"Waiting for all asset generation jobs to complete for scene " + sceneId}'
 
     - skip:
         return:
           status: "SKIPPED"
-          message: ${"Not a completion marker file: " + object}
+          message: '${"Not a completion marker file: " + object}'
