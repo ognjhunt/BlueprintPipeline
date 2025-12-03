@@ -114,40 +114,72 @@ RUN pip install --no-cache-dir \
 #    This is the most important step for avoiding cold starts!
 # ---------------------------------------------------------
 
-# First, try the repo's download script
-RUN echo "Attempting to download models using download.py..." && \
-    if [ -f download.py ]; then \
-        python download.py && echo "download.py succeeded" || \
-        echo "Warning: download.py failed, trying alternative methods..."; \
-    else \
-        echo "download.py not found, will try alternative methods..."; \
-    fi
+# Ensure huggingface_hub is installed before downloading
+RUN pip install --no-cache-dir 'huggingface-hub>=0.36.0'
+
+# Download models using the repo's download script
+# IMPORTANT: This must succeed or the build fails
+RUN echo "========================================" && \
+    echo "Downloading model weights (this will take several minutes)..." && \
+    echo "========================================" && \
+    python download.py && \
+    echo "Model download completed successfully!"
 
 # Verify pretrain/vlm directory exists and has content
-RUN echo "Checking VLM checkpoint directory..." && \
-    if [ -d "pretrain/vlm" ]; then \
-        echo "VLM directory exists:" && \
-        ls -la pretrain/vlm/ && \
-        echo "Total size:" && \
-        du -sh pretrain/vlm/ ; \
-    else \
-        echo "WARNING: VLM checkpoint directory does not exist!" && \
-        echo "The service will fail at runtime without model weights." && \
-        mkdir -p pretrain/vlm ; \
-    fi
-
-# Check for required model files
-RUN echo "Checking for required model files..." && \
-    if [ -f "pretrain/vlm/config.json" ]; then \
-        echo "config.json found" ; \
-    else \
-        echo "WARNING: config.json not found!" ; \
+RUN echo "========================================" && \
+    echo "Verifying VLM checkpoint directory..." && \
+    echo "========================================" && \
+    if [ ! -d "pretrain/vlm" ]; then \
+        echo "ERROR: VLM checkpoint directory does not exist!" && \
+        echo "Model download failed - pretrain/vlm not found" && \
+        exit 1; \
     fi && \
-    if ls pretrain/vlm/*.safetensors 1> /dev/null 2>&1 || ls pretrain/vlm/*.bin 1> /dev/null 2>&1; then \
-        echo "Model weights found" ; \
+    echo "VLM directory contents:" && \
+    ls -lah pretrain/vlm/ && \
+    echo "" && \
+    echo "Total size:" && \
+    du -sh pretrain/vlm/
+
+# Check for required model files and FAIL if missing
+RUN echo "========================================" && \
+    echo "Validating required model files..." && \
+    echo "========================================" && \
+    MISSING_FILES="" && \
+    if [ ! -f "pretrain/vlm/config.json" ]; then \
+        echo "ERROR: config.json not found!" && \
+        MISSING_FILES="config.json "; \
     else \
-        echo "WARNING: No model weights found!" ; \
-    fi
+        echo "✓ config.json found" ; \
+    fi && \
+    if [ ! -f "pretrain/vlm/tokenizer.json" ]; then \
+        echo "ERROR: tokenizer.json not found!" && \
+        MISSING_FILES="${MISSING_FILES}tokenizer.json "; \
+    else \
+        echo "✓ tokenizer.json found" ; \
+    fi && \
+    if [ ! -f "pretrain/vlm/tokenizer_config.json" ]; then \
+        echo "ERROR: tokenizer_config.json not found!" && \
+        MISSING_FILES="${MISSING_FILES}tokenizer_config.json "; \
+    else \
+        echo "✓ tokenizer_config.json found" ; \
+    fi && \
+    WEIGHT_COUNT=$(find pretrain/vlm -name "*.safetensors" -o -name "*.bin" | wc -l) && \
+    if [ "$WEIGHT_COUNT" -eq 0 ]; then \
+        echo "ERROR: No model weight files (*.safetensors or *.bin) found!" && \
+        MISSING_FILES="${MISSING_FILES}model_weights "; \
+    else \
+        echo "✓ Found $WEIGHT_COUNT model weight file(s)" && \
+        find pretrain/vlm -name "*.safetensors" -o -name "*.bin" | head -5 ; \
+    fi && \
+    if [ -n "$MISSING_FILES" ]; then \
+        echo "" && \
+        echo "========================================" && \
+        echo "BUILD FAILED: Missing required files: $MISSING_FILES" && \
+        echo "========================================" && \
+        exit 1; \
+    fi && \
+    echo "" && \
+    echo "✓ All required model files validated successfully!"
 
 # ---------------------------------------------------------
 # 8) Install additional dependencies
