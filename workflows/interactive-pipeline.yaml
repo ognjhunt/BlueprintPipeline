@@ -34,38 +34,12 @@ main:
           - physxEndpoint: ${sys.get_env("PHYSX_ENDPOINT")}
           - jobName: "interactive-job"
           - simreadyJobName: "simready-job"
-        next: check_interactive_count
+        next: log_skip_interactive_pipeline
 
-    - check_interactive_count:
-        try:
-          call: http.get
-          args:
-            url: ${"https://storage.googleapis.com/storage/v1/b/" + bucket + "/o/" + text.url_encode(object) + "?alt=media"}
-            auth:
-              type: OAuth2
-          result: assetsJson
-        except:
-          as: e
-          steps:
-            - log_read_error:
-                call: sys.log
-                args:
-                  # Added single quotes around the expression below to handle the colon inside the string
-                  text: '${"Failed to read scene_assets.json: " + e.message}'
-                  severity: "ERROR"
-                next: skip
-        next: check_if_skip_interactive
-
-    - check_if_skip_interactive:
-        switch:
-          - condition: ${assetsJson.body.interactive_count == 0}
-            next: log_skip_interactive
-        next: run_job
-
-    - log_skip_interactive:
+    - log_skip_interactive_pipeline:
         call: sys.log
         args:
-          text: ${"No interactive objects for scene " + sceneId + "; skipping interactive-job and creating completion marker"}
+          text: ${"Skipping interactive-pipeline entirely (using hunyuan for all objects) for scene " + sceneId + "; creating completion marker"}
           severity: "INFO"
         next: create_completion_marker
 
@@ -75,7 +49,7 @@ main:
           bucket: ${bucket}
           uploadType: "media"
           name: ${assetsPrefix + "/.interactive_complete"}
-          body: ${"skipped - no interactive objects\n"}
+          body: ${"skipped - using hunyuan pipeline for all objects\n"}
         next: log_marker_created
 
     - log_marker_created:
@@ -83,117 +57,7 @@ main:
         args:
           text: ${"Created .interactive_complete marker for scene " + sceneId}
           severity: "INFO"
-        next: run_simready_job
-
-    - run_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: MULTIVIEW_PREFIX
-                      value: ${multiviewPrefix}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: LAYOUT_PREFIX
-                      value: ${layoutPrefix}
-                    - name: PHYSX_ENDPOINT
-                      value: ${physxEndpoint}
-        result: interactiveExec
-        next: wait_for_interactive
-
-    - wait_for_interactive:
-        call: googleapis.run.v2.projects.locations.jobs.executions.get
-        args:
-          name: ${interactiveExec.name}
-        result: interactiveStatus
-        next: check_interactive_status
-
-    - check_interactive_status:
-        switch:
-          - condition: ${interactiveStatus.completionTime != null}
-            next: log_interactive_complete
-          - condition: ${interactiveStatus.failedCount != null and interactiveStatus.failedCount > 0}
-            next: interactive_failed
-        next: wait_interactive_poll
-
-    - wait_interactive_poll:
-        call: sys.sleep
-        args:
-          seconds: 10
-        next: wait_for_interactive
-
-    - log_interactive_complete:
-        call: sys.log
-        args:
-          text: ${"Interactive job completed for scene " + sceneId + ", starting simready"}
-          severity: "INFO"
-        next: run_simready_job
-
-    - interactive_failed:
-        call: sys.log
-        args:
-          text: ${"Interactive job FAILED for scene " + sceneId}
-          severity: "ERROR"
-        next: done_failed
-
-    - run_simready_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + simreadyJobName}
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-        result: simreadyExec
-        next: wait_for_simready
-
-    - wait_for_simready:
-        call: googleapis.run.v2.projects.locations.jobs.executions.get
-        args:
-          name: ${simreadyExec.name}
-        result: simreadyStatus
-        next: check_simready_status
-
-    - check_simready_status:
-        switch:
-          - condition: ${simreadyStatus.completionTime != null}
-            next: log_simready_complete
-          - condition: ${simreadyStatus.failedCount != null and simreadyStatus.failedCount > 0}
-            next: simready_failed
-        next: wait_simready_poll
-
-    - wait_simready_poll:
-        call: sys.sleep
-        args:
-          seconds: 10
-        next: wait_for_simready
-
-    - log_simready_complete:
-        call: sys.log
-        args:
-          text: ${"Simready job completed for scene " + sceneId}
-          severity: "INFO"
         next: done
-
-    - simready_failed:
-        call: sys.log
-        args:
-          text: ${"Simready job FAILED for scene " + sceneId}
-          severity: "ERROR"
-        next: done_failed
 
     - done:
         return: ${"Interactive + simready pipeline completed for " + object}
