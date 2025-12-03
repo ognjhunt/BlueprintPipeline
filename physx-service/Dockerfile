@@ -1,18 +1,10 @@
 # syntax=docker/dockerfile:1
 # physx-service/Dockerfile
 #
-# IMPORTANT: Cloud Run Configuration for this service:
-# - Memory: 32Gi minimum (ML models are large)
-# - CPU: 8 cores minimum  
-# - GPU: 1x NVIDIA L4 or T4
-# - Timeout: 900s (15 minutes for full pipeline)
-# - Concurrency: 1 (GPU can only handle one inference at a time)
-# - Min instances: 1 (avoid cold starts - models take 5+ min to load)
-# - Startup probe: HTTP GET / with 600s timeout
-#
-# Deploy command example:
+# CRITICAL CLOUD RUN SETTINGS (these are REQUIRED):
+# ----------------------------------------------------------
 # gcloud run deploy physx-service \
-#   --image gcr.io/PROJECT/physx-service:latest \
+#   --image gcr.io/PROJECT/physx-service:v3 \
 #   --memory 32Gi \
 #   --cpu 8 \
 #   --gpu 1 \
@@ -22,7 +14,17 @@
 #   --min-instances 1 \
 #   --max-instances 2 \
 #   --port 8080 \
-#   --region us-central1
+#   --region us-central1 \
+#   --no-cpu-throttling \
+#   --set-env-vars "PHYSX_DEBUG=1"
+# ----------------------------------------------------------
+#
+# IMPORTANT NOTES:
+# - concurrency=1 is REQUIRED (GPU can only handle one inference at a time)
+# - min-instances=1 is HIGHLY RECOMMENDED (VLM model takes 10+ minutes to load)
+# - timeout=900 is needed (pipeline can take 5-15 minutes per object)
+# - memory=32Gi is needed for the VLM model
+#
 
 FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04
 
@@ -33,7 +35,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # System deps
 # ---------------------------------------------------------
 RUN apt-get update && apt-get install -y \
-    python3 python3-venv python3-dev \
+    python3 python3-venv python3-dev python3-pip \
     git wget curl \
     build-essential cmake ninja-build pkg-config \
     ffmpeg \
@@ -52,11 +54,13 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel packagin
 
 # ---------------------------------------------------------
 # 1) Install PyTorch (GPU build) FIRST
-#    Torch 2.5.0 + cu124, per official index.
 # ---------------------------------------------------------
 RUN pip install --no-cache-dir \
     torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
     --index-url https://download.pytorch.org/whl/cu124
+
+# Verify CUDA is available
+RUN python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
 
 # ---------------------------------------------------------
 # 2) Clone PhysX-Anything (with submodules)
@@ -77,8 +81,7 @@ RUN pip install --no-cache-dir \
     -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.0_cu124.html
 
 # ---------------------------------------------------------
-# 4) Patch requirements.txt IN PLACE so any internal
-#    'pip install -r requirements.txt' sees a sane file
+# 4) Patch requirements.txt IN PLACE
 # ---------------------------------------------------------
 COPY patch_requirements.py /tmp/patch_requirements.py
 RUN python /tmp/patch_requirements.py requirements.txt
@@ -107,17 +110,44 @@ RUN pip install --no-cache-dir \
       'accelerate>=0.26.0'
 
 # ---------------------------------------------------------
-# 7) Download model weights at build time if possible
-#    This reduces cold-start time significantly
+# 7) CRITICAL: Download model weights at build time
+#    This is the most important step for avoiding cold starts!
 # ---------------------------------------------------------
-RUN if [ -f download.py ]; then \
-        echo "Downloading model weights..." && \
-        python download.py || echo "Warning: download.py failed, models will download at runtime"; \
+
+# First, try the repo's download script
+RUN echo "Attempting to download models using download.py..." && \
+    if [ -f download.py ]; then \
+        python download.py && echo "download.py succeeded" || \
+        echo "Warning: download.py failed, trying alternative methods..."; \
+    else \
+        echo "download.py not found, will try alternative methods..."; \
     fi
 
-# Pre-download Qwen VL model weights (if not already present)
-# This is the biggest contributor to cold-start time
-RUN python -c "from transformers import AutoModelForCausalLM; print('Transformers import OK')" || true
+# Verify pretrain/vlm directory exists and has content
+RUN echo "Checking VLM checkpoint directory..." && \
+    if [ -d "pretrain/vlm" ]; then \
+        echo "VLM directory exists:" && \
+        ls -la pretrain/vlm/ && \
+        echo "Total size:" && \
+        du -sh pretrain/vlm/ ; \
+    else \
+        echo "WARNING: VLM checkpoint directory does not exist!" && \
+        echo "The service will fail at runtime without model weights." && \
+        mkdir -p pretrain/vlm ; \
+    fi
+
+# Check for required model files
+RUN echo "Checking for required model files..." && \
+    if [ -f "pretrain/vlm/config.json" ]; then \
+        echo "config.json found" ; \
+    else \
+        echo "WARNING: config.json not found!" ; \
+    fi && \
+    if ls pretrain/vlm/*.safetensors 1> /dev/null 2>&1 || ls pretrain/vlm/*.bin 1> /dev/null 2>&1; then \
+        echo "Model weights found" ; \
+    else \
+        echo "WARNING: No model weights found!" ; \
+    fi
 
 # ---------------------------------------------------------
 # 8) Install additional dependencies
@@ -125,37 +155,51 @@ RUN python -c "from transformers import AutoModelForCausalLM; print('Transformer
 RUN pip install --no-cache-dir ipdb flask gunicorn
 
 # ---------------------------------------------------------
-# 9) Your Flask wrapper service
+# 9) Copy service files
 # ---------------------------------------------------------
 WORKDIR /app
 
+# Copy the pipeline wrapper
 COPY run_physx_anything_pipeline.py ${PHYSX_ROOT}/run_physx_anything_pipeline.py
+
+# Copy the Flask service
 COPY physx_service.py /app/physx_service.py
 
 # Create temp directory for request processing
 RUN mkdir -p /tmp/physx_anything && chmod 777 /tmp/physx_anything
+
+# Create lock file directory
+RUN mkdir -p /tmp && touch /tmp/physx_pipeline.lock && chmod 666 /tmp/physx_pipeline.lock
 
 # ---------------------------------------------------------
 # Environment and startup configuration
 # ---------------------------------------------------------
 ENV PORT=8080
 ENV PHYSX_ROOT=/opt/physx_anything
+ENV PHYSX_DEBUG=1
 # Disable Python output buffering for better logging
 ENV PYTHONUNBUFFERED=1
+# Reduce transformers verbosity slightly
+ENV TRANSFORMERS_VERBOSITY=warning
+# Help with GPU memory
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Health check (Cloud Run will use this)
-HEALTHCHECK --interval=30s --timeout=30s --start-period=300s --retries=3 \
+# Health check - note the long start period for model loading
+HEALTHCHECK --interval=30s --timeout=30s --start-period=600s --retries=5 \
     CMD curl -f http://localhost:${PORT}/ || exit 1
 
 # Use gunicorn for production with single worker (GPU constraint)
-# Timeout of 900s for long-running inference requests
+# --timeout 900 for long-running inference requests
+# --graceful-timeout 120 to allow in-flight requests to complete on shutdown
 CMD ["gunicorn", \
      "--bind", "0.0.0.0:8080", \
      "--workers", "1", \
      "--threads", "2", \
      "--timeout", "900", \
+     "--graceful-timeout", "120", \
      "--keep-alive", "30", \
      "--log-level", "info", \
      "--access-logfile", "-", \
      "--error-logfile", "-", \
+     "--capture-output", \
      "physx_service:app"]
