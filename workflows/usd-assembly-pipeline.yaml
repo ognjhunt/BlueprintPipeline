@@ -74,10 +74,10 @@ main:
 
     - check_simready_status:
         switch:
-          - condition: ${simreadyStatus.completionTime != null}
-            next: log_simready_complete
           - condition: ${simreadyStatus.failedCount != null and simreadyStatus.failedCount > 0}
             next: simready_failed
+          - condition: ${simreadyStatus.succeededCount != null and simreadyStatus.succeededCount > 0}
+            next: log_simready_complete
         next: wait_simready_poll
 
     - wait_simready_poll:
@@ -138,10 +138,10 @@ main:
 
     - check_usd_status:
         switch:
-          - condition: ${usdStatus.completionTime != null}
-            next: log_usd_complete
           - condition: ${usdStatus.failedCount != null and usdStatus.failedCount > 0}
             next: usd_failed
+          - condition: ${usdStatus.succeededCount != null and usdStatus.succeededCount > 0}
+            next: log_usd_complete
         next: wait_usd_poll
 
     - wait_usd_poll:

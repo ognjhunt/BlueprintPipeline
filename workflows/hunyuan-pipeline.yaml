@@ -63,10 +63,10 @@ main:
 
     - check_hunyuan_status:
         switch:
-          - condition: ${hunyuanStatus.completionTime != null}
-            next: log_hunyuan_complete
           - condition: ${hunyuanStatus.failedCount != null and hunyuanStatus.failedCount > 0}
             next: hunyuan_failed
+          - condition: ${hunyuanStatus.succeededCount != null and hunyuanStatus.succeededCount > 0}
+            next: log_hunyuan_complete
         next: wait_hunyuan_poll
 
     - wait_hunyuan_poll:
