@@ -3,7 +3,8 @@
 # Google Cloud Workflows pipeline that:
 #   1. Triggers on completion marker files from hunyuan-job or interactive-job
 #   2. Waits for BOTH jobs to complete
-#   3. Runs usd-assembly-job to convert GLB->USDZ and build scene.usda
+#   3. Runs simready-job to prepare simulation-ready assets
+#   4. Runs usd-assembly-job to convert GLB->USDZ and build scene.usda
 #
 # Trigger: Cloud Storage object finalized event for .hunyuan_complete or .interactive_complete
 
@@ -89,9 +90,69 @@ main:
     - log_both_ready:
         call: sys.log
         args:
-          text: '${"Both asset jobs complete for scene " + sceneId + " - proceeding with USD assembly"}'
+          text: '${"Both asset jobs complete for scene " + sceneId + " - starting simready-job"}'
+          severity: "INFO"
+        next: run_simready_job
+
+    - run_simready_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/simready-job"}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+        result: simreadyExec
+        next: wait_for_simready
+
+    - wait_for_simready:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${simreadyExec.name}
+        result: simreadyStatus
+        next: check_simready_status
+
+    - check_simready_status:
+        switch:
+          - condition: ${simreadyStatus.completionTime != null}
+            next: log_simready_complete
+          - condition: ${simreadyStatus.failedCount != null and simreadyStatus.failedCount > 0}
+            next: simready_failed
+        next: wait_simready_poll
+
+    - wait_simready_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_simready
+
+    - log_simready_complete:
+        call: sys.log
+        args:
+          text: '${"Simready job completed for scene " + sceneId + " - proceeding with USD assembly"}'
           severity: "INFO"
         next: run_usd_job
+
+    - simready_failed:
+        assign:
+          - errorMsg: '${"Simready job FAILED for scene " + sceneId}'
+        next: log_simready_error
+
+    - log_simready_error:
+        call: sys.log
+        args:
+          text: ${errorMsg}
+          severity: "ERROR"
+        next: raise_simready_error
+
+    - raise_simready_error:
+        raise: ${errorMsg}
 
     - run_usd_job:
         call: googleapis.run.v2.projects.locations.jobs.run
