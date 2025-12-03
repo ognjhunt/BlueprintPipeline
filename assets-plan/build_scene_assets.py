@@ -20,7 +20,11 @@ def parse_interactive_ids(raw: str | None):
             pass
     return ids
 
-def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id: int, static_pipeline: str, sim_role: str | None = None):
+def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id: int, static_pipeline: str, sim_role: str | None = None, skip_interactive: bool = False):
+    # If SKIP_INTERACTIVE_JOB is enabled, force all objects to be static
+    if skip_interactive:
+        return "static", static_pipeline
+
     # First check sim_role (most authoritative)
     if sim_role in ("articulated_furniture", "articulated_appliance", "manipulable_object"):
         return "interactive", "physx"
@@ -97,6 +101,7 @@ def main():
     interactive_ids_env = os.getenv("INTERACTIVE_OBJECT_IDS", "")
     static_pipeline = os.getenv("STATIC_ASSET_PIPELINE", "sam3d")
     physx_endpoint = os.getenv("PHYSX_ENDPOINT")
+    skip_interactive = os.getenv("SKIP_INTERACTIVE_JOB", "0").lower() in ("1", "true", "yes", "on")
 
     if not (multiview_prefix and assets_prefix):
         raise SystemExit("[ASSETS] MULTIVIEW_PREFIX, ASSETS_PREFIX required")
@@ -139,6 +144,7 @@ def main():
     print(f"[ASSETS] Assets root={assets_root}")
     print(f"[ASSETS] interactive_ids={interactive_ids}")
     print(f"[ASSETS] static_pipeline={static_pipeline}")
+    print(f"[ASSETS] skip_interactive={skip_interactive}")
     if physx_endpoint:
         print(f"[ASSETS] physx_endpoint={physx_endpoint}")
 
@@ -171,7 +177,7 @@ def main():
             print(f"[ASSETS] WARNING: missing crop.png or view_0.png for obj {oid} in {mv_dir}")
             continue
 
-        obj_type, pipeline = classify_type(cls, phrase, interactive_ids, oid, static_pipeline=static_pipeline, sim_role=sim_role)
+        obj_type, pipeline = classify_type(cls, phrase, interactive_ids, oid, static_pipeline=static_pipeline, sim_role=sim_role, skip_interactive=skip_interactive)
 
         # Use the relative path for the image that was found
         image_filename = image_path.name

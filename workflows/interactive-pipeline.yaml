@@ -34,7 +34,55 @@ main:
           - physxEndpoint: ${sys.get_env("PHYSX_ENDPOINT")}
           - jobName: "interactive-job"
           - simreadyJobName: "simready-job"
+        next: check_interactive_count
+
+    - check_interactive_count:
+        try:
+          call: http.get
+          args:
+            url: ${"https://storage.googleapis.com/storage/v1/b/" + bucket + "/o/" + text.url_encode(object) + "?alt=media"}
+            auth:
+              type: OAuth2
+          result: assetsJson
+        except:
+          as: e
+          steps:
+            - log_read_error:
+                call: sys.log
+                args:
+                  text: ${"Failed to read scene_assets.json: " + e.message}
+                  severity: "ERROR"
+                next: skip
+        next: check_if_skip_interactive
+
+    - check_if_skip_interactive:
+        switch:
+          - condition: ${assetsJson.body.interactive_count == 0}
+            next: log_skip_interactive
         next: run_job
+
+    - log_skip_interactive:
+        call: sys.log
+        args:
+          text: ${"No interactive objects for scene " + sceneId + "; skipping interactive-job and creating completion marker"}
+          severity: "INFO"
+        next: create_completion_marker
+
+    - create_completion_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          uploadType: "media"
+          name: ${assetsPrefix + "/.interactive_complete"}
+          body: ${"skipped - no interactive objects\n"}
+        next: log_marker_created
+
+    - log_marker_created:
+        call: sys.log
+        args:
+          text: ${"Created .interactive_complete marker for scene " + sceneId}
+          severity: "INFO"
+        next: run_simready_job
 
     - run_job:
         call: googleapis.run.v2.projects.locations.jobs.run
