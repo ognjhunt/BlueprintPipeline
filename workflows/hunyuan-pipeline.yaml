@@ -78,66 +78,14 @@ main:
     - log_hunyuan_complete:
         call: sys.log
         args:
-          text: ${"Hunyuan job completed for scene " + sceneId + ", starting simready"}
+          text: ${"Hunyuan job completed for scene " + sceneId + ", creating completion marker"}
           severity: "INFO"
-        next: run_simready_job
+        next: create_completion_marker
 
     - hunyuan_failed:
         call: sys.log
         args:
           text: ${"Hunyuan job FAILED for scene " + sceneId}
-          severity: "ERROR"
-        next: done_failed
-
-    - run_simready_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/simready-job"}
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-        result: simreadyExec
-        next: wait_for_simready
-
-    - wait_for_simready:
-        call: googleapis.run.v2.projects.locations.jobs.executions.get
-        args:
-          name: ${simreadyExec.name}
-        result: simreadyStatus
-        next: check_simready_status
-
-    - check_simready_status:
-        switch:
-          - condition: ${simreadyStatus.completionTime != null}
-            next: log_simready_complete
-          - condition: ${simreadyStatus.failedCount != null and simreadyStatus.failedCount > 0}
-            next: simready_failed
-        next: wait_simready_poll
-
-    - wait_simready_poll:
-        call: sys.sleep
-        args:
-          seconds: 10
-        next: wait_for_simready
-
-    - log_simready_complete:
-        call: sys.log
-        args:
-          text: ${"Simready job completed for scene " + sceneId + ", creating completion marker"}
-          severity: "INFO"
-        next: create_completion_marker
-
-    - simready_failed:
-        call: sys.log
-        args:
-          text: ${"Simready job FAILED for scene " + sceneId}
           severity: "ERROR"
         next: done_failed
 
@@ -147,7 +95,7 @@ main:
           bucket: ${bucket}
           uploadType: "media"
           name: ${assetsPrefix + "/.hunyuan_complete"}
-          body: ${"hunyuan + simready pipeline completed\n"}
+          body: ${"hunyuan pipeline completed\n"}
         next: log_marker_created
 
     - log_marker_created:
@@ -158,10 +106,10 @@ main:
         next: done
 
     - done:
-        return: ${"Hunyuan + simready pipeline completed for " + object}
+        return: ${"Hunyuan pipeline completed for " + object}
 
     - done_failed:
-        return: ${"Hunyuan + simready pipeline failed for " + object}
+        return: ${"Hunyuan pipeline failed for " + object}
 
     - skip:
         return: ${"hunyuan skip " + object}
