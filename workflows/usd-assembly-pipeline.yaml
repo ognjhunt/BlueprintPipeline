@@ -144,7 +144,7 @@ main:
     - set_usd_execution_name:
         # jobs.run returns a long-running operation; prefer the execution name from metadata when present
         assign:
-          - usdExecutionName: ${usdExec.metadata != null && usdExec.metadata.name != null ? usdExec.metadata.name : usdExec.name}
+          - usdExecutionName: '${if(usdExec.metadata != null and usdExec.metadata.name != null, usdExec.metadata.name, usdExec.name)}'
         next: wait_for_usd
 
     - wait_for_usd:
@@ -156,16 +156,16 @@ main:
 
     - check_usd_status:
         assign:
-          - usdState: ${usdStatus.state != null ? usdStatus.state : (usdStatus.status != null ? usdStatus.status.state : null)}
-          - usdFailedCount: ${usdStatus.failedCount != null ? usdStatus.failedCount : (usdStatus.status != null ? usdStatus.status.failedCount : null)}
-          - usdSucceededCount: ${usdStatus.succeededCount != null ? usdStatus.succeededCount : (usdStatus.status != null ? usdStatus.status.succeededCount : null)}
+          - usdState: '${if(usdStatus.state != null, usdStatus.state, if(usdStatus.status != null, usdStatus.status.state, null))}'
+          - usdFailedCount: '${if(usdStatus.failedCount != null, usdStatus.failedCount, if(usdStatus.status != null, usdStatus.status.failedCount, null))}'
+          - usdSucceededCount: '${if(usdStatus.succeededCount != null, usdStatus.succeededCount, if(usdStatus.status != null, usdStatus.status.succeededCount, null))}'
         next: usd_status_switch
 
     - usd_status_switch:
         switch:
-          - condition: ${usdState == "FAILED" or (usdFailedCount != null and usdFailedCount > 0)}
+          - condition: '${usdState == "FAILED" or (usdFailedCount != null and usdFailedCount > 0)}'
             next: usd_failed
-          - condition: ${usdState == "SUCCEEDED" or (usdSucceededCount != null and usdSucceededCount > 0)}
+          - condition: '${usdState == "SUCCEEDED" or (usdSucceededCount != null and usdSucceededCount > 0)}'
             next: log_usd_complete
         next: wait_usd_poll
 
