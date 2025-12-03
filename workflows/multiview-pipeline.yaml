@@ -140,10 +140,10 @@ main:
 
     - check_assets_plan_status:
         switch:
-          - condition: ${assetsPlanStatus.completionTime != null}
-            next: verify_assets_file
           - condition: ${assetsPlanStatus.failedCount != null and assetsPlanStatus.failedCount > 0}
             next: assets_plan_failed
+          - condition: ${assetsPlanStatus.succeededCount != null and assetsPlanStatus.succeededCount > 0}
+            next: verify_assets_file
         next: wait_assets_plan_poll
 
     - wait_assets_plan_poll:
