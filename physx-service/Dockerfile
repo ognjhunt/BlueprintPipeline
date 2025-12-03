@@ -32,14 +32,15 @@ FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ---------------------------------------------------------
-# System deps
+# System deps (including git-lfs for model downloads)
 # ---------------------------------------------------------
 RUN apt-get update && apt-get install -y \
     python3 python3-venv python3-dev python3-pip \
-    git wget curl \
+    git git-lfs wget curl \
     build-essential cmake ninja-build pkg-config \
     ffmpeg \
     libgl1 libglib2.0-0 \
+    && git lfs install \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CUDA_HOME=/usr/local/cuda
@@ -114,39 +115,72 @@ RUN pip install --no-cache-dir \
 #    This is the most important step for avoiding cold starts!
 # ---------------------------------------------------------
 
-# First, try the repo's download script
-RUN echo "Attempting to download models using download.py..." && \
-    if [ -f download.py ]; then \
-        python download.py && echo "download.py succeeded" || \
-        echo "Warning: download.py failed, trying alternative methods..."; \
-    else \
-        echo "download.py not found, will try alternative methods..."; \
-    fi
+# Accept HF_TOKEN as build argument for authentication
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 
-# Verify pretrain/vlm directory exists and has content
-RUN echo "Checking VLM checkpoint directory..." && \
+# Copy our robust download script
+COPY download_models.py /tmp/download_models.py
+
+# Download models with authentication and retry logic
+RUN echo "========================================" && \
+    echo "Downloading PhysX-Anything models..." && \
+    echo "========================================" && \
+    python /tmp/download_models.py \
+        --repo-id "Caoza/PhysX-Anything" \
+        --output-dir "${PHYSX_ROOT}" \
+        --token "${HF_TOKEN}" && \
+    echo "========================================" && \
+    echo "Model download completed successfully!" && \
+    echo "========================================" || \
+    (echo "ERROR: Model download failed!" && exit 1)
+
+# Unset token for security
+ENV HF_TOKEN=""
+
+# Final verification with detailed output
+RUN echo "========================================" && \
+    echo "Final model verification..." && \
+    echo "========================================" && \
     if [ -d "pretrain/vlm" ]; then \
-        echo "VLM directory exists:" && \
-        ls -la pretrain/vlm/ && \
+        echo "✓ VLM directory exists" && \
+        echo "" && \
+        echo "Files present:" && \
+        ls -lh pretrain/vlm/ && \
+        echo "" && \
         echo "Total size:" && \
-        du -sh pretrain/vlm/ ; \
-    else \
-        echo "WARNING: VLM checkpoint directory does not exist!" && \
-        echo "The service will fail at runtime without model weights." && \
-        mkdir -p pretrain/vlm ; \
-    fi
+        du -sh pretrain/vlm/ && \
+        echo "" && \
+        echo "Checking required files..." && \
+        python -c "
+import sys
+from pathlib import Path
 
-# Check for required model files
-RUN echo "Checking for required model files..." && \
-    if [ -f "pretrain/vlm/config.json" ]; then \
-        echo "config.json found" ; \
+vlm_dir = Path('pretrain/vlm')
+files = [f.name for f in vlm_dir.glob('*') if f.is_file()]
+
+required = ['config.json', 'tokenizer.json', 'tokenizer_config.json']
+missing = [f for f in required if f not in files]
+
+has_weights = any(f.endswith('.safetensors') or f.endswith('.bin') for f in files)
+
+if missing:
+    print(f'ERROR: Missing files: {missing}')
+    sys.exit(1)
+
+if not has_weights:
+    print('ERROR: No model weights found')
+    sys.exit(1)
+
+print('✓ All required files present')
+print(f'✓ Model weights found ({\"safetensors\" if any(f.endswith(\".safetensors\") for f in files) else \"bin\"})')
+" && \
+        echo "========================================" && \
+        echo "✓ Model verification PASSED" && \
+        echo "========================================" ; \
     else \
-        echo "WARNING: config.json not found!" ; \
-    fi && \
-    if ls pretrain/vlm/*.safetensors 1> /dev/null 2>&1 || ls pretrain/vlm/*.bin 1> /dev/null 2>&1; then \
-        echo "Model weights found" ; \
-    else \
-        echo "WARNING: No model weights found!" ; \
+        echo "ERROR: VLM directory not found!" && \
+        exit 1 ; \
     fi
 
 # ---------------------------------------------------------
