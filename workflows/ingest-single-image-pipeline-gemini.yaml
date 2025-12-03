@@ -169,6 +169,10 @@ main:
                       value: ${multiviewPrefix}
                     - name: ASSETS_PREFIX
                       value: ${assetsPrefix}
+                    - name: SKIP_INTERACTIVE_JOB
+                      value: "1"
+                    - name: STATIC_ASSET_PIPELINE
+                      value: "hunyuan"
         result: assetsPlanExec
         next: wait_for_assets_plan
 
