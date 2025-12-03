@@ -63,20 +63,33 @@ main:
                     - name: ASSETS_PREFIX
                       value: ${assetsPrefix}
         result: simreadyExec
+        next: set_simready_execution_name
+
+    - set_simready_execution_name:
+        # jobs.run returns a long-running operation; prefer the execution name from metadata when present
+        assign:
+          - simreadyExecutionName: ${simreadyExec.metadata != null && simreadyExec.metadata.name != null ? simreadyExec.metadata.name : simreadyExec.name}
         next: wait_for_simready
 
     - wait_for_simready:
         call: googleapis.run.v2.projects.locations.jobs.executions.get
         args:
-          name: ${simreadyExec.name}
+          name: ${simreadyExecutionName}
         result: simreadyStatus
         next: check_simready_status
 
     - check_simready_status:
+        assign:
+          - simreadyState: ${simreadyStatus.state != null ? simreadyStatus.state : (simreadyStatus.status != null ? simreadyStatus.status.state : null)}
+          - simreadyFailedCount: ${simreadyStatus.failedCount != null ? simreadyStatus.failedCount : (simreadyStatus.status != null ? simreadyStatus.status.failedCount : null)}
+          - simreadySucceededCount: ${simreadyStatus.succeededCount != null ? simreadyStatus.succeededCount : (simreadyStatus.status != null ? simreadyStatus.status.succeededCount : null)}
+        next: simready_status_switch
+
+    - simready_status_switch:
         switch:
-          - condition: ${simreadyStatus.failedCount != null and simreadyStatus.failedCount > 0}
+          - condition: ${simreadyState == "FAILED" or (simreadyFailedCount != null and simreadyFailedCount > 0)}
             next: simready_failed
-          - condition: ${simreadyStatus.succeededCount != null and simreadyStatus.succeededCount > 0}
+          - condition: ${simreadyState == "SUCCEEDED" or (simreadySucceededCount != null and simreadySucceededCount > 0)}
             next: log_simready_complete
         next: wait_simready_poll
 
@@ -127,20 +140,33 @@ main:
                     - name: USD_PREFIX
                       value: ${usdPrefix}
         result: usdExec
+        next: set_usd_execution_name
+
+    - set_usd_execution_name:
+        # jobs.run returns a long-running operation; prefer the execution name from metadata when present
+        assign:
+          - usdExecutionName: ${usdExec.metadata != null && usdExec.metadata.name != null ? usdExec.metadata.name : usdExec.name}
         next: wait_for_usd
 
     - wait_for_usd:
         call: googleapis.run.v2.projects.locations.jobs.executions.get
         args:
-          name: ${usdExec.name}
+          name: ${usdExecutionName}
         result: usdStatus
         next: check_usd_status
 
     - check_usd_status:
+        assign:
+          - usdState: ${usdStatus.state != null ? usdStatus.state : (usdStatus.status != null ? usdStatus.status.state : null)}
+          - usdFailedCount: ${usdStatus.failedCount != null ? usdStatus.failedCount : (usdStatus.status != null ? usdStatus.status.failedCount : null)}
+          - usdSucceededCount: ${usdStatus.succeededCount != null ? usdStatus.succeededCount : (usdStatus.status != null ? usdStatus.status.succeededCount : null)}
+        next: usd_status_switch
+
+    - usd_status_switch:
         switch:
-          - condition: ${usdStatus.failedCount != null and usdStatus.failedCount > 0}
+          - condition: ${usdState == "FAILED" or (usdFailedCount != null and usdFailedCount > 0)}
             next: usd_failed
-          - condition: ${usdStatus.succeededCount != null and usdStatus.succeededCount > 0}
+          - condition: ${usdState == "SUCCEEDED" or (usdSucceededCount != null and usdSucceededCount > 0)}
             next: log_usd_complete
         next: wait_usd_poll
 
