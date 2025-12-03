@@ -52,11 +52,116 @@ main:
                     - name: MULTIVIEW_PREFIX
                       value: ${multiviewPrefix}
         result: hunyuanExec
+        next: wait_for_hunyuan
+
+    - wait_for_hunyuan:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${hunyuanExec.name}
+        result: hunyuanStatus
+        next: check_hunyuan_status
+
+    - check_hunyuan_status:
+        switch:
+          - condition: ${hunyuanStatus.completionTime != null}
+            next: log_hunyuan_complete
+          - condition: ${hunyuanStatus.failedCount != null and hunyuanStatus.failedCount > 0}
+            next: hunyuan_failed
+        next: wait_hunyuan_poll
+
+    - wait_hunyuan_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_hunyuan
+
+    - log_hunyuan_complete:
+        call: sys.log
+        args:
+          text: ${"Hunyuan job completed for scene " + sceneId + ", starting simready"}
+          severity: "INFO"
+        next: run_simready_job
+
+    - hunyuan_failed:
+        call: sys.log
+        args:
+          text: ${"Hunyuan job FAILED for scene " + sceneId}
+          severity: "ERROR"
+        next: done_failed
+
+    - run_simready_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/simready-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+        result: simreadyExec
+        next: wait_for_simready
+
+    - wait_for_simready:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${simreadyExec.name}
+        result: simreadyStatus
+        next: check_simready_status
+
+    - check_simready_status:
+        switch:
+          - condition: ${simreadyStatus.completionTime != null}
+            next: log_simready_complete
+          - condition: ${simreadyStatus.failedCount != null and simreadyStatus.failedCount > 0}
+            next: simready_failed
+        next: wait_simready_poll
+
+    - wait_simready_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_simready
+
+    - log_simready_complete:
+        call: sys.log
+        args:
+          text: ${"Simready job completed for scene " + sceneId + ", creating completion marker"}
+          severity: "INFO"
+        next: create_completion_marker
+
+    - simready_failed:
+        call: sys.log
+        args:
+          text: ${"Simready job FAILED for scene " + sceneId}
+          severity: "ERROR"
+        next: done_failed
+
+    - create_completion_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          uploadType: "media"
+          name: ${assetsPrefix + "/.hunyuan_complete"}
+          body: ${"hunyuan + simready pipeline completed\n"}
+        next: log_marker_created
+
+    - log_marker_created:
+        call: sys.log
+        args:
+          text: ${"Created .hunyuan_complete marker for scene " + sceneId}
+          severity: "INFO"
         next: done
 
-
     - done:
-        return: ${"sam3d-job started for " + object}
+        return: ${"Hunyuan + simready pipeline completed for " + object}
+
+    - done_failed:
+        return: ${"Hunyuan + simready pipeline failed for " + object}
 
     - skip:
-        return: ${"sam3d skip " + object}
+        return: ${"hunyuan skip " + object}
