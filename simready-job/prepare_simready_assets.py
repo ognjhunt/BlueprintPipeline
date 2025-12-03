@@ -590,21 +590,29 @@ def main() -> None:
         print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
         simready_paths[oid] = sim_rel
 
-    # Update scene_assets.json in-place to include simready_usd references.
+    # Create a completion marker instead of updating scene_assets.json
+    # (updating scene_assets.json would re-trigger the hunyuan pipeline)
+    marker_path = assets_root / ".simready_complete"
     if simready_paths:
-        updated_objects: List[dict] = []
-        for obj in objects:
-            oid = obj.get("id")
-            if oid in simready_paths:
-                obj = dict(obj)
-                obj["simready_usd"] = simready_paths[oid]
-            updated_objects.append(obj)
-        scene_assets["objects"] = updated_objects
-        scene_assets_path.write_text(json.dumps(scene_assets, indent=2), encoding="utf-8")
-        print(f"[SIMREADY] Updated {scene_assets_path} with simready_usd paths")
+        marker_content = {
+            "status": "complete",
+            "simready_assets": simready_paths,
+            "count": len(simready_paths)
+        }
+        marker_path.write_text(json.dumps(marker_content, indent=2), encoding="utf-8")
+        print(f"[SIMREADY] Created completion marker at {marker_path}")
+        print(f"[SIMREADY] Generated {len(simready_paths)} simready assets")
     else:
+        # Still create marker but indicate no assets were created
+        marker_content = {
+            "status": "complete",
+            "simready_assets": {},
+            "count": 0,
+            "note": "No static objects required simready processing"
+        }
+        marker_path.write_text(json.dumps(marker_content, indent=2), encoding="utf-8")
         print(
-            "[SIMREADY] No simready assets were created; scene_assets.json left unchanged",
+            "[SIMREADY] No simready assets were created; created completion marker anyway",
             file=sys.stderr,
         )
 
