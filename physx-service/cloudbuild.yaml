@@ -1,0 +1,25 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'HF_TOKEN=${_HF_TOKEN}'
+      - '--platform'
+      - 'linux/amd64'
+      - '-t'
+      - '${_IMAGE}'
+      - '.'
+    timeout: 7200s
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${_IMAGE}']
+
+substitutions:
+  _IMAGE: 'us-central1-docker.pkg.dev/${PROJECT_ID}/blueprint/physx-service:latest'
+
+options:
+  machineType: 'E2_HIGHCPU_32'
+  diskSizeGb: 200
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 10800s
