@@ -1,12 +1,11 @@
 # usd-assembly-pipeline.yaml
 #
 # Google Cloud Workflows pipeline that:
-#   1. Triggers on completion marker files from hunyuan-job or interactive-job
-#   2. Waits for BOTH jobs to complete
-#   3. Runs simready-job to prepare simulation-ready assets
-#   4. Runs usd-assembly-job to convert GLB->USDZ and build scene.usda
+#   1. Triggers on completion marker file from hunyuan-job
+#   2. Runs simready-job to prepare simulation-ready assets
+#   3. Runs usd-assembly-job to convert GLB->USDZ and build scene.usda
 #
-# Trigger: Cloud Storage object finalized event for .hunyuan_complete or .interactive_complete
+# Trigger: Cloud Storage object finalized event for .hunyuan_complete
 
 main:
   params: [event]
@@ -28,7 +27,7 @@ main:
 
     - filter_completion_markers:
         switch:
-          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.(?:hunyuan|interactive)_complete$")}'
+          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.hunyuan_complete$")}'
             next: derive
         next: skip
 
@@ -40,57 +39,12 @@ main:
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - usdJobName: "usd-assembly-job"
-          - hunyuanMarker: '${assetsPrefix + "/.hunyuan_complete"}'
-          - interactiveMarker: '${assetsPrefix + "/.interactive_complete"}'
         next: log_start
 
     - log_start:
         call: sys.log
         args:
-          text: '${"USD assembly triggered for scene " + sceneId + " - checking for completion markers"}'
-          severity: "INFO"
-        next: check_hunyuan_marker
-
-    - check_hunyuan_marker:
-        try:
-          call: googleapis.storage.v1.objects.get
-          args:
-            bucket: ${bucket}
-            object: ${hunyuanMarker}
-          result: hunyuanExists
-        except:
-          as: e
-          steps:
-            - log_waiting:
-                call: sys.log
-                args:
-                  text: '${"Waiting for hunyuan completion marker for scene " + sceneId}'
-                  severity: "INFO"
-                next: skip_not_ready
-        next: check_interactive_marker
-
-    - check_interactive_marker:
-        try:
-          call: googleapis.storage.v1.objects.get
-          args:
-            bucket: ${bucket}
-            object: ${interactiveMarker}
-          result: interactiveExists
-        except:
-          as: e
-          steps:
-            - log_waiting_interactive:
-                call: sys.log
-                args:
-                  text: '${"Waiting for interactive completion marker for scene " + sceneId}'
-                  severity: "INFO"
-                next: skip_not_ready
-        next: log_both_ready
-
-    - log_both_ready:
-        call: sys.log
-        args:
-          text: '${"Both asset jobs complete for scene " + sceneId + " - starting simready-job"}'
+          text: '${"USD assembly triggered for scene " + sceneId + " - starting simready-job"}'
           severity: "INFO"
         next: run_simready_job
 
@@ -224,12 +178,6 @@ main:
           scene_id: ${sceneId}
           message: '${"USD assembly completed successfully for scene " + sceneId}'
           usd_execution: ${usdExec.name}
-
-    - skip_not_ready:
-        return:
-          status: "WAITING"
-          scene_id: ${sceneId}
-          message: '${"Waiting for all asset generation jobs to complete for scene " + sceneId}'
 
     - skip:
         return:
