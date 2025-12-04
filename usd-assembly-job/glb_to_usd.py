@@ -284,6 +284,12 @@ class USDBuilder:
         root_path = "/Root"
         root_xform = UsdGeom.Xform.Define(self.stage, root_path)
 
+        # CRITICAL: Set the default prim so that external references work correctly.
+        # Without a default prim, when scene.usda references this USDZ via
+        # `prepend references = @asset.usdz@`, USD won't know which prim to bring in,
+        # resulting in empty geometry.
+        self.stage.SetDefaultPrim(root_xform.GetPrim())
+
         # Process default scene or all scenes
         if self.gltf.scene is not None and self.gltf.scenes:
             scene = self.gltf.scenes[self.gltf.scene]
