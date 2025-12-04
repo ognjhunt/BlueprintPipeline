@@ -31,6 +31,7 @@ main:
           - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "objects-job"
+          - lockPath: ${"scenes/" + sceneId + "/layout/.objects_processing_lock"}
         next: check_if_done
 
     # Check if the output already exists to avoid duplicate processing
@@ -59,6 +60,32 @@ main:
                 args:
                   text: ${"Failed to check if objects already exist: " + e.message + ". Proceeding with job."}
                   severity: "WARNING"
+        next: try_acquire_lock
+
+    # Acquire distributed lock using atomic GCS object creation
+    - try_acquire_lock:
+        try:
+          call: http.post
+          args:
+            url: ${"https://storage.googleapis.com/upload/storage/v1/b/" + bucket + "/o?uploadType=media&name=" + text.url_encode(lockPath) + "&ifGenerationMatch=0"}
+            auth:
+              type: OAuth2
+            headers:
+              Content-Type: "application/octet-stream"
+            body: ${"locked by workflow at " + string(sys.now())}
+          result: lockResult
+        except:
+          as: lockError
+          steps:
+            - check_lock_conflict:
+                switch:
+                  # 412 Precondition Failed means another workflow already has the lock
+                  - condition: ${lockError.code == 412}
+                    return: ${"objects-job skipped - another workflow is already processing " + object}
+                  # 200 with error body can also indicate conflict
+                  - condition: ${lockError.code == 200}
+                    return: ${"objects-job skipped - lock already exists for " + object}
+                raise: ${lockError}
         next: run_objects_job
 
     - run_objects_job:
