@@ -12,27 +12,27 @@ main:
         assign:
           - bucket: ${event.data.bucket}
           - object: ${event.data.name}
-          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: "us-central1"
         next: filter_da3_geom
 
     # Only handle scenes/.../da3/da3_geom.npz
     - filter_da3_geom:
         switch:
-          - condition: ${text.match_regex(object, "^scenes/.+/da3/da3_geom\\.npz$")}
+          - condition: '${text.match_regex(object, "^scenes/.+/da3/da3_geom\\.npz$")}'
             next: derive
         next: skip
 
     - derive:
         assign:
-          - parts: ${text.split(object, "/")}
+          - parts: '${text.split(object, "/")}'
           - sceneId: ${parts[1]}
-          - da3Prefix: ${"scenes/" + sceneId + "/da3"}
-          - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
-          - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
+          - da3Prefix: '${"scenes/" + sceneId + "/da3"}'
+          - segDatasetPrefix: '${"scenes/" + sceneId + "/seg/dataset"}'
+          - layoutPrefix: '${"scenes/" + sceneId + "/layout"}'
           - jobName: "layout-job"
-          - layoutOutputPath: ${"scenes/" + sceneId + "/layout/scene_layout.json"}
-          - lockPath: ${"scenes/" + sceneId + "/layout/.processing_lock"}
+          - layoutOutputPath: '${"scenes/" + sceneId + "/layout/scene_layout.json"}'
+          - lockPath: '${"scenes/" + sceneId + "/layout/.processing_lock"}'
         next: check_if_done
 
     # Check if the output already exists to avoid duplicate processing
@@ -46,7 +46,7 @@ main:
                   object: ${layoutOutputPath}
                 result: layoutOutputObject
             - skip_already_done:
-                return: ${"layout-job already completed for " + object + " (found scene_layout.json)"}
+                return: '${"layout-job already completed for " + object + " (found scene_layout.json)"}'
         except:
           as: e
           steps:
@@ -54,6 +54,8 @@ main:
                 switch:
                   - condition: ${e.code == 404}
                     next: try_acquire_lock
+                next: raise_check_error
+            - raise_check_error:
                 raise: ${e}
         next: try_acquire_lock
 
@@ -68,7 +70,7 @@ main:
                   object: ${lockPath}
                 result: existingLock
             - skip_locked:
-                return: ${"layout-job already processing for " + object + " (lock exists)"}
+                return: '${"layout-job already processing for " + object + " (lock exists)"}'
         except:
           as: e
           steps:
@@ -76,6 +78,8 @@ main:
                 switch:
                   - condition: ${e.code == 404}
                     next: create_lock
+                next: raise_lock_error
+            - raise_lock_error:
                 raise: ${e}
         next: skip
 
@@ -86,12 +90,12 @@ main:
             - write_lock:
                 call: http.post
                 args:
-                  url: ${"https://storage.googleapis.com/upload/storage/v1/b/" + bucket + "/o?uploadType=media&name=" + text.url_encode(lockPath) + "&ifGenerationMatch=0"}
+                  url: '${"https://storage.googleapis.com/upload/storage/v1/b/" + bucket + "/o?uploadType=media&name=" + text.url_encode(lockPath) + "&ifGenerationMatch=0"}'
                   auth:
                     type: OAuth2
                   headers:
                     Content-Type: "application/json"
-                  body: ${"processing"}
+                  body: "processing"
                 result: lockObject
         except:
           as: e
@@ -99,15 +103,17 @@ main:
             - log_lock_race:
                 call: sys.log
                 args:
-                  text: ${"Failed to acquire lock (likely race condition): " + e.message}
+                  text: '${"Failed to acquire lock (likely race condition): " + e.message}'
                   severity: "WARNING"
-                return: ${"layout-job lock acquisition failed for " + object}
+                next: return_lock_race
+            - return_lock_race:
+                return: '${"layout-job lock acquisition failed for " + object}'
         next: run_layout_job
 
     - run_layout_job:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}'
           body:
             overrides:
               containerOverrides:
@@ -126,7 +132,7 @@ main:
         next: done
 
     - done:
-        return: ${"layout-job started for " + object}
+        return: '${"layout-job started for " + object}'
 
     - skip:
-        return: ${"layout skip " + object}
+        return: '${"layout skip " + object}'
