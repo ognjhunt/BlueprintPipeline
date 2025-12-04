@@ -18,7 +18,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -222,6 +222,147 @@ def resolve_usdz_asset_path(
 
 
 # -----------------------------------------------------------------------------
+# Scene Shell Geometry Creation
+# -----------------------------------------------------------------------------
+
+
+def create_plane_mesh_points(
+    normal: np.ndarray,
+    d: float,
+    room_box: Dict,
+    margin: float = 0.1,
+) -> Tuple[List[Tuple[float, float, float]], List[int]]:
+    """
+    Create a quad mesh for a plane bounded by room_box.
+
+    Args:
+        normal: Plane normal [nx, ny, nz]
+        d: Plane equation constant (n·x + d = 0)
+        room_box: {"min": [x,y,z], "max": [x,y,z]}
+        margin: Extra margin around the plane
+
+    Returns:
+        (points, face_indices) for the quad
+    """
+    normal = np.array(normal, dtype=np.float64)
+    normal = normal / (np.linalg.norm(normal) + 1e-8)
+
+    room_min = np.array(room_box.get("min", [-5, -5, -5]), dtype=np.float64)
+    room_max = np.array(room_box.get("max", [5, 5, 5]), dtype=np.float64)
+    room_center = (room_min + room_max) / 2
+    room_size = room_max - room_min + 2 * margin
+
+    # Find two vectors perpendicular to normal
+    up = np.array([0, 1, 0], dtype=np.float64)
+    if abs(np.dot(normal, up)) > 0.99:
+        up = np.array([1, 0, 0], dtype=np.float64)
+
+    axis1 = np.cross(normal, up)
+    axis1 = axis1 / (np.linalg.norm(axis1) + 1e-8)
+    axis2 = np.cross(normal, axis1)
+
+    # Find point on plane closest to room center
+    # Plane: n·x + d = 0 => distance from origin along normal is -d
+    plane_point = -d * normal
+
+    # Project room bounds onto the plane axes to determine quad size
+    half_size = max(room_size) / 2 + margin
+
+    # Create quad vertices
+    corners = [
+        plane_point - half_size * axis1 - half_size * axis2,
+        plane_point + half_size * axis1 - half_size * axis2,
+        plane_point + half_size * axis1 + half_size * axis2,
+        plane_point - half_size * axis1 + half_size * axis2,
+    ]
+
+    points = [(float(p[0]), float(p[1]), float(p[2])) for p in corners]
+    face_indices = [4, 0, 1, 2, 3]  # Single quad with 4 vertices
+
+    return points, face_indices
+
+
+def create_box_shell_geometry(
+    room_box: Dict,
+    include_floor: bool = True,
+    include_ceiling: bool = True,
+    include_walls: bool = True,
+) -> Tuple[List[Tuple[float, float, float]], List[int], List[Tuple[float, float, float]]]:
+    """
+    Create a box shell (inverted box) from room_box dimensions.
+
+    This creates the interior surfaces of a room box that faces can be seen from inside.
+
+    Args:
+        room_box: {"min": [x,y,z], "max": [x,y,z]}
+        include_floor: Include bottom face
+        include_ceiling: Include top face
+        include_walls: Include side walls
+
+    Returns:
+        (points, face_vertex_counts, face_vertex_indices, normals)
+    """
+    room_min = np.array(room_box.get("min", [-5, 0, -5]), dtype=np.float64)
+    room_max = np.array(room_box.get("max", [5, 3, 5]), dtype=np.float64)
+
+    # Define the 8 corners of the box
+    # Using Y-up convention
+    x0, y0, z0 = room_min
+    x1, y1, z1 = room_max
+
+    corners = [
+        (x0, y0, z0),  # 0: min corner
+        (x1, y0, z0),  # 1: +x
+        (x1, y0, z1),  # 2: +x +z
+        (x0, y0, z1),  # 3: +z
+        (x0, y1, z0),  # 4: +y
+        (x1, y1, z0),  # 5: +x +y
+        (x1, y1, z1),  # 6: +x +y +z
+        (x0, y1, z1),  # 7: +y +z
+    ]
+
+    points = corners
+    face_vertex_counts = []
+    face_vertex_indices = []
+    normals = []
+
+    # Floor (y = y0, normal pointing UP into room)
+    if include_floor:
+        face_vertex_counts.append(4)
+        face_vertex_indices.extend([0, 1, 2, 3])  # CCW from above
+        normals.append((0.0, 1.0, 0.0))
+
+    # Ceiling (y = y1, normal pointing DOWN into room)
+    if include_ceiling:
+        face_vertex_counts.append(4)
+        face_vertex_indices.extend([7, 6, 5, 4])  # CCW from below
+        normals.append((0.0, -1.0, 0.0))
+
+    if include_walls:
+        # Wall 1: x = x0 (normal pointing +X into room)
+        face_vertex_counts.append(4)
+        face_vertex_indices.extend([0, 3, 7, 4])  # CCW from +X
+        normals.append((1.0, 0.0, 0.0))
+
+        # Wall 2: x = x1 (normal pointing -X into room)
+        face_vertex_counts.append(4)
+        face_vertex_indices.extend([1, 5, 6, 2])  # CCW from -X
+        normals.append((-1.0, 0.0, 0.0))
+
+        # Wall 3: z = z0 (normal pointing +Z into room)
+        face_vertex_counts.append(4)
+        face_vertex_indices.extend([0, 4, 5, 1])  # CCW from +Z
+        normals.append((0.0, 0.0, 1.0))
+
+        # Wall 4: z = z1 (normal pointing -Z into room)
+        face_vertex_counts.append(4)
+        face_vertex_indices.extend([3, 2, 6, 7])  # CCW from -Z
+        normals.append((0.0, 0.0, -1.0))
+
+    return points, face_vertex_counts, face_vertex_indices, normals
+
+
+# -----------------------------------------------------------------------------
 # Scene Building with USD API
 # -----------------------------------------------------------------------------
 
@@ -248,7 +389,7 @@ class SceneBuilder:
         # Create world root
         self.world = UsdGeom.Xform.Define(stage, "/World")
 
-    def add_room_planes(self, room_planes: Dict) -> None:
+    def add_room_planes(self, room_planes: Dict, room_box: Optional[Dict] = None) -> None:
         """Add room plane definitions for physics."""
         room_scope = UsdGeom.Scope.Define(self.stage, "/World/Room")
         prim = room_scope.GetPrim()
@@ -274,6 +415,71 @@ class SceneBuilder:
             prim.CreateAttribute(f"wall{idx}Equation", Sdf.ValueTypeNames.Double4).Set(
                 Gf.Vec4d(*wall_eq)
             )
+
+        # Store room_box if available
+        if room_box:
+            room_min = room_box.get("min", [-5, 0, -5])
+            room_max = room_box.get("max", [5, 3, 5])
+            prim.CreateAttribute("roomMin", Sdf.ValueTypeNames.Double3).Set(
+                Gf.Vec3d(*room_min)
+            )
+            prim.CreateAttribute("roomMax", Sdf.ValueTypeNames.Double3).Set(
+                Gf.Vec3d(*room_max)
+            )
+
+    def add_scene_shell_geometry(self, room_box: Dict) -> None:
+        """
+        Create actual mesh geometry for the scene shell (walls, floor, ceiling).
+
+        This creates collision/physics-ready geometry based on room_box dimensions.
+        The shell is rendered as an inverted box (normals facing inward).
+        """
+        if not room_box:
+            print("[USD] WARNING: No room_box data available, skipping scene shell geometry")
+            return
+
+        # Create shell geometry
+        points, face_counts, face_indices, normals = create_box_shell_geometry(
+            room_box,
+            include_floor=True,
+            include_ceiling=True,
+            include_walls=True,
+        )
+
+        # Create the scene shell prim
+        shell_path = "/World/Room/SceneShell"
+        shell_xform = UsdGeom.Xform.Define(self.stage, shell_path)
+
+        # Create mesh under the shell
+        mesh_path = f"{shell_path}/ShellMesh"
+        mesh = UsdGeom.Mesh.Define(self.stage, mesh_path)
+
+        # Set mesh points
+        mesh.GetPointsAttr().Set([Gf.Vec3f(*p) for p in points])
+
+        # Set face vertex counts and indices
+        mesh.GetFaceVertexCountsAttr().Set(face_counts)
+        mesh.GetFaceVertexIndicesAttr().Set(face_indices)
+
+        # Set mesh purpose to physics for simulation
+        mesh.GetPurposeAttr().Set(UsdGeom.Tokens.default_)
+
+        # Set subdivision scheme to none (we want faceted geometry)
+        mesh.GetSubdivisionSchemeAttr().Set("none")
+
+        # Add custom attributes for robotics simulation
+        prim = mesh.GetPrim()
+        prim.CreateAttribute("isSceneShell", Sdf.ValueTypeNames.Bool).Set(True)
+        prim.CreateAttribute("sim_role", Sdf.ValueTypeNames.String).Set("scene_shell")
+
+        # Store room dimensions
+        room_min = room_box.get("min", [-5, 0, -5])
+        room_max = room_box.get("max", [5, 3, 5])
+        prim.CreateAttribute("shellMin", Sdf.ValueTypeNames.Double3).Set(Gf.Vec3d(*room_min))
+        prim.CreateAttribute("shellMax", Sdf.ValueTypeNames.Double3).Set(Gf.Vec3d(*room_max))
+
+        print(f"[USD] Created scene shell geometry at {shell_path}")
+        print(f"[USD]   Room bounds: min={room_min}, max={room_max}")
 
     def add_cameras(self, cameras: List[Dict]) -> None:
         """Add camera definitions."""
@@ -312,18 +518,46 @@ class SceneBuilder:
                     cam["image_path"]
                 )
 
-    def add_object(self, obj: Dict, layout_objects: Dict[int, Dict]) -> None:
+    def add_object(
+        self,
+        obj: Dict,
+        layout_objects: Dict[Any, Dict],
+        room_box: Optional[Dict] = None,
+    ) -> None:
         """Add a single object to the scene."""
         oid = obj.get("id")
         is_interactive = obj.get("type") == "interactive"
+        class_name = obj.get("class_name", "")
 
-        # Merge layout data
+        # Merge layout data - try both the original ID and string version
         merged = dict(obj)
-        layout_obj = layout_objects.get(oid)
+        layout_obj = layout_objects.get(oid) or layout_objects.get(str(oid))
         if layout_obj:
             for key in ("obb", "center3d"):
                 if key in layout_obj:
                     merged[key] = layout_obj[key]
+
+        # Special handling for scene_background: use room_box for positioning
+        is_scene_background = (
+            class_name == "scene_background" or
+            oid == "scene_background" or
+            obj.get("sim_role") == "scene_shell"
+        )
+
+        if is_scene_background and room_box and not merged.get("obb"):
+            # Create synthetic OBB from room_box for scene_background
+            room_min = np.array(room_box.get("min", [-5, 0, -5]), dtype=np.float64)
+            room_max = np.array(room_box.get("max", [5, 3, 5]), dtype=np.float64)
+            room_center = (room_min + room_max) / 2
+            room_extents = (room_max - room_min) / 2
+
+            merged["obb"] = {
+                "center": room_center.tolist(),
+                "extents": room_extents.tolist(),
+                "R": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],  # Identity rotation
+            }
+            merged["center3d"] = room_center.tolist()
+            print(f"[USD] obj_{oid}: Created synthetic OBB from room_box for scene_background")
 
         # Determine asset path
         asset_path = obj.get("asset_path")
@@ -383,18 +617,22 @@ class SceneBuilder:
         xform = np.eye(4, dtype=np.float64)
         applied = False
 
-        # 1) Recenter mesh
+        # Get OBB data (from layout merge)
+        obb = merged.get("obb")
+        obb_extents = None
+        obb_center = None
+        if obb:
+            obb_extents = obb.get("extents")
+            obb_center = obb.get("center")
+
+        # 1) Recenter mesh (if we have metadata about mesh center)
         if translation is not None:
             T_align = np.eye(4, dtype=np.float64)
             T_align[:3, 3] = translation
             xform = T_align @ xform
             applied = True
 
-        # 2) Scale to match OBB
-        obb = merged.get("obb")
-        obb_extents = None
-        if obb:
-            obb_extents = obb.get("extents")
+        # 2) Scale to match OBB (if we have both mesh bounds and OBB extents)
         if obb_extents is not None and mesh_half_extents is not None:
             mesh_half_extents = np.where(mesh_half_extents == 0, 1.0, mesh_half_extents)
             scale_vec = np.array(obb_extents, dtype=np.float64) / mesh_half_extents
@@ -410,15 +648,25 @@ class SceneBuilder:
                 xform = T @ xform
                 applied = True
 
-            extents = obb.get("extents")
-            if extents:
+            if obb_extents:
                 prim.CreateAttribute("halfExtents", Sdf.ValueTypeNames.Double3).Set(
-                    Gf.Vec3d(*extents)
+                    Gf.Vec3d(*obb_extents)
                 )
 
-        # Apply transform
+        # 4) Fallback: If no OBB but we have center3d from layout, use that
+        if not applied:
+            center3d = merged.get("center3d")
+            if center3d is not None:
+                T_pos = np.eye(4, dtype=np.float64)
+                T_pos[:3, 3] = np.array(center3d, dtype=np.float64)
+                xform = T_pos @ xform
+                applied = True
+                print(f"[USD] obj_{oid}: using center3d fallback position {center3d}")
+
+        # Apply transform (always apply even if identity, to ensure consistent behavior)
+        obj_xform.MakeMatrixXform().Set(numpy_to_gf_matrix(xform))
         if applied:
-            obj_xform.MakeMatrixXform().Set(numpy_to_gf_matrix(xform))
+            print(f"[USD] obj_{oid}: applied transform")
 
         # Mesh metadata
         if metadata:
@@ -465,13 +713,18 @@ class SceneBuilder:
                 prim.CreateAttribute("pendingConversion", Sdf.ValueTypeNames.Bool).Set(True)
                 print(f"[USD] obj_{oid}: marked for GLB->USDZ conversion ({asset_path})")
 
-    def add_objects(self, objects: List[Dict], layout_objects: Dict[int, Dict]) -> None:
+    def add_objects(
+        self,
+        objects: List[Dict],
+        layout_objects: Dict[Any, Dict],
+        room_box: Optional[Dict] = None,
+    ) -> None:
         """Add all objects to the scene."""
         objects_scope = UsdGeom.Scope.Define(self.stage, "/World/Objects")
 
         for obj in objects:
             try:
-                self.add_object(obj, layout_objects)
+                self.add_object(obj, layout_objects, room_box)
             except Exception as e:
                 print(f"[WARN] Failed to add object {obj.get('id')}: {e}")
 
@@ -502,13 +755,24 @@ def build_scene(
     # Extract data
     cameras = layout.get("camera_trajectory") or []
     room_planes = layout.get("room_planes", {})
-    layout_objects = {o.get("id"): o for o in layout.get("objects", [])}
+    room_box = layout.get("room_box", {})
+
+    # Build layout_objects dict with both integer and string keys for compatibility
+    layout_objects: Dict[Any, Dict] = {}
+    for o in layout.get("objects", []):
+        oid = o.get("id")
+        layout_objects[oid] = o
+        # Also store with string key if it's not already a string
+        if not isinstance(oid, str):
+            layout_objects[str(oid)] = o
 
     # Merge objects from assets with layout data
     objects: List[Dict] = []
     for obj in scene_assets.get("objects", []):
         merged = dict(obj)
-        layout_obj = layout_objects.get(obj.get("id"))
+        oid = obj.get("id")
+        # Try both the original ID and string version
+        layout_obj = layout_objects.get(oid) or layout_objects.get(str(oid))
         if layout_obj:
             for key in ("obb", "center3d"):
                 if key in layout_obj:
@@ -521,14 +785,23 @@ def build_scene(
 
     # Build scene
     builder = SceneBuilder(stage, root, assets_prefix, usd_prefix)
-    builder.add_room_planes(room_planes)
+    builder.add_room_planes(room_planes, room_box)
     builder.add_cameras(cameras)
-    builder.add_objects(scene_assets.get("objects", []), layout_objects)
+
+    # Create scene shell geometry from room_box if available
+    if room_box:
+        builder.add_scene_shell_geometry(room_box)
+    else:
+        print("[USD] WARNING: No room_box data in layout, skipping scene shell geometry")
+
+    builder.add_objects(scene_assets.get("objects", []), layout_objects, room_box)
 
     # Save stage
     stage.GetRootLayer().Save()
     print(f"[USD] Wrote stage to {output_path}")
     print(f"[USD] Cameras: {len(cameras)} | Objects: {len(objects)}")
+    if room_box:
+        print(f"[USD] Room box: min={room_box.get('min')}, max={room_box.get('max')}")
 
     return stage, objects
 
