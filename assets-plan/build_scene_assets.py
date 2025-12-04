@@ -20,9 +20,17 @@ def parse_interactive_ids(raw: str | None):
             pass
     return ids
 
-def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id: int, static_pipeline: str, sim_role: str | None = None, skip_interactive: bool = False):
+def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id, static_pipeline: str, sim_role: str | None = None, skip_interactive: bool = False):
     # If SKIP_INTERACTIVE_JOB is enabled, force all objects to be static
     if skip_interactive:
+        return "static", static_pipeline
+
+    # Special handling: scene_background is always static (it's the room shell)
+    if class_name == "scene_background" or obj_id == "scene_background":
+        return "static", static_pipeline
+
+    # Special handling: scene_shell sim_role is always static
+    if sim_role == "scene_shell":
         return "static", static_pipeline
 
     # First check sim_role (most authoritative)
