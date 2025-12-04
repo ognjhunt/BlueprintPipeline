@@ -133,7 +133,7 @@ main:
           steps:
             - handle_da3_error:
                 next: retry_da3_geom
-        next: wait_for_layout_json
+        next: run_layout_job
 
     - retry_da3_geom:
         switch:
@@ -154,6 +154,28 @@ main:
 
     - fail_da3_geom:
         raise: ${"da3_geom.npz not found at " + da3Geom}
+
+    # Run layout-job to generate scene_layout.json with OBB data
+    - run_layout_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/layout-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: DA3_PREFIX
+                      value: ${"scenes/" + sceneId + "/da3"}
+                    - name: SEG_DATASET_PREFIX
+                      value: ${segDatasetPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+        result: layoutExec
+        next: wait_for_layout_json
 
     - wait_for_layout_json:
         try:
