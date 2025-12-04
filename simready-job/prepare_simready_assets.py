@@ -425,21 +425,23 @@ def choose_static_visual_asset(assets_root: Path, oid: Any) -> Optional[Tuple[Pa
     """
     For a static object, pick the visual asset file to reference.
 
-    Preference:
+    Preference (USD-compatible formats only - GLB cannot be referenced directly):
     1) model.usdz
-    2) model.usd / model.usdc
-    3) asset.glb
-    4) mesh.glb
+    2) asset.usdz
+    3) model.usd / model.usdc
+
+    Note: GLB files are NOT included because Isaac Sim cannot load GLB via USD references.
+    GLB files must be converted to USDZ first by the usd-assembly pipeline.
     """
     # Newer pipeline: assets/obj_{id}/...
     base_dir = assets_root / f"obj_{oid}"
 
+    # Only USD-compatible formats - GLB cannot be referenced directly in USD
     candidates = [
         base_dir / "model.usdz",
+        base_dir / "asset.usdz",
         base_dir / "model.usd",
         base_dir / "model.usdc",
-        base_dir / "asset.glb",
-        base_dir / "mesh.glb",
     ]
 
     for p in candidates:
@@ -453,10 +455,9 @@ def choose_static_visual_asset(assets_root: Path, oid: Any) -> Optional[Tuple[Pa
     legacy_dir = assets_root / "static" / f"obj_{oid}"
     candidates = [
         legacy_dir / "model.usdz",
+        legacy_dir / "asset.usdz",
         legacy_dir / "model.usd",
         legacy_dir / "model.usdc",
-        legacy_dir / "asset.glb",
-        legacy_dir / "mesh.glb",
     ]
     for p in candidates:
         if p.is_file():
@@ -478,6 +479,11 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any]) 
 
     We keep everything on a single "Asset" prim so that it is easy to swap into
     downstream USD scenes.
+
+    Note: USD references must be declared as composition arcs in parentheses on the
+    prim definition (e.g., `def Xform "Visual" (prepend references = @file@)`), NOT
+    as attributes inside the braces. Using `rel references = @file@` is invalid USD
+    syntax and will cause Isaac Sim to fail to load the referenced geometry.
     """
     mass = float(physics.get("mass_kg", 1.0))
     dynamic = bool(physics.get("dynamic", True))
@@ -510,8 +516,11 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any]) 
     lines.append(f"    float physics:restitution = {restitution:.4f}")
     lines.append(f'    token physics:rigidBodyEnabled = "{enabled_token}"')
     lines.append("")
-    lines.append('    def Xform "Visual" {')
-    lines.append(f"        rel references = @{asset_rel}@")
+    # Use correct USD syntax: references are composition arcs declared in parentheses
+    lines.append(f'    def Xform "Visual" (')
+    lines.append(f"        prepend references = @{asset_rel}@")
+    lines.append("    )")
+    lines.append("    {")
     lines.append("    }")
     lines.append("}")
     lines.append("")

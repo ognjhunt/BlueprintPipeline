@@ -453,7 +453,11 @@ class SceneBuilder:
             geom_path = f"{obj_path}/Geom"
             geom_xform = UsdGeom.Xform.Define(self.stage, geom_path)
             geom_prim = geom_xform.GetPrim()
-            geom_prim.GetReferences().AddReference(usdz_rel)
+            # Add reference with explicit prim path "/Root" as fallback.
+            # This ensures the reference works even if the USDZ file doesn't have
+            # a default prim set (which is required for prim-less references to work).
+            # The glb_to_usd converter creates all geometry under /Root.
+            geom_prim.GetReferences().AddReference(usdz_rel, primPath=Sdf.Path("/Root"))
             print(f"[USD] obj_{oid}: referenced {usdz_rel}")
         else:
             # No USDZ found - record pending conversion info
