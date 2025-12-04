@@ -30,6 +30,7 @@ main:
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "scale-job"
           - doneMarkerPath: ${"scenes/" + sceneId + "/layout/scene_layout_scaled.done"}
+          - lockPath: ${"scenes/" + sceneId + "/layout/.scale_processing_lock"}
         next: check_if_done
 
     # Check if the output already exists to avoid duplicate processing
@@ -50,8 +51,34 @@ main:
             - check_not_found:
                 switch:
                   - condition: ${e.code == 404}
-                    next: run_scale_job
+                    next: try_acquire_lock
                 raise: ${e}
+        next: try_acquire_lock
+
+    # Acquire distributed lock using atomic GCS object creation
+    - try_acquire_lock:
+        try:
+          call: http.post
+          args:
+            url: ${"https://storage.googleapis.com/upload/storage/v1/b/" + bucket + "/o?uploadType=media&name=" + text.url_encode(lockPath) + "&ifGenerationMatch=0"}
+            auth:
+              type: OAuth2
+            headers:
+              Content-Type: "application/octet-stream"
+            body: ${"locked by workflow at " + string(sys.now())}
+          result: lockResult
+        except:
+          as: lockError
+          steps:
+            - check_lock_conflict:
+                switch:
+                  # 412 Precondition Failed means another workflow already has the lock
+                  - condition: ${lockError.code == 412}
+                    return: ${"scale-job skipped - another workflow is already processing " + object}
+                  # 200 with error body can also indicate conflict
+                  - condition: ${lockError.code == 200}
+                    return: ${"scale-job skipped - lock already exists for " + object}
+                raise: ${lockError}
         next: run_scale_job
 
     - run_scale_job:

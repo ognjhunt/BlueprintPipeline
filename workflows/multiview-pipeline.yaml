@@ -34,6 +34,56 @@ main:
           - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - jobName: "multiview-job"
           - multiviewAttempts: 0
+          - doneMarkerPath: ${"scenes/" + sceneId + "/assets/scene_assets.json"}
+          - lockPath: ${"scenes/" + sceneId + "/multiview/.multiview_processing_lock"}
+        next: check_if_done
+
+    # Check if the output already exists to avoid duplicate processing
+    - check_if_done:
+        try:
+          steps:
+            - get_done_marker:
+                call: googleapis.storage.v1.objects.get
+                args:
+                  bucket: ${bucket}
+                  object: ${doneMarkerPath}
+                result: doneMarkerObject
+            - skip_already_done:
+                return: ${"multiview-job already completed for " + object + " (found scene_assets.json)"}
+        except:
+          as: e
+          steps:
+            - check_not_found:
+                switch:
+                  - condition: ${e.code == 404}
+                    next: try_acquire_lock
+                raise: ${e}
+        next: try_acquire_lock
+
+    # Acquire distributed lock using atomic GCS object creation
+    - try_acquire_lock:
+        try:
+          call: http.post
+          args:
+            url: ${"https://storage.googleapis.com/upload/storage/v1/b/" + bucket + "/o?uploadType=media&name=" + text.url_encode(lockPath) + "&ifGenerationMatch=0"}
+            auth:
+              type: OAuth2
+            headers:
+              Content-Type: "application/octet-stream"
+            body: ${"locked by workflow at " + string(sys.now())}
+          result: lockResult
+        except:
+          as: lockError
+          steps:
+            - check_lock_conflict:
+                switch:
+                  # 412 Precondition Failed means another workflow already has the lock
+                  - condition: ${lockError.code == 412}
+                    return: ${"multiview-job skipped - another workflow is already processing " + object}
+                  # 200 with error body can also indicate conflict
+                  - condition: ${lockError.code == 200}
+                    return: ${"multiview-job skipped - lock already exists for " + object}
+                raise: ${lockError}
         next: run_multiview
 
     - run_multiview:
