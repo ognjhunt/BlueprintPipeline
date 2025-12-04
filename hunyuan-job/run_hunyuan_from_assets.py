@@ -149,25 +149,25 @@ def main() -> None:
     objects = plan.get("objects", [])
     print(f"[HUNYUAN] Loaded plan with {len(objects)} objects")
 
-    # Focus only on static objects with IDs
-    static_objects: List[dict] = [
+    # Process ALL objects with IDs (both static and interactive need 3D assets)
+    objects_to_process: List[dict] = [
         obj for obj in objects
-        if obj.get("type") == "static" and obj.get("id") is not None
+        if obj.get("id") is not None
     ]
-    print(f"[HUNYUAN] Found {len(static_objects)} static objects to process")
+    print(f"[HUNYUAN] Found {len(objects_to_process)} objects to process")
 
-    if not static_objects:
-        print("[HUNYUAN] No static objects to process; exiting.")
+    if not objects_to_process:
+        print("[HUNYUAN] No objects to process; exiting.")
         return
 
     # ------------------------------------------------------------------
-    # Stage 1: Shape generation (image -> mesh.glb for each static obj)
+    # Stage 1: Shape generation (image -> mesh.glb for each object)
     # BUT: we SKIP objects that already have a valid mesh.glb on GCS.
     # ------------------------------------------------------------------
     successful_obj_ids: Set[str] = set()
     objects_needing_shape: List[dict] = []
 
-    for obj in static_objects:
+    for obj in objects_to_process:
         oid = obj["id"]
         out_dir = assets_root / f"obj_{oid}"
         mesh_glb_path = out_dir / "mesh.glb"
@@ -273,7 +273,7 @@ def main() -> None:
 
         print(
             f"[HUNYUAN] Shape generation finished. "
-            f"{len(successful_obj_ids)}/{len(static_objects)} static objects now have meshes."
+            f"{len(successful_obj_ids)}/{len(objects_to_process)} objects now have meshes."
         )
 
         # Free shape pipeline GPU memory before loading the paint model
@@ -289,7 +289,7 @@ def main() -> None:
                 print("[HUNYUAN] Cleared CUDA cache after shape generation")
     else:
         print(
-            "[HUNYUAN] All static objects already have mesh.glb; "
+            "[HUNYUAN] All objects already have mesh.glb; "
             "skipping shape-generation stage."
         )
 
@@ -338,7 +338,7 @@ def main() -> None:
 
     if paint_pipeline is None:
         # Fallback: at least ensure asset.glb exists for each successful object
-        for obj in static_objects:
+        for obj in objects_to_process:
             oid = obj["id"]
             if oid not in successful_obj_ids:
                 continue
@@ -353,7 +353,7 @@ def main() -> None:
         return
 
     # --- FULL TEXTURE LOOP (only runs if paint_pipeline loaded) -----
-    for obj in static_objects:
+    for obj in objects_to_process:
         oid = obj["id"]
         if oid not in successful_obj_ids:
             print(
