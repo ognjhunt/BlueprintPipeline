@@ -72,7 +72,7 @@ main:
           steps:
             - handle_da3_error:
                 next: retry_da3_geom
-        next: run_layout_job
+        next: log_before_layout
 
     - retry_da3_geom:
         switch:
@@ -94,7 +94,15 @@ main:
     - fail_da3_geom:
         raise: ${"da3_geom.npz not found after 15 minutes at " + da3Geom}
 
-    # 7) Run layout-job to generate scene_layout.json with OBB data
+    # 7) Log before running layout-job
+    - log_before_layout:
+        call: sys.log
+        args:
+          text: ${"da3_geom.npz found, now triggering layout-job for scene " + sceneId}
+          severity: "INFO"
+        next: run_layout_job
+
+    # 8) Run layout-job to generate scene_layout.json with OBB data
     - run_layout_job:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
@@ -116,10 +124,10 @@ main:
         result: layoutExec
         next: done
 
-    # 8) Return success status
+    # 9) Return success status
     - done:
         return: ${"scene-da3 and layout-job started for " + object}
 
-    # 9) Skip non-matching objects
+    # 10) Skip non-matching objects
     - skip:
         return: ${"scene-da3 skip " + object}
