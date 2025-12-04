@@ -568,13 +568,8 @@ def main() -> None:
         if oid is None:
             continue
 
-        obj_type = obj.get("type")
-        if obj_type != "static":
-            # For now, treat interactive / other types as already sim-ready.
-            print(f"[SIMREADY] Skipping non-static obj {oid} (type={obj_type})")
-            continue
-
-        print(f"[SIMREADY] Processing static obj {oid}")
+        # Process ALL objects (both static and interactive need simready physics)
+        print(f"[SIMREADY] Processing obj {oid}")
 
         visual = choose_static_visual_asset(assets_root, oid)
         if visual is None:
@@ -617,7 +612,7 @@ def main() -> None:
             "status": "complete",
             "simready_assets": {},
             "count": 0,
-            "note": "No static objects required simready processing"
+            "note": "No objects required simready processing (no visual assets found)"
         }
         marker_path.write_text(json.dumps(marker_content, indent=2), encoding="utf-8")
         print(
