@@ -2,8 +2,9 @@
 #
 # Google Cloud Workflows pipeline that:
 #   1. Triggers on completion marker file from hunyuan-job
-#   2. Runs simready-job to prepare simulation-ready assets
-#   3. Runs usd-assembly-job to convert GLB->USDZ and build scene.usda
+#   2. Runs usd-assembly-job in CONVERT_ONLY mode to convert GLB->USDZ before simready
+#   3. Runs simready-job to prepare simulation-ready assets (now sees USD-compatible files)
+#   4. Runs usd-assembly-job to build scene.usda
 #
 # Trigger: Cloud Storage object finalized event for .hunyuan_complete
 
@@ -44,9 +45,88 @@ main:
     - log_start:
         call: sys.log
         args:
-          text: '${"USD assembly triggered for scene " + sceneId + " - starting simready-job"}'
+          text: '${"USD assembly triggered for scene " + sceneId + " - starting pre-simready GLB->USDZ conversion"}'
+          severity: "INFO"
+        next: run_convert_job
+
+    - run_convert_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + usdJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: USD_PREFIX
+                      value: ${usdPrefix}
+                    - name: CONVERT_ONLY
+                      value: "true"
+        result: convertExec
+        next: set_convert_execution_name
+
+    - set_convert_execution_name:
+        # jobs.run returns a long-running operation; prefer the execution name from metadata when present
+        assign:
+          - convertExecutionName: '${if(convertExec.metadata != null and convertExec.metadata.name != null, convertExec.metadata.name, convertExec.name)}'
+        next: wait_for_convert
+
+    - wait_for_convert:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${convertExecutionName}
+        result: convertStatus
+        next: check_convert_status
+
+    - check_convert_status:
+        assign:
+          - convertState: '${if(convertStatus.state != null, convertStatus.state, if(convertStatus.status != null, convertStatus.status.state, null))}'
+          - convertFailedCount: '${if(convertStatus.failedCount != null, convertStatus.failedCount, if(convertStatus.status != null, convertStatus.status.failedCount, null))}'
+          - convertSucceededCount: '${if(convertStatus.succeededCount != null, convertStatus.succeededCount, if(convertStatus.status != null, convertStatus.status.succeededCount, null))}'
+        next: convert_status_switch
+
+    - convert_status_switch:
+        switch:
+          - condition: '${convertState == "FAILED" or (convertFailedCount != null and convertFailedCount > 0)}'
+            next: convert_failed
+          - condition: '${convertState == "SUCCEEDED" or (convertSucceededCount != null and convertSucceededCount > 0)}'
+            next: log_convert_complete
+        next: wait_convert_poll
+
+    - wait_convert_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_convert
+
+    - log_convert_complete:
+        call: sys.log
+        args:
+          text: '${"GLB->USDZ conversion completed for scene " + sceneId + " - starting simready-job"}'
           severity: "INFO"
         next: run_simready_job
+
+    - convert_failed:
+        assign:
+          - errorMsg: '${"USD conversion job FAILED for scene " + sceneId}'
+        next: log_convert_error
+
+    - log_convert_error:
+        call: sys.log
+        args:
+          text: ${errorMsg}
+          severity: "ERROR"
+        next: raise_convert_error
+
+    - raise_convert_error:
+        raise: ${errorMsg}
 
     - run_simready_job:
         call: googleapis.run.v2.projects.locations.jobs.run
@@ -198,11 +278,12 @@ main:
         raise: ${errorMsg}
 
     - done:
-        return:
-          status: "SUCCESS"
-          scene_id: ${sceneId}
-          message: '${"USD assembly completed successfully for scene " + sceneId}'
-          usd_execution: ${usdExec.name}
+      return:
+        status: "SUCCESS"
+        scene_id: ${sceneId}
+        message: '${"USD assembly completed successfully for scene " + sceneId}'
+        convert_execution: ${convertExec.name}
+        usd_execution: ${usdExec.name}
 
     - skip_not_ready:
         return:
