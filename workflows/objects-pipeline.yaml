@@ -57,7 +57,7 @@ main:
             - log_check_error:
                 call: sys.log
                 args:
-                  text: ${"Failed to check if objects already exist: " + e.message + ". Proceeding with job."}
+                  text: '${"Failed to check if objects already exist: " + e.message + ". Proceeding with job."}'
                   severity: "WARNING"
         next: run_objects_job
 

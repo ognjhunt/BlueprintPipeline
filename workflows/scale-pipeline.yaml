@@ -51,6 +51,7 @@ main:
                 switch:
                   - condition: ${e.code == 404}
                     next: run_scale_job
+            - raise_error:
                 raise: ${e}
         next: run_scale_job
 
