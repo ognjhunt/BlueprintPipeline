@@ -18,7 +18,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
@@ -803,6 +803,7 @@ def build_scene(
                 target[key] = source[key]
 
     layout_objects: Dict[Any, Dict] = {}
+    layout_objects_by_class: Dict[str, List[Dict]] = {}
 
     # First, populate from the primary (scaled) layout
     for o in layout.get("objects", []):
@@ -827,6 +828,10 @@ def build_scene(
         if not isinstance(oid, str):
             layout_objects[str(oid)] = o
 
+        cls = (o.get("class_name") or "").lower()
+        if cls:
+            layout_objects_by_class.setdefault(cls, []).append(o)
+
     # Next, add any fallback-only objects so we don't drop transforms entirely
     if fallback_layout:
         for o in fallback_layout.get("objects", []):
@@ -839,19 +844,36 @@ def build_scene(
             if not isinstance(oid, str):
                 layout_objects[str(oid)] = o
 
+            cls = (o.get("class_name") or "").lower()
+            if cls:
+                layout_objects_by_class.setdefault(cls, []).append(o)
+
     # Merge objects from assets with layout data so downstream logic always
     # sees the spatial information produced by DA3/scale jobs. This merged
     # list is passed to the builder below instead of the raw assets list to
     # avoid dropping transforms when the IDs match but the assets.json entry
     # doesn't carry spatial fields.
     objects: List[Dict] = []
+    matched_layout_ids: Set[Any] = set()
     for obj in scene_assets.get("objects", []):
         merged = dict(obj)
         oid = obj.get("id")
+        cls = (obj.get("class_name") or "").lower()
+
         # Try both the original ID and string version
         layout_obj = layout_objects.get(oid) or layout_objects.get(str(oid))
+
+        # Fallback: if IDs don't line up (common after inventory remapping),
+        # try to match by class name so we still apply DA3/scale spatial data.
+        if not layout_obj and cls:
+            candidates = layout_objects_by_class.get(cls, [])
+            layout_obj = next((o for o in candidates if o.get("id") not in matched_layout_ids), None)
+            if layout_obj:
+                matched_layout_ids.add(layout_obj.get("id"))
+                merged["layout_match_source"] = layout_obj.get("id")
+
         if layout_obj:
-            for key in ("obb", "center3d"):
+            for key in ("obb", "center3d", "center", "bounds", "scale"):
                 if key in layout_obj:
                     merged[key] = layout_obj[key]
         objects.append(merged)
