@@ -205,6 +205,7 @@ def resolve_usdz_asset_path(
     obj_dir = root / assets_prefix / f"obj_{oid}"
 
     candidate_names = [
+        "simready.usda",
         "model.usdz",
         "asset.usdz",
         "mesh.usdz",
@@ -775,6 +776,17 @@ def build_scene(
     """
     # Load input files
     layout = load_json(layout_path)
+
+    # Optional fallback to the unscaled layout if scaled layout is missing
+    # spatial data (seen in some pipelines where only the scaled file exists
+    # but the object list was emptied by a downstream step).
+    fallback_layout_path = layout_path.with_name("scene_layout.json")
+    fallback_layout: Dict[str, Any] = {}
+    if fallback_layout_path != layout_path and fallback_layout_path.is_file():
+        try:
+            fallback_layout = load_json(fallback_layout_path)
+        except Exception:
+            fallback_layout = {}
     scene_assets = load_json(assets_path)
 
     # Extract data
@@ -782,14 +794,50 @@ def build_scene(
     room_planes = layout.get("room_planes", {})
     room_box = layout.get("room_box", {})
 
-    # Build layout_objects dict with both integer and string keys for compatibility
+    # Build layout_objects dict with both integer and string keys for compatibility.
+    # If the scaled layout is missing spatial fields, fall back to the original
+    # (unscaled) layout to recover obb/center information.
+    def _merge_spatial(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+        for key in ("obb", "center3d", "center", "bounds", "scale"):
+            if key not in target and key in source:
+                target[key] = source[key]
+
     layout_objects: Dict[Any, Dict] = {}
+
+    # First, populate from the primary (scaled) layout
     for o in layout.get("objects", []):
         oid = o.get("id")
+        if oid is None:
+            continue
+
+        fallback_obj = None
+        if fallback_layout:
+            fallback_obj = next(
+                (
+                    obj
+                    for obj in fallback_layout.get("objects", [])
+                    if obj.get("id") == oid or str(obj.get("id")) == str(oid)
+                ),
+                None,
+            )
+            if fallback_obj:
+                _merge_spatial(o, fallback_obj)
+
         layout_objects[oid] = o
-        # Also store with string key if it's not already a string
         if not isinstance(oid, str):
             layout_objects[str(oid)] = o
+
+    # Next, add any fallback-only objects so we don't drop transforms entirely
+    if fallback_layout:
+        for o in fallback_layout.get("objects", []):
+            oid = o.get("id")
+            if oid is None:
+                continue
+            if oid in layout_objects or str(oid) in layout_objects:
+                continue
+            layout_objects[oid] = o
+            if not isinstance(oid, str):
+                layout_objects[str(oid)] = o
 
     # Merge objects from assets with layout data so downstream logic always
     # sees the spatial information produced by DA3/scale jobs. This merged
