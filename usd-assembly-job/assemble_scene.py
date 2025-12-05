@@ -342,6 +342,7 @@ def assemble_scene() -> int:
     layout_prefix = os.getenv("LAYOUT_PREFIX")
     assets_prefix = os.getenv("ASSETS_PREFIX")
     usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
+    convert_only = os.getenv("CONVERT_ONLY", "false").lower() in {"1", "true", "yes"}
 
     if not layout_prefix or not assets_prefix:
         print("[ERROR] LAYOUT_PREFIX and ASSETS_PREFIX are required", file=sys.stderr)
@@ -380,6 +381,10 @@ def assemble_scene() -> int:
 
     if failures > 0:
         print(f"[WARN] {failures} conversions failed - continuing with available assets")
+
+    if convert_only:
+        print("\n[INFO] CONVERT_ONLY enabled - skipping scene assembly and exiting after conversions")
+        return 0 if failures == 0 else 1
 
     # Phase 3: Build scene
     print("\n[PHASE 3] Building USD scene...")
