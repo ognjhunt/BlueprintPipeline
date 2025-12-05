@@ -5,7 +5,8 @@ WORKDIR /app
 # Basic deps: numpy for simple math, google-genai for Gemini
 RUN pip install --no-cache-dir \
     numpy \
-    google-genai
+    google-genai \
+    pillow
 
 # Our simready prep script + entrypoint
 COPY prepare_simready_assets.py /app/prepare_simready_assets.py
