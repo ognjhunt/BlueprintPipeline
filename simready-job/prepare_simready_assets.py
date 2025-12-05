@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from PIL import Image  # type: ignore
 
 try:
     # Google GenAI SDK for Gemini 3.x
@@ -33,6 +34,45 @@ def ensure_dir(path: Path) -> None:
 def safe_path_join(root: Path, rel: str) -> Path:
     rel_path = rel.lstrip("/")
     return root / rel_path
+
+
+def choose_reference_image_path(root: Path, obj: Dict[str, Any]) -> Optional[Path]:
+    """
+    Pick the best available reference image for an object.
+
+    Preference (same as other jobs): preferred_view -> multiview/view_0.png -> crop.
+    """
+
+    candidates: List[Path] = []
+
+    preferred_rel = obj.get("preferred_view")
+    mv_rel = obj.get("multiview_dir")
+    crop_rel = obj.get("crop_path")
+
+    if isinstance(preferred_rel, str):
+        candidates.append(safe_path_join(root, preferred_rel))
+    if isinstance(mv_rel, str):
+        candidates.append(safe_path_join(root, mv_rel) / "view_0.png")
+    if isinstance(crop_rel, str):
+        candidates.append(safe_path_join(root, crop_rel))
+
+    for p in candidates:
+        if p.is_file():
+            return p
+
+    return None
+
+
+def load_image_for_gemini(image_path: Path) -> Optional["Image.Image"]:
+    """
+    Load an RGB PIL image for Gemini input.
+    """
+
+    try:
+        return Image.open(str(image_path)).convert("RGB")
+    except Exception as exc:  # pragma: no cover - image decoding errors
+        print(f"[SIMREADY] WARNING: failed to load reference image {image_path}: {exc}", file=sys.stderr)
+        return None
 
 
 def _as_float_list(v: Any, n: int) -> Optional[List[float]]:
@@ -284,6 +324,7 @@ def make_gemini_prompt(
     obj: Dict[str, Any],
     bounds: Dict[str, Any],
     base_cfg: Dict[str, Any],
+    has_image: bool = False,
 ) -> str:
     """
     Prompt Gemini to estimate realistic physics parameters based on object metadata + size.
@@ -294,6 +335,24 @@ def make_gemini_prompt(
 
     obj_desc = _compact_obj_description(obj)
     obj_desc["id"] = oid
+
+    if has_image:
+        image_context = (
+            "You must estimate REALISTIC physics parameters for the *specific object* shown in the attached image,"
+            " using its appearance as the primary signal and the text metadata below as context."
+        )
+        primary_guidance = (
+            "You are given a reference image of the object. Base your estimates primarily on that photo (shape, material, heft), "
+            "and use the metadata below only as supporting context."
+        )
+    else:
+        image_context = (
+            "You must estimate REALISTIC physics parameters for the object using the metadata and scale information below."
+        )
+        primary_guidance = (
+            "No photo was provided. Rely on the metadata below plus the size to estimate realistic properties, "
+            "but avoid generic placeholders."
+        )
 
     skeleton = {
         "dynamic": True,
@@ -310,8 +369,9 @@ def make_gemini_prompt(
     prompt = f"""
 You are configuring physics for USD assets to be simulated in NVIDIA Isaac Sim (PhysX / USD Physics).
 
-You must estimate REALISTIC physics parameters for the *specific object* described below,
-using its name/type and its real-world scale.
+{image_context}
+
+{primary_guidance}
 
 Important implementation notes (affect what "realistic" means here):
 - The sim uses meters and kilograms.
@@ -368,6 +428,7 @@ def call_gemini_for_object(
     oid: Any,
     obj: Dict[str, Any],
     bounds: Dict[str, Any],
+    reference_image: Optional["Image.Image"] = None,
 ) -> Dict[str, Any]:
     """
     Ask Gemini to estimate realistic physics parameters for the object, then
@@ -378,7 +439,7 @@ def call_gemini_for_object(
     if client is None:
         return base_cfg
 
-    prompt = make_gemini_prompt(oid, obj, bounds, base_cfg)
+    prompt = make_gemini_prompt(oid, obj, bounds, base_cfg, has_image=reference_image is not None)
 
     try:
         model_name = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
@@ -416,9 +477,13 @@ def call_gemini_for_object(
                 response_mime_type="application/json",
             )
 
+        contents = [prompt]
+        if reference_image is not None:
+            contents = [reference_image, prompt]
+
         response = client.models.generate_content(
             model=model_name,
-            contents=prompt,
+            contents=contents,
             config=config,
         )
 
@@ -787,7 +852,18 @@ def main() -> None:
         obj_metadata = load_object_metadata(GCS_ROOT, obj, assets_prefix)
         bounds = compute_bounds(obj, obj_metadata)
 
-        physics_cfg = call_gemini_for_object(client, oid, obj, bounds)
+        reference_image = None
+        reference_image_path = choose_reference_image_path(assets_root, obj)
+        if reference_image_path:
+            reference_image = load_image_for_gemini(reference_image_path)
+            if reference_image is not None:
+                print(f"[SIMREADY] Using reference image for obj {oid}: {reference_image_path}")
+            else:
+                print(f"[SIMREADY] WARNING: failed to load reference image for obj {oid} at {reference_image_path}", file=sys.stderr)
+        else:
+            print(f"[SIMREADY] No reference image found for obj {oid}; relying on metadata only")
+
+        physics_cfg = call_gemini_for_object(client, oid, obj, bounds, reference_image)
 
         # Place simready.usda next to the visual asset.
         sim_dir = visual_path.parent
