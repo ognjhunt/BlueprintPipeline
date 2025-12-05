@@ -265,7 +265,15 @@ def wire_usdz_references(
             geom_prim = stage.OverridePrim(geom_path)
             UsdGeom.Xform.Define(stage, geom_path)
 
-            refs = geom_prim.GetReferences()
+            get_references = getattr(geom_prim, "GetReferences", None)
+            if not callable(get_references):
+                print(
+                    "[ERROR] Usd.Prim is missing GetReferences; incompatible USD build detected",
+                    file=sys.stderr,
+                )
+                raise RuntimeError("USD API missing GetReferences")
+
+            refs = get_references()
             refs.ClearReferences()
             refs.AddReference(usdz_rel, primPath=Sdf.Path("/Root"))
 
@@ -406,7 +414,12 @@ def assemble_scene() -> int:
 
     # Phase 4: Wire references
     print("\n[PHASE 4] Wiring USDZ references...")
-    wired = wire_usdz_references(stage, root, assets_prefix, usd_prefix)
+    try:
+        wired = wire_usdz_references(stage, root, assets_prefix, usd_prefix)
+    except Exception as e:
+        print(f"[ERROR] Failed to wire USDZ references: {e}")
+        traceback.print_exc()
+        return 1
     print(f"  Wired {wired} object references")
 
     # Save updated stage
