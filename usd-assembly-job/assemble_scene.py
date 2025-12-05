@@ -86,13 +86,7 @@ def find_glb_assets(
     for obj in scene_assets.get("objects", []):
         oid = obj.get("id")
         oid_str = str(oid)
-        is_interactive = obj.get("type") == "interactive"
-
         seen_ids.add(oid_str)
-
-        # Skip interactive objects (they use URDF)
-        if is_interactive:
-            continue
 
         # Determine asset path - check explicit path first
         asset_path = obj.get("asset_path")
