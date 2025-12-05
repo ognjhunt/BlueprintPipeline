@@ -244,8 +244,10 @@ def wire_usdz_references(
         geom_prim = stage.GetPrimAtPath(geom_path)
         has_ref = False
         if geom_prim and geom_prim.IsValid():
-            refs = geom_prim.GetReferences().GetAddedOrExplicitItems()
-            has_ref = len(refs) > 0
+            # Usd.References no longer exposes GetAddedOrExplicitItems in newer
+            # USD builds. HasAuthoredReferences reliably reports whether any
+            # references are present without depending on that API surface.
+            has_ref = geom_prim.HasAuthoredReferences()
 
         pending_attr = prim.GetAttribute("pendingConversion")
         pending = pending_attr.Get() if pending_attr else False
