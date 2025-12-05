@@ -42,6 +42,7 @@ from build_scene_usd import (
     load_json,
     safe_path_join,
     ensure_dir,
+    resolve_usdz_asset_path,
 )
 
 
@@ -50,25 +51,44 @@ from build_scene_usd import (
 # -----------------------------------------------------------------------------
 
 
+def _discover_glb_in_obj_dir(obj_dir: Path) -> Optional[Path]:
+    """Return the first GLB found in an object directory."""
+    GLB_CANDIDATES = ["asset.glb", "model.glb", "mesh.glb"]
+
+    for candidate_name in GLB_CANDIDATES:
+        candidate = obj_dir / candidate_name
+        if candidate.exists():
+            return candidate
+
+    for candidate in obj_dir.glob("*.glb"):
+        return candidate
+
+    return None
+
+
 def find_glb_assets(
     scene_assets: Dict,
     root: Path,
     assets_prefix: str,
-) -> List[Tuple[int, Path, Path]]:
+) -> List[Tuple[str, Path, Path]]:
     """
     Find all GLB assets that need conversion.
 
     Returns:
         List of (object_id, glb_path, usdz_path) tuples
     """
-    conversions = []
+    conversions: List[Tuple[str, Path, Path]] = []
+    seen_ids: Set[str] = set()
 
     # Candidate GLB filenames to check (in priority order)
     GLB_CANDIDATES = ["asset.glb", "model.glb", "mesh.glb"]
 
     for obj in scene_assets.get("objects", []):
         oid = obj.get("id")
+        oid_str = str(oid)
         is_interactive = obj.get("type") == "interactive"
+
+        seen_ids.add(oid_str)
 
         # Skip interactive objects (they use URDF)
         if is_interactive:
@@ -88,22 +108,9 @@ def find_glb_assets(
         # If no explicit path or it doesn't exist, try candidate filenames
         if glb_path is None:
             obj_dir = root / assets_prefix / f"obj_{oid}"
-            for candidate_name in GLB_CANDIDATES:
-                candidate = obj_dir / candidate_name
-                if candidate.exists():
-                    glb_path = candidate
-                    print(f"[INFO] obj_{oid}: found GLB at {candidate_name}")
-                    break
-
-            # As a last resort, pick the first .glb file in the object folder
-            # (some assets arrive with unconventional filenames).
-            if glb_path is None and obj_dir.is_dir():
-                for candidate in obj_dir.glob("*.glb"):
-                    glb_path = candidate
-                    print(
-                        f"[INFO] obj_{oid}: found GLB at {candidate.name} (fallback glob)"
-                    )
-                    break
+            glb_path = _discover_glb_in_obj_dir(obj_dir)
+            if glb_path:
+                print(f"[INFO] obj_{oid}: found GLB at {glb_path.name}")
 
         # Skip if no GLB found
         if glb_path is None:
@@ -119,7 +126,25 @@ def find_glb_assets(
                 print(f"[INFO] USDZ already up-to-date for obj_{oid}: {usdz_path}")
                 continue
 
+        conversions.append((oid_str, glb_path, usdz_path))
+
+    # Secondary sweep: look for GLBs on disk that weren't present in scene_assets
+    assets_root = root / assets_prefix
+    for obj_dir in assets_root.glob("obj_*"):
+        oid = obj_dir.name.replace("obj_", "")
+        if oid in seen_ids:
+            continue
+
+        glb_path = _discover_glb_in_obj_dir(obj_dir)
+        if not glb_path:
+            continue
+
+        usdz_path = glb_path.with_suffix(".usdz")
+        if usdz_path.exists() and usdz_path.stat().st_mtime >= glb_path.stat().st_mtime:
+            continue
+
         conversions.append((oid, glb_path, usdz_path))
+        print(f"[INFO] obj_{oid}: discovered GLB without scene_assets entry ({glb_path.name})")
 
     return conversions
 
@@ -130,10 +155,10 @@ def find_glb_assets(
 
 
 def convert_single_asset(
-    oid: int,
+    oid: str,
     glb_path: Path,
     usdz_path: Path,
-) -> Tuple[int, bool, str]:
+) -> Tuple[str, bool, str]:
     """
     Convert a single GLB to USDZ.
 
@@ -151,7 +176,7 @@ def convert_single_asset(
 
 
 def convert_all_assets(
-    conversions: List[Tuple[int, Path, Path]],
+    conversions: List[Tuple[str, Path, Path]],
     max_workers: int = 4,
 ) -> Tuple[int, int]:
     """
@@ -218,67 +243,58 @@ def wire_usdz_references(
         if not name.startswith("obj_"):
             continue
 
-        # Check if this object has pending conversion
+        oid = name[len("obj_") :]
+
+        # Check if Geom already has a valid reference
+        geom_path = prim.GetPath().AppendChild("Geom")
+        geom_prim = stage.GetPrimAtPath(geom_path)
+        has_ref = False
+        if geom_prim and geom_prim.IsValid():
+            refs = geom_prim.GetReferences().GetAddedOrExplicitItems()
+            has_ref = len(refs) > 0
+
         pending_attr = prim.GetAttribute("pendingConversion")
-        if not pending_attr or not pending_attr.Get():
+        pending = pending_attr.Get() if pending_attr else False
+
+        # Skip objects that already have a reference and are not pending conversion
+        if has_ref and not pending:
             continue
 
-        # Get object ID
-        try:
-            oid = int(name.split("_")[1])
-        except (IndexError, ValueError):
-            continue
-
-        # Find USDZ file
         asset_path_attr = prim.GetAttribute("asset_path")
         asset_path = asset_path_attr.Get() if asset_path_attr else None
 
-        usdz_path = None
-        if asset_path:
-            glb_path = safe_path_join(root, asset_path)
-            candidate = glb_path.with_suffix(".usdz")
-            if candidate.exists():
-                usdz_path = candidate
+        usdz_rel = resolve_usdz_asset_path(root, assets_prefix, usd_prefix, oid, asset_path)
 
-        if not usdz_path:
-            # Check standard locations with multiple candidate names
-            obj_dir = root / assets_prefix / f"obj_{oid}"
-            for candidate_name in ["asset.usdz", "model.usdz", "mesh.usdz"]:
-                candidate = obj_dir / candidate_name
-                if candidate.exists():
-                    usdz_path = candidate
-                    break
+        if usdz_rel:
+            geom_prim = stage.OverridePrim(geom_path)
+            UsdGeom.Xform.Define(stage, geom_path)
 
-        if not usdz_path:
-            print(f"[WARN] No USDZ found for obj_{oid}")
+            refs = geom_prim.GetReferences()
+            refs.ClearReferences()
+            refs.AddReference(usdz_rel, primPath=Sdf.Path("/Root"))
+
+            if asset_path_attr and asset_path:
+                asset_path_attr.Set(usdz_rel)
+
+            type_attr = prim.GetAttribute("assetType")
+            if type_attr:
+                type_attr.Set("usdz")
+
+            if pending_attr:
+                prim.RemoveProperty("pendingConversion")
+
+            print(f"[WIRE] obj_{oid}: -> {usdz_rel}")
+            wired_count += 1
             continue
 
-        # Calculate relative path
-        rel_path = os.path.relpath(usdz_path, stage_dir)
-        rel_path = rel_path.replace("\\", "/")
-
-        # Create or update Geom child with reference
-        geom_path = prim.GetPath().AppendChild("Geom")
-        geom_prim = stage.OverridePrim(geom_path)
-        UsdGeom.Xform.Define(stage, geom_path)
-
-        refs = geom_prim.GetReferences()
-        refs.ClearReferences()
-        refs.AddReference(rel_path)
-
-        # Clear pending flag
-        prim.RemoveProperty("pendingConversion")
-
-        # Update asset metadata
-        if asset_path_attr:
-            asset_path_attr.Set(str(usdz_path.relative_to(root)).replace("\\", "/"))
-        
-        type_attr = prim.GetAttribute("assetType")
-        if type_attr:
-            type_attr.Set("usdz")
-
-        print(f"[WIRE] obj_{oid}: -> {rel_path}")
-        wired_count += 1
+        # If USDZ is missing but a GLB exists, mark for conversion
+        obj_dir = root / assets_prefix / f"obj_{oid}"
+        glb_path = _discover_glb_in_obj_dir(obj_dir)
+        if glb_path:
+            rel_glb = str(glb_path.relative_to(root)).replace("\\", "/")
+            prim.CreateAttribute("asset_path", Sdf.ValueTypeNames.String).Set(rel_glb)
+            prim.CreateAttribute("pendingConversion", Sdf.ValueTypeNames.Bool).Set(True)
+            print(f"[WIRE] obj_{oid}: USDZ missing, queued GLB for conversion ({rel_glb})")
 
     return wired_count
 
