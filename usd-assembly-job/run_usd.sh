@@ -9,6 +9,7 @@ echo "SCENE_ID:      ${SCENE_ID:-not set}"
 echo "LAYOUT_PREFIX: ${LAYOUT_PREFIX:-not set}"
 echo "ASSETS_PREFIX: ${ASSETS_PREFIX:-not set}"
 echo "USD_PREFIX:    ${USD_PREFIX:-not set}"
+echo "CONVERT_ONLY:  ${CONVERT_ONLY:-false}"
 echo "=========================================="
 
 # Run the main assembly pipeline
