@@ -95,6 +95,16 @@ def find_glb_assets(
                     print(f"[INFO] obj_{oid}: found GLB at {candidate_name}")
                     break
 
+            # As a last resort, pick the first .glb file in the object folder
+            # (some assets arrive with unconventional filenames).
+            if glb_path is None and obj_dir.is_dir():
+                for candidate in obj_dir.glob("*.glb"):
+                    glb_path = candidate
+                    print(
+                        f"[INFO] obj_{oid}: found GLB at {candidate.name} (fallback glob)"
+                    )
+                    break
+
         # Skip if no GLB found
         if glb_path is None:
             print(f"[WARN] GLB not found for obj_{oid} (tried: {GLB_CANDIDATES})")
