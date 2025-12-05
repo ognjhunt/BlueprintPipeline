@@ -44,39 +44,7 @@ def main():
     with inventory_path.open("r") as f:
         inventory = json.load(f)
 
-    # Extract objects from inventory
-    objects = []
-    for obj in inventory.get("objects", []):
-        if obj.get("must_be_separate_asset", False):
-            obj_id = obj.get("id")
-            category = obj.get("category", "object")
-
-            objects.append({
-                "id": obj_id,
-                "class_name": category,
-                "class_id": 0,
-                "short_description": obj.get("short_description", ""),
-                "sim_role": obj.get("sim_role", ""),
-            })
-
-    # Add scene background
-    background_objects = [
-        obj for obj in inventory.get("objects", [])
-        if not obj.get("must_be_separate_asset", False)
-    ]
-
-    if background_objects:
-        objects.append({
-            "id": "scene_background",
-            "class_name": "scene_background",
-            "class_id": 999,
-            "short_description": "Static scene background (walls, floor, ceiling, built-in furniture)",
-            "sim_role": "scene_shell",
-        })
-
-    print(f"[UPDATE-LAYOUT] Found {len(objects)} objects to add to layout")
-
-    # Load or create layout structure
+    # Load or create layout structure FIRST to preserve existing spatial data
     if layout_path.exists():
         try:
             with layout_path.open("r") as f:
@@ -89,7 +57,70 @@ def main():
         print(f"[UPDATE-LAYOUT] Creating new layout structure")
         layout = {"scene_id": scene_id}
 
-    # Update objects
+    # Build a lookup of existing objects by ID to preserve spatial data (obb, center3d, etc.)
+    existing_objects_by_id: Dict[Any, Dict] = {}
+    for existing_obj in layout.get("objects", []):
+        oid = existing_obj.get("id")
+        if oid is not None:
+            existing_objects_by_id[oid] = existing_obj
+            # Also index by string version for flexibility
+            existing_objects_by_id[str(oid)] = existing_obj
+
+    print(f"[UPDATE-LAYOUT] Found {len(existing_objects_by_id) // 2} existing objects with spatial data")
+
+    # Extract objects from inventory, MERGING with existing spatial data
+    objects = []
+    for obj in inventory.get("objects", []):
+        if obj.get("must_be_separate_asset", False):
+            obj_id = obj.get("id")
+            category = obj.get("category", "object")
+
+            # Start with inventory metadata
+            new_obj = {
+                "id": obj_id,
+                "class_name": category,
+                "class_id": 0,
+                "short_description": obj.get("short_description", ""),
+                "sim_role": obj.get("sim_role", ""),
+            }
+
+            # MERGE: Preserve spatial data from existing layout object
+            existing_obj = existing_objects_by_id.get(obj_id) or existing_objects_by_id.get(str(obj_id))
+            if existing_obj:
+                # Preserve critical spatial keys
+                spatial_keys = ["obb", "center3d", "center", "bounds", "scale"]
+                for key in spatial_keys:
+                    if key in existing_obj:
+                        new_obj[key] = existing_obj[key]
+                        print(f"[UPDATE-LAYOUT]   obj_{obj_id}: preserved '{key}' from layout")
+
+            objects.append(new_obj)
+
+    # Add scene background
+    background_objects = [
+        obj for obj in inventory.get("objects", [])
+        if not obj.get("must_be_separate_asset", False)
+    ]
+
+    if background_objects:
+        scene_bg_obj = {
+            "id": "scene_background",
+            "class_name": "scene_background",
+            "class_id": 999,
+            "short_description": "Static scene background (walls, floor, ceiling, built-in furniture)",
+            "sim_role": "scene_shell",
+        }
+        # Also preserve any existing spatial data for scene_background
+        existing_bg = existing_objects_by_id.get("scene_background")
+        if existing_bg:
+            for key in ["obb", "center3d", "center", "bounds", "scale"]:
+                if key in existing_bg:
+                    scene_bg_obj[key] = existing_bg[key]
+        objects.append(scene_bg_obj)
+
+    print(f"[UPDATE-LAYOUT] Found {len(objects)} objects to add to layout")
+
+    # Update objects (now with merged spatial data preserved)
     layout["objects"] = objects
 
     # Add metadata
