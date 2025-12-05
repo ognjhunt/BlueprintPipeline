@@ -207,6 +207,7 @@ def resolve_usdz_asset_path(
     candidate_names = [
         "model.usdz",
         "asset.usdz",
+        "mesh.usdz",
         "model.usda",
         "model.usd",
         "model.usdc",

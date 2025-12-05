@@ -63,6 +63,9 @@ def find_glb_assets(
     """
     conversions = []
 
+    # Candidate GLB filenames to check (in priority order)
+    GLB_CANDIDATES = ["asset.glb", "model.glb", "mesh.glb"]
+
     for obj in scene_assets.get("objects", []):
         oid = obj.get("id")
         is_interactive = obj.get("type") == "interactive"
@@ -71,21 +74,30 @@ def find_glb_assets(
         if is_interactive:
             continue
 
-        # Determine asset path
+        # Determine asset path - check explicit path first
         asset_path = obj.get("asset_path")
-        if not asset_path:
-            # Default GLB location
-            asset_path = f"{assets_prefix}/obj_{oid}/asset.glb"
+        glb_path = None
 
-        # Check if it's a GLB
-        if not asset_path.lower().endswith((".glb", ".gltf")):
-            continue
+        if asset_path:
+            # Check if it's a GLB path
+            if asset_path.lower().endswith((".glb", ".gltf")):
+                candidate = safe_path_join(root, asset_path)
+                if candidate.exists():
+                    glb_path = candidate
 
-        glb_path = safe_path_join(root, asset_path)
+        # If no explicit path or it doesn't exist, try candidate filenames
+        if glb_path is None:
+            obj_dir = root / assets_prefix / f"obj_{oid}"
+            for candidate_name in GLB_CANDIDATES:
+                candidate = obj_dir / candidate_name
+                if candidate.exists():
+                    glb_path = candidate
+                    print(f"[INFO] obj_{oid}: found GLB at {candidate_name}")
+                    break
 
-        # Skip if GLB doesn't exist
-        if not glb_path.exists():
-            print(f"[WARN] GLB not found for obj_{oid}: {glb_path}")
+        # Skip if no GLB found
+        if glb_path is None:
+            print(f"[WARN] GLB not found for obj_{oid} (tried: {GLB_CANDIDATES})")
             continue
 
         # Target USDZ path (same directory, .usdz extension)
@@ -217,12 +229,15 @@ def wire_usdz_references(
             candidate = glb_path.with_suffix(".usdz")
             if candidate.exists():
                 usdz_path = candidate
-        
+
         if not usdz_path:
-            # Check standard location
-            candidate = root / assets_prefix / f"obj_{oid}" / "asset.usdz"
-            if candidate.exists():
-                usdz_path = candidate
+            # Check standard locations with multiple candidate names
+            obj_dir = root / assets_prefix / f"obj_{oid}"
+            for candidate_name in ["asset.usdz", "model.usdz", "mesh.usdz"]:
+                candidate = obj_dir / candidate_name
+                if candidate.exists():
+                    usdz_path = candidate
+                    break
 
         if not usdz_path:
             print(f"[WARN] No USDZ found for obj_{oid}")
