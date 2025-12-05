@@ -278,12 +278,12 @@ main:
         raise: ${errorMsg}
 
     - done:
-      return:
-        status: "SUCCESS"
-        scene_id: ${sceneId}
-        message: '${"USD assembly completed successfully for scene " + sceneId}'
-        convert_execution: ${convertExec.name}
-        usd_execution: ${usdExec.name}
+        return:
+          status: "SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"USD assembly completed successfully for scene " + sceneId}'
+          convert_execution: ${convertExec.name}
+          usd_execution: ${usdExec.name}
 
     - skip_not_ready:
         return:
