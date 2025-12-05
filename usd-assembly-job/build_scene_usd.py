@@ -774,19 +774,75 @@ def build_scene(
     Returns:
         Tuple of (stage, objects_list) for further processing
     """
-    # Load input files
-    layout = load_json(layout_path)
+    def _has_spatial_data(layout_json: Dict[str, Any]) -> bool:
+        return any(
+            obj.get("obb") is not None or obj.get("center3d") is not None
+            for obj in layout_json.get("objects", [])
+        )
 
-    # Optional fallback to the unscaled layout if scaled layout is missing
-    # spatial data (seen in some pipelines where only the scaled file exists
-    # but the object list was emptied by a downstream step).
-    fallback_layout_path = layout_path.with_name("scene_layout.json")
-    fallback_layout: Dict[str, Any] = {}
-    if fallback_layout_path != layout_path and fallback_layout_path.is_file():
+    # Load input files
+    primary_layout = load_json(layout_path)
+    layout = primary_layout
+
+    # Discover candidate layouts for fallback if the scaled layout lacks spatial
+    # data. Preference order:
+    #   1. scene_layout_scaled.json (primary)
+    #   2. scene_layout.json in the same prefix
+    #   3. DA3 layout path (../layout/scene_layout.json)
+    fallback_layouts: List[Tuple[Path, Dict[str, Any]]] = []
+
+    same_prefix_fallback = layout_path.with_name("scene_layout.json")
+    if same_prefix_fallback != layout_path and same_prefix_fallback.is_file():
         try:
-            fallback_layout = load_json(fallback_layout_path)
+            fallback_layouts.append((same_prefix_fallback, load_json(same_prefix_fallback)))
         except Exception:
-            fallback_layout = {}
+            pass
+
+    da3_layout_path = layout_path.parent.parent / "layout" / "scene_layout.json"
+    if da3_layout_path not in {layout_path, same_prefix_fallback} and da3_layout_path.is_file():
+        try:
+            fallback_layouts.append((da3_layout_path, load_json(da3_layout_path)))
+        except Exception:
+            pass
+
+    layout_used_path = layout_path
+    if not _has_spatial_data(layout):
+        print(
+            f"[USD] WARNING: {layout_path} has no objects with 'obb' or 'center3d'; "
+            "attempting to fall back to DA3 layout outputs"
+        )
+
+        for candidate_path, candidate_layout in fallback_layouts:
+            if _has_spatial_data(candidate_layout):
+                layout = candidate_layout
+                layout_used_path = candidate_path
+                print(
+                    f"[USD] Using layout from {candidate_path} because the scaled layout "
+                    "was missing spatial data"
+                )
+                break
+
+    if not _has_spatial_data(layout):
+        tried_paths = [str(layout_path)] + [str(p) for p, _ in fallback_layouts]
+        raise RuntimeError(
+            "No spatial data (obb/center3d) found in any layout. "
+            f"Checked: {', '.join(tried_paths)}. "
+            "Verify DA3 layout generation (scene_layout.json) and scale outputs "
+            "before assembling USD."
+        )
+
+    if layout_used_path != layout_path:
+        print(f"[USD] Layout override: using {layout_used_path}")
+    else:
+        print(f"[USD] Using scaled layout at {layout_used_path}")
+
+    if layout_used_path != layout_path:
+        fallback_layout: Dict[str, Any] = primary_layout
+    else:
+        fallback_layout = next(
+            (data for path, data in fallback_layouts if path != layout_used_path),
+            {},
+        )
     scene_assets = load_json(assets_path)
 
     # Extract data
