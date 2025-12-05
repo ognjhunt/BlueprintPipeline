@@ -668,6 +668,10 @@ class SceneBuilder:
         obj_xform.MakeMatrixXform().Set(numpy_to_gf_matrix(xform))
         if applied:
             print(f"[USD] obj_{oid}: applied transform")
+        else:
+            print(
+                f"[USD] obj_{oid}: no spatial data found; left at origin (check layout merge)"
+            )
 
         # Mesh metadata
         if metadata:
@@ -709,8 +713,28 @@ class SceneBuilder:
             geom_prim.GetReferences().AddReference(usdz_rel, primPath=Sdf.Path("/Root"))
             print(f"[USD] obj_{oid}: referenced {usdz_rel}")
         else:
-            # No USDZ found - record pending conversion info
-            if asset_path and (asset_path.endswith(".glb") or asset_path.endswith(".gltf")):
+            # No USDZ found - try to discover a GLB candidate so we can flag it
+            # for conversion in the wiring phase. This catches assets where the
+            # GLB exists (model.glb/mesh.glb/etc.) but the USDZ was never
+            # produced, which previously left the prim with no geometry.
+            obj_dir = self.root / self.assets_prefix / f"obj_{oid}"
+            glb_candidates = [
+                obj_dir / "asset.glb",
+                obj_dir / "model.glb",
+                obj_dir / "mesh.glb",
+            ]
+            existing_glb = next((p for p in glb_candidates if p.exists()), None)
+
+            if existing_glb:
+                # Update asset_path so downstream conversion can pick it up even
+                # if the original asset_path was missing or pointed elsewhere.
+                rel_glb = str(existing_glb.relative_to(self.root)).replace("\\", "/")
+                prim.CreateAttribute("asset_path", Sdf.ValueTypeNames.String).Set(rel_glb)
+                prim.CreateAttribute("pendingConversion", Sdf.ValueTypeNames.Bool).Set(True)
+                print(
+                    f"[USD] obj_{oid}: missing USDZ, queued GLB for conversion ({rel_glb})"
+                )
+            elif asset_path and (asset_path.endswith(".glb") or asset_path.endswith(".gltf")):
                 prim.CreateAttribute("pendingConversion", Sdf.ValueTypeNames.Bool).Set(True)
                 print(f"[USD] obj_{oid}: marked for GLB->USDZ conversion ({asset_path})")
 
@@ -767,7 +791,11 @@ def build_scene(
         if not isinstance(oid, str):
             layout_objects[str(oid)] = o
 
-    # Merge objects from assets with layout data
+    # Merge objects from assets with layout data so downstream logic always
+    # sees the spatial information produced by DA3/scale jobs. This merged
+    # list is passed to the builder below instead of the raw assets list to
+    # avoid dropping transforms when the IDs match but the assets.json entry
+    # doesn't carry spatial fields.
     objects: List[Dict] = []
     for obj in scene_assets.get("objects", []):
         merged = dict(obj)
@@ -795,7 +823,7 @@ def build_scene(
     else:
         print("[USD] WARNING: No room_box data in layout, skipping scene shell geometry")
 
-    builder.add_objects(scene_assets.get("objects", []), layout_objects, room_box)
+    builder.add_objects(objects, layout_objects, room_box)
 
     # Save stage
     stage.GetRootLayer().Save()
