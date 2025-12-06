@@ -96,6 +96,111 @@ def matrix_from_obb(obb: Dict) -> Optional[np.ndarray]:
     return T
 
 
+def approx_location_to_coords(
+    approx_loc: str, index: int, room_box: Optional[Dict], total_objects: int = 1
+) -> Tuple[float, float, float]:
+    """
+    Convert approx_location strings (e.g., "top left", "middle center") to 3D coordinates.
+
+    Uses the room_box if available, otherwise defaults to a 10m x 3m x 10m room.
+    Returns (x, y, z) world coordinates.
+    """
+    # Determine room bounds
+    if room_box:
+        min_pt = room_box.get("min", [-5, 0, -5])
+        max_pt = room_box.get("max", [5, 3, 5])
+    else:
+        min_pt = [-5, 0, -5]
+        max_pt = [5, 3, 5]
+
+    x_min, y_min, z_min = min_pt
+    x_max, y_max, z_max = max_pt
+    x_range = x_max - x_min
+    z_range = z_max - z_min
+
+    # Default: center of room at floor level
+    x = (x_min + x_max) / 2
+    y = y_min  # Place objects on floor
+    z = (z_min + z_max) / 2
+
+    if not approx_loc:
+        # Grid fallback: distribute objects evenly
+        grid_cols = max(1, int(np.ceil(np.sqrt(total_objects))))
+        row = index // grid_cols
+        col = index % grid_cols
+        margin = 0.15
+        x = x_min + margin * x_range + (col + 0.5) * (x_range * (1 - 2 * margin)) / grid_cols
+        z = z_min + margin * z_range + (row + 0.5) * (z_range * (1 - 2 * margin)) / grid_cols
+        return (x, y, z)
+
+    loc_lower = approx_loc.lower().strip()
+
+    # Horizontal mapping (X axis)
+    if "left" in loc_lower:
+        x = x_min + 0.25 * x_range
+    elif "right" in loc_lower:
+        x = x_min + 0.75 * x_range
+    else:  # center or default
+        x = (x_min + x_max) / 2
+
+    # Depth mapping (Z axis) - "top" = far, "bottom" = near
+    if "top" in loc_lower:
+        z = z_min + 0.75 * z_range
+    elif "bottom" in loc_lower:
+        z = z_min + 0.25 * z_range
+    else:  # middle or default
+        z = (z_min + z_max) / 2
+
+    # Add small offset based on index to prevent overlapping
+    offset = 0.3 * (index % 5)
+    x += offset
+    z += offset * 0.5
+
+    return (x, y, z)
+
+
+def generate_synthetic_spatial_data(
+    objects: List[Dict], room_box: Optional[Dict]
+) -> Dict[str, Dict]:
+    """
+    Generate synthetic OBB/center3d data for objects without spatial information.
+
+    Uses approx_location if available, otherwise distributes objects in a grid.
+    Returns a dict mapping object ID to synthetic spatial data.
+    """
+    synthetic = {}
+    total = len(objects)
+
+    for idx, obj in enumerate(objects):
+        oid = obj.get("id")
+        if oid is None:
+            continue
+
+        # Skip if object already has spatial data
+        if obj.get("obb") or obj.get("center3d"):
+            continue
+
+        approx_loc = obj.get("approx_location", "")
+        x, y, z = approx_location_to_coords(approx_loc, idx, room_box, total)
+
+        # Default extents (will be refined by mesh metadata if available)
+        default_extents = [0.25, 0.25, 0.25]
+
+        synthetic[oid] = {
+            "center3d": [x, y + default_extents[1], z],  # Raise to half-height
+            "obb": {
+                "center": [x, y + default_extents[1], z],
+                "extents": default_extents,
+                "R": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],  # Identity rotation
+            },
+            "synthetic": True,  # Flag for downstream processing
+            "approx_location": approx_loc,
+        }
+        print(f"[USD] obj_{oid}: generated synthetic position from approx_location='{approx_loc}' -> ({x:.2f}, {y:.2f}, {z:.2f})")
+
+    return synthetic
+
+
 def numpy_to_gf_matrix(m: np.ndarray) -> Gf.Matrix4d:
     """Convert a numpy 4x4 matrix to Gf.Matrix4d."""
     m = np.array(m, dtype=np.float64).reshape(4, 4)
@@ -822,14 +927,17 @@ def build_scene(
                 )
                 break
 
+    # Flag to track if we need to generate synthetic positions
+    using_synthetic_positions = False
+
     if not _has_spatial_data(layout):
         tried_paths = [str(layout_path)] + [str(p) for p, _ in fallback_layouts]
-        raise RuntimeError(
-            "No spatial data (obb/center3d) found in any layout. "
+        print(
+            f"[USD] WARNING: No spatial data (obb/center3d) found in any layout. "
             f"Checked: {', '.join(tried_paths)}. "
-            "Verify DA3 layout generation (scene_layout.json) and scale outputs "
-            "before assembling USD."
+            "Will generate synthetic positions from approx_location or grid layout."
         )
+        using_synthetic_positions = True
 
     if layout_used_path != layout_path:
         print(f"[USD] Layout override: using {layout_used_path}")
@@ -929,10 +1037,21 @@ def build_scene(
                 merged["layout_match_source"] = layout_obj.get("id")
 
         if layout_obj:
-            for key in ("obb", "center3d", "center", "bounds", "scale"):
+            for key in ("obb", "center3d", "center", "bounds", "scale", "approx_location"):
                 if key in layout_obj:
                     merged[key] = layout_obj[key]
         objects.append(merged)
+
+    # Generate synthetic spatial data for objects without obb/center3d
+    if using_synthetic_positions:
+        synthetic_data = generate_synthetic_spatial_data(objects, room_box or None)
+        for obj in objects:
+            oid = obj.get("id")
+            if oid and oid in synthetic_data:
+                synth = synthetic_data[oid]
+                for key in ("obb", "center3d", "synthetic", "approx_location"):
+                    if key in synth:
+                        obj[key] = synth[key]
 
     # Create stage
     ensure_dir(output_path.parent)

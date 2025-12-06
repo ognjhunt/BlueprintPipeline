@@ -84,11 +84,16 @@ def main():
                 "sim_role": obj.get("sim_role", ""),
             }
 
+            # Carry forward approx_location for synthetic position generation
+            approx_loc = obj.get("approx_location")
+            if approx_loc:
+                new_obj["approx_location"] = approx_loc
+
             # MERGE: Preserve spatial data from existing layout object
             existing_obj = existing_objects_by_id.get(obj_id) or existing_objects_by_id.get(str(obj_id))
             if existing_obj:
                 # Preserve critical spatial keys
-                spatial_keys = ["obb", "center3d", "center", "bounds", "scale"]
+                spatial_keys = ["obb", "center3d", "center", "bounds", "scale", "approx_location"]
                 for key in spatial_keys:
                     if key in existing_obj:
                         new_obj[key] = existing_obj[key]
@@ -113,7 +118,7 @@ def main():
         # Also preserve any existing spatial data for scene_background
         existing_bg = existing_objects_by_id.get("scene_background")
         if existing_bg:
-            for key in ["obb", "center3d", "center", "bounds", "scale"]:
+            for key in ["obb", "center3d", "center", "bounds", "scale", "approx_location"]:
                 if key in existing_bg:
                     scene_bg_obj[key] = existing_bg[key]
         objects.append(scene_bg_obj)
