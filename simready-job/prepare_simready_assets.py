@@ -169,12 +169,17 @@ def extract_obb_bounds_from_obj(obj: Dict[str, Any]) -> Tuple[Optional[List[floa
     return size, center
 
 
-def compute_bounds(obj: Dict[str, Any], metadata: Optional[dict]) -> Dict[str, Any]:
+def compute_bounds(
+    obj: Dict[str, Any],
+    metadata: Optional[dict],
+    gemini_estimated_size: Optional[List[float]] = None,
+) -> Dict[str, Any]:
     """
     Compute a usable axis-aligned bounds estimate in meters:
       - prefer metadata mesh_bounds
       - fallback to obj.obb
-      - else default
+      - fallback to gemini_estimated_size (if provided)
+      - else default 10cm cube
     """
     size, center = extract_mesh_bounds_from_metadata(metadata)
     source = "metadata"
@@ -184,6 +189,10 @@ def compute_bounds(obj: Dict[str, Any], metadata: Optional[dict]) -> Dict[str, A
         if size2 is not None:
             size, center = size2, center2
             source = "obb"
+
+    if size is None and gemini_estimated_size is not None:
+        size = gemini_estimated_size
+        source = "gemini_estimated"
 
     if size is None:
         size = [0.10, 0.10, 0.10]  # 10cm cube fallback
@@ -411,6 +420,158 @@ Object info (cropped to relevant fields):
 
 def have_gemini() -> bool:
     return genai is not None and types is not None and bool(os.getenv("GEMINI_API_KEY"))
+
+
+def load_multiview_images_for_gemini(
+    root: Path, obj: Dict[str, Any], max_views: int = 4
+) -> List["Image.Image"]:
+    """
+    Load multiple view images from the multiview directory for better dimension estimation.
+    Returns a list of PIL images (up to max_views).
+    """
+    images: List["Image.Image"] = []
+    mv_rel = obj.get("multiview_dir")
+    if not isinstance(mv_rel, str):
+        return images
+
+    mv_dir = safe_path_join(root, mv_rel)
+    if not mv_dir.is_dir():
+        return images
+
+    # Try to load views 0-3 (front, side, back, top typically)
+    for i in range(max_views):
+        view_path = mv_dir / f"view_{i}.png"
+        if view_path.is_file():
+            img = load_image_for_gemini(view_path)
+            if img is not None:
+                images.append(img)
+
+    return images
+
+
+def make_dimension_estimation_prompt(obj: Dict[str, Any], has_multiple_views: bool = False) -> str:
+    """
+    Create a prompt for Gemini to estimate real-world dimensions of an object from images.
+    """
+    obj_desc = _compact_obj_description(obj)
+
+    if has_multiple_views:
+        image_context = (
+            "You are provided with MULTIPLE VIEWS of the same 3D object. "
+            "Use all views together to estimate the real-world dimensions more accurately. "
+            "The views typically include front, side, and other angles."
+        )
+    else:
+        image_context = (
+            "You are provided with a single image of a 3D object. "
+            "Estimate its real-world dimensions based on visual appearance."
+        )
+
+    prompt = f"""
+You are an expert at estimating real-world dimensions of objects from images.
+
+{image_context}
+
+Your task is to estimate the REAL-WORLD physical dimensions (width, height, depth) of the object in METERS.
+
+Important guidelines:
+- Think about what this object actually is and what its typical real-world size would be.
+- Consider common reference objects: a book is typically 0.15-0.30m tall, a chair seat is ~0.45m high,
+  a coffee mug is ~0.10m tall, a dining table is ~0.75m high and 1.0-2.0m wide.
+- For objects like furniture, appliances, or decor items, use your knowledge of typical real-world sizes.
+- The dimensions should represent the axis-aligned bounding box of the object.
+
+Object metadata (for context):
+{json.dumps(obj_desc, indent=2)}
+
+Return ONLY valid JSON (no markdown, no comments, no extra text) with this exact structure:
+{{
+    "width_m": <float>,
+    "height_m": <float>,
+    "depth_m": <float>,
+    "confidence": "<low|medium|high>",
+    "reasoning": "<brief explanation of how you determined the size>"
+}}
+
+Where:
+- width_m: extent along X axis (left-right)
+- height_m: extent along Y axis (up-down)
+- depth_m: extent along Z axis (front-back)
+- All values in meters (e.g., 0.30 for 30cm)
+"""
+    return prompt
+
+
+def call_gemini_for_dimensions(
+    client: "genai.Client",
+    obj: Dict[str, Any],
+    images: List["Image.Image"],
+) -> Optional[List[float]]:
+    """
+    Ask Gemini to estimate real-world dimensions of an object from images.
+    Returns [width, height, depth] in meters, or None if estimation fails.
+    """
+    if client is None or not images:
+        return None
+
+    prompt = make_dimension_estimation_prompt(obj, has_multiple_views=len(images) > 1)
+
+    try:
+        model_name = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+
+        cfg_kwargs: Dict[str, Any] = {
+            "response_mime_type": "application/json",
+        }
+
+        # Enable grounding for Gemini 3.x models
+        grounding_enabled = os.getenv("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
+        if model_name.startswith("gemini-3") and grounding_enabled:
+            if hasattr(types, "GroundingConfig") and hasattr(types, "GoogleSearch"):
+                cfg_kwargs["grounding"] = types.GroundingConfig(
+                    google_search=types.GoogleSearch()
+                )
+
+        try:
+            config = types.GenerateContentConfig(**cfg_kwargs)
+        except Exception:
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+            )
+
+        # Build content: images first, then prompt
+        contents = list(images) + [prompt]
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=config,
+        )
+
+        raw = _strip_code_fences(response.text or "")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("Gemini response was not a JSON object")
+
+        width = float(data.get("width_m", 0))
+        height = float(data.get("height_m", 0))
+        depth = float(data.get("depth_m", 0))
+        confidence = data.get("confidence", "low")
+        reasoning = data.get("reasoning", "")
+
+        # Sanity checks: dimensions should be reasonable (1mm to 10m)
+        if not (0.001 <= width <= 10.0 and 0.001 <= height <= 10.0 and 0.001 <= depth <= 10.0):
+            print(f"[SIMREADY] WARNING: Gemini dimension estimate out of range: {width}x{height}x{depth}m", file=sys.stderr)
+            return None
+
+        print(f"[SIMREADY] Gemini estimated dimensions: {width:.3f}x{height:.3f}x{depth:.3f}m (confidence: {confidence})")
+        if reasoning:
+            print(f"[SIMREADY]   Reasoning: {reasoning[:200]}")
+
+        return [width, height, depth]
+
+    except Exception as e:
+        print(f"[SIMREADY] WARNING: Gemini dimension estimation failed: {e}", file=sys.stderr)
+        return None
 
 
 def _strip_code_fences(s: str) -> str:
@@ -850,7 +1011,28 @@ def main() -> None:
 
         visual_path, visual_rel = visual
         obj_metadata = load_object_metadata(GCS_ROOT, obj, assets_prefix)
-        bounds = compute_bounds(obj, obj_metadata)
+
+        # Check if we need Gemini to estimate dimensions (when metadata/OBB unavailable)
+        gemini_estimated_size: Optional[List[float]] = None
+        size_from_meta, _ = extract_mesh_bounds_from_metadata(obj_metadata)
+        size_from_obb, _ = extract_obb_bounds_from_obj(obj)
+
+        if size_from_meta is None and size_from_obb is None and client is not None:
+            # Load multiview images for better dimension estimation
+            multiview_images = load_multiview_images_for_gemini(assets_root, obj)
+            if multiview_images:
+                print(f"[SIMREADY] No metadata/OBB bounds for obj {oid}; using Gemini to estimate dimensions from {len(multiview_images)} views")
+                gemini_estimated_size = call_gemini_for_dimensions(client, obj, multiview_images)
+            else:
+                # Try single reference image as fallback
+                reference_image_path = choose_reference_image_path(assets_root, obj)
+                if reference_image_path:
+                    single_img = load_image_for_gemini(reference_image_path)
+                    if single_img:
+                        print(f"[SIMREADY] No metadata/OBB bounds for obj {oid}; using Gemini to estimate dimensions from single image")
+                        gemini_estimated_size = call_gemini_for_dimensions(client, obj, [single_img])
+
+        bounds = compute_bounds(obj, obj_metadata, gemini_estimated_size)
 
         reference_image = None
         reference_image_path = choose_reference_image_path(assets_root, obj)
