@@ -381,6 +381,77 @@ Ensure these are set:
 
 ---
 
+## Replicator Bundle Generation
+
+After USD assembly completes, the pipeline automatically generates an **NVIDIA Replicator bundle** for synthetic data generation and domain randomization in Isaac Sim.
+
+### What is the Replicator Job?
+
+The `replicator-job` analyzes the completed scene and generates:
+
+1. **Placement Regions** (`placement_regions.usda`): USD layer defining where objects can spawn
+2. **Policy-Specific Scripts** (`policies/*.py`): Ready-to-run Replicator Python scripts
+3. **Variation Asset Manifests** (`variation_assets/manifest.json`): Additional assets needed
+4. **Configuration Files** (`configs/*.json`): Customizable policy parameters
+
+### Supported Environments & Policies
+
+| Environment | Default Policies |
+|------------|------------------|
+| Kitchen | dish_loading, table_clearing, articulated_access, drawer_manipulation |
+| Grocery | grocery_stocking, mixed_sku_logistics, articulated_access |
+| Warehouse | mixed_sku_logistics, dexterous_pick_place |
+| Lab | precision_insertion, dexterous_pick_place, drawer_manipulation |
+| Home Laundry | laundry_sorting, door_manipulation, knob_manipulation |
+| Office | drawer_manipulation, panel_interaction |
+| Utility Room | panel_interaction, knob_manipulation |
+
+### Output Structure
+
+```
+scenes/<scene_id>/replicator/
+├── replicator_master.py          # Main entry point
+├── placement_regions.usda        # USD layer with placement surfaces
+├── bundle_metadata.json          # Scene and policy information
+├── policies/                     # Policy-specific scripts
+│   ├── dish_loading.py
+│   └── ...
+├── configs/                      # Policy configurations
+│   └── dish_loading.json
+└── variation_assets/
+    └── manifest.json             # Asset requirements
+```
+
+### Using in Isaac Sim
+
+```python
+from replicator_master import ReplicatorManager
+
+manager = ReplicatorManager()
+manager.list_policies()  # See available policies
+manager.run_policy("dish_loading", num_frames=500)
+```
+
+### Deployment
+
+```bash
+# Build and push replicator-job
+cd replicator-job
+docker build -t gcr.io/${PROJECT_ID}/replicator-job:latest .
+docker push gcr.io/${PROJECT_ID}/replicator-job:latest
+
+# Create Cloud Run job
+gcloud run jobs create replicator-job \
+  --image=gcr.io/${PROJECT_ID}/replicator-job:latest \
+  --region=us-central1 \
+  --memory=2Gi \
+  --set-env-vars="GEMINI_API_KEY=${GEMINI_API_KEY}"
+```
+
+See `replicator-job/README.md` for full documentation.
+
+---
+
 ## Future Enhancements
 
 Potential improvements to the Gemini pipeline:
@@ -390,6 +461,7 @@ Potential improvements to the Gemini pipeline:
 3. **Batch API calls**: Process multiple objects per API call for efficiency
 4. **Prompt optimization**: Fine-tune prompts based on object categories
 5. **Quality validation**: Automatically validate generated objects meet criteria
+6. **Replicator asset generation**: Auto-generate variation assets using the pipeline
 
 ---
 
