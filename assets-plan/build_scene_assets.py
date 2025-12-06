@@ -170,6 +170,7 @@ def main():
         cls = obj.get("class_name", f"class_{obj.get('class_id', 0)}")
         phrase = obj.get("object_phrase")  # optional future field
         sim_role = obj.get("sim_role")  # from Gemini inventory
+        approx_location = obj.get("approx_location")  # from Gemini inventory
 
         mv_dir = multiview_root / f"obj_{oid}"
 
@@ -199,6 +200,9 @@ def main():
             "crop_path": f"{multiview_prefix}/obj_{oid}/{image_filename}",
             "polygon": obj.get("polygon"),
         }
+        # Carry forward approx_location for synthetic position generation
+        if approx_location:
+            entry["approx_location"] = approx_location
         if obj_type == "interactive":
             entry["interactive_output"] = f"{assets_prefix}/interactive/obj_{oid}"
             if physx_endpoint:

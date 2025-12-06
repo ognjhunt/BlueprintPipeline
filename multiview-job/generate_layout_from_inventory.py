@@ -30,13 +30,18 @@ def create_layout_from_inventory(
             obj_id = obj.get("id")
             category = obj.get("category", "object")
 
-            objects.append({
+            entry = {
                 "id": obj_id,
                 "class_name": category,
                 "class_id": 0,  # Generic class ID
                 "short_description": obj.get("short_description", ""),
                 "sim_role": obj.get("sim_role", ""),
-            })
+            }
+            # Carry forward approx_location for synthetic position generation
+            approx_loc = obj.get("approx_location")
+            if approx_loc:
+                entry["approx_location"] = approx_loc
+            objects.append(entry)
 
     # Add scene background as a special object
     background_objects = [
