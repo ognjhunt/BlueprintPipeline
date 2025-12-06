@@ -103,6 +103,7 @@ Return ONLY this JSON:
       "sim_role": "scene_shell" | "static_furniture" | "articulated_furniture" | "articulated_appliance" | "static_appliance" | "manipulable_object" | "ignore_for_sim",
       "must_be_separate_asset": true | false,
       "short_description": "5-15 word description",
+      "bbox": [ymin, xmin, ymax, xmax],
       "articulation_hint": "description of moving parts (if applicable)",
       "approx_location": "top left" | "middle center" | "bottom right" | etc.,
       "relationships": ["above X", "on Y", "left of Z", ...],
@@ -110,6 +111,16 @@ Return ONLY this JSON:
     }
   ]
 }
+
+## Bounding Box (bbox)
+
+For each object, provide a bounding box as [ymin, xmin, ymax, xmax] with values from 0 to 1000:
+- ymin: top edge of the bounding box (0 = top of image, 1000 = bottom)
+- xmin: left edge of the bounding box (0 = left of image, 1000 = right)
+- ymax: bottom edge of the bounding box
+- xmax: right edge of the bounding box
+
+The bbox should tightly enclose the visible portion of the object. For scene_shell objects (walls, floor, ceiling), you can use approximate bounds covering the relevant area.
 
 ## Granularity Rules
 
@@ -258,6 +269,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "scene_shell",
       "must_be_separate_asset": false,
       "short_description": "Kitchen walls with white paint",
+      "bbox": [0, 0, 1000, 1000],
       "approx_location": "all around",
       "relationships": []
     },
@@ -267,6 +279,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "scene_shell",
       "must_be_separate_asset": false,
       "short_description": "Light wood laminate flooring",
+      "bbox": [800, 0, 1000, 1000],
       "approx_location": "bottom",
       "relationships": []
     },
@@ -276,6 +289,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "static_furniture",
       "must_be_separate_asset": false,
       "short_description": "L-shaped wooden countertop surface",
+      "bbox": [450, 100, 550, 700],
       "approx_location": "middle center",
       "relationships": ["above lower_cabinet_left"]
     },
@@ -285,6 +299,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "articulated_furniture",
       "must_be_separate_asset": true,
       "short_description": "White upper cabinet with 2 hinged doors and black handles",
+      "bbox": [100, 50, 400, 350],
       "articulation_hint": "2 hinged doors",
       "approx_location": "top left",
       "relationships": ["above countertop"],
@@ -296,6 +311,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "articulated_furniture",
       "must_be_separate_asset": true,
       "short_description": "White lower cabinet with 2 doors and 3 drawers with black handles",
+      "bbox": [550, 50, 900, 350],
       "articulation_hint": "2 hinged doors and 3 drawers",
       "approx_location": "middle left",
       "relationships": ["below countertop"],
@@ -307,6 +323,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "articulated_appliance",
       "must_be_separate_asset": true,
       "short_description": "Tall white built-in refrigerator with flat panel doors",
+      "bbox": [100, 700, 900, 950],
       "articulation_hint": "main door and freezer drawer",
       "approx_location": "middle right",
       "relationships": ["right of upper_cabinet_left"]
@@ -317,6 +334,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "articulated_appliance",
       "must_be_separate_asset": true,
       "short_description": "Black built-in oven with glass window door",
+      "bbox": [550, 400, 850, 600],
       "articulation_hint": "oven door",
       "approx_location": "middle center",
       "relationships": ["below countertop"]
@@ -327,6 +345,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "static_appliance",
       "must_be_separate_asset": true,
       "short_description": "Black 4-burner electric stovetop",
+      "bbox": [430, 400, 530, 600],
       "approx_location": "middle center",
       "relationships": ["on countertop", "above oven_1"]
     },
@@ -336,6 +355,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "manipulable_object",
       "must_be_separate_asset": true,
       "short_description": "Stainless steel electric kettle",
+      "bbox": [380, 200, 450, 280],
       "approx_location": "middle center",
       "relationships": ["on countertop"]
     },
@@ -345,6 +365,7 @@ For a kitchen with upper cabinets (2 doors), lower cabinets (2 doors + 3 drawers
       "sim_role": "manipulable_object",
       "must_be_separate_asset": true,
       "short_description": "Small potted succulent in white ceramic pot",
+      "bbox": [80, 850, 150, 920],
       "approx_location": "top right",
       "relationships": ["on upper_cabinet_left"]
     }
