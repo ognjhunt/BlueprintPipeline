@@ -5,6 +5,7 @@
 #   2. Runs usd-assembly-job in CONVERT_ONLY mode to convert GLB->USDZ before simready
 #   3. Runs simready-job to prepare simulation-ready assets (now sees USD-compatible files)
 #   4. Runs usd-assembly-job to build scene.usda
+#   5. Runs replicator-job to generate Replicator bundle for Isaac Sim domain randomization
 #
 # Trigger: Cloud Storage object finalized event for .hunyuan_complete
 
@@ -36,10 +37,13 @@ main:
         assign:
           - parts: '${text.split(object, "/")}'
           - sceneId: ${parts[1]}
+          - segPrefix: '${"scenes/" + sceneId + "/seg"}'
           - layoutPrefix: '${"scenes/" + sceneId + "/layout"}'
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
+          - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
           - usdJobName: "usd-assembly-job"
+          - replicatorJobName: "replicator-job"
         next: log_start
 
     - log_start:
@@ -258,9 +262,9 @@ main:
     - log_usd_complete:
         call: sys.log
         args:
-          text: '${"USD assembly completed for scene " + sceneId}'
+          text: '${"USD assembly completed for scene " + sceneId + " - starting replicator bundle generation"}'
           severity: "INFO"
-        next: done
+        next: run_replicator_job
 
     - usd_failed:
         assign:
@@ -277,13 +281,107 @@ main:
     - raise_usd_error:
         raise: ${errorMsg}
 
+    # =========================================================================
+    # Replicator Job - Generate domain randomization bundle for Isaac Sim
+    # =========================================================================
+
+    - run_replicator_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + replicatorJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: SEG_PREFIX
+                      value: ${segPrefix}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: USD_PREFIX
+                      value: ${usdPrefix}
+                    - name: REPLICATOR_PREFIX
+                      value: ${replicatorPrefix}
+        result: replicatorExec
+        next: set_replicator_execution_name
+
+    - set_replicator_execution_name:
+        assign:
+          - replicatorExecutionName: '${if(replicatorExec.metadata != null and replicatorExec.metadata.name != null, replicatorExec.metadata.name, replicatorExec.name)}'
+        next: wait_for_replicator
+
+    - wait_for_replicator:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${replicatorExecutionName}
+        result: replicatorStatus
+        next: check_replicator_status
+
+    - check_replicator_status:
+        assign:
+          - replicatorState: '${if(replicatorStatus.state != null, replicatorStatus.state, if(replicatorStatus.status != null, replicatorStatus.status.state, null))}'
+          - replicatorFailedCount: '${if(replicatorStatus.failedCount != null, replicatorStatus.failedCount, if(replicatorStatus.status != null, replicatorStatus.status.failedCount, null))}'
+          - replicatorSucceededCount: '${if(replicatorStatus.succeededCount != null, replicatorStatus.succeededCount, if(replicatorStatus.status != null, replicatorStatus.status.succeededCount, null))}'
+        next: replicator_status_switch
+
+    - replicator_status_switch:
+        switch:
+          - condition: '${replicatorState == "FAILED" or (replicatorFailedCount != null and replicatorFailedCount > 0)}'
+            next: replicator_failed
+          - condition: '${replicatorState == "SUCCEEDED" or (replicatorSucceededCount != null and replicatorSucceededCount > 0)}'
+            next: log_replicator_complete
+        next: wait_replicator_poll
+
+    - wait_replicator_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_replicator
+
+    - log_replicator_complete:
+        call: sys.log
+        args:
+          text: '${"Replicator bundle generation completed for scene " + sceneId}'
+          severity: "INFO"
+        next: done
+
+    - replicator_failed:
+        # Replicator failure is non-fatal - scene is still usable without it
+        call: sys.log
+        args:
+          text: '${"WARNING: Replicator job failed for scene " + sceneId + " - scene.usda is still available but without Replicator scripts"}'
+          severity: "WARNING"
+        next: done_without_replicator
+
+    # =========================================================================
+    # Completion
+    # =========================================================================
+
     - done:
         return:
           status: "SUCCESS"
           scene_id: ${sceneId}
-          message: '${"USD assembly completed successfully for scene " + sceneId}'
+          message: '${"Full pipeline completed for scene " + sceneId + " (USD + Replicator)"}'
           convert_execution: ${convertExec.name}
           usd_execution: ${usdExec.name}
+          replicator_execution: ${replicatorExec.name}
+          outputs:
+            scene_usda: '${"scenes/" + sceneId + "/usd/scene.usda"}'
+            replicator_bundle: '${"scenes/" + sceneId + "/replicator/"}'
+
+    - done_without_replicator:
+        return:
+          status: "PARTIAL_SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"USD assembly completed for scene " + sceneId + " (Replicator generation failed)"}'
+          convert_execution: ${convertExec.name}
+          usd_execution: ${usdExec.name}
+          replicator_execution: ${replicatorExec.name}
+          outputs:
+            scene_usda: '${"scenes/" + sceneId + "/usd/scene.usda"}'
 
     - skip_not_ready:
         return:
