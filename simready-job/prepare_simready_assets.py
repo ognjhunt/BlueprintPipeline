@@ -1019,13 +1019,14 @@ def main() -> None:
 
         if size_from_meta is None and size_from_obb is None and client is not None:
             # Load multiview images for better dimension estimation
-            multiview_images = load_multiview_images_for_gemini(assets_root, obj)
+            # Use GCS_ROOT because multiview_dir paths are relative to the GCS mount point
+            multiview_images = load_multiview_images_for_gemini(GCS_ROOT, obj)
             if multiview_images:
                 print(f"[SIMREADY] No metadata/OBB bounds for obj {oid}; using Gemini to estimate dimensions from {len(multiview_images)} views")
                 gemini_estimated_size = call_gemini_for_dimensions(client, obj, multiview_images)
             else:
                 # Try single reference image as fallback
-                reference_image_path = choose_reference_image_path(assets_root, obj)
+                reference_image_path = choose_reference_image_path(GCS_ROOT, obj)
                 if reference_image_path:
                     single_img = load_image_for_gemini(reference_image_path)
                     if single_img:
@@ -1035,7 +1036,8 @@ def main() -> None:
         bounds = compute_bounds(obj, obj_metadata, gemini_estimated_size)
 
         reference_image = None
-        reference_image_path = choose_reference_image_path(assets_root, obj)
+        # Use GCS_ROOT because multiview_dir/crop_path are relative to the GCS mount point
+        reference_image_path = choose_reference_image_path(GCS_ROOT, obj)
         if reference_image_path:
             reference_image = load_image_for_gemini(reference_image_path)
             if reference_image is not None:
