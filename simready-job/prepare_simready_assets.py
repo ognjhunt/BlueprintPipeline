@@ -242,6 +242,14 @@ GENERIC_FALLBACK: Dict[str, Any] = {
     "dynamic": True,
     "collision_shape": "box",  # box/sphere/capsule
     "material_name": "generic",
+    # New robotics-focused properties
+    "semantic_class": "object",
+    "center_of_mass_offset": [0.0, 0.0, 0.0],  # offset from geometric center
+    "graspable": True,
+    "grasp_regions": [],  # list of {"position": [x,y,z], "type": "pinch|power|wrap", "width_m": float}
+    "contact_offset_m": 0.005,  # PhysX contact detection margin
+    "rest_offset_m": 0.001,  # PhysX rest separation
+    "surface_roughness": 0.5,  # 0=smooth, 1=rough (for tactile simulation)
 }
 
 
@@ -272,6 +280,14 @@ def estimate_default_physics(obj: Dict[str, Any], bounds: Dict[str, Any]) -> Dic
         "restitution": float(GENERIC_FALLBACK["restitution"]),
         "material_name": str(GENERIC_FALLBACK["material_name"]),
         "notes": notes,
+        # Robotics-focused properties
+        "semantic_class": str(GENERIC_FALLBACK["semantic_class"]),
+        "center_of_mass_offset": list(GENERIC_FALLBACK["center_of_mass_offset"]),
+        "graspable": bool(GENERIC_FALLBACK["graspable"]),
+        "grasp_regions": list(GENERIC_FALLBACK["grasp_regions"]),
+        "contact_offset_m": float(GENERIC_FALLBACK["contact_offset_m"]),
+        "rest_offset_m": float(GENERIC_FALLBACK["rest_offset_m"]),
+        "surface_roughness": float(GENERIC_FALLBACK["surface_roughness"]),
     }
 
 
@@ -373,10 +389,17 @@ def make_gemini_prompt(
         "restitution": 0.1,
         "material_name": "generic",
         "notes": "",
+        # Robotics-focused properties
+        "semantic_class": "object",  # e.g. container, tool, food, electronics, furniture, toy, clothing, book, kitchenware
+        "center_of_mass_offset": [0.0, 0.0, 0.0],  # offset from geometric center in meters [x, y, z]
+        "graspable": True,  # can a robot gripper pick this up?
+        "grasp_regions": [],  # list of grasp points: [{"position": [x,y,z], "type": "pinch|power|wrap", "width_m": 0.05}]
+        "surface_roughness": 0.5,  # 0.0=glass-smooth, 1.0=sandpaper-rough (affects tactile sensing)
     }
 
     prompt = f"""
 You are configuring physics for USD assets to be simulated in NVIDIA Isaac Sim (PhysX / USD Physics).
+These assets will be used by ROBOTICS COMPANIES for manipulation training, so accuracy matters.
 
 {image_context}
 
@@ -400,12 +423,43 @@ Important implementation notes (affect what "realistic" means here):
 - Static friction is usually >= dynamic friction. Most household objects have low restitution (~0.0-0.2).
 - Collision shape: choose "box" for blocky/general shapes, "sphere" for near-spherical, "capsule" for elongated.
 
+### ROBOTICS-SPECIFIC GUIDANCE (critical for manipulation tasks):
+
+1. **semantic_class**: Choose the most specific applicable category:
+   - container, tool, food, electronics, furniture, toy, clothing, book, kitchenware,
+   - bottle, can, box, bag, utensil, appliance, decoration, plant, sporting_goods, office_supply
+
+2. **center_of_mass_offset**: Offset from geometric center in meters [x, y, z].
+   - For uniform objects: [0, 0, 0]
+   - For objects heavier at bottom (e.g., bottles, vases): negative Y offset like [0, -0.02, 0]
+   - For objects with asymmetric mass (e.g., hammer): offset toward heavy end
+   - Consider: filled containers have CoM based on contents, not shell
+
+3. **graspable**: Can a parallel-jaw or suction gripper pick this up?
+   - False for: very large furniture, fixtures, things bolted down
+   - True for: most household objects under ~20kg
+
+4. **grasp_regions**: Suggest 1-3 good grasp locations relative to object center.
+   Each region: {{"position": [x, y, z], "type": "pinch|power|wrap", "width_m": <gripper_opening>}}
+   - pinch: precision grip with fingertips (small objects, edges)
+   - power: full-hand cylindrical grip (handles, bottles)
+   - wrap: enveloping grip (irregular shapes)
+   - width_m: required gripper opening in meters (0.02-0.15 typical)
+   - For simple objects, one central grasp is fine. For tools/handles, suggest multiple.
+
+5. **surface_roughness**: 0.0 (glass-smooth) to 1.0 (sandpaper-rough)
+   - Polished metal/glass: 0.1-0.2
+   - Painted/coated plastic: 0.3-0.4
+   - Bare wood: 0.5-0.6
+   - Textured rubber/fabric: 0.7-0.9
+
 CRITICAL:
 - Do NOT return generic placeholder values.
 - Make mass_kg plausible for this object *at this scale*.
 - If you output both mass_kg and bulk_density_kg_per_m3, they should approximately agree with:
     mass_kg ≈ bulk_density_kg_per_m3 * approx_volume_m3
   (within a few times is fine because bounds include air/voids).
+- For grasp_regions, be SPECIFIC about where on this particular object a robot should grip.
 
 Return ONLY valid JSON (no markdown, no comments, no extra text) matching this structure:
 
@@ -759,6 +813,103 @@ def call_gemini_for_object(
         extra = f"gemini_estimated; volume={volume:.6f} m^3; eff_bulk_density={merged['bulk_density_kg_per_m3']:.1f} kg/m^3"
         merged["notes"] = (notes + " | " + extra).strip(" |")
 
+        # ========== ROBOTICS-FOCUSED PROPERTIES ==========
+
+        # Get size for validation bounds
+        size_m = list(bounds.get("size_m") or [0.1, 0.1, 0.1])
+
+        # Semantic class
+        semantic_class = _get_str(
+            ["semantic_class", "semanticClass", "category", "object_type"],
+            str(merged.get("semantic_class", "object"))
+        ).lower().replace(" ", "_")
+        # Validate against known classes
+        valid_classes = {
+            "object", "container", "tool", "food", "electronics", "furniture",
+            "toy", "clothing", "book", "kitchenware", "bottle", "can", "box",
+            "bag", "utensil", "appliance", "decoration", "plant", "sporting_goods",
+            "office_supply", "hygiene", "cleaning", "storage", "hardware"
+        }
+        if semantic_class not in valid_classes:
+            semantic_class = "object"
+        merged["semantic_class"] = semantic_class
+
+        # Center of mass offset
+        def _get_float_list(keys: List[str], default: List[float], n: int = 3) -> List[float]:
+            for k in keys:
+                if k in data:
+                    val = data[k]
+                    if isinstance(val, (list, tuple)) and len(val) == n:
+                        try:
+                            return [float(x) for x in val]
+                        except Exception:
+                            pass
+            return list(default)
+
+        com_offset = _get_float_list(
+            ["center_of_mass_offset", "centerOfMassOffset", "com_offset"],
+            merged.get("center_of_mass_offset", [0.0, 0.0, 0.0])
+        )
+        # Clamp CoM offset to reasonable range (within half the object size)
+        max_offset = max(size_m) * 0.5 if size_m else 0.1
+        com_offset = [_clamp(v, -max_offset, max_offset) for v in com_offset]
+        merged["center_of_mass_offset"] = com_offset
+
+        # Graspable flag
+        merged["graspable"] = _get_bool(
+            ["graspable", "is_graspable", "pickable"],
+            bool(merged.get("graspable", True))
+        )
+        # Auto-set graspable=False for very heavy objects
+        if merged["mass_kg"] > 25.0:
+            merged["graspable"] = False
+
+        # Grasp regions
+        grasp_regions_raw = data.get("grasp_regions") or data.get("graspRegions") or []
+        grasp_regions: List[Dict[str, Any]] = []
+        if isinstance(grasp_regions_raw, list):
+            for gr in grasp_regions_raw[:5]:  # limit to 5 grasp regions
+                if isinstance(gr, dict):
+                    pos = gr.get("position") or gr.get("pos") or [0.0, 0.0, 0.0]
+                    gtype = str(gr.get("type", "power")).lower()
+                    width = float(gr.get("width_m", 0.08))
+                    if gtype not in {"pinch", "power", "wrap", "suction"}:
+                        gtype = "power"
+                    if isinstance(pos, (list, tuple)) and len(pos) == 3:
+                        try:
+                            grasp_regions.append({
+                                "position": [float(p) for p in pos],
+                                "type": gtype,
+                                "width_m": _clamp(width, 0.005, 0.30),
+                            })
+                        except Exception:
+                            pass
+        merged["grasp_regions"] = grasp_regions if grasp_regions else merged.get("grasp_regions", [])
+
+        # Surface roughness
+        merged["surface_roughness"] = _clamp(
+            _get_float(["surface_roughness", "surfaceRoughness", "roughness"],
+                      float(merged.get("surface_roughness", 0.5))),
+            0.0,
+            1.0,
+        )
+
+        # Contact offsets (PhysX-specific, use sensible defaults based on object size)
+        min_dim = min(size_m) if size_m else 0.1
+        default_contact = _clamp(min_dim * 0.02, 0.002, 0.01)  # 2% of smallest dimension
+        default_rest = _clamp(min_dim * 0.005, 0.0005, 0.003)  # 0.5% of smallest dimension
+
+        merged["contact_offset_m"] = _clamp(
+            _get_float(["contact_offset_m", "contactOffset"], default_contact),
+            0.001,
+            0.02,
+        )
+        merged["rest_offset_m"] = _clamp(
+            _get_float(["rest_offset_m", "restOffset"], default_rest),
+            0.0001,
+            0.005,
+        )
+
         return merged
 
     except Exception as e:  # pragma: no cover
@@ -818,15 +969,18 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
         - Apply PhysicsRigidBodyAPI + PhysicsMassAPI to /Asset
         - Author bool physics:rigidBodyEnabled
         - Author physics:mass (and do NOT also author density to avoid precedence confusion)
+        - Author physics:centerOfMass for accurate manipulation dynamics
 
     - Always:
         - Reference the visual USD/Z under /Asset/Visual
-        - Create a collision proxy prim with PhysicsCollisionAPI under /Asset/Collision
+        - Create a collision proxy prim with PhysicsCollisionAPI + PhysxCollisionAPI under /Asset/Collision
         - Define a UsdShade Material with PhysicsMaterialAPI under /Asset/Looks
         - Bind it to the collider using rel material:binding:physics
+        - Add robotics-focused metadata (semantic class, graspability, grasp regions, etc.)
     """
     add_proxy = os.getenv("SIMREADY_ADD_PROXY_COLLIDER", "true").lower() in {"1", "true", "yes"}
 
+    # Core physics properties
     dynamic = bool(physics.get("dynamic", True))
     mass = float(physics.get("mass_kg", 1.0))
     static_friction = float(physics.get("static_friction", 0.6))
@@ -834,8 +988,23 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
     restitution = float(physics.get("restitution", 0.1))
     collision_shape = str(physics.get("collision_shape", "box")).lower()
 
+    # Robotics-focused properties
+    semantic_class = str(physics.get("semantic_class", "object"))
+    material_name = str(physics.get("material_name", "generic"))
+    graspable = bool(physics.get("graspable", True))
+    grasp_regions = list(physics.get("grasp_regions", []))
+    surface_roughness = float(physics.get("surface_roughness", 0.5))
+    contact_offset = float(physics.get("contact_offset_m", 0.005))
+    rest_offset = float(physics.get("rest_offset_m", 0.001))
+
+    # Center of mass (geometric center + offset)
+    com_offset = list(physics.get("center_of_mass_offset", [0.0, 0.0, 0.0]))
+
     size_m = list(bounds.get("size_m") or [0.1, 0.1, 0.1])
     center_m = list(bounds.get("center_m") or [0.0, 0.0, 0.0])
+
+    # Compute absolute center of mass (geometric center + offset)
+    center_of_mass = [center_m[i] + com_offset[i] for i in range(3)]
 
     # Use padded bounds for collision proxy (if any)
     size_pad = padded_size(size_m)
@@ -858,6 +1027,8 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
     if dynamic:
         lines.append("    bool physics:rigidBodyEnabled = 1")
         lines.append(f"    float physics:mass = {mass:.6f}")
+        # Center of mass for accurate manipulation dynamics
+        lines.append(f"    point3f physics:centerOfMass = ({center_of_mass[0]:.6f}, {center_of_mass[1]:.6f}, {center_of_mass[2]:.6f})")
         # (Intentionally not authoring physics:density here. Mass has precedence over density in USD Physics.)
 
     # Visual reference
@@ -892,13 +1063,16 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
         if collision_shape == "sphere":
             radius = 0.5 * max(size_pad)
             lines.append('        def Sphere "Collider" (')
-            lines.append('            prepend apiSchemas = ["PhysicsCollisionAPI"]')
+            lines.append('            prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]')
             lines.append("        )")
             lines.append("        {")
             lines.append(f"            rel material:binding:physics = {material_path}")
             lines.append(f"            double radius = {radius:.6f}")
             lines.append(f"            double3 xformOp:translate = ({center_m[0]:.6f}, {center_m[1]:.6f}, {center_m[2]:.6f})")
             lines.append('            uniform token[] xformOpOrder = ["xformOp:translate"]')
+            # PhysX contact properties for stable simulation
+            lines.append(f"            float physxCollision:contactOffset = {contact_offset:.6f}")
+            lines.append(f"            float physxCollision:restOffset = {rest_offset:.6f}")
             lines.append("        }")
 
         elif collision_shape == "capsule":
@@ -922,7 +1096,7 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
             height = max(max_dim - 2.0 * r, 0.0)
 
             lines.append('        def Capsule "Collider" (')
-            lines.append('            prepend apiSchemas = ["PhysicsCollisionAPI"]')
+            lines.append('            prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]')
             lines.append("        )")
             lines.append("        {")
             lines.append(f"            rel material:binding:physics = {material_path}")
@@ -931,12 +1105,15 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
             lines.append(f"            double height = {height:.6f}")
             lines.append(f"            double3 xformOp:translate = ({center_m[0]:.6f}, {center_m[1]:.6f}, {center_m[2]:.6f})")
             lines.append('            uniform token[] xformOpOrder = ["xformOp:translate"]')
+            # PhysX contact properties for stable simulation
+            lines.append(f"            float physxCollision:contactOffset = {contact_offset:.6f}")
+            lines.append(f"            float physxCollision:restOffset = {rest_offset:.6f}")
             lines.append("        }")
 
         else:
             # Default: box proxy collider (Cube) with non-uniform scale.
             lines.append('        def Cube "Collider" (')
-            lines.append('            prepend apiSchemas = ["PhysicsCollisionAPI"]')
+            lines.append('            prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]')
             lines.append("        )")
             lines.append("        {")
             lines.append(f"            rel material:binding:physics = {material_path}")
@@ -945,8 +1122,46 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
             lines.append(f"            float3 xformOp:scale = ({size_pad[0]:.6f}, {size_pad[1]:.6f}, {size_pad[2]:.6f})")
             # xformOpOrder is applied in reverse; this ordering yields scale first, then translate.
             lines.append('            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]')
+            # PhysX contact properties for stable simulation
+            lines.append(f"            float physxCollision:contactOffset = {contact_offset:.6f}")
+            lines.append(f"            float physxCollision:restOffset = {rest_offset:.6f}")
             lines.append("        }")
 
+        lines.append("    }")
+
+    # ========== ROBOTICS-FOCUSED METADATA ==========
+    lines.append("")
+    lines.append("    # Robotics metadata for perception and manipulation")
+
+    # Semantic class (for object detection/segmentation)
+    lines.append(f'    string semantic:class = "{semantic_class}"')
+
+    # Material name (for tactile/visual sensing)
+    safe_material = material_name.replace('"', '\\"')
+    lines.append(f'    string simready:material = "{safe_material}"')
+
+    # Graspability flag
+    graspable_val = "true" if graspable else "false"
+    lines.append(f"    bool simready:graspable = {graspable_val}")
+
+    # Surface roughness (for tactile simulation: 0=smooth glass, 1=sandpaper)
+    lines.append(f"    float simready:surfaceRoughness = {surface_roughness:.4f}")
+
+    # Grasp regions (for manipulation planning)
+    if grasp_regions:
+        lines.append("")
+        lines.append('    def Scope "GraspRegions"')
+        lines.append("    {")
+        for idx, gr in enumerate(grasp_regions):
+            pos = gr.get("position", [0.0, 0.0, 0.0])
+            gtype = gr.get("type", "power")
+            width = gr.get("width_m", 0.08)
+            lines.append(f'        def Xform "Grasp_{idx}" {{')
+            lines.append(f"            double3 xformOp:translate = ({pos[0]:.6f}, {pos[1]:.6f}, {pos[2]:.6f})")
+            lines.append('            uniform token[] xformOpOrder = ["xformOp:translate"]')
+            lines.append(f'            string simready:graspType = "{gtype}"')
+            lines.append(f"            float simready:graspWidth = {width:.4f}")
+            lines.append("        }")
         lines.append("    }")
 
     # Optional notes for debugging
