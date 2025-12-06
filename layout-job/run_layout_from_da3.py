@@ -204,6 +204,76 @@ def parse_yolo_labels(label_path: Path, class_names=None):
     return objects
 
 
+def parse_inventory_objects(inventory_path: Path) -> List[Dict]:
+    """
+    Parse Gemini inventory.json and convert bboxes to normalized polygons.
+
+    Inventory bbox format: [ymin, xmin, ymax, xmax] with values 0-1000
+    Output polygon format: [[x, y], ...] normalized to [0, 1]
+    """
+    objects = []
+    if not inventory_path.is_file():
+        print(f"[LAYOUT] WARNING: inventory.json not found at {inventory_path}", file=sys.stderr)
+        return objects
+
+    try:
+        with inventory_path.open("r") as f:
+            inventory = json.load(f)
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"[LAYOUT] WARNING: Failed to parse inventory.json: {e}", file=sys.stderr)
+        return objects
+
+    for obj in inventory.get("objects", []):
+        obj_id = obj.get("id")
+        if not obj_id:
+            continue
+
+        # Skip objects that shouldn't be separate assets (scene shell elements)
+        # We still want to compute OBB for them though
+        bbox = obj.get("bbox")
+        if not bbox or not isinstance(bbox, list) or len(bbox) != 4:
+            print(f"[LAYOUT] WARNING: Object '{obj_id}' missing valid bbox, skipping")
+            continue
+
+        # bbox is [ymin, xmin, ymax, xmax] in 0-1000 range
+        ymin, xmin, ymax, xmax = bbox
+
+        # Normalize to [0, 1]
+        ymin_norm = ymin / 1000.0
+        xmin_norm = xmin / 1000.0
+        ymax_norm = ymax / 1000.0
+        xmax_norm = xmax / 1000.0
+
+        # Create a rectangular polygon from the bbox (4 corners)
+        # Format: [[x, y], ...] normalized
+        polygon = [
+            [xmin_norm, ymin_norm],  # top-left
+            [xmax_norm, ymin_norm],  # top-right
+            [xmax_norm, ymax_norm],  # bottom-right
+            [xmin_norm, ymax_norm],  # bottom-left
+        ]
+
+        # Compute YOLO-style bbox2d [cx, cy, w, h]
+        cx = (xmin_norm + xmax_norm) / 2.0
+        cy = (ymin_norm + ymax_norm) / 2.0
+        w = xmax_norm - xmin_norm
+        h = ymax_norm - ymin_norm
+
+        objects.append({
+            "id": obj_id,
+            "class_id": 0,  # Generic
+            "class_name": obj.get("category", "object"),
+            "short_description": obj.get("short_description", ""),
+            "sim_role": obj.get("sim_role", ""),
+            "must_be_separate_asset": obj.get("must_be_separate_asset", False),
+            "bbox2d": [cx, cy, w, h],
+            "polygon": polygon,
+            "approx_location": obj.get("approx_location", ""),
+        })
+
+    return objects
+
+
 def gather_object_points(
     polygon: List[List[float]],
     depth_all: np.ndarray,
@@ -326,8 +396,12 @@ def main() -> None:
         print(f"[LAYOUT] ERROR: da3_geom.npz not found at {geom_path}", file=sys.stderr)
         sys.exit(1)
 
-    # For labels, assume YOLO file is under seg/dataset/valid/labels/room.txt
-    # and image is seg/dataset/valid/images/room.jpg
+    # Look for inventory.json first (Gemini pipeline), then fall back to YOLO labels
+    # inventory.json is in seg/ directory (parent of seg/dataset)
+    seg_dir = seg_dataset_dir.parent  # seg/dataset -> seg/
+    inventory_path = seg_dir / "inventory.json"
+
+    # For YOLO labels fallback
     valid_images_dir = seg_dataset_dir / "valid" / "images"
     valid_labels_dir = seg_dataset_dir / "valid" / "labels"
     room_img_path = valid_images_dir / "room.jpg"
@@ -336,8 +410,14 @@ def main() -> None:
     if not room_img_path.is_file():
         print(f"[LAYOUT] WARNING: room image not found at {room_img_path}", file=sys.stderr)
 
-    if not room_label_path.is_file():
-        print(f"[LAYOUT] WARNING: room labels not found at {room_label_path}", file=sys.stderr)
+    # Check for inventory.json (preferred) or YOLO labels (fallback)
+    use_inventory = inventory_path.is_file()
+    if use_inventory:
+        print(f"[LAYOUT] Found inventory.json at {inventory_path}, will use Gemini bboxes")
+    elif room_label_path.is_file():
+        print(f"[LAYOUT] No inventory.json, falling back to YOLO labels at {room_label_path}")
+    else:
+        print(f"[LAYOUT] WARNING: Neither inventory.json nor room.txt found", file=sys.stderr)
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -396,10 +476,16 @@ def main() -> None:
         "walls": walls,
     }
 
-    # ---- Load YOLO labels and fit per-object OBBs from fused depth ----
-    objects = parse_yolo_labels(room_label_path, class_names=None)
-    print(f"[LAYOUT] Parsed {len(objects)} YOLO objects")
+    # ---- Load objects from inventory.json (preferred) or YOLO labels (fallback) ----
+    if use_inventory:
+        objects = parse_inventory_objects(inventory_path)
+        print(f"[LAYOUT] Parsed {len(objects)} objects from inventory.json")
+    else:
+        objects = parse_yolo_labels(room_label_path, class_names=None)
+        print(f"[LAYOUT] Parsed {len(objects)} objects from YOLO labels")
 
+    objects_with_obb = 0
+    objects_without_obb = 0
     for obj in objects:
         poly = obj.get("polygon") or []
         pts_obj = gather_object_points(poly, depth_all, conf_all, intr_all, extr_all)
@@ -408,6 +494,16 @@ def main() -> None:
         obj["center3d"] = center
         obj["obb"] = obb
         obj["points_used"] = int(pts_obj.shape[0])
+
+        obj_id = obj.get("id")
+        if obb:
+            objects_with_obb += 1
+            print(f"[LAYOUT] obj_{obj_id}: OBB computed from {pts_obj.shape[0]} depth points, center={[round(c, 3) for c in center]}")
+        else:
+            objects_without_obb += 1
+            print(f"[LAYOUT] obj_{obj_id}: No OBB (insufficient depth points: {pts_obj.shape[0]})")
+
+    print(f"[LAYOUT] OBB summary: {objects_with_obb}/{len(objects)} objects have valid OBB data")
 
     # ---- Cameras ----
     cameras = []
