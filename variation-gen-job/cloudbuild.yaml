@@ -1,0 +1,75 @@
+# Cloud Build configuration for variation-gen-job
+# Generates reference images for variation assets using Gemini Imagen 3
+#
+# Usage:
+#   gcloud builds submit --config=cloudbuild.yaml .
+#
+# Or with substitutions:
+#   gcloud builds submit --config=cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPO=blueprint-jobs .
+
+substitutions:
+  _REGION: us-central1
+  _REPO: blueprint-jobs
+  _JOB_NAME: variation-gen-job
+  _MEMORY: 2Gi
+  _CPU: "2"
+  _TIMEOUT: 3600s
+  _MAX_RETRIES: "1"
+
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+      - '.'
+    dir: 'variation-gen-job'
+
+  # Push the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}'
+
+  # Deploy or update the Cloud Run job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Check if job exists
+        if gcloud run jobs describe ${_JOB_NAME} --region=${_REGION} --format='value(name)' 2>/dev/null; then
+          echo "Updating existing job ${_JOB_NAME}..."
+          gcloud run jobs update ${_JOB_NAME} \
+            --region=${_REGION} \
+            --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA} \
+            --memory=${_MEMORY} \
+            --cpu=${_CPU} \
+            --task-timeout=${_TIMEOUT} \
+            --max-retries=${_MAX_RETRIES} \
+            --set-secrets=GEMINI_API_KEY=gemini-api-key:latest \
+            --execute-now=false
+        else
+          echo "Creating new job ${_JOB_NAME}..."
+          gcloud run jobs create ${_JOB_NAME} \
+            --region=${_REGION} \
+            --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA} \
+            --memory=${_MEMORY} \
+            --cpu=${_CPU} \
+            --task-timeout=${_TIMEOUT} \
+            --max-retries=${_MAX_RETRIES} \
+            --set-secrets=GEMINI_API_KEY=gemini-api-key:latest \
+            --execute-now=false
+        fi
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
