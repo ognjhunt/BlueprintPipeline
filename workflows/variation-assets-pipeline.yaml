@@ -1,0 +1,348 @@
+# variation-assets-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that generates variation assets for domain randomization.
+#
+# This pipeline:
+#   1. Triggers on .replicator_complete marker from replicator-job
+#   2. Runs variation-gen-job to generate reference images using Gemini Imagen 3
+#   3. Runs hunyuan-job to convert reference images to 3D models
+#   4. Runs simready-job to add physics properties to the 3D models
+#
+# Trigger: Cloud Storage object finalized event for .replicator_complete
+#
+# The generated variation assets are placed in scenes/{sceneId}/variation_assets/
+# and can be used by Replicator scripts for domain randomization.
+
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: "us-central1"
+        next: filter_replicator_complete
+
+    - filter_replicator_complete:
+        switch:
+          - condition: '${text.match_regex(object, "^scenes/.+/replicator/\\.replicator_complete$")}'
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
+          - variationAssetsPrefix: '${"scenes/" + sceneId + "/variation_assets"}'
+          - variationGenJobName: "variation-gen-job"
+          - hunyuanJobName: "hunyuan-job"
+          - simreadyJobName: "simready-job"
+        next: log_start
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Variation assets pipeline triggered for scene " + sceneId}'
+          severity: "INFO"
+        next: run_variation_gen_job
+
+    # =========================================================================
+    # Stage 1: Generate reference images using Gemini Imagen 3
+    # =========================================================================
+
+    - run_variation_gen_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + variationGenJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: REPLICATOR_PREFIX
+                      value: ${replicatorPrefix}
+                    - name: VARIATION_ASSETS_PREFIX
+                      value: ${variationAssetsPrefix}
+                    # Generate only required and recommended assets by default
+                    # Set to empty string to generate all
+                    - name: PRIORITY_FILTER
+                      value: ""
+        result: variationGenExec
+        next: set_variation_gen_execution_name
+
+    - set_variation_gen_execution_name:
+        assign:
+          - variationGenExecutionName: '${if(variationGenExec.metadata != null and variationGenExec.metadata.name != null, variationGenExec.metadata.name, variationGenExec.name)}'
+        next: wait_for_variation_gen
+
+    - wait_for_variation_gen:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${variationGenExecutionName}
+        result: variationGenStatus
+        next: check_variation_gen_status
+
+    - check_variation_gen_status:
+        assign:
+          - variationGenState: '${if(variationGenStatus.state != null, variationGenStatus.state, if(variationGenStatus.status != null, variationGenStatus.status.state, null))}'
+          - variationGenFailedCount: '${if(variationGenStatus.failedCount != null, variationGenStatus.failedCount, if(variationGenStatus.status != null, variationGenStatus.status.failedCount, null))}'
+          - variationGenSucceededCount: '${if(variationGenStatus.succeededCount != null, variationGenStatus.succeededCount, if(variationGenStatus.status != null, variationGenStatus.status.succeededCount, null))}'
+        next: variation_gen_status_switch
+
+    - variation_gen_status_switch:
+        switch:
+          - condition: '${variationGenState == "FAILED" or (variationGenFailedCount != null and variationGenFailedCount > 0)}'
+            next: variation_gen_failed
+          - condition: '${variationGenState == "SUCCEEDED" or (variationGenSucceededCount != null and variationGenSucceededCount > 0)}'
+            next: log_variation_gen_complete
+        next: wait_variation_gen_poll
+
+    - wait_variation_gen_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_variation_gen
+
+    - log_variation_gen_complete:
+        call: sys.log
+        args:
+          text: '${"Variation image generation completed for scene " + sceneId + " - starting hunyuan-job for 3D conversion"}'
+          severity: "INFO"
+        next: check_variation_assets_exist
+
+    - variation_gen_failed:
+        assign:
+          - errorMsg: '${"Variation generation job FAILED for scene " + sceneId}'
+        next: log_variation_gen_error
+
+    - log_variation_gen_error:
+        call: sys.log
+        args:
+          text: ${errorMsg}
+          severity: "ERROR"
+        next: raise_variation_gen_error
+
+    - raise_variation_gen_error:
+        raise: ${errorMsg}
+
+    # =========================================================================
+    # Check if any assets were generated before proceeding
+    # =========================================================================
+
+    - check_variation_assets_exist:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${variationAssetsPrefix + "/variation_assets.json"}'
+          result: variationAssetsJson
+        except:
+          as: e
+          steps:
+            - no_assets_generated:
+                call: sys.log
+                args:
+                  text: '${"No variation assets were generated for scene " + sceneId + " - pipeline complete"}'
+                  severity: "INFO"
+                next: done_no_assets
+        next: run_hunyuan_job
+
+    # =========================================================================
+    # Stage 2: Convert reference images to 3D models using Hunyuan
+    # =========================================================================
+
+    - run_hunyuan_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + hunyuanJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: '${sceneId + "_variation"}'
+                    - name: ASSETS_PREFIX
+                      value: ${variationAssetsPrefix}
+                    # Use faster settings for variation assets
+                    - name: HUNYUAN_NUM_STEPS
+                      value: "30"
+                    - name: HUNYUAN_RENDER_SIZE
+                      value: "512"
+                    - name: HUNYUAN_TEXTURE_SIZE
+                      value: "1024"
+        result: hunyuanExec
+        next: set_hunyuan_execution_name
+
+    - set_hunyuan_execution_name:
+        assign:
+          - hunyuanExecutionName: '${if(hunyuanExec.metadata != null and hunyuanExec.metadata.name != null, hunyuanExec.metadata.name, hunyuanExec.name)}'
+        next: wait_for_hunyuan
+
+    - wait_for_hunyuan:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${hunyuanExecutionName}
+        result: hunyuanStatus
+        next: check_hunyuan_status
+
+    - check_hunyuan_status:
+        assign:
+          - hunyuanState: '${if(hunyuanStatus.state != null, hunyuanStatus.state, if(hunyuanStatus.status != null, hunyuanStatus.status.state, null))}'
+          - hunyuanFailedCount: '${if(hunyuanStatus.failedCount != null, hunyuanStatus.failedCount, if(hunyuanStatus.status != null, hunyuanStatus.status.failedCount, null))}'
+          - hunyuanSucceededCount: '${if(hunyuanStatus.succeededCount != null, hunyuanStatus.succeededCount, if(hunyuanStatus.status != null, hunyuanStatus.status.succeededCount, null))}'
+        next: hunyuan_status_switch
+
+    - hunyuan_status_switch:
+        switch:
+          - condition: '${hunyuanState == "FAILED" or (hunyuanFailedCount != null and hunyuanFailedCount > 0)}'
+            next: hunyuan_failed
+          - condition: '${hunyuanState == "SUCCEEDED" or (hunyuanSucceededCount != null and hunyuanSucceededCount > 0)}'
+            next: log_hunyuan_complete
+        next: wait_hunyuan_poll
+
+    - wait_hunyuan_poll:
+        call: sys.sleep
+        args:
+          seconds: 15
+        next: wait_for_hunyuan
+
+    - log_hunyuan_complete:
+        call: sys.log
+        args:
+          text: '${"Hunyuan 3D conversion completed for scene " + sceneId + " variation assets - starting simready-job"}'
+          severity: "INFO"
+        next: run_simready_job
+
+    - hunyuan_failed:
+        # Hunyuan failure is non-fatal - we may have partial results
+        call: sys.log
+        args:
+          text: '${"WARNING: Hunyuan job failed for scene " + sceneId + " variation assets - attempting simready with available assets"}'
+          severity: "WARNING"
+        next: run_simready_job
+
+    # =========================================================================
+    # Stage 3: Add physics properties to 3D models
+    # =========================================================================
+
+    - run_simready_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + simreadyJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: '${sceneId + "_variation"}'
+                    - name: ASSETS_PREFIX
+                      value: ${variationAssetsPrefix}
+        result: simreadyExec
+        next: set_simready_execution_name
+
+    - set_simready_execution_name:
+        assign:
+          - simreadyExecutionName: '${if(simreadyExec.metadata != null and simreadyExec.metadata.name != null, simreadyExec.metadata.name, simreadyExec.name)}'
+        next: wait_for_simready
+
+    - wait_for_simready:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${simreadyExecutionName}
+        result: simreadyStatus
+        next: check_simready_status
+
+    - check_simready_status:
+        assign:
+          - simreadyState: '${if(simreadyStatus.state != null, simreadyStatus.state, if(simreadyStatus.status != null, simreadyStatus.status.state, null))}'
+          - simreadyFailedCount: '${if(simreadyStatus.failedCount != null, simreadyStatus.failedCount, if(simreadyStatus.status != null, simreadyStatus.status.failedCount, null))}'
+          - simreadySucceededCount: '${if(simreadyStatus.succeededCount != null, simreadyStatus.succeededCount, if(simreadyStatus.status != null, simreadyStatus.status.succeededCount, null))}'
+        next: simready_status_switch
+
+    - simready_status_switch:
+        switch:
+          - condition: '${simreadyState == "FAILED" or (simreadyFailedCount != null and simreadyFailedCount > 0)}'
+            next: simready_failed
+          - condition: '${simreadyState == "SUCCEEDED" or (simreadySucceededCount != null and simreadySucceededCount > 0)}'
+            next: log_simready_complete
+        next: wait_simready_poll
+
+    - wait_simready_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_simready
+
+    - log_simready_complete:
+        call: sys.log
+        args:
+          text: '${"Simready job completed for scene " + sceneId + " variation assets"}'
+          severity: "INFO"
+        next: write_completion_marker
+
+    - simready_failed:
+        call: sys.log
+        args:
+          text: '${"WARNING: Simready job failed for scene " + sceneId + " variation assets - assets may not have physics properties"}'
+          severity: "WARNING"
+        next: write_completion_marker
+
+    # =========================================================================
+    # Write completion marker and finish
+    # =========================================================================
+
+    - write_completion_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: '${variationAssetsPrefix + "/.variation_pipeline_complete"}'
+          body:
+            contentType: "text/plain"
+          uploadType: "media"
+          data: '${"Completed at " + time.format(sys.now())}'
+        result: markerResult
+        next: done
+
+    # =========================================================================
+    # Completion states
+    # =========================================================================
+
+    - done:
+        return:
+          status: "SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"Variation assets pipeline completed for scene " + sceneId}'
+          variation_gen_execution: ${variationGenExec.name}
+          hunyuan_execution: ${hunyuanExec.name}
+          simready_execution: ${simreadyExec.name}
+          outputs:
+            variation_assets: '${variationAssetsPrefix}'
+            assets_json: '${variationAssetsPrefix + "/variation_assets.json"}'
+
+    - done_no_assets:
+        return:
+          status: "SUCCESS_NO_ASSETS"
+          scene_id: ${sceneId}
+          message: '${"No variation assets to generate for scene " + sceneId}'
+          variation_gen_execution: ${variationGenExec.name}
+
+    - skip:
+        return:
+          status: "SKIPPED"
+          message: '${"Not a replicator completion marker: " + object}'

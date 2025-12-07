@@ -1153,21 +1153,46 @@ if __name__ == "__main__":
 
 def generate_asset_manifest(
     assets: List[VariationAsset],
-    scene_id: str
+    scene_id: str,
+    scene_type: str = "generic",
+    environment_type: Optional[EnvironmentType] = None,
+    policies: Optional[List[str]] = None
 ) -> dict:
-    """Generate a manifest of variation assets needed."""
+    """
+    Generate a manifest of variation assets needed for domain randomization.
+
+    This manifest is consumed by variation-gen-job to generate reference images
+    using Gemini Imagen 3, which are then processed by hunyuan-job for 3D conversion.
+
+    Args:
+        assets: List of VariationAsset specifications
+        scene_id: Scene identifier
+        scene_type: Type of scene (kitchen, grocery, etc.)
+        environment_type: EnvironmentType enum value
+        policies: List of policy IDs this manifest supports
+    """
 
     manifest = {
         "scene_id": scene_id,
+        "scene_type": scene_type,
+        "environment_type": environment_type.value if environment_type else "generic",
         "generated_at": None,  # Will be filled in
         "total_assets": len(assets),
+        "policies": policies or [],
         "by_priority": {
             "required": [],
             "recommended": [],
             "optional": []
         },
         "by_category": {},
-        "assets": []
+        "assets": [],
+        # Generation hints for variation-gen-job
+        "generation_config": {
+            "image_model": "imagen-3.0-generate-002",
+            "default_style": "photorealistic product photography",
+            "background": "white studio background",
+            "lighting": "soft 3-point studio lighting"
+        }
     }
 
     for asset in assets:
@@ -1184,10 +1209,117 @@ def generate_asset_manifest(
             manifest["by_category"][category] = []
         manifest["by_category"][category].append(asset_dict["name"])
 
+        # Enrich asset with generation hints based on category and semantic class
+        enriched_asset = _enrich_asset_for_generation(asset_dict, scene_type)
+
         # Add full asset details
-        manifest["assets"].append(asset_dict)
+        manifest["assets"].append(enriched_asset)
 
     return manifest
+
+
+def _enrich_asset_for_generation(asset_dict: dict, scene_type: str) -> dict:
+    """
+    Enrich an asset dictionary with additional hints for image generation.
+
+    This adds material hints, style suggestions, and physics defaults based
+    on the asset's category and semantic class.
+    """
+    enriched = asset_dict.copy()
+
+    category = asset_dict.get("category", "").lower()
+    semantic_class = asset_dict.get("semantic_class", "").lower()
+
+    # Material hints by category
+    material_hints = {
+        "dishes": "ceramic, porcelain, or stoneware",
+        "utensils": "stainless steel or silver-plated metal",
+        "food": "realistic food textures and colors",
+        "groceries": "plastic packaging, cardboard boxes, or metal cans",
+        "produce": "natural organic textures with realistic imperfections",
+        "bottles": "glass or plastic with appropriate transparency",
+        "cans": "aluminum or tin with printed labels",
+        "boxes": "cardboard with printed packaging graphics",
+        "clothing": "cotton, polyester, or mixed fabric textures",
+        "towels": "cotton terry cloth or microfiber texture",
+        "tools": "metal with rubber or plastic grips",
+        "containers": "plastic, glass, or metal storage containers",
+        "electronics": "plastic housing with metal accents",
+        "office_supplies": "plastic, metal, or paper materials",
+        "lab_equipment": "borosilicate glass, stainless steel, or medical-grade plastic",
+    }
+
+    # Style hints by category
+    style_hints = {
+        "dishes": "clean dinnerware, may have subtle patterns or solid colors",
+        "utensils": "polished cutlery, professional quality",
+        "food": "appetizing presentation, realistic textures",
+        "groceries": "retail packaging, brand-appropriate design",
+        "produce": "fresh market quality, natural variations",
+        "bottles": "consumer beverage or household product",
+        "cans": "retail food packaging with labels",
+        "boxes": "shipping or retail packaging",
+        "clothing": "casual or household garments",
+        "towels": "household linens, folded or crumpled",
+        "tools": "hand tools or small equipment",
+        "containers": "storage or organization items",
+        "electronics": "consumer electronics or devices",
+        "office_supplies": "desk accessories and supplies",
+        "lab_equipment": "scientific or medical instruments",
+    }
+
+    # Default physics hints if not provided
+    default_physics = {
+        "dishes": {"mass_range_kg": [0.2, 0.8], "friction": 0.4, "collision_shape": "convex"},
+        "utensils": {"mass_range_kg": [0.02, 0.15], "friction": 0.3, "collision_shape": "convex"},
+        "food": {"mass_range_kg": [0.05, 1.0], "friction": 0.5, "collision_shape": "convex"},
+        "groceries": {"mass_range_kg": [0.1, 2.0], "friction": 0.4, "collision_shape": "box"},
+        "produce": {"mass_range_kg": [0.05, 0.5], "friction": 0.5, "collision_shape": "convex"},
+        "bottles": {"mass_range_kg": [0.3, 1.5], "friction": 0.3, "collision_shape": "convex"},
+        "cans": {"mass_range_kg": [0.2, 0.8], "friction": 0.4, "collision_shape": "convex"},
+        "boxes": {"mass_range_kg": [0.1, 5.0], "friction": 0.5, "collision_shape": "box"},
+        "clothing": {"mass_range_kg": [0.1, 1.0], "friction": 0.6, "collision_shape": "convex"},
+        "towels": {"mass_range_kg": [0.2, 0.8], "friction": 0.6, "collision_shape": "convex"},
+        "tools": {"mass_range_kg": [0.1, 2.0], "friction": 0.5, "collision_shape": "convex"},
+        "containers": {"mass_range_kg": [0.1, 1.0], "friction": 0.4, "collision_shape": "box"},
+        "electronics": {"mass_range_kg": [0.1, 2.0], "friction": 0.4, "collision_shape": "box"},
+        "office_supplies": {"mass_range_kg": [0.01, 0.5], "friction": 0.4, "collision_shape": "box"},
+        "lab_equipment": {"mass_range_kg": [0.05, 1.0], "friction": 0.3, "collision_shape": "convex"},
+    }
+
+    # Add material hint
+    if category in material_hints:
+        enriched["material_hint"] = material_hints[category]
+
+    # Add style hint
+    if category in style_hints:
+        enriched["style_hint"] = style_hints[category]
+
+    # Add/merge physics hints
+    if not enriched.get("physics_hints") or not enriched["physics_hints"]:
+        enriched["physics_hints"] = default_physics.get(category, {
+            "mass_range_kg": [0.1, 1.0],
+            "friction": 0.5,
+            "collision_shape": "convex"
+        })
+    else:
+        # Merge with defaults for any missing fields
+        defaults = default_physics.get(category, {})
+        for key, value in defaults.items():
+            if key not in enriched["physics_hints"]:
+                enriched["physics_hints"][key] = value
+
+    # Add image generation prompt hint
+    description = enriched.get("description", "")
+    material = enriched.get("material_hint", "appropriate materials")
+    style = enriched.get("style_hint", "")
+
+    enriched["generation_prompt_hint"] = (
+        f"A {description}, made of {material}. "
+        f"{style}. Photorealistic product photography style."
+    )
+
+    return enriched
 
 
 # ============================================================================
@@ -1377,10 +1509,13 @@ def write_replicator_bundle(
         save_json(config_path, config_dict)
     print(f"[REPLICATOR] Written: configs/*.json ({len(bundle.policies)} configs)")
 
-    # 5. Write variation asset manifest
+    # 5. Write variation asset manifest (enhanced for variation-gen-job)
     asset_manifest = generate_asset_manifest(
         assets=bundle.global_variation_assets,
-        scene_id=bundle.scene_id
+        scene_id=bundle.scene_id,
+        scene_type=bundle.scene_type,
+        environment_type=bundle.environment_type,
+        policies=[p.policy_id for p in bundle.policies]
     )
     import datetime
     asset_manifest["generated_at"] = datetime.datetime.utcnow().isoformat() + "Z"
