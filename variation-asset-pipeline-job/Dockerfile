@@ -1,7 +1,7 @@
 # Variation Asset Pipeline - End-to-End SimReady Asset Generation
 #
 # This job orchestrates the complete variation asset generation pipeline:
-# 1. Generate reference images (Gemini 2.0 Flash)
+# 1. Generate reference images (Gemini 3.0 Pro Image - Nano Banana Pro)
 # 2. Convert to 3D (SAM3D or Hunyuan)
 # 3. Add physics properties
 # 4. Output SimReady USDZ assets

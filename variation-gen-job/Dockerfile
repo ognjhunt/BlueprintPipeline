@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Variation Asset Generator - Generates reference images for domain randomization assets
 #
-# This lightweight container uses Gemini Imagen 3 to generate reference images
+# This lightweight container uses Gemini 3.0 Pro Image (Nano Banana Pro) to generate reference images
 # for variation assets identified by replicator-job. The generated images are
 # then processed by hunyuan-job to create 3D models.
 

@@ -1,5 +1,5 @@
 # Variation Asset Generator Dependencies
-# Generates reference images using Gemini Imagen 3
+# Generates reference images using Gemini 3.0 Pro Image (Nano Banana Pro)
 
 # Google GenAI SDK for Gemini API access
 google-genai>=1.0.0

@@ -8,7 +8,7 @@ and creates reference images for assets that need to be generated (source_hint="
 Pipeline flow:
 1. Read manifest.json from replicator/variation_assets/
 2. For each asset with source_hint="generate":
-   - Generate a reference image using Gemini 2.0 Flash (preferred) or Imagen 3
+   - Generate a reference image using Gemini 3.0 Pro Image (Nano Banana Pro)
    - Save to variation_assets/{asset_name}/reference.png
 3. Create variation_assets.json for hunyuan-job to process
 4. Write completion marker for downstream pipeline
@@ -20,8 +20,7 @@ NOTE: For a complete end-to-end solution, consider using variation-asset-pipelin
 which combines image generation, 3D conversion, and physics assignment into one job.
 
 Environment Variables:
-    USE_GEMINI_FLASH: Set to "1" (default) to use Gemini 2.0 Flash for image generation
-                      Set to "0" to use legacy Imagen 3
+    (None specific to model selection; always uses Gemini 3.0 Pro Image.)
 """
 
 import json
@@ -50,12 +49,9 @@ except ImportError:
 
 GCS_ROOT = Path("/mnt/gcs")
 
-# Gemini model for image generation
-# Using Gemini 2.0 Flash with native image generation (much better quality than Imagen 3)
-GEMINI_IMAGE_MODEL = "gemini-2.0-flash-preview-image-generation"
-
-# Legacy Imagen model (deprecated - keeping for reference)
-IMAGEN_MODEL = "imagen-3.0-generate-002"
+# Gemini model for image generation (Nano Banana Pro / Gemini 3.0 Pro Image Preview)
+GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
+GEMINI_IMAGE_MODEL_NAME = "Gemini 3.0 Pro Image (Nano Banana Pro)"
 
 # Generation settings
 DEFAULT_IMAGE_SIZE = 2048
@@ -147,7 +143,7 @@ def create_gemini_client():
 
 def build_asset_generation_prompt(asset: VariationAssetSpec, policy_context: Optional[str] = None) -> str:
     """
-    Build a prompt for Gemini Imagen to generate a reference image for an asset.
+    Build a prompt for Gemini 3.0 Pro Image to generate a reference image for an asset.
 
     The prompt is designed to produce:
     - High-quality product photography style
@@ -245,13 +241,11 @@ def generate_asset_image(
     output_dir: Path,
     policy_context: Optional[str] = None,
     dry_run: bool = False,
-    use_gemini_flash: bool = True
 ) -> GenerationResult:
     """
     Generate a reference image for a single asset.
 
-    Uses Gemini 2.0 Flash with native image generation by default (better quality).
-    Falls back to Imagen 3 if use_gemini_flash=False.
+    Uses Gemini 3.0 Pro Image (Nano Banana Pro) with native image generation.
 
     Args:
         client: Gemini client instance
@@ -259,7 +253,6 @@ def generate_asset_image(
         output_dir: Directory to save the generated image
         policy_context: Optional context about the training policy
         dry_run: If True, skip actual generation (for testing)
-        use_gemini_flash: If True, use Gemini 2.0 Flash (recommended)
 
     Returns:
         GenerationResult with success status and image path
@@ -290,94 +283,49 @@ def generate_asset_image(
     print(f"[VARIATION-GEN] Generating image for: {asset.name}")
     print(f"[VARIATION-GEN]   Category: {asset.category}")
     print(f"[VARIATION-GEN]   Description: {asset.description[:80]}...")
-    print(f"[VARIATION-GEN]   Model: {'Gemini 2.0 Flash' if use_gemini_flash else 'Imagen 3'}")
+    print(f"[VARIATION-GEN]   Model: {GEMINI_IMAGE_MODEL_NAME}")
 
     # Retry loop for robustness
     last_error = None
     for attempt in range(MAX_RETRIES):
         try:
-            if use_gemini_flash:
-                # Use Gemini 2.0 Flash with native image generation
-                response = client.models.generate_content(
-                    model=GEMINI_IMAGE_MODEL,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_modalities=["IMAGE", "TEXT"],
-                        temperature=0.8,
-                    ),
-                )
+            response = client.models.generate_content(
+                model=GEMINI_IMAGE_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE", "TEXT"],
+                    temperature=0.8,
+                ),
+            )
 
-                # Extract image from Gemini response
-                if response.candidates and len(response.candidates) > 0:
-                    candidate = response.candidates[0]
-                    if candidate.content and candidate.content.parts:
-                        for part in candidate.content.parts:
-                            if hasattr(part, 'inline_data') and part.inline_data:
-                                # Decode base64 image data
-                                image_data = part.inline_data.data
-                                if isinstance(image_data, str):
-                                    image_bytes = base64.b64decode(image_data)
-                                else:
-                                    image_bytes = image_data
+            # Extract image from Gemini response
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'inline_data') and part.inline_data:
+                            # Decode base64 image data
+                            image_data = part.inline_data.data
+                            if isinstance(image_data, str):
+                                image_bytes = base64.b64decode(image_data)
+                            else:
+                                image_bytes = image_data
 
-                                # Save image
-                                img = Image.open(io.BytesIO(image_bytes))
-                                img.save(str(image_path), format='PNG')
+                            # Save image
+                            img = Image.open(io.BytesIO(image_bytes))
+                            img.save(str(image_path), format='PNG')
 
-                                elapsed = time.time() - start_time
-                                print(f"[VARIATION-GEN] Generated: {asset.name} ({elapsed:.1f}s)")
+                            elapsed = time.time() - start_time
+                            print(f"[VARIATION-GEN] Generated: {asset.name} ({elapsed:.1f}s)")
 
-                                return GenerationResult(
-                                    asset_name=asset.name,
-                                    success=True,
-                                    image_path=str(image_path),
-                                    generation_time_seconds=elapsed
-                                )
+                            return GenerationResult(
+                                asset_name=asset.name,
+                                success=True,
+                                image_path=str(image_path),
+                                generation_time_seconds=elapsed
+                            )
 
-                raise ValueError("No image data in Gemini response")
-
-            else:
-                # Fall back to Imagen 3 API
-                response = client.models.generate_images(
-                    model=IMAGEN_MODEL,
-                    prompt=prompt,
-                    config=types.GenerateImagesConfig(
-                        number_of_images=1,
-                        aspect_ratio=DEFAULT_ASPECT_RATIO,
-                        safety_filter_level="BLOCK_MEDIUM_AND_ABOVE",
-                        person_generation="DONT_ALLOW",
-                    )
-                )
-
-                # Extract image from response
-                if response.generated_images and len(response.generated_images) > 0:
-                    generated_image = response.generated_images[0]
-
-                    # Save image
-                    image = generated_image.image
-                    if hasattr(image, 'save'):
-                        image.save(str(image_path), format='PNG')
-                    elif hasattr(generated_image, '_pil_image'):
-                        generated_image._pil_image.save(str(image_path), format='PNG')
-                    else:
-                        # Try to get raw bytes and save
-                        image_bytes = getattr(image, 'data', None) or getattr(image, '_image_bytes', None)
-                        if image_bytes:
-                            image_path.write_bytes(image_bytes)
-                        else:
-                            raise ValueError("Could not extract image data from response")
-
-                    elapsed = time.time() - start_time
-                    print(f"[VARIATION-GEN] Generated: {asset.name} ({elapsed:.1f}s)")
-
-                    return GenerationResult(
-                        asset_name=asset.name,
-                        success=True,
-                        image_path=str(image_path),
-                        generation_time_seconds=elapsed
-                    )
-                else:
-                    raise ValueError("No images returned from API")
+            raise ValueError("No image data in Gemini response")
 
         except Exception as e:
             last_error = str(e)
@@ -403,7 +351,6 @@ def generate_all_assets(
     policy_context: Optional[str] = None,
     max_assets: Optional[int] = None,
     dry_run: bool = False,
-    use_gemini_flash: bool = True
 ) -> Tuple[List[GenerationResult], Dict[str, Any]]:
     """
     Generate reference images for all assets that need generation.
@@ -415,7 +362,6 @@ def generate_all_assets(
         policy_context: Optional context about training policy
         max_assets: Optional limit on number of assets to generate
         dry_run: If True, skip actual generation
-        use_gemini_flash: If True, use Gemini 2.0 Flash (default, better quality)
 
     Returns:
         Tuple of (list of results, summary statistics)
@@ -430,8 +376,9 @@ def generate_all_assets(
     if max_assets is not None:
         assets_to_generate = assets_to_generate[:max_assets]
 
-    model_name = "Gemini 2.0 Flash" if use_gemini_flash else "Imagen 3"
-    print(f"[VARIATION-GEN] Generating {len(assets_to_generate)} assets using {model_name}...")
+    print(
+        f"[VARIATION-GEN] Generating {len(assets_to_generate)} assets using {GEMINI_IMAGE_MODEL_NAME}..."
+    )
 
     results: List[GenerationResult] = []
 
@@ -444,7 +391,6 @@ def generate_all_assets(
             output_dir=output_dir,
             policy_context=policy_context,
             dry_run=dry_run,
-            use_gemini_flash=use_gemini_flash
         )
         results.append(result)
 
@@ -463,7 +409,7 @@ def generate_all_assets(
         "failed": failed,
         "total_generation_time_seconds": total_time,
         "average_time_per_asset_seconds": total_time / len(results) if results else 0,
-        "image_model": model_name
+        "image_model": GEMINI_IMAGE_MODEL_NAME
     }
 
     return results, summary
@@ -624,8 +570,7 @@ def process_variation_assets(
     variation_assets_prefix: str,
     max_assets: Optional[int] = None,
     dry_run: bool = False,
-    priority_filter: Optional[str] = None,
-    use_gemini_flash: bool = True
+    priority_filter: Optional[str] = None
 ) -> bool:
     """
     Main processing function for variation asset generation.
@@ -638,7 +583,6 @@ def process_variation_assets(
         max_assets: Optional limit on number of assets
         dry_run: If True, skip actual generation
         priority_filter: Optional filter ("required", "recommended", "optional")
-        use_gemini_flash: If True, use Gemini 2.0 Flash (default, better quality)
 
     Returns:
         True if successful, False otherwise
@@ -704,7 +648,6 @@ def process_variation_assets(
         policy_context=policy_context,
         max_assets=max_assets,
         dry_run=dry_run,
-        use_gemini_flash=use_gemini_flash
     )
 
     print(f"[VARIATION-GEN] Generation complete:")
@@ -732,7 +675,7 @@ def process_variation_assets(
         "summary": summary,
         "results": [asdict(r) for r in results],
         "config": {
-            "imagen_model": IMAGEN_MODEL,
+            "image_model": GEMINI_IMAGE_MODEL,
             "max_assets": max_assets,
             "priority_filter": priority_filter,
             "dry_run": dry_run
@@ -776,9 +719,6 @@ def main():
 
     dry_run = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"}
 
-    # Use Gemini 2.0 Flash by default (better quality than Imagen 3)
-    use_gemini_flash = os.getenv("USE_GEMINI_FLASH", "1").lower() in {"1", "true", "yes"}
-
     if not scene_id:
         print("[VARIATION-GEN] ERROR: SCENE_ID environment variable is required", file=sys.stderr)
         sys.exit(1)
@@ -788,7 +728,7 @@ def main():
     print(f"[VARIATION-GEN] Bucket: {bucket}")
     print(f"[VARIATION-GEN] Replicator prefix: {replicator_prefix}")
     print(f"[VARIATION-GEN] Output prefix: {variation_assets_prefix}")
-    print(f"[VARIATION-GEN] Image model: {'Gemini 2.0 Flash' if use_gemini_flash else 'Imagen 3'}")
+    print(f"[VARIATION-GEN] Image model: {GEMINI_IMAGE_MODEL_NAME}")
     if max_assets:
         print(f"[VARIATION-GEN] Max assets: {max_assets}")
     if priority_filter:
@@ -805,7 +745,6 @@ def main():
             max_assets=max_assets,
             dry_run=dry_run,
             priority_filter=priority_filter,
-            use_gemini_flash=use_gemini_flash
         )
 
         if success:

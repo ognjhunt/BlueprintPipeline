@@ -2,7 +2,7 @@
 # =============================================================================
 # Variation Asset Generator - Entry Point Script
 # =============================================================================
-# Generates reference images for variation assets using Gemini Imagen 3.
+# Generates reference images for variation assets using Gemini 3.0 Pro Image (Nano Banana Pro).
 #
 # Environment Variables:
 #   BUCKET              - GCS bucket name
