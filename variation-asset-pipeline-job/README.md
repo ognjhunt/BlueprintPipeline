@@ -14,7 +14,7 @@ replicator-job manifest.json
 │                                       │
 │   1. Check asset library (optional)   │
 │   2. Generate reference images        │
-│      (Gemini 2.0 Flash)               │
+│      (Gemini 3.0 Pro Image)           │
 │   3. Convert to 3D mesh               │
 │      (SAM3D or Hunyuan3D)             │
 │   4. Add physics properties           │
@@ -222,7 +222,7 @@ When `ASSET_LIBRARY_PATH` is set, the pipeline will:
 
 | Stage | Duration (per asset) | Notes |
 |-------|---------------------|-------|
-| Image Generation | 5-15s | Gemini 2.0 Flash |
+| Image Generation | 5-15s | Gemini 3.0 Pro Image (Nano Banana Pro) |
 | SAM3D Conversion | 30-60s | Good for simple objects |
 | Hunyuan Conversion | 2-5min | Higher quality |
 | Physics Estimation | <1s | Category-based defaults |

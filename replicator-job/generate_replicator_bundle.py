@@ -1162,7 +1162,8 @@ def generate_asset_manifest(
     Generate a manifest of variation assets needed for domain randomization.
 
     This manifest is consumed by variation-gen-job to generate reference images
-    using Gemini Imagen 3, which are then processed by hunyuan-job for 3D conversion.
+    using Gemini 3.0 Pro Image (Nano Banana Pro), which are then processed by
+    hunyuan-job for 3D conversion.
 
     Args:
         assets: List of VariationAsset specifications
@@ -1188,7 +1189,7 @@ def generate_asset_manifest(
         "assets": [],
         # Generation hints for variation-gen-job
         "generation_config": {
-            "image_model": "imagen-3.0-generate-002",
+            "image_model": "gemini-3-pro-image-preview",
             "default_style": "photorealistic product photography",
             "background": "white studio background",
             "lighting": "soft 3-point studio lighting"
