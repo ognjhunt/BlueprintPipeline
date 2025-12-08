@@ -1,5 +1,5 @@
 # Cloud Build configuration for variation-gen-job
-# Generates reference images for variation assets using Gemini Imagen 3
+# Generates reference images for variation assets using Gemini 3.0 Pro Image (Nano Banana Pro)
 #
 # Usage:
 #   gcloud builds submit --config=cloudbuild.yaml .
