@@ -4,7 +4,7 @@
 #
 # This pipeline:
 #   1. Triggers on .replicator_complete marker from replicator-job
-#   2. Runs variation-gen-job to generate reference images using Gemini Imagen 3
+#   2. Runs variation-gen-job to generate reference images using Gemini 3.0 Pro Image (Nano Banana Pro)
 #   3. Runs hunyuan-job to convert reference images to 3D models
 #   4. Runs simready-job to add physics properties to the 3D models
 #
@@ -56,7 +56,7 @@ main:
         next: run_variation_gen_job
 
     # =========================================================================
-    # Stage 1: Generate reference images using Gemini Imagen 3
+    # Stage 1: Generate reference images using Gemini 3.0 Pro Image (Nano Banana Pro)
     # =========================================================================
 
     - run_variation_gen_job:

@@ -8,7 +8,7 @@ needed for domain randomization in Isaac Sim Replicator:
 1. Read manifest from replicator-job (variation_assets/manifest.json)
 2. Check asset library for existing assets (optional optimization)
 3. For missing assets:
-   a. Generate reference images using Gemini 2.0 Flash
+   a. Generate reference images using Gemini 3.0 Pro Image (Nano Banana Pro)
    b. Convert to 3D using SAM3D (fast) or Hunyuan (quality)
    c. Add physics properties inline (mass, friction, COM, collision)
 4. Output: SimReady USDZ assets ready for Replicator placement
@@ -67,8 +67,8 @@ except ImportError:
 
 GCS_ROOT = Path("/mnt/gcs")
 
-# Gemini model for image generation (Gemini 2.0 Flash with native image gen)
-GEMINI_IMAGE_MODEL = "gemini-2.0-flash-preview-image-generation"
+# Gemini model for image generation (Nano Banana Pro / Gemini 3.0 Pro Image Preview)
+GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
 
 # Quality presets
 QUALITY_PRESETS = {
@@ -293,7 +293,7 @@ def copy_from_library(
 
 
 # ============================================================================
-# Image Generation (Gemini 2.0 Flash)
+# Image Generation (Gemini 3.0 Pro Image / Nano Banana Pro)
 # ============================================================================
 
 def build_image_generation_prompt(asset: AssetSpec, scene_context: str = "") -> str:
@@ -338,7 +338,7 @@ def generate_reference_image_gemini(
     dry_run: bool = False
 ) -> Tuple[bool, Optional[Path], Optional[str]]:
     """
-    Generate a reference image using Gemini 2.0 Flash native image generation.
+    Generate a reference image using Gemini 3.0 Pro Image native image generation.
 
     Returns: (success, image_path, error_message)
     """
@@ -359,7 +359,7 @@ def generate_reference_image_gemini(
 
     for attempt in range(max_retries):
         try:
-            # Use Gemini 2.0 Flash with native image generation
+        # Use Gemini 3.0 Pro Image with native image generation
             response = client.models.generate_content(
                 model=GEMINI_IMAGE_MODEL,
                 contents=prompt,
