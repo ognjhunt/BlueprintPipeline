@@ -186,7 +186,13 @@ print(f'✓ Model weights found ({\"safetensors\" if any(f.endswith(\".safetenso
 # ---------------------------------------------------------
 # 8) Install additional dependencies
 # ---------------------------------------------------------
-RUN pip install --no-cache-dir ipdb flask gunicorn
+RUN pip install --no-cache-dir \
+    ipdb \
+    flask \
+    gunicorn \
+    trimesh \
+    Pillow \
+    pyglet
 
 # ---------------------------------------------------------
 # 9) Copy service files
@@ -195,6 +201,9 @@ WORKDIR /app
 
 # Copy the pipeline wrapper
 COPY run_physx_anything_pipeline.py ${PHYSX_ROOT}/run_physx_anything_pipeline.py
+
+# Copy mesh rendering utility (for GLB → image conversion)
+COPY mesh_to_views.py /app/mesh_to_views.py
 
 # Copy the Flask service
 COPY physx_service.py /app/physx_service.py
