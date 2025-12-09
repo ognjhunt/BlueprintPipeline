@@ -1,313 +1,438 @@
+#!/usr/bin/env python3
 """
-Interactive asset generation job.
+Interactive Asset Pipeline for ZeroScene Integration.
 
-This job orchestrates calls to the PhysX-Anything service to generate
-physics-ready assets (URDF + mesh) from object crops.
+This job processes 3D assets (GLB meshes) from ZeroScene to add articulation
+data using PhysX-Anything. The pipeline:
 
-Key improvements:
-- Much longer warmup wait (service can take 10+ minutes to load VLM model)
-- Better retry logic with service health checking
-- Sequential processing (GPU can't handle parallel inference)
-- Detailed logging for debugging
+1. Receives GLB meshes from ZeroScene (or crop images as fallback)
+2. Renders multi-view images from GLB for VLM analysis
+3. Calls PhysX-Anything to detect joints/hinges
+4. Outputs URDF with articulation data + segmented meshes
+
+Designed for the ZeroScene pipeline:
+    ZeroScene → interactive-job → simready-job → usd-assembly-job
+
+Environment Variables:
+    BUCKET: GCS bucket name
+    SCENE_ID: Scene identifier
+    ASSETS_PREFIX: Path to assets (contains scene_assets.json)
+    PHYSX_ENDPOINT: PhysX-Anything Cloud Run service URL
+    ZEROSCENE_PREFIX: Optional path to ZeroScene outputs (default: same as ASSETS_PREFIX)
+    INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
 """
 import base64
 import json
 import os
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
-import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+import xml.etree.ElementTree as ET
 
 
-def log(msg: str, level: str = "INFO") -> None:
-    """Log with prefix and level."""
+# =============================================================================
+# Configuration
+# =============================================================================
+
+# Service timeouts
+SERVICE_WARMUP_TIMEOUT = int(os.getenv("PHYSX_WARMUP_TIMEOUT", "600"))  # 10 min
+REQUEST_TIMEOUT_FIRST = 900  # 15 min for first request (cold start)
+REQUEST_TIMEOUT_RETRY = 600  # 10 min for retries
+MAX_RETRIES = 3
+
+# Processing modes
+MODE_GLB = "glb"      # ZeroScene GLB mesh input (default)
+MODE_IMAGE = "image"  # Legacy crop image input
+
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+def log(msg: str, level: str = "INFO", obj_id: str = "") -> None:
+    """Log with prefix and optional object ID."""
+    prefix = f"[{obj_id}] " if obj_id else ""
     stream = sys.stderr if level in ("ERROR", "WARNING") else sys.stdout
-    print(f"[PHYSX] [{level}] {msg}", file=stream, flush=True)
+    print(f"[INTERACTIVE] [{level}] {prefix}{msg}", file=stream, flush=True)
 
 
-def load_scene_assets(path: Path) -> dict:
-    if not path.is_file():
-        raise FileNotFoundError(f"scene_assets.json not found at {path}")
+# =============================================================================
+# File/Path Utilities
+# =============================================================================
+
+def ensure_dir(path: Path) -> None:
+    """Create directory if it doesn't exist."""
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def load_json(path: Path) -> dict:
+    """Load JSON file."""
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+def save_json(data: dict, path: Path) -> None:
+    """Save JSON file."""
+    ensure_dir(path.parent)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
+
+def find_glb_file(obj_dir: Path, obj_id: str) -> Optional[Path]:
+    """
+    Find GLB mesh file for an object.
+
+    ZeroScene outputs meshes as:
+    - obj_{id}.glb (direct output)
+    - mesh.glb (alternative naming)
+    - part.glb (from PhysX-Anything)
+    """
+    candidates = [
+        obj_dir / f"obj_{obj_id}.glb",
+        obj_dir / "mesh.glb",
+        obj_dir / "part.glb",
+        obj_dir / f"{obj_id}.glb",
+    ]
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    # Fallback: find any GLB in directory
+    glb_files = list(obj_dir.glob("*.glb"))
+    if glb_files:
+        return glb_files[0]
+
+    return None
+
+
+def find_crop_image(obj_dir: Path, multiview_root: Path, obj_id: str) -> Optional[Path]:
+    """
+    Find crop/view image for an object.
+
+    Looks in:
+    1. Object directory (crop.png, view_0.png)
+    2. Multiview directory structure
+    """
+    obj_name = f"obj_{obj_id}"
+
+    # Check object directory
+    for name in ["crop.png", "view_0.png", "input.png", "reference.png"]:
+        candidate = obj_dir / name
+        if candidate.is_file():
+            return candidate
+
+    # Check multiview directory
+    multiview_obj = multiview_root / obj_name
+    if multiview_obj.is_dir():
+        for name in ["crop.png", "view_0.png"]:
+            candidate = multiview_obj / name
+            if candidate.is_file():
+                return candidate
+
+    # Find any PNG in object directory
+    png_files = list(obj_dir.glob("*.png"))
+    if png_files:
+        return png_files[0]
+
+    return None
+
+
+# =============================================================================
+# Mesh Rendering (GLB → Multi-View Images)
+# =============================================================================
+
+def render_mesh_views(glb_path: Path, output_dir: Path, num_views: int = 4) -> List[Path]:
+    """
+    Render multiple views of a GLB mesh for VLM analysis.
+
+    Uses trimesh for cross-platform rendering (no GPU required).
+
+    Args:
+        glb_path: Path to GLB mesh file
+        output_dir: Directory to save rendered views
+        num_views: Number of views to render (default: 4)
+
+    Returns:
+        List of paths to rendered PNG images
+    """
+    try:
+        import trimesh
+        import numpy as np
+    except ImportError:
+        log("trimesh not available, skipping mesh rendering", "WARNING")
+        return []
+
+    ensure_dir(output_dir)
+    view_paths = []
+
+    try:
+        # Load mesh
+        mesh = trimesh.load(str(glb_path), force='mesh')
+
+        if isinstance(mesh, trimesh.Scene):
+            # Extract geometry from scene
+            geometries = list(mesh.geometry.values())
+            if geometries:
+                mesh = trimesh.util.concatenate(geometries)
+            else:
+                log(f"No geometry found in {glb_path}", "WARNING")
+                return []
+
+        # Get bounding box for camera positioning
+        bounds = mesh.bounds
+        center = mesh.centroid
+        size = np.max(bounds[1] - bounds[0])
+
+        # Camera distance (ensure full object is visible)
+        distance = size * 2.5
+
+        # Render from multiple angles
+        angles = np.linspace(0, 360, num_views, endpoint=False)
+
+        for i, angle in enumerate(angles):
+            try:
+                # Create scene with camera at angle
+                scene = trimesh.Scene(mesh)
+
+                # Position camera
+                rad = np.radians(angle)
+                camera_pos = center + np.array([
+                    distance * np.cos(rad),
+                    distance * np.sin(rad),
+                    distance * 0.5  # Slight elevation
+                ])
+
+                # Set camera transform (look at center)
+                scene.set_camera(
+                    angles=(0, 0, 0),
+                    distance=distance,
+                    center=center,
+                )
+
+                # Render to PNG
+                view_path = output_dir / f"view_{i}.png"
+
+                # Use offscreen rendering
+                png_data = scene.save_image(resolution=(512, 512))
+                if png_data:
+                    view_path.write_bytes(png_data)
+                    view_paths.append(view_path)
+                    log(f"Rendered view {i} ({angle}°): {view_path}")
+
+            except Exception as e:
+                log(f"Failed to render view {i}: {e}", "WARNING")
+                continue
+
+    except Exception as e:
+        log(f"Failed to load/render mesh {glb_path}: {e}", "WARNING")
+
+    return view_paths
+
+
+def render_mesh_to_single_view(glb_path: Path, output_path: Path) -> Optional[Path]:
+    """
+    Render a single front view of a GLB mesh.
+
+    This is a simpler fallback when multi-view rendering fails.
+    """
+    try:
+        import trimesh
+    except ImportError:
+        return None
+
+    ensure_dir(output_path.parent)
+
+    try:
+        mesh = trimesh.load(str(glb_path), force='mesh')
+
+        if isinstance(mesh, trimesh.Scene):
+            geometries = list(mesh.geometry.values())
+            if geometries:
+                mesh = trimesh.util.concatenate(geometries)
+            else:
+                return None
+
+        scene = trimesh.Scene(mesh)
+        png_data = scene.save_image(resolution=(512, 512))
+
+        if png_data:
+            output_path.write_bytes(png_data)
+            return output_path
+
+    except Exception as e:
+        log(f"Single view render failed: {e}", "WARNING")
+
+    return None
+
+
+# =============================================================================
+# PhysX-Anything Service Communication
+# =============================================================================
 
 def check_service_health(endpoint: str, timeout: int = 30) -> Tuple[bool, str, Optional[dict]]:
     """
-    Check PhysX service health.
-    
+    Check PhysX service health status.
+
     Returns:
-        (is_ready, status_message, response_json)
+        (is_ready, status_message, response_data)
     """
     try:
         req = urllib.request.Request(endpoint, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
-            try:
-                data = json.loads(body)
-                is_ready = data.get("ready", False) and data.get("status") == "ok"
-                return is_ready, data.get("status", "unknown"), data
-            except json.JSONDecodeError:
-                return False, f"Invalid JSON: {body[:100]}", None
-                
+            data = json.loads(body)
+            is_ready = data.get("ready", False) and data.get("status") == "ok"
+            return is_ready, data.get("status", "unknown"), data
     except urllib.error.HTTPError as e:
         try:
             body = e.read().decode("utf-8", errors="replace")
             data = json.loads(body)
             return False, data.get("message", f"HTTP {e.code}"), data
         except:
-            return False, f"HTTP {e.code}: {e.reason}", None
-            
+            return False, f"HTTP {e.code}", None
     except urllib.error.URLError as e:
         return False, f"Network error: {e.reason}", None
-        
     except Exception as e:
-        return False, f"Error: {type(e).__name__}: {e}", None
+        return False, f"Error: {e}", None
 
 
-def wait_for_service_ready(endpoint: str, max_wait: int = 600) -> bool:
+def wait_for_service_ready(endpoint: str, max_wait: int = SERVICE_WARMUP_TIMEOUT) -> bool:
     """
-    Wait for the PhysX service to be ready.
-    
-    The VLM model can take 10+ minutes to load on cold start,
-    so we need a very long wait time.
-    
-    Args:
-        endpoint: Service URL
-        max_wait: Maximum seconds to wait (default: 10 minutes)
-        
-    Returns:
-        True if service is ready, False if timeout
+    Wait for PhysX service to be ready.
+
+    The VLM model takes 10+ minutes to load on cold start.
     """
     log(f"Waiting for service to be ready (max {max_wait}s)...")
-    log(f"Endpoint: {endpoint}")
-    
     start_time = time.time()
-    attempt = 0
     last_status = ""
-    
+
     while time.time() - start_time < max_wait:
-        attempt += 1
         elapsed = int(time.time() - start_time)
-        
-        is_ready, status, response = check_service_health(endpoint)
-        
+        is_ready, status, _ = check_service_health(endpoint)
+
         if is_ready:
-            log(f"Service ready after {elapsed}s!")
-            if response:
-                log(f"Response: {json.dumps(response, indent=2)[:500]}")
+            log(f"Service ready after {elapsed}s")
             return True
-        
-        # Log status changes
+
         if status != last_status:
-            log(f"Service status: {status} (attempt {attempt}, {elapsed}s elapsed)", "WARNING")
+            log(f"Service status: {status} ({elapsed}s elapsed)", "WARNING")
             last_status = status
-        elif elapsed > 0 and elapsed % 60 == 0:
-            # Log every minute even if status unchanged
-            log(f"Still waiting... ({elapsed}s elapsed, status: {status})", "WARNING")
-        
-        # Adaptive backoff: start slow, then faster
+
+        # Adaptive backoff
         if elapsed < 60:
-            sleep_time = 10  # First minute: check every 10s
+            time.sleep(10)
         elif elapsed < 300:
-            sleep_time = 20  # 1-5 minutes: check every 20s
+            time.sleep(20)
         else:
-            sleep_time = 30  # After 5 minutes: check every 30s
-        
-        time.sleep(sleep_time)
-    
-    log(f"ERROR: Service not ready after {max_wait}s (last status: {last_status})", "ERROR")
+            time.sleep(30)
+
+    log(f"Service not ready after {max_wait}s", "ERROR")
     return False
 
 
-def call_physx_anything(
-    endpoint: str, 
-    crop_path: Path, 
+def call_physx_service(
+    endpoint: str,
+    image_path: Path,
     obj_id: str,
-    max_retries: int = 3,
-    first_timeout: int = 900,  # 15 min for first request
-    retry_timeout: int = 600,  # 10 min for retries
+    glb_path: Optional[Path] = None,
 ) -> Optional[dict]:
     """
-    Post the crop image to the PhysX-Anything service with retry logic.
+    Call PhysX-Anything service with image (and optional GLB).
 
-    Args:
-        endpoint: PhysX service URL
-        crop_path: Path to the crop image
-        obj_id: Object ID for logging
-        max_retries: Maximum retry attempts
-        first_timeout: Timeout for first attempt (longer for cold start)
-        retry_timeout: Timeout for retry attempts
+    The service expects:
+    - image_base64: Base64-encoded PNG/JPEG image
+    - glb_base64: Optional Base64-encoded GLB mesh (for better reconstruction)
 
     Returns:
-        Response dict or None on failure
+        Service response dict or None on failure
     """
-    with crop_path.open("rb") as f:
-        payload = base64.b64encode(f.read()).decode("utf-8")
-    body = json.dumps({"image_base64": payload}).encode("utf-8")
-    
-    log(f"[{obj_id}] Image size: {len(payload)} bytes (base64)")
+    # Build request payload
+    payload = {}
 
-    for attempt in range(max_retries + 1):
+    # Add image
+    with image_path.open("rb") as f:
+        payload["image_base64"] = base64.b64encode(f.read()).decode("utf-8")
+
+    # Add GLB if provided (for mesh-conditioned generation)
+    if glb_path and glb_path.is_file():
+        with glb_path.open("rb") as f:
+            payload["glb_base64"] = base64.b64encode(f.read()).decode("utf-8")
+
+    body = json.dumps(payload).encode("utf-8")
+    log(f"Request payload: image={len(payload.get('image_base64', ''))} bytes, glb={'yes' if glb_path else 'no'}", obj_id=obj_id)
+
+    # Retry loop
+    for attempt in range(MAX_RETRIES + 1):
         try:
+            timeout = REQUEST_TIMEOUT_FIRST if attempt == 0 else REQUEST_TIMEOUT_RETRY
+
+            if attempt > 0:
+                log(f"Retry {attempt}/{MAX_RETRIES} (timeout={timeout}s)", obj_id=obj_id)
+            else:
+                log(f"POST {endpoint} (timeout={timeout}s)", obj_id=obj_id)
+
             req = urllib.request.Request(
                 endpoint,
                 data=body,
                 headers={"Content-Type": "application/json"},
             )
 
-            # Use longer timeout for first attempt
-            timeout = first_timeout if attempt == 0 else retry_timeout
+            start = time.time()
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                elapsed = int(time.time() - start)
+                log(f"Response: {resp.status} ({elapsed}s)", obj_id=obj_id)
 
-            if attempt > 0:
-                log(f"[{obj_id}] Retry {attempt}/{max_retries} (timeout={timeout}s)")
-            else:
-                log(f"[{obj_id}] POST {endpoint} (timeout={timeout}s)")
-
-            start_time = time.time()
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-                elapsed = int(time.time() - start_time)
-                log(f"[{obj_id}] Response status: {resp.status} (took {elapsed}s)")
-                
                 text = resp.read().decode("utf-8", errors="replace")
-                
-                try:
-                    data = json.loads(text)
-                    is_placeholder = data.get("placeholder", True)
-                    log(f"[{obj_id}] Success! placeholder={is_placeholder}")
-                    
-                    # Log asset sizes if present
-                    if data.get("mesh_base64"):
-                        mesh_size = len(data["mesh_base64"]) * 3 // 4  # Approximate decoded size
-                        log(f"[{obj_id}] Mesh size: ~{mesh_size} bytes")
-                    
-                    return data
-                    
-                except json.JSONDecodeError:
-                    log(f"[{obj_id}] WARNING: non-JSON response: {text[:500]}...", "WARNING")
-                    return None
+                data = json.loads(text)
+
+                is_placeholder = data.get("placeholder", True)
+                log(f"Success: placeholder={is_placeholder}", obj_id=obj_id)
+
+                return data
 
         except urllib.error.HTTPError as e:
-            elapsed = int(time.time() - start_time) if 'start_time' in locals() else 0
-            
             error_body = ""
             try:
-                error_body = e.read().decode("utf-8", errors="replace")
+                error_body = e.read().decode("utf-8", errors="replace")[:1000]
             except:
                 pass
-            
-            # Truncate error body for logging but show enough context
-            if len(error_body) > 1000:
-                error_display = error_body[:500] + "\n...[truncated]...\n" + error_body[-500:]
-            else:
-                error_display = error_body
-            
-            log(f"[{obj_id}] HTTP {e.code} (after {elapsed}s): {error_display}", "ERROR")
-            
-            # Don't retry 4xx errors (client errors) except 429 (rate limit)
+
+            log(f"HTTP {e.code}: {error_body}", level="ERROR", obj_id=obj_id)
+
+            # Don't retry client errors (except 429)
             if 400 <= e.code < 500 and e.code != 429:
                 return None
-                
-            # Retry 503 (service busy/warming) and 5xx errors
-            if attempt < max_retries:
-                if e.code == 503:
-                    # Service is busy or warming up - wait longer
-                    wait_time = min(60 * (attempt + 1), 180)  # 60s, 120s, 180s
-                    log(f"[{obj_id}] Service unavailable, waiting {wait_time}s before retry...", "WARNING")
-                else:
-                    # Other server errors - exponential backoff
-                    wait_time = min(20 * (2 ** attempt), 120)  # 20s, 40s, 80s, max 120s
-                    log(f"[{obj_id}] Server error, waiting {wait_time}s before retry...", "WARNING")
-                    
-                time.sleep(wait_time)
-                continue
-            return None
 
-        except urllib.error.URLError as e:
-            log(f"[{obj_id}] Network error: {e.reason}", "ERROR")
-            if attempt < max_retries:
-                wait_time = min(20 * (2 ** attempt), 120)
-                log(f"[{obj_id}] Retrying in {wait_time}s...", "WARNING")
+            if attempt < MAX_RETRIES:
+                wait_time = min(60 * (attempt + 1), 180) if e.code == 503 else min(20 * (2 ** attempt), 120)
+                log(f"Waiting {wait_time}s before retry...", "WARNING", obj_id)
                 time.sleep(wait_time)
-                continue
-            return None
 
-        except TimeoutError:
-            log(f"[{obj_id}] Request timed out after {timeout}s", "ERROR")
-            if attempt < max_retries:
-                log(f"[{obj_id}] Retrying...", "WARNING")
-                time.sleep(10)
-                continue
-            return None
+        except (urllib.error.URLError, TimeoutError) as e:
+            log(f"Network error: {e}", "ERROR", obj_id=obj_id)
+            if attempt < MAX_RETRIES:
+                time.sleep(min(20 * (2 ** attempt), 120))
 
         except Exception as e:
-            log(f"[{obj_id}] Unexpected error: {type(e).__name__}: {e}", "ERROR")
-            if attempt < max_retries:
-                wait_time = min(20 * (2 ** attempt), 120)
-                log(f"[{obj_id}] Retrying in {wait_time}s...", "WARNING")
-                time.sleep(wait_time)
-                continue
-            return None
+            log(f"Unexpected error: {type(e).__name__}: {e}", "ERROR", obj_id=obj_id)
+            if attempt < MAX_RETRIES:
+                time.sleep(20)
 
     return None
 
 
-def download_file(url: str, out_path: Path) -> bool:
-    ensure_dir(out_path.parent)
-    log(f"Downloading {url} -> {out_path}")
-    try:
-        urllib.request.urlretrieve(url, out_path)  # nosec B310
-        return True
-    except Exception as e:
-        log(f"WARNING: failed to download {url}: {e}", "WARNING")
-        if out_path.is_file():
-            try:
-                out_path.unlink()
-            except OSError:
-                pass
-        return False
+# =============================================================================
+# URDF Generation and Parsing
+# =============================================================================
 
-
-def write_placeholder_assets(out_dir: Path, obj_id: str) -> Tuple[Path, Path]:
-    """
-    Writes placeholder URDF/mesh when service cannot produce real assets.
-    """
-    ensure_dir(out_dir)
-
-    mesh_path = out_dir / "part.glb"
-    placeholder = b"Placeholder GLB - PhysX-Anything service failed"
-    mesh_path.write_bytes(placeholder)
-
-    urdf_path = out_dir / f"{obj_id}.urdf"
-    urdf = f"""<?xml version="1.0" encoding="UTF-8"?>
-<robot name="{obj_id}">
-  <link name="base">
-    <visual>
-      <geometry>
-        <mesh filename="{mesh_path.name}" />
-      </geometry>
-    </visual>
-  </link>
-</robot>
-"""
-    urdf_path.write_text(urdf.strip() + "\n", encoding="utf-8")
-    return mesh_path, urdf_path
-
-
-def parse_urdf_summary(urdf_path: Path) -> Dict:
-    """Extracts joint/link summary from URDF."""
-    import xml.etree.ElementTree as ET
-
+def parse_urdf_summary(urdf_path: Path) -> Dict[str, List[Dict]]:
+    """Extract joint/link summary from URDF file."""
     summary: Dict[str, List[Dict]] = {"joints": [], "links": []}
+
     if not urdf_path.is_file():
         return summary
 
@@ -315,355 +440,505 @@ def parse_urdf_summary(urdf_path: Path) -> Dict:
         tree = ET.parse(urdf_path)
         root = tree.getroot()
     except Exception as e:
-        log(f"WARNING: failed to parse URDF {urdf_path}: {e}", "WARNING")
+        log(f"Failed to parse URDF: {e}", "WARNING")
         return summary
 
+    # Extract links
     for link in root.findall("link"):
+        link_data = {"name": link.attrib.get("name")}
+
         inertial = link.find("inertial")
-        mass_tag = inertial.find("mass") if inertial is not None else None
-        mass_val = None
-        if mass_tag is not None:
-            value = mass_tag.attrib.get("value")
-            if value:
+        if inertial is not None:
+            mass_elem = inertial.find("mass")
+            if mass_elem is not None and mass_elem.attrib.get("value"):
                 try:
-                    mass_val = float(value)
+                    link_data["mass"] = float(mass_elem.attrib["value"])
                 except ValueError:
                     pass
-        summary["links"].append({
-            "name": link.attrib.get("name"),
-            "mass": mass_val,
-        })
 
+        summary["links"].append(link_data)
+
+    # Extract joints
     for joint in root.findall("joint"):
-        axis_tag = joint.find("axis")
-        limit_tag = joint.find("limit")
-        axis = axis_tag.attrib.get("xyz") if axis_tag is not None else None
-        lower = upper = None
-        if limit_tag is not None:
-            try:
-                lower = float(limit_tag.attrib.get("lower", ""))
-            except (ValueError, TypeError):
-                pass
-            try:
-                upper = float(limit_tag.attrib.get("upper", ""))
-            except (ValueError, TypeError):
-                pass
-
-        parent_elem = joint.find("parent")
-        child_elem = joint.find("child")
-        
-        summary["joints"].append({
+        joint_data = {
             "name": joint.attrib.get("name"),
             "type": joint.attrib.get("type"),
-            "parent": parent_elem.attrib.get("link") if parent_elem is not None else None,
-            "child": child_elem.attrib.get("link") if child_elem is not None else None,
-            "axis": axis,
-            "lower": lower,
-            "upper": upper,
-        })
+        }
+
+        parent = joint.find("parent")
+        child = joint.find("child")
+        axis = joint.find("axis")
+        limit = joint.find("limit")
+
+        if parent is not None:
+            joint_data["parent"] = parent.attrib.get("link")
+        if child is not None:
+            joint_data["child"] = child.attrib.get("link")
+        if axis is not None:
+            joint_data["axis"] = axis.attrib.get("xyz")
+        if limit is not None:
+            try:
+                joint_data["lower"] = float(limit.attrib.get("lower", ""))
+            except (ValueError, TypeError):
+                pass
+            try:
+                joint_data["upper"] = float(limit.attrib.get("upper", ""))
+            except (ValueError, TypeError):
+                pass
+
+        summary["joints"].append(joint_data)
 
     return summary
 
 
-def decode_base64_to_file(data_b64: str, out_path: Path) -> None:
-    ensure_dir(out_path.parent)
-    out_path.write_bytes(base64.b64decode(data_b64))
+def generate_static_urdf(obj_id: str, mesh_filename: str = "mesh.glb") -> str:
+    """
+    Generate a static URDF for objects without articulation.
+
+    This is used as a fallback when PhysX-Anything doesn't detect any joints.
+    """
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<robot name="{obj_id}">
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <mesh filename="{mesh_filename}"/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="{mesh_filename}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="1.0"/>
+      <inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"/>
+    </inertial>
+  </link>
+</robot>
+"""
 
 
-def materialize_service_assets(
-    response: Dict,
+def generate_placeholder_urdf(obj_id: str, reason: str = "service_unavailable") -> str:
+    """Generate placeholder URDF when processing fails."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!-- Placeholder URDF: {reason} -->
+<robot name="{obj_id}_placeholder">
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.1 0.1 0.1"/>
+      </geometry>
+    </visual>
+  </link>
+</robot>
+"""
+
+
+# =============================================================================
+# Asset Materialization
+# =============================================================================
+
+def materialize_physx_response(
+    response: dict,
     output_dir: Path,
     obj_id: str,
-) -> Tuple[Optional[Path], Optional[Path], Dict]:
+) -> Tuple[Optional[Path], Optional[Path], Dict[str, Any]]:
     """
-    Materialize PhysX-Anything outputs to disk.
-    Returns (mesh_path, urdf_path, metadata).
+    Materialize PhysX-Anything response to disk.
+
+    Returns:
+        (mesh_path, urdf_path, metadata)
     """
-    mesh_path = output_dir / "part.glb"
-    urdf_path = output_dir / f"{obj_id}.urdf"
     ensure_dir(output_dir)
 
-    meta: Dict = {
-        "mesh_url": response.get("mesh_url"),
-        "urdf_url": response.get("urdf_url"),
-        "asset_zip_url": response.get("asset_zip_url"),
+    mesh_path = output_dir / "part.glb"
+    urdf_path = output_dir / f"{obj_id}.urdf"
+
+    meta: Dict[str, Any] = {
         "placeholder": response.get("placeholder", False),
-        "generator": response.get("generator", "unknown"),
+        "generator": response.get("generator", "physx-anything"),
     }
 
-    # If service already marked as placeholder, skip materialization
+    # Handle placeholder response
     if response.get("placeholder"):
         return None, None, meta
 
-    # 1) ZIP bundle path
-    if response.get("asset_zip_url"):
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=True) as tmp:
-                ok = download_file(response["asset_zip_url"], Path(tmp.name))
-                if ok:
-                    with zipfile.ZipFile(tmp.name) as zf:
-                        zf.extractall(output_dir)
-                        for name in zf.namelist():
-                            lower = name.lower()
-                            if lower.endswith(".urdf"):
-                                urdf_path = output_dir / name
-                            if lower.endswith((".glb", ".gltf")):
-                                mesh_path = output_dir / name
-            if urdf_path.is_file() and mesh_path.is_file():
-                return mesh_path, urdf_path, meta
-        except Exception as e:
-            log(f"WARNING: failed to handle asset_zip_url: {e}", "WARNING")
-
-    # 2) Direct URLs
-    if response.get("mesh_url"):
-        download_file(response["mesh_url"], mesh_path)
-    if response.get("urdf_url"):
-        download_file(response["urdf_url"], urdf_path)
-    if urdf_path.is_file() and mesh_path.is_file():
-        return mesh_path, urdf_path, meta
-
-    # 3) Inline base64 payloads
+    # Decode mesh
     if response.get("mesh_base64"):
-        decode_base64_to_file(response["mesh_base64"], mesh_path)
-    if response.get("urdf_base64"):
-        decode_base64_to_file(response["urdf_base64"], urdf_path)
-    
-    if urdf_path.is_file() and mesh_path.is_file():
-        mesh_size = mesh_path.stat().st_size
-        urdf_size = urdf_path.stat().st_size
-        log(f"[{obj_id}] Mesh: {mesh_size} bytes, URDF: {urdf_size} bytes")
-        if mesh_size < 100:
-            log(f"[{obj_id}] WARNING: Mesh file suspiciously small!", "WARNING")
-        return mesh_path, urdf_path, meta
-
-    meta["placeholder"] = True
-    return None, None, meta
-
-
-def process_interactive_object(
-    obj: dict,
-    multiview_root: Path,
-    assets_root: Path,
-    endpoint: Optional[str],
-    obj_index: int,
-    total_objects: int,
-) -> dict:
-    """Process a single interactive object."""
-    obj_id = obj.get("id")
-    obj_name = f"obj_{obj_id}"
-    crop_rel = obj.get("crop_path")
-
-    log(f"[{obj_name}] Processing object {obj_index + 1}/{total_objects}")
-
-    # Determine crop path
-    if crop_rel:
-        crop_path = Path("/mnt/gcs") / crop_rel
+        try:
+            mesh_bytes = base64.b64decode(response["mesh_base64"])
+            mesh_path.write_bytes(mesh_bytes)
+            log(f"Wrote mesh: {len(mesh_bytes)} bytes", obj_id=obj_id)
+        except Exception as e:
+            log(f"Failed to decode mesh: {e}", "ERROR", obj_id)
+            return None, None, meta
     else:
-        obj_dir = multiview_root / obj_name
-        crop_png = obj_dir / "crop.png"
-        view_png = obj_dir / "view_0.png"
+        return None, None, meta
 
-        if crop_png.is_file():
-            crop_path = crop_png
-        elif view_png.is_file():
-            crop_path = view_png
-        else:
-            crop_path = crop_png
+    # Decode URDF
+    if response.get("urdf_base64"):
+        try:
+            urdf_bytes = base64.b64decode(response["urdf_base64"])
+            urdf_path.write_bytes(urdf_bytes)
+            log(f"Wrote URDF: {len(urdf_bytes)} bytes", obj_id=obj_id)
+        except Exception as e:
+            log(f"Failed to decode URDF: {e}", "ERROR", obj_id)
+            return mesh_path, None, meta
+    else:
+        # Generate static URDF if not provided
+        urdf_content = generate_static_urdf(obj_id, mesh_path.name)
+        urdf_path.write_text(urdf_content, encoding="utf-8")
+        meta["urdf_generated"] = True
 
+    return mesh_path, urdf_path, meta
+
+
+# =============================================================================
+# Object Processing
+# =============================================================================
+
+def process_object(
+    obj: dict,
+    assets_root: Path,
+    zeroscene_root: Path,
+    multiview_root: Path,
+    endpoint: Optional[str],
+    mode: str,
+    index: int,
+    total: int,
+) -> dict:
+    """
+    Process a single interactive object.
+
+    Pipeline:
+    1. Find input (GLB mesh from ZeroScene or crop image)
+    2. Render views from GLB if needed
+    3. Call PhysX-Anything service
+    4. Materialize outputs (mesh + URDF)
+    5. Generate manifest with joint summary
+    """
+    obj_id = str(obj.get("id"))
+    obj_name = f"obj_{obj_id}"
+    obj_class = obj.get("class_name", "unknown")
+
+    log(f"Processing {index + 1}/{total}: {obj_class}", obj_id=obj_name)
+
+    # Output directory
     output_dir = assets_root / "interactive" / obj_name
     ensure_dir(output_dir)
 
+    # Result structure
     result = {
         "id": obj_id,
         "name": obj_name,
-        "status": "placeholder",
-        "crop_path": str(crop_path),
+        "class_name": obj_class,
+        "status": "pending",
+        "mode": mode,
         "output_dir": str(output_dir),
-        "urdf_path": None,
         "mesh_path": None,
-        "endpoint": endpoint,
-        "service_response": None,
+        "urdf_path": None,
+        "joint_count": 0,
+        "is_articulated": False,
     }
 
-    if not crop_path.is_file():
-        log(f"[{obj_name}] WARNING: missing crop at {crop_path}", "WARNING")
-        mesh_path, urdf_path = write_placeholder_assets(output_dir, obj_name)
+    # Find inputs based on mode
+    glb_path: Optional[Path] = None
+    image_path: Optional[Path] = None
+
+    if mode == MODE_GLB:
+        # ZeroScene mode: find GLB mesh
+        zeroscene_obj_dir = zeroscene_root / obj_name
+        glb_path = find_glb_file(zeroscene_obj_dir, obj_id)
+
+        if glb_path:
+            log(f"Found GLB: {glb_path}", obj_id=obj_name)
+            result["input_glb"] = str(glb_path)
+
+            # Render view from GLB for VLM
+            rendered = render_mesh_to_single_view(glb_path, output_dir / "rendered.png")
+            if rendered:
+                image_path = rendered
+                log(f"Rendered view: {image_path}", obj_id=obj_name)
+            else:
+                # Try multi-view as fallback
+                views = render_mesh_views(glb_path, output_dir / "views", num_views=4)
+                if views:
+                    image_path = views[0]
+                    log(f"Using first of {len(views)} rendered views", obj_id=obj_name)
+        else:
+            log(f"No GLB found in {zeroscene_obj_dir}, trying image fallback", "WARNING", obj_name)
+
+    # Fallback or image mode: find crop/view image
+    if not image_path:
+        obj_dir = assets_root / obj_name
+        image_path = find_crop_image(obj_dir, multiview_root, obj_id)
+
+        if image_path:
+            log(f"Using image: {image_path}", obj_id=obj_name)
+            result["input_image"] = str(image_path)
+        else:
+            # Try from object's crop_path in manifest
+            if obj.get("crop_path"):
+                crop_full = Path("/mnt/gcs") / obj["crop_path"]
+                if crop_full.is_file():
+                    image_path = crop_full
+                    log(f"Using manifest crop: {image_path}", obj_id=obj_name)
+
+    # Check if we have valid input
+    if not image_path or not image_path.is_file():
+        log(f"No valid input found", "ERROR", obj_name)
+        result["status"] = "error"
+        result["error"] = "no_input_found"
+
+        # Write placeholder URDF
+        urdf_path = output_dir / f"{obj_name}.urdf"
+        urdf_path.write_text(generate_placeholder_urdf(obj_name, "no_input"), encoding="utf-8")
         result["urdf_path"] = str(urdf_path)
-        result["mesh_path"] = str(mesh_path)
         return result
 
-    # Call PhysX service
-    response: Optional[dict] = None
-    if endpoint:
-        response = call_physx_anything(endpoint, crop_path, obj_name)
-        result["service_response"] = response
+    result["input_image"] = str(image_path)
 
-    # Materialize assets
-    mesh_path: Optional[Path] = None
-    urdf_path: Optional[Path] = None
-    manifest: Dict = {}
+    # Call PhysX-Anything service
+    if not endpoint:
+        log("No endpoint configured, using static URDF", "WARNING", obj_name)
+        result["status"] = "static"
 
-    if response and not response.get("placeholder"):
-        mesh_path, urdf_path, download_meta = materialize_service_assets(
-            response, output_dir, obj_name
-        )
-        manifest.update(download_meta)
+        # Copy GLB if available, or create placeholder
+        if glb_path and glb_path.is_file():
+            import shutil
+            mesh_out = output_dir / "mesh.glb"
+            shutil.copy(glb_path, mesh_out)
+            result["mesh_path"] = str(mesh_out)
 
-    # Fallback to placeholder if needed
-    if mesh_path is None or urdf_path is None:
-        log(f"[{obj_name}] Using placeholder assets", "WARNING")
-        mesh_path, urdf_path = write_placeholder_assets(output_dir, obj_name)
-        manifest["placeholder"] = True
+        urdf_path = output_dir / f"{obj_name}.urdf"
+        urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
+        result["urdf_path"] = str(urdf_path)
+        return result
+
+    # Call service
+    response = call_physx_service(endpoint, image_path, obj_name, glb_path)
+
+    if not response:
+        log("Service call failed", "ERROR", obj_name)
+        result["status"] = "error"
+        result["error"] = "service_failed"
+
+        # Fallback to static URDF with original mesh
+        if glb_path and glb_path.is_file():
+            import shutil
+            mesh_out = output_dir / "mesh.glb"
+            shutil.copy(glb_path, mesh_out)
+            result["mesh_path"] = str(mesh_out)
+
+        urdf_path = output_dir / f"{obj_name}.urdf"
+        urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
+        result["urdf_path"] = str(urdf_path)
+        return result
+
+    # Materialize response
+    mesh_path, urdf_path, meta = materialize_physx_response(response, output_dir, obj_name)
+
+    if not mesh_path or not urdf_path:
+        log("Materialization failed, using fallback", "WARNING", obj_name)
+        result["status"] = "fallback"
+
+        # Use original GLB if available
+        if glb_path and glb_path.is_file():
+            import shutil
+            mesh_out = output_dir / "mesh.glb"
+            shutil.copy(glb_path, mesh_out)
+            result["mesh_path"] = str(mesh_out)
+            mesh_path = mesh_out
+
+        urdf_path = output_dir / f"{obj_name}.urdf"
+        urdf_path.write_text(generate_static_urdf(obj_name, mesh_path.name if mesh_path else "mesh.glb"), encoding="utf-8")
+        result["urdf_path"] = str(urdf_path)
+        return result
+
+    # Parse URDF for joint information
+    joint_summary = parse_urdf_summary(urdf_path)
+    joint_count = len(joint_summary.get("joints", []))
 
     # Build manifest
-    manifest.update({
+    manifest = {
         "object_id": obj_id,
         "object_name": obj_name,
+        "class_name": obj_class,
+        "generator": meta.get("generator", "physx-anything"),
         "endpoint": endpoint,
-        "urdf_path": urdf_path.name,
         "mesh_path": mesh_path.name,
-    })
+        "urdf_path": urdf_path.name,
+        "is_articulated": joint_count > 0,
+        "joint_summary": joint_summary,
+        "input_mode": mode,
+    }
 
-    manifest["joint_summary"] = parse_urdf_summary(urdf_path)
+    if glb_path:
+        manifest["input_glb"] = str(glb_path)
+    if image_path:
+        manifest["input_image"] = str(image_path)
 
+    # Save manifest
     manifest_path = output_dir / "interactive_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    save_json(manifest, manifest_path)
 
-    result.update({
-        "status": "ok" if not manifest.get("placeholder") else "placeholder",
-        "urdf_path": str(urdf_path),
-        "mesh_path": str(mesh_path),
-        "manifest": str(manifest_path),
-    })
-    
-    log(f"[{obj_name}] Completed with status={result['status']}")
+    # Update result
+    result["status"] = "ok"
+    result["mesh_path"] = str(mesh_path)
+    result["urdf_path"] = str(urdf_path)
+    result["manifest_path"] = str(manifest_path)
+    result["joint_count"] = joint_count
+    result["is_articulated"] = joint_count > 0
+
+    log(f"Completed: {joint_count} joints detected, articulated={joint_count > 0}", obj_id=obj_name)
+
     return result
 
 
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
 def main() -> None:
+    """Main entry point for interactive asset processing."""
+
+    # Configuration from environment
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
-    multiview_prefix = os.getenv("MULTIVIEW_PREFIX")
-    assets_prefix = os.getenv("ASSETS_PREFIX")
-    layout_prefix = os.getenv("LAYOUT_PREFIX")
-    endpoint = os.getenv("PHYSX_ENDPOINT")
-    
-    # Configuration
-    parallel_enabled = os.getenv("PHYSX_PARALLEL", "0") == "1"
-    max_workers = int(os.getenv("PHYSX_MAX_WORKERS", "1"))
-    warmup_timeout = int(os.getenv("PHYSX_WARMUP_TIMEOUT", "600"))  # 10 minutes default
+    assets_prefix = os.getenv("ASSETS_PREFIX", "")
+    multiview_prefix = os.getenv("MULTIVIEW_PREFIX", "")
+    zeroscene_prefix = os.getenv("ZEROSCENE_PREFIX", "")  # New: ZeroScene output path
+    endpoint = os.getenv("PHYSX_ENDPOINT", "")
+    mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
 
-    if not multiview_prefix or not assets_prefix:
-        log("MULTIVIEW_PREFIX and ASSETS_PREFIX are required", "ERROR")
+    if not assets_prefix:
+        log("ASSETS_PREFIX is required", "ERROR")
         sys.exit(1)
 
+    # Setup paths
     root = Path("/mnt/gcs")
-    multiview_root = root / multiview_prefix
     assets_root = root / assets_prefix
-    layout_root = root / layout_prefix if layout_prefix else None
+    multiview_root = root / multiview_prefix if multiview_prefix else assets_root / "multiview"
+    zeroscene_root = root / zeroscene_prefix if zeroscene_prefix else assets_root / "zeroscene"
 
-    assets_manifest = assets_root / "scene_assets.json"
-    if not assets_manifest.is_file():
-        log(f"ERROR: scene_assets.json not found at {assets_manifest}", "ERROR")
+    # Load scene assets manifest
+    manifest_path = assets_root / "scene_assets.json"
+    if not manifest_path.is_file():
+        log(f"scene_assets.json not found at {manifest_path}", "ERROR")
         sys.exit(1)
 
-    scene_assets = load_scene_assets(assets_manifest)
+    scene_assets = load_json(manifest_path)
     objects = scene_assets.get("objects", [])
-    interactive = [o for o in objects if o.get("type") == "interactive"]
 
+    # Filter interactive objects
+    interactive_objects = [o for o in objects if o.get("type") == "interactive"]
+
+    # Print configuration
     log("=" * 60)
-    log("Interactive Asset Generation")
+    log("Interactive Asset Pipeline (ZeroScene Integration)")
     log("=" * 60)
     log(f"Bucket: {bucket}")
-    log(f"Scene: {scene_id}")
-    log(f"Multiview: {multiview_root}")
+    log(f"Scene ID: {scene_id}")
     log(f"Assets: {assets_root}")
-    log(f"Endpoint: {endpoint}")
-    log(f"Interactive objects: {len(interactive)}")
-    log(f"Parallel: {parallel_enabled}, Workers: {max_workers}")
-    log(f"Warmup timeout: {warmup_timeout}s")
+    log(f"ZeroScene: {zeroscene_root}")
+    log(f"Multiview: {multiview_root}")
+    log(f"Endpoint: {endpoint or '(none - static mode)'}")
+    log(f"Mode: {mode}")
+    log(f"Interactive objects: {len(interactive_objects)}")
     log("=" * 60)
 
-    if not endpoint and interactive:
-        log("ERROR: PHYSX_ENDPOINT is required for interactive assets", "ERROR")
-        sys.exit(1)
+    # Early exit if no interactive objects
+    if not interactive_objects:
+        log("No interactive objects to process")
 
-    # Wait for PhysX service to be ready before processing
-    # This is critical - the VLM model can take 10+ minutes to load!
-    if endpoint and interactive:
-        log("Checking service health before processing...")
-        if not wait_for_service_ready(endpoint, max_wait=warmup_timeout):
-            log("WARNING: Service not ready after timeout", "WARNING")
-            log("Will attempt processing anyway (may result in placeholders)", "WARNING")
+        # Write empty results
+        results_path = assets_root / "interactive" / "interactive_results.json"
+        ensure_dir(results_path.parent)
+        save_json({
+            "scene_id": scene_id,
+            "total_objects": 0,
+            "objects": [],
+        }, results_path)
 
-    # Process objects
+        # Write completion marker
+        marker_path = assets_root / ".interactive_complete"
+        marker_path.write_text("completed (no interactive objects)\n")
+
+        log("Done (no objects)")
+        return
+
+    # Wait for service to be ready
+    if endpoint:
+        log("Checking PhysX service health...")
+        if not wait_for_service_ready(endpoint):
+            log("Service not ready, will attempt processing anyway", "WARNING")
+
+    # Process each object
     results = []
-    total = len(interactive)
-
-    if not parallel_enabled or max_workers <= 1 or total <= 1:
-        # Sequential processing (recommended for GPU-bound service)
-        log(f"Processing {total} objects sequentially...")
-        for i, obj in enumerate(interactive):
-            result = process_interactive_object(
-                obj, multiview_root, assets_root, endpoint, i, total
+    for i, obj in enumerate(interactive_objects):
+        try:
+            result = process_object(
+                obj=obj,
+                assets_root=assets_root,
+                zeroscene_root=zeroscene_root,
+                multiview_root=multiview_root,
+                endpoint=endpoint,
+                mode=mode,
+                index=i,
+                total=len(interactive_objects),
             )
             results.append(result)
-    else:
-        # Parallel processing (use with caution)
-        log(f"Processing {total} objects with {max_workers} workers...")
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    process_interactive_object, 
-                    obj, multiview_root, assets_root, endpoint, i, total
-                ): obj
-                for i, obj in enumerate(interactive)
-            }
-            for future in as_completed(futures):
-                obj = futures[future]
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    log(f"ERROR processing obj_{obj.get('id')}: {e}", "ERROR")
-                    results.append({
-                        "id": obj.get("id"),
-                        "status": "error",
-                        "error": str(e),
-                    })
+        except Exception as e:
+            log(f"Error processing obj_{obj.get('id')}: {e}", "ERROR")
+            results.append({
+                "id": obj.get("id"),
+                "status": "error",
+                "error": str(e),
+            })
 
-    # Write summary
+    # Summary statistics
     ok_count = sum(1 for r in results if r.get("status") == "ok")
-    placeholder_count = sum(1 for r in results if r.get("status") == "placeholder")
+    articulated_count = sum(1 for r in results if r.get("is_articulated"))
     error_count = sum(1 for r in results if r.get("status") == "error")
-    
-    summary = {
+    fallback_count = sum(1 for r in results if r.get("status") in ("fallback", "static"))
+
+    # Write results
+    results_data = {
         "scene_id": scene_id,
-        "total_objects": total,
+        "total_objects": len(interactive_objects),
         "ok_count": ok_count,
-        "placeholder_count": placeholder_count,
+        "articulated_count": articulated_count,
         "error_count": error_count,
-        "interactive_processed": results,
+        "fallback_count": fallback_count,
+        "mode": mode,
+        "endpoint": endpoint,
+        "objects": results,
     }
-    
-    out_path = assets_root / "interactive" / "interactive_results.json"
-    ensure_dir(out_path.parent)
-    out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    log(f"Wrote summary to {out_path}")
+
+    results_path = assets_root / "interactive" / "interactive_results.json"
+    ensure_dir(results_path.parent)
+    save_json(results_data, results_path)
+    log(f"Results written to {results_path}")
 
     # Write completion marker
     marker_path = assets_root / ".interactive_complete"
-    marker_path.write_text(f"completed at {os.getenv('K_REVISION', 'unknown')}\n")
-    log(f"Wrote completion marker: {marker_path}")
+    marker_path.write_text(f"completed: {ok_count} ok, {articulated_count} articulated, {error_count} errors\n")
 
-    # Summary
+    # Final summary
     log("=" * 60)
-    log(f"RESULTS: {ok_count} ok, {placeholder_count} placeholder, {error_count} error")
+    log("SUMMARY")
     log("=" * 60)
-    
+    log(f"Total processed: {len(interactive_objects)}")
+    log(f"OK: {ok_count}")
+    log(f"Articulated: {articulated_count}")
+    log(f"Fallback/Static: {fallback_count}")
+    log(f"Errors: {error_count}")
+    log("=" * 60)
+
     # Exit with error if all failed
-    if ok_count == 0 and total > 0:
-        log("WARNING: All objects resulted in placeholders or errors!", "WARNING")
+    if ok_count == 0 and len(interactive_objects) > 0:
+        log("WARNING: All objects failed or fell back to static!", "WARNING")
 
 
 if __name__ == "__main__":
