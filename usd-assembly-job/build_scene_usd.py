@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
+from tools.asset_catalog import AssetCatalogClient
 
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
@@ -212,15 +213,31 @@ def numpy_to_gf_matrix(m: np.ndarray) -> Gf.Matrix4d:
 # -----------------------------------------------------------------------------
 
 
-def load_object_metadata(root: Path, obj: Dict, assets_prefix: str) -> Optional[dict]:
+def load_object_metadata(
+    root: Path,
+    obj: Dict,
+    assets_prefix: str,
+    catalog_client: Optional[AssetCatalogClient] = None,
+) -> Optional[dict]:
     """
     Load per-object metadata if present.
 
     Resolution order:
-      1. obj["metadata_path"] if present (bucket-relative)
-      2. metadata.json next to the asset_path
-      3. assets_prefix/obj_{id}/metadata.json (standard layout)
+      1. central catalog lookup (asset_id or asset_path)
+      2. obj["metadata_path"] if present (bucket-relative)
+      3. metadata.json next to the asset_path
+      4. assets_prefix/obj_{id}/metadata.json (standard layout)
     """
+    if catalog_client is not None:
+        try:
+            catalog_meta = catalog_client.lookup_metadata(
+                asset_id=obj.get("id"), asset_path=obj.get("asset_path")
+            )
+            if catalog_meta:
+                return catalog_meta
+        except Exception as exc:  # pragma: no cover - network errors
+            print(f"[USD] WARNING: catalog lookup failed: {exc}", file=sys.stderr)
+
     metadata_rel = obj.get("metadata_path")
     if metadata_rel:
         candidate = safe_path_join(root, metadata_rel)
@@ -488,6 +505,7 @@ class SceneBuilder:
         self.root = root
         self.assets_prefix = assets_prefix
         self.usd_prefix = usd_prefix
+        self.catalog_client = AssetCatalogClient()
 
         # Configure stage
         UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
@@ -699,6 +717,7 @@ class SceneBuilder:
             self.root,
             {"id": oid, "asset_path": asset_path, "metadata_path": obj.get("metadata_path")},
             self.assets_prefix,
+            self.catalog_client,
         )
         translation, mesh_half_extents = alignment_from_metadata(metadata or {})
 
