@@ -1202,16 +1202,18 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
 
 # ---------- Main pipeline ----------
 
-def main() -> None:
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    assets_prefix = os.getenv("ASSETS_PREFIX")  # scenes/<sceneId>/assets
 
+def prepare_simready_assets_job(
+    bucket: str,
+    scene_id: str,
+    assets_prefix: str,
+    root: Path = GCS_ROOT,
+) -> int:
     if not assets_prefix:
         print("[SIMREADY] ASSETS_PREFIX is required", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
-    assets_root = GCS_ROOT / assets_prefix
+    assets_root = root / assets_prefix
     manifest_path = assets_root / "scene_manifest.json"
 
     print(f"[SIMREADY] Bucket={bucket}")
@@ -1226,7 +1228,7 @@ def main() -> None:
             f"[SIMREADY] scene manifest missing at {manifest_path} and {legacy_path}",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return 1
     objects = scene_assets.get("objects", [])
     print(f"[SIMREADY] Found {len(objects)} objects in manifest")
 
@@ -1234,7 +1236,7 @@ def main() -> None:
 
     client = None
     if have_gemini():
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         print("[SIMREADY] Gemini client initialized")
     else:
         print(
@@ -1257,69 +1259,61 @@ def main() -> None:
             continue
 
         visual_path, visual_rel = visual
-        obj_metadata = load_object_metadata(GCS_ROOT, obj, assets_prefix, catalog_client)
+        obj_metadata = load_object_metadata(root, obj, assets_prefix, catalog_client)
+        obj_metadata = obj_metadata or {}
 
-        # Check if we need Gemini to estimate dimensions (when metadata/OBB unavailable)
-        gemini_estimated_size: Optional[List[float]] = None
-        size_from_meta, _ = extract_mesh_bounds_from_metadata(obj_metadata)
-        size_from_obb, _ = extract_obb_bounds_from_obj(obj)
+        mesh_bounds_metadata, mesh_center_metadata = extract_mesh_bounds_from_metadata(
+            obj_metadata
+        )
+        obb_bounds, obb_center = extract_obb_bounds_from_obj(obj)
 
-        if size_from_meta is None and size_from_obb is None and client is not None:
-            # Load multiview images for better dimension estimation
-            # Use GCS_ROOT because multiview_dir paths are relative to the GCS mount point
-            multiview_images = load_multiview_images_for_gemini(GCS_ROOT, obj)
-            if multiview_images:
-                print(f"[SIMREADY] No metadata/OBB bounds for obj {oid}; using Gemini to estimate dimensions from {len(multiview_images)} views")
-                gemini_estimated_size = call_gemini_for_dimensions(client, obj, multiview_images)
-            else:
-                # Try single reference image as fallback
-                reference_image_path = choose_reference_image_path(GCS_ROOT, obj)
-                if reference_image_path:
-                    single_img = load_image_for_gemini(reference_image_path)
-                    if single_img:
-                        print(f"[SIMREADY] No metadata/OBB bounds for obj {oid}; using Gemini to estimate dimensions from single image")
-                        gemini_estimated_size = call_gemini_for_dimensions(client, obj, [single_img])
+        gemini_estimated_size = None
+        ref_image = choose_reference_image_path(root, obj)
+        if ref_image:
+            ref_img = load_image_for_gemini(ref_image)
+            if client and ref_img:
+                gemini_estimated_size = estimate_scale_gemini(
+                    client, obj, ref_img, obj_metadata.get("class_name")
+                )
 
-        bounds = compute_bounds(obj, obj_metadata, gemini_estimated_size)
+        bounds = compute_bounds(
+            obj=obj,
+            metadata=obj_metadata,
+            obb_bounds=obb_bounds,
+            obb_center=obb_center,
+            mesh_bounds_metadata=mesh_bounds_metadata,
+            mesh_center_metadata=mesh_center_metadata,
+            gemini_estimated_size=gemini_estimated_size,
+        )
 
-        reference_image = None
-        # Use GCS_ROOT because multiview_dir/crop_path are relative to the GCS mount point
-        reference_image_path = choose_reference_image_path(GCS_ROOT, obj)
-        if reference_image_path:
-            reference_image = load_image_for_gemini(reference_image_path)
-            if reference_image is not None:
-                print(f"[SIMREADY] Using reference image for obj {oid}: {reference_image_path}")
-            else:
-                print(f"[SIMREADY] WARNING: failed to load reference image for obj {oid} at {reference_image_path}", file=sys.stderr)
-        else:
-            print(f"[SIMREADY] No reference image found for obj {oid}; relying on metadata only")
+        physics_cfg = build_physics_config(
+            obj=obj,
+            bounds=bounds,
+            mesh_bounds=mesh_bounds_metadata,
+            mesh_center=mesh_center_metadata,
+        )
 
-        physics_cfg = call_gemini_for_object(client, oid, obj, bounds, reference_image)
+        sim_path = emit_usd(visual_path, physics_cfg)
 
-        # Place simready.usda next to the visual asset.
-        sim_dir = visual_path.parent
-        ensure_dir(sim_dir)
-        sim_path = sim_dir / "simready.usda"
-
-        write_simready_usd(sim_path, visual_rel, physics_cfg, bounds)
-
-        if catalog_client is not None:
+        if catalog_client:
             try:
-                export_bounds = {
-                    "size": bounds.get("size_m"),
-                    "center": bounds.get("center_m"),
-                    "volume_m3": bounds.get("volume_m3"),
-                    "source": bounds.get("source"),
-                }
+                export_bounds = physics_cfg.get("mesh_bounds") or {}
                 catalog_payload = {
+                    "id": obj.get("id"),
+                    "class_name": obj.get("class_name"),
                     "asset_path": obj.get("asset_path") or visual_rel,
                     "mesh_bounds": {"export": export_bounds},
                     "physics": physics_cfg,
                     "material_name": physics_cfg.get("material_name"),
                 }
-                catalog_client.publish_metadata(oid, catalog_payload, asset_path=catalog_payload["asset_path"])
+                catalog_client.publish_metadata(
+                    oid, catalog_payload, asset_path=catalog_payload["asset_path"]
+                )
             except Exception as exc:  # pragma: no cover - network errors
-                print(f"[SIMREADY] WARNING: failed to publish catalog metadata for obj {oid}: {exc}", file=sys.stderr)
+                print(
+                    f"[SIMREADY] WARNING: failed to publish catalog metadata for obj {oid}: {exc}",
+                    file=sys.stderr,
+                )
 
         sim_rel = f"{assets_prefix}/obj_{oid}/simready.usda"
         if "static/obj_" in str(visual_path):
@@ -1328,7 +1322,6 @@ def main() -> None:
         print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
         simready_paths[oid] = sim_rel
 
-    # Create a completion marker instead of updating scene_assets.json
     marker_path = assets_root / ".simready_complete"
     if simready_paths:
         marker_content = {
@@ -1347,7 +1340,21 @@ def main() -> None:
             "note": "No objects required simready processing (no visual assets found)",
         }
         marker_path.write_text(json.dumps(marker_content, indent=2), encoding="utf-8")
-        print("[SIMREADY] No simready assets were created; created completion marker anyway", file=sys.stderr)
+        print(
+            "[SIMREADY] No simready assets were created; created completion marker anyway",
+            file=sys.stderr,
+        )
+
+    return 0
+
+
+def main() -> None:
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.append(str(REPO_ROOT))
+
+    from blueprint_sim.simready import run_from_env
+
+    sys.exit(run_from_env(root=GCS_ROOT))
 
 
 if __name__ == "__main__":

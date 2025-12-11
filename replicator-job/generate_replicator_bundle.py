@@ -21,12 +21,18 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 import re
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
 try:
     from google import genai
     from google.genai import types
 except ImportError:
     genai = None
     types = None
+
+from tools.scene_manifest.loader import load_manifest_or_scene_assets
 
 # ============================================================================
 # Constants and Configuration
@@ -1342,18 +1348,18 @@ def process_scene(
 
     # Load scene data
     inventory_path = root / seg_prefix / "inventory.json"
-    scene_assets_path = root / assets_prefix / "scene_assets.json"
+    assets_root = root / assets_prefix
 
     if not inventory_path.is_file():
         raise FileNotFoundError(f"Missing inventory.json at {inventory_path}")
 
     inventory = load_json(inventory_path)
 
-    # scene_assets.json might not exist yet in some pipeline configurations
-    if scene_assets_path.is_file():
-        scene_assets = load_json(scene_assets_path)
-    else:
-        print(f"[REPLICATOR] Warning: scene_assets.json not found, using inventory only")
+    scene_assets = load_manifest_or_scene_assets(assets_root)
+    if scene_assets is None:
+        print(
+            f"[REPLICATOR] Warning: no scene manifest found in {assets_root}, using inventory only"
+        )
         scene_assets = {"objects": inventory.get("objects", [])}
 
     # Detect environment type
@@ -1654,34 +1660,17 @@ For issues or improvements, see the pipeline documentation.
 # Entry Point
 # ============================================================================
 
-def main():
-    """Main entry point for the replicator job."""
-
-    # Get configuration from environment
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    seg_prefix = os.getenv("SEG_PREFIX", f"scenes/{scene_id}/seg")
-    assets_prefix = os.getenv("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
-    usd_prefix = os.getenv("USD_PREFIX", f"scenes/{scene_id}/usd")
-    replicator_prefix = os.getenv("REPLICATOR_PREFIX", f"scenes/{scene_id}/replicator")
-
-    # Optional: specific policies to generate
-    requested_policies_str = os.getenv("REQUESTED_POLICIES", "")
-    requested_policies = [p.strip() for p in requested_policies_str.split(",") if p.strip()] or None
-
-    if not scene_id:
-        print("[REPLICATOR] ERROR: SCENE_ID environment variable is required", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"[REPLICATOR] Starting replicator bundle generation")
-    print(f"[REPLICATOR] Scene ID: {scene_id}")
-    print(f"[REPLICATOR] Bucket: {bucket}")
-
-    root = GCS_ROOT
-    output_dir = root / replicator_prefix
-
+def generate_replicator_bundle_job(
+    bucket: str,
+    scene_id: str,
+    seg_prefix: str,
+    assets_prefix: str,
+    usd_prefix: str,
+    replicator_prefix: str,
+    requested_policies: Optional[List[str]] = None,
+    root: Path = GCS_ROOT,
+) -> int:
     try:
-        # Process scene
         bundle, analysis_result = process_scene(
             root=root,
             scene_id=scene_id,
@@ -1689,25 +1678,25 @@ def main():
             assets_prefix=assets_prefix,
             usd_prefix=usd_prefix,
             replicator_prefix=replicator_prefix,
-            requested_policies=requested_policies
+            requested_policies=requested_policies,
         )
+    except Exception as exc:
+        print(f"[REPLICATOR] ERROR: {exc}", file=sys.stderr)
+        raise
 
-        # Write outputs
-        write_replicator_bundle(bundle, analysis_result, output_dir)
+    save_bundle(bundle, root / replicator_prefix, analysis_result)
+    print("[REPLICATOR] Bundle generation complete")
+    return 0
 
-        # Write completion marker
-        marker_path = output_dir / ".replicator_complete"
-        marker_path.write_text(f"Completed at {bundle.metadata.get('generated_at', 'unknown')}")
 
-        print(f"[REPLICATOR] SUCCESS: Bundle generated with {len(bundle.policies)} policies")
-        print(f"[REPLICATOR] Output: {output_dir}")
+def main():
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.append(str(REPO_ROOT))
 
-    except Exception as e:
-        print(f"[REPLICATOR] ERROR: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    from blueprint_sim.replicator import run_from_env
+
+    return run_from_env(root=GCS_ROOT)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
