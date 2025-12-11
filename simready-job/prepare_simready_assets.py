@@ -598,6 +598,12 @@ def call_gemini_for_dimensions(
 
     try:
         model_name = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+        if model_name.startswith("gemini-1") or model_name.startswith("gemini-2"):
+            print(
+                f"[SIMREADY] Overriding legacy Gemini model '{model_name}' with gemini-3-pro-preview",
+                file=sys.stderr,
+            )
+            model_name = "gemini-3-pro-preview"
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
@@ -705,10 +711,6 @@ def call_gemini_for_object(
             if model_name.startswith("gemini-3") and ThinkingLevel is not None:
                 cfg_kwargs["thinking_config"] = ThinkingConfig(
                     thinking_level=getattr(ThinkingLevel, "HIGH", "HIGH")
-                )
-            elif model_name.startswith("gemini-2.5"):
-                cfg_kwargs["thinking_config"] = ThinkingConfig(
-                    include_thoughts=True
                 )
 
         try:

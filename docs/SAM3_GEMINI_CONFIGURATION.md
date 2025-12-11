@@ -126,7 +126,7 @@ if hasattr(types, "ThinkingConfig"):
 | `SAM3_CONFIDENCE` | 0.30 | 0.60 | Minimum confidence threshold for segmentation masks |
 | `GEMINI_GROUNDING_ENABLED` | false | true | Enable Google Search grounding for enhanced context |
 | `GEMINI_STRUCTURED_OUTPUT` | false | true | Use JSON schema for structured, consistent responses |
-| `GEMINI_MODEL` | gemini-2.5-pro | gemini-3-pro-preview | Gemini model to use (configurable) |
+| `GEMINI_MODEL` | gemini-3-pro-preview | gemini-3-pro-preview | Gemini model to use (configurable) |
 
 ## Implementation Checklist
 
