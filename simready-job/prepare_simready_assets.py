@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image  # type: ignore
+from tools.asset_catalog import AssetCatalogClient
 
 try:
     # Google GenAI SDK for Gemini 3.x
@@ -91,13 +92,29 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return float(min(max(float(x), lo), hi))
 
 
-def load_object_metadata(root: Path, obj: Dict[str, Any], assets_prefix: str) -> Optional[dict]:
+def load_object_metadata(
+    root: Path,
+    obj: Dict[str, Any],
+    assets_prefix: str,
+    catalog_client: Optional[AssetCatalogClient] = None,
+) -> Optional[dict]:
     """
     Same lookup strategy as usd-assembly build_scene_usd:
-    1. explicit metadata_path
-    2. next to asset_path
-    3. fallback: assets/static/obj_{id}/metadata.json
+    1. catalog lookup by asset_id or asset_path
+    2. explicit metadata_path
+    3. next to asset_path
+    4. fallback: assets/static/obj_{id}/metadata.json
     """
+    if catalog_client is not None:
+        try:
+            catalog_meta = catalog_client.lookup_metadata(
+                asset_id=obj.get("id"), asset_path=obj.get("asset_path")
+            )
+            if catalog_meta:
+                return catalog_meta
+        except Exception as exc:  # pragma: no cover - network errors
+            print(f"[SIMREADY] WARNING: catalog lookup failed: {exc}", file=sys.stderr)
+
     metadata_rel = obj.get("metadata_path")
     if metadata_rel:
         candidate = safe_path_join(root, metadata_rel)
@@ -1200,6 +1217,8 @@ def main() -> None:
     objects = scene_assets.get("objects", [])
     print(f"[SIMREADY] Found {len(objects)} objects in scene_assets.json")
 
+    catalog_client = AssetCatalogClient()
+
     client = None
     if have_gemini():
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -1225,7 +1244,7 @@ def main() -> None:
             continue
 
         visual_path, visual_rel = visual
-        obj_metadata = load_object_metadata(GCS_ROOT, obj, assets_prefix)
+        obj_metadata = load_object_metadata(GCS_ROOT, obj, assets_prefix, catalog_client)
 
         # Check if we need Gemini to estimate dimensions (when metadata/OBB unavailable)
         gemini_estimated_size: Optional[List[float]] = None
@@ -1270,6 +1289,24 @@ def main() -> None:
         sim_path = sim_dir / "simready.usda"
 
         write_simready_usd(sim_path, visual_rel, physics_cfg, bounds)
+
+        if catalog_client is not None:
+            try:
+                export_bounds = {
+                    "size": bounds.get("size_m"),
+                    "center": bounds.get("center_m"),
+                    "volume_m3": bounds.get("volume_m3"),
+                    "source": bounds.get("source"),
+                }
+                catalog_payload = {
+                    "asset_path": obj.get("asset_path") or visual_rel,
+                    "mesh_bounds": {"export": export_bounds},
+                    "physics": physics_cfg,
+                    "material_name": physics_cfg.get("material_name"),
+                }
+                catalog_client.publish_metadata(oid, catalog_payload, asset_path=catalog_payload["asset_path"])
+            except Exception as exc:  # pragma: no cover - network errors
+                print(f"[SIMREADY] WARNING: failed to publish catalog metadata for obj {oid}: {exc}", file=sys.stderr)
 
         sim_rel = f"{assets_prefix}/obj_{oid}/simready.usda"
         if "static/obj_" in str(visual_path):
