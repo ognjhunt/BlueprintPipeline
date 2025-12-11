@@ -1,15 +1,14 @@
-"""Lightweight vector store client used by the asset catalog utilities.
+"""Vector store helpers for asset embeddings.
 
-The implementation is intentionally simple and dependency-free so it can run
-in both local notebooks and Cloud Run jobs without additional services. If a
-real vector database is desired, you can swap the backend by subclassing
-:class:`VectorStoreClient`.
+This module centralizes how BlueprintPipeline writes and queries embeddings
+from vector databases such as Vertex AI Vector Search or pgvector. The default
+implementation ships with an in-memory store to keep local execution simple
+while providing the same API shape that cloud backends use.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
@@ -17,85 +16,164 @@ import numpy as np
 
 @dataclass
 class VectorStoreConfig:
-    """Configuration for initializing a vector store client."""
+    """Configuration for connecting to a vector database."""
 
-    backend: str = "in-memory"
-    namespace: str = "default"
+    provider: str = "in-memory"
+    collection: str = "asset-embeddings"
+    project_id: Optional[str] = None
+    location: Optional[str] = None
+    connection_uri: Optional[str] = None
+    namespace: Optional[str] = None
+    dimension: Optional[int] = None
 
 
 @dataclass
 class VectorRecord:
-    """Single record stored in the vector store."""
+    """Single embedding record stored in a vector DB."""
 
     id: str
     embedding: np.ndarray
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any]
     score: Optional[float] = None
 
 
-class VectorStoreClient:
-    """Tiny, dependency-light vector store for similarity search.
+class BaseVectorStore:
+    """Abstract interface for all vector store providers."""
 
-    The client keeps embeddings in-memory grouped by namespace. It supports a
-    subset of the operations used by the asset catalog utilities: upsert,
-    query (cosine similarity), fetch by ID, and list by metadata filter.
-    """
-
-    def __init__(self, config: Optional[VectorStoreConfig] = None):
-        self.config = config or VectorStoreConfig()
-        self._store: dict[str, dict[str, VectorRecord]] = {}
-
-    # ------------------------ CRUD ------------------------
     def upsert(self, records: Iterable[VectorRecord], namespace: Optional[str] = None) -> None:
-        ns = namespace or self.config.namespace
-        bucket = self._store.setdefault(ns, {})
-        for rec in records:
-            bucket[rec.id] = rec
+        raise NotImplementedError
 
-    def fetch(self, ids: Iterable[str], namespace: Optional[str] = None) -> List[VectorRecord]:
-        ns = namespace or self.config.namespace
-        bucket = self._store.get(ns, {})
-        return [bucket[i] for i in ids if i in bucket]
-
-    def list(self, namespace: Optional[str] = None, filter_metadata: Optional[Dict[str, Any]] = None) -> List[VectorRecord]:
-        ns = namespace or self.config.namespace
-        bucket = list(self._store.get(ns, {}).values())
-        if not filter_metadata:
-            return bucket
-
-        filtered: list[VectorRecord] = []
-        for rec in bucket:
-            if all(rec.metadata.get(k) == v for k, v in filter_metadata.items()):
-                filtered.append(rec)
-        return filtered
-
-    # ------------------------ Query ------------------------
     def query(
         self,
         embedding: np.ndarray,
         top_k: int = 10,
         namespace: Optional[str] = None,
-        filter_metadata: Optional[Dict[str, Any]] = None,
+        filter_metadata: Optional[dict[str, Any]] = None,
     ) -> List[VectorRecord]:
-        ns = namespace or self.config.namespace
-        bucket = self.list(namespace=ns, filter_metadata=filter_metadata)
+        raise NotImplementedError
+
+    def fetch(self, ids: Iterable[str], namespace: Optional[str] = None) -> List[VectorRecord]:
+        raise NotImplementedError
+
+    def list(
+        self, namespace: Optional[str] = None, filter_metadata: Optional[dict[str, Any]] = None
+    ) -> List[VectorRecord]:
+        raise NotImplementedError
+
+
+class InMemoryVectorStore(BaseVectorStore):
+    """Lightweight in-memory vector DB used for local execution and tests."""
+
+    def __init__(self) -> None:
+        self._storage: dict[str, list[VectorRecord]] = {}
+
+    def _namespace_bucket(self, namespace: Optional[str]) -> list[VectorRecord]:
+        bucket_key = namespace or "default"
+        if bucket_key not in self._storage:
+            self._storage[bucket_key] = []
+        return self._storage[bucket_key]
+
+    def upsert(self, records: Iterable[VectorRecord], namespace: Optional[str] = None) -> None:
+        bucket = self._namespace_bucket(namespace)
+        bucket_index = {rec.id: rec for rec in bucket}
+        for record in records:
+            bucket_index[record.id] = record
+        self._storage[namespace or "default"] = list(bucket_index.values())
+
+    def query(
+        self,
+        embedding: np.ndarray,
+        top_k: int = 10,
+        namespace: Optional[str] = None,
+        filter_metadata: Optional[dict[str, Any]] = None,
+    ) -> List[VectorRecord]:
+        bucket = self._namespace_bucket(namespace)
         if not bucket:
             return []
 
-        query_norm = embedding / (np.linalg.norm(embedding) + 1e-8)
+        def _matches_filter(record: VectorRecord) -> bool:
+            if not filter_metadata:
+                return True
+            for key, value in filter_metadata.items():
+                if record.metadata.get(key) != value:
+                    return False
+            return True
 
+        filtered = [rec for rec in bucket if _matches_filter(rec)]
+        if not filtered:
+            return []
+
+        emb_norm = np.linalg.norm(embedding) + 1e-8
         scored: list[VectorRecord] = []
-        for rec in bucket:
-            emb = rec.embedding
-            denom = (np.linalg.norm(emb) * np.linalg.norm(query_norm)) + 1e-8
-            score = float(np.dot(emb, query_norm) / denom) if denom != 0 else 0.0
-            scored.append(VectorRecord(id=rec.id, embedding=rec.embedding, metadata=rec.metadata, score=score))
+        for rec in filtered:
+            denom = (np.linalg.norm(rec.embedding) * emb_norm) + 1e-8
+            score = float(np.dot(rec.embedding, embedding) / denom)
+            scored.append(
+                VectorRecord(id=rec.id, embedding=rec.embedding, metadata=rec.metadata, score=score)
+            )
 
         scored.sort(key=lambda r: r.score or 0.0, reverse=True)
         return scored[:top_k]
 
-    # ------------------------ Convenience ------------------------
-    def clear(self, namespace: Optional[str] = None) -> None:
-        ns = namespace or self.config.namespace
-        self._store.pop(ns, None)
+    def fetch(self, ids: Iterable[str], namespace: Optional[str] = None) -> List[VectorRecord]:
+        bucket = self._namespace_bucket(namespace)
+        id_set = set(ids)
+        return [rec for rec in bucket if rec.id in id_set]
 
+    def list(
+        self, namespace: Optional[str] = None, filter_metadata: Optional[dict[str, Any]] = None
+    ) -> List[VectorRecord]:
+        bucket = self._namespace_bucket(namespace)
+        if not filter_metadata:
+            return list(bucket)
+        return [rec for rec in bucket if all(rec.metadata.get(k) == v for k, v in filter_metadata.items())]
+
+
+class VectorStoreClient:
+    """Convenience wrapper that hides provider-specific details."""
+
+    def __init__(self, config: VectorStoreConfig, store: Optional[BaseVectorStore] = None):
+        self.config = config
+        self.store = store or self._create_store(config)
+
+    def _create_store(self, config: VectorStoreConfig) -> BaseVectorStore:
+        provider = (config.provider or "in-memory").lower()
+        if provider == "in-memory":
+            return InMemoryVectorStore()
+
+        if provider == "pgvector":
+            raise NotImplementedError(
+                "pgvector provider requires a connection URI and integration with a Postgres driver"
+            )
+
+        if provider in {"vertex", "vertex-ai", "vertexai"}:
+            raise NotImplementedError(
+                "Vertex AI Vector Search requires the google-cloud-aiplatform dependency and project configuration"
+            )
+
+        raise ValueError(f"Unsupported vector store provider: {config.provider}")
+
+    def upsert(self, records: Iterable[VectorRecord], namespace: Optional[str] = None) -> None:
+        self.store.upsert(records, namespace=namespace or self.config.collection)
+
+    def query(
+        self,
+        embedding: np.ndarray,
+        top_k: int = 10,
+        namespace: Optional[str] = None,
+        filter_metadata: Optional[dict[str, Any]] = None,
+    ) -> List[VectorRecord]:
+        return self.store.query(
+            embedding=embedding,
+            top_k=top_k,
+            namespace=namespace or self.config.collection,
+            filter_metadata=filter_metadata,
+        )
+
+    def fetch(self, ids: Iterable[str], namespace: Optional[str] = None) -> List[VectorRecord]:
+        return self.store.fetch(ids, namespace=namespace or self.config.collection)
+
+    def list(
+        self, namespace: Optional[str] = None, filter_metadata: Optional[dict[str, Any]] = None
+    ) -> List[VectorRecord]:
+        return self.store.list(namespace=namespace or self.config.collection, filter_metadata=filter_metadata)
