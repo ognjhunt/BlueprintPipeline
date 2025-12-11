@@ -196,6 +196,11 @@ Creates Python scripts that:
 
 Edit `policy_configs/environment_policies.json`:
 
+> **Note:** The canonical policy configuration now lives at the repo root in
+> `policy_configs/environment_policies.json` so other jobs (e.g., future Isaac
+> Lab task generation) can share the same mapping. The copy in this folder is
+> kept identical for the Replicator container build context.
+
 ```json
 {
   "environments": {
