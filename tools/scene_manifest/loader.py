@@ -33,7 +33,8 @@ def _canonical_to_legacy_object(obj: Dict) -> Dict:
 
     entry = {
         "id": obj.get("id"),
-        "class_name": (obj.get("semantics") or {}).get("category")
+        "class_name": obj.get("category")
+        or (obj.get("semantics") or {}).get("category")
         or from_scene_assets.get("class_name"),
         "type": legacy_type,
         "pipeline": generation.get("pipeline") or from_scene_assets.get("pipeline"),
@@ -63,7 +64,7 @@ def _manifest_to_legacy(manifest: Dict) -> Dict:
     return {
         "scene_id": manifest.get("scene_id"),
         "objects": objects,
-        "schema_version": manifest.get("schema_version"),
+        "schema_version": manifest.get("version") or manifest.get("schema_version"),
     }
 
 
