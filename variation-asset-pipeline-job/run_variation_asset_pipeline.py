@@ -49,6 +49,7 @@ from dataclasses import dataclass, asdict, field
 from enum import Enum
 import io
 import base64
+import filecmp
 
 from PIL import Image
 import numpy as np
@@ -200,6 +201,9 @@ class AssetResult:
     success: bool
     stage_completed: str  # "skipped", "library", "image", "3d", "physics", "complete"
     output_path: Optional[str] = None
+    asset_dir: Optional[str] = None
+    reference_image: Optional[str] = None
+    metadata_path: Optional[str] = None
     error: Optional[str] = None
     timings: Dict[str, float] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -209,6 +213,7 @@ class AssetResult:
 class PipelineConfig:
     """Pipeline configuration."""
     scene_id: str
+    bucket: Optional[str]
     replicator_prefix: str
     variation_assets_prefix: str
     backend_3d: Backend3D
@@ -216,6 +221,8 @@ class PipelineConfig:
     max_assets: Optional[int]
     priority_filter: Optional[str]
     asset_library_path: Optional[str]
+    registry_backend_uri: Optional[str]
+    register_assets: bool
     skip_existing: bool
     dry_run: bool
     vector_backend_uri: Optional[str]
@@ -346,6 +353,249 @@ def load_vector_index(
     )
 
     return VectorIndex(records)
+
+
+# ============================================================================
+# Asset Registry & Library Ingestion
+# ============================================================================
+
+
+def build_storage_uri(path: Path, bucket: Optional[str]) -> str:
+    """Convert a local GCS-mounted path to a gs:// URI when possible."""
+
+    try:
+        rel = path.relative_to(GCS_ROOT)
+        if bucket:
+            return f"gs://{bucket}/{rel.as_posix()}"
+        return rel.as_posix()
+    except ValueError:
+        return str(path)
+
+
+def is_same_file(src: Path, dst: Path) -> bool:
+    try:
+        return dst.is_file() and filecmp.cmp(src, dst, shallow=False)
+    except OSError:
+        return False
+
+
+class AssetRegistry:
+    """Simple registry backend with idempotent file-based upsert."""
+
+    def __init__(self, backend_uri: Optional[str], enabled: bool, dry_run: bool):
+        self.backend_uri = backend_uri
+        self.enabled = enabled and backend_uri is not None
+        self.dry_run = dry_run
+
+    def _resolve_path(self) -> Optional[Path]:
+        if not self.backend_uri:
+            return None
+
+        if self.backend_uri.startswith("file://"):
+            return Path(self.backend_uri[len("file://") :])
+
+        # Default to local path if no scheme
+        return Path(self.backend_uri)
+
+    def upsert(self, entry: Dict[str, Any]) -> None:
+        if not self.enabled:
+            print("[VAR-PIPELINE] Registry disabled; skipping registry update")
+            return
+
+        if self.dry_run:
+            print("[VAR-PIPELINE] [DRY-RUN] Would update registry")
+            return
+
+        registry_path = self._resolve_path()
+        if registry_path is None:
+            print("[VAR-PIPELINE] Registry backend not configured; skipping")
+            return
+
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+        data: Dict[str, Any] = {"assets": []}
+        try:
+            if registry_path.is_file():
+                with registry_path.open("r") as f:
+                    data = json.load(f)
+        except Exception as e:
+            print(f"[VAR-PIPELINE] Failed to read registry {registry_path}: {e}")
+            data = {"assets": []}
+
+        assets: List[Dict[str, Any]] = data.get("assets", [])
+        existing_idx = next(
+            (i for i, a in enumerate(assets) if a.get("asset_id") == entry["asset_id"]),
+            None,
+        )
+
+        if existing_idx is not None and assets[existing_idx] == entry:
+            print(
+                f"[VAR-PIPELINE] Registry already up-to-date for {entry['asset_id']}"
+            )
+            return
+
+        if existing_idx is not None:
+            assets[existing_idx] = entry
+            print(f"[VAR-PIPELINE] Updated registry entry for {entry['asset_id']}")
+        else:
+            assets.append(entry)
+            print(f"[VAR-PIPELINE] Added registry entry for {entry['asset_id']}")
+
+        data["assets"] = assets
+
+        try:
+            with registry_path.open("w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"[VAR-PIPELINE] Failed to write registry {registry_path}: {e}")
+
+
+def persist_asset_to_library(
+    asset: AssetSpec, result: AssetResult, config: PipelineConfig
+) -> Dict[str, Optional[Path]]:
+    """
+    Copy generated assets into the shared library structure.
+
+    Returns paths for the published asset, metadata, and thumbnail (if written).
+    """
+
+    if not config.asset_library_path:
+        return {}
+
+    if config.dry_run:
+        print("[VAR-PIPELINE] [DRY-RUN] Would publish asset to library")
+        return {}
+
+    if not result.output_path:
+        return {}
+
+    lib_root = GCS_ROOT / config.asset_library_path
+    lib_category_dir = lib_root / asset.category
+    lib_category_dir.mkdir(parents=True, exist_ok=True)
+
+    source_asset_path = Path(result.output_path)
+    asset_safe = safe_name(asset.name)
+
+    # Skip copying if asset already inside the library root
+    try:
+        source_asset_path.relative_to(lib_root)
+        asset_in_library = True
+    except ValueError:
+        asset_in_library = False
+
+    dest_asset_path = lib_category_dir / f"{asset_safe}{source_asset_path.suffix or '.usdz'}"
+
+    if not asset_in_library:
+        if dest_asset_path.suffix != source_asset_path.suffix:
+            dest_asset_path = lib_category_dir / f"{asset_safe}{source_asset_path.suffix}"
+
+        if dest_asset_path.exists() and is_same_file(source_asset_path, dest_asset_path):
+            print(
+                f"[VAR-PIPELINE] Library already has up-to-date asset for {asset.name}"
+            )
+        else:
+            shutil.copy(source_asset_path, dest_asset_path)
+            print(
+                f"[VAR-PIPELINE] Published asset to library: {dest_asset_path}"
+            )
+
+    # Metadata
+    metadata_candidates = []
+    if result.metadata_path:
+        metadata_candidates.append(Path(result.metadata_path))
+    if result.asset_dir:
+        metadata_candidates.append(Path(result.asset_dir) / "metadata.json")
+
+    dest_metadata_path = None
+    for meta in metadata_candidates:
+        if meta.is_file():
+            dest_metadata_path = lib_category_dir / f"{asset_safe}.json"
+            if not (dest_metadata_path.exists() and is_same_file(meta, dest_metadata_path)):
+                shutil.copy(meta, dest_metadata_path)
+                print(
+                    f"[VAR-PIPELINE] Published metadata for {asset.name} -> {dest_metadata_path}"
+                )
+            break
+
+    # Thumbnail
+    thumbnail_candidates = []
+    if result.reference_image:
+        thumbnail_candidates.append(Path(result.reference_image))
+    if result.asset_dir:
+        thumbnail_candidates.append(Path(result.asset_dir) / "reference.png")
+
+    dest_thumbnail_path = None
+    for thumb in thumbnail_candidates:
+        if thumb.is_file():
+            dest_thumbnail_path = lib_category_dir / f"{asset_safe}_thumb{thumb.suffix}"
+            if not (dest_thumbnail_path.exists() and is_same_file(thumb, dest_thumbnail_path)):
+                shutil.copy(thumb, dest_thumbnail_path)
+                print(
+                    f"[VAR-PIPELINE] Published thumbnail for {asset.name} -> {dest_thumbnail_path}"
+                )
+            break
+
+    return {
+        "asset": dest_asset_path if dest_asset_path.exists() else None,
+        "metadata": dest_metadata_path,
+        "thumbnail": dest_thumbnail_path,
+    }
+
+
+def ingest_asset(
+    asset: AssetSpec,
+    result: AssetResult,
+    config: PipelineConfig,
+    registry: AssetRegistry,
+    source_pipeline: str = "variation",
+):
+    """Persist assets to the library and update registry with idempotency."""
+
+    if config.dry_run:
+        print("[VAR-PIPELINE] [DRY-RUN] Skipping ingestion")
+        return
+
+    published_paths = persist_asset_to_library(asset, result, config)
+
+    if not config.register_assets:
+        return
+
+    storage_uris: Dict[str, str] = {}
+    if result.output_path:
+        storage_uris["variation_output"] = build_storage_uri(
+            Path(result.output_path), config.bucket
+        )
+
+    for key, path in published_paths.items():
+        if path:
+            storage_uris[f"library_{key}"] = build_storage_uri(path, config.bucket)
+
+    metadata_uri = None
+    if published_paths.get("metadata"):
+        metadata_uri = build_storage_uri(published_paths["metadata"], config.bucket)
+    elif result.metadata_path:
+        metadata_uri = build_storage_uri(Path(result.metadata_path), config.bucket)
+
+    thumbnail_uri = None
+    if published_paths.get("thumbnail"):
+        thumbnail_uri = build_storage_uri(published_paths["thumbnail"], config.bucket)
+    elif result.reference_image:
+        thumbnail_uri = build_storage_uri(Path(result.reference_image), config.bucket)
+
+    entry = {
+        "asset_id": safe_name(asset.name),
+        "category": asset.category,
+        "tags": list({asset.category, asset.semantic_class, *asset.example_variants}),
+        "source_pipeline": source_pipeline,
+        "storage_uris": storage_uris,
+        "metadata_uri": metadata_uri,
+        "thumbnail_uri": thumbnail_uri,
+        "simready": True,
+        "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "priority": asset.priority,
+    }
+
+    registry.upsert(entry)
 
 
 # ============================================================================
@@ -504,6 +754,10 @@ def copy_from_library(
     meta_path = library_asset_path.with_suffix('.json')
     if meta_path.is_file():
         shutil.copy(meta_path, output_path.with_suffix('.json'))
+
+    thumb_path = library_asset_path.with_name(f"{library_asset_path.stem}_thumb.png")
+    if thumb_path.is_file():
+        shutil.copy(thumb_path, output_path.with_name(f"{output_path.stem}_thumb.png"))
 
     return output_path
 
@@ -940,6 +1194,9 @@ def process_single_asset(
             success=True,
             stage_completed="skipped",
             output_path=str(usdz_path),
+            asset_dir=str(asset_out_dir),
+            reference_image=str(asset_out_dir / "reference.png"),
+            metadata_path=str(asset_out_dir / "metadata.json"),
             timings={"total": 0.0},
         )
 
@@ -959,6 +1216,9 @@ def process_single_asset(
                 success=True,
                 stage_completed="library",
                 output_path=str(output_path),
+                asset_dir=str(asset_out_dir),
+                reference_image=str(output_path.with_name(f"{output_path.stem}_thumb.png")),
+                metadata_path=str(output_path.with_suffix('.json')),
                 timings={"total": time.time() - start_total},
             )
 
@@ -988,6 +1248,8 @@ def process_single_asset(
             success=True,
             stage_completed="complete",
             output_path=str(usdz_path),
+            asset_dir=str(asset_out_dir),
+            reference_image=str(image_path) if image_path else None,
             timings=timings,
         )
 
@@ -1063,6 +1325,9 @@ def process_single_asset(
         output_path=str(usdz_path if usdz_success else glb_path),
         timings=timings,
         metadata={"physics": physics},
+        asset_dir=str(asset_out_dir),
+        reference_image=str(image_path) if image_path else None,
+        metadata_path=str(meta_path),
     )
 
 
@@ -1152,6 +1417,11 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         config.vector_backend_uri, config.asset_library_path
     )
     vector_index = load_vector_index(resolved_backend, config.asset_library_path)
+    registry = AssetRegistry(
+        backend_uri=config.registry_backend_uri,
+        enabled=config.register_assets,
+        dry_run=config.dry_run,
+    )
 
     # Process assets
     scene_context = manifest.get("scene_type", "")
@@ -1169,6 +1439,15 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             scene_context=scene_context,
         )
         results.append(result)
+
+        if result.success:
+            ingest_asset(
+                asset=asset,
+                result=result,
+                config=config,
+                registry=registry,
+                source_pipeline="variation",
+            )
 
         if result.success:
             print(f"[VAR-PIPELINE] ✓ {asset.name} ({result.stage_completed})")
@@ -1245,8 +1524,12 @@ def main():
         print("[VAR-PIPELINE] ERROR: SCENE_ID is required", file=sys.stderr)
         sys.exit(1)
 
+    dry_run = getenv_bool("DRY_RUN", "0")
+    register_assets = getenv_bool("REGISTER_ASSETS", "1") and not dry_run
+
     config = PipelineConfig(
         scene_id=scene_id,
+        bucket=bucket or None,
         replicator_prefix=os.getenv("REPLICATOR_PREFIX", f"scenes/{scene_id}/replicator"),
         variation_assets_prefix=os.getenv("VARIATION_ASSETS_PREFIX", f"scenes/{scene_id}/variation_assets"),
         backend_3d=Backend3D(os.getenv("3D_BACKEND", "auto").lower()),
@@ -1254,8 +1537,10 @@ def main():
         max_assets=int(os.getenv("MAX_ASSETS")) if os.getenv("MAX_ASSETS") else None,
         priority_filter=os.getenv("PRIORITY_FILTER") or None,
         asset_library_path=os.getenv("ASSET_LIBRARY_PATH"),
+        registry_backend_uri=os.getenv("ASSET_REGISTRY_BACKEND_URI"),
+        register_assets=register_assets,
         skip_existing=getenv_bool("SKIP_EXISTING", "1"),
-        dry_run=getenv_bool("DRY_RUN", "0"),
+        dry_run=dry_run,
         vector_backend_uri=os.getenv("ASSET_VECTOR_BACKEND_URI"),
         vector_similarity_threshold=float(
             os.getenv("ASSET_VECTOR_SIMILARITY_THRESHOLD", "0.82")
@@ -1276,6 +1561,11 @@ def main():
         print(f"[VAR-PIPELINE]   Priority Filter: {config.priority_filter}")
     if config.asset_library_path:
         print(f"[VAR-PIPELINE]   Asset Library: {config.asset_library_path}")
+    if config.registry_backend_uri:
+        print(f"[VAR-PIPELINE]   Registry backend: {config.registry_backend_uri}")
+    print(
+        f"[VAR-PIPELINE]   Registry updates: {'enabled' if config.register_assets else 'disabled'}"
+    )
     if config.vector_backend_uri:
         print(f"[VAR-PIPELINE]   Vector backend: {config.vector_backend_uri}")
     print(
