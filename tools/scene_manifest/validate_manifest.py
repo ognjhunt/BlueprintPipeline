@@ -1,4 +1,4 @@
-"""Utilities for working with scene manifests.
+"""Utilities for working with canonical scene manifests.
 
 Provides:
 - ``validate``: Validate a scene_manifest.json against the schema.
@@ -14,7 +14,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, Mapping
 
 try:
     import jsonschema
@@ -22,6 +22,11 @@ except ImportError as e:  # pragma: no cover - utility script
     jsonschema = None
 
 SCHEMA_PATH = Path(__file__).with_name("manifest_schema.json")
+DEFAULT_VERSION = "1.0.0"
+DEFAULT_SCENE = {
+    "coordinate_frame": "y_up",
+    "meters_per_unit": 1.0,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -37,11 +42,13 @@ def load_json(path: Path) -> Dict[str, Any]:
 def normalize_sim_role(role: str | None) -> str:
     allowed = {
         "static",
+        "interactive",
         "manipulable_object",
         "articulated_furniture",
         "articulated_appliance",
         "scene_shell",
         "background",
+        "clutter",
         "unknown",
     }
     if not role:
@@ -51,8 +58,87 @@ def normalize_sim_role(role: str | None) -> str:
         return role
     # Graceful downgrade for legacy labels
     if role in {"interactive", "dynamic"}:
-        return "manipulable_object"
+        return "interactive"
     return "unknown"
+
+
+def _coerce_number(value: Any, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _canonical_transform(*sources: Mapping[str, Any] | None) -> Dict[str, Any]:
+    position = {"x": 0.0, "y": 0.0, "z": 0.0}
+    scale = {"x": 1.0, "y": 1.0, "z": 1.0}
+    rotation_euler: Dict[str, float] | None = None
+    rotation_quaternion: Dict[str, float] | None = None
+
+    for source in sources:
+        if not source:
+            continue
+
+        transform = source.get("transform") if isinstance(source, Mapping) else None
+        transform = transform or (source if isinstance(source, Mapping) else None)
+
+        pos = None
+        if transform:
+            pos = transform.get("position") or transform.get("translation")
+        if isinstance(pos, Mapping):
+            position.update({
+                "x": _coerce_number(pos.get("x"), position["x"]),
+                "y": _coerce_number(pos.get("y"), position["y"]),
+                "z": _coerce_number(pos.get("z"), position["z"]),
+            })
+        if isinstance(pos, Iterable) and not isinstance(pos, (str, bytes, Mapping)):
+            pos_list = list(pos)
+            if len(pos_list) >= 3:
+                position.update({
+                    "x": _coerce_number(pos_list[0], position["x"]),
+                    "y": _coerce_number(pos_list[1], position["y"]),
+                    "z": _coerce_number(pos_list[2], position["z"]),
+                })
+
+        rot_euler = (transform or {}).get("rotation_euler") if transform else None
+        if isinstance(rot_euler, Mapping):
+            rotation_euler = {
+                "roll": _coerce_number(rot_euler.get("roll"), 0.0),
+                "pitch": _coerce_number(rot_euler.get("pitch"), 0.0),
+                "yaw": _coerce_number(rot_euler.get("yaw"), 0.0),
+            }
+
+        rot_quat = (transform or {}).get("rotation") or (transform or {}).get("rotation_quaternion")
+        if isinstance(rot_quat, Mapping):
+            rotation_quaternion = {
+                "w": _coerce_number(rot_quat.get("w"), 1.0),
+                "x": _coerce_number(rot_quat.get("x"), 0.0),
+                "y": _coerce_number(rot_quat.get("y"), 0.0),
+                "z": _coerce_number(rot_quat.get("z"), 0.0),
+            }
+
+        scl = (transform or {}).get("scale") if transform else None
+        if isinstance(scl, Mapping):
+            scale.update({
+                "x": _coerce_number(scl.get("x"), scale["x"]),
+                "y": _coerce_number(scl.get("y"), scale["y"]),
+                "z": _coerce_number(scl.get("z"), scale["z"]),
+            })
+        if isinstance(scl, Iterable) and not isinstance(scl, (str, bytes, Mapping)):
+            scl_list = list(scl)
+            if len(scl_list) >= 3:
+                scale.update({
+                    "x": _coerce_number(scl_list[0], scale["x"]),
+                    "y": _coerce_number(scl_list[1], scale["y"]),
+                    "z": _coerce_number(scl_list[2], scale["z"]),
+                })
+
+    transform_out: Dict[str, Any] = {"position": position, "scale": scale}
+    if rotation_euler:
+        transform_out["rotation_euler"] = rotation_euler
+    if rotation_quaternion:
+        transform_out["rotation_quaternion"] = rotation_quaternion
+    return transform_out
 
 
 def validate_manifest(manifest: Dict[str, Any]) -> None:
@@ -76,11 +162,20 @@ def manifest_from_scene_assets(scene_assets: Dict[str, Any], inventory: Dict[str
     inventory = inventory or {}
     inv_map = {str(o.get("id")): o for o in inventory.get("objects", [])}
 
+    scene_block = {**DEFAULT_SCENE}
+    if inventory.get("environment_type") is not None:
+        scene_block["environment_type"] = inventory.get("environment_type")
+    if inventory.get("room"):
+        scene_block["room"] = inventory.get("room")
+
     manifest = {
-        "schema_version": "1.0",
-        "source": "gemini",
-        "scene_id": scene_assets.get("scene_id"),
+        "version": DEFAULT_VERSION,
+        "scene_id": str(scene_assets.get("scene_id", "")),
+        "scene": scene_block,
         "objects": [],
+        "metadata": {
+            "source_pipeline": "gemini",
+        },
     }
 
     for obj in scene_assets.get("objects", []):
@@ -91,15 +186,21 @@ def manifest_from_scene_assets(scene_assets: Dict[str, Any], inventory: Dict[str
         background_candidate = obj.get("class_name") == "scene_background" or oid == "scene_background"
 
         entry = {
-            "id": oid,
+            "id": str(oid),
+            "name": inv.get("display_name"),
+            "category": obj.get("class_name") or inv.get("category"),
+            "description": inv.get("short_description") or obj.get("object_phrase"),
             "sim_role": normalize_sim_role(obj.get("sim_role") or inv.get("sim_role") or obj.get("type")),
+            "transform": _canonical_transform(obj, inv),
             "asset": {
                 "path": asset_path,
                 "format": "glb" if asset_path and asset_path.endswith(".glb") else None,
                 "source": "scene_assets",
-                "scene_asset_id": oid,
-                "inventory_id": inv.get("id"),
+                "relative_path": obj.get("relative_path"),
+                "pack_name": obj.get("pack_name") or inv.get("pack_name"),
+                "candidates": inv.get("candidates") or obj.get("candidates"),
             },
+            "placement_region": obj.get("placement_region"),
             "placement": {
                 "polygon": obj.get("polygon") or inv.get("polygon"),
                 "approx_location": obj.get("approx_location") or inv.get("approx_location"),
@@ -107,9 +208,7 @@ def manifest_from_scene_assets(scene_assets: Dict[str, Any], inventory: Dict[str
             "articulation": {
                 "physx_endpoint": obj.get("physx_endpoint"),
             },
-            "physics": {
-                "hints": inv.get("physics_hints") or obj.get("physics_hints"),
-            },
+            "physics_hints": inv.get("physics_hints") or obj.get("physics_hints"),
             "semantics": {
                 "category": obj.get("class_name") or inv.get("category"),
                 "short_description": inv.get("short_description") or obj.get("object_phrase"),
@@ -133,7 +232,7 @@ def manifest_from_scene_assets(scene_assets: Dict[str, Any], inventory: Dict[str
         # Drop empty nested mappings
         entry["asset"] = {k: v for k, v in entry["asset"].items() if v is not None}
         entry["articulation"] = {k: v for k, v in entry["articulation"].items() if v is not None}
-        entry["physics"] = {k: v for k, v in entry["physics"].items() if v}
+        entry["physics_hints"] = entry["physics_hints"] or None
         entry["semantics"] = {k: v for k, v in entry["semantics"].items() if v}
         entry["placement"] = {k: v for k, v in entry["placement"].items() if v}
         entry["asset_generation"] = {
@@ -157,11 +256,22 @@ def manifest_from_scene_assets(scene_assets: Dict[str, Any], inventory: Dict[str
 def manifest_from_blueprint_recipe(scene_plan: Dict[str, Any], matched_assets: Dict[str, Any]) -> Dict[str, Any]:
     assets_by_id = {str(a.get("id") or a.get("object_id")): a for a in matched_assets.get("objects", matched_assets.get("assets", []))}
 
+    scene_block = {**DEFAULT_SCENE}
+    detected_env = (scene_plan.get("environment_analysis") or {}).get("detected_type")
+    if detected_env is not None:
+        scene_block["environment_type"] = detected_env
+    if scene_plan.get("room"):
+        scene_block["room"] = scene_plan.get("room")
+
     manifest = {
-        "schema_version": "1.0",
-        "source": "blueprint_recipe",
-        "scene_id": scene_plan.get("scene_id"),
+        "version": DEFAULT_VERSION,
+        "scene_id": str(scene_plan.get("scene_id", "")),
+        "scene": scene_block,
         "objects": [],
+        "metadata": {
+            "source_pipeline": "blueprint_recipe",
+            "scene_plan_version": scene_plan.get("version"),
+        },
     }
 
     for obj in scene_plan.get("objects", []):
@@ -170,19 +280,31 @@ def manifest_from_blueprint_recipe(scene_plan: Dict[str, Any], matched_assets: D
         asset_path = matched.get("asset_path") or matched.get("path")
 
         entry = {
-            "id": oid,
+            "id": str(oid),
+            "name": obj.get("name"),
+            "category": obj.get("category"),
+            "description": obj.get("description"),
             "sim_role": normalize_sim_role(obj.get("sim_role")),
+            "transform": _canonical_transform(obj.get("transform") or obj),
             "asset": {
                 "path": asset_path,
                 "format": matched.get("format"),
                 "source": matched.get("source", "blueprint_recipe"),
+                "pack_name": matched.get("pack_name"),
+                "relative_path": matched.get("relative_path"),
+                "variants": matched.get("variants"),
+                "candidates": matched.get("candidates"),
+                "simready_metadata": matched.get("simready_metadata"),
+                "asset_id": matched.get("asset_id"),
                 "inventory_id": matched.get("inventory_id"),
             },
-            "transform": obj.get("transform"),
             "articulation": obj.get("articulation"),
-            "physics": obj.get("physics_hints") or matched.get("physics"),
+            "physics": obj.get("physics") or obj.get("physics_hints") or matched.get("physics"),
             "semantics": obj.get("semantics"),
+            "placement_region": obj.get("placement_region"),
             "placement": obj.get("placement"),
+            "relationships": obj.get("relationships"),
+            "dimensions_est": obj.get("dimensions_est") or obj.get("dimensions"),
             "source": {
                 "blueprint_recipe": obj,
                 "matched_asset": matched,
@@ -190,7 +312,7 @@ def manifest_from_blueprint_recipe(scene_plan: Dict[str, Any], matched_assets: D
         }
 
         entry["asset"] = {k: v for k, v in entry["asset"].items() if v is not None}
-        for key in ("articulation", "physics", "semantics", "placement"):
+        for key in ("articulation", "physics", "semantics", "placement", "relationships"):
             if isinstance(entry.get(key), dict):
                 entry[key] = {k: v for k, v in entry[key].items() if v is not None}
 

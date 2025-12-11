@@ -1,48 +1,53 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Scene Manifest",
+  "title": "SceneManifest",
+  "description": "Canonical manifest describing scene intent, assets, and simulation hints for downstream jobs.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "objects"],
+  "required": ["version", "scene_id", "scene", "objects"],
   "properties": {
-    "schema_version": {
+    "version": {
       "type": "string",
-      "description": "Version string for the manifest schema."
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Manifest schema version."
     },
     "scene_id": {
-      "type": ["string", "integer"],
-      "description": "Identifier for the scene."
-    },
-    "source": {
       "type": "string",
-      "enum": ["gemini", "blueprint_recipe", "manual", "unknown"],
-      "description": "Where this manifest originated."
+      "description": "Identifier for the scene or capture."
     },
-    "background": {
+    "scene": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Background mesh and semantic metadata.",
+      "required": ["coordinate_frame", "meters_per_unit"],
       "properties": {
-        "mesh": {
+        "coordinate_frame": {
+          "type": "string",
+          "enum": ["y_up", "z_up"],
+          "description": "Coordinate frame used by authored assets."
+        },
+        "meters_per_unit": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Scale factor converting authored units to meters."
+        },
+        "environment_type": {
+          "type": "string",
+          "description": "Scene environment classification (kitchen, warehouse, etc.)."
+        },
+        "room": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["path"],
           "properties": {
-            "path": {"type": "string"},
-            "format": {"type": "string"},
-            "scale": {
-              "type": "array",
-              "items": {"type": "number"},
-              "minItems": 3,
-              "maxItems": 3
+            "bounds": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "width": {"type": "number"},
+                "depth": {"type": "number"},
+                "height": {"type": "number"}
+              }
             },
-            "rotation": {
-              "type": "array",
-              "items": {"type": "number"},
-              "minItems": 4,
-              "maxItems": 4
-            },
-            "translation": {
+            "origin": {
               "type": "array",
               "items": {"type": "number"},
               "minItems": 3,
@@ -50,13 +55,44 @@
             }
           }
         },
-        "semantics": {
+        "physics_defaults": {
           "type": "object",
-          "additionalProperties": true,
+          "additionalProperties": false,
           "properties": {
-            "category": {"type": "string"},
-            "tags": {"type": "array", "items": {"type": "string"}},
-            "description": {"type": "string"}
+            "gravity": {
+              "type": "object",
+              "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "z": {"type": "number"}
+              }
+            },
+            "solver": {"type": "string"},
+            "time_steps_per_second": {"type": "number"}
+          }
+        }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "asset_root": {
+          "type": "string",
+          "description": "Base URI/path where assets can be resolved."
+        },
+        "packs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string"},
+              "version_hash": {"type": "string"},
+              "local_path_template": {"type": "string"},
+              "gcs_path_template": {"type": "string"}
+            }
           }
         }
       }
@@ -66,128 +102,188 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "sim_role", "asset"],
+        "required": ["id", "sim_role", "asset", "transform"],
         "properties": {
-          "id": {
-            "type": ["string", "integer"],
-            "description": "Object identifier used across the pipeline."
-          },
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "category": {"type": "string"},
+          "description": {"type": "string"},
           "sim_role": {
             "type": "string",
             "enum": [
               "static",
+              "interactive",
               "manipulable_object",
               "articulated_furniture",
               "articulated_appliance",
-              "scene_shell",
+              "clutter",
               "background",
+              "scene_shell",
               "unknown"
-            ],
-            "description": "How the simulator should treat this object."
+            ]
+          },
+          "must_be_separate_asset": {"type": "boolean"},
+          "placement_region": {"type": "string"},
+          "transform": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["position", "scale"],
+            "properties": {
+              "position": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["x", "y", "z"],
+                "properties": {
+                  "x": {"type": "number"},
+                  "y": {"type": "number"},
+                  "z": {"type": "number"}
+                }
+              },
+              "rotation_euler": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "roll": {"type": "number"},
+                  "pitch": {"type": "number"},
+                  "yaw": {"type": "number"}
+                }
+              },
+              "rotation_quaternion": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "w": {"type": "number"},
+                  "x": {"type": "number"},
+                  "y": {"type": "number"},
+                  "z": {"type": "number"}
+                }
+              },
+              "scale": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["x", "y", "z"],
+                "properties": {
+                  "x": {"type": "number"},
+                  "y": {"type": "number"},
+                  "z": {"type": "number"}
+                }
+              }
+            }
+          },
+          "dimensions_est": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "width": {"type": "number"},
+              "depth": {"type": "number"},
+              "height": {"type": "number"}
+            }
           },
           "asset": {
             "type": "object",
             "additionalProperties": false,
             "required": ["path"],
             "properties": {
-              "path": {"type": "string"},
-              "format": {"type": "string"},
+              "asset_id": {"type": "string"},
               "source": {"type": "string"},
-              "inventory_id": {"type": ["string", "integer"]},
-              "scene_asset_id": {"type": ["string", "integer"]}
-            }
-          },
-          "transform": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "translation": {
-                "type": "array",
-                "items": {"type": "number"},
-                "minItems": 3,
-                "maxItems": 3
+              "pack_name": {"type": "string"},
+              "relative_path": {"type": "string"},
+              "path": {"type": "string", "minLength": 1},
+              "format": {"type": "string"},
+              "variants": {
+                "type": "object",
+                "additionalProperties": {"type": "string"}
               },
-              "rotation": {
+              "candidates": {
                 "type": "array",
-                "items": {"type": "number"},
-                "minItems": 4,
-                "maxItems": 4
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "asset_path": {"type": "string"},
+                    "score": {"type": "number"},
+                    "dimensions": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "width": {"type": "number"},
+                        "depth": {"type": "number"},
+                        "height": {"type": "number"}
+                      }
+                    }
+                  }
+                }
               },
-              "scale": {
-                "type": "array",
-                "items": {"type": "number"},
-                "minItems": 3,
-                "maxItems": 3
-              }
-            }
-          },
-          "articulation": {
-            "type": "object",
-            "additionalProperties": true,
-            "properties": {
-              "type": {"type": "string"},
-              "axes": {"type": "array"},
-              "default_state": {"type": "string"},
-              "physx_endpoint": {"type": "string"}
-            }
-          },
-          "physics": {
-            "type": "object",
-            "additionalProperties": true,
-            "properties": {
-              "dynamic": {"type": "boolean"},
-              "mass": {"type": "number"},
-              "gravity": {"type": "boolean"},
-              "collision": {"type": "string"},
-              "material": {"type": "string"},
-              "hints": {"type": "object"}
+              "simready_metadata": {"type": "object"}
             }
           },
           "semantics": {
             "type": "object",
             "additionalProperties": true,
             "properties": {
-              "category": {"type": "string"},
-              "short_description": {"type": "string"},
-              "tags": {"type": "array", "items": {"type": "string"}},
-              "attributes": {"type": "object"}
+              "class": {"type": "string"},
+              "instance_id": {"type": "string"},
+              "affordances": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "tags": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "custom_labels": {
+                "type": "object",
+                "additionalProperties": {"type": "string"}
+              }
             }
           },
-          "placement": {
+          "physics": {"type": "object"},
+          "physics_hints": {"type": "object"},
+          "placement": {"type": "object"},
+          "asset_generation": {"type": "object"},
+          "articulation": {
             "type": "object",
             "additionalProperties": true,
             "properties": {
-              "polygon": {
-                "type": "array",
-                "items": {
-                  "type": "array",
-                  "items": {"type": "number"},
-                  "minItems": 2,
-                  "maxItems": 2
+              "type": {"type": "string"},
+              "axis": {"type": "string"},
+              "limits": {
+                "type": "object",
+                "properties": {
+                  "lower": {"type": "number"},
+                  "upper": {"type": "number"}
                 }
               },
-              "approx_location": {"type": ["string", "array", "object"]}
+              "damping": {"type": "number"},
+              "physx_endpoint": {"type": "string"}
             }
           },
-          "asset_generation": {
-            "type": "object",
-            "additionalProperties": true,
-            "properties": {
-              "pipeline": {"type": "string"},
-              "inputs": {"type": "object"},
-              "output": {"type": "string"}
+          "relationships": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {"type": "string"},
+                "subject_id": {"type": "string"},
+                "object_id": {"type": "string"}
+              }
             }
           },
-          "source": {
-            "type": "object",
-            "additionalProperties": true,
-            "properties": {
-              "scene_assets": {"type": "object"},
-              "inventory": {"type": "object"},
-              "blueprint_recipe": {"type": "object"}
-            }
-          }
+          "variation_candidate": {"type": "boolean"},
+          "source": {"type": "object"}
         }
+      }
+    },
+    "background": {
+      "type": "object"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "scene_path": {"type": "string"},
+        "source_pipeline": {"type": "string"},
+        "notes": {"type": "string"}
       }
     }
   }
