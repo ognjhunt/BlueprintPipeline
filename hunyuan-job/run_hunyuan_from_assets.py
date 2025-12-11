@@ -8,6 +8,12 @@ import sys
 from pathlib import Path
 from typing import Optional, List, Set
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from tools.scene_manifest.loader import load_manifest_or_scene_assets
+
 from PIL import Image
 import trimesh  # for OBJ -> GLB without Blender
 
@@ -86,13 +92,18 @@ def pick_reference_image(root: Path, obj: dict) -> Optional[Path]:
     return None
 
 
-def load_asset_plan(assets_root: Path) -> Optional[Path]:
-    """scene_assets.json is produced by the assets-plan job."""
-    plan_path = assets_root / "scene_assets.json"
-    if not plan_path.is_file():
-        print(f"[HUNYUAN] ERROR: assets plan not found at {plan_path}", file=sys.stderr)
+def load_asset_plan(assets_root: Path) -> Optional[dict]:
+    plan = load_manifest_or_scene_assets(assets_root)
+    if plan is None:
+        manifest_path = assets_root / "scene_manifest.json"
+        legacy_path = assets_root / "scene_assets.json"
+        print(
+            f"[HUNYUAN] ERROR: assets manifest not found at {manifest_path} "
+            f"or legacy plan at {legacy_path}",
+            file=sys.stderr,
+        )
         return None
-    return plan_path
+    return plan
 
 
 def main() -> None:
@@ -127,8 +138,8 @@ def main() -> None:
         sys.exit(1)
 
     assets_root = GCS_ROOT / assets_prefix
-    plan_path = load_asset_plan(assets_root)
-    if plan_path is None:
+    plan = load_asset_plan(assets_root)
+    if plan is None:
         sys.exit(1)
 
     print(f"[HUNYUAN] Bucket={bucket}")
@@ -145,7 +156,6 @@ def main() -> None:
         f"[HUNYUAN] Performance: skip_existing={skip_existing_assets}"
     )
 
-    plan = json.loads(plan_path.read_text())
     objects = plan.get("objects", [])
     print(f"[HUNYUAN] Loaded plan with {len(objects)} objects")
 

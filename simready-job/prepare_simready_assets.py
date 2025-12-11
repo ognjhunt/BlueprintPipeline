@@ -4,6 +4,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from tools.scene_manifest.loader import load_manifest_or_scene_assets
+
 import numpy as np
 from PIL import Image  # type: ignore
 from tools.asset_catalog import AssetCatalogClient
@@ -1206,16 +1212,23 @@ def main() -> None:
         sys.exit(1)
 
     assets_root = GCS_ROOT / assets_prefix
-    scene_assets_path = assets_root / "scene_assets.json"
+    manifest_path = assets_root / "scene_manifest.json"
 
     print(f"[SIMREADY] Bucket={bucket}")
     print(f"[SIMREADY] Scene={scene_id}")
     print(f"[SIMREADY] Assets root={assets_root}")
-    print(f"[SIMREADY] Loading {scene_assets_path}")
+    print(f"[SIMREADY] Loading {manifest_path} (or legacy scene_assets.json)")
 
-    scene_assets = load_json(scene_assets_path)
+    scene_assets = load_manifest_or_scene_assets(assets_root)
+    if scene_assets is None:
+        legacy_path = assets_root / "scene_assets.json"
+        print(
+            f"[SIMREADY] scene manifest missing at {manifest_path} and {legacy_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     objects = scene_assets.get("objects", [])
-    print(f"[SIMREADY] Found {len(objects)} objects in scene_assets.json")
+    print(f"[SIMREADY] Found {len(objects)} objects in manifest")
 
     catalog_client = AssetCatalogClient()
 

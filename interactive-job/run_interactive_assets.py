@@ -32,6 +32,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from tools.scene_manifest.loader import load_manifest_or_scene_assets
+
 
 # =============================================================================
 # Configuration
@@ -822,13 +828,16 @@ def main() -> None:
     multiview_root = root / multiview_prefix if multiview_prefix else assets_root / "multiview"
     zeroscene_root = root / zeroscene_prefix if zeroscene_prefix else assets_root / "zeroscene"
 
-    # Load scene assets manifest
-    manifest_path = assets_root / "scene_assets.json"
-    if not manifest_path.is_file():
-        log(f"scene_assets.json not found at {manifest_path}", "ERROR")
+    # Load scene assets manifest (prefer canonical scene_manifest.json)
+    scene_assets = load_manifest_or_scene_assets(assets_root)
+    if scene_assets is None:
+        manifest_path = assets_root / "scene_manifest.json"
+        legacy_path = assets_root / "scene_assets.json"
+        log(
+            f"scene manifest not found at {manifest_path} or {legacy_path}",
+            "ERROR",
+        )
         sys.exit(1)
-
-    scene_assets = load_json(manifest_path)
     objects = scene_assets.get("objects", [])
 
     # Filter interactive objects
