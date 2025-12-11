@@ -14,7 +14,7 @@ DEFAULT_CAPTION_PROMPT = (
 def caption_thumbnail(
     image_path: str,
     api_key: Optional[str] = None,
-    model: str = "gemini-1.5-flash",
+    model: str = "gemini-3-pro-preview",
     prompt: str = DEFAULT_CAPTION_PROMPT,
 ) -> str:
     """Generate a caption for a thumbnail using Gemini Vision when available.
