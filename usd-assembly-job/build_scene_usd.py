@@ -235,9 +235,12 @@ def load_object_metadata(
       4. assets_prefix/obj_{id}/metadata.json (standard layout)
     """
     if catalog_client is not None:
+        logical_id = obj.get("logical_asset_id") or obj.get("logical_id")
         try:
             catalog_meta = catalog_client.lookup_metadata(
-                asset_id=obj.get("id"), asset_path=obj.get("asset_path")
+                asset_id=obj.get("id"),
+                asset_path=obj.get("asset_path"),
+                logical_id=logical_id,
             )
             if catalog_meta:
                 return catalog_meta

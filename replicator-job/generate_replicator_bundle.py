@@ -32,6 +32,7 @@ except ImportError:
     genai = None
     types = None
 
+from tools.asset_catalog import AssetCatalogClient
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 
 # ============================================================================
@@ -190,6 +191,9 @@ class VariationAsset:
     source_hint: Optional[str] = None  # "generate", "library", "simready"
     example_variants: List[str] = field(default_factory=list)
     physics_hints: Dict[str, Any] = field(default_factory=dict)
+    asset_id: Optional[str] = None
+    asset_path: Optional[str] = None
+    thumbnail_uri: Optional[str] = None
 
 
 @dataclass
@@ -259,6 +263,54 @@ def create_gemini_client():
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable is required")
     return genai.Client(api_key=api_key)
+
+
+def create_catalog_client() -> Optional[AssetCatalogClient]:
+    """Create an asset catalog client if dependencies are available."""
+
+    try:
+        return AssetCatalogClient()
+    except Exception as exc:  # pragma: no cover - optional dependency may be missing
+        print(f"[REPLICATOR] WARNING: catalog unavailable: {exc}", file=sys.stderr)
+        return None
+
+
+def enrich_variation_assets_from_catalog(
+    assets: List[VariationAsset], catalog_client: Optional[AssetCatalogClient]
+) -> List[VariationAsset]:
+    """Augment variation assets with catalog paths/physics when possible."""
+
+    if catalog_client is None:
+        return assets
+
+    enriched: List[VariationAsset] = []
+    for asset in assets:
+        match = None
+        try:
+            matches = catalog_client.query_assets(
+                sim_roles={"variation_asset", "background", "decor"},
+                class_name=asset.semantic_class,
+                limit=1,
+            )
+            match = matches[0] if matches else None
+        except Exception as exc:  # pragma: no cover - network errors
+            print(f"[REPLICATOR] WARNING: catalog query failed: {exc}", file=sys.stderr)
+
+        if match is None:
+            enriched.append(asset)
+            continue
+
+        asset.asset_id = asset.asset_id or match.asset_id
+        asset.asset_path = asset.asset_path or match.usd_path or match.gcs_uri
+        asset.thumbnail_uri = asset.thumbnail_uri or match.thumbnail_uri
+        if not asset.physics_hints and match.physics_profile:
+            asset.physics_hints = match.physics_profile
+        if match.source:
+            asset.source_hint = asset.source_hint or match.source
+
+        enriched.append(asset)
+
+    return enriched
 
 
 def detect_environment_type(scene_type: str, inventory: dict) -> EnvironmentType:
@@ -704,7 +756,8 @@ def generate_replicator_script(
     asset_paths = {}
     for a in assets_used:
         safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', a.name)
-        asset_paths[a.name] = f"./variation_assets/{safe_name}.usdz"
+        target_path = a.asset_path or f"./variation_assets/{safe_name}.usdz"
+        asset_paths[a.name] = target_path
 
     # Build randomizer configs
     randomizers = policy_config.randomizers if policy_config.randomizers else []
@@ -1370,6 +1423,7 @@ def process_scene(
 
     # Create Gemini client and analyze scene
     client = create_gemini_client()
+    catalog_client = create_catalog_client()
 
     analysis_result = analyze_scene_with_gemini(
         client=client,
@@ -1409,6 +1463,8 @@ def process_scene(
             physics_hints=a.get("physics_hints", {})
         )
         variation_assets.append(asset)
+
+    variation_assets = enrich_variation_assets_from_catalog(variation_assets, catalog_client)
 
     policy_configs = []
     for p in analysis_result.get("policy_configs", []):
