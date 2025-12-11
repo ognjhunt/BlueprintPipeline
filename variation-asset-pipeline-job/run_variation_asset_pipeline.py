@@ -218,6 +218,134 @@ class PipelineConfig:
     asset_library_path: Optional[str]
     skip_existing: bool
     dry_run: bool
+    vector_backend_uri: Optional[str]
+    vector_similarity_threshold: float
+    vector_max_candidates: int
+
+
+@dataclass
+class EmbeddingRecord:
+    """Embedding record for an asset in the vector store."""
+
+    asset_id: str
+    category: str
+    path: str
+    embedding: List[float]
+    tags: List[str] = field(default_factory=list)
+    description: Optional[str] = None
+
+
+class VectorIndex:
+    """Lightweight in-memory vector index using cosine similarity."""
+
+    def __init__(self, records: List[EmbeddingRecord]):
+        self.records = records
+
+    def search(
+        self,
+        query_embedding: List[float],
+        category: str,
+        top_k: int,
+    ) -> List[Tuple[float, EmbeddingRecord]]:
+        if not self.records:
+            return []
+
+        q = np.array(query_embedding, dtype=np.float32)
+        q_norm = q / (np.linalg.norm(q) + 1e-8)
+
+        scored: List[Tuple[float, EmbeddingRecord]] = []
+
+        for record in self.records:
+            if record.category != category:
+                continue
+            v = np.array(record.embedding, dtype=np.float32)
+            v_norm = v / (np.linalg.norm(v) + 1e-8)
+            similarity = float(np.dot(q_norm, v_norm))
+            scored.append((similarity, record))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[:top_k]
+
+
+def resolve_vector_backend_uri(
+    explicit_uri: Optional[str], library_path: Optional[str]
+) -> Optional[str]:
+    """Resolve vector backend URI, defaulting to index.json in library if present."""
+
+    if explicit_uri:
+        return explicit_uri
+
+    if library_path:
+        default_index = GCS_ROOT / library_path / "index.json"
+        if default_index.is_file():
+            return f"file://{default_index}"
+
+    return None
+
+
+def load_vector_index(
+    backend_uri: Optional[str], library_path: Optional[str]
+) -> Optional[VectorIndex]:
+    """
+    Load vector index from backend URI.
+
+    Currently supports file:// URIs pointing to JSON with structure:
+    {
+        "assets": [
+            {
+                "asset_id": "plate_white_001",
+                "category": "dishes",
+                "path": "dishes/plate_white_001.usdz",
+                "embedding": [...],
+                "tags": ["ceramic", "plate"],
+                "description": "white ceramic plate"
+            }
+        ]
+    }
+    """
+
+    if not backend_uri:
+        return None
+
+    if backend_uri.startswith("file://"):
+        index_path = Path(backend_uri[len("file://") :])
+    else:
+        index_path = Path(backend_uri)
+
+    if not index_path.is_file():
+        print(
+            f"[VAR-PIPELINE] Vector index not found at {index_path}; skipping vector search"
+        )
+        return None
+
+    try:
+        with index_path.open("r") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[VAR-PIPELINE] Failed to load vector index: {e}")
+        return None
+
+    records: List[EmbeddingRecord] = []
+    for entry in data.get("assets", []):
+        embedding = entry.get("embedding")
+        if not embedding:
+            continue
+        records.append(
+            EmbeddingRecord(
+                asset_id=entry.get("asset_id", entry.get("id", "")),
+                category=entry.get("category", ""),
+                path=entry.get("path", ""),
+                embedding=embedding,
+                tags=entry.get("tags", []),
+                description=entry.get("description"),
+            )
+        )
+
+    print(
+        f"[VAR-PIPELINE] Loaded vector index with {len(records)} records from {index_path}"
+    )
+
+    return VectorIndex(records)
 
 
 # ============================================================================
@@ -242,13 +370,62 @@ def create_gemini_client():
     return genai.Client(api_key=api_key)
 
 
+def build_asset_embedding_text(asset: AssetSpec) -> str:
+    """Create a descriptive string for embedding generation."""
+
+    sections = [
+        f"name: {asset.name}",
+        f"category: {asset.category}",
+        f"description: {asset.description}",
+        f"semantic_class: {asset.semantic_class}",
+        f"priority: {asset.priority}",
+    ]
+
+    if asset.example_variants:
+        sections.append(f"variants: {', '.join(asset.example_variants)}")
+    if asset.material_hint:
+        sections.append(f"materials: {asset.material_hint}")
+    if asset.style_hint:
+        sections.append(f"style: {asset.style_hint}")
+
+    return " | ".join(sections)
+
+
+def embed_asset_spec(asset: AssetSpec, client) -> Optional[List[float]]:
+    """Embed asset description using Gemini embeddings."""
+
+    if client is None:
+        return None
+
+    try:
+        response = client.models.embed_content(
+            model="text-embedding-004", contents=build_asset_embedding_text(asset)
+        )
+
+        embedding = None
+        if hasattr(response, "embedding"):
+            embedding = getattr(response.embedding, "values", response.embedding)
+        elif hasattr(response, "values"):
+            embedding = response.values
+
+        if embedding:
+            return list(embedding)
+    except Exception as e:
+        print(f"[VAR-PIPELINE] Failed to embed asset spec: {e}")
+
+    return None
+
+
 # ============================================================================
 # Asset Library (Optional)
 # ============================================================================
 
 def check_asset_library(
     asset: AssetSpec,
-    library_path: Optional[str]
+    library_path: Optional[str],
+    vector_index: Optional[VectorIndex],
+    config: PipelineConfig,
+    client,
 ) -> Optional[Path]:
     """
     Check if an asset exists in the shared library.
@@ -270,7 +447,46 @@ def check_asset_library(
         print(f"[VAR-PIPELINE] Found in library: {asset.name} -> {asset_path}")
         return asset_path
 
-    # Could also check by semantic similarity here in the future
+    # Semantic/vector search fallback
+    backend_uri = resolve_vector_backend_uri(
+        config.vector_backend_uri, library_path
+    )
+
+    if not backend_uri or not vector_index:
+        return None
+
+    if config.vector_max_candidates <= 0:
+        return None
+
+    query_embedding = embed_asset_spec(asset, client)
+    if not query_embedding:
+        return None
+
+    candidates = vector_index.search(
+        query_embedding=query_embedding,
+        category=asset.category,
+        top_k=config.vector_max_candidates,
+    )
+
+    if not candidates:
+        print(
+            f"[VAR-PIPELINE] No vector candidates for {asset.name} in category {asset.category}"
+        )
+        return None
+
+    best_score, best_record = candidates[0]
+    best_path = Path(best_record.path)
+    if not best_path.is_absolute():
+        best_path = lib_root / best_path
+
+    print(
+        f"[VAR-PIPELINE] Vector match for {asset.name}: {best_record.asset_id} -> "
+        f"{best_path} (score={best_score:.3f})"
+    )
+
+    if best_score >= config.vector_similarity_threshold and best_path.is_file():
+        return best_path
+
     return None
 
 
@@ -703,6 +919,7 @@ def process_single_asset(
     config: PipelineConfig,
     client,
     output_dir: Path,
+    vector_index: Optional[VectorIndex],
     scene_context: str = ""
 ) -> AssetResult:
     """
@@ -728,7 +945,13 @@ def process_single_asset(
 
     # Check asset library
     if config.asset_library_path:
-        library_asset = check_asset_library(asset, config.asset_library_path)
+        library_asset = check_asset_library(
+            asset,
+            config.asset_library_path,
+            vector_index,
+            config,
+            client,
+        )
         if library_asset:
             output_path = copy_from_library(library_asset, output_dir, asset.name)
             return AssetResult(
@@ -924,6 +1147,12 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     else:
         client = None
 
+    # Prepare vector index (optional)
+    resolved_backend = resolve_vector_backend_uri(
+        config.vector_backend_uri, config.asset_library_path
+    )
+    vector_index = load_vector_index(resolved_backend, config.asset_library_path)
+
     # Process assets
     scene_context = manifest.get("scene_type", "")
     results: List[AssetResult] = []
@@ -936,6 +1165,7 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             config=config,
             client=client,
             output_dir=output_dir,
+            vector_index=vector_index,
             scene_context=scene_context,
         )
         results.append(result)
@@ -1026,6 +1256,11 @@ def main():
         asset_library_path=os.getenv("ASSET_LIBRARY_PATH"),
         skip_existing=getenv_bool("SKIP_EXISTING", "1"),
         dry_run=getenv_bool("DRY_RUN", "0"),
+        vector_backend_uri=os.getenv("ASSET_VECTOR_BACKEND_URI"),
+        vector_similarity_threshold=float(
+            os.getenv("ASSET_VECTOR_SIMILARITY_THRESHOLD", "0.82")
+        ),
+        vector_max_candidates=int(os.getenv("ASSET_VECTOR_MAX_CANDIDATES", "5")),
     )
 
     print(f"[VAR-PIPELINE] Configuration:")
@@ -1041,6 +1276,14 @@ def main():
         print(f"[VAR-PIPELINE]   Priority Filter: {config.priority_filter}")
     if config.asset_library_path:
         print(f"[VAR-PIPELINE]   Asset Library: {config.asset_library_path}")
+    if config.vector_backend_uri:
+        print(f"[VAR-PIPELINE]   Vector backend: {config.vector_backend_uri}")
+    print(
+        f"[VAR-PIPELINE]   Vector similarity threshold: {config.vector_similarity_threshold}"
+    )
+    print(
+        f"[VAR-PIPELINE]   Vector max candidates: {config.vector_max_candidates}"
+    )
     if config.dry_run:
         print(f"[VAR-PIPELINE]   DRY RUN MODE")
 
