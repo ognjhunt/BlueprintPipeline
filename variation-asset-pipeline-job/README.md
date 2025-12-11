@@ -56,10 +56,12 @@ Use this job when you need to generate variation assets for a scene that has alr
 | `MAX_ASSETS` | - | Limit number of assets to generate |
 | `PRIORITY_FILTER` | - | `required`, `recommended`, or `optional` |
 | `ASSET_LIBRARY_PATH` | - | Path to shared asset library |
+| `ASSET_REGISTRY_BACKEND_URI` | - | File or Firestore-like URI used to persist registry entries (e.g., `file:///mnt/gcs/asset_registry.json`) |
 | `ASSET_VECTOR_BACKEND_URI` | - | URI to vector store for semantic asset lookup (defaults to `{ASSET_LIBRARY_PATH}/index.json` when present) |
 | `ASSET_VECTOR_SIMILARITY_THRESHOLD` | `0.82` | Minimum cosine similarity to accept a semantic match |
 | `ASSET_VECTOR_MAX_CANDIDATES` | `5` | Max top-K candidates to consider from vector search |
 | `SKIP_EXISTING` | `1` | Skip assets that already exist |
+| `REGISTER_ASSETS` | `1` | Toggle registry ingestion (automatically disabled when `DRY_RUN=1`) |
 | `DRY_RUN` | `0` | Skip actual generation (for testing) |
 
 ### Quality Presets
@@ -126,6 +128,8 @@ The job produces SimReady assets in the output directory:
 ├── simready_assets.json           # Asset manifest for downstream
 ├── .variation_pipeline_complete   # Completion marker
 │
+├── asset_registry.json            # Optional file-based registry backend (when configured)
+│
 ├── plate_ceramic_white/
 │   ├── reference.png              # Generated reference image
 │   ├── model.glb                  # 3D mesh
@@ -140,6 +144,44 @@ The job produces SimReady assets in the output directory:
 │
 └── ...
 ```
+
+### Library ingestion
+
+When `ASSET_LIBRARY_PATH` is provided, successful assets are copied into the shared library and de-duplicated:
+
+```
+{ASSET_LIBRARY_PATH}/
+└── {category}/
+    ├── {asset_name}.usdz        # Primary SimReady asset
+    ├── {asset_name}.json        # Physics + provenance metadata
+    └── {asset_name}_thumb.png   # Thumbnail (Gemini reference image)
+```
+
+Idempotency checks prevent overwriting identical files, and ingestion is automatically skipped when `DRY_RUN=1`.
+
+### Registry updates
+
+Each successful generation or library selection is recorded in a registry backend when `ASSET_REGISTRY_BACKEND_URI` is set. The default implementation writes to a JSON file, but the schema is designed to mirror Firestore-style documents:
+
+```json
+{
+  "asset_id": "plate_ceramic_white",
+  "category": "dishes",
+  "tags": ["dishes", "dish"],
+  "source_pipeline": "variation",
+  "storage_uris": {
+    "variation_output": "gs://<bucket>/scenes/<scene>/variation_assets/plate_ceramic_white/model.usdz",
+    "library_asset": "gs://<bucket>/<library>/dishes/plate_ceramic_white.usdz"
+  },
+  "metadata_uri": "gs://<bucket>/<library>/dishes/plate_ceramic_white.json",
+  "thumbnail_uri": "gs://<bucket>/<library>/dishes/plate_ceramic_white_thumb.png",
+  "simready": true,
+  "priority": "required",
+  "updated_at": "2024-07-16T12:34:56Z"
+}
+```
+
+Registry writes are idempotent: repeated runs update the existing entry only when fields change. Setting `REGISTER_ASSETS=0` or `DRY_RUN=1` disables registry mutations while leaving the rest of the pipeline untouched.
 
 ### SimReady Metadata
 
