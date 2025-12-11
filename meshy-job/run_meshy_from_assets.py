@@ -3,11 +3,25 @@ from pathlib import Path
 
 import requests
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from tools.scene_manifest.loader import load_manifest_or_scene_assets
+
 MESHY_BASE = "https://api.meshy.ai"
 
-def load_assets_plan(path: Path):
-    with path.open("r") as f:
-        return json.load(f)
+def load_assets_plan(assets_root: Path):
+    plan = load_manifest_or_scene_assets(assets_root)
+    if plan is None:
+        manifest_path = assets_root / "scene_manifest.json"
+        legacy_path = assets_root / "scene_assets.json"
+        print(
+            f"[MESHY] ERROR: expected manifest at {manifest_path} or legacy plan at {legacy_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return plan
 
 def image_to_data_uri(img_path: Path):
     mime = "image/png"
@@ -71,13 +85,7 @@ def main():
 
     root = Path("/mnt/gcs")
     assets_root = root / assets_prefix
-    plan_path = assets_root / "scene_assets.json"
-
-    if not plan_path.is_file():
-        print(f"[MESHY] ERROR: assets plan not found: {plan_path}", file=sys.stderr)
-        sys.exit(1)
-
-    plan = load_assets_plan(plan_path)
+    plan = load_assets_plan(assets_root)
     objs = plan.get("objects", [])
     print(f"[MESHY] Loaded plan with {len(objs)} objects")
 
