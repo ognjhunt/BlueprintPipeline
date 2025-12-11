@@ -56,6 +56,9 @@ Use this job when you need to generate variation assets for a scene that has alr
 | `MAX_ASSETS` | - | Limit number of assets to generate |
 | `PRIORITY_FILTER` | - | `required`, `recommended`, or `optional` |
 | `ASSET_LIBRARY_PATH` | - | Path to shared asset library |
+| `ASSET_VECTOR_BACKEND_URI` | - | URI to vector store for semantic asset lookup (defaults to `{ASSET_LIBRARY_PATH}/index.json` when present) |
+| `ASSET_VECTOR_SIMILARITY_THRESHOLD` | `0.82` | Minimum cosine similarity to accept a semantic match |
+| `ASSET_VECTOR_MAX_CANDIDATES` | `5` | Max top-K candidates to consider from vector search |
 | `SKIP_EXISTING` | `1` | Skip assets that already exist |
 | `DRY_RUN` | `0` | Skip actual generation (for testing) |
 
@@ -217,6 +220,15 @@ When `ASSET_LIBRARY_PATH` is set, the pipeline will:
 1. Check if the asset exists in the library
 2. If found, copy it instead of generating
 3. If not found, generate and (optionally) add to library
+
+### Semantic/Vector Search
+
+When an exact `{category}/{asset_name}.usdz` match is missing, the pipeline can fall back to a semantic search to find the closest asset in the same category:
+
+- Point `ASSET_VECTOR_BACKEND_URI` to a vector store (e.g., `file:///mnt/gcs/<library>/index.json`, pgvector endpoint, or Vertex AI Vector Search proxy). If unset, the job automatically looks for `{ASSET_LIBRARY_PATH}/index.json`.
+- The index should contain embeddings derived from asset descriptions or tags and be keyed by an `asset_id` and asset-relative `path`.
+- At runtime the requested `AssetSpec` description is embedded and the vector index is queried for the top-K matches (`ASSET_VECTOR_MAX_CANDIDATES`).
+- The best candidate above `ASSET_VECTOR_SIMILARITY_THRESHOLD` is copied from the library. The pipeline logs both the similarity score and the chosen asset path for observability.
 
 ## Performance
 
