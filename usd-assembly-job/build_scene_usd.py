@@ -20,6 +20,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from tools.scene_manifest.loader import load_manifest_or_scene_assets
+
 import numpy as np
 from tools.asset_catalog import AssetCatalogClient
 
@@ -898,6 +904,9 @@ def build_scene(
     Returns:
         Tuple of (stage, objects_list) for further processing
     """
+    assets_root = root / assets_prefix
+    print(f"[USD] Loading asset manifest from {assets_path}")
+
     def _has_spatial_data(layout_json: Dict[str, Any]) -> bool:
         return any(
             obj.get("obb") is not None or obj.get("center3d") is not None
@@ -970,7 +979,12 @@ def build_scene(
             (data for path, data in fallback_layouts if path != layout_used_path),
             {},
         )
-    scene_assets = load_json(assets_path)
+    scene_assets = load_manifest_or_scene_assets(assets_root)
+    if scene_assets is None:
+        raise FileNotFoundError(
+            f"scene manifest not found at {assets_root / 'scene_manifest.json'} "
+            f"or legacy plan at {assets_root / 'scene_assets.json'}"
+        )
 
     # Extract data
     cameras = layout.get("camera_trajectory") or []
@@ -1114,8 +1128,16 @@ def main() -> None:
     root = Path("/mnt/gcs")
 
     layout_path = root / layout_prefix / "scene_layout_scaled.json"
-    assets_path = root / assets_prefix / "scene_assets.json"
+    manifest_path = root / assets_prefix / "scene_manifest.json"
+    assets_path = manifest_path if manifest_path.is_file() else root / assets_prefix / "scene_assets.json"
     stage_path = root / usd_prefix / "scene.usda"
+
+    if not assets_path.is_file():
+        print(
+            f"[USD] scene manifest not found at {manifest_path} or legacy scene_assets.json",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     build_scene(
         layout_path=layout_path,

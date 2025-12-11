@@ -1,0 +1,194 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scene Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "objects"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version string for the manifest schema."
+    },
+    "scene_id": {
+      "type": ["string", "integer"],
+      "description": "Identifier for the scene."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["gemini", "blueprint_recipe", "manual", "unknown"],
+      "description": "Where this manifest originated."
+    },
+    "background": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Background mesh and semantic metadata.",
+      "properties": {
+        "mesh": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path"],
+          "properties": {
+            "path": {"type": "string"},
+            "format": {"type": "string"},
+            "scale": {
+              "type": "array",
+              "items": {"type": "number"},
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "rotation": {
+              "type": "array",
+              "items": {"type": "number"},
+              "minItems": 4,
+              "maxItems": 4
+            },
+            "translation": {
+              "type": "array",
+              "items": {"type": "number"},
+              "minItems": 3,
+              "maxItems": 3
+            }
+          }
+        },
+        "semantics": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "category": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "description": {"type": "string"}
+          }
+        }
+      }
+    },
+    "objects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "sim_role", "asset"],
+        "properties": {
+          "id": {
+            "type": ["string", "integer"],
+            "description": "Object identifier used across the pipeline."
+          },
+          "sim_role": {
+            "type": "string",
+            "enum": [
+              "static",
+              "manipulable_object",
+              "articulated_furniture",
+              "articulated_appliance",
+              "scene_shell",
+              "background",
+              "unknown"
+            ],
+            "description": "How the simulator should treat this object."
+          },
+          "asset": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": {"type": "string"},
+              "format": {"type": "string"},
+              "source": {"type": "string"},
+              "inventory_id": {"type": ["string", "integer"]},
+              "scene_asset_id": {"type": ["string", "integer"]}
+            }
+          },
+          "transform": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "translation": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "rotation": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 4,
+                "maxItems": 4
+              },
+              "scale": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              }
+            }
+          },
+          "articulation": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "type": {"type": "string"},
+              "axes": {"type": "array"},
+              "default_state": {"type": "string"},
+              "physx_endpoint": {"type": "string"}
+            }
+          },
+          "physics": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "dynamic": {"type": "boolean"},
+              "mass": {"type": "number"},
+              "gravity": {"type": "boolean"},
+              "collision": {"type": "string"},
+              "material": {"type": "string"},
+              "hints": {"type": "object"}
+            }
+          },
+          "semantics": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "category": {"type": "string"},
+              "short_description": {"type": "string"},
+              "tags": {"type": "array", "items": {"type": "string"}},
+              "attributes": {"type": "object"}
+            }
+          },
+          "placement": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "polygon": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {"type": "number"},
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              },
+              "approx_location": {"type": ["string", "array", "object"]}
+            }
+          },
+          "asset_generation": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "pipeline": {"type": "string"},
+              "inputs": {"type": "object"},
+              "output": {"type": "string"}
+            }
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "scene_assets": {"type": "object"},
+              "inventory": {"type": "object"},
+              "blueprint_recipe": {"type": "object"}
+            }
+          }
+        }
+      }
+    }
+  }
+}
