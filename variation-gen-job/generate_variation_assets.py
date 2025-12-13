@@ -10,10 +10,10 @@ Pipeline flow:
 2. For each asset with source_hint="generate":
    - Generate a reference image using Gemini 3.0 Pro Image (Nano Banana Pro)
    - Save to variation_assets/{asset_name}/reference.png
-3. Create variation_assets.json for hunyuan-job to process
+3. Create variation_assets.json for downstream processing
 4. Write completion marker for downstream pipeline
 
-The generated images are then processed by hunyuan-job to create 3D models,
+The generated images are then processed by downstream jobs to create 3D models,
 followed by simready-job to add physics properties.
 
 NOTE: For a complete end-to-end solution, consider using variation-asset-pipeline-job
@@ -470,7 +470,7 @@ def create_hunyuan_assets_json(
     scene_id: str
 ) -> Path:
     """
-    Create a scene_assets.json-compatible file for hunyuan-job to process.
+    Create a scene_assets.json-compatible file for downstream processing.
 
     This file follows the same format as the main scene_assets.json but
     contains only the variation assets.
@@ -487,7 +487,7 @@ def create_hunyuan_assets_json(
         if asset is None:
             continue
 
-        # Create object entry compatible with hunyuan-job
+        # Create object entry compatible with downstream 3D conversion
         obj = {
             "id": result.asset_name,
             "category": asset.category,
@@ -519,7 +519,7 @@ def create_hunyuan_assets_json(
     with output_path.open("w") as f:
         json.dump(assets_json, f, indent=2)
 
-    print(f"[VARIATION-GEN] Created hunyuan-compatible assets file: {output_path}")
+    print(f"[VARIATION-GEN] Created downstream-compatible assets file: {output_path}")
     return output_path
 
 
