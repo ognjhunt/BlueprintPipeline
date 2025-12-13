@@ -22,6 +22,16 @@ except ImportError:  # pragma: no cover
     genai = None
     types = None
 
+# Unified LLM client supporting Gemini + OpenAI
+try:
+    from tools.llm_client import create_llm_client, LLMProvider, LLMResponse
+    HAVE_LLM_CLIENT = True
+except ImportError:  # pragma: no cover
+    HAVE_LLM_CLIENT = False
+    create_llm_client = None
+    LLMProvider = None
+    LLMResponse = None
+
 GCS_ROOT = Path("/mnt/gcs")
 
 
@@ -500,6 +510,31 @@ Object info (cropped to relevant fields):
 
 def have_gemini() -> bool:
     return genai is not None and types is not None and bool(os.getenv("GEMINI_API_KEY"))
+
+
+def have_openai() -> bool:
+    """Check if OpenAI is available."""
+    return bool(os.getenv("OPENAI_API_KEY"))
+
+
+def have_any_llm() -> bool:
+    """Check if any LLM provider is available."""
+    return have_gemini() or have_openai()
+
+
+def get_llm_provider() -> Optional[str]:
+    """Get the preferred LLM provider based on environment."""
+    provider = os.getenv("LLM_PROVIDER", "auto").lower()
+    if provider == "openai" and have_openai():
+        return "openai"
+    elif provider == "gemini" and have_gemini():
+        return "gemini"
+    elif provider == "auto":
+        if have_gemini():
+            return "gemini"
+        elif have_openai():
+            return "openai"
+    return None
 
 
 def load_multiview_images_for_gemini(
