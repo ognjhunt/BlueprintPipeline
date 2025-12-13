@@ -1,13 +1,13 @@
 # usd-assembly-pipeline.yaml
 #
 # Google Cloud Workflows pipeline that:
-#   1. Triggers on completion marker file from hunyuan-job
+#   1. Triggers on completion marker file from zeroscene-job
 #   2. Runs usd-assembly-job in CONVERT_ONLY mode to convert GLB->USDZ before simready
 #   3. Runs simready-job to prepare simulation-ready assets (now sees USD-compatible files)
 #   4. Runs usd-assembly-job to build scene.usda
 #   5. Runs replicator-job to generate Replicator bundle for Isaac Sim domain randomization
 #
-# Trigger: Cloud Storage object finalized event for .hunyuan_complete
+# Trigger: Cloud Storage object finalized event for .zeroscene_complete
 
 main:
   params: [event]
@@ -29,7 +29,7 @@ main:
 
     - filter_completion_markers:
         switch:
-          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.hunyuan_complete$")}'
+          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.zeroscene_complete$")}'
             next: derive
         next: skip
 

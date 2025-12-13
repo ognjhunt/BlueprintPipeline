@@ -1254,7 +1254,7 @@ def generate_asset_manifest(
 
     This manifest is consumed by variation-gen-job to generate reference images
     using Gemini 3.0 Pro Image (Nano Banana Pro), which are then processed by
-    hunyuan-job for 3D conversion.
+    downstream jobs for 3D conversion.
 
     Args:
         assets: List of VariationAsset specifications

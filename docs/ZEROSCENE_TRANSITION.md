@@ -1,31 +1,54 @@
-# ZeroScene Transition Guide
+# ZeroScene Pipeline Guide
 
-This document describes the transition from the current reconstruction pipeline to a ZeroScene-first approach.
+This document describes the ZeroScene-based BlueprintPipeline for scene reconstruction and SimReady asset generation.
 
 **Last Updated**: December 2025
 
 ## Overview
 
-[ZeroScene](https://arxiv.org/html/2509.23607v1) provides an improved reconstruction pipeline that covers:
+[ZeroScene](https://arxiv.org/html/2509.23607v1) provides the reconstruction pipeline that covers:
 - Instance segmentation + depth extraction
 - Object pose optimization using 3D/2D projection losses
 - Foreground + background mesh reconstruction
 - PBR material estimation for improved rendering realism
 - Triangle mesh outputs for each object
 
-## Implementation Status
+## Pipeline Architecture
 
-### New Tooling Added
+### Job Sequence
 
-| Tool | Path | Description |
-|------|------|-------------|
-| **LLM Client** | `tools/llm_client/` | Unified API for Gemini + OpenAI GPT-5.2 Thinking |
-| **Job Registry** | `tools/job_registry/` | Central registry tracking deprecation status |
-| **Pipeline Selector** | `tools/pipeline_selector/` | Automatic routing between ZeroScene/Gemini |
+```
+image → ZeroScene → zeroscene-job → scale-job (optional) → interactive-job
+                                                                    ↓
+                                                             simready-job
+                                                                    ↓
+                                                           usd-assembly-job
+                                                                    ↓
+                                                            replicator-job
+                                                                    ↓
+                                                           variation-gen-job
+                                                                    ↓
+                                                            isaac-lab-job
+```
 
-### LLM Provider Support
+### Active Jobs
 
-The pipeline now supports multiple LLM providers:
+| Job | Purpose | Notes |
+|-----|---------|-------|
+| `zeroscene-job` | Adapter for ZeroScene outputs | Converts ZeroScene → manifest + layout |
+| `scale-job` | Scale calibration (optional) | Calibrates metric scale if needed |
+| `interactive-job` | Articulation bridge (PhysX-Anything) | Adds joints to doors/drawers |
+| `simready-job` | Physics + manipulation hints | Adds mass/friction/graspability |
+| `usd-assembly-job` | Convert + assemble scene.usda | Final USD assembly |
+| `replicator-job` | Policy scripts + placement regions | Domain randomization |
+| `variation-gen-job` | Domain randomization assets | Generates clutter objects |
+| `isaac-lab-job` | Isaac Lab task generation | RL training packages |
+
+## Tooling
+
+### LLM Client (`tools/llm_client/`)
+
+Unified API for Gemini + OpenAI GPT-5.2 Thinking:
 
 | Provider | Model | Use Case |
 |----------|-------|----------|
@@ -63,65 +86,47 @@ response = client.generate(
 )
 ```
 
-## Jobs Status After ZeroScene
+### Job Registry (`tools/job_registry/`)
 
-### Jobs to be DEPRECATED (Replaced by ZeroScene)
-
-These jobs will be replaced by ZeroScene when it becomes available:
-
-| Job | Current Purpose | ZeroScene Replacement | Status |
-|-----|----------------|----------------------|--------|
-| `seg-job` | Segmentation + inventory | ZeroScene segmentation | **DEPRECATED** |
-| `multiview-job` | Object isolation/generative views | ZeroScene foreground/background | **DEPRECATED** |
-| `scene-da3-job` | Depth/point cloud extraction | ZeroScene depth extraction | **DEPRECATED** |
-| `layout-job` | Layout reconstruction | ZeroScene pose optimization | **DEPRECATED** |
-| `sam3d-job` | 3D mesh generation | ZeroScene mesh reconstruction | **DEPRECATED** |
-| `hunyuan-job` | Texture/refinement | ZeroScene PBR materials | **DEPRECATED** |
-
-**Note:** Keep these jobs as a fallback while ZeroScene is not fully operational. The Gemini pipeline remains a coherent ingestion path.
-
-**Deprecation Behavior:**
-
-Deprecated jobs now check `PIPELINE_MODE` before execution:
+Central registry tracking all pipeline jobs:
 
 ```python
-# In deprecated job's main():
-from tools.pipeline_selector import should_skip_deprecated_job
+from tools.job_registry import get_registry
 
-if should_skip_deprecated_job("seg-job"):
-    print("DEPRECATED: This job is skipped in ZeroScene-first mode")
-    sys.exit(0)  # Silent skip
+registry = get_registry()
+
+# Get all active jobs
+jobs = registry.get_active_jobs()
+
+# Check pipeline readiness
+if registry.is_zeroscene_ready():
+    print("ZeroScene pipeline is ready")
+
+# Get job sequence
+sequence = registry.get_job_sequence()
+
+# Print status report
+registry.print_status_report()
 ```
 
-**Force deprecated jobs to run:**
-```bash
-# Option 1: Use Gemini-only mode
-PIPELINE_MODE=gemini_only
+### Pipeline Selector (`tools/pipeline_selector/`)
 
-# Option 2: Force specific job
-FORCE_DEPRECATED_JOB=true
+Handles job routing:
+
+```python
+from tools.pipeline_selector import select_pipeline
+from pathlib import Path
+
+decision = select_pipeline(Path('/mnt/gcs/scenes/scene_123'))
+print(f'Use ZeroScene: {decision.use_zeroscene}')
+print(f'Jobs: {decision.job_sequence}')
 ```
 
-### Jobs to KEEP (Still Required)
-
-These jobs are still necessary because ZeroScene does not provide SimReady Isaac Sim training packages:
-
-| Job | Purpose | Notes |
-|-----|---------|-------|
-| `zeroscene-job` | **NEW** - Adapter for ZeroScene outputs | Converts ZeroScene → manifest + layout |
-| `interactive-job` | Articulation bridge (PhysX-Anything) | Adds joints to doors/drawers |
-| `simready-job` | Physics + manipulation hints | Adds mass/friction/graspability |
-| `usd-assembly-job` | Convert + assemble scene.usda | Final USD assembly |
-| `replicator-job` | Policy scripts + placement regions | Domain randomization |
-| `variation-gen-job` | Domain randomization assets | Generates clutter objects |
-| `isaac-lab-job` | **NEW** - Isaac Lab task generation | RL training packages |
-
-## New Integration Points
-
-### 1. ZeroScene Adapter Job (`zeroscene-job`)
+## ZeroScene Adapter Job
 
 The adapter converts ZeroScene outputs to BlueprintPipeline format:
 
+### Input Structure
 ```
 zeroscene_output/
 ├── scene_info.json
@@ -138,18 +143,18 @@ zeroscene_output/
 └── depth/
 ```
 
-**Outputs:**
+### Output Structure
 - `assets/scene_manifest.json` - Canonical manifest
 - `layout/scene_layout_scaled.json` - Layout with transforms
 - `seg/inventory.json` - Semantic inventory
 - `assets/obj_*/` - Organized asset directories
 
-### 2. Scale Authority Integration
+## Scale Authority
 
-Scale is determined by:
+Scale is determined by priority:
 1. User-provided anchor (highest priority)
 2. Calibrated scale factor from scale-job
-3. ZeroScene scale (if trusted)
+3. ZeroScene scale (if trusted via `TRUST_ZEROSCENE_SCALE=true`)
 4. Reference object heuristics
 
 The authoritative scale is written to:
@@ -157,47 +162,38 @@ The authoritative scale is written to:
 - `layout.meters_per_unit`
 - USD `metersPerUnit` metadata
 
-### 3. Articulation Wiring
+## Articulation Wiring
 
 After `interactive-job` generates articulated assets:
 1. Assets are placed in `assets/interactive/obj_{id}/`
 2. `usd-assembly-job` automatically wires them into `scene.usda`
 3. Manifest is updated with articulation metadata
 
-### 4. Isaac Lab Task Generation
+## Isaac Lab Task Generation
 
-New `isaac-lab-job` generates:
+`isaac-lab-job` generates:
 - `env_cfg.py` - ManagerBasedEnv configuration
 - `task_{policy}.py` - Task implementation
 - `train_cfg.yaml` - Training hyperparameters
 - `randomizations.py` - EventManager-compatible hooks
 - `reward_functions.py` - Reward modules
 
-## Pipeline Flow Comparison
+## Environment Variables
 
-### Current Pipeline (Gemini-based)
-```
-image → seg-job → multiview-job → sam3d-job → hunyuan-job
-                                      ↓
-                              usd-assembly-job → simready-job → replicator-job
-```
-
-### ZeroScene Pipeline
-```
-image → ZeroScene → zeroscene-job → simready-job → usd-assembly-job
-                         ↓                              ↓
-                  interactive-job                 replicator-job
-                                                       ↓
-                                               isaac-lab-job
-```
-
-## Migration Steps
-
-1. **Keep Both Pipelines**: Maintain the Gemini pipeline as fallback
-2. **Implement ZeroScene Adapter**: Use `tools/zeroscene_adapter/`
-3. **Update Workflows**: Add ZeroScene workflow YAML
-4. **Test End-to-End**: Use `tools/qa_validation/` for validation
-5. **Deprecate Old Jobs**: Once ZeroScene is stable
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `BUCKET` | GCS bucket name | `blueprint-scenes` |
+| `SCENE_ID` | Scene identifier | `scene_123` |
+| `ASSETS_PREFIX` | Assets path | `scenes/scene_123/assets` |
+| `LAYOUT_PREFIX` | Layout path | `scenes/scene_123/layout` |
+| `USD_PREFIX` | USD output path | `scenes/scene_123/usd` |
+| `REPLICATOR_PREFIX` | Replicator path | `scenes/scene_123/replicator` |
+| `ZEROSCENE_PREFIX` | ZeroScene output path | `scenes/scene_123/zeroscene` |
+| `ENVIRONMENT_TYPE` | Environment hint | `kitchen`, `office`, etc. |
+| `SCALE_FACTOR` | Scale override | `1.0` |
+| `TRUST_ZEROSCENE_SCALE` | Trust ZeroScene scale | `true`/`false` |
+| `LLM_PROVIDER` | LLM provider selection | `auto`, `gemini`, `openai` |
+| `ZEROSCENE_AVAILABLE` | Override ZeroScene detection | `true`/`false` |
 
 ## Definition of Done
 
@@ -228,75 +224,6 @@ else:
         print(f"FAIL: {issue}")
 ```
 
-## Environment Variables
-
-Jobs should use these environment variables:
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `BUCKET` | GCS bucket name | `blueprint-scenes` |
-| `SCENE_ID` | Scene identifier | `scene_123` |
-| `ASSETS_PREFIX` | Assets path | `scenes/scene_123/assets` |
-| `LAYOUT_PREFIX` | Layout path | `scenes/scene_123/layout` |
-| `USD_PREFIX` | USD output path | `scenes/scene_123/usd` |
-| `REPLICATOR_PREFIX` | Replicator path | `scenes/scene_123/replicator` |
-| `ZEROSCENE_PREFIX` | ZeroScene output path | `scenes/scene_123/zeroscene` |
-| `ENVIRONMENT_TYPE` | Environment hint | `kitchen`, `office`, etc. |
-| `SCALE_FACTOR` | Scale override | `1.0` |
-| `TRUST_ZEROSCENE_SCALE` | Trust ZeroScene scale | `true`/`false` |
-| `PIPELINE_MODE` | Pipeline selection | `zeroscene_first`, `gemini_only`, `hybrid` |
-| `FORCE_DEPRECATED_JOB` | Force run deprecated job | `true`/`false` |
-| `LLM_PROVIDER` | LLM provider selection | `auto`, `gemini`, `openai` |
-| `AUTO_FALLBACK` | Auto-fallback to Gemini | `true`/`false` |
-
-## Pipeline Mode Configuration
-
-Set `PIPELINE_MODE` to control which pipeline is used:
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `zeroscene_first` | Use ZeroScene when available, fallback to Gemini | **Default** - Production |
-| `gemini_only` | Use only the Gemini reconstruction pipeline | Fallback when ZeroScene unavailable |
-| `hybrid` | Run both pipelines for comparison | Development/testing |
-
-**Example workflow configuration:**
-```yaml
-# Vertex AI Workflow
-- assign:
-    - pipelineMode: ${sys.get_env("PIPELINE_MODE", "zeroscene_first")}
-
-- run_job:
-    switch:
-      - condition: ${pipelineMode == "zeroscene_first"}
-        call: zeroscene_pipeline
-      - condition: ${pipelineMode == "gemini_only"}
-        call: gemini_pipeline
-```
-
-## Job Registry
-
-Use the job registry to query deprecation status programmatically:
-
-```python
-from tools.job_registry import get_registry, JobStatus
-
-registry = get_registry()
-
-# Check if job is deprecated
-if registry.is_deprecated("seg-job"):
-    print("seg-job is deprecated")
-
-# Get replacement
-replacement = registry.get_replacement("seg-job")
-# Returns: "zeroscene-job"
-
-# Get all deprecated jobs
-deprecated = registry.get_deprecated_jobs()
-
-# Print status report
-registry.print_status_report()
-```
-
 ## CLI Usage
 
 Check pipeline status from command line:
@@ -311,7 +238,6 @@ from tools.pipeline_selector import select_pipeline
 from pathlib import Path
 
 decision = select_pipeline(Path('/mnt/gcs/scenes/scene_123'))
-print(f'Mode: {decision.mode}')
 print(f'Use ZeroScene: {decision.use_zeroscene}')
 print(f'Jobs: {decision.job_sequence}')
 "
