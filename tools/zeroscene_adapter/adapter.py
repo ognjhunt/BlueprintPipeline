@@ -1,0 +1,821 @@
+"""ZeroScene to BlueprintPipeline adapter.
+
+Converts ZeroScene reconstruction outputs into formats expected by downstream jobs.
+
+Expected ZeroScene Output Structure:
+    zeroscene_output/
+        scene_info.json           # Scene metadata + camera parameters
+        objects/
+            obj_0/
+                mesh.glb          # Triangulated mesh
+                material.json     # PBR material parameters
+                pose.json         # 4x4 transform matrix
+                bounds.json       # Axis-aligned bounding box
+                segmentation.png  # Instance mask (optional)
+            obj_1/
+            ...
+        background/
+            mesh.glb              # Background/scene shell mesh
+            material.json
+        depth/
+            depth.exr             # Extracted depth map
+            depth_confidence.png  # Depth confidence mask
+        camera/
+            intrinsics.json       # Camera intrinsics matrix
+            extrinsics.json       # Camera pose (optional)
+
+This adapter produces:
+    assets/
+        scene_manifest.json       # Canonical manifest
+        obj_0/, obj_1/, ...       # Asset directories with GLB + metadata
+    layout/
+        scene_layout_scaled.json  # Layout with OBB transforms
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import numpy as np
+
+
+# =============================================================================
+# Data Classes for ZeroScene Outputs
+# =============================================================================
+
+
+@dataclass
+class ZeroScenePose:
+    """Object pose from ZeroScene.
+
+    ZeroScene optimizes poses using 3D/2D projection losses.
+    The transform is a 4x4 matrix in world coordinates.
+    """
+    transform_matrix: List[List[float]]  # 4x4 row-major matrix
+    translation: Optional[List[float]] = None  # [x, y, z]
+    rotation_quaternion: Optional[List[float]] = None  # [w, x, y, z]
+    scale: Optional[List[float]] = None  # [sx, sy, sz]
+    confidence: float = 1.0
+
+
+@dataclass
+class ZeroSceneMaterial:
+    """PBR material parameters from ZeroScene.
+
+    ZeroScene includes PBR material estimation for rendering realism.
+    """
+    base_color: List[float] = field(default_factory=lambda: [0.8, 0.8, 0.8])  # RGB
+    metallic: float = 0.0
+    roughness: float = 0.5
+    normal_map_path: Optional[str] = None
+    albedo_map_path: Optional[str] = None
+    material_type: str = "generic"  # ceramic, metal, wood, plastic, fabric, etc.
+
+
+@dataclass
+class ZeroSceneObject:
+    """Single object from ZeroScene reconstruction.
+
+    Represents a foreground object with mesh, pose, and material.
+    """
+    id: str
+    mesh_path: str  # Path to GLB file
+    pose: ZeroScenePose
+    bounds: Dict[str, List[float]]  # {"min": [x,y,z], "max": [x,y,z], "center": [...], "size": [...]}
+    material: Optional[ZeroSceneMaterial] = None
+    segmentation_mask_path: Optional[str] = None
+
+    # Semantic information (may be inferred by downstream jobs)
+    category: Optional[str] = None
+    description: Optional[str] = None
+    sim_role: str = "unknown"  # Will be enriched by inventory step
+
+    # Confidence/quality metrics
+    reconstruction_confidence: float = 1.0
+    mesh_quality_score: Optional[float] = None
+
+
+@dataclass
+class ZeroSceneOutput:
+    """Complete ZeroScene reconstruction output.
+
+    Contains all objects, background, and scene metadata.
+    """
+    scene_id: str
+    objects: List[ZeroSceneObject]
+    background: Optional[ZeroSceneObject] = None
+
+    # Camera parameters
+    camera_intrinsics: Optional[List[List[float]]] = None  # 3x3 matrix
+    camera_extrinsics: Optional[List[List[float]]] = None  # 4x4 matrix
+    image_size: Tuple[int, int] = (1920, 1080)
+
+    # Scene metadata
+    coordinate_frame: str = "y_up"  # or "z_up"
+    meters_per_unit: float = 1.0
+    depth_map_path: Optional[str] = None
+    source_image_path: Optional[str] = None
+
+    # Quality metrics
+    overall_confidence: float = 1.0
+    reconstruction_method: str = "zeroscene"
+    version: str = "1.0"
+
+
+# =============================================================================
+# Adapter Implementation
+# =============================================================================
+
+
+class ZeroSceneAdapter:
+    """Adapter to convert ZeroScene outputs to BlueprintPipeline formats.
+
+    Usage:
+        adapter = ZeroSceneAdapter()
+        zeroscene_output = adapter.load_zeroscene_output(zeroscene_dir)
+        manifest = adapter.create_manifest(zeroscene_output, scene_id)
+        layout = adapter.create_layout(zeroscene_output)
+        adapter.copy_assets(zeroscene_output, output_dir)
+    """
+
+    MANIFEST_VERSION = "1.0.0"
+
+    def __init__(self, verbose: bool = True):
+        self.verbose = verbose
+
+    def log(self, msg: str) -> None:
+        if self.verbose:
+            print(f"[ZEROSCENE-ADAPTER] {msg}")
+
+    def load_zeroscene_output(self, zeroscene_dir: Path) -> ZeroSceneOutput:
+        """Load ZeroScene outputs from a directory.
+
+        Args:
+            zeroscene_dir: Path to ZeroScene output directory
+
+        Returns:
+            Parsed ZeroSceneOutput
+        """
+        zeroscene_dir = Path(zeroscene_dir)
+
+        # Load scene info
+        scene_info_path = zeroscene_dir / "scene_info.json"
+        if scene_info_path.is_file():
+            scene_info = json.loads(scene_info_path.read_text())
+        else:
+            scene_info = {}
+
+        scene_id = scene_info.get("scene_id", zeroscene_dir.name)
+
+        # Load objects
+        objects = []
+        objects_dir = zeroscene_dir / "objects"
+        if objects_dir.is_dir():
+            for obj_dir in sorted(objects_dir.iterdir()):
+                if obj_dir.is_dir():
+                    obj = self._load_object(obj_dir)
+                    if obj:
+                        objects.append(obj)
+
+        # Load background
+        background = None
+        bg_dir = zeroscene_dir / "background"
+        if bg_dir.is_dir():
+            background = self._load_object(bg_dir, is_background=True)
+
+        # Load camera parameters
+        camera_intrinsics = None
+        camera_extrinsics = None
+        camera_dir = zeroscene_dir / "camera"
+        if camera_dir.is_dir():
+            intr_path = camera_dir / "intrinsics.json"
+            if intr_path.is_file():
+                camera_intrinsics = json.loads(intr_path.read_text()).get("matrix")
+            extr_path = camera_dir / "extrinsics.json"
+            if extr_path.is_file():
+                camera_extrinsics = json.loads(extr_path.read_text()).get("matrix")
+
+        # Get depth map path
+        depth_map_path = None
+        depth_dir = zeroscene_dir / "depth"
+        if depth_dir.is_dir():
+            for ext in [".exr", ".png", ".npy"]:
+                candidate = depth_dir / f"depth{ext}"
+                if candidate.is_file():
+                    depth_map_path = str(candidate)
+                    break
+
+        return ZeroSceneOutput(
+            scene_id=scene_id,
+            objects=objects,
+            background=background,
+            camera_intrinsics=camera_intrinsics,
+            camera_extrinsics=camera_extrinsics,
+            image_size=tuple(scene_info.get("image_size", [1920, 1080])),
+            coordinate_frame=scene_info.get("coordinate_frame", "y_up"),
+            meters_per_unit=scene_info.get("meters_per_unit", 1.0),
+            depth_map_path=depth_map_path,
+            source_image_path=scene_info.get("source_image_path"),
+            overall_confidence=scene_info.get("confidence", 1.0),
+            reconstruction_method="zeroscene",
+            version=scene_info.get("version", "1.0"),
+        )
+
+    def _load_object(self, obj_dir: Path, is_background: bool = False) -> Optional[ZeroSceneObject]:
+        """Load a single object from its directory."""
+        # Find mesh file
+        mesh_path = None
+        for name in ["mesh.glb", "model.glb", "asset.glb", "mesh.obj"]:
+            candidate = obj_dir / name
+            if candidate.is_file():
+                mesh_path = str(candidate)
+                break
+
+        if not mesh_path:
+            self.log(f"WARNING: No mesh found in {obj_dir}")
+            return None
+
+        # Load pose
+        pose_path = obj_dir / "pose.json"
+        if pose_path.is_file():
+            pose_data = json.loads(pose_path.read_text())
+            pose = ZeroScenePose(
+                transform_matrix=pose_data.get("transform_matrix", np.eye(4).tolist()),
+                translation=pose_data.get("translation"),
+                rotation_quaternion=pose_data.get("rotation_quaternion"),
+                scale=pose_data.get("scale"),
+                confidence=pose_data.get("confidence", 1.0),
+            )
+        else:
+            pose = ZeroScenePose(transform_matrix=np.eye(4).tolist())
+
+        # Load bounds
+        bounds_path = obj_dir / "bounds.json"
+        if bounds_path.is_file():
+            bounds = json.loads(bounds_path.read_text())
+        else:
+            # Default bounds
+            bounds = {
+                "min": [-0.5, -0.5, -0.5],
+                "max": [0.5, 0.5, 0.5],
+                "center": [0.0, 0.0, 0.0],
+                "size": [1.0, 1.0, 1.0],
+            }
+
+        # Load material
+        material = None
+        mat_path = obj_dir / "material.json"
+        if mat_path.is_file():
+            mat_data = json.loads(mat_path.read_text())
+            material = ZeroSceneMaterial(
+                base_color=mat_data.get("base_color", [0.8, 0.8, 0.8]),
+                metallic=mat_data.get("metallic", 0.0),
+                roughness=mat_data.get("roughness", 0.5),
+                normal_map_path=mat_data.get("normal_map_path"),
+                albedo_map_path=mat_data.get("albedo_map_path"),
+                material_type=mat_data.get("material_type", "generic"),
+            )
+
+        # Find segmentation mask
+        seg_mask_path = None
+        for name in ["segmentation.png", "mask.png"]:
+            candidate = obj_dir / name
+            if candidate.is_file():
+                seg_mask_path = str(candidate)
+                break
+
+        obj_id = "scene_background" if is_background else obj_dir.name
+        sim_role = "background" if is_background else "unknown"
+
+        return ZeroSceneObject(
+            id=obj_id,
+            mesh_path=mesh_path,
+            pose=pose,
+            bounds=bounds,
+            material=material,
+            segmentation_mask_path=seg_mask_path,
+            sim_role=sim_role,
+        )
+
+    def create_manifest(
+        self,
+        zeroscene_output: ZeroSceneOutput,
+        scene_id: Optional[str] = None,
+        environment_type: str = "generic",
+    ) -> Dict[str, Any]:
+        """Create a canonical scene_manifest.json from ZeroScene output.
+
+        Args:
+            zeroscene_output: Parsed ZeroScene output
+            scene_id: Optional override for scene ID
+            environment_type: Type of environment (kitchen, office, etc.)
+
+        Returns:
+            Manifest dictionary ready for JSON serialization
+        """
+        scene_id = scene_id or zeroscene_output.scene_id
+
+        objects = []
+
+        # Process foreground objects
+        for obj in zeroscene_output.objects:
+            manifest_obj = self._object_to_manifest(obj, zeroscene_output)
+            objects.append(manifest_obj)
+
+        # Process background
+        if zeroscene_output.background:
+            bg_obj = self._object_to_manifest(
+                zeroscene_output.background,
+                zeroscene_output,
+                is_background=True,
+            )
+            objects.append(bg_obj)
+
+        manifest = {
+            "version": self.MANIFEST_VERSION,
+            "scene_id": scene_id,
+            "scene": {
+                "coordinate_frame": zeroscene_output.coordinate_frame,
+                "meters_per_unit": zeroscene_output.meters_per_unit,
+                "environment_type": environment_type,
+                "room": self._compute_room_bounds(zeroscene_output),
+                "physics_defaults": {
+                    "gravity": {"x": 0.0, "y": -9.81, "z": 0.0},
+                    "solver": "TGS",
+                    "time_steps_per_second": 60,
+                },
+            },
+            "objects": objects,
+            "assets": {
+                "asset_root": f"scenes/{scene_id}/assets",
+                "packs": [],
+            },
+            "metadata": {
+                "source_pipeline": "zeroscene",
+                "zeroscene_version": zeroscene_output.version,
+                "reconstruction_confidence": zeroscene_output.overall_confidence,
+                "source_image_path": zeroscene_output.source_image_path,
+            },
+        }
+
+        return manifest
+
+    def _object_to_manifest(
+        self,
+        obj: ZeroSceneObject,
+        scene: ZeroSceneOutput,
+        is_background: bool = False,
+    ) -> Dict[str, Any]:
+        """Convert a ZeroSceneObject to manifest object format."""
+        # Extract transform components from matrix
+        transform = self._decompose_transform(obj.pose.transform_matrix)
+
+        # Determine sim_role based on object properties
+        sim_role = obj.sim_role
+        if sim_role == "unknown":
+            # Will be enriched by inventory/segmentation job
+            sim_role = "static"
+
+        manifest_obj = {
+            "id": obj.id,
+            "sim_role": sim_role,
+            "name": obj.id,
+            "category": obj.category,
+            "description": obj.description,
+            "transform": {
+                "position": {
+                    "x": transform["translation"][0],
+                    "y": transform["translation"][1],
+                    "z": transform["translation"][2],
+                },
+                "scale": {
+                    "x": transform["scale"][0],
+                    "y": transform["scale"][1],
+                    "z": transform["scale"][2],
+                },
+                "rotation_quaternion": {
+                    "w": transform["rotation"][0],
+                    "x": transform["rotation"][1],
+                    "y": transform["rotation"][2],
+                    "z": transform["rotation"][3],
+                },
+            },
+            "asset": {
+                "path": f"assets/obj_{obj.id}/asset.glb",
+                "format": "glb",
+                "source": "zeroscene",
+            },
+            "dimensions_est": {
+                "width": obj.bounds.get("size", [1, 1, 1])[0],
+                "height": obj.bounds.get("size", [1, 1, 1])[1],
+                "depth": obj.bounds.get("size", [1, 1, 1])[2],
+            },
+            "semantics": {
+                "class": obj.category or "object",
+                "affordances": [],
+                "tags": [],
+            },
+            "physics": {},  # Will be enriched by simready-job
+            "physics_hints": {},  # Will be enriched by simready-job
+            "articulation": {},  # Will be enriched by interactive-job
+            "relationships": [],
+            "variation_candidate": False,
+        }
+
+        # Add material hints if available
+        if obj.material:
+            manifest_obj["physics_hints"]["material_type"] = obj.material.material_type
+            manifest_obj["physics_hints"]["roughness"] = obj.material.roughness
+            manifest_obj["physics_hints"]["metallic"] = obj.material.metallic
+
+        return manifest_obj
+
+    def _decompose_transform(self, matrix: List[List[float]]) -> Dict[str, List[float]]:
+        """Decompose a 4x4 transform matrix into translation, rotation, scale."""
+        m = np.array(matrix, dtype=np.float64)
+
+        # Translation
+        translation = m[:3, 3].tolist()
+
+        # Extract rotation matrix (upper 3x3)
+        rot_scale = m[:3, :3]
+
+        # Scale from column norms
+        scale = [
+            float(np.linalg.norm(rot_scale[:, 0])),
+            float(np.linalg.norm(rot_scale[:, 1])),
+            float(np.linalg.norm(rot_scale[:, 2])),
+        ]
+
+        # Normalize to get rotation
+        rot = rot_scale.copy()
+        for i in range(3):
+            if scale[i] > 1e-6:
+                rot[:, i] /= scale[i]
+
+        # Convert rotation matrix to quaternion
+        rotation = self._matrix_to_quaternion(rot)
+
+        return {
+            "translation": translation,
+            "rotation": rotation,  # [w, x, y, z]
+            "scale": scale,
+        }
+
+    def _matrix_to_quaternion(self, m: np.ndarray) -> List[float]:
+        """Convert 3x3 rotation matrix to quaternion [w, x, y, z]."""
+        trace = m[0, 0] + m[1, 1] + m[2, 2]
+
+        if trace > 0:
+            s = 0.5 / np.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (m[2, 1] - m[1, 2]) * s
+            y = (m[0, 2] - m[2, 0]) * s
+            z = (m[1, 0] - m[0, 1]) * s
+        elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2])
+            w = (m[2, 1] - m[1, 2]) / s
+            x = 0.25 * s
+            y = (m[0, 1] + m[1, 0]) / s
+            z = (m[0, 2] + m[2, 0]) / s
+        elif m[1, 1] > m[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2])
+            w = (m[0, 2] - m[2, 0]) / s
+            x = (m[0, 1] + m[1, 0]) / s
+            y = 0.25 * s
+            z = (m[1, 2] + m[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1])
+            w = (m[1, 0] - m[0, 1]) / s
+            x = (m[0, 2] + m[2, 0]) / s
+            y = (m[1, 2] + m[2, 1]) / s
+            z = 0.25 * s
+
+        return [float(w), float(x), float(y), float(z)]
+
+    def _compute_room_bounds(self, zeroscene_output: ZeroSceneOutput) -> Dict[str, Any]:
+        """Compute room bounds from all objects."""
+        all_bounds = []
+
+        for obj in zeroscene_output.objects:
+            all_bounds.append(obj.bounds)
+
+        if zeroscene_output.background:
+            all_bounds.append(zeroscene_output.background.bounds)
+
+        if not all_bounds:
+            return {
+                "bounds": {"min": [-5, 0, -5], "max": [5, 3, 5]},
+                "origin": [0, 0, 0],
+            }
+
+        # Compute union of all bounds
+        mins = np.array([b.get("min", [-5, 0, -5]) for b in all_bounds])
+        maxs = np.array([b.get("max", [5, 3, 5]) for b in all_bounds])
+
+        room_min = mins.min(axis=0).tolist()
+        room_max = maxs.max(axis=0).tolist()
+
+        return {
+            "bounds": {"min": room_min, "max": room_max},
+            "origin": [
+                (room_min[0] + room_max[0]) / 2,
+                room_min[1],  # Origin at floor level
+                (room_min[2] + room_max[2]) / 2,
+            ],
+        }
+
+    def create_layout(
+        self,
+        zeroscene_output: ZeroSceneOutput,
+        apply_scale_factor: float = 1.0,
+    ) -> Dict[str, Any]:
+        """Create scene_layout_scaled.json from ZeroScene output.
+
+        This layout format is required by usd-assembly-job.
+
+        Args:
+            zeroscene_output: Parsed ZeroScene output
+            apply_scale_factor: Optional scale factor to apply
+
+        Returns:
+            Layout dictionary ready for JSON serialization
+        """
+        objects = []
+
+        for obj in zeroscene_output.objects:
+            layout_obj = self._object_to_layout(obj, apply_scale_factor)
+            objects.append(layout_obj)
+
+        if zeroscene_output.background:
+            bg_obj = self._object_to_layout(
+                zeroscene_output.background,
+                apply_scale_factor,
+                is_background=True,
+            )
+            objects.append(bg_obj)
+
+        # Compute room box
+        room_info = self._compute_room_bounds(zeroscene_output)
+        room_box = {
+            "min": room_info["bounds"]["min"],
+            "max": room_info["bounds"]["max"],
+        }
+
+        # Apply scale factor to room box
+        if apply_scale_factor != 1.0:
+            room_box["min"] = [v * apply_scale_factor for v in room_box["min"]]
+            room_box["max"] = [v * apply_scale_factor for v in room_box["max"]]
+
+        layout = {
+            "scene_id": zeroscene_output.scene_id,
+            "objects": objects,
+            "room_box": room_box,
+            "room_planes": self._generate_room_planes(room_box),
+            "camera_trajectory": self._build_camera_trajectory(zeroscene_output),
+            "scale_factor": apply_scale_factor,
+            "meters_per_unit": zeroscene_output.meters_per_unit * apply_scale_factor,
+            "coordinate_frame": zeroscene_output.coordinate_frame,
+            "metadata": {
+                "source": "zeroscene",
+                "scaled": apply_scale_factor != 1.0,
+            },
+        }
+
+        return layout
+
+    def _object_to_layout(
+        self,
+        obj: ZeroSceneObject,
+        scale_factor: float,
+        is_background: bool = False,
+    ) -> Dict[str, Any]:
+        """Convert ZeroSceneObject to layout object format."""
+        # Extract center from transform or bounds
+        m = np.array(obj.pose.transform_matrix, dtype=np.float64)
+        center = (m[:3, 3] * scale_factor).tolist()
+
+        # Compute scaled extents (half-sizes)
+        size = obj.bounds.get("size", [1, 1, 1])
+        extents = [s * scale_factor * 0.5 for s in size]
+
+        # Extract rotation matrix
+        rot = m[:3, :3].tolist()
+
+        layout_obj = {
+            "id": obj.id,
+            "class_name": obj.category or ("scene_background" if is_background else "object"),
+            "center3d": center,
+            "obb": {
+                "center": center,
+                "extents": extents,
+                "R": rot,
+            },
+            "bounds": {
+                "min": [center[i] - extents[i] for i in range(3)],
+                "max": [center[i] + extents[i] for i in range(3)],
+            },
+            "approx_location": self._center_to_approx_location(center),
+        }
+
+        return layout_obj
+
+    def _center_to_approx_location(self, center: List[float]) -> str:
+        """Convert 3D center to approx_location string."""
+        x, y, z = center
+
+        h = "center"
+        if x < -1:
+            h = "left"
+        elif x > 1:
+            h = "right"
+
+        v = "middle"
+        if z < -1:
+            v = "bottom"
+        elif z > 1:
+            v = "top"
+
+        return f"{v} {h}"
+
+    def _generate_room_planes(self, room_box: Dict[str, List[float]]) -> Dict[str, Any]:
+        """Generate room plane equations from room box."""
+        min_pt = room_box["min"]
+        max_pt = room_box["max"]
+
+        return {
+            "floor": {
+                "equation": [0, 1, 0, -min_pt[1]],  # y = min_y
+                "normal": [0, 1, 0],
+            },
+            "ceiling": {
+                "equation": [0, -1, 0, max_pt[1]],  # y = max_y
+                "normal": [0, -1, 0],
+            },
+            "walls": [
+                {"equation": [1, 0, 0, -min_pt[0]], "normal": [1, 0, 0]},   # x = min_x
+                {"equation": [-1, 0, 0, max_pt[0]], "normal": [-1, 0, 0]}, # x = max_x
+                {"equation": [0, 0, 1, -min_pt[2]], "normal": [0, 0, 1]},   # z = min_z
+                {"equation": [0, 0, -1, max_pt[2]], "normal": [0, 0, -1]}, # z = max_z
+            ],
+        }
+
+    def _build_camera_trajectory(self, zeroscene_output: ZeroSceneOutput) -> List[Dict]:
+        """Build camera trajectory from ZeroScene camera parameters."""
+        cameras = []
+
+        if zeroscene_output.camera_intrinsics:
+            cam = {
+                "id": 0,
+                "intrinsics": zeroscene_output.camera_intrinsics,
+                "image_size": list(zeroscene_output.image_size),
+            }
+            if zeroscene_output.camera_extrinsics:
+                cam["extrinsics"] = zeroscene_output.camera_extrinsics
+            if zeroscene_output.source_image_path:
+                cam["image_path"] = zeroscene_output.source_image_path
+            cameras.append(cam)
+
+        return cameras
+
+    def copy_assets(
+        self,
+        zeroscene_output: ZeroSceneOutput,
+        output_dir: Path,
+        assets_prefix: str = "assets",
+    ) -> Dict[str, str]:
+        """Copy ZeroScene assets to the expected directory structure.
+
+        Creates:
+            output_dir/
+                {assets_prefix}/
+                    obj_{id}/
+                        asset.glb
+                        metadata.json
+
+        Args:
+            zeroscene_output: Parsed ZeroScene output
+            output_dir: Base output directory
+            assets_prefix: Prefix for assets directory
+
+        Returns:
+            Mapping of object IDs to their asset paths
+        """
+        output_dir = Path(output_dir)
+        assets_dir = output_dir / assets_prefix
+
+        asset_paths = {}
+
+        # Copy foreground objects
+        for obj in zeroscene_output.objects:
+            obj_dir = assets_dir / f"obj_{obj.id}"
+            obj_dir.mkdir(parents=True, exist_ok=True)
+
+            # Copy mesh
+            src_mesh = Path(obj.mesh_path)
+            dst_mesh = obj_dir / "asset.glb"
+            if src_mesh.is_file():
+                shutil.copy2(src_mesh, dst_mesh)
+                asset_paths[obj.id] = str(dst_mesh.relative_to(output_dir))
+                self.log(f"Copied mesh for obj_{obj.id}")
+
+            # Write metadata
+            metadata = {
+                "id": obj.id,
+                "category": obj.category,
+                "mesh_bounds": {
+                    "export": {
+                        "min": obj.bounds.get("min"),
+                        "max": obj.bounds.get("max"),
+                        "center": obj.bounds.get("center"),
+                        "size": obj.bounds.get("size"),
+                    }
+                },
+                "source": "zeroscene",
+                "reconstruction_confidence": obj.reconstruction_confidence,
+            }
+
+            if obj.material:
+                metadata["material"] = asdict(obj.material)
+
+            metadata_path = obj_dir / "metadata.json"
+            metadata_path.write_text(json.dumps(metadata, indent=2))
+
+        # Copy background
+        if zeroscene_output.background:
+            bg_dir = assets_dir / "obj_scene_background"
+            bg_dir.mkdir(parents=True, exist_ok=True)
+
+            src_mesh = Path(zeroscene_output.background.mesh_path)
+            dst_mesh = bg_dir / "asset.glb"
+            if src_mesh.is_file():
+                shutil.copy2(src_mesh, dst_mesh)
+                asset_paths["scene_background"] = str(dst_mesh.relative_to(output_dir))
+                self.log("Copied background mesh")
+
+        return asset_paths
+
+
+# =============================================================================
+# Convenience Functions
+# =============================================================================
+
+
+def manifest_from_zeroscene(
+    zeroscene_dir: Path,
+    scene_id: Optional[str] = None,
+    environment_type: str = "generic",
+) -> Dict[str, Any]:
+    """Create a canonical scene_manifest.json from ZeroScene output directory.
+
+    This is the primary integration point for the ZeroScene-first pipeline.
+
+    Args:
+        zeroscene_dir: Path to ZeroScene output directory
+        scene_id: Optional scene ID (defaults to directory name)
+        environment_type: Type of environment (kitchen, office, etc.)
+
+    Returns:
+        Manifest dictionary ready for JSON serialization
+
+    Example:
+        manifest = manifest_from_zeroscene(
+            Path("/mnt/gcs/scenes/scene_123/zeroscene"),
+            scene_id="scene_123",
+            environment_type="kitchen"
+        )
+        Path("scene_manifest.json").write_text(json.dumps(manifest, indent=2))
+    """
+    adapter = ZeroSceneAdapter()
+    zeroscene_output = adapter.load_zeroscene_output(zeroscene_dir)
+    return adapter.create_manifest(zeroscene_output, scene_id, environment_type)
+
+
+def layout_from_zeroscene(
+    zeroscene_dir: Path,
+    scale_factor: float = 1.0,
+) -> Dict[str, Any]:
+    """Create scene_layout_scaled.json from ZeroScene output directory.
+
+    This layout is required by usd-assembly-job for scene construction.
+
+    Args:
+        zeroscene_dir: Path to ZeroScene output directory
+        scale_factor: Optional scale factor to apply (for metric calibration)
+
+    Returns:
+        Layout dictionary ready for JSON serialization
+
+    Example:
+        layout = layout_from_zeroscene(
+            Path("/mnt/gcs/scenes/scene_123/zeroscene"),
+            scale_factor=1.0
+        )
+        Path("scene_layout_scaled.json").write_text(json.dumps(layout, indent=2))
+    """
+    adapter = ZeroSceneAdapter()
+    zeroscene_output = adapter.load_zeroscene_output(zeroscene_dir)
+    return adapter.create_layout(zeroscene_output, scale_factor)
