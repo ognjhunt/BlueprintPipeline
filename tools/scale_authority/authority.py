@@ -18,7 +18,7 @@ class ScaleSource(str, Enum):
     USER_ANCHOR = "user_anchor"          # User provided known dimension
     SCALE_JOB = "scale_job"              # Computed by scale-job with calibration
     ZEROSCENE = "zeroscene"              # From ZeroScene reconstruction
-    LAYOUT_JOB = "layout_job"            # From DA3/layout reconstruction
+    LAYOUT_JOB = "layout_job"            # Historic: from legacy reconstruction
     REFERENCE_OBJECT = "reference_object" # Inferred from known object types
     DEFAULT = "default"                   # Default heuristic
 
@@ -146,7 +146,7 @@ class ScaleAuthority:
         """Compute authoritative scale configuration.
 
         Args:
-            layout: Scene layout data (from layout-job or ZeroScene)
+            layout: Scene layout data (from ZeroScene or legacy sources)
             manifest: Scene manifest data
             user_anchor: User-provided scale anchor {object_id: dimension_m}
             zeroscene_scale: Scale factor from ZeroScene (if available)

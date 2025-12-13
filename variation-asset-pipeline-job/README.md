@@ -317,7 +317,6 @@ SCENE_ID=test_scene DRY_RUN=1 python run_variation_asset_pipeline.py
 ## Related Jobs
 
 - **replicator-job**: Creates the manifest consumed by this job
-- **variation-gen-job**: Legacy image-only generation (replaced by this job)
+- **variation-gen-job**: Reference image generation
 - **simready-job**: Standalone physics property assignment
-- **hunyuan-job**: Standalone Hunyuan 3D generation
-- **sam3d-job**: Standalone SAM3D reconstruction
+- **zeroscene-job**: ZeroScene adapter for mesh generation

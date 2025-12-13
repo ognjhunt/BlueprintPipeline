@@ -14,13 +14,15 @@ The `replicator-job` analyzes completed scenes and generates ready-to-run Replic
 ## Pipeline Position
 
 ```
-Image Upload → seg-job → multiview-job → sam3d-job → hunyuan-job
-                                                          ↓
-         usd-assembly-job (CONVERT) → simready-job → usd-assembly-job (FULL)
-                                                          ↓
-                                               replicator-job ← YOU ARE HERE
-                                                          ↓
-                                               scenes/<id>/replicator/
+Image Upload → ZeroScene → zeroscene-job → scale-job (optional) → interactive-job
+                                                                        ↓
+                                                                  simready-job
+                                                                        ↓
+                                                              usd-assembly-job
+                                                                        ↓
+                                                               replicator-job ← YOU ARE HERE
+                                                                        ↓
+                                                               scenes/<id>/replicator/
 ```
 
 ## Supported Environments
@@ -236,7 +238,7 @@ Edit `policy_configs/environment_policies.json`:
 
 The `manifest.json` in `variation_assets/` lists all needed assets. Assets can be sourced from:
 
-1. **BlueprintPipeline Generation**: Use the same multiview→sam3d pipeline
+1. **BlueprintPipeline Generation**: Use zeroscene-job for mesh generation
 2. **NVIDIA SimReady Library**: Download from Omniverse
 3. **Manual Creation**: Create in Blender/Maya and export to USDZ
 

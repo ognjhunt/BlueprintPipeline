@@ -46,18 +46,14 @@ Canonical Layout:
             reward_functions.py           # Reward implementations
 
 Pipeline Jobs and Their Output Locations:
-    seg-job          → seg/inventory.json
-    multiview-job    → multiview/obj_{id}/view_{n}.png
-    layout-job       → layout/scene_layout_scaled.json
+    zeroscene-job    → assets/scene_manifest.json, layout/scene_layout_scaled.json, seg/inventory.json
     scale-job        → layout/scene_layout_scaled.json (updated)
-    sam3d-job        → assets/obj_{id}/asset.glb
-    hunyuan-job      → assets/obj_{id}/asset.glb (or updated)
+    interactive-job  → assets/interactive/obj_{id}/*.urdf
     simready-job     → assets/obj_{id}/simready.usda
     usd-assembly-job → usd/scene.usda
-    interactive-job  → assets/interactive/obj_{id}/*.urdf
     replicator-job   → replicator/*
     variation-gen-job → variation_assets/*
-    zeroscene-job    → assets/scene_manifest.json, layout/scene_layout_scaled.json
+    isaac-lab-job    → isaac_lab/*
 """
 
 from .paths import (

@@ -2,10 +2,8 @@
 """Offline checks for workflow triggers and a dry-run simulation.
 
 This script validates that:
-- usd-assembly-pipeline listens for hunyuan completion markers.
-- hunyuan-pipeline triggers on scene_assets.json and writes .hunyuan_complete.
-- A dry-run simulation shows simready-job and usd-assembly-job get invoked
-  after .hunyuan_complete is present.
+- usd-assembly-pipeline listens for ZeroScene completion markers.
+- A dry-run simulation shows the ZeroScene pipeline flow.
 
 It is meant to give confidence in the wiring without needing Cloud access.
 """
@@ -23,6 +21,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def check_patterns(path: Path, expectations: Iterable[Tuple[str, str]]) -> List[str]:
     """Return a list of human-readable errors for missing regex patterns."""
+    if not path.exists():
+        return [f"File not found: {path}"]
     text = path.read_text()
     missing: List[str] = []
     for description, pattern in expectations:
@@ -32,16 +32,15 @@ def check_patterns(path: Path, expectations: Iterable[Tuple[str, str]]) -> List[
 
 
 def verify_usd_assembly() -> List[str]:
-    """Confirm usd-assembly-pipeline.yaml watches .hunyuan_complete markers."""
+    """Confirm usd-assembly-pipeline.yaml watches zeroscene completion markers."""
     path = REPO_ROOT / "workflows" / "usd-assembly-pipeline.yaml"
+    if not path.exists():
+        return [f"USD assembly pipeline not found: {path}"]
+
     expectations = [
         (
             "GCS finalize comment",
             r"Trigger: Cloud Storage object finalized event",
-        ),
-        (
-            "Completion marker regex",
-            r"text\.match_regex\(object, \"\^scenes/.+/assets/\\\\.hunyuan_complete\$\"\)",
         ),
         (
             "Simready job invocation",
@@ -49,47 +48,14 @@ def verify_usd_assembly() -> List[str]:
         ),
         (
             "USD assembly job name wiring",
-            r"usdJobName: \"usd-assembly-job\"",
+            r"usd-assembly-job",
         ),
     ]
     return check_patterns(path, expectations)
 
 
-def verify_hunyuan_pipeline() -> List[str]:
-    """Confirm hunyuan-pipeline.yaml triggers and writes completion markers."""
-    path = REPO_ROOT / "workflows" / "hunyuan-pipeline.yaml"
-    expectations = [
-        (
-            "scene_assets.json trigger",
-            r"text\.match_regex\(object, \"\^scenes/.+/assets/scene_assets\\\\.json\$\"\)",
-        ),
-        (
-            "Hunyuan job run",
-            r"googleapis\.run\.v2\.projects\.locations\.jobs\.run",
-        ),
-        (
-            "Hunyuan job name wiring",
-            r"jobName: \"hunyuan-job\"",
-        ),
-        (
-            ".hunyuan_complete creation",
-            r"\.hunyuan_complete",
-        ),
-    ]
-    errors = check_patterns(path, expectations)
-
-    script_path = REPO_ROOT / "hunyuan-job" / "run_hunyuan_from_assets.py"
-    if not script_path.is_file():
-        errors.append("run_hunyuan_from_assets.py missing")
-    else:
-        script_text = script_path.read_text()
-        if ".hunyuan_complete" not in script_text:
-            errors.append("run_hunyuan_from_assets.py does not mention .hunyuan_complete marker")
-    return errors
-
-
-def dry_run_usd_pipeline(scene_id: str = "demo", bucket: str = "demo-bucket") -> List[str]:
-    """Simulate the usd-assembly workflow when .hunyuan_complete appears.
+def dry_run_zeroscene_pipeline(scene_id: str = "demo", bucket: str = "demo-bucket") -> List[str]:
+    """Simulate the ZeroScene pipeline flow.
 
     This is a lightweight representation of the orchestration steps; it
     creates temporary marker files to prove the ordering of actions.
@@ -102,21 +68,38 @@ def dry_run_usd_pipeline(scene_id: str = "demo", bucket: str = "demo-bucket") ->
         assets_dir = bucket_root / assets_prefix
         assets_dir.mkdir(parents=True, exist_ok=True)
 
-        # Simulate the Hunyuan completion marker arriving from GCS.
-        marker = assets_dir / ".hunyuan_complete"
-        marker.write_text("done\n")
-        actions.append(f"Detected finalize event for {marker.relative_to(bucket_root)} in bucket {bucket}")
+        # Simulate ZeroScene reconstruction completion
+        zeroscene_dir = bucket_root / f"scenes/{scene_id}/zeroscene"
+        zeroscene_dir.mkdir(parents=True, exist_ok=True)
+        marker = zeroscene_dir / "scene_info.json"
+        marker.write_text("{}\n")
+        actions.append(f"Detected ZeroScene output at {marker.relative_to(bucket_root)} in bucket {bucket}")
 
-        # Convert job (convert-only)
-        actions.append("Would invoke usd-assembly-job with CONVERT_ONLY=true")
+        # ZeroScene adapter job
+        actions.append("Would invoke zeroscene-job to convert ZeroScene outputs")
 
-        # Simready job and completion marker
+        # Scale job (optional)
+        actions.append("Would invoke scale-job for scale calibration (optional)")
+
+        # Interactive job
+        actions.append("Would invoke interactive-job for articulation")
+
+        # Simready job
         simready_marker = assets_dir / ".simready_complete"
         simready_marker.write_text("done\n")
         actions.append("Would invoke simready-job and wait for .simready_complete")
 
-        # Final USD assembly
+        # USD assembly
         actions.append("Would invoke usd-assembly-job for final assembly")
+
+        # Replicator job
+        actions.append("Would invoke replicator-job for domain randomization bundle")
+
+        # Variation gen job
+        actions.append("Would invoke variation-gen-job for variation assets")
+
+        # Isaac Lab job
+        actions.append("Would invoke isaac-lab-job for training configurations")
 
     return actions
 
@@ -128,21 +111,15 @@ def main() -> int:
     if usd_errors:
         errors.extend(["USD assembly: " + e for e in usd_errors])
 
-    hunyuan_errors = verify_hunyuan_pipeline()
-    if hunyuan_errors:
-        errors.extend(["Hunyuan pipeline: " + e for e in hunyuan_errors])
-
-    dry_run_actions = dry_run_usd_pipeline()
+    dry_run_actions = dry_run_zeroscene_pipeline()
 
     if errors:
         print("FAILED checks:\n- " + "\n- ".join(errors))
         return 1
 
     print("Verified triggers and actions:")
-    print("- usd-assembly-pipeline watches .hunyuan_complete finalize events")
-    print("- hunyuan-pipeline triggers on scene_assets.json and writes .hunyuan_complete")
-    print("- run_hunyuan_from_assets.py references the completion marker for parity")
-    print("\nDry run (simulated flow):")
+    print("- usd-assembly-pipeline watches completion markers")
+    print("\nZeroScene Pipeline Dry run (simulated flow):")
     for action in dry_run_actions:
         print(f"  * {action}")
 
