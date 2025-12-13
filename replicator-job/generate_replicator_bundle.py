@@ -32,6 +32,15 @@ except ImportError:
     genai = None
     types = None
 
+# Unified LLM client supporting Gemini + OpenAI
+try:
+    from tools.llm_client import create_llm_client, LLMProvider
+    HAVE_LLM_CLIENT = True
+except ImportError:
+    HAVE_LLM_CLIENT = False
+    create_llm_client = None
+    LLMProvider = None
+
 from tools.asset_catalog import AssetCatalogClient
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 
@@ -263,6 +272,29 @@ def create_gemini_client():
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable is required")
     return genai.Client(api_key=api_key)
+
+
+def create_unified_llm_client():
+    """Create a unified LLM client supporting Gemini and OpenAI.
+
+    Returns the unified client if available, falls back to Gemini.
+    """
+    if HAVE_LLM_CLIENT and create_llm_client is not None:
+        try:
+            return create_llm_client()
+        except Exception as e:
+            print(f"[REPLICATOR] Unified LLM client failed: {e}, falling back to Gemini", file=sys.stderr)
+
+    # Fallback to direct Gemini
+    return create_gemini_client()
+
+
+def get_llm_provider_name() -> str:
+    """Get the name of the current LLM provider."""
+    provider = os.getenv("LLM_PROVIDER", "auto").lower()
+    if provider == "openai" and os.getenv("OPENAI_API_KEY"):
+        return "openai"
+    return "gemini"
 
 
 def create_catalog_client() -> Optional[AssetCatalogClient]:

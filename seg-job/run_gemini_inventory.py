@@ -4,6 +4,18 @@ Gemini-based scene inventory generation (replaces SAM3 segmentation).
 
 This script analyzes a scene image using Gemini 3.0 Pro and generates
 a structured inventory of all objects in the scene.
+
+DEPRECATION NOTICE (ZeroScene Transition):
+    This job is DEPRECATED and will be replaced by zeroscene-job when
+    ZeroScene becomes available. ZeroScene provides superior segmentation
+    with 3D-aware instance segmentation and depth extraction.
+
+    This job is kept as a FALLBACK while ZeroScene is not fully operational.
+    Set PIPELINE_MODE=gemini_only to use this job in production.
+    Set PIPELINE_MODE=zeroscene_first (default) to skip this job.
+
+    See: docs/ZEROSCENE_TRANSITION.md for migration details.
+    ZeroScene paper: https://arxiv.org/html/2509.23607v1
 """
 
 import os
@@ -526,8 +538,31 @@ names:
     print(f"[GEMINI-INV] Created minimal dataset structure at {seg_dir}/dataset")
 
 
+def _check_deprecation():
+    """Check if this job should run based on pipeline mode."""
+    pipeline_mode = os.getenv("PIPELINE_MODE", "zeroscene_first").lower()
+    force_run = os.getenv("FORCE_DEPRECATED_JOB", "").lower() in ("1", "true", "yes")
+
+    if pipeline_mode == "zeroscene_first" and not force_run:
+        print("[GEMINI-INV] WARNING: This job is DEPRECATED (ZeroScene transition)", file=sys.stderr)
+        print("[GEMINI-INV] Set PIPELINE_MODE=gemini_only or FORCE_DEPRECATED_JOB=true to run", file=sys.stderr)
+        print("[GEMINI-INV] See docs/ZEROSCENE_TRANSITION.md for details", file=sys.stderr)
+        return False
+
+    if pipeline_mode != "gemini_only":
+        print("[GEMINI-INV] NOTE: Running deprecated job as fallback", file=sys.stderr)
+        print("[GEMINI-INV] Consider migrating to ZeroScene pipeline", file=sys.stderr)
+
+    return True
+
+
 def main():
     """Main entry point."""
+    # Check deprecation status
+    if not _check_deprecation():
+        print("[GEMINI-INV] Skipping deprecated job (use FORCE_DEPRECATED_JOB=true to override)")
+        sys.exit(0)
+
     # Get environment variables
     bucket = os.getenv("BUCKET", "")
     images_prefix = os.getenv("IMAGES_PREFIX", "")
