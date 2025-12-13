@@ -2,8 +2,8 @@
 # Variation Asset Generator - Generates reference images for domain randomization assets
 #
 # This lightweight container uses Gemini 3.0 Pro Image (Nano Banana Pro) to generate reference images
-# for variation assets identified by replicator-job. The generated images are
-# then processed by hunyuan-job to create 3D models.
+# for variation assets identified by replicator-job. The generated images can be
+# processed by downstream jobs to create 3D models.
 
 FROM python:3.10-slim
 
