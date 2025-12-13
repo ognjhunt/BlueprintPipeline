@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -7,6 +9,20 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from .manifest import DEFAULT_ROOT, load_canonical_manifest
+
+# Import articulation wiring (optional - graceful degradation if not available)
+try:
+    from tools.articulation_wiring import ArticulationWiring
+    HAVE_ARTICULATION_WIRING = True
+except ImportError:
+    HAVE_ARTICULATION_WIRING = False
+
+# Import scale authority (optional)
+try:
+    from tools.scale_authority import ScaleAuthority, apply_scale_to_manifest
+    HAVE_SCALE_AUTHORITY = True
+except ImportError:
+    HAVE_SCALE_AUTHORITY = False
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 USD_ASSEMBLY_DIR = REPO_ROOT / "usd-assembly-job"
@@ -347,6 +363,32 @@ def assemble_scene(
         return 1
     print(f"  Wired {wired} object references")
 
+    # [PHASE 4.5] Wire articulated assets from interactive-job
+    articulated_count = 0
+    if HAVE_ARTICULATION_WIRING:
+        print("\n[PHASE 4.5] Wiring articulated assets...")
+        try:
+            articulation_wiring = ArticulationWiring(root, assets_prefix, usd_prefix)
+            articulated_count, articulated_assets = articulation_wiring.wire_scene(
+                stage, scene_assets
+            )
+            print(f"  Wired {articulated_count} articulated objects")
+
+            # Update manifest with articulation data
+            if articulated_count > 0:
+                manifest_path = root / assets_prefix / "scene_manifest.json"
+                if manifest_path.is_file():
+                    manifest = json.loads(manifest_path.read_text())
+                    updated_manifest = articulation_wiring.update_manifest(
+                        manifest, articulated_assets
+                    )
+                    manifest_path.write_text(json.dumps(updated_manifest, indent=2))
+                    print(f"  Updated manifest with articulation data")
+        except Exception as e:
+            print(f"[WARN] Articulation wiring failed (non-fatal): {e}")
+    else:
+        print("\n[PHASE 4.5] Articulation wiring not available (skipping)")
+
     stage.GetRootLayer().Save()
     print(f"  Saved updated scene: {stage_path}")
 
@@ -368,6 +410,7 @@ def assemble_scene(
     print(f"  Objects: {len(objects)}")
     print(f"  GLB->USDZ: {success} converted, {failures} failed")
     print(f"  References: {wired} wired")
+    print(f"  Articulated: {articulated_count} objects")
     print("=" * 60)
 
     return 0 if failures == 0 else 1
