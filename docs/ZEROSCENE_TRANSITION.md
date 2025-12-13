@@ -2,6 +2,8 @@
 
 This document describes the transition from the current reconstruction pipeline to a ZeroScene-first approach.
 
+**Last Updated**: December 2025
+
 ## Overview
 
 [ZeroScene](https://arxiv.org/html/2509.23607v1) provides an improved reconstruction pipeline that covers:
@@ -10,6 +12,56 @@ This document describes the transition from the current reconstruction pipeline 
 - Foreground + background mesh reconstruction
 - PBR material estimation for improved rendering realism
 - Triangle mesh outputs for each object
+
+## Implementation Status
+
+### New Tooling Added
+
+| Tool | Path | Description |
+|------|------|-------------|
+| **LLM Client** | `tools/llm_client/` | Unified API for Gemini + OpenAI GPT-5.2 Thinking |
+| **Job Registry** | `tools/job_registry/` | Central registry tracking deprecation status |
+| **Pipeline Selector** | `tools/pipeline_selector/` | Automatic routing between ZeroScene/Gemini |
+
+### LLM Provider Support
+
+The pipeline now supports multiple LLM providers:
+
+| Provider | Model | Use Case |
+|----------|-------|----------|
+| **Google Gemini** | gemini-3-pro-preview | Default for all jobs |
+| **OpenAI** | gpt-5.2-thinking | Alternative with web browsing |
+
+**Environment Variables:**
+```bash
+# Select LLM provider
+LLM_PROVIDER=auto          # Auto-detect (default)
+LLM_PROVIDER=gemini        # Force Gemini
+LLM_PROVIDER=openai        # Force OpenAI GPT-5.2 Thinking
+
+# API Keys (at least one required)
+GEMINI_API_KEY=your_key
+OPENAI_API_KEY=your_key
+
+# Fallback behavior
+LLM_FALLBACK_ENABLED=true  # Auto-fallback to other provider
+```
+
+**Usage in Jobs:**
+```python
+from tools.llm_client import create_llm_client
+
+# Auto-select provider
+client = create_llm_client()
+
+# Generate content with web search
+response = client.generate(
+    prompt="Analyze this scene",
+    image=pil_image,
+    json_output=True,
+    use_web_search=True  # Enables Google Search or web browsing
+)
+```
 
 ## Jobs Status After ZeroScene
 
@@ -27,6 +79,28 @@ These jobs will be replaced by ZeroScene when it becomes available:
 | `hunyuan-job` | Texture/refinement | ZeroScene PBR materials | **DEPRECATED** |
 
 **Note:** Keep these jobs as a fallback while ZeroScene is not fully operational. The Gemini pipeline remains a coherent ingestion path.
+
+**Deprecation Behavior:**
+
+Deprecated jobs now check `PIPELINE_MODE` before execution:
+
+```python
+# In deprecated job's main():
+from tools.pipeline_selector import should_skip_deprecated_job
+
+if should_skip_deprecated_job("seg-job"):
+    print("DEPRECATED: This job is skipped in ZeroScene-first mode")
+    sys.exit(0)  # Silent skip
+```
+
+**Force deprecated jobs to run:**
+```bash
+# Option 1: Use Gemini-only mode
+PIPELINE_MODE=gemini_only
+
+# Option 2: Force specific job
+FORCE_DEPRECATED_JOB=true
+```
 
 ### Jobs to KEEP (Still Required)
 
@@ -170,3 +244,75 @@ Jobs should use these environment variables:
 | `ENVIRONMENT_TYPE` | Environment hint | `kitchen`, `office`, etc. |
 | `SCALE_FACTOR` | Scale override | `1.0` |
 | `TRUST_ZEROSCENE_SCALE` | Trust ZeroScene scale | `true`/`false` |
+| `PIPELINE_MODE` | Pipeline selection | `zeroscene_first`, `gemini_only`, `hybrid` |
+| `FORCE_DEPRECATED_JOB` | Force run deprecated job | `true`/`false` |
+| `LLM_PROVIDER` | LLM provider selection | `auto`, `gemini`, `openai` |
+| `AUTO_FALLBACK` | Auto-fallback to Gemini | `true`/`false` |
+
+## Pipeline Mode Configuration
+
+Set `PIPELINE_MODE` to control which pipeline is used:
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `zeroscene_first` | Use ZeroScene when available, fallback to Gemini | **Default** - Production |
+| `gemini_only` | Use only the Gemini reconstruction pipeline | Fallback when ZeroScene unavailable |
+| `hybrid` | Run both pipelines for comparison | Development/testing |
+
+**Example workflow configuration:**
+```yaml
+# Vertex AI Workflow
+- assign:
+    - pipelineMode: ${sys.get_env("PIPELINE_MODE", "zeroscene_first")}
+
+- run_job:
+    switch:
+      - condition: ${pipelineMode == "zeroscene_first"}
+        call: zeroscene_pipeline
+      - condition: ${pipelineMode == "gemini_only"}
+        call: gemini_pipeline
+```
+
+## Job Registry
+
+Use the job registry to query deprecation status programmatically:
+
+```python
+from tools.job_registry import get_registry, JobStatus
+
+registry = get_registry()
+
+# Check if job is deprecated
+if registry.is_deprecated("seg-job"):
+    print("seg-job is deprecated")
+
+# Get replacement
+replacement = registry.get_replacement("seg-job")
+# Returns: "zeroscene-job"
+
+# Get all deprecated jobs
+deprecated = registry.get_deprecated_jobs()
+
+# Print status report
+registry.print_status_report()
+```
+
+## CLI Usage
+
+Check pipeline status from command line:
+
+```bash
+# Print job registry status
+python -c "from tools.job_registry import get_registry; get_registry().print_status_report()"
+
+# Select pipeline for a scene
+python -c "
+from tools.pipeline_selector import select_pipeline
+from pathlib import Path
+
+decision = select_pipeline(Path('/mnt/gcs/scenes/scene_123'))
+print(f'Mode: {decision.mode}')
+print(f'Use ZeroScene: {decision.use_zeroscene}')
+print(f'Jobs: {decision.job_sequence}')
+"
+```
