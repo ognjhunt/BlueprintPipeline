@@ -323,7 +323,8 @@ def run_zeroscene_adapter_job(
             print(f"[ZEROSCENE-JOB] WARNING: Failed to generate inventory: {e}")
             # Non-fatal - continue
 
-    # 5. Write completion marker
+    # 5. Write completion markers
+    # Write both .zeroscene_complete (for workflow trigger) and .zeroscene_adapter_complete (legacy)
     marker_content = {
         "status": "complete",
         "scene_id": scene_id,
@@ -333,8 +334,15 @@ def run_zeroscene_adapter_job(
         "environment_type": environment_type,
         "completed_at": datetime.utcnow().isoformat() + "Z",
     }
-    marker_path = assets_dir / ".zeroscene_adapter_complete"
-    marker_path.write_text(json.dumps(marker_content, indent=2))
+
+    # Primary marker for workflow trigger
+    primary_marker_path = assets_dir / ".zeroscene_complete"
+    primary_marker_path.write_text(json.dumps(marker_content, indent=2))
+    print(f"[ZEROSCENE-JOB] Wrote completion marker: {primary_marker_path}")
+
+    # Legacy marker for backwards compatibility
+    legacy_marker_path = assets_dir / ".zeroscene_adapter_complete"
+    legacy_marker_path.write_text(json.dumps(marker_content, indent=2))
 
     print("[ZEROSCENE-JOB] ✓ ZeroScene adapter completed successfully")
     print(f"[ZEROSCENE-JOB]   Objects: {len(zeroscene_output.objects)}")

@@ -344,17 +344,92 @@ main:
     - log_replicator_complete:
         call: sys.log
         args:
-          text: '${"Replicator bundle generation completed for scene " + sceneId}'
+          text: '${"Replicator bundle generation completed for scene " + sceneId + " - starting Isaac Lab task generation"}'
           severity: "INFO"
-        next: done
+        next: run_isaac_lab_job
 
     - replicator_failed:
         # Replicator failure is non-fatal - scene is still usable without it
         call: sys.log
         args:
-          text: '${"WARNING: Replicator job failed for scene " + sceneId + " - scene.usda is still available but without Replicator scripts"}'
+          text: '${"WARNING: Replicator job failed for scene " + sceneId + " - proceeding with Isaac Lab generation anyway"}'
           severity: "WARNING"
-        next: done_without_replicator
+        next: run_isaac_lab_job
+
+    # =========================================================================
+    # Isaac Lab Job - Generate RL training task packages
+    # =========================================================================
+
+    - run_isaac_lab_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/isaac-lab-job"}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: USD_PREFIX
+                      value: ${usdPrefix}
+                    - name: REPLICATOR_PREFIX
+                      value: ${replicatorPrefix}
+                    - name: ISAAC_LAB_PREFIX
+                      value: '${"scenes/" + sceneId + "/isaac_lab"}'
+        result: isaacLabExec
+        next: set_isaac_lab_execution_name
+
+    - set_isaac_lab_execution_name:
+        assign:
+          - isaacLabExecutionName: '${if(isaacLabExec.metadata != null and isaacLabExec.metadata.name != null, isaacLabExec.metadata.name, isaacLabExec.name)}'
+        next: wait_for_isaac_lab
+
+    - wait_for_isaac_lab:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${isaacLabExecutionName}
+        result: isaacLabStatus
+        next: check_isaac_lab_status
+
+    - check_isaac_lab_status:
+        assign:
+          - isaacLabState: '${if(isaacLabStatus.state != null, isaacLabStatus.state, if(isaacLabStatus.status != null, isaacLabStatus.status.state, null))}'
+          - isaacLabFailedCount: '${if(isaacLabStatus.failedCount != null, isaacLabStatus.failedCount, if(isaacLabStatus.status != null, isaacLabStatus.status.failedCount, null))}'
+          - isaacLabSucceededCount: '${if(isaacLabStatus.succeededCount != null, isaacLabStatus.succeededCount, if(isaacLabStatus.status != null, isaacLabStatus.status.succeededCount, null))}'
+        next: isaac_lab_status_switch
+
+    - isaac_lab_status_switch:
+        switch:
+          - condition: '${isaacLabState == "FAILED" or (isaacLabFailedCount != null and isaacLabFailedCount > 0)}'
+            next: isaac_lab_failed
+          - condition: '${isaacLabState == "SUCCEEDED" or (isaacLabSucceededCount != null and isaacLabSucceededCount > 0)}'
+            next: log_isaac_lab_complete
+        next: wait_isaac_lab_poll
+
+    - wait_isaac_lab_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_isaac_lab
+
+    - log_isaac_lab_complete:
+        call: sys.log
+        args:
+          text: '${"Isaac Lab task generation completed for scene " + sceneId}'
+          severity: "INFO"
+        next: done
+
+    - isaac_lab_failed:
+        # Isaac Lab failure is non-fatal - scene is usable for sim without RL tasks
+        call: sys.log
+        args:
+          text: '${"WARNING: Isaac Lab task generation failed for scene " + sceneId + " - scene is still usable but without RL training packages"}'
+          severity: "WARNING"
+        next: done_without_isaac_lab
 
     # =========================================================================
     # Completion
@@ -364,10 +439,25 @@ main:
         return:
           status: "SUCCESS"
           scene_id: ${sceneId}
-          message: '${"Full pipeline completed for scene " + sceneId + " (USD + Replicator)"}'
+          message: '${"Full pipeline completed for scene " + sceneId + " (USD + Replicator + Isaac Lab)"}'
           convert_execution: ${convertExec.name}
           usd_execution: ${usdExec.name}
           replicator_execution: ${replicatorExec.name}
+          isaac_lab_execution: ${isaacLabExec.name}
+          outputs:
+            scene_usda: '${"scenes/" + sceneId + "/usd/scene.usda"}'
+            replicator_bundle: '${"scenes/" + sceneId + "/replicator/"}'
+            isaac_lab_package: '${"scenes/" + sceneId + "/isaac_lab/"}'
+
+    - done_without_isaac_lab:
+        return:
+          status: "PARTIAL_SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"Pipeline completed for scene " + sceneId + " (USD + Replicator, Isaac Lab failed)"}'
+          convert_execution: ${convertExec.name}
+          usd_execution: ${usdExec.name}
+          replicator_execution: ${replicatorExec.name}
+          isaac_lab_execution: ${isaacLabExec.name}
           outputs:
             scene_usda: '${"scenes/" + sceneId + "/usd/scene.usda"}'
             replicator_bundle: '${"scenes/" + sceneId + "/replicator/"}'
@@ -379,7 +469,6 @@ main:
           message: '${"USD assembly completed for scene " + sceneId + " (Replicator generation failed)"}'
           convert_execution: ${convertExec.name}
           usd_execution: ${usdExec.name}
-          replicator_execution: ${replicatorExec.name}
           outputs:
             scene_usda: '${"scenes/" + sceneId + "/usd/scene.usda"}'
 
