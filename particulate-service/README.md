@@ -1,0 +1,87 @@
+# Particulate Service
+
+Feed-forward 3D object articulation service based on [Particulate](https://arxiv.org/abs/2512.11798) by Li et al.
+
+## Overview
+
+Particulate takes a 3D mesh as input and infers its articulated structure (parts, kinematic tree, joint types, axes, ranges) in a single feed-forward pass (~10 seconds).
+
+**Key differences from PhysX-Anything:**
+
+| Feature | Particulate | PhysX-Anything |
+|---------|-------------|----------------|
+| Input | 3D mesh (GLB) | Image (PNG/JPEG) |
+| Speed | ~10 seconds | 5-15 minutes |
+| Memory | 16GB | 32GB |
+| Cold Start | 1-2 minutes | 10-15 minutes |
+| Strengths | Internal parts, batch processing | Physical properties, in-the-wild |
+
+## API
+
+### POST / - Articulate Mesh
+
+**Request:**
+```json
+{
+  "glb_base64": "<base64-encoded GLB mesh>"
+}
+```
+
+**Response:**
+```json
+{
+  "mesh_base64": "<segmented GLB>",
+  "urdf_base64": "<URDF with joints>",
+  "placeholder": false,
+  "generator": "particulate",
+  "articulation": {
+    "joint_count": 2,
+    "part_count": 3,
+    "is_articulated": true
+  }
+}
+```
+
+### GET / - Health Check
+
+Returns service status and readiness.
+
+### GET /debug - Debug Info
+
+Returns detailed service state and model validation info.
+
+## Deployment
+
+See [BUILD_AND_DEPLOY.md](./BUILD_AND_DEPLOY.md) for detailed deployment instructions.
+
+Quick start:
+```bash
+# Build
+docker build -t particulate-service -f Dockerfile .
+
+# Deploy to Cloud Run
+gcloud run deploy particulate-service \
+  --image <image-url> \
+  --memory 16Gi --cpu 4 \
+  --gpu 1 --gpu-type nvidia-l4 \
+  --timeout 300 --concurrency 1
+```
+
+## Integration
+
+Set these environment variables in interactive-job:
+
+```bash
+# Use Particulate as the default backend
+ARTICULATION_BACKEND=particulate
+PARTICULATE_ENDPOINT=https://particulate-service-xxx.run.app
+
+# PhysX as fallback
+PHYSX_ENDPOINT=https://physx-service-xxx.run.app
+```
+
+## References
+
+- [Paper: arXiv:2512.11798](https://arxiv.org/abs/2512.11798)
+- [GitHub: RuiningLi/particulate](https://github.com/RuiningLi/particulate)
+- [HuggingFace Demo](https://huggingface.co/spaces/rayli/particulate/)
