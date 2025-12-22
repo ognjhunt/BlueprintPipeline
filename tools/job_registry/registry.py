@@ -8,7 +8,7 @@ Tracks all pipeline jobs for the 3D-RE-GEN-based BlueprintPipeline.
 
 Pipeline Jobs (3D-RE-GEN-first approach):
     - regen3d-job: Adapter for 3D-RE-GEN outputs
-    - interactive-job: Articulation bridge (PhysX-Anything)
+    - interactive-job: Articulation bridge (Particulate default, PhysX-Anything fallback)
     - simready-job: Physics + manipulation hints
     - usd-assembly-job: USD scene assembly
     - replicator-job: Domain randomization scripts
@@ -121,17 +121,23 @@ class JobRegistry:
 
         self._jobs["interactive-job"] = JobInfo(
             name="interactive-job",
-            description="Articulation bridge using PhysX-Anything",
+            description="Articulation bridge using Particulate (fast mesh-based, ~10s)",
             status=JobStatus.ACTIVE,
             category=JobCategory.ENRICHMENT,
             entry_script="interactive-job/run_interactive_assets.py",
             docker_image="interactive-job",
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX"],
-            optional_env_vars=["PHYSX_SERVICE_URL", "TIMEOUT_SECONDS"],
+            optional_env_vars=[
+                "ARTICULATION_BACKEND",    # "particulate" (default) or "physx"
+                "PARTICULATE_ENDPOINT",    # Particulate service URL (default backend)
+                "PHYSX_ENDPOINT",          # PhysX-Anything URL (fallback)
+                "TIMEOUT_SECONDS",
+            ],
             depends_on=["regen3d-job"],
             outputs=["assets/interactive/obj_*/articulated.usda"],
             migration_notes=(
-                "Uses articulated object candidates from inventory."
+                "Default backend: Particulate (arXiv:2512.11798) - fast feed-forward "
+                "mesh articulation. Fallback: PhysX-Anything for image-based articulation."
             ),
         )
 
