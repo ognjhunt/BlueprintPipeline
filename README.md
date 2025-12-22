@@ -4,15 +4,25 @@ A production-ready pipeline for converting scene images into simulation-ready US
 
 ## Overview
 
-BlueprintPipeline converts scene reconstructions (from [ZeroScene](https://arxiv.org/html/2509.23607v1)) into:
+BlueprintPipeline converts scene reconstructions (from [3D-RE-GEN](https://arxiv.org/abs/2512.17459)) into:
 - **SimReady USD scenes** for Isaac Sim
 - **Replicator bundles** for domain randomization
 - **Isaac Lab task packages** for RL training
 
+3D-RE-GEN is a modular, compositional pipeline for "image → sim-ready 3D reconstruction" with explicit physical constraints:
+- 4-DoF ground-alignment for floor-contact objects
+- Background bounding constraint for anti-penetration
+- A-Q (Application-Querying) for scene-aware occlusion completion
+
+**Reference:**
+- Paper: https://arxiv.org/abs/2512.17459
+- Project: https://3dregen.jdihlmann.com/
+- GitHub: https://github.com/cgtuebingen/3D-RE-GEN (code pending release)
+
 ## Pipeline Architecture
 
 ```
-image → ZeroScene → zeroscene-job → simready-job → usd-assembly-job → replicator-job → isaac-lab-job
+image → 3D-RE-GEN → regen3d-job → simready-job → usd-assembly-job → replicator-job → isaac-lab-job
                           ↓              ↓              ↓                 ↓               ↓
                      manifest      physics       scene.usda       replicator/        isaac_lab/
                       layout        props                       placement_regions   env_cfg.py
@@ -24,8 +34,8 @@ image → ZeroScene → zeroscene-job → simready-job → usd-assembly-job → 
 ### Local Testing (Without GCS/Cloud Run)
 
 ```bash
-# 1. Generate mock ZeroScene outputs
-python fixtures/generate_mock_zeroscene.py --scene-id test_kitchen --output-dir ./test_scenes
+# 1. Generate mock 3D-RE-GEN outputs
+python fixtures/generate_mock_regen3d.py --scene-id test_kitchen --output-dir ./test_scenes
 
 # 2. Run the local pipeline
 python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen --validate
@@ -40,13 +50,13 @@ The pipeline runs on Google Cloud using:
 - **Cloud Run Jobs** for each pipeline step
 - **Cloud Workflows** for orchestration (`workflows/usd-assembly-pipeline.yaml`)
 - **Cloud Storage** for scene data
-- **EventArc** for triggering (on `.zeroscene_complete` marker)
+- **EventArc** for triggering (on `.regen3d_complete` marker)
 
 ## Jobs
 
 | Job | Purpose | Inputs | Outputs |
 |-----|---------|--------|---------|
-| `zeroscene-job` | Adapt ZeroScene outputs | ZeroScene meshes + poses | `scene_manifest.json`, `scene_layout_scaled.json` |
+| `regen3d-job` | Adapt 3D-RE-GEN outputs | 3D-RE-GEN meshes + poses | `scene_manifest.json`, `scene_layout_scaled.json` |
 | `interactive-job` | Add articulation (PhysX-Anything) | GLB meshes | URDF + segmented meshes |
 | `simready-job` | Add physics properties | Manifest | `simready.usda` per object |
 | `usd-assembly-job` | Build final USD scene | Manifest + layout | `scene.usda` |
@@ -61,7 +71,7 @@ After running the pipeline, each scene has:
 scenes/{scene_id}/
 ├── input/
 │   └── room.jpg                    # Source image
-├── zeroscene/                      # ZeroScene reconstruction
+├── regen3d/                        # 3D-RE-GEN reconstruction
 │   ├── scene_info.json
 │   ├── objects/
 │   │   └── obj_{id}/
@@ -71,7 +81,7 @@ scenes/{scene_id}/
 │   └── background/
 ├── assets/
 │   ├── scene_manifest.json         # Canonical manifest
-│   ├── .zeroscene_complete         # Completion marker
+│   ├── .regen3d_complete           # Completion marker
 │   └── obj_{id}/
 │       └── asset.glb
 ├── layout/
@@ -122,7 +132,7 @@ report = run_qa_validation(scene_dir=Path("scenes/scene_123"))
 | `LAYOUT_PREFIX` | Layout path | `scenes/{id}/layout` |
 | `USD_PREFIX` | USD output path | `scenes/{id}/usd` |
 | `REPLICATOR_PREFIX` | Replicator path | `scenes/{id}/replicator` |
-| `ZEROSCENE_PREFIX` | ZeroScene path | `scenes/{id}/zeroscene` |
+| `REGEN3D_PREFIX` | 3D-RE-GEN path | `scenes/{id}/regen3d` |
 | `ENVIRONMENT_TYPE` | Environment hint | `generic` |
 | `PHYSX_ENDPOINT` | PhysX-Anything service URL | - |
 | `LLM_PROVIDER` | LLM provider (`gemini`/`openai`/`auto`) | `auto` |
@@ -139,7 +149,7 @@ python -m pytest tests/test_pipeline_e2e.py::test_full_pipeline -v
 # Run local pipeline with specific steps
 python tools/run_local_pipeline.py \
     --scene-dir ./scenes/test \
-    --steps zeroscene,simready,usd \
+    --steps regen3d,simready,usd \
     --validate
 ```
 
@@ -167,7 +177,10 @@ for step in range(1000):
 
 ## External Dependencies
 
-- **ZeroScene**: Scene reconstruction (code pending release)
+- **3D-RE-GEN**: Scene reconstruction (code pending release ~Q1 2025)
+  - Paper: https://arxiv.org/abs/2512.17459
+  - Project: https://3dregen.jdihlmann.com/
+  - GitHub: https://github.com/cgtuebingen/3D-RE-GEN
 - **PhysX-Anything**: Articulation detection ([github.com/ziangcao0312/PhysX-Anything](https://github.com/ziangcao0312/PhysX-Anything))
 - **Isaac Sim/Lab**: NVIDIA simulation platform
 - **Omniverse Replicator**: Synthetic data generation

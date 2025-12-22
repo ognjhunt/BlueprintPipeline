@@ -1,13 +1,17 @@
 # usd-assembly-pipeline.yaml
 #
 # Google Cloud Workflows pipeline that:
-#   1. Triggers on completion marker file from zeroscene-job
+#   1. Triggers on completion marker file from regen3d-job
 #   2. Runs usd-assembly-job in CONVERT_ONLY mode to convert GLB->USDZ before simready
 #   3. Runs simready-job to prepare simulation-ready assets (now sees USD-compatible files)
 #   4. Runs usd-assembly-job to build scene.usda
 #   5. Runs replicator-job to generate Replicator bundle for Isaac Sim domain randomization
 #
-# Trigger: Cloud Storage object finalized event for .zeroscene_complete
+# Trigger: Cloud Storage object finalized event for .regen3d_complete
+#
+# 3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
+# "image → sim-ready 3D reconstruction" with explicit physical constraints.
+# Reference: https://3dregen.jdihlmann.com/
 
 main:
   params: [event]
@@ -29,7 +33,7 @@ main:
 
     - filter_completion_markers:
         switch:
-          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.zeroscene_complete$")}'
+          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.regen3d_complete$")}'
             next: derive
         next: skip
 
@@ -49,7 +53,7 @@ main:
     - log_start:
         call: sys.log
         args:
-          text: '${"USD assembly triggered for scene " + sceneId + " - starting pre-simready GLB->USDZ conversion"}'
+          text: '${"USD assembly triggered for scene " + sceneId + " (3D-RE-GEN) - starting pre-simready GLB->USDZ conversion"}'
           severity: "INFO"
         next: run_convert_job
 

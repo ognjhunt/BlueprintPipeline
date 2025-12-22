@@ -7,24 +7,32 @@ Useful for development, testing, and debugging.
 
 Usage:
     # Generate mock scene and run pipeline
-    python fixtures/generate_mock_zeroscene.py --scene-id test_kitchen --output-dir ./test_scenes
+    python fixtures/generate_mock_regen3d.py --scene-id test_kitchen --output-dir ./test_scenes
     python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen
 
     # Run with specific steps
-    python tools/run_local_pipeline.py --scene-dir ./scene --steps zeroscene,simready,usd
+    python tools/run_local_pipeline.py --scene-dir ./scene --steps regen3d,simready,usd
 
     # Run with validation
     python tools/run_local_pipeline.py --scene-dir ./scene --validate
 
 Pipeline Steps:
-    1. zeroscene  - Adapt ZeroScene outputs to BlueprintPipeline format
-    2. scale      - (Optional) Scale calibration
+    1. regen3d   - Adapt 3D-RE-GEN outputs to BlueprintPipeline format
+    2. scale     - (Optional) Scale calibration
     3. interactive - PhysX-Anything articulation (requires PHYSX_ENDPOINT)
-    4. simready   - Prepare physics-ready assets
-    5. usd        - Assemble scene.usda
+    4. simready  - Prepare physics-ready assets
+    5. usd       - Assemble scene.usda
     6. replicator - Generate Replicator bundle
-    7. isaac-lab  - Generate Isaac Lab task package
-    8. validate   - QA validation
+    7. isaac-lab - Generate Isaac Lab task package
+    8. validate  - QA validation
+
+3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
+"image → sim-ready 3D reconstruction" with explicit physical constraints.
+
+Reference:
+- Paper: https://arxiv.org/abs/2512.17459
+- Project: https://3dregen.jdihlmann.com/
+- GitHub: https://github.com/cgtuebingen/3D-RE-GEN
 """
 
 import argparse
@@ -46,7 +54,7 @@ if str(REPO_ROOT) not in sys.path:
 
 class PipelineStep(str, Enum):
     """Pipeline steps in execution order."""
-    ZEROSCENE = "zeroscene"
+    REGEN3D = "regen3d"
     SCALE = "scale"
     INTERACTIVE = "interactive"
     SIMREADY = "simready"
@@ -75,7 +83,7 @@ class LocalPipelineRunner:
 
     # Default step order
     DEFAULT_STEPS = [
-        PipelineStep.ZEROSCENE,
+        PipelineStep.REGEN3D,
         PipelineStep.SIMREADY,
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
@@ -92,7 +100,7 @@ class LocalPipelineRunner:
         """Initialize the local pipeline runner.
 
         Args:
-            scene_dir: Path to scene directory (contains zeroscene/, etc.)
+            scene_dir: Path to scene directory (contains regen3d/, etc.)
             verbose: Print detailed progress
             skip_interactive: Skip interactive-job (requires external service)
             environment_type: Environment type for policy selection
@@ -106,7 +114,7 @@ class LocalPipelineRunner:
         self.scene_id = self.scene_dir.name
 
         # Setup paths
-        self.zeroscene_dir = self.scene_dir / "zeroscene"
+        self.regen3d_dir = self.scene_dir / "regen3d"
         self.assets_dir = self.scene_dir / "assets"
         self.layout_dir = self.scene_dir / "layout"
         self.seg_dir = self.scene_dir / "seg"
@@ -150,9 +158,9 @@ class LocalPipelineRunner:
         self.log("=" * 60)
 
         # Check prerequisites
-        if not self.zeroscene_dir.is_dir():
-            self.log(f"ERROR: ZeroScene output not found at {self.zeroscene_dir}", "ERROR")
-            self.log("Run: python fixtures/generate_mock_zeroscene.py first", "ERROR")
+        if not self.regen3d_dir.is_dir():
+            self.log(f"ERROR: 3D-RE-GEN output not found at {self.regen3d_dir}", "ERROR")
+            self.log("Run: python fixtures/generate_mock_regen3d.py first", "ERROR")
             return False
 
         # Create output directories
@@ -184,8 +192,8 @@ class LocalPipelineRunner:
         self.log(f"\n--- Running step: {step.value} ---")
 
         try:
-            if step == PipelineStep.ZEROSCENE:
-                result = self._run_zeroscene_adapter()
+            if step == PipelineStep.REGEN3D:
+                result = self._run_regen3d_adapter()
             elif step == PipelineStep.SCALE:
                 result = self._run_scale()
             elif step == PipelineStep.INTERACTIVE:
@@ -221,19 +229,19 @@ class LocalPipelineRunner:
 
         return result
 
-    def _run_zeroscene_adapter(self) -> StepResult:
-        """Run the zeroscene adapter."""
-        from tools.zeroscene_adapter import ZeroSceneAdapter
+    def _run_regen3d_adapter(self) -> StepResult:
+        """Run the 3D-RE-GEN adapter."""
+        from tools.regen3d_adapter import Regen3DAdapter
 
-        adapter = ZeroSceneAdapter(verbose=self.verbose)
+        adapter = Regen3DAdapter(verbose=self.verbose)
 
-        # Load ZeroScene outputs
-        zeroscene_output = adapter.load_zeroscene_output(self.zeroscene_dir)
-        self.log(f"Loaded {len(zeroscene_output.objects)} objects from ZeroScene")
+        # Load 3D-RE-GEN outputs
+        regen3d_output = adapter.load_regen3d_output(self.regen3d_dir)
+        self.log(f"Loaded {len(regen3d_output.objects)} objects from 3D-RE-GEN")
 
         # Generate manifest
         manifest = adapter.create_manifest(
-            zeroscene_output,
+            regen3d_output,
             scene_id=self.scene_id,
             environment_type=self.environment_type,
         )
@@ -242,57 +250,58 @@ class LocalPipelineRunner:
         self.log(f"Wrote manifest: {manifest_path}")
 
         # Generate layout
-        layout = adapter.create_layout(zeroscene_output, apply_scale_factor=1.0)
+        layout = adapter.create_layout(regen3d_output, apply_scale_factor=1.0)
         layout_path = self.layout_dir / "scene_layout_scaled.json"
         layout_path.write_text(json.dumps(layout, indent=2))
         self.log(f"Wrote layout: {layout_path}")
 
         # Copy assets
         asset_paths = adapter.copy_assets(
-            zeroscene_output,
+            regen3d_output,
             self.scene_dir,
             assets_prefix="assets",
         )
         self.log(f"Copied {len(asset_paths)} assets")
 
         # Generate inventory
-        inventory = self._generate_inventory(zeroscene_output)
+        inventory = self._generate_inventory(regen3d_output)
         inventory_path = self.seg_dir / "inventory.json"
         inventory_path.write_text(json.dumps(inventory, indent=2))
         self.log(f"Wrote inventory: {inventory_path}")
 
         # Write completion marker
-        marker_path = self.assets_dir / ".zeroscene_complete"
+        marker_path = self.assets_dir / ".regen3d_complete"
         marker_content = {
             "status": "complete",
             "scene_id": self.scene_id,
-            "objects_count": len(zeroscene_output.objects),
+            "objects_count": len(regen3d_output.objects),
             "completed_at": datetime.utcnow().isoformat() + "Z",
         }
         marker_path.write_text(json.dumps(marker_content, indent=2))
 
         return StepResult(
-            step=PipelineStep.ZEROSCENE,
+            step=PipelineStep.REGEN3D,
             success=True,
             duration_seconds=0,
-            message="ZeroScene adapter completed",
+            message="3D-RE-GEN adapter completed",
             outputs={
                 "manifest": str(manifest_path),
                 "layout": str(layout_path),
-                "objects_count": len(zeroscene_output.objects),
+                "objects_count": len(regen3d_output.objects),
             },
         )
 
-    def _generate_inventory(self, zeroscene_output) -> Dict[str, Any]:
-        """Generate semantic inventory from ZeroScene output."""
+    def _generate_inventory(self, regen3d_output) -> Dict[str, Any]:
+        """Generate semantic inventory from 3D-RE-GEN output."""
         objects = []
-        for obj in zeroscene_output.objects:
+        for obj in regen3d_output.objects:
             inv_obj = {
                 "id": obj.id,
                 "category": obj.category or "object",
                 "short_description": obj.description or f"Object {obj.id}",
                 "sim_role": obj.sim_role if obj.sim_role != "unknown" else "static",
                 "bounds": obj.bounds,
+                "is_floor_contact": obj.pose.is_floor_contact,
             }
             objects.append(inv_obj)
 
@@ -302,21 +311,21 @@ class LocalPipelineRunner:
             "total_objects": len(objects),
             "objects": objects,
             "metadata": {
-                "source": "zeroscene_adapter",
+                "source": "regen3d_adapter",
                 "generated_at": datetime.utcnow().isoformat() + "Z",
             },
         }
 
     def _run_scale(self) -> StepResult:
         """Run scale calibration (optional)."""
-        # For local testing, we trust the ZeroScene scale
-        self.log("Scale calibration: using ZeroScene scale (trusted)")
+        # For local testing, we trust the 3D-RE-GEN scale
+        self.log("Scale calibration: using 3D-RE-GEN scale (trusted)")
 
         return StepResult(
             step=PipelineStep.SCALE,
             success=True,
             duration_seconds=0,
-            message="Using ZeroScene scale",
+            message="Using 3D-RE-GEN scale",
         )
 
     def _run_interactive(self) -> StepResult:
@@ -357,7 +366,7 @@ class LocalPipelineRunner:
                 step=PipelineStep.SIMREADY,
                 success=False,
                 duration_seconds=0,
-                message="Manifest not found - run zeroscene step first",
+                message="Manifest not found - run regen3d step first",
             )
 
         manifest = json.loads(manifest_path.read_text())
@@ -764,7 +773,7 @@ def main():
     parser.add_argument(
         "--scene-dir",
         required=True,
-        help="Path to scene directory (contains zeroscene/, etc.)",
+        help="Path to scene directory (contains regen3d/, etc.)",
     )
     parser.add_argument(
         "--steps",
