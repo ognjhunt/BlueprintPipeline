@@ -3,7 +3,11 @@
 # Interactive Asset Pipeline for ZeroScene Integration
 #
 # This job processes 3D assets from ZeroScene to add articulation data
-# using PhysX-Anything.
+# using Particulate (default) or PhysX-Anything (fallback).
+#
+# Articulation backends:
+# - Particulate (default): Fast feed-forward mesh articulation (~10s)
+# - PhysX-Anything: VLM-based image-to-articulation (5-15min)
 #
 # CLOUD RUN JOB SETTINGS:
 # ----------------------------------------------------------

@@ -30,7 +30,10 @@ main:
           - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
-          # NOTE: set PHYSX_ENDPOINT as an environment variable on this workflow.
+          # NOTE: Set ARTICULATION_BACKEND, PARTICULATE_ENDPOINT, and/or PHYSX_ENDPOINT
+          # as environment variables. Default backend is "particulate" (fast mesh-based).
+          - articulationBackend: ${default(sys.get_env("ARTICULATION_BACKEND"), "particulate")}
+          - particulateEndpoint: ${sys.get_env("PARTICULATE_ENDPOINT")}
           - physxEndpoint: ${sys.get_env("PHYSX_ENDPOINT")}
           - jobName: "interactive-job"
           - simreadyJobName: "simready-job"
