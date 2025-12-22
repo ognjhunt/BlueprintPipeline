@@ -2,7 +2,7 @@
 """
 End-to-End Integration Tests for BlueprintPipeline.
 
-Tests the complete pipeline from mock ZeroScene inputs to final Isaac Lab outputs.
+Tests the complete pipeline from mock 3D-RE-GEN inputs to final Isaac Lab outputs.
 
 Usage:
     # Run all tests
@@ -13,6 +13,11 @@ Usage:
 
     # Run with specific test
     python -m pytest tests/test_pipeline_e2e.py::test_full_pipeline -v
+
+3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
+"image → sim-ready 3D reconstruction" with explicit physical constraints.
+
+Reference: https://3dregen.jdihlmann.com/
 """
 
 import json
@@ -51,20 +56,20 @@ class PipelineTestHarness:
         self.scene_dir = self.test_dir / "scenes" / self.scene_id
 
     def setup(self) -> None:
-        """Generate mock ZeroScene outputs for testing."""
-        from fixtures.generate_mock_zeroscene import generate_mock_zeroscene
+        """Generate mock 3D-RE-GEN outputs for testing."""
+        from fixtures.generate_mock_regen3d import generate_mock_regen3d
 
-        # Generate mock ZeroScene output
-        generate_mock_zeroscene(
+        # Generate mock 3D-RE-GEN output
+        generate_mock_regen3d(
             output_dir=self.test_dir,
             scene_id=self.scene_id,
             environment_type="kitchen",
         )
 
-        # Verify zeroscene output was created
-        assert (self.scene_dir / "zeroscene").is_dir(), "ZeroScene output not created"
-        assert (self.scene_dir / "zeroscene" / "scene_info.json").is_file()
-        assert (self.scene_dir / "zeroscene" / "objects").is_dir()
+        # Verify regen3d output was created
+        assert (self.scene_dir / "regen3d").is_dir(), "3D-RE-GEN output not created"
+        assert (self.scene_dir / "regen3d" / "scene_info.json").is_file()
+        assert (self.scene_dir / "regen3d" / "objects").is_dir()
 
     def run_pipeline(self, steps: Optional[str] = None) -> bool:
         """Run the local pipeline.
@@ -109,7 +114,7 @@ class PipelineTestHarness:
             ("assets/scene_manifest.json", "Canonical manifest"),
             ("layout/scene_layout_scaled.json", "Scene layout"),
             ("usd/scene.usda", "USD scene"),
-            ("assets/.zeroscene_complete", "ZeroScene completion marker"),
+            ("assets/.regen3d_complete", "3D-RE-GEN completion marker"),
         ]
 
         # Optional but expected outputs
@@ -327,21 +332,21 @@ class PipelineTestHarness:
 # Test Functions
 # =============================================================================
 
-def test_mock_zeroscene_generation():
-    """Test that mock ZeroScene outputs are generated correctly."""
+def test_mock_regen3d_generation():
+    """Test that mock 3D-RE-GEN outputs are generated correctly."""
     harness = PipelineTestHarness()
     try:
         harness.setup()
 
-        # Check ZeroScene structure
-        zeroscene_dir = harness.scene_dir / "zeroscene"
-        assert zeroscene_dir.is_dir()
-        assert (zeroscene_dir / "scene_info.json").is_file()
-        assert (zeroscene_dir / "objects").is_dir()
-        assert (zeroscene_dir / "background").is_dir()
+        # Check 3D-RE-GEN structure
+        regen3d_dir = harness.scene_dir / "regen3d"
+        assert regen3d_dir.is_dir()
+        assert (regen3d_dir / "scene_info.json").is_file()
+        assert (regen3d_dir / "objects").is_dir()
+        assert (regen3d_dir / "background").is_dir()
 
         # Check objects were created
-        objects_dir = zeroscene_dir / "objects"
+        objects_dir = regen3d_dir / "objects"
         obj_dirs = list(objects_dir.iterdir())
         assert len(obj_dirs) > 0, "No objects created"
 
@@ -351,13 +356,13 @@ def test_mock_zeroscene_generation():
             assert (obj_dir / "pose.json").is_file(), f"Missing pose in {obj_dir}"
             assert (obj_dir / "bounds.json").is_file(), f"Missing bounds in {obj_dir}"
 
-        print("PASS: Mock ZeroScene generation")
+        print("PASS: Mock 3D-RE-GEN generation")
     finally:
         harness.cleanup()
 
 
-def test_zeroscene_adapter():
-    """Test the ZeroScene adapter step."""
+def test_regen3d_adapter():
+    """Test the 3D-RE-GEN adapter step."""
     harness = PipelineTestHarness()
     try:
         harness.setup()
@@ -369,21 +374,21 @@ def test_zeroscene_adapter():
             skip_interactive=True,
             environment_type="kitchen",
         )
-        success = runner.run(steps=[PipelineStep.ZEROSCENE], run_validation=False)
-        assert success, "ZeroScene adapter failed"
+        success = runner.run(steps=[PipelineStep.REGEN3D], run_validation=False)
+        assert success, "3D-RE-GEN adapter failed"
 
         # Validate outputs
         assert (harness.scene_dir / "assets" / "scene_manifest.json").is_file()
         assert (harness.scene_dir / "layout" / "scene_layout_scaled.json").is_file()
         assert (harness.scene_dir / "seg" / "inventory.json").is_file()
-        assert (harness.scene_dir / "assets" / ".zeroscene_complete").is_file()
+        assert (harness.scene_dir / "assets" / ".regen3d_complete").is_file()
 
         # Validate manifest content
         results = harness.validate_manifest()
         assert results["passed"], f"Manifest validation failed: {results['issues']}"
         assert results["objects_count"] > 0, "No objects in manifest"
 
-        print(f"PASS: ZeroScene adapter ({results['objects_count']} objects)")
+        print(f"PASS: 3D-RE-GEN adapter ({results['objects_count']} objects)")
     finally:
         harness.cleanup()
 
@@ -401,7 +406,7 @@ def test_simready_step():
             skip_interactive=True,
             environment_type="kitchen",
         )
-        success = runner.run(steps=[PipelineStep.ZEROSCENE, PipelineStep.SIMREADY], run_validation=False)
+        success = runner.run(steps=[PipelineStep.REGEN3D, PipelineStep.SIMREADY], run_validation=False)
         assert success, "Pipeline failed at simready"
 
         # Check physics properties were added
@@ -433,7 +438,7 @@ def test_usd_assembly():
             environment_type="kitchen",
         )
         success = runner.run(
-            steps=[PipelineStep.ZEROSCENE, PipelineStep.SIMREADY, PipelineStep.USD],
+            steps=[PipelineStep.REGEN3D, PipelineStep.SIMREADY, PipelineStep.USD],
             run_validation=False
         )
         assert success, "Pipeline failed at USD assembly"
@@ -462,7 +467,7 @@ def test_replicator_bundle():
             environment_type="kitchen",
         )
         success = runner.run(
-            steps=[PipelineStep.ZEROSCENE, PipelineStep.SIMREADY, PipelineStep.USD, PipelineStep.REPLICATOR],
+            steps=[PipelineStep.REGEN3D, PipelineStep.SIMREADY, PipelineStep.USD, PipelineStep.REPLICATOR],
             run_validation=False
         )
         assert success, "Pipeline failed at Replicator"
@@ -493,7 +498,7 @@ def test_isaac_lab_task_generation():
         )
         success = runner.run(
             steps=[
-                PipelineStep.ZEROSCENE, PipelineStep.SIMREADY, PipelineStep.USD,
+                PipelineStep.REGEN3D, PipelineStep.SIMREADY, PipelineStep.USD,
                 PipelineStep.REPLICATOR, PipelineStep.ISAAC_LAB
             ],
             run_validation=False
@@ -642,8 +647,8 @@ def run_all_tests():
     print()
 
     tests = [
-        ("Mock ZeroScene Generation", test_mock_zeroscene_generation),
-        ("ZeroScene Adapter", test_zeroscene_adapter),
+        ("Mock 3D-RE-GEN Generation", test_mock_regen3d_generation),
+        ("3D-RE-GEN Adapter", test_regen3d_adapter),
         ("SimReady Step", test_simready_step),
         ("USD Assembly", test_usd_assembly),
         ("Replicator Bundle", test_replicator_bundle),

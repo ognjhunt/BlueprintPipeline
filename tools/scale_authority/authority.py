@@ -17,7 +17,7 @@ class ScaleSource(str, Enum):
     """Source of scale authority."""
     USER_ANCHOR = "user_anchor"          # User provided known dimension
     SCALE_JOB = "scale_job"              # Computed by scale-job with calibration
-    ZEROSCENE = "zeroscene"              # From ZeroScene reconstruction
+    REGEN3D = "regen3d"                  # From 3D-RE-GEN reconstruction
     LAYOUT_JOB = "layout_job"            # Historic: from legacy reconstruction
     REFERENCE_OBJECT = "reference_object" # Inferred from known object types
     DEFAULT = "default"                   # Default heuristic
@@ -139,19 +139,19 @@ class ScaleAuthority:
         layout: Optional[Dict[str, Any]] = None,
         manifest: Optional[Dict[str, Any]] = None,
         user_anchor: Optional[Dict[str, float]] = None,
-        zeroscene_scale: Optional[float] = None,
+        regen3d_scale: Optional[float] = None,
         reference_objects: Optional[List[str]] = None,
-        trust_zeroscene: bool = False,
+        trust_regen3d: bool = False,
     ) -> ScaleConfig:
         """Compute authoritative scale configuration.
 
         Args:
-            layout: Scene layout data (from ZeroScene or legacy sources)
+            layout: Scene layout data (from 3D-RE-GEN or legacy sources)
             manifest: Scene manifest data
             user_anchor: User-provided scale anchor {object_id: dimension_m}
-            zeroscene_scale: Scale factor from ZeroScene (if available)
+            regen3d_scale: Scale factor from 3D-RE-GEN (if available)
             reference_objects: List of object types to use for scale inference
-            trust_zeroscene: If True, prefer ZeroScene scale
+            trust_regen3d: If True, prefer 3D-RE-GEN scale
 
         Returns:
             ScaleConfig with authoritative scale information
@@ -174,14 +174,14 @@ class ScaleAuthority:
                     notes="From previous scale-job calibration",
                 )
 
-        # 3. ZeroScene scale (if trusted)
-        if trust_zeroscene and zeroscene_scale is not None:
+        # 3. 3D-RE-GEN scale (if trusted)
+        if trust_regen3d and regen3d_scale is not None:
             return ScaleConfig(
-                meters_per_unit=zeroscene_scale,
-                scale_factor=zeroscene_scale,
-                source=ScaleSource.ZEROSCENE,
+                meters_per_unit=regen3d_scale,
+                scale_factor=regen3d_scale,
+                source=ScaleSource.REGEN3D,
                 confidence=0.7,
-                notes="From ZeroScene reconstruction",
+                notes="From 3D-RE-GEN reconstruction",
             )
 
         # 4. Infer from reference objects
