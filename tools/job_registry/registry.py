@@ -1,10 +1,13 @@
 """
 Job Registry Implementation.
 
-Tracks all pipeline jobs for the ZeroScene-based BlueprintPipeline.
+Tracks all pipeline jobs for the 3D-RE-GEN-based BlueprintPipeline.
 
-Pipeline Jobs (ZeroScene-first approach):
-    - zeroscene-job: Adapter for ZeroScene outputs
+3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
+"image → sim-ready 3D reconstruction" with explicit physical constraints.
+
+Pipeline Jobs (3D-RE-GEN-first approach):
+    - regen3d-job: Adapter for 3D-RE-GEN outputs
     - interactive-job: Articulation bridge (PhysX-Anything)
     - simready-job: Physics + manipulation hints
     - usd-assembly-job: USD scene assembly
@@ -12,6 +15,11 @@ Pipeline Jobs (ZeroScene-first approach):
     - variation-gen-job: Variation asset generation
     - isaac-lab-job: Isaac Lab task generation
     - scale-job: Optional scale calibration
+
+Reference:
+- Paper: https://arxiv.org/abs/2512.17459
+- Project: https://3dregen.jdihlmann.com/
+- GitHub: https://github.com/cgtuebingen/3D-RE-GEN
 """
 
 from __future__ import annotations
@@ -25,7 +33,7 @@ from typing import Dict, List, Optional
 class JobStatus(str, Enum):
     """Status of a job in the pipeline."""
     ACTIVE = "active"              # Fully operational, primary path
-    NEW = "new"                    # Newly added for ZeroScene pipeline
+    NEW = "new"                    # Newly added for 3D-RE-GEN pipeline
     EXPERIMENTAL = "experimental"  # Under development
 
 
@@ -40,7 +48,7 @@ class JobCategory(str, Enum):
 
 class PipelineMode(str, Enum):
     """Pipeline execution mode."""
-    ZEROSCENE_FIRST = "zeroscene_first"  # Use ZeroScene pipeline (default)
+    REGEN3D_FIRST = "regen3d_first"  # Use 3D-RE-GEN pipeline (default)
 
 
 @dataclass
@@ -74,7 +82,7 @@ class JobInfo:
 class JobRegistry:
     """Central registry for all pipeline jobs.
 
-    Tracks job status for the ZeroScene-based pipeline.
+    Tracks job status for the 3D-RE-GEN-based pipeline.
     """
 
     def __init__(self):
@@ -85,19 +93,19 @@ class JobRegistry:
         """Initialize the job registry with all known jobs."""
 
         # =====================================================================
-        # ZEROSCENE PIPELINE JOBS
+        # 3D-RE-GEN PIPELINE JOBS
         # =====================================================================
 
-        self._jobs["zeroscene-job"] = JobInfo(
-            name="zeroscene-job",
-            description="Adapter converting ZeroScene outputs to BlueprintPipeline format",
+        self._jobs["regen3d-job"] = JobInfo(
+            name="regen3d-job",
+            description="Adapter converting 3D-RE-GEN outputs to BlueprintPipeline format",
             status=JobStatus.NEW,
             category=JobCategory.ADAPTER,
-            entry_script="zeroscene-job/zeroscene_adapter_job.py",
-            docker_image="zeroscene-job",
-            required_env_vars=["SCENE_ID", "ZEROSCENE_PREFIX", "ASSETS_PREFIX", "LAYOUT_PREFIX"],
-            optional_env_vars=["GEMINI_API_KEY", "OPENAI_API_KEY", "TRUST_ZEROSCENE_SCALE"],
-            depends_on=["zeroscene-reconstruction"],
+            entry_script="regen3d-job/regen3d_adapter_job.py",
+            docker_image="regen3d-job",
+            required_env_vars=["SCENE_ID", "REGEN3D_PREFIX", "ASSETS_PREFIX", "LAYOUT_PREFIX"],
+            optional_env_vars=["GEMINI_API_KEY", "OPENAI_API_KEY", "TRUST_REGEN3D_SCALE"],
+            depends_on=["regen3d-reconstruction"],
             outputs=[
                 "assets/scene_manifest.json",
                 "layout/scene_layout_scaled.json",
@@ -105,8 +113,9 @@ class JobRegistry:
                 "assets/obj_*/asset.glb",
             ],
             migration_notes=(
-                "This adapter is the critical integration layer between ZeroScene "
-                "and the rest of the BlueprintPipeline."
+                "This adapter is the critical integration layer between 3D-RE-GEN "
+                "and the rest of the BlueprintPipeline. 3D-RE-GEN uses 4-DoF ground "
+                "constraints and background bounding for sim-ready placement."
             ),
         )
 
@@ -119,7 +128,7 @@ class JobRegistry:
             docker_image="interactive-job",
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX"],
             optional_env_vars=["PHYSX_SERVICE_URL", "TIMEOUT_SECONDS"],
-            depends_on=["zeroscene-job"],
+            depends_on=["regen3d-job"],
             outputs=["assets/interactive/obj_*/articulated.usda"],
             migration_notes=(
                 "Uses articulated object candidates from inventory."
@@ -135,14 +144,14 @@ class JobRegistry:
             docker_image="simready-job",
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX"],
             optional_env_vars=["GEMINI_API_KEY", "OPENAI_API_KEY", "SIMREADY_ADD_PROXY_COLLIDER"],
-            depends_on=["zeroscene-job", "interactive-job"],
+            depends_on=["regen3d-job", "interactive-job"],
             outputs=[
                 "assets/obj_*/simready.usda",
                 "assets/obj_*/metadata.json",
             ],
             migration_notes=(
                 "Supports both Gemini and OpenAI for physics estimation. "
-                "ZeroScene materials provide additional hints for friction/roughness."
+                "3D-RE-GEN materials provide additional hints for friction/roughness."
             ),
         )
 
@@ -157,7 +166,7 @@ class JobRegistry:
             depends_on=["simready-job"],
             outputs=["usd/scene.usda"],
             migration_notes=(
-                "Reads layout from ZeroScene adapter output."
+                "Reads layout from 3D-RE-GEN adapter output."
             ),
         )
 
@@ -227,11 +236,11 @@ class JobRegistry:
             entry_script="scale-job/calibrate_scale.py",
             docker_image="scale-job",
             required_env_vars=["BUCKET", "SCENE_ID", "LAYOUT_PREFIX"],
-            depends_on=["zeroscene-job"],
+            depends_on=["regen3d-job"],
             outputs=["layout/scene_layout_scaled.json"],
             migration_notes=(
-                "Optional if TRUST_ZEROSCENE_SCALE=true. "
-                "Otherwise runs after zeroscene-job to calibrate metric scale."
+                "Optional if TRUST_REGEN3D_SCALE=true. "
+                "Otherwise runs after regen3d-job to calibrate metric scale."
             ),
         )
 
@@ -255,9 +264,9 @@ class JobRegistry:
         """Get all active jobs."""
         return [j for j in self._jobs.values() if j.is_active]
 
-    def is_zeroscene_ready(self) -> bool:
-        """Check if ZeroScene pipeline is ready (all required jobs exist)."""
-        required_jobs = ["zeroscene-job"]
+    def is_regen3d_ready(self) -> bool:
+        """Check if 3D-RE-GEN pipeline is ready (all required jobs exist)."""
+        required_jobs = ["regen3d-job"]
         for name in required_jobs:
             job = self.get_job(name)
             if not job:
@@ -266,13 +275,13 @@ class JobRegistry:
 
     def get_pipeline_mode(self) -> PipelineMode:
         """Get current pipeline mode from environment."""
-        return PipelineMode.ZEROSCENE_FIRST
+        return PipelineMode.REGEN3D_FIRST
 
     def get_job_sequence(self) -> List[str]:
         """Get the recommended job execution sequence."""
         return [
-            "zeroscene-reconstruction",  # External ZeroScene
-            "zeroscene-job",
+            "regen3d-reconstruction",  # External 3D-RE-GEN
+            "regen3d-job",
             "scale-job",  # Optional
             "interactive-job",
             "simready-job",
@@ -289,13 +298,13 @@ class JobRegistry:
         print("=" * 70)
 
         print(f"\nPipeline Mode: {self.get_pipeline_mode().value}")
-        print(f"ZeroScene Ready: {self.is_zeroscene_ready()}")
+        print(f"3D-RE-GEN Ready: {self.is_regen3d_ready()}")
 
         print("\n--- ACTIVE JOBS ---")
         for job in self.get_jobs_by_status(JobStatus.ACTIVE):
             print(f"  [{job.status.value:12}] {job.name:20} - {job.description[:40]}...")
 
-        print("\n--- NEW JOBS (ZeroScene Pipeline) ---")
+        print("\n--- NEW JOBS (3D-RE-GEN Pipeline) ---")
         for job in self.get_jobs_by_status(JobStatus.NEW):
             print(f"  [{job.status.value:12}] {job.name:20} - {job.description[:40]}...")
 
