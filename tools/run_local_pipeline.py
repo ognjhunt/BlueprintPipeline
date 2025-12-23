@@ -24,15 +24,17 @@ Pipeline Steps:
     5. usd       - Assemble scene.usda
     6. replicator - Generate Replicator bundle
     7. isaac-lab - Generate Isaac Lab task package
-    8. validate  - QA validation
+    8. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
+    9. validate  - QA validation
 
-3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
-"image → sim-ready 3D reconstruction" with explicit physical constraints.
+References:
+- 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
+  Paper: https://arxiv.org/abs/2512.17459
+  Project: https://3dregen.jdihlmann.com/
 
-Reference:
-- Paper: https://arxiv.org/abs/2512.17459
-- Project: https://3dregen.jdihlmann.com/
-- GitHub: https://github.com/cgtuebingen/3D-RE-GEN
+- DWM (arXiv:2512.17907): Dexterous World Models for egocentric interaction
+  Paper: https://arxiv.org/abs/2512.17907
+  Project: https://snuvclab.github.io/dwm/
 """
 
 import argparse
@@ -61,6 +63,7 @@ class PipelineStep(str, Enum):
     USD = "usd"
     REPLICATOR = "replicator"
     ISAAC_LAB = "isaac-lab"
+    DWM = "dwm"  # Dexterous World Model preparation
     VALIDATE = "validate"
 
 
@@ -88,6 +91,7 @@ class LocalPipelineRunner:
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
         PipelineStep.ISAAC_LAB,
+        PipelineStep.DWM,  # DWM conditioning data generation
     ]
 
     def __init__(
@@ -121,6 +125,7 @@ class LocalPipelineRunner:
         self.usd_dir = self.scene_dir / "usd"
         self.replicator_dir = self.scene_dir / "replicator"
         self.isaac_lab_dir = self.scene_dir / "isaac_lab"
+        self.dwm_dir = self.scene_dir / "dwm"  # DWM conditioning data
 
         self.results: List[StepResult] = []
 
@@ -165,7 +170,8 @@ class LocalPipelineRunner:
 
         # Create output directories
         for d in [self.assets_dir, self.layout_dir, self.seg_dir,
-                  self.usd_dir, self.replicator_dir, self.isaac_lab_dir]:
+                  self.usd_dir, self.replicator_dir, self.isaac_lab_dir,
+                  self.dwm_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
         # Run each step
@@ -206,6 +212,8 @@ class LocalPipelineRunner:
                 result = self._run_replicator()
             elif step == PipelineStep.ISAAC_LAB:
                 result = self._run_isaac_lab()
+            elif step == PipelineStep.DWM:
+                result = self._run_dwm()
             elif step == PipelineStep.VALIDATE:
                 result = self._run_validation()
             else:
@@ -707,6 +715,78 @@ class LocalPipelineRunner:
         except Exception as e:
             return StepResult(
                 step=PipelineStep.ISAAC_LAB,
+                success=False,
+                duration_seconds=0,
+                message=f"Error: {e}\n{traceback.format_exc()}",
+            )
+
+    def _run_dwm(self) -> StepResult:
+        """
+        Run DWM (Dexterous World Model) preparation.
+
+        Generates conditioning data for DWM video diffusion model:
+        - Egocentric camera trajectories
+        - Static scene video renders
+        - Hand mesh video renders
+        - Text prompts
+
+        Reference: DWM paper (arXiv:2512.17907)
+        """
+        try:
+            # Import DWM preparation job
+            sys.path.insert(0, str(REPO_ROOT / "dwm-preparation-job"))
+            from prepare_dwm_bundle import run_dwm_preparation
+
+            # Check prerequisites
+            manifest_path = self.assets_dir / "scene_manifest.json"
+            if not manifest_path.is_file():
+                return StepResult(
+                    step=PipelineStep.DWM,
+                    success=False,
+                    duration_seconds=0,
+                    message="Manifest not found - run regen3d step first",
+                )
+
+            # Run DWM preparation
+            output = run_dwm_preparation(
+                scene_dir=self.scene_dir,
+                output_dir=self.dwm_dir,
+                num_trajectories=5,  # Default number of trajectories
+                verbose=self.verbose,
+            )
+
+            if output.success:
+                return StepResult(
+                    step=PipelineStep.DWM,
+                    success=True,
+                    duration_seconds=output.generation_time_seconds,
+                    message=f"Generated {output.num_bundles} DWM bundles",
+                    outputs={
+                        "bundles_count": output.num_bundles,
+                        "total_frames": output.total_frames,
+                        "output_dir": str(output.output_dir),
+                        "manifest": str(output.manifest_path) if output.manifest_path else None,
+                    },
+                )
+            else:
+                return StepResult(
+                    step=PipelineStep.DWM,
+                    success=False,
+                    duration_seconds=output.generation_time_seconds,
+                    message=f"DWM generation failed: {output.errors[:1]}",
+                    outputs={"errors": output.errors},
+                )
+
+        except ImportError as e:
+            return StepResult(
+                step=PipelineStep.DWM,
+                success=False,
+                duration_seconds=0,
+                message=f"Import error (DWM job not found): {e}",
+            )
+        except Exception as e:
+            return StepResult(
+                step=PipelineStep.DWM,
                 success=False,
                 duration_seconds=0,
                 message=f"Error: {e}\n{traceback.format_exc()}",
