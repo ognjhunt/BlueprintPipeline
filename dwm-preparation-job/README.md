@@ -115,6 +115,40 @@ Optional:
 - ffmpeg (video encoding)
 - trimesh (mesh loading)
 
+### MANO Hand Model (Optional, Recommended)
+
+For anatomically accurate hand meshes (instead of geometric placeholders):
+
+1. **Install smplx package**:
+   ```bash
+   pip install smplx
+   pip install torch  # Required by smplx
+   ```
+
+2. **Get MANO model files**:
+   - Register at https://mano.is.tue.mpg.de/
+   - Download the MANO model files
+   - Place in one of:
+     - `~/.mano/models/` (recommended)
+     - `./mano_models/`
+     - Set `MANO_MODEL_PATH` environment variable
+
+3. **Usage**:
+   ```python
+   from hand_motion.hand_mesh_renderer import HandRenderConfig, HandModel
+
+   # Use MANO rendering
+   config = HandRenderConfig(
+       hand_model=HandModel.MANO,
+       mano_model_path="/path/to/mano/models",  # Optional if env var set
+   )
+
+   # Or use helper method
+   config = HandRenderConfig().with_mano("/path/to/mano/models")
+   ```
+
+Without MANO files, the renderer falls back to SimpleHandMesh (geometric boxes) automatically.
+
 ## DWM Integration (When Code is Released)
 
 Once DWM code is available, bundles can be used directly:
@@ -140,7 +174,10 @@ output_video = dwm.generate(
 ## Limitations
 
 Current implementation:
-- Uses simple geometric hand model (MANO integration planned)
+- MANO integration is ready (stub implemented), but requires:
+  - `smplx` package installation
+  - MANO model files from MPI (license required)
+  - Falls back to SimpleHandMesh (geometric boxes) if MANO unavailable
 - Mock renderer used when PyRender/Isaac Sim unavailable
 - USD scene rendering requires Isaac Sim
 
