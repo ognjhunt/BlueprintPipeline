@@ -62,6 +62,7 @@ The pipeline runs on Google Cloud using:
 | `usd-assembly-job` | Build final USD scene | Manifest + layout | `scene.usda` |
 | `replicator-job` | Generate domain randomization | Manifest + inventory | `placement_regions.usda`, policy scripts |
 | `isaac-lab-job` | Generate RL training tasks | Manifest + USD | `env_cfg.py`, `train_cfg.yaml`, etc. |
+| `dwm-preparation-job` | Generate DWM conditioning data | Manifest + USD | Egocentric videos, hand meshes, bundles |
 
 ## Output Structure
 
@@ -96,12 +97,22 @@ scenes/{scene_id}/
 │   ├── policies/                   # Replicator scripts
 │   └── variation_assets/
 │       └── manifest.json
-└── isaac_lab/
-    ├── env_cfg.py                  # ManagerBasedEnv config
-    ├── task_{policy}.py            # Task implementation
-    ├── train_cfg.yaml              # Training hyperparameters
-    ├── randomizations.py           # Domain randomization hooks
-    └── reward_functions.py         # Reward modules
+├── isaac_lab/
+│   ├── env_cfg.py                  # ManagerBasedEnv config
+│   ├── task_{policy}.py            # Task implementation
+│   ├── train_cfg.yaml              # Training hyperparameters
+│   ├── randomizations.py           # Domain randomization hooks
+│   └── reward_functions.py         # Reward modules
+└── dwm/                            # DWM conditioning data
+    ├── dwm_bundles_manifest.json   # Overall manifest
+    └── {bundle_id}/
+        ├── manifest.json           # Bundle metadata
+        ├── static_scene_video.mp4  # Rendered static scene
+        ├── hand_mesh_video.mp4     # Rendered hand meshes
+        ├── camera_trajectory.json  # Camera poses
+        ├── hand_trajectory.json    # Hand poses (MANO format)
+        └── metadata/
+            └── prompt.txt          # Text prompt for DWM
 ```
 
 ## Definition of Done
