@@ -1,0 +1,180 @@
+{
+  "_description": "Physics configuration profiles for different simulation scenarios. These profiles optimize the tradeoff between simulation fidelity and speed for specific use cases.",
+  "_usage": "Select a profile based on the primary task: manipulation tasks need high-fidelity contact, navigation can use faster settings.",
+
+  "profiles": {
+    "manipulation_contact_rich": {
+      "description": "High-fidelity settings for contact-rich manipulation tasks (grasping, insertion, assembly). Prioritizes accurate contact resolution over speed.",
+      "use_cases": ["grasping", "insertion", "assembly", "peg_in_hole", "dish_loading", "bin_picking"],
+      "simulation": {
+        "dt": 0.004,
+        "substeps": 4,
+        "solver_iterations": 32,
+        "solver_type": "TGS",
+        "enable_gyroscopic_forces": true,
+        "enable_stabilization": true
+      },
+      "contact": {
+        "contact_offset": 0.005,
+        "rest_offset": 0.001,
+        "bounce_threshold_velocity": 0.2,
+        "friction_offset_threshold": 0.02,
+        "friction_correlation_distance": 0.025
+      },
+      "randomization": {
+        "dt_jitter_range": [0.003, 0.005],
+        "solver_iteration_range": [24, 40],
+        "contact_offset_range": [0.003, 0.008],
+        "friction_scale_range": [0.8, 1.2]
+      },
+      "notes": "Use for tasks where contact accuracy matters more than simulation speed. Expect ~4x slower than navigation profile."
+    },
+
+    "manipulation_standard": {
+      "description": "Balanced settings for general manipulation tasks. Good accuracy with reasonable speed.",
+      "use_cases": ["pick_place", "articulated_access", "drawer_manipulation", "door_opening"],
+      "simulation": {
+        "dt": 0.008,
+        "substeps": 2,
+        "solver_iterations": 16,
+        "solver_type": "TGS",
+        "enable_gyroscopic_forces": true,
+        "enable_stabilization": true
+      },
+      "contact": {
+        "contact_offset": 0.005,
+        "rest_offset": 0.001,
+        "bounce_threshold_velocity": 0.5,
+        "friction_offset_threshold": 0.04,
+        "friction_correlation_distance": 0.025
+      },
+      "randomization": {
+        "dt_jitter_range": [0.006, 0.012],
+        "solver_iteration_range": [12, 24],
+        "contact_offset_range": [0.003, 0.008],
+        "friction_scale_range": [0.85, 1.15]
+      },
+      "notes": "Default profile for most manipulation tasks. Good balance of accuracy and speed."
+    },
+
+    "navigation": {
+      "description": "Fast settings for navigation and locomotion tasks. Prioritizes simulation speed over contact accuracy.",
+      "use_cases": ["navigation", "locomotion", "mobile_manipulation_coarse", "exploration"],
+      "simulation": {
+        "dt": 0.016,
+        "substeps": 1,
+        "solver_iterations": 8,
+        "solver_type": "PGS",
+        "enable_gyroscopic_forces": false,
+        "enable_stabilization": false
+      },
+      "contact": {
+        "contact_offset": 0.01,
+        "rest_offset": 0.002,
+        "bounce_threshold_velocity": 2.0,
+        "friction_offset_threshold": 0.1,
+        "friction_correlation_distance": 0.05
+      },
+      "randomization": {
+        "dt_jitter_range": [0.012, 0.020],
+        "solver_iteration_range": [4, 12],
+        "contact_offset_range": [0.005, 0.015],
+        "friction_scale_range": [0.7, 1.3]
+      },
+      "notes": "Use for wheeled/legged robots where ground contact accuracy is less critical. ~4x faster than manipulation profile."
+    },
+
+    "vision_only": {
+      "description": "Minimal physics for vision/perception training. Objects are mostly static or kinematic.",
+      "use_cases": ["object_detection", "segmentation", "pose_estimation", "synthetic_data"],
+      "simulation": {
+        "dt": 0.033,
+        "substeps": 1,
+        "solver_iterations": 4,
+        "solver_type": "PGS",
+        "enable_gyroscopic_forces": false,
+        "enable_stabilization": false
+      },
+      "contact": {
+        "contact_offset": 0.02,
+        "rest_offset": 0.005,
+        "bounce_threshold_velocity": 5.0,
+        "friction_offset_threshold": 0.2,
+        "friction_correlation_distance": 0.1
+      },
+      "randomization": {
+        "dt_jitter_range": [0.025, 0.050],
+        "solver_iteration_range": [2, 8],
+        "contact_offset_range": [0.01, 0.03],
+        "friction_scale_range": [0.5, 1.5]
+      },
+      "notes": "Use when physics accuracy doesn't matter. Objects should be kinematic or static when possible."
+    },
+
+    "deformable": {
+      "description": "Settings for deformable/soft body simulation (cloth, cables, soft objects).",
+      "use_cases": ["cloth_folding", "cable_routing", "soft_manipulation", "fabric_handling"],
+      "simulation": {
+        "dt": 0.002,
+        "substeps": 8,
+        "solver_iterations": 48,
+        "solver_type": "TGS",
+        "enable_gyroscopic_forces": true,
+        "enable_stabilization": true
+      },
+      "contact": {
+        "contact_offset": 0.003,
+        "rest_offset": 0.0005,
+        "bounce_threshold_velocity": 0.1,
+        "friction_offset_threshold": 0.01,
+        "friction_correlation_distance": 0.015
+      },
+      "randomization": {
+        "dt_jitter_range": [0.0015, 0.003],
+        "solver_iteration_range": [32, 64],
+        "contact_offset_range": [0.002, 0.005],
+        "friction_scale_range": [0.9, 1.1]
+      },
+      "notes": "Use for soft body tasks. Very slow but necessary for stable deformable simulation."
+    }
+  },
+
+  "profile_selection_rules": {
+    "_description": "Rules for automatically selecting a physics profile based on task characteristics.",
+    "rules": [
+      {
+        "condition": "task contains 'insertion' or 'assembly' or 'peg'",
+        "profile": "manipulation_contact_rich"
+      },
+      {
+        "condition": "task contains 'cloth' or 'fabric' or 'cable' or 'soft'",
+        "profile": "deformable"
+      },
+      {
+        "condition": "task contains 'navigation' or 'locomotion' or 'mobile'",
+        "profile": "navigation"
+      },
+      {
+        "condition": "task contains 'detection' or 'segmentation' or 'synthetic'",
+        "profile": "vision_only"
+      },
+      {
+        "condition": "default",
+        "profile": "manipulation_standard"
+      }
+    ]
+  },
+
+  "solver_meta_randomization": {
+    "_description": "Meta-randomization settings to improve sim2real transfer by training across solver configurations.",
+    "enabled": true,
+    "randomize_per": "episode",
+    "parameters": {
+      "dt_noise_ratio": 0.15,
+      "solver_iteration_noise": 4,
+      "contact_offset_noise_ratio": 0.3,
+      "friction_combine_modes": ["average", "min", "multiply"],
+      "restitution_combine_modes": ["average", "min", "multiply"]
+    }
+  }
+}

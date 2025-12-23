@@ -104,6 +104,176 @@ def reward_smooth_motion(
     joint_acc = robot.data.joint_acc
     return -penalty_scale * torch.sum(joint_acc ** 2, dim=-1)
 ''',
+        # ============================================================================
+        # SIM2REAL TRANSFER: Jerk Penalty
+        # ============================================================================
+        # These rewards are CRITICAL for sim2real transfer. They prevent policies
+        # from exploiting simulator artifacts by learning to "vibrate" or use
+        # unrealistically high-frequency actions that real actuators cannot execute.
+        "action_jerk_penalty": '''
+def reward_action_jerk_penalty(
+    env: ManagerBasedEnv,
+    penalty_scale: float = 0.01,
+) -> torch.Tensor:
+    """
+    Penalty for high-frequency action changes (jerk).
+
+    This is CRITICAL for sim2real transfer because:
+    1. Real actuators have rate limits and cannot change instantly
+    2. Policies that "vibrate" exploit numerical solver artifacts
+    3. Smooth actions transfer better to real hardware
+
+    The penalty is computed as the squared difference between
+    consecutive actions, encouraging smooth action trajectories.
+
+    Args:
+        env: The environment instance
+        penalty_scale: Scale factor for the penalty (default: 0.01)
+
+    Returns:
+        Negative reward proportional to action jerk
+    """
+    # Get current and previous actions
+    current_actions = env.action_manager.action
+    prev_actions = getattr(env, "_prev_actions", current_actions)
+
+    # Store current actions for next step
+    env._prev_actions = current_actions.clone()
+
+    # Compute action difference (jerk proxy)
+    action_diff = current_actions - prev_actions
+
+    # L2 norm of action change
+    jerk = torch.sum(action_diff ** 2, dim=-1)
+
+    return -penalty_scale * jerk
+''',
+        "action_rate_penalty": '''
+def reward_action_rate_penalty(
+    env: ManagerBasedEnv,
+    penalty_scale: float = 0.005,
+    rate_limit: float = 0.1,
+) -> torch.Tensor:
+    """
+    Penalty for exceeding action rate limits.
+
+    Encourages actions that stay within realistic actuator rate limits.
+    This is complementary to jerk penalty - jerk penalizes acceleration
+    while this penalizes exceeding a velocity threshold.
+
+    Args:
+        env: The environment instance
+        penalty_scale: Scale factor for the penalty
+        rate_limit: Maximum allowed action change per step
+
+    Returns:
+        Negative reward when action rate exceeds limit
+    """
+    current_actions = env.action_manager.action
+    prev_actions = getattr(env, "_prev_actions_rate", current_actions)
+    env._prev_actions_rate = current_actions.clone()
+
+    action_diff = torch.abs(current_actions - prev_actions)
+
+    # Penalize actions that exceed rate limit
+    excess = torch.clamp(action_diff - rate_limit, min=0.0)
+    penalty = torch.sum(excess ** 2, dim=-1)
+
+    return -penalty_scale * penalty
+''',
+        "action_magnitude_penalty": '''
+def reward_action_magnitude_penalty(
+    env: ManagerBasedEnv,
+    penalty_scale: float = 0.001,
+) -> torch.Tensor:
+    """
+    Penalty for large action magnitudes.
+
+    Encourages energy-efficient actions and prevents policies
+    from learning to saturate actuators constantly.
+
+    Args:
+        env: The environment instance
+        penalty_scale: Scale factor for the penalty
+
+    Returns:
+        Negative reward proportional to action magnitude
+    """
+    actions = env.action_manager.action
+    magnitude = torch.sum(actions ** 2, dim=-1)
+    return -penalty_scale * magnitude
+''',
+        "joint_acceleration_penalty": '''
+def reward_joint_acceleration_penalty(
+    env: ManagerBasedEnv,
+    penalty_scale: float = 0.0001,
+    max_acc: float = 100.0,
+) -> torch.Tensor:
+    """
+    Penalty for high joint accelerations.
+
+    High accelerations indicate jerky motion that:
+    1. Causes wear on real robot hardware
+    2. Can destabilize manipulation tasks
+    3. Often indicates policy is exploiting simulator
+
+    Args:
+        env: The environment instance
+        penalty_scale: Scale factor for the penalty
+        max_acc: Maximum expected acceleration (for normalization)
+
+    Returns:
+        Negative reward proportional to joint acceleration
+    """
+    robot = env.scene["robot"]
+    joint_acc = robot.data.joint_acc
+
+    # Normalize by max expected acceleration
+    normalized_acc = joint_acc / max_acc
+
+    # Sum of squared accelerations
+    acc_penalty = torch.sum(normalized_acc ** 2, dim=-1)
+
+    return -penalty_scale * acc_penalty
+''',
+        "smooth_ee_velocity": '''
+def reward_smooth_ee_velocity(
+    env: ManagerBasedEnv,
+    penalty_scale: float = 0.005,
+    max_velocity: float = 1.0,
+) -> torch.Tensor:
+    """
+    Penalty for high end-effector velocity changes.
+
+    Encourages smooth end-effector motion which:
+    1. Is safer around objects and humans
+    2. Produces more reliable grasping
+    3. Transfers better to real hardware
+
+    Args:
+        env: The environment instance
+        penalty_scale: Scale factor for the penalty
+        max_velocity: Maximum expected EE velocity (m/s)
+
+    Returns:
+        Negative reward for high EE velocity changes
+    """
+    robot = env.scene["robot"]
+
+    # Get end-effector velocity
+    ee_body_idx = robot.find_bodies("panda_hand")[0] if hasattr(robot, "find_bodies") else -1
+    ee_vel = robot.data.body_vel_w[:, ee_body_idx, :3]  # Linear velocity
+
+    # Store previous velocity
+    prev_ee_vel = getattr(env, "_prev_ee_vel", ee_vel)
+    env._prev_ee_vel = ee_vel.clone()
+
+    # Compute velocity change (acceleration proxy)
+    vel_change = ee_vel - prev_ee_vel
+    vel_change_mag = torch.norm(vel_change, dim=-1)
+
+    return -penalty_scale * vel_change_mag
+''',
         "task_completion": '''
 def reward_task_completion(
     env: ManagerBasedEnv,
