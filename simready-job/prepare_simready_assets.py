@@ -289,6 +289,84 @@ GENERIC_FALLBACK: Dict[str, Any] = {
 }
 
 
+# ---------- Sim2Real Distribution Parameters ----------
+# These define uncertainty ranges for physics properties to enable
+# domain randomization during training, improving sim2real transfer.
+
+def compute_physics_distributions(physics: Dict[str, Any], bounds: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compute distribution ranges for physics properties to enable domain randomization.
+
+    Returns a dict with *_range fields for key physics properties:
+    - mass_kg_range: [min, max] for mass randomization
+    - friction_static_range: [min, max] for static friction
+    - friction_dynamic_range: [min, max] for dynamic friction
+    - restitution_range: [min, max] for bounciness
+    - center_of_mass_noise: [x, y, z] noise magnitude per axis
+    - contact_offset_range: [min, max] for PhysX contact offset
+
+    These ranges are designed for realistic domain randomization that
+    improves policy robustness without creating implausible physics.
+    """
+    distributions: Dict[str, Any] = {}
+
+    # Mass distribution: ±20% of estimated mass (common manufacturing variance)
+    mass = float(physics.get("mass_kg", 1.0))
+    mass_variance = 0.20
+    distributions["mass_kg_range"] = [
+        max(0.001, mass * (1.0 - mass_variance)),
+        mass * (1.0 + mass_variance)
+    ]
+
+    # Friction distributions: ±15% variance (surface condition variance)
+    static_f = float(physics.get("static_friction", 0.6))
+    dynamic_f = float(physics.get("dynamic_friction", 0.5))
+    friction_variance = 0.15
+
+    distributions["friction_static_range"] = [
+        max(0.1, static_f * (1.0 - friction_variance)),
+        min(1.5, static_f * (1.0 + friction_variance))
+    ]
+    distributions["friction_dynamic_range"] = [
+        max(0.05, dynamic_f * (1.0 - friction_variance)),
+        min(1.2, dynamic_f * (1.0 + friction_variance))
+    ]
+
+    # Restitution distribution: ±30% (material property variance)
+    restitution = float(physics.get("restitution", 0.1))
+    restitution_variance = 0.30
+    distributions["restitution_range"] = [
+        max(0.0, restitution * (1.0 - restitution_variance)),
+        min(1.0, restitution * (1.0 + restitution_variance))
+    ]
+
+    # Center of mass noise: proportional to object size (5% of each dimension)
+    size_m = list(bounds.get("size_m") or [0.1, 0.1, 0.1])
+    com_noise_ratio = 0.05
+    distributions["center_of_mass_noise"] = [
+        size_m[0] * com_noise_ratio,
+        size_m[1] * com_noise_ratio,
+        size_m[2] * com_noise_ratio
+    ]
+
+    # Contact offset range: ±50% (solver sensitivity variance)
+    contact_offset = float(physics.get("contact_offset_m", 0.005))
+    distributions["contact_offset_range"] = [
+        max(0.001, contact_offset * 0.5),
+        min(0.02, contact_offset * 1.5)
+    ]
+
+    # Surface roughness range: ±20%
+    roughness = float(physics.get("surface_roughness", 0.5))
+    roughness_variance = 0.20
+    distributions["surface_roughness_range"] = [
+        max(0.0, roughness * (1.0 - roughness_variance)),
+        min(1.0, roughness * (1.0 + roughness_variance))
+    ]
+
+    return distributions
+
+
 # ---------- Physics config (default + Gemini) ----------
 
 def estimate_default_physics(obj: Dict[str, Any], bounds: Dict[str, Any]) -> Dict[str, Any]:
@@ -1332,6 +1410,10 @@ def prepare_simready_assets_job(
             mesh_bounds=mesh_bounds_metadata,
             mesh_center=mesh_center_metadata,
         )
+
+        # Compute sim2real distribution ranges for domain randomization
+        physics_distributions = compute_physics_distributions(physics_cfg, bounds)
+        physics_cfg.update(physics_distributions)
 
         sim_path = emit_usd(visual_path, physics_cfg)
 

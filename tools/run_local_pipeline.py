@@ -374,11 +374,24 @@ class LocalPipelineRunner:
         # For local testing, add basic physics properties to each object
         for obj in manifest.get("objects", []):
             if not obj.get("physics"):
+                mass = self._estimate_mass(obj)
+                friction_static = 0.5
+                friction_dynamic = 0.4
+                restitution = 0.1
+
                 obj["physics"] = {
                     "dynamic": obj.get("sim_role") in ["manipulable_object", "clutter"],
-                    "mass": self._estimate_mass(obj),
-                    "friction": 0.5,
-                    "restitution": 0.1,
+                    "mass_kg": mass,
+                    "friction_static": friction_static,
+                    "friction_dynamic": friction_dynamic,
+                    "restitution": restitution,
+                    "center_of_mass_offset": [0.0, 0.0, 0.0],
+                    # Sim2Real distribution ranges for domain randomization
+                    "mass_kg_range": [mass * 0.8, mass * 1.2],
+                    "friction_static_range": [friction_static * 0.85, min(1.5, friction_static * 1.15)],
+                    "friction_dynamic_range": [friction_dynamic * 0.85, min(1.2, friction_dynamic * 1.15)],
+                    "restitution_range": [max(0.0, restitution * 0.7), min(1.0, restitution * 1.3)],
+                    "center_of_mass_noise": [0.005, 0.005, 0.005],
                 }
 
         # Write updated manifest
