@@ -6,6 +6,7 @@ This module generates complete Isaac Lab task packages including:
 - Task definitions (observations, actions, rewards)
 - Domain randomization hooks (EventManager compatible)
 - Training configuration
+- Physics profiles for sim2real transfer
 
 Note: Generated code is designed to work with Isaac Lab's ManagerBasedEnv
 architecture and its event-driven randomization system.
@@ -19,6 +20,54 @@ from typing import Any, Optional
 
 from .env_config import EnvConfigGenerator
 from .reward_functions import RewardFunctionGenerator
+
+
+# Physics profile path relative to repo root
+PHYSICS_PROFILES_PATH = Path(__file__).resolve().parents[2] / "policy_configs" / "physics_profiles.json"
+
+
+def load_physics_profiles() -> dict[str, Any]:
+    """Load physics profiles configuration."""
+    if PHYSICS_PROFILES_PATH.is_file():
+        return json.loads(PHYSICS_PROFILES_PATH.read_text())
+    return {"profiles": {}}
+
+
+def select_physics_profile(policy_id: str, profiles_config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Select the appropriate physics profile based on policy ID.
+
+    Uses rule-based selection from physics_profiles.json, with
+    'manipulation_standard' as the default fallback.
+    """
+    profiles = profiles_config.get("profiles", {})
+    rules = profiles_config.get("profile_selection_rules", {}).get("rules", [])
+
+    # Check rules in order
+    policy_lower = policy_id.lower()
+    for rule in rules:
+        condition = rule.get("condition", "").lower()
+        if condition == "default":
+            continue
+
+        # Simple keyword matching
+        keywords = []
+        if "contains" in condition:
+            # Parse "task contains 'x' or 'y'"
+            parts = condition.replace("task contains", "").replace("'", "").split(" or ")
+            keywords = [k.strip() for k in parts if k.strip()]
+
+        if any(kw in policy_lower for kw in keywords):
+            profile_name = rule.get("profile", "manipulation_standard")
+            if profile_name in profiles:
+                return profiles[profile_name]
+
+    # Default to manipulation_standard
+    return profiles.get("manipulation_standard", {
+        "simulation": {"dt": 0.008, "substeps": 2, "solver_iterations": 16},
+        "contact": {"contact_offset": 0.005, "rest_offset": 0.001},
+        "randomization": {}
+    })
 
 
 @dataclass
@@ -37,6 +86,7 @@ class TaskConfig:
     task_metadata: dict[str, Any] = field(default_factory=dict)
     reward_weights: dict[str, float] = field(default_factory=dict)
     randomization_config: dict[str, Any] = field(default_factory=dict)
+    physics_profile: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -172,12 +222,26 @@ class IsaacLabTaskGenerator:
         if primary_target and primary_target not in scene_entities:
             scene_entities[primary_target] = f"/World/Scene/{primary_target}"
 
-        # Get reward weights
+        # Get reward weights - include sim2real penalties by default
         reward_components = policy.get("reward_components", [])
         reward_weights = {comp: 1.0 for comp in reward_components}
 
+        # Add default sim2real transfer rewards (jerk/smoothness penalties)
+        # These are CRITICAL for sim2real transfer and are included by default
+        sim2real_defaults = {
+            "action_jerk_penalty": 0.01,      # Penalize high-frequency action changes
+            "action_magnitude_penalty": 0.001, # Penalize large actions (energy efficiency)
+        }
+        for component, weight in sim2real_defaults.items():
+            if component not in reward_weights:
+                reward_weights[component] = weight
+
         # Get randomization config
         randomization_config = self._build_randomization_config(policy, recipe)
+
+        # Select physics profile based on task type for sim2real optimization
+        physics_profiles = load_physics_profiles()
+        physics_profile = select_physics_profile(policy_id, physics_profiles)
 
         return TaskConfig(
             task_name=f"{recipe['metadata']['environment_type']}_{policy_id}",
@@ -195,7 +259,8 @@ class IsaacLabTaskGenerator:
                 "target_object": primary_target,
             },
             reward_weights=reward_weights,
-            randomization_config=randomization_config
+            randomization_config=randomization_config,
+            physics_profile=physics_profile,
         )
 
     def _build_observation_space(
@@ -564,10 +629,26 @@ class {self._to_class_name(config.task_name)}EnvCfg(ManagerBasedEnvCfg):
     episode_length_s = {config.episode_length / 60.0:.1f}  # seconds
 
     def __post_init__(self):
-        """Post initialization."""
-        # Simulation settings
-        self.sim.dt = 1.0 / 60.0
+        \"\"\"Post initialization with physics profile for sim2real optimization.\"\"\"
+        # Physics profile: {config.physics_profile.get("description", "standard")}
+        # Selected based on task type for optimal sim2real transfer
+
+        # Simulation settings from physics profile
+        self.sim.dt = {config.physics_profile.get("simulation", {{}}).get("dt", 0.008)}
+        self.sim.substeps = {config.physics_profile.get("simulation", {{}}).get("substeps", 2)}
         self.sim.render_interval = 1
+
+        # PhysX solver settings
+        self.sim.physx.solver_type = {1 if config.physics_profile.get("simulation", {{}}).get("solver_type", "TGS") == "TGS" else 0}  # 0=PGS, 1=TGS
+        self.sim.physx.num_position_iterations = {config.physics_profile.get("simulation", {{}}).get("solver_iterations", 16)}
+        self.sim.physx.num_velocity_iterations = {max(1, config.physics_profile.get("simulation", {{}}).get("solver_iterations", 16) // 4)}
+        self.sim.physx.enable_stabilization = {str(config.physics_profile.get("simulation", {{}}).get("enable_stabilization", True))}
+        self.sim.physx.enable_gyroscopic_forces = {str(config.physics_profile.get("simulation", {{}}).get("enable_gyroscopic_forces", True))}
+
+        # Contact settings for accurate manipulation
+        self.sim.physx.bounce_threshold_velocity = {config.physics_profile.get("contact", {{}}).get("bounce_threshold_velocity", 0.5)}
+        self.sim.physx.friction_offset_threshold = {config.physics_profile.get("contact", {{}}).get("friction_offset_threshold", 0.04)}
+        self.sim.physx.friction_correlation_distance = {config.physics_profile.get("contact", {{}}).get("friction_correlation_distance", 0.025)}
 
         # Update scene settings
         self.scene.num_envs = {config.num_envs}
@@ -942,9 +1023,215 @@ def randomize_materials(
         rigid_objects.write_rigid_body_properties_to_sim(props, env_ids=env_ids)
 
 
+# ============================================================================
+# SIM2REAL TRANSFER: Action/Observation Delay Randomization
+# ============================================================================
+# These are CRITICAL for sim2real transfer. Real robots have latency from:
+# - Communication delays (network, USB, CAN bus)
+# - Sensor processing time (camera exposure, filtering)
+# - Control loop delays (safety checks, interpolation)
+# Training with delay randomization prevents policies from exploiting
+# unrealistic instantaneous response in simulation.
+
+
+class ActionDelayBuffer:
+    \"\"\"
+    Circular buffer for action delay randomization.
+
+    Delays actions by a random number of steps to simulate real-world
+    communication and processing latency. This is CRITICAL for sim2real
+    transfer as it prevents policies from exploiting instantaneous response.
+    \"\"\"
+
+    def __init__(self, num_envs: int, action_dim: int, max_delay: int, device: torch.device):
+        self.num_envs = num_envs
+        self.action_dim = action_dim
+        self.max_delay = max_delay
+        self.device = device
+
+        # Circular buffer: [num_envs, max_delay + 1, action_dim]
+        self.buffer = torch.zeros(num_envs, max_delay + 1, action_dim, device=device)
+        self.write_idx = torch.zeros(num_envs, dtype=torch.long, device=device)
+        self.delays = torch.zeros(num_envs, dtype=torch.long, device=device)
+
+    def set_delays(self, delays: torch.Tensor):
+        \"\"\"Set per-environment delays (0 to max_delay).\"\"\"
+        self.delays = delays.clamp(0, self.max_delay).long()
+
+    def push(self, actions: torch.Tensor) -> torch.Tensor:
+        \"\"\"Push new actions and return delayed actions.\"\"\"
+        # Write new actions to buffer
+        batch_indices = torch.arange(self.num_envs, device=self.device)
+        self.buffer[batch_indices, self.write_idx] = actions
+
+        # Read delayed actions
+        read_idx = (self.write_idx - self.delays) % (self.max_delay + 1)
+        delayed_actions = self.buffer[batch_indices, read_idx]
+
+        # Advance write pointer
+        self.write_idx = (self.write_idx + 1) % (self.max_delay + 1)
+
+        return delayed_actions
+
+    def reset(self, env_ids: torch.Tensor, default_action: torch.Tensor):
+        \"\"\"Reset buffer for specified environments.\"\"\"
+        self.buffer[env_ids] = default_action.unsqueeze(1).expand(-1, self.max_delay + 1, -1)
+        self.write_idx[env_ids] = 0
+
+
+class ObservationDelayBuffer:
+    \"\"\"
+    Circular buffer for observation delay randomization.
+
+    Delays observations to simulate sensor latency, processing time,
+    and communication delays. Helps policies become robust to real-world
+    sensing delays.
+    \"\"\"
+
+    def __init__(self, num_envs: int, obs_dim: int, max_delay: int, device: torch.device):
+        self.num_envs = num_envs
+        self.obs_dim = obs_dim
+        self.max_delay = max_delay
+        self.device = device
+
+        self.buffer = torch.zeros(num_envs, max_delay + 1, obs_dim, device=device)
+        self.write_idx = torch.zeros(num_envs, dtype=torch.long, device=device)
+        self.delays = torch.zeros(num_envs, dtype=torch.long, device=device)
+
+    def set_delays(self, delays: torch.Tensor):
+        \"\"\"Set per-environment delays.\"\"\"
+        self.delays = delays.clamp(0, self.max_delay).long()
+
+    def push(self, observations: torch.Tensor) -> torch.Tensor:
+        \"\"\"Push new observations and return delayed observations.\"\"\"
+        batch_indices = torch.arange(self.num_envs, device=self.device)
+        self.buffer[batch_indices, self.write_idx] = observations
+
+        read_idx = (self.write_idx - self.delays) % (self.max_delay + 1)
+        delayed_obs = self.buffer[batch_indices, read_idx]
+
+        self.write_idx = (self.write_idx + 1) % (self.max_delay + 1)
+        return delayed_obs
+
+    def reset(self, env_ids: torch.Tensor, default_obs: torch.Tensor):
+        \"\"\"Reset buffer for specified environments.\"\"\"
+        self.buffer[env_ids] = default_obs.unsqueeze(1).expand(-1, self.max_delay + 1, -1)
+        self.write_idx[env_ids] = 0
+
+
+def randomize_action_delay(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    delay_range: tuple[int, int] = (0, 3),
+):
+    \"\"\"
+    Randomize action delay for specified environments.
+
+    Args:
+        env: The environment instance
+        env_ids: Environments to randomize
+        delay_range: (min_steps, max_steps) delay range
+
+    This simulates real-world communication and processing delays:
+    - 0 steps: Ideal (unrealistic for real robots)
+    - 1-2 steps: Typical for well-tuned systems
+    - 3+ steps: Systems with significant latency (wireless, vision processing)
+    \"\"\"
+    num_envs = len(env_ids)
+
+    # Generate random delays
+    delays = torch.randint(
+        delay_range[0], delay_range[1] + 1,
+        (num_envs,), device=env.device
+    )
+
+    # Store in env for use during step
+    if not hasattr(env, "_action_delay_buffer"):
+        # Initialize buffer on first use
+        action_dim = env.action_manager.action.shape[-1] if hasattr(env, "action_manager") else 7
+        env._action_delay_buffer = ActionDelayBuffer(
+            env.num_envs, action_dim, delay_range[1], env.device
+        )
+
+    env._action_delay_buffer.set_delays(delays)
+
+
+def randomize_observation_delay(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    delay_range: tuple[int, int] = (0, 2),
+):
+    \"\"\"
+    Randomize observation delay for specified environments.
+
+    Args:
+        env: The environment instance
+        env_ids: Environments to randomize
+        delay_range: (min_steps, max_steps) delay range
+
+    This simulates sensor latency:
+    - Camera exposure and readout time
+    - Image processing and feature extraction
+    - Network transmission delays
+    - Filter settling time
+    \"\"\"
+    num_envs = len(env_ids)
+
+    delays = torch.randint(
+        delay_range[0], delay_range[1] + 1,
+        (num_envs,), device=env.device
+    )
+
+    if not hasattr(env, "_observation_delay_buffer"):
+        obs_dim = env.observation_manager.observation.shape[-1] if hasattr(env, "observation_manager") else 32
+        env._observation_delay_buffer = ObservationDelayBuffer(
+            env.num_envs, obs_dim, delay_range[1], env.device
+        )
+
+    env._observation_delay_buffer.set_delays(delays)
+
+
+def randomize_actuator_dynamics(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    strength_range: tuple[float, float] = (0.8, 1.2),
+    damping_range: tuple[float, float] = (0.9, 1.1),
+):
+    \"\"\"
+    Randomize actuator strength and damping.
+
+    Simulates variation in motor performance:
+    - Motor aging and wear
+    - Temperature effects on motor efficiency
+    - Manufacturing tolerances
+    - Load-dependent efficiency changes
+    \"\"\"
+    robot = env.scene.get("robot")
+    if robot is None:
+        return
+
+    num_envs = len(env_ids)
+
+    # Randomize actuator strength (gain multiplier)
+    strength = torch.rand(num_envs, device=env.device)
+    strength = strength * (strength_range[1] - strength_range[0]) + strength_range[0]
+
+    # Randomize damping
+    damping = torch.rand(num_envs, device=env.device)
+    damping = damping * (damping_range[1] - damping_range[0]) + damping_range[0]
+
+    # Store for use in action processing
+    if not hasattr(env, "_actuator_strength"):
+        env._actuator_strength = torch.ones(env.num_envs, device=env.device)
+        env._actuator_damping = torch.ones(env.num_envs, device=env.device)
+
+    env._actuator_strength[env_ids] = strength
+    env._actuator_damping[env_ids] = damping
+
+
 # Event term configurations for EventManager
 def get_reset_events() -> dict[str, EventTermCfg]:
-    """Get reset event configurations."""
+    \"\"\"Get reset event configurations including sim2real transfer events.\"\"\"
     return {{
         "randomize_objects": EventTermCfg(
             func=randomize_object_poses,
@@ -954,13 +1241,29 @@ def get_reset_events() -> dict[str, EventTermCfg]:
             func=randomize_articulation_state,
             mode="reset",
         ),
+        "randomize_action_delay": EventTermCfg(
+            func=randomize_action_delay,
+            mode="reset",
+            params={{"delay_range": (0, 3)}},
+        ),
+        "randomize_observation_delay": EventTermCfg(
+            func=randomize_observation_delay,
+            mode="reset",
+            params={{"delay_range": (0, 2)}},
+        ),
+        "randomize_actuator_dynamics": EventTermCfg(
+            func=randomize_actuator_dynamics,
+            mode="reset",
+            params={{"strength_range": (0.85, 1.15), "damping_range": (0.9, 1.1)}},
+        ),
     }}
 
 
 def get_interval_events() -> dict[str, EventTermCfg]:
-    """Get interval event configurations."""
+    \"\"\"Get interval event configurations.\"\"\"
     return {{
-        # Add periodic randomization events here
+        # Periodic material/lighting randomization could go here
+        # for longer training runs
     }}
 '''
 
