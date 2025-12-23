@@ -13,15 +13,25 @@ Hand Models Supported:
 - MANO: Parametric hand model (research standard)
 - Simple mesh: Placeholder geometric hand
 - Robot gripper: For robotics applications
+
+MANO Integration:
+To use MANO hand model, you need:
+1. MANO model files from https://mano.is.tue.mpg.de/
+2. Install smplx package: pip install smplx
+3. Set MANO_MODEL_PATH environment variable or pass model_path to MANOHandMesh
+
+Without MANO files, the renderer falls back to SimpleHandMesh (geometric boxes).
 """
 
 import json
+import logging
+import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -29,6 +39,58 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from models import CameraTrajectory, HandPose, HandTrajectory
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# MANO Availability Check
+# ============================================================================
+
+def is_mano_available() -> bool:
+    """
+    Check if MANO model can be used.
+
+    Returns True if:
+    1. smplx package is installed
+    2. MANO model files are accessible
+    """
+    try:
+        import smplx  # noqa: F401
+        model_path = get_mano_model_path()
+        return model_path is not None and Path(model_path).exists()
+    except ImportError:
+        return False
+
+
+def get_mano_model_path() -> Optional[str]:
+    """
+    Get path to MANO model files.
+
+    Checks in order:
+    1. MANO_MODEL_PATH environment variable
+    2. ~/.mano/models/
+    3. ./mano_models/
+
+    Returns:
+        Path to MANO model directory, or None if not found
+    """
+    # Check environment variable
+    env_path = os.environ.get("MANO_MODEL_PATH")
+    if env_path and Path(env_path).exists():
+        return env_path
+
+    # Check home directory
+    home_path = Path.home() / ".mano" / "models"
+    if home_path.exists():
+        return str(home_path)
+
+    # Check local directory
+    local_path = Path("./mano_models")
+    if local_path.exists():
+        return str(local_path)
+
+    return None
 
 
 class HandModel(str, Enum):
@@ -58,6 +120,10 @@ class HandRenderConfig:
     # Hand model to use
     hand_model: HandModel = HandModel.SIMPLE
 
+    # MANO-specific configuration
+    mano_model_path: Optional[str] = None  # Path to MANO model files
+    is_right_hand: bool = True  # Use right hand model
+
     # Background
     background_color: tuple[int, int, int, int] = (0, 0, 0, 255)  # RGBA
     transparent_background: bool = False
@@ -71,6 +137,23 @@ class HandRenderConfig:
 
     # Output format
     output_format: str = "png"
+
+    def with_mano(self, model_path: Optional[str] = None) -> "HandRenderConfig":
+        """
+        Create a copy configured for MANO rendering.
+
+        Args:
+            model_path: Path to MANO model files (optional)
+
+        Returns:
+            New HandRenderConfig with MANO settings
+        """
+        import copy
+        config = copy.copy(self)
+        config.hand_model = HandModel.MANO
+        if model_path:
+            config.mano_model_path = model_path
+        return config
 
 
 class SimpleHandMesh:
@@ -188,6 +271,322 @@ class SimpleHandMesh:
         return verts
 
 
+# ============================================================================
+# MANO Hand Mesh (Integration Stub - Ready for Model Files)
+# ============================================================================
+
+class MANOHandMesh:
+    """
+    MANO parametric hand model mesh.
+
+    This class provides MANO hand mesh generation from pose and shape parameters.
+    MANO (hand Model with Articulated and Non-rigid defOrmations) is the standard
+    parametric hand model used in research.
+
+    Requirements:
+        - smplx package: pip install smplx
+        - MANO model files from https://mano.is.tue.mpg.de/
+
+    MANO Parameters:
+        - pose_params: 45-dim (15 joints × 3 axis-angle)
+        - shape_params: 10-dim (PCA coefficients for hand shape)
+        - global_orient: 3-dim (global rotation, axis-angle)
+        - transl: 3-dim (global translation)
+
+    Output:
+        - vertices: 778 vertices
+        - faces: 1538 triangular faces
+    """
+
+    # MANO constants
+    NUM_VERTICES = 778
+    NUM_FACES = 1538
+    NUM_JOINTS = 16  # 15 finger joints + 1 wrist
+    NUM_POSE_PARAMS = 45  # 15 joints × 3
+    NUM_SHAPE_PARAMS = 10
+
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        is_right_hand: bool = True,
+        use_pca: bool = False,
+        num_pca_comps: int = 45,
+        flat_hand_mean: bool = True,
+    ):
+        """
+        Initialize MANO hand mesh.
+
+        Args:
+            model_path: Path to MANO model files. If None, uses get_mano_model_path()
+            is_right_hand: If True, use right hand model; else left hand
+            use_pca: If True, use PCA pose space (fewer params)
+            num_pca_comps: Number of PCA components if use_pca=True
+            flat_hand_mean: If True, use flat hand as mean pose
+        """
+        self.is_right_hand = is_right_hand
+        self.use_pca = use_pca
+        self.num_pca_comps = num_pca_comps
+        self.flat_hand_mean = flat_hand_mean
+
+        # Model state
+        self._model = None
+        self._model_loaded = False
+        self._fallback_mesh = None
+
+        # Resolve model path
+        self.model_path = model_path or get_mano_model_path()
+
+        # Attempt to load MANO model
+        self._load_model()
+
+    def _load_model(self) -> bool:
+        """
+        Load MANO model from files.
+
+        Returns:
+            True if model loaded successfully
+        """
+        if self.model_path is None:
+            logger.warning(
+                "MANO model path not set. Set MANO_MODEL_PATH environment variable "
+                "or pass model_path parameter. Falling back to SimpleHandMesh."
+            )
+            self._init_fallback()
+            return False
+
+        try:
+            import smplx
+            import torch
+
+            self._model = smplx.MANO(
+                model_path=self.model_path,
+                is_rhand=self.is_right_hand,
+                use_pca=self.use_pca,
+                num_pca_comps=self.num_pca_comps if self.use_pca else None,
+                flat_hand_mean=self.flat_hand_mean,
+                batch_size=1,
+            )
+
+            # Get faces from model (static, doesn't change)
+            self.faces = self._model.faces.astype(np.int32)
+            self._model_loaded = True
+
+            logger.info(
+                f"MANO model loaded successfully from {self.model_path} "
+                f"({'right' if self.is_right_hand else 'left'} hand)"
+            )
+            return True
+
+        except ImportError as e:
+            logger.warning(
+                f"smplx package not available: {e}. "
+                "Install with: pip install smplx. Falling back to SimpleHandMesh."
+            )
+            self._init_fallback()
+            return False
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to load MANO model: {e}. Falling back to SimpleHandMesh."
+            )
+            self._init_fallback()
+            return False
+
+    def _init_fallback(self):
+        """Initialize fallback SimpleHandMesh."""
+        self._fallback_mesh = SimpleHandMesh()
+        self.faces = self._fallback_mesh.faces
+
+    @property
+    def is_loaded(self) -> bool:
+        """Check if MANO model is loaded."""
+        return self._model_loaded
+
+    def get_vertices(
+        self,
+        hand_pose: HandPose,
+        return_joints: bool = False,
+    ) -> np.ndarray:
+        """
+        Get MANO mesh vertices for a hand pose.
+
+        Args:
+            hand_pose: Hand pose containing pose_params and shape_params
+            return_joints: If True, also return joint positions
+
+        Returns:
+            vertices: (778, 3) array of vertex positions in world space
+            joints (optional): (16, 3) array of joint positions
+        """
+        # Use fallback if MANO not available
+        if not self._model_loaded:
+            return self._fallback_mesh.get_vertices(hand_pose)
+
+        try:
+            import torch
+
+            # Prepare inputs
+            # Global orientation (first 3 values of pose_params, or from rotation)
+            if hand_pose.pose_params is not None and len(hand_pose.pose_params) >= 3:
+                global_orient = torch.tensor(
+                    hand_pose.pose_params[:3].reshape(1, 3),
+                    dtype=torch.float32,
+                )
+                # Hand articulation (remaining 42 values)
+                if len(hand_pose.pose_params) >= 45:
+                    hand_pose_tensor = torch.tensor(
+                        hand_pose.pose_params[3:].reshape(1, 42),
+                        dtype=torch.float32,
+                    )
+                else:
+                    hand_pose_tensor = torch.zeros(1, 42, dtype=torch.float32)
+            else:
+                # Use rotation matrix to derive global_orient
+                from scipy.spatial.transform import Rotation as R
+                rot_obj = R.from_matrix(hand_pose.rotation)
+                global_orient = torch.tensor(
+                    rot_obj.as_rotvec().reshape(1, 3),
+                    dtype=torch.float32,
+                )
+                hand_pose_tensor = torch.zeros(1, 42, dtype=torch.float32)
+
+            # Shape parameters
+            if hand_pose.shape_params is not None:
+                betas = torch.tensor(
+                    hand_pose.shape_params.reshape(1, -1),
+                    dtype=torch.float32,
+                )
+            else:
+                betas = torch.zeros(1, self.NUM_SHAPE_PARAMS, dtype=torch.float32)
+
+            # Translation
+            transl = torch.tensor(
+                hand_pose.position.reshape(1, 3),
+                dtype=torch.float32,
+            )
+
+            # Forward pass through MANO
+            with torch.no_grad():
+                output = self._model(
+                    global_orient=global_orient,
+                    hand_pose=hand_pose_tensor,
+                    betas=betas,
+                    transl=transl,
+                )
+
+            vertices = output.vertices[0].numpy()
+
+            if return_joints:
+                joints = output.joints[0].numpy()
+                return vertices, joints
+
+            return vertices
+
+        except Exception as e:
+            logger.warning(f"MANO forward pass failed: {e}. Using fallback.")
+            return self._fallback_mesh.get_vertices(hand_pose)
+
+    def get_rest_pose_vertices(
+        self,
+        shape_params: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Get vertices for the rest pose (flat/mean hand).
+
+        Args:
+            shape_params: Optional shape parameters (10-dim)
+
+        Returns:
+            vertices: (778, 3) array of vertex positions
+        """
+        if not self._model_loaded:
+            return self._fallback_mesh.vertices
+
+        try:
+            import torch
+
+            betas = torch.zeros(1, self.NUM_SHAPE_PARAMS, dtype=torch.float32)
+            if shape_params is not None:
+                betas[0, : len(shape_params)] = torch.tensor(
+                    shape_params, dtype=torch.float32
+                )
+
+            with torch.no_grad():
+                output = self._model(betas=betas)
+
+            return output.vertices[0].numpy()
+
+        except Exception as e:
+            logger.warning(f"Failed to get rest pose: {e}")
+            return self._fallback_mesh.vertices
+
+    @staticmethod
+    def get_fingertip_indices() -> dict[str, int]:
+        """
+        Get vertex indices for fingertips.
+
+        Returns:
+            Dictionary mapping finger names to vertex indices
+        """
+        # Standard MANO fingertip vertex indices
+        return {
+            "thumb": 744,
+            "index": 320,
+            "middle": 443,
+            "ring": 555,
+            "pinky": 672,
+        }
+
+    @staticmethod
+    def get_joint_names() -> list[str]:
+        """Get names of MANO joints in order."""
+        return [
+            "wrist",
+            "index1", "index2", "index3",
+            "middle1", "middle2", "middle3",
+            "pinky1", "pinky2", "pinky3",
+            "ring1", "ring2", "ring3",
+            "thumb1", "thumb2", "thumb3",
+        ]
+
+
+# ============================================================================
+# Hand Mesh Factory
+# ============================================================================
+
+def create_hand_mesh(
+    hand_model: HandModel,
+    model_path: Optional[str] = None,
+    is_right_hand: bool = True,
+) -> "SimpleHandMesh | MANOHandMesh":
+    """
+    Factory function to create the appropriate hand mesh.
+
+    Args:
+        hand_model: Which hand model to use
+        model_path: Path to MANO model files (for MANO model)
+        is_right_hand: Use right hand model
+
+    Returns:
+        Hand mesh instance (MANOHandMesh or SimpleHandMesh)
+    """
+    if hand_model == HandModel.MANO:
+        mesh = MANOHandMesh(model_path=model_path, is_right_hand=is_right_hand)
+        if mesh.is_loaded:
+            return mesh
+        else:
+            logger.warning("MANO requested but not available, using SimpleHandMesh")
+            return SimpleHandMesh()
+
+    elif hand_model == HandModel.SIMPLE:
+        return SimpleHandMesh()
+
+    else:
+        # For robot hands (FRANKA_GRIPPER, SHADOW_HAND), use simple mesh as placeholder
+        logger.info(f"Hand model {hand_model} not yet implemented, using SimpleHandMesh")
+        return SimpleHandMesh()
+
+
 class HandMeshRenderer:
     """
     Renderer for hand meshes.
@@ -202,9 +601,28 @@ class HandMeshRenderer:
 
         Args:
             config: Rendering configuration
+
+        The renderer will use the hand model specified in config.hand_model:
+        - MANO: Full parametric hand model (requires smplx + model files)
+        - SIMPLE: Geometric placeholder (always available)
+        - FRANKA_GRIPPER, SHADOW_HAND: Robot hands (placeholder for now)
+
+        If MANO is requested but not available, falls back to SIMPLE automatically.
         """
         self.config = config or HandRenderConfig()
-        self.hand_mesh = SimpleHandMesh()
+
+        # Create hand mesh using factory (handles MANO fallback)
+        self.hand_mesh = create_hand_mesh(
+            hand_model=self.config.hand_model,
+            model_path=self.config.mano_model_path,
+            is_right_hand=self.config.is_right_hand,
+        )
+
+        # Log which model is being used
+        if isinstance(self.hand_mesh, MANOHandMesh) and self.hand_mesh.is_loaded:
+            logger.info("HandMeshRenderer using MANO hand model")
+        else:
+            logger.info("HandMeshRenderer using SimpleHandMesh (geometric placeholder)")
 
     def render_frame(
         self,
