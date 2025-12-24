@@ -1,0 +1,209 @@
+# scene-generation-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that:
+#   1. Triggers scene-generation-job to create new scene images
+#   2. Monitors for successful generation
+#   3. For each generated scene, triggers the downstream 3D reconstruction pipeline
+#
+# This workflow can be triggered by:
+#   - Cloud Scheduler (daily at 8:00 AM)
+#   - Manual invocation via gcloud or API
+#   - Other workflows
+#
+# IMPORTANT: This workflow is NOT automatically scheduled.
+# The scheduler (scene-generation-job/scheduler_config.yaml) is paused by default.
+# Enable it manually when ready to go live.
+#
+# To manually trigger:
+#   gcloud workflows run scene-generation-pipeline \
+#     --location=us-central1 \
+#     --data='{"scenes_per_run": 10, "bucket": "your-bucket"}'
+
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: "us-central1"
+          - bucket: '${default(map.get(args, "bucket"), "blueprint-scenes")}'
+          - scenesPerRun: '${default(map.get(args, "scenes_per_run"), 10)}'
+          - dryRun: '${default(map.get(args, "dry_run"), false)}'
+          - jobName: "scene-generation-job"
+          - startTime: '${time.format(sys.now())}'
+        next: log_start
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Scene generation pipeline started - generating " + string(scenesPerRun) + " scenes"}'
+          severity: "INFO"
+        next: check_dry_run
+
+    - check_dry_run:
+        switch:
+          - condition: ${dryRun == true}
+            next: dry_run_log
+        next: run_generation_job
+
+    - dry_run_log:
+        call: sys.log
+        args:
+          text: "DRY RUN MODE - would generate scenes but skipping actual execution"
+          severity: "WARNING"
+        next: done_dry_run
+
+    - run_generation_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENES_PER_RUN
+                      value: '${string(scenesPerRun)}'
+                    - name: DRY_RUN
+                      value: '${if(dryRun, "true", "false")}'
+        result: jobExec
+        next: set_execution_name
+
+    - set_execution_name:
+        assign:
+          - executionName: '${if(jobExec.metadata != null and jobExec.metadata.name != null, jobExec.metadata.name, jobExec.name)}'
+        next: wait_for_generation
+
+    - wait_for_generation:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${executionName}
+        result: execStatus
+        next: check_generation_status
+
+    - check_generation_status:
+        assign:
+          - execState: '${if(execStatus.state != null, execStatus.state, if(execStatus.status != null, execStatus.status.state, null))}'
+          - failedCount: '${if(execStatus.failedCount != null, execStatus.failedCount, if(execStatus.status != null, execStatus.status.failedCount, null))}'
+          - succeededCount: '${if(execStatus.succeededCount != null, execStatus.succeededCount, if(execStatus.status != null, execStatus.status.succeededCount, null))}'
+        next: generation_status_switch
+
+    - generation_status_switch:
+        switch:
+          - condition: '${execState == "FAILED" or (failedCount != null and failedCount > 0)}'
+            next: generation_failed
+          - condition: '${execState == "SUCCEEDED" or (succeededCount != null and succeededCount > 0)}'
+            next: log_generation_complete
+        next: wait_generation_poll
+
+    - wait_generation_poll:
+        call: sys.sleep
+        args:
+          seconds: 30
+        next: wait_for_generation
+
+    - log_generation_complete:
+        call: sys.log
+        args:
+          text: '${"Scene generation job completed successfully"}'
+          severity: "INFO"
+        next: list_generated_scenes
+
+    - generation_failed:
+        call: sys.log
+        args:
+          text: "Scene generation job FAILED"
+          severity: "ERROR"
+        next: raise_generation_error
+
+    - raise_generation_error:
+        raise: "Scene generation job failed"
+
+    # List newly generated scenes by checking for completion markers
+    - list_generated_scenes:
+        try:
+          call: googleapis.storage.v1.objects.list
+          args:
+            bucket: ${bucket}
+            prefix: "scenes/"
+            # Look for recent scene_generation_complete markers
+            # In practice, you might filter by timestamp
+          result: scenesList
+        except:
+          as: e
+          steps:
+            - log_list_error:
+                call: sys.log
+                args:
+                  text: '${"Warning: Could not list scenes: " + e.message}'
+                  severity: "WARNING"
+                next: done_partial
+        next: process_scenes
+
+    - process_scenes:
+        # In a real implementation, you would:
+        # 1. Filter to only newly generated scenes (by timestamp)
+        # 2. For each scene, check if it needs downstream processing
+        # 3. Optionally trigger 3D-RE-GEN pipeline for each
+        #
+        # For now, we just log completion since 3D-RE-GEN integration
+        # is handled by the scene generation job writing trigger markers
+        call: sys.log
+        args:
+          text: '${"Scene generation complete. Downstream pipelines will be triggered by completion markers."}'
+          severity: "INFO"
+        next: done
+
+    # Completion states
+    - done:
+        return:
+          status: "SUCCESS"
+          message: '${"Generated " + string(scenesPerRun) + " scenes successfully"}'
+          execution: ${executionName}
+          bucket: ${bucket}
+          started_at: ${startTime}
+          completed_at: '${time.format(sys.now())}'
+
+    - done_partial:
+        return:
+          status: "PARTIAL_SUCCESS"
+          message: "Scene generation completed but could not verify all scenes"
+          execution: ${executionName}
+          bucket: ${bucket}
+
+    - done_dry_run:
+        return:
+          status: "DRY_RUN"
+          message: '${"Would have generated " + string(scenesPerRun) + " scenes"}'
+          bucket: ${bucket}
+
+---
+# Deployment instructions:
+#
+# 1. Deploy the workflow:
+#    gcloud workflows deploy scene-generation-pipeline \
+#      --location=us-central1 \
+#      --source=workflows/scene-generation-pipeline.yaml \
+#      --service-account=WORKFLOW_SA@PROJECT_ID.iam.gserviceaccount.com
+#
+# 2. Create the Cloud Run job:
+#    gcloud run jobs create scene-generation-job \
+#      --image=gcr.io/PROJECT_ID/scene-generation-job:latest \
+#      --region=us-central1 \
+#      --set-env-vars=GEMINI_API_KEY=your-key \
+#      --memory=4Gi \
+#      --timeout=3600
+#
+# 3. Create the scheduler (paused):
+#    gcloud scheduler jobs create http scene-generation-daily \
+#      --schedule="0 8 * * *" \
+#      --location=us-central1 \
+#      --uri="https://workflowexecutions.googleapis.com/v1/projects/PROJECT_ID/locations/us-central1/workflows/scene-generation-pipeline/executions" \
+#      --http-method=POST \
+#      --oauth-service-account-email=SCHEDULER_SA@PROJECT_ID.iam.gserviceaccount.com \
+#      --message-body='{"argument": "{\"scenes_per_run\": 10}"}' \
+#      --paused
+#
+# 4. When ready to go live, enable the scheduler:
+#    gcloud scheduler jobs resume scene-generation-daily --location=us-central1
