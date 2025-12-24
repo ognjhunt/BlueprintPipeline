@@ -1,0 +1,573 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Configuration for scene generation archetypes",
+  "version": "1.0.0",
+  "archetypes": {
+    "kitchen": {
+      "name": "Commercial Kitchen / Prep Line",
+      "marketplace_category": "Kitchens",
+      "description": "Commercial food preparation environments including prep lines, dish pits, quick-serve stations, and service pass-throughs",
+      "sub_types": [
+        "prep_station",
+        "dish_pit",
+        "quick_serve",
+        "service_window",
+        "cold_prep",
+        "hot_line"
+      ],
+      "key_elements": [
+        "stainless steel prep tables",
+        "commercial dishwashers",
+        "three-compartment sinks",
+        "spray rinse stations",
+        "walk-in refrigerators",
+        "reach-in refrigerators",
+        "commercial ovens",
+        "ranges with burners",
+        "flat-top griddles",
+        "deep fryers",
+        "warming stations",
+        "heat lamps",
+        "utensil racks",
+        "cutting boards",
+        "knife blocks",
+        "storage shelving",
+        "metro shelving",
+        "ventilation hoods",
+        "floor drains",
+        "hand washing stations",
+        "condiment stations",
+        "speed rails",
+        "lowboy refrigerators"
+      ],
+      "articulated_objects": [
+        "dishwasher doors",
+        "dishwasher racks",
+        "refrigerator doors",
+        "freezer doors",
+        "oven doors",
+        "cabinet doors",
+        "drawers",
+        "warming lamp arms",
+        "faucet handles",
+        "sprayer nozzles"
+      ],
+      "lighting_variations": [
+        "bright fluorescent overhead",
+        "under-cabinet task lighting",
+        "pass-through window natural light",
+        "early morning prep shift",
+        "dinner rush service",
+        "deep cleaning after hours"
+      ],
+      "floor_types": [
+        "commercial tile with grout",
+        "quarry tile",
+        "commercial rubber mats",
+        "anti-fatigue mats",
+        "sealed concrete",
+        "epoxy-coated concrete"
+      ],
+      "state_variations": [
+        "clean_setup",
+        "mid_service_busy",
+        "post_rush_cleanup",
+        "closing_sanitization",
+        "morning_prep",
+        "fully_stocked",
+        "end_of_day"
+      ],
+      "policy_targets": [
+        "dish_loading",
+        "table_clearing",
+        "dexterous_pick_place",
+        "articulated_access",
+        "drawer_manipulation",
+        "door_manipulation"
+      ],
+      "weight": 0.18
+    },
+    "grocery": {
+      "name": "Grocery / Retail Aisle",
+      "marketplace_category": "Grocery / Retail",
+      "description": "Grocery store and retail environments with stocked shelving, refrigeration, and checkout areas",
+      "sub_types": [
+        "center_aisle",
+        "refrigerated_section",
+        "frozen_section",
+        "produce_section",
+        "checkout_lane",
+        "pharmacy_area",
+        "deli_counter"
+      ],
+      "key_elements": [
+        "gondola shelving units",
+        "peg board displays",
+        "refrigerated display cases",
+        "open-air refrigerated cases",
+        "freezer sections with doors",
+        "shopping carts",
+        "shopping baskets",
+        "price tags and shelf labels",
+        "electronic shelf labels",
+        "barcode scanners",
+        "checkout counters",
+        "conveyor belts",
+        "bagging areas",
+        "produce displays",
+        "produce scales",
+        "endcap promotions",
+        "floor displays"
+      ],
+      "articulated_objects": [
+        "refrigerator doors",
+        "freezer doors",
+        "hinged shelf labels",
+        "checkout dividers",
+        "shopping cart handles",
+        "produce bin lids",
+        "deli case doors"
+      ],
+      "lighting_variations": [
+        "bright overhead fluorescent",
+        "refrigerator case lighting",
+        "accent spotlights on displays",
+        "natural skylights",
+        "morning opening",
+        "evening shopping"
+      ],
+      "floor_types": [
+        "polished concrete",
+        "vinyl tile",
+        "commercial linoleum",
+        "rubber anti-fatigue mats at checkout"
+      ],
+      "state_variations": [
+        "fully_stocked",
+        "needs_restocking",
+        "active_shopping",
+        "morning_stocking",
+        "sale_displays",
+        "seasonal_setup"
+      ],
+      "policy_targets": [
+        "grocery_stocking",
+        "mixed_sku_logistics",
+        "dexterous_pick_place",
+        "articulated_access"
+      ],
+      "weight": 0.15
+    },
+    "warehouse": {
+      "name": "Warehouse / Fulfillment Center",
+      "marketplace_category": "Warehouses",
+      "description": "Industrial warehouse environments with racking systems, pallets, and logistics infrastructure",
+      "sub_types": [
+        "pallet_racking_aisle",
+        "tote_picking_zone",
+        "packing_station",
+        "staging_area",
+        "cross_dock",
+        "returns_processing"
+      ],
+      "key_elements": [
+        "selective pallet racking",
+        "drive-in racking",
+        "cantilever racking",
+        "tote bins",
+        "plastic totes",
+        "cardboard boxes",
+        "shipping labels",
+        "barcode systems",
+        "conveyor systems",
+        "roller conveyors",
+        "belt conveyors",
+        "pallet jacks",
+        "safety barriers",
+        "floor markings",
+        "aisle markers",
+        "staging areas",
+        "pack stations",
+        "label printers"
+      ],
+      "articulated_objects": [
+        "roll-up doors",
+        "conveyor gates",
+        "adjustable shelf brackets",
+        "pallet jack handles",
+        "safety gate latches",
+        "tote lids"
+      ],
+      "lighting_variations": [
+        "high bay LED",
+        "natural skylights",
+        "motion-activated zones",
+        "task lighting at pack stations",
+        "emergency lighting simulation"
+      ],
+      "floor_types": [
+        "sealed concrete with lane markings",
+        "epoxy coating",
+        "anti-slip coating",
+        "painted safety zones"
+      ],
+      "state_variations": [
+        "fully_stocked",
+        "mid_shift_active",
+        "receiving_shipment",
+        "outbound_staging",
+        "inventory_count",
+        "peak_season_full"
+      ],
+      "policy_targets": [
+        "mixed_sku_logistics",
+        "dexterous_pick_place",
+        "general_manipulation"
+      ],
+      "weight": 0.17
+    },
+    "loading_dock": {
+      "name": "Loading Dock / Shipping Bay",
+      "marketplace_category": "Loading Docks",
+      "description": "Industrial loading dock environments with dock levelers, restraints, and staging areas",
+      "sub_types": [
+        "single_bay",
+        "multi_bay",
+        "cross_dock",
+        "refrigerated_dock",
+        "ground_level"
+      ],
+      "key_elements": [
+        "dock levelers",
+        "dock plates",
+        "dock bumpers",
+        "truck restraints",
+        "overhead doors",
+        "dock lights",
+        "pallet positions",
+        "staging pallets",
+        "dock seals",
+        "dock shelters",
+        "safety bollards",
+        "height clearance signs",
+        "dock appointment boards",
+        "forklift charging stations"
+      ],
+      "articulated_objects": [
+        "overhead doors",
+        "dock leveler plates",
+        "truck restraint hooks",
+        "dock light arms",
+        "liftgate mechanisms"
+      ],
+      "lighting_variations": [
+        "outdoor daylight transition",
+        "overhead dock lights",
+        "trailer interior lighting",
+        "dawn receiving",
+        "evening shipping",
+        "night shift"
+      ],
+      "floor_types": [
+        "diamond plate steel",
+        "sealed concrete",
+        "dock bumper rubber",
+        "painted safety markings"
+      ],
+      "state_variations": [
+        "trailer_backed_in",
+        "empty_bay",
+        "mid_unload",
+        "staged_outbound",
+        "forklift_active"
+      ],
+      "policy_targets": [
+        "mixed_sku_logistics",
+        "general_manipulation"
+      ],
+      "weight": 0.08
+    },
+    "lab": {
+      "name": "Laboratory / Cleanroom",
+      "marketplace_category": "Labs",
+      "description": "Scientific laboratory environments with precision equipment, safety features, and controlled conditions",
+      "sub_types": [
+        "wet_lab_bench",
+        "cleanroom",
+        "biosafety",
+        "analytical_lab",
+        "quality_control",
+        "research_lab"
+      ],
+      "key_elements": [
+        "lab benches with sinks",
+        "fume hoods",
+        "gloveboxes",
+        "biosafety cabinets",
+        "laminar flow hoods",
+        "centrifuges",
+        "microscopes",
+        "sample racks",
+        "test tube racks",
+        "pipette holders",
+        "pipette tips",
+        "chemical storage cabinets",
+        "flammables cabinet",
+        "emergency eyewash stations",
+        "gas lines and valves",
+        "autoclave",
+        "incubators",
+        "analytical balances"
+      ],
+      "articulated_objects": [
+        "fume hood sashes",
+        "glovebox ports",
+        "cabinet doors",
+        "centrifuge lids",
+        "drawer pulls",
+        "gas valve handles",
+        "biosafety cabinet sashes"
+      ],
+      "lighting_variations": [
+        "bright even overhead",
+        "task lighting at benches",
+        "UV-filtered zones",
+        "cleanroom lighting",
+        "microscope area dim"
+      ],
+      "floor_types": [
+        "epoxy resin",
+        "static-dissipative tile",
+        "vinyl sheet flooring",
+        "seamless cleanroom flooring"
+      ],
+      "state_variations": [
+        "clean_ready",
+        "experiment_in_progress",
+        "samples_staged",
+        "equipment_calibration",
+        "end_of_day_cleanup"
+      ],
+      "policy_targets": [
+        "precision_insertion",
+        "dexterous_pick_place",
+        "articulated_access",
+        "drawer_manipulation"
+      ],
+      "weight": 0.12
+    },
+    "office": {
+      "name": "Office / Workspace",
+      "marketplace_category": "Offices",
+      "description": "Office environments with desks, storage, and collaborative spaces",
+      "sub_types": [
+        "open_plan",
+        "private_office",
+        "conference_room",
+        "break_room",
+        "reception",
+        "hot_desk"
+      ],
+      "key_elements": [
+        "desks with monitors",
+        "standing desks",
+        "office chairs",
+        "filing cabinets",
+        "lateral files",
+        "bookcases",
+        "credenzas",
+        "conference tables",
+        "whiteboards",
+        "glass boards",
+        "printers",
+        "copiers",
+        "phone systems",
+        "cable management",
+        "desk lamps",
+        "plants",
+        "coat racks"
+      ],
+      "articulated_objects": [
+        "desk drawers",
+        "filing cabinet drawers",
+        "door handles",
+        "adjustable monitor arms",
+        "cabinet doors",
+        "chair mechanisms",
+        "standing desk controls"
+      ],
+      "lighting_variations": [
+        "overhead panel lighting",
+        "natural window light",
+        "task desk lamps",
+        "conference room lighting",
+        "after hours security lighting"
+      ],
+      "floor_types": [
+        "commercial carpet",
+        "carpet tiles",
+        "vinyl plank",
+        "raised floor tiles",
+        "hardwood in executive areas"
+      ],
+      "state_variations": [
+        "clean_organized",
+        "active_workday",
+        "meeting_in_progress",
+        "end_of_day",
+        "hot_desk_available"
+      ],
+      "policy_targets": [
+        "drawer_manipulation",
+        "door_manipulation",
+        "dexterous_pick_place",
+        "panel_interaction"
+      ],
+      "weight": 0.12
+    },
+    "utility_room": {
+      "name": "Utility Room / Mechanical Space",
+      "marketplace_category": "Utility Rooms",
+      "description": "Back-of-house utility spaces with electrical panels, HVAC, and building systems",
+      "sub_types": [
+        "electrical_room",
+        "mechanical_room",
+        "server_room",
+        "janitor_closet",
+        "maintenance_shop"
+      ],
+      "key_elements": [
+        "electrical panels",
+        "circuit breakers",
+        "HVAC units",
+        "air handlers",
+        "water heaters",
+        "pipe runs",
+        "valves",
+        "conduit and wiring",
+        "meters and gauges",
+        "safety signage",
+        "fire suppression",
+        "access panels",
+        "tool storage",
+        "maintenance carts"
+      ],
+      "articulated_objects": [
+        "breaker switches",
+        "valve handles",
+        "access panel doors",
+        "circuit breaker toggles",
+        "damper controls",
+        "service disconnects",
+        "cabinet doors"
+      ],
+      "lighting_variations": [
+        "utility fluorescent",
+        "emergency lighting",
+        "task flashlight spots",
+        "limited natural light",
+        "maintenance work lights"
+      ],
+      "floor_types": [
+        "bare concrete",
+        "painted concrete",
+        "rubber utility mats",
+        "raised grating"
+      ],
+      "state_variations": [
+        "normal_operation",
+        "maintenance_access",
+        "inspection_mode",
+        "emergency_state"
+      ],
+      "policy_targets": [
+        "panel_interaction",
+        "knob_manipulation",
+        "door_manipulation",
+        "articulated_access"
+      ],
+      "weight": 0.08
+    },
+    "home_laundry": {
+      "name": "Home Laundry Room",
+      "marketplace_category": "Home / Assistive",
+      "description": "Residential laundry environments with washers, dryers, and folding areas",
+      "sub_types": [
+        "dedicated_room",
+        "closet_laundry",
+        "stacked_units",
+        "garage_laundry",
+        "basement_laundry"
+      ],
+      "key_elements": [
+        "front-load washer",
+        "front-load dryer",
+        "top-load washer",
+        "stacked washer-dryer",
+        "laundry sink",
+        "folding table",
+        "folding counter",
+        "hanging rod",
+        "laundry baskets",
+        "hampers",
+        "detergent storage",
+        "ironing board",
+        "drying rack",
+        "lint traps",
+        "dryer vent"
+      ],
+      "articulated_objects": [
+        "washer door",
+        "dryer door",
+        "detergent dispenser",
+        "cabinet doors",
+        "drawer pulls",
+        "ironing board legs",
+        "folding drying rack"
+      ],
+      "lighting_variations": [
+        "residential overhead fixture",
+        "natural window light",
+        "under-cabinet lighting",
+        "laundry room pendant",
+        "basement utility lighting"
+      ],
+      "floor_types": [
+        "ceramic tile",
+        "vinyl flooring",
+        "concrete with paint",
+        "rubber utility mat"
+      ],
+      "state_variations": [
+        "clean_empty",
+        "laundry_in_progress",
+        "folding_session",
+        "baskets_full",
+        "ironing_setup"
+      ],
+      "policy_targets": [
+        "laundry_sorting",
+        "door_manipulation",
+        "knob_manipulation",
+        "dexterous_pick_place"
+      ],
+      "weight": 0.10
+    }
+  },
+  "generation_settings": {
+    "image_model": "gemini-3-pro-image-preview",
+    "prompt_model": "gemini-3-pro-preview",
+    "default_aspect_ratio": "16:9",
+    "default_image_size": "2K",
+    "grounding_enabled": true,
+    "max_retries": 3,
+    "retry_delay_seconds": 5,
+    "rate_limit_delay_seconds": 2
+  },
+  "diversity_settings": {
+    "history_lookback_days": 30,
+    "variation_coverage_threshold": 3,
+    "prompt_similarity_threshold": 0.85,
+    "balance_archetype_distribution": true
+  }
+}

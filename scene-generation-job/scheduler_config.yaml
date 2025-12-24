@@ -1,0 +1,96 @@
+# Cloud Scheduler Configuration for Scene Generation Job
+#
+# This scheduler triggers daily scene generation at 8:00 AM.
+#
+# IMPORTANT: This scheduler is DISABLED by default (paused: true).
+# To enable, set paused: false and deploy with:
+#   gcloud scheduler jobs update http scene-generation-daily \
+#     --schedule="0 8 * * *" \
+#     --location=us-central1 \
+#     --paused=false
+#
+# Or create with:
+#   gcloud scheduler jobs create http scene-generation-daily \
+#     --schedule="0 8 * * *" \
+#     --location=us-central1 \
+#     --uri="https://REGION-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/PROJECT_ID/jobs/scene-generation-job:run" \
+#     --http-method=POST \
+#     --oauth-service-account-email=SCHEDULER_SA@PROJECT_ID.iam.gserviceaccount.com \
+#     --paused
+
+# Scheduler Job Configuration
+name: scene-generation-daily
+description: |
+  Daily automated scene generation for BlueprintPipeline.
+  Generates 10 new diverse scene images across all supported archetypes.
+  Images are uploaded to GCS to trigger the downstream 3D reconstruction pipeline.
+
+# Schedule: 8:00 AM every day (Pacific Time)
+# Cron format: minute hour day-of-month month day-of-week
+schedule: "0 8 * * *"
+timezone: "America/Los_Angeles"
+
+# IMPORTANT: Scheduler starts DISABLED (paused)
+# This prevents automatic runs until explicitly enabled
+paused: true
+
+# HTTP Target Configuration
+http_target:
+  # Cloud Run Job invocation URL
+  # Replace PROJECT_ID and REGION with actual values
+  uri: "https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/scene-generation-job:run"
+  http_method: POST
+
+  # OAuth token for authentication
+  oauth_token:
+    service_account_email: "${SCHEDULER_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
+    scope: "https://www.googleapis.com/auth/cloud-platform"
+
+  # Request body with job configuration
+  body: |
+    {
+      "overrides": {
+        "containerOverrides": [{
+          "env": [
+            {"name": "SCENES_PER_RUN", "value": "10"},
+            {"name": "BUCKET", "value": "${BUCKET}"}
+          ]
+        }]
+      }
+    }
+
+  headers:
+    Content-Type: "application/json"
+
+# Retry Configuration
+retry_config:
+  retry_count: 3
+  min_backoff_duration: "5s"
+  max_backoff_duration: "60s"
+  max_doublings: 3
+
+# Attempt Deadline
+attempt_deadline: "1800s"  # 30 minutes max
+
+---
+# Alternative: Cloud Workflows trigger instead of direct Cloud Run
+# Use this if you want the scheduler to trigger the full orchestration workflow
+
+# name: scene-generation-workflow-daily
+# description: |
+#   Daily trigger for scene generation workflow.
+#   Triggers the full scene-generation-pipeline workflow.
+#
+# schedule: "0 8 * * *"
+# timezone: "America/Los_Angeles"
+# paused: true
+#
+# http_target:
+#   uri: "https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/us-central1/workflows/scene-generation-pipeline/executions"
+#   http_method: POST
+#   oauth_token:
+#     service_account_email: "${SCHEDULER_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
+#   body: |
+#     {
+#       "argument": "{\"scenes_per_run\": 10, \"bucket\": \"${BUCKET}\"}"
+#     }
