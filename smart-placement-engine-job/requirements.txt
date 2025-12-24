@@ -1,0 +1,17 @@
+# Smart Placement Engine Dependencies
+# Core AI
+google-genai>=1.0.0
+
+# Image processing (for region detection from images)
+Pillow>=10.0.0
+
+# Data handling
+numpy>=1.24.0
+
+# Optional: Cloud storage integration
+google-cloud-storage>=2.10.0
+google-cloud-firestore>=2.11.0
+
+# Development/testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
