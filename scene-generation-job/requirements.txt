@@ -1,0 +1,13 @@
+# Scene Generation Job Dependencies
+
+# Gemini AI SDK
+google-genai>=1.0.0
+
+# Google Cloud
+google-cloud-firestore>=2.11.0
+google-cloud-storage>=2.10.0
+
+# Image processing
+Pillow>=10.0.0
+
+# Utilities
