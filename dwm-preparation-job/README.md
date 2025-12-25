@@ -25,17 +25,70 @@ This job runs as part of the BlueprintPipeline:
 Image → 3D-RE-GEN → BlueprintPipeline → ... → DWM Preparation → DWM Bundles
 ```
 
-Run with the local pipeline:
+### Local Pipeline
 ```bash
 python tools/run_local_pipeline.py --scene-dir ./scene --steps dwm
 ```
 
-Or standalone:
+### Standalone CLI
 ```bash
 python dwm-preparation-job/prepare_dwm_bundle.py \
     --scene-dir ./scenes/kitchen_001 \
     --num-trajectories 10
 ```
+
+### Cloud Auto-Trigger (Production)
+
+The job auto-triggers when 3D-RE-GEN completes via EventArc:
+
+```
+.regen3d_complete marker uploaded
+        ↓ (EventArc trigger)
+dwm-preparation-pipeline workflow
+        ↓
+dwm-preparation-job Cloud Run job
+        ↓
+.dwm_complete marker written
+```
+
+**Deploy to Cloud Run:**
+```bash
+gcloud builds submit --config=dwm-preparation-job/cloudbuild.yaml .
+```
+
+**Setup EventArc Trigger:**
+```bash
+chmod +x dwm-preparation-job/scripts/setup_eventarc_trigger.sh
+./dwm-preparation-job/scripts/setup_eventarc_trigger.sh <project_id> <bucket_name>
+```
+
+Or manually:
+```bash
+gcloud eventarc triggers create dwm-preparation-trigger \
+  --location=us-central1 \
+  --service-account="${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --destination-workflow=dwm-preparation-pipeline \
+  --destination-workflow-location=us-central1 \
+  --event-filters="type=google.cloud.storage.object.v1.finalized" \
+  --event-filters="bucket=${BUCKET}" \
+  --event-data-content-type="application/json"
+```
+
+**Environment Variables (Cloud Run):**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| BUCKET | Yes | - | GCS bucket name |
+| SCENE_ID | Yes | - | Scene identifier |
+| ASSETS_PREFIX | No | scenes/{id}/assets | GCS prefix for assets |
+| USD_PREFIX | No | scenes/{id}/usd | GCS prefix for USD files |
+| DWM_PREFIX | No | scenes/{id}/dwm | GCS prefix for output |
+| NUM_TRAJECTORIES | No | 5 | Trajectories per scene |
+| RESOLUTION_WIDTH | No | 720 | Video width |
+| RESOLUTION_HEIGHT | No | 480 | Video height |
+| NUM_FRAMES | No | 49 | Frames per video |
+| FPS | No | 24 | Frames per second |
+| MANO_MODEL_PATH | No | /mano_models | Path to MANO files |
 
 ## Output Structure
 
@@ -117,35 +170,19 @@ Optional:
 
 ### MANO Hand Model (Optional, Recommended)
 
-For anatomically accurate hand meshes (instead of geometric placeholders):
+For anatomically accurate hand meshes (instead of geometric placeholders), you need the MANO model files.
 
-1. **Install smplx package**:
-   ```bash
-   pip install smplx
-   pip install torch  # Required by smplx
-   ```
+**Quick Setup:**
+1. Register at [mano.is.tue.mpg.de](https://mano.is.tue.mpg.de/)
+2. Download MANO model files
+3. Install: `pip install smplx torch`
+4. Place files in `~/.mano/models/` or set `MANO_MODEL_PATH`
 
-2. **Get MANO model files**:
-   - Register at https://mano.is.tue.mpg.de/
-   - Download the MANO model files
-   - Place in one of:
-     - `~/.mano/models/` (recommended)
-     - `./mano_models/`
-     - Set `MANO_MODEL_PATH` environment variable
-
-3. **Usage**:
-   ```python
-   from hand_motion.hand_mesh_renderer import HandRenderConfig, HandModel
-
-   # Use MANO rendering
-   config = HandRenderConfig(
-       hand_model=HandModel.MANO,
-       mano_model_path="/path/to/mano/models",  # Optional if env var set
-   )
-
-   # Or use helper method
-   config = HandRenderConfig().with_mano("/path/to/mano/models")
-   ```
+**Detailed Instructions:** See [MANO_SETUP.md](MANO_SETUP.md) for:
+- Cloud Run deployment with MANO
+- GCS-based model file loading
+- License considerations
+- Troubleshooting guide
 
 Without MANO files, the renderer falls back to SimpleHandMesh (geometric boxes) automatically.
 
