@@ -1,0 +1,93 @@
+# Cloud Build configuration for dwm-preparation-job
+# Generates DWM conditioning bundles (static scene + hand mesh videos + trajectories)
+#
+# DWM (Dexterous World Model) enables video generation of hand-object interactions
+# Reference: https://snuvclab.github.io/dwm/
+#
+# Usage:
+#   gcloud builds submit --config=dwm-preparation-job/cloudbuild.yaml .
+#
+# Or with substitutions:
+#   gcloud builds submit --config=dwm-preparation-job/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPO=blueprint-jobs .
+#
+# Prerequisites:
+#   - Artifact Registry repository exists
+#   - Cloud Run API enabled
+#   - (Optional) MANO model files stored in Secret Manager or GCS
+
+substitutions:
+  _REGION: us-central1
+  _REPO: blueprint-jobs
+  _JOB_NAME: dwm-preparation-job
+  _MEMORY: 4Gi
+  _CPU: "2"
+  _TIMEOUT: 1800s
+  _MAX_RETRIES: "1"
+
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+      - '.'
+    dir: 'dwm-preparation-job'
+
+  # Push the container image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}'
+
+  # Deploy or update the Cloud Run job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Check if job exists
+        if gcloud run jobs describe ${_JOB_NAME} --region=${_REGION} --format='value(name)' 2>/dev/null; then
+          echo "Updating existing job ${_JOB_NAME}..."
+          gcloud run jobs update ${_JOB_NAME} \
+            --region=${_REGION} \
+            --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA} \
+            --memory=${_MEMORY} \
+            --cpu=${_CPU} \
+            --task-timeout=${_TIMEOUT} \
+            --max-retries=${_MAX_RETRIES} \
+            --execute-now=false
+        else
+          echo "Creating new job ${_JOB_NAME}..."
+          gcloud run jobs create ${_JOB_NAME} \
+            --region=${_REGION} \
+            --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA} \
+            --memory=${_MEMORY} \
+            --cpu=${_CPU} \
+            --task-timeout=${_TIMEOUT} \
+            --max-retries=${_MAX_RETRIES} \
+            --execute-now=false
+        fi
+
+  # Deploy the workflow
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Deploying dwm-preparation-pipeline workflow..."
+        gcloud workflows deploy dwm-preparation-pipeline \
+          --location=${_REGION} \
+          --source=workflows/dwm-preparation-pipeline.yaml \
+          --description="DWM conditioning bundle preparation pipeline (triggered by .regen3d_complete)"
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
