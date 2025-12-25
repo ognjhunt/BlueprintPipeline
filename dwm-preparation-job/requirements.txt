@@ -1,0 +1,21 @@
+# Core dependencies
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# GCS access
+google-cloud-storage>=2.10.0
+
+# Video encoding (optional, uses ffmpeg CLI if not installed)
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9
+
+# Mesh handling (optional)
+trimesh>=4.0.0
+
+# Rendering (optional - falls back to mock renderer if not available)
+# pyrender>=0.1.45  # Uncomment for better rendering quality
+
+# MANO hand model (optional - falls back to simple hand mesh)
+# See MANO_SETUP.md for installation instructions
+# smplx>=0.1.28
+# torch>=2.0.0
