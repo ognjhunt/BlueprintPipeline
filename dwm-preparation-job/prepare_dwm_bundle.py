@@ -656,6 +656,129 @@ def run_dwm_preparation(
     )
 
 
+# =============================================================================
+# Episode-Based DWM Generation (Enhanced Pipeline)
+# =============================================================================
+
+
+def prepare_dwm_episodes(
+    manifest_path: Path,
+    output_dir: Path = Path("./dwm_output"),
+    scene_usd_path: Optional[Path] = None,
+    max_episodes: int = 10,
+    max_clips_per_episode: int = 10,
+    prioritize_by: str = "dwm_relevance",
+    use_llm_analysis: bool = True,
+    use_grounded_search: bool = True,
+    resolution: tuple[int, int] = (720, 480),
+    frames_per_clip: int = 49,
+    fps: float = 24.0,
+    render_videos: bool = False,
+    verbose: bool = True,
+):
+    """
+    Generate episode-based DWM bundles with scene analysis and task planning.
+
+    This is the enhanced pipeline that uses:
+    1. Scene Analyzer - Extract semantic meaning from manifest using Gemini
+    2. Task Planner - Generate episode action sequences
+    3. Episode Bundler - Chain clips into full manipulation tasks
+
+    Args:
+        manifest_path: Path to scene_manifest.json
+        output_dir: Output directory for bundles
+        scene_usd_path: Optional path to scene USD for rendering
+        max_episodes: Maximum episodes to generate
+        max_clips_per_episode: Maximum clips per episode
+        prioritize_by: How to prioritize tasks ("dwm_relevance", "difficulty", "variety")
+        use_llm_analysis: Use Gemini for scene analysis
+        use_grounded_search: Enable Google Search grounding for analysis
+        resolution: Video resolution (default: 720x480)
+        frames_per_clip: Frames per DWM clip (default: 49)
+        fps: Frames per second (default: 24.0)
+        render_videos: Whether to render videos (requires Isaac Sim)
+        verbose: Print progress
+
+    Returns:
+        EpisodeBundlerOutput with all generated episodes
+
+    Example:
+        output = prepare_dwm_episodes(
+            manifest_path="./assets/scene_manifest.json",
+            output_dir="./dwm_episodes",
+            max_episodes=5,
+        )
+
+        for episode in output.episodes:
+            print(f"Episode: {episode.task_name}")
+            for clip in episode.clips:
+                print(f"  Clip {clip.clip_index}: {clip.text_prompt}")
+    """
+    from episode_bundler import EpisodeBundler
+
+    bundler = EpisodeBundler(
+        output_dir=Path(output_dir),
+        frames_per_clip=frames_per_clip,
+        fps=fps,
+        resolution=resolution,
+        generate_trajectories=True,
+        render_videos=render_videos,
+        verbose=verbose,
+    )
+
+    return bundler.bundle_from_manifest(
+        manifest_path=Path(manifest_path),
+        scene_usd_path=Path(scene_usd_path) if scene_usd_path else None,
+        max_episodes=max_episodes,
+        max_clips_per_episode=max_clips_per_episode,
+    )
+
+
+def run_dwm_episode_preparation(
+    scene_dir: Path,
+    output_dir: Optional[Path] = None,
+    max_episodes: int = 10,
+    verbose: bool = True,
+):
+    """
+    Run episode-based DWM preparation on a scene directory.
+
+    This is the enhanced version that generates meaningful task episodes
+    based on scene analysis.
+
+    Expects standard BlueprintPipeline scene structure:
+        scene_dir/
+        ├── assets/
+        │   └── scene_manifest.json
+        └── usd/
+            └── scene.usda
+
+    Args:
+        scene_dir: Path to scene directory
+        output_dir: Output directory (default: scene_dir/dwm_episodes)
+        max_episodes: Maximum episodes to generate
+        verbose: Print progress
+
+    Returns:
+        EpisodeBundlerOutput with results
+    """
+    scene_dir = Path(scene_dir)
+
+    manifest_path = scene_dir / "assets" / "scene_manifest.json"
+    scene_usd_path = scene_dir / "usd" / "scene.usda"
+
+    if output_dir is None:
+        output_dir = scene_dir / "dwm_episodes"
+
+    return prepare_dwm_episodes(
+        manifest_path=manifest_path,
+        scene_usd_path=scene_usd_path,
+        output_dir=output_dir,
+        max_episodes=max_episodes,
+        verbose=verbose,
+    )
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -663,20 +786,29 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Generate from manifest
+    # Generate from manifest (legacy mode)
     python prepare_dwm_bundle.py \\
         --manifest-path ./assets/scene_manifest.json \\
         --output-dir ./dwm_output
 
-    # Generate from scene directory
+    # Generate from scene directory (legacy mode)
     python prepare_dwm_bundle.py \\
         --scene-dir ./scenes/kitchen_001 \\
         --num-trajectories 10
 
-    # Generate with specific actions
+    # ENHANCED: Generate episode-based bundles with scene analysis
+    python prepare_dwm_bundle.py \\
+        --scene-dir ./scenes/kitchen_001 \\
+        --episodes \\
+        --max-episodes 5
+
+    # ENHANCED: Episode-based with custom settings
     python prepare_dwm_bundle.py \\
         --manifest-path ./manifest.json \\
-        --actions grasp pull push
+        --episodes \\
+        --max-episodes 10 \\
+        --max-clips 8 \\
+        --prioritize difficulty
 """,
     )
 
@@ -701,19 +833,48 @@ Examples:
         default=Path("./dwm_output"),
         help="Output directory for bundles",
     )
+
+    # Episode-based mode (enhanced)
+    parser.add_argument(
+        "--episodes",
+        action="store_true",
+        help="Use episode-based generation with scene analysis (enhanced mode)",
+    )
+    parser.add_argument(
+        "--max-episodes",
+        type=int,
+        default=10,
+        help="Maximum episodes to generate (episode mode only)",
+    )
+    parser.add_argument(
+        "--max-clips",
+        type=int,
+        default=10,
+        help="Maximum clips per episode (episode mode only)",
+    )
+    parser.add_argument(
+        "--prioritize",
+        choices=["dwm_relevance", "difficulty", "variety"],
+        default="dwm_relevance",
+        help="Task prioritization strategy (episode mode only)",
+    )
+
+    # Legacy mode options
     parser.add_argument(
         "--num-trajectories",
         type=int,
         default=5,
-        help="Number of trajectories to generate",
+        help="Number of trajectories to generate (legacy mode)",
     )
     parser.add_argument(
         "--actions",
         nargs="+",
         choices=["reach", "grasp", "pull", "push", "rotate", "lift", "place"],
         default=["grasp", "pull", "push"],
-        help="Hand action types to generate",
+        help="Hand action types to generate (legacy mode)",
     )
+
+    # Common options
     parser.add_argument(
         "--resolution",
         type=int,
@@ -726,7 +887,7 @@ Examples:
         "--num-frames",
         type=int,
         default=49,
-        help="Number of frames per video",
+        help="Number of frames per video/clip",
     )
     parser.add_argument(
         "--fps",
@@ -751,13 +912,42 @@ Examples:
     if args.scene_dir:
         manifest_path = args.scene_dir / "assets" / "scene_manifest.json"
         scene_usd_path = args.scene_usd_path or (args.scene_dir / "usd" / "scene.usda")
-        output_dir = args.output_dir or (args.scene_dir / "dwm")
+        if args.episodes:
+            output_dir = args.output_dir if args.output_dir != Path("./dwm_output") else (args.scene_dir / "dwm_episodes")
+        else:
+            output_dir = args.output_dir if args.output_dir != Path("./dwm_output") else (args.scene_dir / "dwm")
     elif args.manifest_path:
         manifest_path = args.manifest_path
         scene_usd_path = args.scene_usd_path
         output_dir = args.output_dir
     else:
         parser.error("Either --manifest-path or --scene-dir is required")
+
+    # Use episode-based mode if requested
+    if args.episodes:
+        print("[DWM] Using EPISODE-BASED mode with scene analysis")
+        print(f"[DWM] Max episodes: {args.max_episodes}, Max clips/episode: {args.max_clips}")
+        print(f"[DWM] Prioritize by: {args.prioritize}")
+
+        output = prepare_dwm_episodes(
+            manifest_path=manifest_path,
+            output_dir=output_dir,
+            scene_usd_path=scene_usd_path,
+            max_episodes=args.max_episodes,
+            max_clips_per_episode=args.max_clips,
+            prioritize_by=args.prioritize,
+            resolution=tuple(args.resolution),
+            frames_per_clip=args.num_frames,
+            fps=args.fps,
+            render_videos=not args.no_render,
+            verbose=not args.quiet,
+        )
+
+        # Exit with appropriate code
+        sys.exit(0 if output.success else 1)
+
+    # Legacy mode: trajectory-based generation
+    print("[DWM] Using LEGACY mode (trajectory-based)")
 
     # Map action names to enums
     action_map = {
