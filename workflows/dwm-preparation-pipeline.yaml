@@ -1,0 +1,227 @@
+# dwm-preparation-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that:
+#   1. Triggers on completion marker file from regen3d-job (.regen3d_complete)
+#   2. Runs dwm-preparation-job to generate DWM conditioning bundles
+#   3. Writes .dwm_complete marker when finished
+#
+# Trigger: Cloud Storage object finalized event for .regen3d_complete
+#
+# DWM (Dexterous World Model) generates egocentric interaction videos from:
+#   - Static scene video (rendered from 3D scene)
+#   - Hand mesh video (rendered MANO hand meshes)
+#   - Text prompt (semantic action description)
+#
+# Reference: https://snuvclab.github.io/dwm/
+#            arXiv:2512.17907
+#
+# EventArc Setup:
+#   gcloud eventarc triggers create dwm-preparation-trigger \
+#     --location=us-central1 \
+#     --service-account="${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+#     --destination-workflow=dwm-preparation-pipeline \
+#     --destination-workflow-location=us-central1 \
+#     --event-filters="type=google.cloud.storage.object.v1.finalized" \
+#     --event-filters="bucket=${BUCKET}" \
+#     --event-data-content-type="application/json"
+
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: "us-central1"
+        next: filter_completion_markers
+
+    # Filter for .regen3d_complete marker files
+    # This runs in parallel with usd-assembly-pipeline on the same trigger
+    - filter_completion_markers:
+        switch:
+          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.regen3d_complete$")}'
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
+          - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
+          - dwmPrefix: '${"scenes/" + sceneId + "/dwm"}'
+          - dwmJobName: "dwm-preparation-job"
+          - dwmCompleteMarker: '${"scenes/" + sceneId + "/dwm/.dwm_complete"}'
+        next: check_already_processed
+
+    # Check if DWM bundles already generated (idempotence)
+    - check_already_processed:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${dwmCompleteMarker}
+          result: existingMarker
+        except:
+          as: e
+          steps:
+            - check_not_found:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: log_start
+                next: raise_check_error
+        next: skip_already_processed
+
+    - skip_already_processed:
+        call: sys.log
+        args:
+          text: '${"DWM bundles already generated for scene " + sceneId + " - skipping"}'
+          severity: "INFO"
+        next: skip
+
+    - raise_check_error:
+        raise: '${e}'
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"DWM preparation triggered for scene " + sceneId}'
+          severity: "INFO"
+        next: run_dwm_job
+
+    # Run the DWM preparation job
+    - run_dwm_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dwmJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: USD_PREFIX
+                      value: ${usdPrefix}
+                    - name: DWM_PREFIX
+                      value: ${dwmPrefix}
+                    - name: NUM_TRAJECTORIES
+                      value: "5"
+                    - name: RESOLUTION_WIDTH
+                      value: "720"
+                    - name: RESOLUTION_HEIGHT
+                      value: "480"
+                    - name: NUM_FRAMES
+                      value: "49"
+                    - name: FPS
+                      value: "24"
+        result: dwmExec
+        next: set_dwm_execution_name
+
+    - set_dwm_execution_name:
+        # jobs.run returns a long-running operation; prefer the execution name from metadata when present
+        assign:
+          - dwmExecutionName: '${if(dwmExec.metadata != null and dwmExec.metadata.name != null, dwmExec.metadata.name, dwmExec.name)}'
+        next: wait_for_dwm
+
+    # Poll for job completion
+    - wait_for_dwm:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${dwmExecutionName}
+        result: dwmStatus
+        next: check_dwm_status
+
+    - check_dwm_status:
+        assign:
+          - dwmState: '${if(dwmStatus.state != null, dwmStatus.state, if(dwmStatus.status != null, dwmStatus.status.state, null))}'
+          - dwmFailedCount: '${if(dwmStatus.failedCount != null, dwmStatus.failedCount, if(dwmStatus.status != null, dwmStatus.status.failedCount, null))}'
+          - dwmSucceededCount: '${if(dwmStatus.succeededCount != null, dwmStatus.succeededCount, if(dwmStatus.status != null, dwmStatus.status.succeededCount, null))}'
+        next: dwm_status_switch
+
+    - dwm_status_switch:
+        switch:
+          - condition: '${dwmState == "FAILED" or (dwmFailedCount != null and dwmFailedCount > 0)}'
+            next: dwm_failed
+          - condition: '${dwmState == "SUCCEEDED" or (dwmSucceededCount != null and dwmSucceededCount > 0)}'
+            next: log_dwm_complete
+        next: wait_dwm_poll
+
+    - wait_dwm_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_dwm
+
+    - log_dwm_complete:
+        call: sys.log
+        args:
+          text: '${"DWM preparation completed for scene " + sceneId}'
+          severity: "INFO"
+        next: write_completion_marker
+
+    # Write completion marker for downstream processes
+    - write_completion_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${dwmCompleteMarker}
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        result: markerResult
+        next: done
+
+    - dwm_failed:
+        # DWM failure is non-fatal - scene is still usable for other purposes
+        call: sys.log
+        args:
+          text: '${"WARNING: DWM preparation failed for scene " + sceneId + " - scene still usable for simulation"}'
+          severity: "WARNING"
+        next: write_failure_marker
+
+    - write_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: '${"scenes/" + sceneId + "/dwm/.dwm_failed"}'
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        result: failMarkerResult
+        next: done_with_failure
+
+    # =========================================================================
+    # Completion
+    # =========================================================================
+
+    - done:
+        return:
+          status: "SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"DWM preparation completed for scene " + sceneId}'
+          dwm_execution: ${dwmExec.name}
+          outputs:
+            dwm_bundles: '${"scenes/" + sceneId + "/dwm/"}'
+            completion_marker: ${dwmCompleteMarker}
+
+    - done_with_failure:
+        return:
+          status: "FAILED"
+          scene_id: ${sceneId}
+          message: '${"DWM preparation failed for scene " + sceneId}'
+          dwm_execution: ${dwmExec.name}
+
+    - skip:
+        return:
+          status: "SKIPPED"
+          message: '${"Not a completion marker file: " + object}'
