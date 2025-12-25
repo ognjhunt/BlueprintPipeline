@@ -353,3 +353,234 @@ class DWMPipelineOutput:
     def success(self) -> bool:
         """Check if pipeline completed successfully."""
         return len(self.bundles) > 0 and len(self.errors) == 0
+
+
+# =============================================================================
+# Episode-Based Models (Enhanced DWM Generation)
+# =============================================================================
+
+
+class EpisodePhase(str, Enum):
+    """Phases within a manipulation episode."""
+    APPROACH = "approach"
+    REACH = "reach"
+    GRASP = "grasp"
+    LIFT = "lift"
+    TRANSPORT = "transport"
+    POSITION = "position"
+    PLACE = "place"
+    RELEASE = "release"
+    RETRACT = "retract"
+    ARTICULATE = "articulate"  # For opening/closing
+    IDLE = "idle"
+
+
+@dataclass
+class EpisodeClipConfig:
+    """Configuration for a single clip within an episode."""
+
+    # Clip identifier
+    clip_id: str
+    clip_index: int
+
+    # Frame range within episode
+    start_frame: int
+    end_frame: int
+
+    # Primary action in this clip
+    primary_phase: EpisodePhase
+    primary_action: HandActionType
+    target_object_id: Optional[str] = None
+
+    # Text prompt for DWM
+    text_prompt: str = ""
+
+    # Trajectory hints
+    camera_trajectory_type: TrajectoryType = TrajectoryType.REACH_MANIPULATE
+    approach_speed: float = 1.0  # Relative speed (1.0 = normal)
+
+    @property
+    def frame_count(self) -> int:
+        return self.end_frame - self.start_frame
+
+
+@dataclass
+class ManipulationEpisodeConfig:
+    """Configuration for a complete manipulation episode."""
+
+    # Episode identifier
+    episode_id: str
+    task_id: str
+    task_name: str
+    description: str
+
+    # Scene context
+    scene_id: str
+    environment_type: str = "generic"
+
+    # Clips in this episode (each is 49 frames)
+    clips: list[EpisodeClipConfig] = field(default_factory=list)
+
+    # Objects involved
+    source_objects: list[str] = field(default_factory=list)
+    target_objects: list[str] = field(default_factory=list)
+    manipulated_object: Optional[str] = None
+
+    # Timing
+    total_frames: int = 0
+    total_duration_seconds: float = 0.0
+
+    # Metadata
+    difficulty: str = "medium"
+    priority: int = 1
+    requires_articulation: bool = False
+
+    @property
+    def clip_count(self) -> int:
+        return len(self.clips)
+
+    def get_all_text_prompts(self) -> list[str]:
+        """Get text prompts for all clips in order."""
+        return [clip.text_prompt for clip in self.clips]
+
+
+@dataclass
+class DWMEpisodeBundle:
+    """
+    Complete DWM bundle for an episode (multiple clips).
+
+    This is the enhanced output format that organizes clips by task/episode.
+    """
+
+    # Episode metadata
+    episode_id: str
+    task_id: str
+    task_name: str
+    description: str
+
+    # Scene context
+    scene_id: str
+    environment_type: str = "generic"
+
+    # Clip bundles (each is a complete DWMConditioningBundle)
+    clip_bundles: list[DWMConditioningBundle] = field(default_factory=list)
+
+    # Episode-level paths
+    output_dir: Optional[Path] = None
+    episode_manifest_path: Optional[Path] = None
+
+    # Timing
+    total_frames: int = 0
+    total_duration_seconds: float = 0.0
+    fps: float = 24.0
+
+    # Objects
+    source_objects: list[str] = field(default_factory=list)
+    target_objects: list[str] = field(default_factory=list)
+
+    # Generation metadata
+    generated_at: Optional[str] = None
+    generation_time_seconds: float = 0.0
+
+    @property
+    def clip_count(self) -> int:
+        return len(self.clip_bundles)
+
+    def is_complete(self) -> bool:
+        """Check if all clips in episode are complete."""
+        return all(clip.is_complete() for clip in self.clip_bundles)
+
+    def get_all_prompts(self) -> list[str]:
+        """Get all text prompts in order."""
+        return [clip.text_prompt for clip in self.clip_bundles]
+
+
+@dataclass
+class DWMEpisodePipelineConfig:
+    """Configuration for episode-based DWM generation."""
+
+    # Scene paths
+    scene_manifest_path: Path
+    scene_usd_path: Optional[Path] = None
+
+    # Output configuration
+    output_dir: Path = Path("./dwm_output")
+
+    # Video parameters (DWM defaults)
+    resolution: tuple[int, int] = (720, 480)
+    frames_per_clip: int = 49
+    fps: float = 24.0
+
+    # Episode generation parameters
+    max_episodes: int = 10
+    max_clips_per_episode: int = 10
+    prioritize_by: str = "dwm_relevance"  # "dwm_relevance", "difficulty", "variety"
+
+    # Scene analysis options
+    use_llm_analysis: bool = True
+    use_grounded_search: bool = True
+
+    # Trajectory generation
+    generate_camera_trajectories: bool = True
+    generate_hand_trajectories: bool = True
+
+    # Rendering options
+    render_videos: bool = False  # Set True if renderer available
+    renderer: str = "isaac_sim"  # "isaac_sim", "pyrender", "blender"
+
+    # Hand model
+    hand_model: str = "mano"  # "mano", "geometric"
+
+    # Quality settings
+    render_quality: str = "medium"  # "low", "medium", "high"
+
+    # Optional filters
+    target_policies: Optional[list[str]] = None  # Only generate for these policies
+    target_object_ids: Optional[list[str]] = None  # Only target these objects
+
+
+@dataclass
+class DWMEpisodePipelineOutput:
+    """Output from the episode-based DWM pipeline."""
+
+    # Scene ID
+    scene_id: str
+    environment_type: str
+
+    # Generated episode bundles
+    episodes: list[DWMEpisodeBundle] = field(default_factory=list)
+
+    # Statistics
+    total_episodes: int = 0
+    total_clips: int = 0
+    total_frames: int = 0
+    total_duration_seconds: float = 0.0
+
+    # Output paths
+    output_dir: Optional[Path] = None
+    master_manifest_path: Optional[Path] = None
+
+    # Scene analysis info
+    scene_summary: str = ""
+    recommended_policies: list[str] = field(default_factory=list)
+    key_objects: list[str] = field(default_factory=list)
+
+    # Errors
+    errors: list[str] = field(default_factory=list)
+
+    # Timing
+    generation_time_seconds: float = 0.0
+    analysis_time_seconds: float = 0.0
+    planning_time_seconds: float = 0.0
+
+    @property
+    def success(self) -> bool:
+        """Check if pipeline completed successfully."""
+        return len(self.episodes) > 0 and len(self.errors) == 0
+
+    def get_episode_by_task(self, task_id: str) -> Optional[DWMEpisodeBundle]:
+        """Get episode bundle by task ID."""
+        for episode in self.episodes:
+            if episode.task_id == task_id:
+                return episode
+        return None
