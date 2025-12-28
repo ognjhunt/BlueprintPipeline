@@ -277,7 +277,7 @@ class GenerationHistoryEntry:
     prompt_hash: str
     prompt_summary: str  # First 200 chars
     variation_tags: List[str]
-    generated_at: str  # ISO format
+    generated_at: datetime.datetime  # UTC timestamp
     success: bool
 
 
@@ -315,13 +315,12 @@ class GenerationHistoryTracker:
             return []
 
         try:
-            cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days)
-            cutoff_str = cutoff.isoformat() + "Z"
+            cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
 
             query = (
                 self.db.collection(FIRESTORE_COLLECTION_HISTORY)
                 .where("archetype", "==", archetype.value)
-                .where("generated_at", ">=", cutoff_str)
+                .where("generated_at", ">=", cutoff)
                 .order_by("generated_at", direction=firestore.Query.DESCENDING)
                 .limit(limit)
             )
@@ -363,7 +362,10 @@ class GenerationHistoryTracker:
 
         try:
             doc_ref = self.db.collection(FIRESTORE_COLLECTION_HISTORY).document(entry.scene_id)
-            doc_ref.set(asdict(entry))
+            data = asdict(entry)
+            # Always store a Firestore timestamp to avoid string ordering issues
+            data["generated_at"] = firestore.SERVER_TIMESTAMP if firestore is not None else entry.generated_at
+            doc_ref.set(data)
             return True
 
         except Exception as e:
@@ -376,15 +378,14 @@ class GenerationHistoryTracker:
             return {}
 
         try:
-            cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days)
-            cutoff_str = cutoff.isoformat() + "Z"
+            cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
 
             counts = {}
             for archetype in EnvironmentArchetype:
                 query = (
                     self.db.collection(FIRESTORE_COLLECTION_HISTORY)
                     .where("archetype", "==", archetype.value)
-                    .where("generated_at", ">=", cutoff_str)
+                    .where("generated_at", ">=", cutoff)
                     .where("success", "==", True)
                 )
                 # Count documents
@@ -975,7 +976,7 @@ def generate_scene_batch(
                 prompt_hash=prompt_hash,
                 prompt_summary=prompt[:200],
                 variation_tags=variation_tags,
-                generated_at=datetime.datetime.utcnow().isoformat() + "Z",
+                generated_at=datetime.datetime.now(datetime.timezone.utc),
                 success=True
             )
             history_tracker.record_generation(history_entry)
