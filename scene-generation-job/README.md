@@ -187,7 +187,7 @@ scene_generation_history/
 │   ├── prompt_hash: string
 │   ├── prompt_summary: string (first 200 chars)
 │   ├── variation_tags: string[]
-│   ├── generated_at: timestamp
+│   ├── generated_at: timestamp (Firestore `Timestamp`)
 │   └── success: boolean
 ```
 
@@ -208,6 +208,11 @@ scene_generation_history/
 3. Gemini API key
 
 ### Deploy Steps
+
+```bash
+# 0. Apply Firestore indexes (required for history queries)
+gcloud firestore indexes composite create --file=scene-generation-job/firestore.indexes.json
+```
 
 ```bash
 # 1. Build and push container
