@@ -48,6 +48,7 @@ from models import (
     TrajectoryType,
 )
 from trajectory_generator import EgocentricTrajectoryGenerator
+from trajectory_generator.physics_policy_runner import PhysicsPolicyRunner
 from scene_renderer import RenderBackend, RenderConfig, SceneRenderer
 from hand_motion import (
     HandMeshRenderer,
@@ -100,6 +101,7 @@ class DWMJobConfig:
     enable_robot_retargeting: bool = False
     robot_config_name: str = "ur5e_parallel_gripper"
     robot_demo_roots: Optional[list[Path]] = None
+    use_physics_ground_truth: bool = False
 
     def __post_init__(self):
         if self.trajectory_types is None:
@@ -168,6 +170,7 @@ class DWMPreparationJob:
 
         # Initialize packager
         self.packager = DWMBundlePackager(config.output_dir)
+        self.physics_runner = PhysicsPolicyRunner(fps=config.fps)
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -470,11 +473,44 @@ class DWMPreparationJob:
         self.log(f"Rendered {len(outputs)} hand mesh videos")
         return outputs
 
+    def run_physics_rollouts(
+        self,
+        trajectory_pairs: list[tuple[CameraTrajectory, HandTrajectory]],
+    ) -> dict[str, Path]:
+        """
+        Execute optional physics-based rollouts for each trajectory.
+
+        Returns:
+            Dict mapping trajectory_id to physics rollout log path
+        """
+        if not self.config.use_physics_ground_truth:
+            self.log("Skipping physics rollouts (disabled)")
+            return {}
+
+        if not self.config.scene_usd_path or not self.config.scene_usd_path.exists():
+            self.log(
+                "Physics rollouts requested but USD scene is missing",
+                "WARN",
+            )
+            return {}
+
+        self.log("Running physics rollouts with scripted policies...")
+        output_dir = self.config.output_dir / "metadata"
+
+        return self.physics_runner.run_rollouts(
+            scene_usd_path=self.config.scene_usd_path,
+            trajectory_pairs=trajectory_pairs,
+            output_dir=output_dir,
+            num_frames=self.config.num_frames,
+            scene_objects=self.scene_objects,
+        )
+
     def create_bundles(
         self,
         trajectory_pairs: list[tuple[CameraTrajectory, HandTrajectory]],
         scene_renders: dict[str, dict],
         hand_renders: dict[str, dict],
+        physics_rollouts: Optional[dict[str, Path]] = None,
     ) -> list[DWMConditioningBundle]:
         """
         Create DWM conditioning bundles from all components.
@@ -492,6 +528,7 @@ class DWMPreparationJob:
         bundles = []
         for cam_traj, hand_traj in trajectory_pairs:
             traj_id = cam_traj.trajectory_id
+            physics_log_path = (physics_rollouts or {}).get(traj_id)
 
             # Get target object info for prompt
             target_obj_id = cam_traj.target_object_id
@@ -525,6 +562,7 @@ class DWMPreparationJob:
                 static_scene_seg_dir=scene_render.get("seg_dir"),
                 scene_state_path=scene_render.get("scene_state_path"),
                 hand_mesh_frames_dir=hand_render.get("frames_dir"),
+                physics_log_path=physics_log_path,
                 text_prompt=text_prompt,
                 resolution=self.config.resolution,
                 num_frames=self.config.num_frames,
@@ -539,6 +577,11 @@ class DWMPreparationJob:
                         "enabled": self.config.enable_robot_retargeting,
                         "robot_model": self.config.robot_config_name,
                         "demo_roots": [str(p) for p in self.config.robot_demo_roots],
+                    },
+                    "physics_rollout": {
+                        "enabled": self.config.use_physics_ground_truth,
+                        "log_relative_path": "metadata/physics_rollout.jsonl"
+                        if physics_log_path else None,
                     },
                 },
             )
@@ -622,9 +665,21 @@ class DWMPreparationJob:
             errors.append(f"Hand rendering failed: {e}")
             hand_renders = {}
 
+        # Optional: Physics rollouts
+        try:
+            physics_rollouts = self.run_physics_rollouts(trajectory_pairs)
+        except Exception as e:
+            errors.append(f"Physics rollout failed: {e}")
+            physics_rollouts = {}
+
         # Step 7: Create bundles
         try:
-            bundles = self.create_bundles(trajectory_pairs, scene_renders, hand_renders)
+            bundles = self.create_bundles(
+                trajectory_pairs,
+                scene_renders,
+                hand_renders,
+                physics_rollouts,
+            )
         except Exception as e:
             errors.append(f"Bundle creation failed: {e}")
             bundles = []
@@ -675,6 +730,7 @@ def prepare_dwm_bundles(
     num_frames: int = 49,
     fps: float = 24.0,
     verbose: bool = True,
+    use_physics_ground_truth: bool = False,
 ) -> DWMPipelineOutput:
     """
     Convenience function to prepare DWM bundles.
@@ -690,6 +746,7 @@ def prepare_dwm_bundles(
         num_frames: Number of frames per video
         fps: Frames per second
         verbose: Print progress
+        use_physics_ground_truth: Run Isaac Sim/Lab rollouts for aligned physics logs
 
     Returns:
         DWMPipelineOutput with results
@@ -705,6 +762,7 @@ def prepare_dwm_bundles(
         num_frames=num_frames,
         fps=fps,
         verbose=verbose,
+        use_physics_ground_truth=use_physics_ground_truth,
     )
 
     job = DWMPreparationJob(config)
@@ -716,6 +774,7 @@ def run_dwm_preparation(
     output_dir: Optional[Path] = None,
     num_trajectories: int = 5,
     verbose: bool = True,
+    use_physics_ground_truth: bool = False,
 ) -> DWMPipelineOutput:
     """
     Run DWM preparation on a scene directory.
@@ -750,6 +809,7 @@ def run_dwm_preparation(
         output_dir=output_dir,
         num_trajectories=num_trajectories,
         verbose=verbose,
+        use_physics_ground_truth=use_physics_ground_truth,
     )
 
 
@@ -1045,6 +1105,11 @@ Examples:
         help="Disable scene state export",
     )
     parser.add_argument(
+        "--use-physics-ground-truth",
+        action="store_true",
+        help="Run scripted physics rollouts in Isaac Sim/Lab and log per-frame states/actions/contacts",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Reduce output verbosity",
@@ -1127,6 +1192,7 @@ Examples:
         enable_robot_retargeting=args.enable_robot_retargeting,
         robot_config_name=args.robot_config,
         robot_demo_roots=args.robot_demo_root,
+        use_physics_ground_truth=args.use_physics_ground_truth,
     )
 
     # Run job

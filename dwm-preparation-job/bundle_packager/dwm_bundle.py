@@ -70,6 +70,7 @@ class BundleManifest:
     hand_mesh_frames_dir: Optional[str] = None
     static_scene_depth_dir: Optional[str] = None
     static_scene_seg_dir: Optional[str] = None
+    physics_rollout_file: Optional[str] = None
 
     # Source info
     source_manifest: Optional[str] = None
@@ -186,6 +187,8 @@ def create_bundle_manifest(
         manifest.static_scene_seg_dir = "frames/static_scene_seg"
     if bundle.scene_state_path:
         manifest.scene_state_file = "metadata/scene_state.json"
+    if bundle.physics_log_path:
+        manifest.physics_rollout_file = "metadata/physics_rollout.jsonl"
 
     return manifest
 
@@ -301,6 +304,8 @@ class DWMBundlePackager:
         self._write_robot_finetune_manifest(bundle, metadata_dir)
         if bundle.scene_state_path and bundle.scene_state_path.exists():
             shutil.copy2(bundle.scene_state_path, metadata_dir / "scene_state.json")
+        if bundle.physics_log_path and bundle.physics_log_path.exists():
+            shutil.copy2(bundle.physics_log_path, metadata_dir / "physics_rollout.jsonl")
 
         # Create and write manifest
         manifest = create_bundle_manifest(bundle, bundle_dir)
@@ -327,6 +332,7 @@ class DWMBundlePackager:
                 "static_scene_depth_dir": manifest.static_scene_depth_dir,
                 "static_scene_seg_dir": manifest.static_scene_seg_dir,
                 "scene_state_file": manifest.scene_state_file,
+                "physics_rollout_file": manifest.physics_rollout_file,
             },
             indent=2,
         ))
@@ -489,6 +495,8 @@ class DWMBundlePackager:
                         if b.camera_trajectory else None
                     ),
                     "text_prompt": b.text_prompt,
+                    "physics_rollout_file": "metadata/physics_rollout.jsonl"
+                    if b.physics_log_path else None,
                 }
                 for b in packaged_bundles
             ],
@@ -539,6 +547,7 @@ def package_dwm_bundle(
     static_scene_depth_dir: Optional[Path] = None,
     static_scene_seg_dir: Optional[Path] = None,
     scene_state_path: Optional[Path] = None,
+    physics_log_path: Optional[Path] = None,
     target_category: Optional[str] = None,
     target_description: Optional[str] = None,
 ) -> Path:
@@ -583,6 +592,7 @@ def package_dwm_bundle(
         static_scene_depth_dir=static_scene_depth_dir,
         static_scene_seg_dir=static_scene_seg_dir,
         scene_state_path=scene_state_path,
+        physics_log_path=physics_log_path,
         text_prompt=text_prompt,
         resolution=camera_trajectory.resolution,
         num_frames=camera_trajectory.num_frames,
