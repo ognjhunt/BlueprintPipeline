@@ -242,6 +242,15 @@ class HandTrajectory:
     # Optional retargeted robot actions aligned to the hand poses
     robot_actions: list[RobotAction] = field(default_factory=list)
 
+    # Grounding metadata for the manipulation target
+    target_position: Optional[np.ndarray] = None
+    handle_position: Optional[np.ndarray] = None
+    approach_direction: Optional[np.ndarray] = None
+    motion_axis: Optional[np.ndarray] = None
+    joint_limits: Optional[dict[str, float]] = None
+    affordance_template: Optional[str] = None
+    grounding: dict[str, Any] = field(default_factory=dict)
+
     @property
     def num_frames(self) -> int:
         """Number of frames."""
