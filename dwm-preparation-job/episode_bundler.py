@@ -119,6 +119,9 @@ class ClipBundle:
     primary_action: Optional[str] = None
     target_object: Optional[str] = None
     frame_range: Tuple[int, int] = (0, 49)
+    state_init: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    state_end: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    step_goals: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -155,6 +158,8 @@ class EpisodeBundle:
 
     # Output directory
     output_dir: Optional[Path] = None
+    state_init: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    state_end: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @property
     def clip_count(self) -> int:
@@ -317,10 +322,22 @@ class EpisodeBundler:
 
         # Step 2: Plan episodes
         self.log("Step 2: Planning episodes...")
+        plan_episodes: List[ManipulationEpisode] = []
         try:
             plan = self.task_planner.plan_episodes(analysis, max_episodes=max_episodes)
             self.log(f"  Planned {len(plan.episodes)} episodes, "
                      f"{plan.total_clips} clips")
+            plan_episodes, length_errors = self._validate_episode_lengths(plan.episodes)
+            errors.extend(length_errors)
+            if length_errors:
+                self.log(f"  Validation warnings: {len(length_errors)}", "WARNING")
+            if not plan_episodes:
+                return EpisodeBundlerOutput(
+                    scene_id=analysis.scene_id,
+                    environment_type=analysis.environment_type.value,
+                    errors=errors or ["No episodes passed validation"],
+                    generation_time_seconds=time.time() - start_time,
+                )
         except Exception as e:
             errors.append(f"Task planning failed: {e}")
             return EpisodeBundlerOutput(
@@ -347,8 +364,8 @@ class EpisodeBundler:
         self.log("Step 4: Generating episode bundles...")
         episode_bundles = []
 
-        for i, episode in enumerate(plan.episodes):
-            self.log(f"  Episode {i+1}/{len(plan.episodes)}: {episode.task_name}")
+        for i, episode in enumerate(plan_episodes):
+            self.log(f"  Episode {i+1}/{len(plan_episodes)}: {episode.task_name}")
 
             try:
                 bundle = self._create_episode_bundle(
@@ -420,13 +437,19 @@ class EpisodeBundler:
 
         clips_to_process = episode.clips[:max_clips]
         clip_bundles = []
+        prev_cam: Optional[CameraTrajectory] = None
+        prev_hand: Optional[HandTrajectory] = None
 
         for clip in clips_to_process:
             clip_bundle = self._create_clip_bundle(
                 clip=clip,
                 episode=episode,
                 analysis=analysis,
+                previous_camera=prev_cam,
+                previous_hand=prev_hand,
             )
+            prev_cam = clip_bundle.camera_trajectory or prev_cam
+            prev_hand = clip_bundle.hand_trajectory or prev_hand
             clip_bundles.append(clip_bundle)
 
         total_frames = sum(c.frame_range[1] - c.frame_range[0] for c in clip_bundles)
@@ -443,6 +466,8 @@ class EpisodeBundler:
             target_objects=episode.target_objects,
             total_frames=total_frames,
             total_duration_seconds=total_frames / self.fps,
+            state_init=clips_to_process[0].object_states_start if clips_to_process else {},
+            state_end=clips_to_process[-1].object_states_end if clips_to_process else {},
         )
 
     def _create_clip_bundle(
@@ -450,19 +475,23 @@ class EpisodeBundler:
         clip: EpisodeClip,
         episode: ManipulationEpisode,
         analysis: SceneAnalysisResult,
+        previous_camera: Optional[CameraTrajectory] = None,
+        previous_hand: Optional[HandTrajectory] = None,
     ) -> ClipBundle:
         """Create a bundle for a single clip."""
 
         # Generate camera trajectory
         camera_trajectory = None
         if self.generate_trajectories and self.trajectory_generator:
-            camera_trajectory = self._generate_camera_trajectory(clip, episode, analysis)
+            camera_trajectory = self._generate_camera_trajectory(
+                clip, episode, analysis, previous_camera
+            )
 
         # Generate hand trajectory
         hand_trajectory = None
         if self.generate_trajectories and camera_trajectory:
             hand_trajectory = self._generate_hand_trajectory(
-                clip, camera_trajectory, episode, analysis
+                clip, camera_trajectory, episode, analysis, previous_hand
             )
 
         return ClipBundle(
@@ -475,6 +504,9 @@ class EpisodeBundler:
             primary_action=clip.primary_action.value if clip.primary_action else None,
             target_object=clip.primary_target,
             frame_range=(clip.start_frame, clip.end_frame),
+            state_init=clip.object_states_start,
+            state_end=clip.object_states_end,
+            step_goals=clip.step_goals,
         )
 
     def _generate_camera_trajectory(
@@ -482,6 +514,7 @@ class EpisodeBundler:
         clip: EpisodeClip,
         episode: ManipulationEpisode,
         analysis: SceneAnalysisResult,
+        previous_camera: Optional[CameraTrajectory] = None,
     ) -> Optional[CameraTrajectory]:
         """Generate camera trajectory for a clip."""
 
@@ -518,11 +551,63 @@ class EpisodeBundler:
                 trajectory_id=f"{clip.clip_id}_cam",
             )
             trajectory.target_object_id = target_id
+            if previous_camera and previous_camera.poses:
+                trajectory = self._align_camera_trajectory(
+                    trajectory, previous_camera.poses[-1]
+                )
             return trajectory
 
         except Exception as e:
             self.log(f"    Camera trajectory generation failed: {e}", "WARNING")
             return None
+
+    def _align_camera_trajectory(
+        self, trajectory: CameraTrajectory, previous_pose: CameraPose
+    ) -> CameraTrajectory:
+        """Align a generated trajectory to start from previous pose."""
+        if not trajectory.poses:
+            return trajectory
+
+        base_start = trajectory.poses[0]
+        try:
+            transform_offset = previous_pose.transform @ np.linalg.inv(base_start.transform)
+        except Exception:
+            transform_offset = None
+
+        aligned_poses = []
+        prev_idx = previous_pose.frame_idx if previous_pose.frame_idx is not None else self.frames_per_clip - 1
+        prev_ts = previous_pose.timestamp if previous_pose.timestamp is not None else (
+            prev_idx / self.fps
+        )
+        time_offset = prev_ts + (1.0 / self.fps) - base_start.timestamp
+
+        for pose in trajectory.poses:
+            new_transform = pose.transform
+            if transform_offset is not None:
+                new_transform = transform_offset @ pose.transform
+
+            aligned_poses.append(
+                CameraPose(
+                    frame_idx=pose.frame_idx,
+                    transform=new_transform,
+                    timestamp=pose.timestamp + time_offset,
+                    focal_length=pose.focal_length,
+                )
+            )
+
+        return CameraTrajectory(
+            trajectory_id=trajectory.trajectory_id,
+            trajectory_type=trajectory.trajectory_type,
+            poses=aligned_poses,
+            fps=trajectory.fps,
+            focal_length=trajectory.focal_length,
+            sensor_width=trajectory.sensor_width,
+            sensor_height=trajectory.sensor_height,
+            resolution=trajectory.resolution,
+            target_object_id=trajectory.target_object_id,
+            action_type=trajectory.action_type,
+            description=trajectory.description,
+        )
 
     def _generate_hand_trajectory(
         self,
@@ -530,6 +615,7 @@ class EpisodeBundler:
         camera_trajectory: CameraTrajectory,
         episode: ManipulationEpisode,
         analysis: SceneAnalysisResult,
+        previous_hand: Optional[HandTrajectory] = None,
     ) -> Optional[HandTrajectory]:
         """Generate hand trajectory aligned with camera trajectory."""
 
@@ -559,6 +645,11 @@ class EpisodeBundler:
             hand_trajectory.camera_trajectory_id = camera_trajectory.trajectory_id
             hand_trajectory.target_object_id = target_id
 
+            if previous_hand and previous_hand.poses:
+                hand_trajectory = self._align_hand_trajectory(
+                    hand_trajectory, previous_hand.poses[-1]
+                )
+
             if self.hand_retargeter:
                 hand_trajectory.robot_actions = self.hand_retargeter.retarget(
                     hand_trajectory, camera_traj=camera_trajectory
@@ -569,6 +660,59 @@ class EpisodeBundler:
         except Exception as e:
             self.log(f"    Hand trajectory generation failed: {e}", "WARNING")
             return None
+
+    def _align_hand_trajectory(
+        self, trajectory: HandTrajectory, previous_pose: HandPose
+    ) -> HandTrajectory:
+        """Offset hand trajectory so it continues smoothly from previous pose."""
+        if not trajectory.poses:
+            return trajectory
+
+        base_start = trajectory.poses[0]
+        translation_offset = previous_pose.position - base_start.position
+
+        # rotation alignment
+        try:
+            rotation_offset = previous_pose.rotation @ np.linalg.inv(base_start.rotation)
+        except Exception:
+            rotation_offset = None
+
+        prev_idx = previous_pose.frame_idx if previous_pose.frame_idx is not None else self.frames_per_clip - 1
+        prev_ts = previous_pose.timestamp if previous_pose.timestamp is not None else (
+            prev_idx / self.fps
+        )
+        time_offset = prev_ts + (1.0 / self.fps) - base_start.timestamp
+
+        aligned_poses: List[HandPose] = []
+        for pose in trajectory.poses:
+            new_position = pose.position + translation_offset
+            new_rotation = pose.rotation
+            if rotation_offset is not None:
+                new_rotation = rotation_offset @ pose.rotation
+
+            aligned_pose = HandPose(
+                frame_idx=pose.frame_idx,
+                hand_side=pose.hand_side,
+                position=new_position,
+                rotation=new_rotation,
+                pose_params=pose.pose_params,
+                shape_params=pose.shape_params,
+                joint_positions=pose.joint_positions,
+                timestamp=pose.timestamp + time_offset,
+                contact_fingertips=pose.contact_fingertips,
+            )
+            aligned_poses.append(aligned_pose)
+
+        return HandTrajectory(
+            trajectory_id=trajectory.trajectory_id,
+            action_type=trajectory.action_type,
+            poses=aligned_poses,
+            camera_trajectory_id=trajectory.camera_trajectory_id,
+            target_object_id=trajectory.target_object_id,
+            description=trajectory.description,
+            fps=trajectory.fps,
+            robot_actions=trajectory.robot_actions,
+        )
 
     def _write_episode_bundle(self, bundle: EpisodeBundle) -> None:
         """Write an episode bundle to disk."""
@@ -590,6 +734,8 @@ class EpisodeBundler:
             "total_duration_seconds": bundle.total_duration_seconds,
             "source_objects": bundle.source_objects,
             "target_objects": bundle.target_objects,
+            "state_init": bundle.state_init,
+            "state_end": bundle.state_end,
             "clips": [
                 {
                     "clip_id": clip.clip_id,
@@ -599,6 +745,9 @@ class EpisodeBundler:
                     "target_object": clip.target_object,
                     "text_prompt": clip.text_prompt,
                     "is_complete": clip.is_complete,
+                    "state_init": clip.state_init,
+                    "state_end": clip.state_end,
+                    "step_goals": clip.step_goals,
                 }
                 for clip in bundle.clips
             ],
@@ -637,6 +786,9 @@ class EpisodeBundler:
             "has_robot_actions": bool(
                 clip.hand_trajectory and clip.hand_trajectory.robot_actions
             ),
+            "state_init": clip.state_init,
+            "state_end": clip.state_end,
+            "step_goals": clip.step_goals,
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
 
@@ -678,6 +830,8 @@ class EpisodeBundler:
             "fps": self.fps,
             "frame_count": self.frames_per_clip,
             "has_robot_actions": bool(clip.robot_actions_path),
+            "state_init": clip.state_init,
+            "state_end": clip.state_end,
         }
         (metadata_dir / "clip_info.json").write_text(json.dumps(clip_info, indent=2))
 
@@ -783,6 +937,8 @@ class EpisodeBundler:
                     "clip_count": e.clip_count,
                     "total_frames": e.total_frames,
                     "output_dir": str(e.output_dir) if e.output_dir else None,
+                    "state_init": e.state_init,
+                    "state_end": e.state_end,
                 }
                 for e in episodes
             ],
@@ -795,6 +951,30 @@ class EpisodeBundler:
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
         return manifest_path
+
+    def _validate_episode_lengths(
+        self, episodes: List[ManipulationEpisode]
+    ) -> Tuple[List[ManipulationEpisode], List[str]]:
+        """Validate clip counts against requested sequence lengths."""
+        valid: List[ManipulationEpisode] = []
+        errors: List[str] = []
+
+        for episode in episodes:
+            expected = None
+            if episode.source_template:
+                expected = episode.source_template.dwm_clip_count
+
+            if expected and episode.clip_count != expected:
+                msg = (
+                    f"Episode {episode.task_id} expected {expected} clips "
+                    f"but planned {episode.clip_count}"
+                )
+                errors.append(msg)
+                continue
+
+            valid.append(episode)
+
+        return valid, errors
 
 
 # =============================================================================
@@ -826,8 +1006,10 @@ def bundle_from_analysis(
     plan = bundler.task_planner.plan_episodes(analysis, max_episodes=max_episodes)
 
     # Create bundles
+    valid_episodes, _ = bundler._validate_episode_lengths(plan.episodes)
+
     episode_bundles = []
-    for episode in plan.episodes:
+    for episode in valid_episodes:
         try:
             bundle = bundler._create_episode_bundle(episode, analysis)
             episode_bundles.append(bundle)
