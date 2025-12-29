@@ -12,6 +12,7 @@ from .egocentric_trajectories import (
     generate_reach_manipulate_trajectory,
     generate_walkthrough_trajectory,
 )
+from .physics_policy_runner import PhysicsPolicyRunner
 
 __all__ = [
     "EgocentricTrajectoryGenerator",
@@ -19,4 +20,5 @@ __all__ = [
     "generate_orbit_trajectory",
     "generate_reach_manipulate_trajectory",
     "generate_walkthrough_trajectory",
+    "PhysicsPolicyRunner",
 ]
