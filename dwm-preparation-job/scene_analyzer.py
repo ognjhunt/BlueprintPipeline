@@ -172,6 +172,7 @@ class SceneAnalysisResult:
     # Metadata
     analysis_confidence: float = 0.0
     llm_sources: List[Dict[str, str]] = field(default_factory=list)
+    object_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def get_objects_by_affordance(self, affordance: ObjectAffordance) -> List[ObjectSemantics]:
         """Get objects that support a specific affordance."""
@@ -253,6 +254,7 @@ class SceneAnalyzer:
         # Load manifest
         manifest = json.loads(manifest_path.read_text())
         scene_id = manifest.get("scene_id", "unknown")
+        object_states = self._extract_object_states(manifest)
 
         # Load policy configs if available
         policy_configs = None
@@ -289,7 +291,7 @@ class SceneAnalyzer:
 
         # Parse LLM response into result
         result = self._parse_analysis_response(
-            analysis_data, manifest, scene_id, env_type, sources
+            analysis_data, manifest, scene_id, env_type, sources, object_states
         )
 
         self.log(f"Analysis complete: {len(result.object_semantics)} objects, "
@@ -496,7 +498,8 @@ Return ONLY the JSON, no additional text or explanation.
         manifest: dict,
         scene_id: str,
         env_type: EnvironmentType,
-        sources: List[Dict[str, str]]
+        sources: List[Dict[str, str]],
+        object_states: Dict[str, Dict[str, Any]],
     ) -> SceneAnalysisResult:
         """Parse LLM response into SceneAnalysisResult."""
 
@@ -582,6 +585,7 @@ Return ONLY the JSON, no additional text or explanation.
             recommended_policies=data.get("recommended_policies", []),
             analysis_confidence=data.get("analysis_confidence", 0.0),
             llm_sources=sources,
+            object_states=object_states,
         )
 
     def _basic_analysis(
@@ -632,7 +636,36 @@ Return ONLY the JSON, no additional text or explanation.
             object_semantics=object_semantics,
             scene_summary="Basic analysis (LLM unavailable)",
             analysis_confidence=0.3,
+            object_states=self._extract_object_states(manifest),
         )
+
+    def _extract_object_states(self, manifest: dict) -> Dict[str, Dict[str, Any]]:
+        """Extract static object poses and articulation hints from manifest."""
+        states: Dict[str, Dict[str, Any]] = {}
+
+        for obj in manifest.get("objects", []):
+            obj_id = obj.get("id") or obj.get("object_id")
+            if not obj_id:
+                continue
+
+            transform = obj.get("transform", {})
+            pos = transform.get("position", {})
+            rot = transform.get("rotation", {})
+
+            position = [pos.get("x", 0.0), pos.get("y", 0.0), pos.get("z", 0.0)]
+            rotation = rot if rot else None
+
+            state: Dict[str, Any] = {"position": position}
+            if rotation:
+                state["rotation"] = rotation
+
+            articulation = obj.get("articulation_state") or obj.get("articulation")
+            if articulation is not None:
+                state["articulation"] = articulation
+
+            states[obj_id] = state
+
+        return states
 
 
 # =============================================================================
