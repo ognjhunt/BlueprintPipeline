@@ -60,6 +60,8 @@ main:
           - dwmPrefix: '${"scenes/" + sceneId + "/dwm"}'
           - dwmJobName: "dwm-preparation-job"
           - dwmCompleteMarker: '${"scenes/" + sceneId + "/dwm/.dwm_complete"}'
+          - dwmInferenceJobName: "dwm-inference-job"
+          - dwmInferenceCompleteMarker: '${"scenes/" + sceneId + "/dwm/.dwm_inference_complete"}'
         next: check_already_processed
 
     # Check if DWM bundles already generated (idempotence)
@@ -180,7 +182,97 @@ main:
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
         result: markerResult
+        next: log_inference_start
+
+    - log_inference_start:
+        call: sys.log
+        args:
+          text: '${"Starting DWM inference for scene " + sceneId}'
+          severity: "INFO"
+        next: run_dwm_inference_job
+
+    # Run the DWM inference job
+    - run_dwm_inference_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dwmInferenceJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: DWM_PREFIX
+                      value: ${dwmPrefix}
+        result: dwmInferenceExec
+        next: set_dwm_inference_execution_name
+
+    - set_dwm_inference_execution_name:
+        assign:
+          - dwmInferenceExecutionName: '${if(dwmInferenceExec.metadata != null and dwmInferenceExec.metadata.name != null, dwmInferenceExec.metadata.name, dwmInferenceExec.name)}'
+        next: wait_for_dwm_inference
+
+    - wait_for_dwm_inference:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${dwmInferenceExecutionName}
+        result: dwmInferenceStatus
+        next: check_dwm_inference_status
+
+    - check_dwm_inference_status:
+        assign:
+          - dwmInferenceState: '${if(dwmInferenceStatus.state != null, dwmInferenceStatus.state, if(dwmInferenceStatus.status != null, dwmInferenceStatus.status.state, null))}'
+          - dwmInferenceFailedCount: '${if(dwmInferenceStatus.failedCount != null, dwmInferenceStatus.failedCount, if(dwmInferenceStatus.status != null, dwmInferenceStatus.status.failedCount, null))}'
+          - dwmInferenceSucceededCount: '${if(dwmInferenceStatus.succeededCount != null, dwmInferenceStatus.succeededCount, if(dwmInferenceStatus.status != null, dwmInferenceStatus.status.succeededCount, null))}'
+        next: dwm_inference_status_switch
+
+    - dwm_inference_status_switch:
+        switch:
+          - condition: '${dwmInferenceState == "FAILED" or (dwmInferenceFailedCount != null and dwmInferenceFailedCount > 0)}'
+            next: dwm_inference_failed
+          - condition: '${dwmInferenceState == "SUCCEEDED" or (dwmInferenceSucceededCount != null and dwmInferenceSucceededCount > 0)}'
+            next: log_dwm_inference_complete
+        next: wait_inference_poll
+
+    - wait_inference_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_dwm_inference
+
+    - log_dwm_inference_complete:
+        call: sys.log
+        args:
+          text: '${"DWM inference completed for scene " + sceneId}'
+          severity: "INFO"
+        next: write_inference_completion_marker
+
+    - write_inference_completion_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${dwmInferenceCompleteMarker}
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
         next: done
+
+    - dwm_inference_failed:
+        call: sys.log
+        args:
+          text: '${"WARNING: DWM inference failed for scene " + sceneId}'
+          severity: "WARNING"
+        next: write_inference_failure_marker
+
+    - write_inference_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: '${"scenes/" + sceneId + "/dwm/.dwm_inference_failed"}'
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        next: done_with_failure
 
     - dwm_failed:
         # DWM failure is non-fatal - scene is still usable for other purposes
@@ -208,11 +300,12 @@ main:
         return:
           status: "SUCCESS"
           scene_id: ${sceneId}
-          message: '${"DWM preparation completed for scene " + sceneId}'
+          message: '${"DWM preparation and inference completed for scene " + sceneId}'
           dwm_execution: ${dwmExec.name}
           outputs:
             dwm_bundles: '${"scenes/" + sceneId + "/dwm/"}'
             completion_marker: ${dwmCompleteMarker}
+            inference_marker: ${dwmInferenceCompleteMarker}
 
     - done_with_failure:
         return:

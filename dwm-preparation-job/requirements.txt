@@ -5,6 +5,9 @@ Pillow>=10.0.0
 # GCS access
 google-cloud-storage>=2.10.0
 
+# HTTP client for DWM inference API
+requests>=2.31.0
+
 # Video encoding (optional, uses ffmpeg CLI if not installed)
 imageio>=2.31.0
 imageio-ffmpeg>=0.4.9
