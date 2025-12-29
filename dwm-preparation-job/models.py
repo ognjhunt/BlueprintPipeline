@@ -179,6 +179,42 @@ class HandPose:
 
 
 @dataclass
+class RobotAction:
+    """Per-frame robot control target derived from hand motion."""
+
+    # Frame index aligned with hand/camera trajectories
+    frame_idx: int
+
+    # 4x4 pose for the wrist/end-effector in the robot base frame
+    wrist_pose: np.ndarray
+
+    # Joint positions for the target robot (ordered per joint_names)
+    joint_positions: list[float] = field(default_factory=list)
+
+    # Optional joint names (helpful for downstream controllers)
+    joint_names: Optional[list[str]] = None
+
+    # Gripper aperture/command (meters for parallel gripper)
+    gripper_aperture: float = 0.0
+
+    # Frames of reference
+    base_frame: str = "world"
+    end_effector_frame: str = "tool0"
+
+    def to_json(self) -> dict:
+        """Serialize robot action for JSON export."""
+        return {
+            "frame_idx": self.frame_idx,
+            "wrist_pose": self.wrist_pose.tolist(),
+            "joint_positions": self.joint_positions,
+            "joint_names": self.joint_names,
+            "gripper_aperture": self.gripper_aperture,
+            "base_frame": self.base_frame,
+            "end_effector_frame": self.end_effector_frame,
+        }
+
+
+@dataclass
 class HandTrajectory:
     """A sequence of hand poses for manipulation."""
 
@@ -202,6 +238,9 @@ class HandTrajectory:
 
     # FPS (should match camera trajectory)
     fps: float = 24.0
+
+    # Optional retargeted robot actions aligned to the hand poses
+    robot_actions: list[RobotAction] = field(default_factory=list)
 
     @property
     def num_frames(self) -> int:
