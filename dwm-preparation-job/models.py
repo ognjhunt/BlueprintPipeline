@@ -283,6 +283,9 @@ class DWMConditioningBundle:
     # Paths to individual frames (if video not yet encoded)
     static_scene_frames_dir: Optional[Path] = None
     hand_mesh_frames_dir: Optional[Path] = None
+    static_scene_depth_dir: Optional[Path] = None
+    static_scene_seg_dir: Optional[Path] = None
+    scene_state_path: Optional[Path] = None
 
     # Resolution
     resolution: tuple[int, int] = (720, 480)
