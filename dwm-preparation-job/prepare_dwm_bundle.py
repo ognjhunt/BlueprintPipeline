@@ -14,6 +14,9 @@ Based on DWM paper (arXiv:2512.17907):
 - Output resolution: 720x480, 49 frames at 24fps
 - Uses video diffusion to generate plausible interaction dynamics
 
+Production bundles must be rendered against the real USD scene (Isaac Sim backend).
+The mock renderer is reserved for CI smoke tests where GPU rendering is unavailable.
+
 Usage:
     python prepare_dwm_bundle.py \\
         --manifest-path ./assets/scene_manifest.json \\
@@ -84,7 +87,7 @@ class DWMJobConfig:
     fps: float = 24.0
 
     # Rendering
-    render_backend: Optional[RenderBackend] = None
+    render_backend: Optional[RenderBackend] = None  # Isaac Sim for production; mock only for CI
     render_static_scene: bool = True
     render_hand_mesh: bool = True
     export_depth: bool = True
@@ -316,10 +319,23 @@ class DWMPreparationJob:
         elif self.config.scene_usd_path and self.config.scene_usd_path.exists():
             scene_path = self.config.scene_usd_path
         else:
-            self.log("No renderable scene file found - using mock renderer", "WARN")
+            if self.scene_renderer.backend == RenderBackend.MOCK:
+                self.log(
+                    "No renderable scene file found - mock renderer active (intended for CI smoke tests only)",
+                    "WARN",
+                )
+            else:
+                raise FileNotFoundError(
+                    "No renderable scene file found. Provide a USD/GLB scene path for production rendering "
+                    "or disable rendering explicitly for CI runs."
+                )
 
         # Load scene
         if scene_path:
+            if self.scene_renderer.backend == RenderBackend.ISAAC_SIM and scene_path.suffix.lower() not in {".usd", ".usda", ".usdc"}:
+                raise ValueError(
+                    f"Isaac Sim rendering requires a USD input. Found {scene_path.suffix} for {scene_path}."
+                )
             self.scene_renderer.load_scene(scene_path)
 
         outputs = {}
@@ -996,7 +1012,7 @@ Examples:
     parser.add_argument(
         "--scene-usd-path",
         type=Path,
-        help="Path to scene USD file",
+        help="Path to scene USD file (required for production Isaac Sim rendering)",
     )
     parser.add_argument(
         "--output-dir",
@@ -1087,7 +1103,7 @@ Examples:
     parser.add_argument(
         "--no-render",
         action="store_true",
-        help="Skip rendering (generate trajectories only)",
+        help="Skip rendering (CI/smoke tests only; production bundles require rendered frames)",
     )
     parser.add_argument(
         "--no-depth",
