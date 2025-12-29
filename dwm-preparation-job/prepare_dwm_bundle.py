@@ -178,6 +178,25 @@ class DWMPreparationJob:
             enable_robot_retargeting=config.enable_robot_retargeting,
         )
 
+    @staticmethod
+    def _vector_from_value(value: Any) -> Optional[np.ndarray]:
+        """Robustly parse a 3D vector from common manifest shapes."""
+        if value is None:
+            return None
+
+        if isinstance(value, (list, tuple)) and len(value) == 3:
+            return np.array(value, dtype=np.float64)
+
+        if isinstance(value, dict):
+            if all(k in value for k in ("x", "y", "z")):
+                return np.array([value["x"], value["y"], value["z"]], dtype=np.float64)
+            if "vector" in value:
+                vec = value["vector"]
+                if isinstance(vec, (list, tuple)) and len(vec) == 3:
+                    return np.array(vec, dtype=np.float64)
+
+        return None
+
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
         if self.config.verbose:
@@ -199,12 +218,34 @@ class DWMPreparationJob:
                     pos.get("z", 0),
                 ])
 
+                bounds = obj.get("bounds", {}) or {}
+                articulation = obj.get("articulation_state") or obj.get("articulation") or {}
+                articulation_axis = self._vector_from_value(articulation.get("axis"))
+                joint_limits = articulation.get("limits")
+                if isinstance(joint_limits, (list, tuple)) and len(joint_limits) == 2:
+                    joint_limits = {"lower": joint_limits[0], "upper": joint_limits[1]}
+                elif not isinstance(joint_limits, dict):
+                    joint_limits = None
+                handle_position = (
+                    self._vector_from_value(bounds.get("handle_position"))
+                    or self._vector_from_value(articulation.get("handle_position"))
+                )
+                bounds_center = self._vector_from_value(bounds.get("center"))
+                if handle_position is None and bounds_center is not None:
+                    handle_position = bounds_center
+
                 self.scene_objects[obj_id] = {
                     "position": position,
                     "category": obj.get("category", "object"),
                     "sim_role": obj.get("sim_role", "static"),
-                    "bounds": obj.get("bounds", {}),
+                    "bounds": bounds,
                     "description": obj.get("semantics", {}).get("description", ""),
+                    "affordances": (obj.get("semantics") or {}).get("affordances", []),
+                    "articulation": articulation,
+                    "articulation_type": articulation.get("type"),
+                    "articulation_axis": articulation_axis,
+                    "joint_limits": joint_limits,
+                    "handle_position": handle_position,
                 }
 
             self.log(f"Loaded manifest: {self.scene_id} ({len(self.scene_objects)} objects)")
@@ -241,6 +282,76 @@ class DWMPreparationJob:
         self.log(f"Generated {len(trajectories)} camera trajectories")
         return trajectories
 
+    @staticmethod
+    def _normalize(vec: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        if vec is None:
+            return None
+        norm = np.linalg.norm(vec)
+        if norm < 1e-8:
+            return None
+        return vec / norm
+
+    def _build_grounding(
+        self,
+        camera_trajectory: CameraTrajectory,
+        target_obj_id: Optional[str],
+        action_type: HandActionType,
+    ) -> dict[str, Any]:
+        """Construct grounded target info from manifest articulation and bounds."""
+        grounding: dict[str, Any] = {}
+
+        obj_info = self.scene_objects.get(target_obj_id or "", {}) if target_obj_id else {}
+        target_position = obj_info.get("handle_position") or obj_info.get("position")
+        approach_direction = None
+        motion_axis = self._normalize(obj_info.get("articulation_axis"))
+        joint_limits = obj_info.get("joint_limits") if isinstance(obj_info.get("joint_limits"), dict) else None
+        articulation_type = (obj_info.get("articulation_type") or "").lower()
+
+        # Default to last camera forward vector if nothing else is available
+        if target_position is None and camera_trajectory.poses:
+            last_pose = camera_trajectory.poses[-1]
+            target_position = last_pose.position + last_pose.forward * 0.5
+
+        # Affordance-driven motion templates
+        affordance_template = None
+        if articulation_type == "prismatic":
+            affordance_template = "drawer_slide"
+            if motion_axis is not None:
+                approach_direction = -motion_axis if action_type == HandActionType.PULL else motion_axis
+        elif articulation_type == "revolute":
+            affordance_template = "hinge_pull"
+
+        # Derive approach direction for hinges from handle offset when available
+        handle_position = obj_info.get("handle_position") or target_position
+        if approach_direction is None and handle_position is not None and obj_info.get("position") is not None:
+            offset = handle_position - obj_info["position"]
+            if motion_axis is not None:
+                offset = offset - np.dot(offset, motion_axis) * motion_axis
+            approach_direction = self._normalize(offset)
+
+        if approach_direction is None and motion_axis is not None:
+            # Choose a stable perpendicular direction
+            fallback = np.cross(motion_axis, np.array([0, 1, 0], dtype=np.float64))
+            if np.linalg.norm(fallback) < 1e-8:
+                fallback = np.cross(motion_axis, np.array([1, 0, 0], dtype=np.float64))
+            approach_direction = self._normalize(fallback)
+
+        # Fallback to camera-based approach direction
+        if approach_direction is None and camera_trajectory.poses:
+            last_pose = camera_trajectory.poses[-1]
+            approach_direction = self._normalize(target_position - last_pose.position) if target_position is not None else last_pose.forward
+
+        grounding.update({
+            "target_position": target_position,
+            "handle_position": handle_position,
+            "approach_direction": approach_direction,
+            "motion_axis": motion_axis,
+            "joint_limits": joint_limits,
+            "affordance_template": affordance_template,
+            "articulation_type": articulation_type or None,
+        })
+        return grounding
+
     def generate_hand_trajectories(
         self,
         camera_trajectories: list[CameraTrajectory],
@@ -260,12 +371,7 @@ class DWMPreparationJob:
         for cam_traj in camera_trajectories:
             # Determine target position
             target_obj_id = cam_traj.target_object_id
-            if target_obj_id and target_obj_id in self.scene_objects:
-                target_pos = self.scene_objects[target_obj_id]["position"]
-            else:
-                # Use last camera position as target (approximation)
-                last_pose = cam_traj.poses[-1]
-                target_pos = last_pose.position + last_pose.forward * 0.5
+            obj_info = self.scene_objects.get(target_obj_id, {})
 
             # Determine action type
             if cam_traj.action_type:
@@ -275,16 +381,35 @@ class DWMPreparationJob:
             else:
                 action_type = HandActionType.REACH
 
+            grounding = self._build_grounding(
+                camera_trajectory=cam_traj,
+                target_obj_id=target_obj_id,
+                action_type=action_type,
+            )
+            target_pos = grounding.get("target_position")
+            if target_pos is None and cam_traj.poses:
+                target_pos = cam_traj.poses[-1].position
+
             # Generate hand trajectory
             hand_traj = self.hand_generator.generate_for_camera_trajectory(
                 camera_trajectory=cam_traj,
                 target_position=target_pos,
                 action_type=action_type,
+                approach_direction=grounding.get("approach_direction"),
+                handle_position=grounding.get("handle_position"),
+                motion_axis=grounding.get("motion_axis"),
+                joint_limits=grounding.get("joint_limits"),
+                affordance_template=grounding.get("affordance_template"),
+                grounding_metadata=grounding,
             )
 
             # Link trajectories
             hand_traj.camera_trajectory_id = cam_traj.trajectory_id
             hand_traj.target_object_id = target_obj_id
+            hand_traj.grounding.update({
+                "target_category": obj_info.get("category"),
+                "articulation_type": obj_info.get("articulation_type"),
+            })
 
             if self.hand_retargeter:
                 hand_traj.robot_actions = self.hand_retargeter.retarget(
