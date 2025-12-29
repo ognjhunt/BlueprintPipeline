@@ -107,6 +107,8 @@ class ActionStep:
     action_type: HandActionType
     target_object_id: Optional[str] = None
     target_position: Optional[np.ndarray] = None
+    object_state_start: Optional[Dict[str, Any]] = None
+    object_state_goal: Optional[Dict[str, Any]] = None
 
     # Timing
     start_frame: int = 0
@@ -137,6 +139,7 @@ class EpisodeClip:
 
     # Actions in this clip
     action_steps: List[ActionStep] = field(default_factory=list)
+    step_goals: List[Dict[str, Any]] = field(default_factory=list)
 
     # Primary action (for DWM prompt)
     primary_action: Optional[HandActionType] = None
@@ -148,6 +151,8 @@ class EpisodeClip:
     # Trajectories (to be filled by trajectory generator)
     camera_trajectory: Optional[CameraTrajectory] = None
     hand_trajectory: Optional[HandTrajectory] = None
+    object_states_start: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    object_states_end: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @property
     def frame_count(self) -> int:
@@ -174,6 +179,8 @@ class ManipulationEpisode:
 
     # Clips (each is 49 frames)
     clips: List[EpisodeClip] = field(default_factory=list)
+    object_states_start: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    object_states_end: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # Objects involved
     source_objects: List[str] = field(default_factory=list)
@@ -376,7 +383,9 @@ class TaskPlanner:
         self._assign_frame_timing(action_steps)
 
         # Split into clips
-        clips = self._split_into_clips(action_steps, task.task_id)
+        clips = self._split_into_clips(
+            action_steps, task.task_id, analysis.object_states
+        )
 
         # Generate text prompts for each clip
         for clip in clips:
@@ -396,6 +405,8 @@ class TaskPlanner:
             scene_id=analysis.scene_id,
             action_steps=action_steps,
             clips=clips,
+            object_states_start=clips[0].object_states_start if clips else {},
+            object_states_end=clips[-1].object_states_end if clips else {},
             source_objects=task.source_objects,
             target_objects=task.target_objects,
             total_frames=total_frames,
@@ -541,6 +552,7 @@ Return ONLY the JSON.
         """Parse action sequence into ActionStep objects."""
 
         steps = []
+        current_states = {k: dict(v) for k, v in analysis.object_states.items()}
         for i, action in enumerate(actions):
             action_name = action.get("action", "reach").lower()
 
@@ -551,6 +563,11 @@ Return ONLY the JSON.
             # Get target position if available
             target_id = action.get("target")
             target_position = self._get_object_position(target_id, analysis)
+            start_state, goal_state = self._get_object_states_for_action(
+                action_name, target_id, current_states, target_position
+            )
+            if goal_state and target_id:
+                current_states[target_id] = goal_state
 
             step = ActionStep(
                 step_id=f"step_{i:03d}",
@@ -558,6 +575,8 @@ Return ONLY the JSON.
                 action_type=hand_action,
                 target_object_id=target_id,
                 target_position=target_position,
+                object_state_start=start_state,
+                object_state_goal=goal_state,
                 duration_seconds=action.get("duration_seconds", 1.5),
                 description=action.get("description", f"{action_name} {target_id}"),
                 camera_trajectory_type=self._get_trajectory_type(action_name),
@@ -646,13 +665,60 @@ Return ONLY the JSON.
         if not object_id:
             return None
 
-        # Try to find in object semantics
-        for obj in analysis.object_semantics:
-            if obj.object_id == object_id:
-                # Would need position from manifest - return None for now
+        state = analysis.object_states.get(object_id)
+        if state and "position" in state:
+            try:
+                return np.array(state["position"], dtype=float)
+            except Exception:
                 return None
 
+        # Try to find in object semantics
+        for obj in analysis.object_semantics:
+            if obj.object_id == object_id and obj.typical_height_m:
+                return np.array([0, obj.typical_height_m, 0.0], dtype=float)
+
         return None
+
+    def _get_object_states_for_action(
+        self,
+        action_name: str,
+        target_id: Optional[str],
+        current_states: Dict[str, Dict[str, Any]],
+        target_position: Optional[np.ndarray],
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Derive start/goal state for an action, threading pose/articulation."""
+        if not target_id:
+            return None, None
+
+        start_state = dict(current_states.get(target_id, {}))
+        goal_state = dict(start_state)
+
+        if target_position is not None:
+            goal_state["position"] = target_position.tolist()
+
+        articulation_targets = {
+            "open": "opened",
+            "close": "closed",
+            "pull": "extended",
+            "push": "compressed",
+            "extend": "extended",
+            "retract": "retracted",
+            "rotate": "rotated",
+        }
+        if action_name in articulation_targets:
+            goal_state["articulation"] = articulation_targets[action_name]
+
+        if action_name in ["grasp", "grip"]:
+            goal_state["held"] = True
+        if action_name in ["lift", "transport", "move", "carry"]:
+            goal_state["held"] = True
+        if action_name in ["place", "insert", "release", "drop"]:
+            goal_state["held"] = False
+
+        if goal_state == start_state:
+            return start_state or None, None
+
+        return start_state or None, goal_state
 
     def _assign_frame_timing(self, steps: List[ActionStep]) -> None:
         """Assign frame timing to action steps."""
@@ -668,6 +734,7 @@ Return ONLY the JSON.
         self,
         steps: List[ActionStep],
         task_id: str,
+        initial_states: Dict[str, Dict[str, Any]],
     ) -> List[EpisodeClip]:
         """Split action steps into DWM clips (49 frames each)."""
 
@@ -678,15 +745,27 @@ Return ONLY the JSON.
         num_clips = math.ceil(total_frames / self.frames_per_clip)
 
         clips = []
+        state_tracker = {k: dict(v) for k, v in initial_states.items()}
+        applied_steps: set[str] = set()
         for clip_idx in range(num_clips):
             start_frame = clip_idx * self.frames_per_clip
             end_frame = min(start_frame + self.frames_per_clip, total_frames)
 
             # Find actions that overlap with this clip
             clip_steps = []
+            step_goals = []
             for step in steps:
                 if step.end_frame > start_frame and step.start_frame < end_frame:
                     clip_steps.append(step)
+                    if step.object_state_goal:
+                        step_goals.append(
+                            {
+                                "step_id": step.step_id,
+                                "target_object_id": step.target_object_id,
+                                "goal_state": step.object_state_goal,
+                                "start_state": step.object_state_start,
+                            }
+                        )
 
             # Determine primary action for the clip
             primary_action = None
@@ -697,14 +776,31 @@ Return ONLY the JSON.
                 primary_action = best_step.action_type
                 primary_target = best_step.target_object_id
 
+            clip_start_state = {k: dict(v) for k, v in state_tracker.items()}
+
+            for step in clip_steps:
+                if (
+                    step.object_state_goal
+                    and step.end_frame <= end_frame
+                    and step.step_id not in applied_steps
+                    and step.target_object_id
+                ):
+                    state_tracker[step.target_object_id] = dict(step.object_state_goal)
+                    applied_steps.add(step.step_id)
+
+            clip_end_state = {k: dict(v) for k, v in state_tracker.items()}
+
             clip = EpisodeClip(
                 clip_id=f"{task_id}_clip_{clip_idx:03d}",
                 clip_index=clip_idx,
                 start_frame=start_frame,
                 end_frame=end_frame,
                 action_steps=clip_steps,
+                step_goals=step_goals,
                 primary_action=primary_action,
                 primary_target=primary_target,
+                object_states_start=clip_start_state,
+                object_states_end=clip_end_state,
             )
             clips.append(clip)
 
