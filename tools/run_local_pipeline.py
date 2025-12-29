@@ -25,7 +25,8 @@ Pipeline Steps:
     6. replicator - Generate Replicator bundle
     7. isaac-lab - Generate Isaac Lab task package
     8. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
-    9. validate  - QA validation
+    9. dwm-inference - Run DWM model to generate interaction videos for each bundle
+    10. validate  - QA validation
 
 References:
 - 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
@@ -64,6 +65,7 @@ class PipelineStep(str, Enum):
     REPLICATOR = "replicator"
     ISAAC_LAB = "isaac-lab"
     DWM = "dwm"  # Dexterous World Model preparation
+    DWM_INFERENCE = "dwm-inference"  # Run DWM model on prepared bundles
     VALIDATE = "validate"
 
 
@@ -92,6 +94,7 @@ class LocalPipelineRunner:
         PipelineStep.REPLICATOR,
         PipelineStep.ISAAC_LAB,
         PipelineStep.DWM,  # DWM conditioning data generation
+        PipelineStep.DWM_INFERENCE,  # Run DWM model on bundles
     ]
 
     def __init__(
@@ -133,6 +136,14 @@ class LocalPipelineRunner:
         """Log a message."""
         if self.verbose:
             print(f"[LOCAL-PIPELINE] [{level}] {msg}")
+
+    def _write_marker(self, marker_path: Path, status: str) -> None:
+        """Write a simple JSON marker file."""
+        marker_path.write_text(json.dumps({
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "scene_id": self.scene_id,
+        }, indent=2))
 
     def run(
         self,
@@ -214,6 +225,8 @@ class LocalPipelineRunner:
                 result = self._run_isaac_lab()
             elif step == PipelineStep.DWM:
                 result = self._run_dwm()
+            elif step == PipelineStep.DWM_INFERENCE:
+                result = self._run_dwm_inference()
             elif step == PipelineStep.VALIDATE:
                 result = self._run_validation()
             else:
@@ -756,6 +769,9 @@ class LocalPipelineRunner:
             )
 
             if output.success:
+                marker_path = self.dwm_dir / ".dwm_complete"
+                self._write_marker(marker_path, status="completed")
+
                 return StepResult(
                     step=PipelineStep.DWM,
                     success=True,
@@ -766,6 +782,7 @@ class LocalPipelineRunner:
                         "total_frames": output.total_frames,
                         "output_dir": str(output.output_dir),
                         "manifest": str(output.manifest_path) if output.manifest_path else None,
+                        "completion_marker": str(marker_path),
                     },
                 )
             else:
@@ -787,6 +804,66 @@ class LocalPipelineRunner:
         except Exception as e:
             return StepResult(
                 step=PipelineStep.DWM,
+                success=False,
+                duration_seconds=0,
+                message=f"Error: {e}\n{traceback.format_exc()}",
+            )
+
+    def _run_dwm_inference(self) -> StepResult:
+        """Run the DWM inference job on prepared bundles."""
+        try:
+            sys.path.insert(0, str(REPO_ROOT / "dwm-preparation-job"))
+            from dwm_inference_job import run_dwm_inference
+
+            manifest_path = self.dwm_dir / "dwm_bundles_manifest.json"
+            if not manifest_path.is_file():
+                return StepResult(
+                    step=PipelineStep.DWM_INFERENCE,
+                    success=False,
+                    duration_seconds=0,
+                    message="DWM bundles manifest not found - run dwm step first",
+                )
+
+            output = run_dwm_inference(
+                bundles_dir=self.dwm_dir,
+                api_endpoint=os.environ.get("DWM_API_ENDPOINT"),
+                checkpoint_path=os.environ.get("DWM_CHECKPOINT_PATH"),
+                verbose=self.verbose,
+            )
+
+            if output.success:
+                marker_path = self.dwm_dir / ".dwm_inference_complete"
+                self._write_marker(marker_path, status="completed")
+                return StepResult(
+                    step=PipelineStep.DWM_INFERENCE,
+                    success=True,
+                    duration_seconds=0,
+                    message=f"Generated interaction videos for {len(output.bundles_processed)} bundles",
+                    outputs={
+                        "bundles": len(output.bundles_processed),
+                        "manifest": str(output.manifest_path) if output.manifest_path else None,
+                        "completion_marker": str(marker_path),
+                    },
+                )
+
+            return StepResult(
+                step=PipelineStep.DWM_INFERENCE,
+                success=False,
+                duration_seconds=0,
+                message=f"DWM inference failed: {output.errors[:1]}",
+                outputs={"errors": output.errors},
+            )
+
+        except ImportError as e:
+            return StepResult(
+                step=PipelineStep.DWM_INFERENCE,
+                success=False,
+                duration_seconds=0,
+                message=f"Import error (DWM inference job not found): {e}",
+            )
+        except Exception as e:
+            return StepResult(
+                step=PipelineStep.DWM_INFERENCE,
                 success=False,
                 duration_seconds=0,
                 message=f"Error: {e}\n{traceback.format_exc()}",
