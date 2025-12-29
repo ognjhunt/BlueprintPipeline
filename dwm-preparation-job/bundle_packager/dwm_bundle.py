@@ -64,12 +64,14 @@ class BundleManifest:
     camera_trajectory_file: str = "camera_trajectory.json"
     hand_trajectory_file: Optional[str] = None
     robot_actions_file: Optional[str] = None
+    interaction_video: Optional[str] = None
 
     # Optional frame directories
     static_scene_frames_dir: Optional[str] = None
     hand_mesh_frames_dir: Optional[str] = None
     static_scene_depth_dir: Optional[str] = None
     static_scene_seg_dir: Optional[str] = None
+    interaction_frames_dir: Optional[str] = None
     physics_rollout_file: Optional[str] = None
 
     # Source info
@@ -177,6 +179,10 @@ def create_bundle_manifest(
         manifest.static_scene_frames_dir = "frames/static_scene"
     if bundle.hand_mesh_frames_dir:
         manifest.hand_mesh_frames_dir = "frames/hand_mesh"
+    if bundle.interaction_video_path:
+        manifest.interaction_video = bundle.interaction_video_path.name
+    if bundle.interaction_frames_dir:
+        manifest.interaction_frames_dir = "frames/interaction"
     if bundle.hand_trajectory:
         manifest.hand_trajectory_file = "hand_trajectory.json"
         if bundle.hand_trajectory.robot_actions:
@@ -322,11 +328,13 @@ class DWMBundlePackager:
                 "text_prompt": manifest.text_prompt,
                 "static_scene_video": manifest.static_scene_video,
                 "hand_mesh_video": manifest.hand_mesh_video,
+                "interaction_video": manifest.interaction_video,
                 "camera_trajectory_file": manifest.camera_trajectory_file,
                 "hand_trajectory_file": manifest.hand_trajectory_file,
                 "robot_actions_file": manifest.robot_actions_file,
                 "static_scene_frames_dir": manifest.static_scene_frames_dir,
                 "hand_mesh_frames_dir": manifest.hand_mesh_frames_dir,
+                "interaction_frames_dir": manifest.interaction_frames_dir,
                 "dwm_compatible": manifest.dwm_compatible,
                 "dwm_version": manifest.dwm_version,
                 "static_scene_depth_dir": manifest.static_scene_depth_dir,
@@ -497,6 +505,14 @@ class DWMBundlePackager:
                     "text_prompt": b.text_prompt,
                     "physics_rollout_file": "metadata/physics_rollout.jsonl"
                     if b.physics_log_path else None,
+                    "interaction_video": (
+                        b.interaction_video_path.name
+                        if b.interaction_video_path else None
+                    ),
+                    "interaction_frames_dir": (
+                        "frames/interaction"
+                        if b.interaction_frames_dir else None
+                    ),
                 }
                 for b in packaged_bundles
             ],

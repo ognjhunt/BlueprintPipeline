@@ -277,6 +277,12 @@ class DWMConditioningBundle:
     # Path to rendered hand mesh video
     hand_mesh_video_path: Optional[Path] = None
 
+    # Path to generated interaction video (DWM output)
+    interaction_video_path: Optional[Path] = None
+
+    # Directory containing interaction frames (DWM output)
+    interaction_frames_dir: Optional[Path] = None
+
     # Text prompt for DWM
     text_prompt: str = ""
 
