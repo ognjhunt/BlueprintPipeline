@@ -28,9 +28,11 @@ from .prepare_dwm_bundle import (
     prepare_dwm_bundles,
     run_dwm_preparation,
 )
+from .dwm_inference_job import run_dwm_inference
 
 __all__ = [
     "DWMPreparationJob",
     "prepare_dwm_bundles",
     "run_dwm_preparation",
+    "run_dwm_inference",
 ]
