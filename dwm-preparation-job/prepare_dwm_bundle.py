@@ -49,7 +49,13 @@ from models import (
 )
 from trajectory_generator import EgocentricTrajectoryGenerator
 from scene_renderer import RenderBackend, RenderConfig, SceneRenderer
-from hand_motion import HandMeshRenderer, HandRenderConfig, HandTrajectoryGenerator
+from hand_motion import (
+    HandMeshRenderer,
+    HandRenderConfig,
+    HandTrajectoryGenerator,
+    HandRetargeter,
+    RobotConfig,
+)
 from bundle_packager import DWMBundlePackager, generate_text_prompt
 
 
@@ -88,6 +94,9 @@ class DWMJobConfig:
 
     # Processing
     verbose: bool = True
+    enable_robot_retargeting: bool = False
+    robot_config_name: str = "ur5e_parallel_gripper"
+    robot_demo_roots: Optional[list[Path]] = None
 
     def __post_init__(self):
         if self.trajectory_types is None:
@@ -101,6 +110,8 @@ class DWMJobConfig:
                 HandActionType.PULL,
                 HandActionType.PUSH,
             ]
+        if self.robot_demo_roots is None:
+            self.robot_demo_roots = []
 
 
 class DWMPreparationJob:
@@ -130,6 +141,11 @@ class DWMPreparationJob:
         # Initialize generators
         self.trajectory_generator = None
         self.hand_generator = HandTrajectoryGenerator()
+        self.hand_retargeter = (
+            HandRetargeter(RobotConfig(name=config.robot_config_name))
+            if config.enable_robot_retargeting
+            else None
+        )
 
         # Initialize renderers
         render_config = RenderConfig(
@@ -257,6 +273,11 @@ class DWMPreparationJob:
             # Link trajectories
             hand_traj.camera_trajectory_id = cam_traj.trajectory_id
             hand_traj.target_object_id = target_obj_id
+
+            if self.hand_retargeter:
+                hand_traj.robot_actions = self.hand_retargeter.retarget(
+                    hand_traj, camera_traj=cam_traj
+                )
 
             pairs.append((cam_traj, hand_traj))
 
@@ -443,6 +464,11 @@ class DWMPreparationJob:
                     "action_type": hand_traj.action_type.value,
                     "trajectory_type": cam_traj.trajectory_type.value,
                     "generated_at": datetime.utcnow().isoformat() + "Z",
+                    "robot_retargeting": {
+                        "enabled": self.config.enable_robot_retargeting,
+                        "robot_model": self.config.robot_config_name,
+                        "demo_roots": [str(p) for p in self.config.robot_demo_roots],
+                    },
                 },
             )
 
@@ -675,6 +701,9 @@ def prepare_dwm_episodes(
     fps: float = 24.0,
     render_videos: bool = False,
     verbose: bool = True,
+    enable_robot_retargeting: bool = False,
+    robot_config_name: str = "ur5e_parallel_gripper",
+    robot_demo_roots: Optional[list[Path]] = None,
 ):
     """
     Generate episode-based DWM bundles with scene analysis and task planning.
@@ -714,6 +743,8 @@ def prepare_dwm_episodes(
             for clip in episode.clips:
                 print(f"  Clip {clip.clip_index}: {clip.text_prompt}")
     """
+    if robot_demo_roots is None:
+        robot_demo_roots = []
     from episode_bundler import EpisodeBundler
 
     bundler = EpisodeBundler(
@@ -724,6 +755,9 @@ def prepare_dwm_episodes(
         generate_trajectories=True,
         render_videos=render_videos,
         verbose=verbose,
+        enable_robot_retargeting=enable_robot_retargeting,
+        robot_config_name=robot_config_name,
+        robot_demo_roots=robot_demo_roots,
     )
 
     return bundler.bundle_from_manifest(
@@ -739,6 +773,9 @@ def run_dwm_episode_preparation(
     output_dir: Optional[Path] = None,
     max_episodes: int = 10,
     verbose: bool = True,
+    enable_robot_retargeting: bool = False,
+    robot_config_name: str = "ur5e_parallel_gripper",
+    robot_demo_roots: Optional[list[Path]] = None,
 ):
     """
     Run episode-based DWM preparation on a scene directory.
@@ -776,6 +813,9 @@ def run_dwm_episode_preparation(
         output_dir=output_dir,
         max_episodes=max_episodes,
         verbose=verbose,
+        enable_robot_retargeting=enable_robot_retargeting,
+        robot_config_name=robot_config_name,
+        robot_demo_roots=robot_demo_roots,
     )
 
 
@@ -896,6 +936,24 @@ Examples:
         help="Frames per second",
     )
     parser.add_argument(
+        "--enable-robot-retargeting",
+        action="store_true",
+        help="Enable hand-to-robot retargeting and robot fine-tune metadata",
+    )
+    parser.add_argument(
+        "--robot-config",
+        type=str,
+        default="ur5e_parallel_gripper",
+        help="Robot configuration name to use for retargeting",
+    )
+    parser.add_argument(
+        "--robot-demo-root",
+        type=Path,
+        action="append",
+        default=[],
+        help="Root path to real-robot demonstration data (can be specified multiple times)",
+    )
+    parser.add_argument(
         "--no-render",
         action="store_true",
         help="Skip rendering (generate trajectories only)",
@@ -941,6 +999,9 @@ Examples:
             fps=args.fps,
             render_videos=not args.no_render,
             verbose=not args.quiet,
+            enable_robot_retargeting=args.enable_robot_retargeting,
+            robot_config_name=args.robot_config,
+            robot_demo_roots=args.robot_demo_root,
         )
 
         # Exit with appropriate code
@@ -974,6 +1035,9 @@ Examples:
         render_static_scene=not args.no_render,
         render_hand_mesh=not args.no_render,
         verbose=not args.quiet,
+        enable_robot_retargeting=args.enable_robot_retargeting,
+        robot_config_name=args.robot_config,
+        robot_demo_roots=args.robot_demo_root,
     )
 
     # Run job

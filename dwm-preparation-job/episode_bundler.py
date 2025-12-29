@@ -68,10 +68,12 @@ from models import (
     HandActionType,
     HandPose,
     HandTrajectory,
+    RobotAction,
     TrajectoryType,
 )
 from trajectory_generator import EgocentricTrajectoryGenerator
 from hand_motion import HandTrajectoryGenerator
+from hand_motion import HandRetargeter, RobotConfig
 
 
 # =============================================================================
@@ -111,6 +113,7 @@ class ClipBundle:
     # Frame directories
     static_scene_frames_dir: Optional[Path] = None
     hand_mesh_frames_dir: Optional[Path] = None
+    robot_actions_path: Optional[Path] = None
 
     # Metadata
     primary_action: Optional[str] = None
@@ -220,6 +223,9 @@ class EpisodeBundler:
         generate_trajectories: bool = True,
         render_videos: bool = True,
         verbose: bool = True,
+        enable_robot_retargeting: bool = False,
+        robot_config_name: str = "ur5e_parallel_gripper",
+        robot_demo_roots: Optional[List[Path]] = None,
     ):
         """
         Initialize the episode bundler.
@@ -240,6 +246,7 @@ class EpisodeBundler:
         self.generate_trajectories = generate_trajectories
         self.render_videos = render_videos
         self.verbose = verbose
+        self.robot_demo_roots = robot_demo_roots or []
 
         # Initialize components
         self.scene_analyzer = SceneAnalyzer(verbose=verbose)
@@ -250,6 +257,11 @@ class EpisodeBundler:
         )
         self.trajectory_generator = None
         self.hand_generator = HandTrajectoryGenerator()
+        self.hand_retargeter = (
+            HandRetargeter(RobotConfig(name=robot_config_name))
+            if enable_robot_retargeting
+            else None
+        )
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -547,6 +559,11 @@ class EpisodeBundler:
             hand_trajectory.camera_trajectory_id = camera_trajectory.trajectory_id
             hand_trajectory.target_object_id = target_id
 
+            if self.hand_retargeter:
+                hand_trajectory.robot_actions = self.hand_retargeter.retarget(
+                    hand_trajectory, camera_traj=camera_trajectory
+                )
+
             return hand_trajectory
 
         except Exception as e:
@@ -617,6 +634,9 @@ class EpisodeBundler:
             "resolution": list(self.resolution),
             "has_camera_trajectory": clip.camera_trajectory is not None,
             "has_hand_trajectory": clip.hand_trajectory is not None,
+            "has_robot_actions": bool(
+                clip.hand_trajectory and clip.hand_trajectory.robot_actions
+            ),
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
 
@@ -639,6 +659,14 @@ class EpisodeBundler:
             hand_path.write_text(json.dumps(hand_data, indent=2))
             clip.hand_trajectory_path = hand_path
 
+            if clip.hand_trajectory.robot_actions:
+                robot_actions_data = self._serialize_robot_actions(
+                    clip.hand_trajectory.robot_actions
+                )
+                robot_actions_path = clip_dir / "robot_actions.json"
+                robot_actions_path.write_text(json.dumps(robot_actions_data, indent=2))
+                clip.robot_actions_path = robot_actions_path
+
         # Write additional metadata
         clip_info = {
             "clip_id": clip.clip_id,
@@ -649,8 +677,11 @@ class EpisodeBundler:
             "resolution": list(self.resolution),
             "fps": self.fps,
             "frame_count": self.frames_per_clip,
+            "has_robot_actions": bool(clip.robot_actions_path),
         }
         (metadata_dir / "clip_info.json").write_text(json.dumps(clip_info, indent=2))
+
+        self._write_robot_finetune_manifest(metadata_dir)
 
     def _serialize_camera_trajectory(self, trajectory: CameraTrajectory) -> dict:
         """Serialize camera trajectory to JSON-compatible dict."""
@@ -697,7 +728,33 @@ class EpisodeBundler:
                 }
                 for pose in trajectory.poses
             ],
+            "robot_actions_file": "robot_actions.json"
+            if trajectory.robot_actions
+            else None,
         }
+
+    def _serialize_robot_actions(self, actions: List[RobotAction]) -> dict:
+        """Serialize robot actions for export."""
+        return {
+            "actions": [action.to_json() for action in actions],
+        }
+
+    def _write_robot_finetune_manifest(self, metadata_dir: Path) -> None:
+        """Write a scaffold manifest for real-robot fine-tuning assets."""
+        robot_model = (
+            self.hand_retargeter.robot_config.name if self.hand_retargeter else None
+        )
+        manifest = {
+            "robot_model": robot_model,
+            "real_robot_demos": [str(p) for p in self.robot_demo_roots],
+            "notes": (
+                "Add paths to synchronized robot demonstrations for fine-tuning. "
+                "Robot actions are recorded in robot_actions.json."
+            ),
+        }
+        (metadata_dir / "robot_finetune_manifest.json").write_text(
+            json.dumps(manifest, indent=2)
+        )
 
     def _write_master_manifest(
         self,

@@ -16,6 +16,7 @@ from .hand_mesh_renderer import (
     HandMeshRenderer,
     render_hand_trajectory_to_video,
 )
+from .retargeting import HandRetargeter, RobotConfig
 
 __all__ = [
     "HandTrajectoryGenerator",
@@ -25,4 +26,6 @@ __all__ = [
     "generate_reach_trajectory",
     "HandMeshRenderer",
     "render_hand_trajectory_to_video",
+    "HandRetargeter",
+    "RobotConfig",
 ]
