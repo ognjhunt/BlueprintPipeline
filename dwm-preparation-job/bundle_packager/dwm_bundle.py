@@ -63,6 +63,7 @@ class BundleManifest:
     hand_mesh_video: Optional[str] = None
     camera_trajectory_file: str = "camera_trajectory.json"
     hand_trajectory_file: Optional[str] = None
+    robot_actions_file: Optional[str] = None
 
     # Optional frame directories
     static_scene_frames_dir: Optional[str] = None
@@ -174,6 +175,8 @@ def create_bundle_manifest(
         manifest.hand_mesh_frames_dir = "frames/hand_mesh"
     if bundle.hand_trajectory:
         manifest.hand_trajectory_file = "hand_trajectory.json"
+        if bundle.hand_trajectory.robot_actions:
+            manifest.robot_actions_file = "robot_actions.json"
 
     return manifest
 
@@ -257,12 +260,12 @@ class DWMBundlePackager:
                     frames_dir / "static_scene",
                     dirs_exist_ok=True,
                 )
-            if bundle.hand_mesh_frames_dir and bundle.hand_mesh_frames_dir.exists():
-                shutil.copytree(
-                    bundle.hand_mesh_frames_dir,
-                    frames_dir / "hand_mesh",
-                    dirs_exist_ok=True,
-                )
+        if bundle.hand_mesh_frames_dir and bundle.hand_mesh_frames_dir.exists():
+            shutil.copytree(
+                bundle.hand_mesh_frames_dir,
+                frames_dir / "hand_mesh",
+                dirs_exist_ok=True,
+            )
 
         # Write text prompt
         (metadata_dir / "prompt.txt").write_text(bundle.text_prompt)
@@ -272,6 +275,9 @@ class DWMBundlePackager:
             bundle.metadata,
             indent=2,
         ))
+
+        # Robot fine-tune manifest scaffold
+        self._write_robot_finetune_manifest(bundle, metadata_dir)
 
         # Create and write manifest
         manifest = create_bundle_manifest(bundle, bundle_dir)
@@ -290,6 +296,7 @@ class DWMBundlePackager:
                 "hand_mesh_video": manifest.hand_mesh_video,
                 "camera_trajectory_file": manifest.camera_trajectory_file,
                 "hand_trajectory_file": manifest.hand_trajectory_file,
+                "robot_actions_file": manifest.robot_actions_file,
                 "static_scene_frames_dir": manifest.static_scene_frames_dir,
                 "hand_mesh_frames_dir": manifest.hand_mesh_frames_dir,
                 "dwm_compatible": manifest.dwm_compatible,
@@ -361,6 +368,9 @@ class DWMBundlePackager:
             "target_object_id": trajectory.target_object_id,
             "camera_trajectory_id": trajectory.camera_trajectory_id,
             "poses": [],
+            "robot_actions_file": "robot_actions.json"
+            if trajectory.robot_actions
+            else None,
         }
 
         for pose in trajectory.poses:
@@ -380,6 +390,26 @@ class DWMBundlePackager:
 
             data["poses"].append(pose_data)
 
+        output_path.write_text(json.dumps(data, indent=2))
+
+        if trajectory.robot_actions:
+            self._export_robot_actions(
+                trajectory.robot_actions,
+                output_path.parent / "robot_actions.json",
+            )
+
+    def _export_robot_actions(
+        self,
+        actions: list,
+        output_path: Path,
+    ) -> None:
+        """Export robot actions aligned with the hand trajectory."""
+        data = {
+            "actions": {
+                str(action.frame_idx): action.to_json()
+                for action in actions
+            }
+        }
         output_path.write_text(json.dumps(data, indent=2))
 
     def package_all(
@@ -449,6 +479,25 @@ class DWMBundlePackager:
             manifest_path=manifest_path,
             errors=errors,
             generation_time_seconds=time.time() - start_time,
+        )
+
+    def _write_robot_finetune_manifest(
+        self,
+        bundle: DWMConditioningBundle,
+        metadata_dir: Path,
+    ) -> None:
+        """Write scaffold manifest pointing to real-robot fine-tune assets."""
+        robot_info = (bundle.metadata or {}).get("robot_retargeting", {}) if bundle.metadata else {}
+        manifest = {
+            "robot_model": robot_info.get("robot_model"),
+            "real_robot_demos": robot_info.get("demo_roots", []),
+            "notes": (
+                "Add references to real robot demonstration sequences aligned with "
+                "robot_actions.json for fine-tuning."
+            ),
+        }
+        (metadata_dir / "robot_finetune_manifest.json").write_text(
+            json.dumps(manifest, indent=2)
         )
 
 
