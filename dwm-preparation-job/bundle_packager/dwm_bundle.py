@@ -68,10 +68,13 @@ class BundleManifest:
     # Optional frame directories
     static_scene_frames_dir: Optional[str] = None
     hand_mesh_frames_dir: Optional[str] = None
+    static_scene_depth_dir: Optional[str] = None
+    static_scene_seg_dir: Optional[str] = None
 
     # Source info
     source_manifest: Optional[str] = None
     source_usd: Optional[str] = None
+    scene_state_file: Optional[str] = None
 
     # DWM compatibility
     dwm_compatible: bool = True
@@ -177,6 +180,12 @@ def create_bundle_manifest(
         manifest.hand_trajectory_file = "hand_trajectory.json"
         if bundle.hand_trajectory.robot_actions:
             manifest.robot_actions_file = "robot_actions.json"
+    if bundle.static_scene_depth_dir:
+        manifest.static_scene_depth_dir = "frames/static_scene_depth"
+    if bundle.static_scene_seg_dir:
+        manifest.static_scene_seg_dir = "frames/static_scene_seg"
+    if bundle.scene_state_path:
+        manifest.scene_state_file = "metadata/scene_state.json"
 
     return manifest
 
@@ -260,6 +269,18 @@ class DWMBundlePackager:
                     frames_dir / "static_scene",
                     dirs_exist_ok=True,
                 )
+            if bundle.static_scene_depth_dir and bundle.static_scene_depth_dir.exists():
+                shutil.copytree(
+                    bundle.static_scene_depth_dir,
+                    frames_dir / "static_scene_depth",
+                    dirs_exist_ok=True,
+                )
+            if bundle.static_scene_seg_dir and bundle.static_scene_seg_dir.exists():
+                shutil.copytree(
+                    bundle.static_scene_seg_dir,
+                    frames_dir / "static_scene_seg",
+                    dirs_exist_ok=True,
+                )
         if bundle.hand_mesh_frames_dir and bundle.hand_mesh_frames_dir.exists():
             shutil.copytree(
                 bundle.hand_mesh_frames_dir,
@@ -278,6 +299,8 @@ class DWMBundlePackager:
 
         # Robot fine-tune manifest scaffold
         self._write_robot_finetune_manifest(bundle, metadata_dir)
+        if bundle.scene_state_path and bundle.scene_state_path.exists():
+            shutil.copy2(bundle.scene_state_path, metadata_dir / "scene_state.json")
 
         # Create and write manifest
         manifest = create_bundle_manifest(bundle, bundle_dir)
@@ -301,6 +324,9 @@ class DWMBundlePackager:
                 "hand_mesh_frames_dir": manifest.hand_mesh_frames_dir,
                 "dwm_compatible": manifest.dwm_compatible,
                 "dwm_version": manifest.dwm_version,
+                "static_scene_depth_dir": manifest.static_scene_depth_dir,
+                "static_scene_seg_dir": manifest.static_scene_seg_dir,
+                "scene_state_file": manifest.scene_state_file,
             },
             indent=2,
         ))
@@ -510,6 +536,9 @@ def package_dwm_bundle(
     hand_mesh_video_path: Optional[Path] = None,
     static_scene_frames_dir: Optional[Path] = None,
     hand_mesh_frames_dir: Optional[Path] = None,
+    static_scene_depth_dir: Optional[Path] = None,
+    static_scene_seg_dir: Optional[Path] = None,
+    scene_state_path: Optional[Path] = None,
     target_category: Optional[str] = None,
     target_description: Optional[str] = None,
 ) -> Path:
@@ -525,6 +554,9 @@ def package_dwm_bundle(
         hand_mesh_video_path: Path to hand mesh video
         static_scene_frames_dir: Path to static scene frames
         hand_mesh_frames_dir: Path to hand mesh frames
+        static_scene_depth_dir: Path to static scene depth frames
+        static_scene_seg_dir: Path to static scene segmentation frames
+        scene_state_path: Path to per-frame scene state JSON
         target_category: Category of target object
         target_description: Description of target
 
@@ -548,6 +580,9 @@ def package_dwm_bundle(
         hand_mesh_video_path=hand_mesh_video_path,
         static_scene_frames_dir=static_scene_frames_dir,
         hand_mesh_frames_dir=hand_mesh_frames_dir,
+        static_scene_depth_dir=static_scene_depth_dir,
+        static_scene_seg_dir=static_scene_seg_dir,
+        scene_state_path=scene_state_path,
         text_prompt=text_prompt,
         resolution=camera_trajectory.resolution,
         num_frames=camera_trajectory.num_frames,
