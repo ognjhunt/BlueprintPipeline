@@ -86,6 +86,9 @@ class DWMJobConfig:
     render_backend: Optional[RenderBackend] = None
     render_static_scene: bool = True
     render_hand_mesh: bool = True
+    export_depth: bool = True
+    export_segmentation: bool = True
+    export_scene_state: bool = True
 
     # Output options
     encode_videos: bool = True
@@ -320,14 +323,25 @@ class DWMPreparationJob:
         for cam_traj, hand_traj in trajectory_pairs:
             traj_id = cam_traj.trajectory_id
             frames_dir = self.config.output_dir / "frames" / traj_id / "static_scene"
+            depth_dir = (
+                self.config.output_dir / "frames" / traj_id / "static_scene_depth"
+                if self.config.export_depth else None
+            )
+            seg_dir = (
+                self.config.output_dir / "frames" / traj_id / "static_scene_seg"
+                if self.config.export_segmentation else None
+            )
 
             self.log(f"  Rendering {traj_id}...")
 
-            frame_paths = self.scene_renderer.render_trajectory_frames(
+            render_outputs = self.scene_renderer.render_trajectory_outputs(
                 trajectory=cam_traj,
                 output_dir=frames_dir,
                 frame_prefix="scene",
+                depth_dir=depth_dir,
+                segmentation_dir=seg_dir,
             )
+            frame_paths = render_outputs.get("color", [])
 
             video_path = None
             if self.config.encode_videos and frame_paths:
@@ -340,14 +354,68 @@ class DWMPreparationJob:
                     frame_pattern="scene_*.png",
                 )
 
+            scene_state_path = None
+            if self.config.export_scene_state:
+                state_dir = self.config.output_dir / "metadata" / traj_id
+                scene_state_path = self._write_scene_state(
+                    cam_traj,
+                    state_dir / "scene_state.json",
+                )
+
             outputs[traj_id] = {
                 "frames_dir": frames_dir,
                 "video_path": video_path,
                 "num_frames": len(frame_paths),
+                "depth_dir": depth_dir if render_outputs.get("depth") else None,
+                "seg_dir": seg_dir if render_outputs.get("segmentation") else None,
+                "scene_state_path": scene_state_path,
             }
 
         self.log(f"Rendered {len(outputs)} static scene videos")
         return outputs
+
+    def _build_object_states(self) -> list[dict[str, Any]]:
+        """Build object state list from the loaded manifest."""
+        object_states = []
+        for obj in self.manifest.get("objects", []):
+            articulation_state = obj.get("articulation_state") or obj.get("articulation") or {}
+            object_states.append({
+                "id": obj.get("id"),
+                "name": obj.get("name"),
+                "category": obj.get("category"),
+                "sim_role": obj.get("sim_role"),
+                "transform": obj.get("transform", {}),
+                "articulation": articulation_state,
+            })
+        return object_states
+
+    def _write_scene_state(
+        self,
+        trajectory: CameraTrajectory,
+        output_path: Path,
+    ) -> Path:
+        """Write per-frame scene state entries for a trajectory."""
+        object_states = self._build_object_states()
+        scene_info = self.manifest.get("scene", {})
+
+        state_entries = []
+        for pose in trajectory.poses:
+            timestamp = pose.frame_idx / trajectory.fps if trajectory.fps else pose.frame_idx
+            state_entries.append({
+                "frame_idx": pose.frame_idx,
+                "timestamp": timestamp,
+                "camera_pose": pose.transform.tolist(),
+                "camera_position": pose.position.tolist(),
+                "objects": object_states,
+                "scene": {
+                    "coordinate_frame": scene_info.get("coordinate_frame"),
+                    "meters_per_unit": scene_info.get("meters_per_unit"),
+                },
+            })
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(state_entries, indent=2))
+        return output_path
 
     def render_hand_videos(
         self,
@@ -453,6 +521,9 @@ class DWMPreparationJob:
                 static_scene_video_path=scene_render.get("video_path"),
                 hand_mesh_video_path=hand_render.get("video_path"),
                 static_scene_frames_dir=scene_render.get("frames_dir"),
+                static_scene_depth_dir=scene_render.get("depth_dir"),
+                static_scene_seg_dir=scene_render.get("seg_dir"),
+                scene_state_path=scene_render.get("scene_state_path"),
                 hand_mesh_frames_dir=hand_render.get("frames_dir"),
                 text_prompt=text_prompt,
                 resolution=self.config.resolution,
@@ -959,6 +1030,21 @@ Examples:
         help="Skip rendering (generate trajectories only)",
     )
     parser.add_argument(
+        "--no-depth",
+        action="store_true",
+        help="Disable depth map export during static scene rendering",
+    )
+    parser.add_argument(
+        "--no-segmentation",
+        action="store_true",
+        help="Disable segmentation mask export during static scene rendering",
+    )
+    parser.add_argument(
+        "--no-scene-state",
+        action="store_true",
+        help="Disable scene state export",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Reduce output verbosity",
@@ -1034,6 +1120,9 @@ Examples:
         fps=args.fps,
         render_static_scene=not args.no_render,
         render_hand_mesh=not args.no_render,
+        export_depth=not args.no_depth,
+        export_segmentation=not args.no_segmentation,
+        export_scene_state=not args.no_scene_state,
         verbose=not args.quiet,
         enable_robot_retargeting=args.enable_robot_retargeting,
         robot_config_name=args.robot_config,

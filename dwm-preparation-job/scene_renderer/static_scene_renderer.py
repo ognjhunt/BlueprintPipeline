@@ -97,6 +97,8 @@ class BaseRenderer(ABC):
         self,
         camera_pose: CameraPose,
         output_path: Path,
+        depth_path: Optional[Path] = None,
+        segmentation_path: Optional[Path] = None,
     ) -> bool:
         """Render a single frame from the given camera pose."""
         pass
@@ -106,7 +108,9 @@ class BaseRenderer(ABC):
         trajectory: CameraTrajectory,
         output_dir: Path,
         frame_prefix: str = "frame",
-    ) -> list[Path]:
+        depth_dir: Optional[Path] = None,
+        segmentation_dir: Optional[Path] = None,
+    ) -> dict[str, list[Path]]:
         """
         Render all frames in a trajectory.
 
@@ -114,25 +118,55 @@ class BaseRenderer(ABC):
             trajectory: Camera trajectory
             output_dir: Directory for output frames
             frame_prefix: Prefix for frame filenames
+            depth_dir: Optional directory for depth outputs
+            segmentation_dir: Optional directory for segmentation outputs
 
         Returns:
-            List of paths to rendered frames
+            Dictionary containing paths for color, depth, and segmentation frames
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if depth_dir:
+            depth_dir = Path(depth_dir)
+            depth_dir.mkdir(parents=True, exist_ok=True)
+        if segmentation_dir:
+            segmentation_dir = Path(segmentation_dir)
+            segmentation_dir.mkdir(parents=True, exist_ok=True)
 
-        frame_paths = []
+        color_paths = []
+        depth_paths = []
+        seg_paths = []
         for pose in trajectory.poses:
             frame_name = f"{frame_prefix}_{pose.frame_idx:04d}.{self.config.output_format}"
             frame_path = output_dir / frame_name
 
-            success = self.render_frame(pose, frame_path)
+            depth_path = None
+            seg_path = None
+            if depth_dir:
+                depth_path = depth_dir / f"{frame_prefix}_{pose.frame_idx:04d}.npy"
+            if segmentation_dir:
+                seg_path = segmentation_dir / f"{frame_prefix}_{pose.frame_idx:04d}.npy"
+
+            success = self.render_frame(
+                pose,
+                frame_path,
+                depth_path=depth_path,
+                segmentation_path=seg_path,
+            )
             if success:
-                frame_paths.append(frame_path)
+                color_paths.append(frame_path)
+                if depth_path:
+                    depth_paths.append(depth_path)
+                if seg_path:
+                    seg_paths.append(seg_path)
             else:
                 print(f"Warning: Failed to render frame {pose.frame_idx}")
 
-        return frame_paths
+        return {
+            "color": color_paths,
+            "depth": depth_paths,
+            "segmentation": seg_paths,
+        }
 
 
 class MockRenderer(BaseRenderer):
@@ -155,6 +189,8 @@ class MockRenderer(BaseRenderer):
         self,
         camera_pose: CameraPose,
         output_path: Path,
+        depth_path: Optional[Path] = None,
+        segmentation_path: Optional[Path] = None,
     ) -> bool:
         """Generate a mock frame (solid color with frame info)."""
         try:
@@ -185,12 +221,32 @@ class MockRenderer(BaseRenderer):
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
             img.save(output_path)
+
+            # Save mock depth/segmentation if requested
+            if depth_path:
+                depth_path.parent.mkdir(parents=True, exist_ok=True)
+                depth = np.linspace(0, 1, num=self.config.width * self.config.height).reshape(
+                    (self.config.height, self.config.width)
+                )
+                np.save(depth_path, depth)
+
+            if segmentation_path:
+                segmentation_path.parent.mkdir(parents=True, exist_ok=True)
+                seg_map = np.zeros((self.config.height, self.config.width), dtype=np.int32)
+                np.save(segmentation_path, seg_map)
+
             return True
 
         except ImportError:
             # PIL not available, create empty file
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"")
+            if depth_path:
+                depth_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(depth_path, np.zeros((self.config.height, self.config.width)))
+            if segmentation_path:
+                segmentation_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(segmentation_path, np.zeros((self.config.height, self.config.width)))
             return True
 
 
@@ -259,6 +315,8 @@ class PyRenderRenderer(BaseRenderer):
         self,
         camera_pose: CameraPose,
         output_path: Path,
+        depth_path: Optional[Path] = None,
+        segmentation_path: Optional[Path] = None,
     ) -> bool:
         """Render a frame using PyRender."""
         if self.scene is None or self.renderer is None:
@@ -289,6 +347,17 @@ class PyRenderRenderer(BaseRenderer):
             img = Image.fromarray(color)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             img.save(output_path)
+
+            # Save depth map if requested
+            if depth_path:
+                depth_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(depth_path, depth)
+
+            # Save dummy segmentation map if requested
+            if segmentation_path:
+                segmentation_path.parent.mkdir(parents=True, exist_ok=True)
+                seg_map = np.zeros_like(depth, dtype=np.int32)
+                np.save(segmentation_path, seg_map)
 
             # Remove camera for next frame
             self.scene.remove_node(camera_node)
@@ -324,6 +393,8 @@ class IsaacSimRenderer(BaseRenderer):
         self,
         camera_pose: CameraPose,
         output_path: Path,
+        depth_path: Optional[Path] = None,
+        segmentation_path: Optional[Path] = None,
     ) -> bool:
         """
         Not directly implemented - use generate_render_script instead.
@@ -338,7 +409,9 @@ class IsaacSimRenderer(BaseRenderer):
         trajectory: CameraTrajectory,
         output_dir: Path,
         frame_prefix: str = "frame",
-    ) -> list[Path]:
+        depth_dir: Optional[Path] = None,
+        segmentation_dir: Optional[Path] = None,
+    ) -> dict[str, list[Path]]:
         """
         Generate a script for Isaac Sim to render the trajectory.
 
@@ -354,13 +427,23 @@ class IsaacSimRenderer(BaseRenderer):
             output_dir,
             script_path,
             frame_prefix,
+            depth_dir=depth_dir,
+            segmentation_dir=segmentation_dir,
         )
 
         # Return expected frame paths
-        expected_paths = []
+        expected_paths = {"color": [], "depth": [], "segmentation": []}
         for pose in trajectory.poses:
             frame_name = f"{frame_prefix}_{pose.frame_idx:04d}.{self.config.output_format}"
-            expected_paths.append(output_dir / frame_name)
+            expected_paths["color"].append(output_dir / frame_name)
+            if depth_dir:
+                expected_paths["depth"].append(
+                    Path(depth_dir) / f"{frame_prefix}_{pose.frame_idx:04d}.npy"
+                )
+            if segmentation_dir:
+                expected_paths["segmentation"].append(
+                    Path(segmentation_dir) / f"{frame_prefix}_{pose.frame_idx:04d}.npy"
+                )
 
         return expected_paths
 
@@ -370,6 +453,8 @@ class IsaacSimRenderer(BaseRenderer):
         output_dir: Path,
         script_path: Path,
         frame_prefix: str,
+        depth_dir: Optional[Path] = None,
+        segmentation_dir: Optional[Path] = None,
     ) -> None:
         """Generate Python script for Isaac Sim rendering."""
         poses_data = []
@@ -404,6 +489,12 @@ OUTPUT_DIR = Path("{output_dir}")
 FRAME_PREFIX = "{frame_prefix}"
 WIDTH = {self.config.width}
 HEIGHT = {self.config.height}
+WRITE_DEPTH = {bool(depth_dir)}
+WRITE_SEGMENTATION = {bool(segmentation_dir)}
+
+# Optional outputs
+DEPTH_DIR = Path("{depth_dir}") if {bool(depth_dir)} else None
+SEG_DIR = Path("{segmentation_dir}") if {bool(segmentation_dir)} else None
 
 # Camera poses
 POSES = {json.dumps(poses_data, indent=4)}
@@ -435,6 +526,7 @@ def render_frame(stage, pose, output_path):
     """Render a single frame."""
     import omni.kit.viewport.utility as vp_utils
     from omni.kit.capture.viewport import CaptureExtension
+    from omni.syntheticdata import SyntheticDataHelper
 
     # Setup camera
     pose_matrix = pose["transform"]
@@ -446,6 +538,37 @@ def render_frame(stage, pose, output_path):
 
     capture_ext = CaptureExtension()
     capture_ext.capture_frame(str(output_path), WIDTH, HEIGHT)
+
+    # Capture depth/segmentation if requested
+    render_product = viewport.get_render_product_path()
+    sd_helper = SyntheticDataHelper()
+
+    depth_path = None
+    seg_path = None
+    frame_idx = pose["frame_idx"]
+    if WRITE_DEPTH and DEPTH_DIR:
+        DEPTH_DIR.mkdir(parents=True, exist_ok=True)
+        depth_path = DEPTH_DIR / f"{FRAME_PREFIX}_{frame_idx:04d}.npy"
+    if WRITE_SEGMENTATION and SEG_DIR:
+        SEG_DIR.mkdir(parents=True, exist_ok=True)
+        seg_path = SEG_DIR / f"{FRAME_PREFIX}_{frame_idx:04d}.npy"
+
+    if depth_path or seg_path:
+        gt = sd_helper.get_groundtruth(
+            render_product,
+            ["depth", "instanceSegmentation"],
+            wait_for_servers=True,
+        )
+
+        if depth_path and "depth" in gt:
+            np.save(depth_path, gt["depth"])
+
+        if seg_path and "instanceSegmentation" in gt:
+            seg_data = gt["instanceSegmentation"]
+            if isinstance(seg_data, dict):
+                seg_data = seg_data.get("data")
+            if seg_data is not None:
+                np.save(seg_path, seg_data)
 
 
 def main():
@@ -565,11 +688,46 @@ class SceneRenderer:
         Returns:
             List of paths to rendered frames
         """
-        return self.renderer.render_trajectory(
+        outputs = self.renderer.render_trajectory(
             trajectory,
             output_dir,
             frame_prefix,
         )
+        if isinstance(outputs, dict):
+            return outputs.get("color", [])
+        return outputs
+
+    def render_trajectory_outputs(
+        self,
+        trajectory: CameraTrajectory,
+        output_dir: Path,
+        frame_prefix: str = "static_scene",
+        depth_dir: Optional[Path] = None,
+        segmentation_dir: Optional[Path] = None,
+    ) -> dict[str, list[Path]]:
+        """
+        Render trajectory to individual frames and optionally depth/segmentation.
+
+        Args:
+            trajectory: Camera trajectory
+            output_dir: Output directory for RGB frames
+            frame_prefix: Prefix for frame filenames
+            depth_dir: Optional depth directory
+            segmentation_dir: Optional segmentation directory
+
+        Returns:
+            Dict with keys color/depth/segmentation listing generated paths
+        """
+        outputs = self.renderer.render_trajectory(
+            trajectory,
+            output_dir,
+            frame_prefix,
+            depth_dir=depth_dir,
+            segmentation_dir=segmentation_dir,
+        )
+        if isinstance(outputs, dict):
+            return outputs
+        return {"color": outputs, "depth": [], "segmentation": []}
 
     def frames_to_video(
         self,
