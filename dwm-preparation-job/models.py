@@ -285,6 +285,7 @@ class DWMConditioningBundle:
     hand_mesh_frames_dir: Optional[Path] = None
     static_scene_depth_dir: Optional[Path] = None
     static_scene_seg_dir: Optional[Path] = None
+    physics_log_path: Optional[Path] = None
     scene_state_path: Optional[Path] = None
 
     # Resolution
