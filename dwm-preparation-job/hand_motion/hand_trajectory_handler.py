@@ -256,6 +256,25 @@ def generate_grasp_trajectory(
     )
 
 
+def _clamp_distance_from_limits(
+    pull_distance: float,
+    joint_limits: Optional[dict[str, float]] = None,
+) -> float:
+    """Clamp translational travel based on joint limits if provided."""
+    if not joint_limits:
+        return pull_distance
+
+    lower = joint_limits.get("lower")
+    upper = joint_limits.get("upper")
+    if lower is None or upper is None:
+        return pull_distance
+
+    allowed = max(0.0, float(upper) - float(lower))
+    if allowed <= 0:
+        return 0.0
+    return min(pull_distance, allowed)
+
+
 def generate_pull_trajectory(
     handle_position: np.ndarray,
     pull_direction: np.ndarray = None,
@@ -264,6 +283,7 @@ def generate_pull_trajectory(
     fps: float = 24.0,
     hand_side: str = "right",
     trajectory_id: Optional[str] = None,
+    joint_limits: Optional[dict[str, float]] = None,
 ) -> HandTrajectory:
     """
     Generate a pulling trajectory (e.g., opening a drawer).
@@ -288,6 +308,8 @@ def generate_pull_trajectory(
     if pull_direction is None:
         pull_direction = np.array([0, 0, -1], dtype=np.float64)
     pull_direction = pull_direction / np.linalg.norm(pull_direction)
+
+    pull_distance = _clamp_distance_from_limits(pull_distance, joint_limits)
 
     handle = np.asarray(handle_position, dtype=np.float64)
 
@@ -365,6 +387,7 @@ def generate_push_trajectory(
     fps: float = 24.0,
     hand_side: str = "right",
     trajectory_id: Optional[str] = None,
+    joint_limits: Optional[dict[str, float]] = None,
 ) -> HandTrajectory:
     """
     Generate a pushing trajectory.
@@ -387,6 +410,8 @@ def generate_push_trajectory(
     if push_direction is None:
         push_direction = np.array([0, 0, 1], dtype=np.float64)
     push_direction = push_direction / np.linalg.norm(push_direction)
+
+    push_distance = _clamp_distance_from_limits(push_distance, joint_limits)
 
     contact = np.asarray(contact_position, dtype=np.float64)
 
@@ -476,6 +501,12 @@ class HandTrajectoryGenerator:
         target_position: np.ndarray,
         action_type: HandActionType = HandActionType.GRASP,
         hand_side: str = "right",
+        approach_direction: Optional[np.ndarray] = None,
+        handle_position: Optional[np.ndarray] = None,
+        motion_axis: Optional[np.ndarray] = None,
+        joint_limits: Optional[dict[str, float]] = None,
+        affordance_template: Optional[str] = None,
+        grounding_metadata: Optional[dict] = None,
     ) -> HandTrajectory:
         """
         Generate hand trajectory aligned with camera trajectory.
@@ -493,6 +524,13 @@ class HandTrajectoryGenerator:
             HandTrajectory aligned with camera motion
         """
         target = np.asarray(target_position, dtype=np.float64)
+        approach_direction = (
+            approach_direction / np.linalg.norm(approach_direction)
+            if approach_direction is not None and np.linalg.norm(approach_direction) > 1e-8
+            else None
+        )
+
+        trajectory: Optional[HandTrajectory] = None
 
         # Determine trajectory based on action type
         if action_type == HandActionType.REACH:
@@ -500,7 +538,7 @@ class HandTrajectoryGenerator:
             first_pose = camera_trajectory.poses[0]
             start_pos = first_pose.position + first_pose.forward * 0.3 + np.array([0.15, -0.2, 0])
 
-            return generate_reach_trajectory(
+            trajectory = generate_reach_trajectory(
                 start_position=start_pos,
                 target_position=target,
                 num_frames=camera_trajectory.num_frames,
@@ -509,12 +547,14 @@ class HandTrajectoryGenerator:
             )
 
         elif action_type == HandActionType.GRASP:
-            # Approach from camera direction
+            # Approach from camera direction unless specified
             last_pose = camera_trajectory.poses[-1]
-            approach_dir = target - last_pose.position
-            approach_dir = approach_dir / np.linalg.norm(approach_dir)
+            approach_dir = approach_direction
+            if approach_dir is None:
+                approach_dir = target - last_pose.position
+                approach_dir = approach_dir / np.linalg.norm(approach_dir)
 
-            return generate_grasp_trajectory(
+            trajectory = generate_grasp_trajectory(
                 object_position=target,
                 approach_direction=approach_dir,
                 num_frames=camera_trajectory.num_frames,
@@ -523,42 +563,84 @@ class HandTrajectoryGenerator:
             )
 
         elif action_type == HandActionType.PULL:
-            # Pull toward camera
+            # Pull toward camera unless a motion axis or approach is defined
             last_pose = camera_trajectory.poses[-1]
-            pull_dir = last_pose.position - target
-            pull_dir = pull_dir / np.linalg.norm(pull_dir)
+            pull_dir = approach_direction
+            if pull_dir is None:
+                pull_dir = last_pose.position - target
+                pull_dir = pull_dir / np.linalg.norm(pull_dir)
 
-            return generate_pull_trajectory(
+            trajectory = generate_pull_trajectory(
                 handle_position=target,
                 pull_direction=pull_dir,
                 num_frames=camera_trajectory.num_frames,
                 fps=camera_trajectory.fps,
                 hand_side=hand_side,
+                joint_limits=joint_limits,
             )
 
         elif action_type == HandActionType.PUSH:
-            # Push away from camera
+            # Push away from camera unless motion axis or approach is defined
             last_pose = camera_trajectory.poses[-1]
-            push_dir = target - last_pose.position
-            push_dir[1] = 0  # Keep horizontal
-            push_dir = push_dir / np.linalg.norm(push_dir)
+            push_dir = approach_direction
+            if push_dir is None:
+                push_dir = target - last_pose.position
+                push_dir[1] = 0  # Keep horizontal
+                push_dir = push_dir / np.linalg.norm(push_dir)
 
-            return generate_push_trajectory(
+            trajectory = generate_push_trajectory(
                 contact_position=target,
                 push_direction=push_dir,
                 num_frames=camera_trajectory.num_frames,
                 fps=camera_trajectory.fps,
                 hand_side=hand_side,
+                joint_limits=joint_limits,
             )
 
         else:
             # Default to grasp
-            return generate_grasp_trajectory(
+            trajectory = generate_grasp_trajectory(
                 object_position=target,
                 num_frames=camera_trajectory.num_frames,
                 fps=camera_trajectory.fps,
                 hand_side=hand_side,
             )
+            trajectory.affordance_template = affordance_template
+
+        if trajectory is None:
+            raise RuntimeError("Failed to generate a hand trajectory.")
+
+        return self._attach_grounding(
+            trajectory=trajectory,
+            target=target,
+            handle_position=handle_position,
+            approach_direction=approach_direction,
+            motion_axis=motion_axis,
+            joint_limits=joint_limits,
+            affordance_template=affordance_template,
+            grounding_metadata=grounding_metadata,
+        )
+
+    def _attach_grounding(
+        self,
+        trajectory: HandTrajectory,
+        target: np.ndarray,
+        handle_position: Optional[np.ndarray],
+        approach_direction: Optional[np.ndarray],
+        motion_axis: Optional[np.ndarray],
+        joint_limits: Optional[dict[str, float]],
+        affordance_template: Optional[str],
+        grounding_metadata: Optional[dict],
+    ) -> HandTrajectory:
+        trajectory.target_position = target
+        trajectory.handle_position = handle_position
+        trajectory.approach_direction = approach_direction
+        trajectory.motion_axis = motion_axis
+        trajectory.joint_limits = joint_limits
+        trajectory.affordance_template = affordance_template
+        if grounding_metadata:
+            trajectory.grounding.update(grounding_metadata)
+        return trajectory
 
     def export_trajectory(
         self,
@@ -586,6 +668,13 @@ class HandTrajectoryGenerator:
             "description": trajectory.description,
             "target_object_id": trajectory.target_object_id,
             "camera_trajectory_id": trajectory.camera_trajectory_id,
+            "target_position": trajectory.target_position.tolist() if trajectory.target_position is not None else None,
+            "handle_position": trajectory.handle_position.tolist() if trajectory.handle_position is not None else None,
+            "approach_direction": trajectory.approach_direction.tolist() if trajectory.approach_direction is not None else None,
+            "motion_axis": trajectory.motion_axis.tolist() if trajectory.motion_axis is not None else None,
+            "joint_limits": trajectory.joint_limits,
+            "affordance_template": trajectory.affordance_template,
+            "grounding": trajectory.grounding,
             "poses": [],
         }
 
