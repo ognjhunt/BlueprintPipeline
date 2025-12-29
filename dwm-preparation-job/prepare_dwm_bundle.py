@@ -173,7 +173,10 @@ class DWMPreparationJob:
 
         # Initialize packager
         self.packager = DWMBundlePackager(config.output_dir)
-        self.physics_runner = PhysicsPolicyRunner(fps=config.fps)
+        self.physics_runner = PhysicsPolicyRunner(
+            fps=config.fps,
+            enable_robot_retargeting=config.enable_robot_retargeting,
+        )
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
