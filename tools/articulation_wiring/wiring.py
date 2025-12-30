@@ -78,6 +78,278 @@ class ArticulatedAsset:
 
 
 # =============================================================================
+# URDF Validation
+# =============================================================================
+
+
+@dataclass
+class URDFValidationResult:
+    """Result of URDF validation."""
+    is_valid: bool
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    joint_count: int = 0
+    link_count: int = 0
+
+
+def validate_urdf(urdf_path: Path) -> URDFValidationResult:
+    """
+    Validate a URDF file for correctness and simulation compatibility.
+
+    Checks:
+    - XML syntax and well-formedness
+    - Required elements (robot root, links, joints)
+    - Joint type validity
+    - Joint limits (required for revolute/prismatic)
+    - Link connectivity (no orphaned links)
+    - Mesh file references exist
+    - Inertia values are physically plausible
+    - No duplicate names
+
+    Args:
+        urdf_path: Path to URDF file
+
+    Returns:
+        URDFValidationResult with validation status and any issues found
+    """
+    result = URDFValidationResult(is_valid=True)
+    urdf_path = Path(urdf_path)
+
+    # Check file exists
+    if not urdf_path.is_file():
+        result.is_valid = False
+        result.errors.append(f"URDF file not found: {urdf_path}")
+        return result
+
+    # Parse XML
+    try:
+        tree = ET.parse(urdf_path)
+        root = tree.getroot()
+    except ET.ParseError as e:
+        result.is_valid = False
+        result.errors.append(f"XML parse error: {e}")
+        return result
+
+    # Check root element
+    if root.tag != "robot":
+        result.is_valid = False
+        result.errors.append(f"Root element must be 'robot', found '{root.tag}'")
+        return result
+
+    robot_name = root.attrib.get("name", "")
+    if not robot_name:
+        result.warnings.append("Robot name is empty")
+
+    # Collect links and joints
+    links = root.findall("link")
+    joints = root.findall("joint")
+
+    result.link_count = len(links)
+    result.joint_count = len([j for j in joints if j.attrib.get("type") != "fixed"])
+
+    # Check for at least one link
+    if not links:
+        result.is_valid = False
+        result.errors.append("URDF must have at least one link")
+        return result
+
+    # Validate link names and check for duplicates
+    link_names = set()
+    for link in links:
+        name = link.attrib.get("name")
+        if not name:
+            result.is_valid = False
+            result.errors.append("Found link without 'name' attribute")
+        elif name in link_names:
+            result.is_valid = False
+            result.errors.append(f"Duplicate link name: '{name}'")
+        else:
+            link_names.add(name)
+
+        # Validate inertial if present
+        inertial = link.find("inertial")
+        if inertial is not None:
+            mass_elem = inertial.find("mass")
+            if mass_elem is not None:
+                try:
+                    mass = float(mass_elem.attrib.get("value", "0"))
+                    if mass < 0:
+                        result.errors.append(f"Link '{name}' has negative mass: {mass}")
+                        result.is_valid = False
+                    elif mass == 0:
+                        result.warnings.append(f"Link '{name}' has zero mass")
+                except ValueError:
+                    result.errors.append(f"Link '{name}' has invalid mass value")
+                    result.is_valid = False
+
+            inertia_elem = inertial.find("inertia")
+            if inertia_elem is not None:
+                # Check diagonal elements are positive
+                for attr in ["ixx", "iyy", "izz"]:
+                    try:
+                        val = float(inertia_elem.attrib.get(attr, "0"))
+                        if val < 0:
+                            result.errors.append(f"Link '{name}' has negative inertia {attr}: {val}")
+                            result.is_valid = False
+                    except ValueError:
+                        result.errors.append(f"Link '{name}' has invalid inertia {attr}")
+                        result.is_valid = False
+
+        # Check mesh file references
+        for visual_or_collision in ["visual", "collision"]:
+            elem = link.find(visual_or_collision)
+            if elem is not None:
+                geom = elem.find("geometry")
+                if geom is not None:
+                    mesh = geom.find("mesh")
+                    if mesh is not None:
+                        filename = mesh.attrib.get("filename", "")
+                        if filename:
+                            # Check if file exists (relative to URDF location)
+                            mesh_path = urdf_path.parent / filename
+                            if not mesh_path.is_file():
+                                # Also try without leading ./
+                                alt_path = urdf_path.parent / filename.lstrip("./")
+                                if not alt_path.is_file():
+                                    result.warnings.append(
+                                        f"Link '{name}' references missing mesh: {filename}"
+                                    )
+
+    # Validate joints
+    VALID_JOINT_TYPES = {"revolute", "continuous", "prismatic", "fixed", "floating", "planar"}
+    joint_names = set()
+
+    for joint in joints:
+        joint_name = joint.attrib.get("name", "")
+        joint_type = joint.attrib.get("type", "")
+
+        if not joint_name:
+            result.is_valid = False
+            result.errors.append("Found joint without 'name' attribute")
+            continue
+
+        if joint_name in joint_names:
+            result.is_valid = False
+            result.errors.append(f"Duplicate joint name: '{joint_name}'")
+        else:
+            joint_names.add(joint_name)
+
+        if not joint_type:
+            result.is_valid = False
+            result.errors.append(f"Joint '{joint_name}' missing 'type' attribute")
+        elif joint_type not in VALID_JOINT_TYPES:
+            result.is_valid = False
+            result.errors.append(f"Joint '{joint_name}' has invalid type: '{joint_type}'")
+
+        # Check parent/child links
+        parent = joint.find("parent")
+        child = joint.find("child")
+
+        if parent is None:
+            result.is_valid = False
+            result.errors.append(f"Joint '{joint_name}' missing parent link")
+        else:
+            parent_link = parent.attrib.get("link", "")
+            if parent_link not in link_names:
+                result.is_valid = False
+                result.errors.append(
+                    f"Joint '{joint_name}' references unknown parent link: '{parent_link}'"
+                )
+
+        if child is None:
+            result.is_valid = False
+            result.errors.append(f"Joint '{joint_name}' missing child link")
+        else:
+            child_link = child.attrib.get("link", "")
+            if child_link not in link_names:
+                result.is_valid = False
+                result.errors.append(
+                    f"Joint '{joint_name}' references unknown child link: '{child_link}'"
+                )
+
+        # Check limits for revolute/prismatic joints
+        if joint_type in ("revolute", "prismatic"):
+            limit = joint.find("limit")
+            if limit is None:
+                result.is_valid = False
+                result.errors.append(f"Joint '{joint_name}' ({joint_type}) requires <limit> element")
+            else:
+                # Check required limit attributes
+                lower = limit.attrib.get("lower")
+                upper = limit.attrib.get("upper")
+
+                if lower is None or upper is None:
+                    result.is_valid = False
+                    result.errors.append(
+                        f"Joint '{joint_name}' limit must have both 'lower' and 'upper' attributes"
+                    )
+                else:
+                    try:
+                        lower_val = float(lower)
+                        upper_val = float(upper)
+                        if lower_val > upper_val:
+                            result.errors.append(
+                                f"Joint '{joint_name}' has lower limit > upper limit: {lower_val} > {upper_val}"
+                            )
+                            result.is_valid = False
+                    except ValueError:
+                        result.errors.append(f"Joint '{joint_name}' has invalid limit values")
+                        result.is_valid = False
+
+        # Check axis for non-fixed joints
+        if joint_type not in ("fixed", "floating"):
+            axis = joint.find("axis")
+            if axis is not None:
+                xyz = axis.attrib.get("xyz", "0 0 1")
+                try:
+                    axis_vals = [float(x) for x in xyz.split()]
+                    if len(axis_vals) != 3:
+                        result.warnings.append(f"Joint '{joint_name}' axis must have 3 values")
+                    elif all(v == 0 for v in axis_vals):
+                        result.warnings.append(f"Joint '{joint_name}' has zero axis vector")
+                except ValueError:
+                    result.warnings.append(f"Joint '{joint_name}' has invalid axis values")
+
+    # Check for link connectivity (no orphaned links except root)
+    child_links = set()
+    parent_links = set()
+    for joint in joints:
+        parent = joint.find("parent")
+        child = joint.find("child")
+        if parent is not None:
+            parent_links.add(parent.attrib.get("link", ""))
+        if child is not None:
+            child_links.add(child.attrib.get("link", ""))
+
+    # Find root links (links that are parents but not children)
+    root_links = parent_links - child_links
+
+    # Find orphaned links (links that are neither parents nor children, excluding root if no joints)
+    if joints:
+        connected_links = parent_links | child_links
+        orphaned = link_names - connected_links
+        if orphaned:
+            result.warnings.append(f"Orphaned links (not connected by joints): {orphaned}")
+
+    return result
+
+
+def validate_urdf_for_simulation(urdf_path: Path) -> Tuple[bool, List[str]]:
+    """
+    Convenience function: validate URDF and return simple result.
+
+    Args:
+        urdf_path: Path to URDF file
+
+    Returns:
+        Tuple of (is_valid, list of error/warning messages)
+    """
+    result = validate_urdf(urdf_path)
+    messages = result.errors + [f"WARNING: {w}" for w in result.warnings]
+    return result.is_valid, messages
+
+
+# =============================================================================
 # URDF Parsing
 # =============================================================================
 

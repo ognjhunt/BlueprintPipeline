@@ -435,9 +435,108 @@ class IsaacSimRenderer(BaseRenderer):
         segmentation_path: Optional[Path] = None,
     ) -> bool:
         """
-        Not directly implemented - use render_trajectory for Isaac Sim.
+        Render a single frame using Isaac Sim.
+
+        This method initializes Isaac Sim, loads the scene, positions the camera,
+        and captures the frame. For efficiency, prefer using render_trajectory()
+        when rendering multiple frames.
+
+        Args:
+            camera_pose: Camera pose for the frame
+            output_path: Path to save the rendered RGB image
+            depth_path: Optional path to save depth map as .npy
+            segmentation_path: Optional path to save segmentation mask as .npy
+
+        Returns:
+            True if rendering succeeded, False otherwise
         """
-        raise NotImplementedError("Isaac Sim renderer expects render_trajectory to be used.")
+        self._require_isaac_modules()
+
+        if self.scene_path is None:
+            print("[IsaacSimRenderer] Error: Scene not loaded")
+            return False
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from omni.isaac.kit import SimulationApp
+            import omni
+            from omni.isaac.core.utils.stage import open_stage
+            import omni.kit.viewport.utility as vp_utils
+            from omni.kit.capture.viewport import CaptureExtension
+
+            # Create headless SimulationApp
+            simulation_app = SimulationApp({"headless": True})
+
+            try:
+                # Load the scene
+                open_stage(str(self.scene_path))
+                stage = omni.usd.get_context().get_stage()
+
+                # Setup viewport
+                viewport = vp_utils.get_active_viewport()
+                viewport.set_texture_resolution((self.config.width, self.config.height))
+                viewport.set_active_camera(self.CAMERA_PATH)
+
+                # Position camera
+                self._update_camera(stage, camera_pose.transform, focal_length=35.0)
+                simulation_app.update()
+
+                # Capture frame
+                capture_ext = CaptureExtension()
+                capture_ext.capture_frame(str(output_path), self.config.width, self.config.height)
+                simulation_app.update()
+
+                # Capture depth and segmentation if requested
+                if depth_path or segmentation_path:
+                    try:
+                        from omni.syntheticdata import SyntheticDataHelper
+
+                        sd_helper = SyntheticDataHelper()
+                        render_product = viewport.get_render_product_path()
+
+                        sensor_types = []
+                        if depth_path:
+                            sensor_types.append("depth")
+                        if segmentation_path:
+                            sensor_types.append("instanceSegmentation")
+
+                        gt = sd_helper.get_groundtruth(
+                            render_product,
+                            sensor_types,
+                            wait_for_servers=True,
+                        )
+
+                        if depth_path and "depth" in gt:
+                            depth_path = Path(depth_path)
+                            depth_path.parent.mkdir(parents=True, exist_ok=True)
+                            np.save(depth_path, gt["depth"])
+
+                        if segmentation_path and "instanceSegmentation" in gt:
+                            segmentation_path = Path(segmentation_path)
+                            segmentation_path.parent.mkdir(parents=True, exist_ok=True)
+                            seg_data = gt["instanceSegmentation"]
+                            if isinstance(seg_data, dict):
+                                seg_data = seg_data.get("data", seg_data)
+                            np.save(segmentation_path, seg_data)
+
+                    except ImportError:
+                        print("[IsaacSimRenderer] Warning: SyntheticDataHelper not available")
+                    except Exception as e:
+                        print(f"[IsaacSimRenderer] Warning: Failed to capture depth/segmentation: {e}")
+
+                return True
+
+            finally:
+                simulation_app.close()
+
+        except ImportError as e:
+            print(f"[IsaacSimRenderer] Error: Required Isaac Sim modules not available: {e}")
+            return False
+        except Exception as e:
+            print(f"[IsaacSimRenderer] Error: Rendering failed: {e}")
+            return False
 
     def render_trajectory(
         self,

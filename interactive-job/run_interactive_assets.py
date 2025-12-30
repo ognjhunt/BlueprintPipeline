@@ -3,15 +3,12 @@
 Interactive Asset Pipeline for ZeroScene Integration.
 
 This job processes 3D assets (GLB meshes) from ZeroScene to add articulation
-data using either:
-- Particulate (default): Fast feed-forward mesh articulation (~10s per object)
-- PhysX-Anything: VLM-based image-to-articulation (5-15min per object)
+data using Particulate - a fast feed-forward mesh articulation model (~10s per object).
 
 The pipeline:
 1. Receives GLB meshes from ZeroScene (or crop images as fallback)
-2. For Particulate: Sends GLB directly for articulation
-3. For PhysX-Anything: Renders images from GLB, then calls VLM
-4. Outputs URDF with articulation data + segmented meshes
+2. Sends GLB directly to Particulate for articulation
+3. Outputs URDF with articulation data + segmented meshes
 
 Designed for the ZeroScene pipeline:
     ZeroScene → interactive-job → simready-job → usd-assembly-job
@@ -20,9 +17,7 @@ Environment Variables:
     BUCKET: GCS bucket name
     SCENE_ID: Scene identifier
     ASSETS_PREFIX: Path to assets (contains scene_assets.json)
-    ARTICULATION_BACKEND: "particulate" (default) or "physx"
     PARTICULATE_ENDPOINT: Particulate Cloud Run service URL
-    PHYSX_ENDPOINT: PhysX-Anything Cloud Run service URL (fallback)
     ZEROSCENE_PREFIX: Optional path to ZeroScene outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
 """
@@ -48,19 +43,8 @@ from tools.scene_manifest.loader import load_manifest_or_scene_assets
 # Configuration
 # =============================================================================
 
-# Articulation backends
-BACKEND_PARTICULATE = "particulate"  # Fast mesh-based articulation (~10s)
-BACKEND_PHYSX = "physx"              # VLM-based articulation (5-15min)
-
 # Service timeouts
-SERVICE_WARMUP_TIMEOUT = int(os.getenv("PHYSX_WARMUP_TIMEOUT", "600"))  # 10 min
 PARTICULATE_WARMUP_TIMEOUT = int(os.getenv("PARTICULATE_WARMUP_TIMEOUT", "120"))  # 2 min
-
-# PhysX-Anything timeouts (slow VLM inference)
-PHYSX_REQUEST_TIMEOUT_FIRST = 900  # 15 min for first request (cold start)
-PHYSX_REQUEST_TIMEOUT_RETRY = 600  # 10 min for retries
-
-# Particulate timeouts (fast inference)
 PARTICULATE_REQUEST_TIMEOUT = 120  # 2 min (inference takes ~10s)
 
 MAX_RETRIES = 3
@@ -292,12 +276,12 @@ def render_mesh_to_single_view(glb_path: Path, output_path: Path) -> Optional[Pa
 
 
 # =============================================================================
-# PhysX-Anything Service Communication
+# Particulate Service Communication
 # =============================================================================
 
 def check_service_health(endpoint: str, timeout: int = 30) -> Tuple[bool, str, Optional[dict]]:
     """
-    Check PhysX service health status.
+    Check service health status.
 
     Returns:
         (is_ready, status_message, response_data)
@@ -320,136 +304,6 @@ def check_service_health(endpoint: str, timeout: int = 30) -> Tuple[bool, str, O
         return False, f"Network error: {e.reason}", None
     except Exception as e:
         return False, f"Error: {e}", None
-
-
-def wait_for_service_ready(endpoint: str, max_wait: int = SERVICE_WARMUP_TIMEOUT) -> bool:
-    """
-    Wait for PhysX service to be ready.
-
-    The VLM model takes 10+ minutes to load on cold start.
-    """
-    log(f"Waiting for service to be ready (max {max_wait}s)...")
-    start_time = time.time()
-    last_status = ""
-
-    while time.time() - start_time < max_wait:
-        elapsed = int(time.time() - start_time)
-        is_ready, status, _ = check_service_health(endpoint)
-
-        if is_ready:
-            log(f"Service ready after {elapsed}s")
-            return True
-
-        if status != last_status:
-            log(f"Service status: {status} ({elapsed}s elapsed)", "WARNING")
-            last_status = status
-
-        # Adaptive backoff
-        if elapsed < 60:
-            time.sleep(10)
-        elif elapsed < 300:
-            time.sleep(20)
-        else:
-            time.sleep(30)
-
-    log(f"Service not ready after {max_wait}s", "ERROR")
-    return False
-
-
-def call_physx_service(
-    endpoint: str,
-    image_path: Path,
-    obj_id: str,
-    glb_path: Optional[Path] = None,
-) -> Optional[dict]:
-    """
-    Call PhysX-Anything service with image (and optional GLB).
-
-    The service expects:
-    - image_base64: Base64-encoded PNG/JPEG image
-    - glb_base64: Optional Base64-encoded GLB mesh (for better reconstruction)
-
-    Returns:
-        Service response dict or None on failure
-    """
-    # Build request payload
-    payload = {}
-
-    # Add image
-    with image_path.open("rb") as f:
-        payload["image_base64"] = base64.b64encode(f.read()).decode("utf-8")
-
-    # Add GLB if provided (for mesh-conditioned generation)
-    if glb_path and glb_path.is_file():
-        with glb_path.open("rb") as f:
-            payload["glb_base64"] = base64.b64encode(f.read()).decode("utf-8")
-
-    body = json.dumps(payload).encode("utf-8")
-    log(f"Request payload: image={len(payload.get('image_base64', ''))} bytes, glb={'yes' if glb_path else 'no'}", obj_id=obj_id)
-
-    # Retry loop
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            timeout = PHYSX_REQUEST_TIMEOUT_FIRST if attempt == 0 else PHYSX_REQUEST_TIMEOUT_RETRY
-
-            if attempt > 0:
-                log(f"Retry {attempt}/{MAX_RETRIES} (timeout={timeout}s)", obj_id=obj_id)
-            else:
-                log(f"POST {endpoint} (timeout={timeout}s)", obj_id=obj_id)
-
-            req = urllib.request.Request(
-                endpoint,
-                data=body,
-                headers={"Content-Type": "application/json"},
-            )
-
-            start = time.time()
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                elapsed = int(time.time() - start)
-                log(f"Response: {resp.status} ({elapsed}s)", obj_id=obj_id)
-
-                text = resp.read().decode("utf-8", errors="replace")
-                data = json.loads(text)
-
-                is_placeholder = data.get("placeholder", True)
-                log(f"Success: placeholder={is_placeholder}", obj_id=obj_id)
-
-                return data
-
-        except urllib.error.HTTPError as e:
-            error_body = ""
-            try:
-                error_body = e.read().decode("utf-8", errors="replace")[:1000]
-            except:
-                pass
-
-            log(f"HTTP {e.code}: {error_body}", level="ERROR", obj_id=obj_id)
-
-            # Don't retry client errors (except 429)
-            if 400 <= e.code < 500 and e.code != 429:
-                return None
-
-            if attempt < MAX_RETRIES:
-                wait_time = min(60 * (attempt + 1), 180) if e.code == 503 else min(20 * (2 ** attempt), 120)
-                log(f"Waiting {wait_time}s before retry...", "WARNING", obj_id)
-                time.sleep(wait_time)
-
-        except (urllib.error.URLError, TimeoutError) as e:
-            log(f"Network error: {e}", "ERROR", obj_id=obj_id)
-            if attempt < MAX_RETRIES:
-                time.sleep(min(20 * (2 ** attempt), 120))
-
-        except Exception as e:
-            log(f"Unexpected error: {type(e).__name__}: {e}", "ERROR", obj_id=obj_id)
-            if attempt < MAX_RETRIES:
-                time.sleep(20)
-
-    return None
-
-
-# =============================================================================
-# Particulate Service Communication
-# =============================================================================
 
 def wait_for_particulate_ready(endpoint: str, max_wait: int = PARTICULATE_WARMUP_TIMEOUT) -> bool:
     """
@@ -693,13 +547,13 @@ def generate_placeholder_urdf(obj_id: str, reason: str = "service_unavailable") 
 # Asset Materialization
 # =============================================================================
 
-def materialize_physx_response(
+def materialize_articulation_response(
     response: dict,
     output_dir: Path,
     obj_id: str,
 ) -> Tuple[Optional[Path], Optional[Path], Dict[str, Any]]:
     """
-    Materialize PhysX-Anything response to disk.
+    Materialize Particulate articulation response to disk.
 
     Returns:
         (mesh_path, urdf_path, metadata)
@@ -711,7 +565,7 @@ def materialize_physx_response(
 
     meta: Dict[str, Any] = {
         "placeholder": response.get("placeholder", False),
-        "generator": response.get("generator", "physx-anything"),
+        "generator": response.get("generator", "particulate"),
     }
 
     # Handle placeholder response
@@ -757,28 +611,22 @@ def process_object(
     assets_root: Path,
     zeroscene_root: Path,
     multiview_root: Path,
-    backend: str,
     particulate_endpoint: Optional[str],
-    physx_endpoint: Optional[str],
     mode: str,
     index: int,
     total: int,
 ) -> dict:
     """
-    Process a single interactive object.
+    Process a single interactive object using Particulate.
 
     Pipeline:
-    1. Find input (GLB mesh from ZeroScene or crop image)
-    2. Based on backend:
-       - Particulate: Send GLB directly for articulation
-       - PhysX-Anything: Render views from GLB, then call VLM
+    1. Find GLB mesh from ZeroScene
+    2. Send GLB to Particulate for articulation
     3. Materialize outputs (mesh + URDF)
     4. Generate manifest with joint summary
 
     Args:
-        backend: "particulate" or "physx"
         particulate_endpoint: Particulate service URL
-        physx_endpoint: PhysX-Anything service URL (fallback)
     """
     obj_id = str(obj.get("id"))
     obj_name = f"obj_{obj_id}"
@@ -797,7 +645,7 @@ def process_object(
         "class_name": obj_class,
         "status": "pending",
         "mode": mode,
-        "backend": backend,
+        "backend": "particulate",
         "output_dir": str(output_dir),
         "mesh_path": None,
         "urdf_path": None,
@@ -805,119 +653,75 @@ def process_object(
         "is_articulated": False,
     }
 
-    # Find inputs based on mode
+    # Find GLB mesh from ZeroScene
     glb_path: Optional[Path] = None
-    image_path: Optional[Path] = None
 
     if mode == MODE_GLB:
-        # ZeroScene mode: find GLB mesh
         zeroscene_obj_dir = zeroscene_root / obj_name
         glb_path = find_glb_file(zeroscene_obj_dir, obj_id)
 
         if glb_path:
             log(f"Found GLB: {glb_path}", obj_id=obj_name)
             result["input_glb"] = str(glb_path)
-
-            # Render view from GLB for VLM
-            rendered = render_mesh_to_single_view(glb_path, output_dir / "rendered.png")
-            if rendered:
-                image_path = rendered
-                log(f"Rendered view: {image_path}", obj_id=obj_name)
-            else:
-                # Try multi-view as fallback
-                views = render_mesh_views(glb_path, output_dir / "views", num_views=4)
-                if views:
-                    image_path = views[0]
-                    log(f"Using first of {len(views)} rendered views", obj_id=obj_name)
         else:
-            log(f"No GLB found in {zeroscene_obj_dir}, trying image fallback", "WARNING", obj_name)
+            log(f"No GLB found in {zeroscene_obj_dir}", "WARNING", obj_name)
 
-    # Fallback or image mode: find crop/view image
-    if not image_path:
-        obj_dir = assets_root / obj_name
-        image_path = find_crop_image(obj_dir, multiview_root, obj_id)
+    # Particulate requires GLB - if not found, try alternative locations
+    if not glb_path or not glb_path.is_file():
+        # Try assets root
+        alt_paths = [
+            assets_root / obj_name / f"obj_{obj_id}.glb",
+            assets_root / obj_name / "mesh.glb",
+            assets_root / "static" / obj_name / "mesh.glb",
+        ]
+        for alt_path in alt_paths:
+            if alt_path.is_file():
+                glb_path = alt_path
+                log(f"Found GLB at alternative location: {glb_path}", obj_id=obj_name)
+                result["input_glb"] = str(glb_path)
+                break
 
-        if image_path:
-            log(f"Using image: {image_path}", obj_id=obj_name)
-            result["input_image"] = str(image_path)
-        else:
-            # Try from object's crop_path in manifest
-            if obj.get("crop_path"):
-                crop_full = Path("/mnt/gcs") / obj["crop_path"]
-                if crop_full.is_file():
-                    image_path = crop_full
-                    log(f"Using manifest crop: {image_path}", obj_id=obj_name)
+    # If still no GLB, generate static URDF
+    if not glb_path or not glb_path.is_file():
+        log(f"No GLB mesh found, generating static URDF", "WARNING", obj_name)
+        result["status"] = "static"
+        result["error"] = "no_glb_found"
 
-    # Check if we have valid input based on backend
-    # Particulate requires GLB, PhysX requires image (or can render from GLB)
-    if backend == BACKEND_PARTICULATE:
-        if not glb_path or not glb_path.is_file():
-            log(f"No GLB found for Particulate, trying PhysX fallback", "WARNING", obj_name)
-            backend = BACKEND_PHYSX
-            result["backend"] = backend
-            result["backend_fallback"] = True
+        urdf_path = output_dir / f"{obj_name}.urdf"
+        urdf_path.write_text(generate_placeholder_urdf(obj_name, "no_glb"), encoding="utf-8")
+        result["urdf_path"] = str(urdf_path)
+        return result
 
-    if backend == BACKEND_PHYSX:
-        if not image_path or not image_path.is_file():
-            log(f"No valid image input found", "ERROR", obj_name)
-            result["status"] = "error"
-            result["error"] = "no_input_found"
-
-            # Write placeholder URDF
-            urdf_path = output_dir / f"{obj_name}.urdf"
-            urdf_path.write_text(generate_placeholder_urdf(obj_name, "no_input"), encoding="utf-8")
-            result["urdf_path"] = str(urdf_path)
-            return result
-
-        result["input_image"] = str(image_path)
-
-    # Determine endpoint
-    if backend == BACKEND_PARTICULATE:
-        endpoint = particulate_endpoint
-        if not endpoint:
-            log("No Particulate endpoint configured, trying PhysX", "WARNING", obj_name)
-            backend = BACKEND_PHYSX
-            endpoint = physx_endpoint
-            result["backend"] = backend
-    else:
-        endpoint = physx_endpoint
-
-    # Check if any endpoint is configured
-    if not endpoint:
-        log("No endpoint configured, using static URDF", "WARNING", obj_name)
+    # Check if Particulate endpoint is configured
+    if not particulate_endpoint:
+        log("No Particulate endpoint configured, using static URDF", "WARNING", obj_name)
         result["status"] = "static"
 
-        # Copy GLB if available, or create placeholder
-        if glb_path and glb_path.is_file():
-            import shutil
-            mesh_out = output_dir / "mesh.glb"
-            shutil.copy(glb_path, mesh_out)
-            result["mesh_path"] = str(mesh_out)
+        # Copy GLB and generate static URDF
+        import shutil
+        mesh_out = output_dir / "mesh.glb"
+        shutil.copy(glb_path, mesh_out)
+        result["mesh_path"] = str(mesh_out)
 
         urdf_path = output_dir / f"{obj_name}.urdf"
         urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
         result["urdf_path"] = str(urdf_path)
         return result
 
-    # Call appropriate service
-    if backend == BACKEND_PARTICULATE:
-        log(f"Using Particulate backend (fast mesh articulation)", obj_id=obj_name)
-        response = call_particulate_service(endpoint, glb_path, obj_name)
-    else:
-        log(f"Using PhysX-Anything backend (VLM articulation)", obj_id=obj_name)
-        response = call_physx_service(endpoint, image_path, obj_name, glb_path)
+    # Call Particulate service
+    log(f"Calling Particulate for articulation", obj_id=obj_name)
+    response = call_particulate_service(particulate_endpoint, glb_path, obj_name)
 
     if not response:
-        log("Service call failed", "ERROR", obj_name)
+        log("Particulate service call failed", "ERROR", obj_name)
         result["status"] = "error"
         result["error"] = "service_failed"
 
         # Fallback to static URDF with original mesh
-        if glb_path and glb_path.is_file():
-            import shutil
-            mesh_out = output_dir / "mesh.glb"
-            shutil.copy(glb_path, mesh_out)
-            result["mesh_path"] = str(mesh_out)
+        import shutil
+        mesh_out = output_dir / "mesh.glb"
+        shutil.copy(glb_path, mesh_out)
+        result["mesh_path"] = str(mesh_out)
 
         urdf_path = output_dir / f"{obj_name}.urdf"
         urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
@@ -925,7 +729,7 @@ def process_object(
         return result
 
     # Materialize response
-    mesh_path, urdf_path, meta = materialize_physx_response(response, output_dir, obj_name)
+    mesh_path, urdf_path, meta = materialize_articulation_response(response, output_dir, obj_name)
 
     if not mesh_path or not urdf_path:
         log("Materialization failed, using fallback", "WARNING", obj_name)
@@ -989,7 +793,7 @@ def process_object(
 # =============================================================================
 
 def main() -> None:
-    """Main entry point for interactive asset processing."""
+    """Main entry point for interactive asset processing using Particulate."""
 
     # Configuration from environment
     bucket = os.getenv("BUCKET", "")
@@ -998,21 +802,8 @@ def main() -> None:
     multiview_prefix = os.getenv("MULTIVIEW_PREFIX", "")
     zeroscene_prefix = os.getenv("ZEROSCENE_PREFIX", "")  # ZeroScene output path
 
-    # Articulation backend configuration
-    # Default to Particulate (faster, mesh-based)
-    backend = os.getenv("ARTICULATION_BACKEND", BACKEND_PARTICULATE).lower()
-    if backend not in (BACKEND_PARTICULATE, BACKEND_PHYSX):
-        log(f"Unknown backend '{backend}', using {BACKEND_PARTICULATE}", "WARNING")
-        backend = BACKEND_PARTICULATE
-
+    # Particulate endpoint
     particulate_endpoint = os.getenv("PARTICULATE_ENDPOINT", "")
-    physx_endpoint = os.getenv("PHYSX_ENDPOINT", "")
-
-    # Legacy compatibility: if only PHYSX_ENDPOINT is set and backend is particulate,
-    # switch to physx backend
-    if backend == BACKEND_PARTICULATE and not particulate_endpoint and physx_endpoint:
-        log("PARTICULATE_ENDPOINT not set, falling back to PhysX", "WARNING")
-        backend = BACKEND_PHYSX
 
     mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
 
@@ -1043,17 +834,14 @@ def main() -> None:
 
     # Print configuration
     log("=" * 60)
-    log("Interactive Asset Pipeline (ZeroScene Integration)")
+    log("Interactive Asset Pipeline (Particulate)")
     log("=" * 60)
     log(f"Bucket: {bucket}")
     log(f"Scene ID: {scene_id}")
     log(f"Assets: {assets_root}")
     log(f"ZeroScene: {zeroscene_root}")
     log(f"Multiview: {multiview_root}")
-    log(f"Backend: {backend}")
-    if backend == BACKEND_PARTICULATE:
-        log(f"Particulate Endpoint: {particulate_endpoint or '(none)'}")
-    log(f"PhysX Endpoint: {physx_endpoint or '(none - fallback/static mode)'}")
+    log(f"Particulate Endpoint: {particulate_endpoint or '(none - static mode)'}")
     log(f"Mode: {mode}")
     log(f"Interactive objects: {len(interactive_objects)}")
     log("=" * 60)
@@ -1078,15 +866,11 @@ def main() -> None:
         log("Done (no objects)")
         return
 
-    # Wait for service to be ready
-    if backend == BACKEND_PARTICULATE and particulate_endpoint:
+    # Wait for Particulate service to be ready
+    if particulate_endpoint:
         log("Checking Particulate service health...")
         if not wait_for_particulate_ready(particulate_endpoint):
             log("Particulate service not ready, will attempt processing anyway", "WARNING")
-    elif physx_endpoint:
-        log("Checking PhysX service health...")
-        if not wait_for_service_ready(physx_endpoint):
-            log("PhysX service not ready, will attempt processing anyway", "WARNING")
 
     # Process each object
     results = []
@@ -1097,9 +881,7 @@ def main() -> None:
                 assets_root=assets_root,
                 zeroscene_root=zeroscene_root,
                 multiview_root=multiview_root,
-                backend=backend,
                 particulate_endpoint=particulate_endpoint,
-                physx_endpoint=physx_endpoint,
                 mode=mode,
                 index=i,
                 total=len(interactive_objects),
@@ -1128,9 +910,8 @@ def main() -> None:
         "error_count": error_count,
         "fallback_count": fallback_count,
         "mode": mode,
-        "backend": backend,
+        "backend": "particulate",
         "particulate_endpoint": particulate_endpoint or None,
-        "physx_endpoint": physx_endpoint or None,
         "objects": results,
     }
 
@@ -1147,7 +928,6 @@ def main() -> None:
     log("=" * 60)
     log("SUMMARY")
     log("=" * 60)
-    log(f"Backend: {backend}")
     log(f"Total processed: {len(interactive_objects)}")
     log(f"OK: {ok_count}")
     log(f"Articulated: {articulated_count}")
