@@ -30,18 +30,224 @@ Environment Variables:
     NUM_ENVS: Number of parallel environments (default: 1024)
 """
 
+import ast
 import json
 import os
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.isaac_lab_tasks.task_generator import IsaacLabTaskGenerator
+
+
+# =============================================================================
+# Code Validation
+# =============================================================================
+
+
+@dataclass
+class CodeValidationResult:
+    """Result of Python code validation."""
+    is_valid: bool
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
+def validate_python_syntax(code: str, filename: str = "<string>") -> CodeValidationResult:
+    """
+    Validate Python code for syntax errors.
+
+    Args:
+        code: Python source code
+        filename: Filename for error messages
+
+    Returns:
+        CodeValidationResult with syntax errors if any
+    """
+    result = CodeValidationResult(is_valid=True)
+
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        result.is_valid = False
+        result.errors.append(f"{filename}:{e.lineno}: SyntaxError: {e.msg}")
+
+    return result
+
+
+def validate_isaac_lab_env_config(code: str) -> CodeValidationResult:
+    """
+    Validate Isaac Lab env_cfg.py structure.
+
+    Checks for:
+    - Required class definitions
+    - Required imports
+    - Proper configuration structure
+
+    Args:
+        code: Python source code of env_cfg.py
+
+    Returns:
+        CodeValidationResult with any issues found
+    """
+    result = validate_python_syntax(code, "env_cfg.py")
+    if not result.is_valid:
+        return result
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return result
+
+    # Track what we find
+    found_classes = set()
+    found_imports = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            found_classes.add(node.name)
+
+            # Check for required base classes
+            if node.name.endswith("EnvCfg"):
+                has_manager_based = any(
+                    "ManagerBasedEnvCfg" in ast.unparse(base) if hasattr(ast, 'unparse') else True
+                    for base in node.bases
+                )
+                if not has_manager_based:
+                    result.warnings.append(
+                        f"Class {node.name} should inherit from ManagerBasedEnvCfg"
+                    )
+
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                found_imports.add(alias.name)
+
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                found_imports.add(node.module)
+
+    # Check for required elements
+    env_cfg_found = any(name.endswith("EnvCfg") for name in found_classes)
+    if not env_cfg_found:
+        result.errors.append("Missing EnvCfg class definition")
+        result.is_valid = False
+
+    # Check for Isaac Lab imports
+    required_imports = ["omni.isaac.lab"]
+    for req in required_imports:
+        if not any(req in imp for imp in found_imports):
+            result.warnings.append(f"Missing expected import: {req}")
+
+    return result
+
+
+def validate_isaac_lab_task(code: str) -> CodeValidationResult:
+    """
+    Validate Isaac Lab task Python file.
+
+    Args:
+        code: Python source code of task file
+
+    Returns:
+        CodeValidationResult with any issues found
+    """
+    result = validate_python_syntax(code, "task.py")
+    if not result.is_valid:
+        return result
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return result
+
+    found_classes = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            found_classes.add(node.name)
+
+    # Check for task class
+    task_found = any(
+        name.endswith("Env") or name.endswith("Task")
+        for name in found_classes
+    )
+    if not task_found:
+        result.warnings.append("No Env or Task class found in task file")
+
+    return result
+
+
+def validate_reward_functions(code: str) -> CodeValidationResult:
+    """
+    Validate reward functions module.
+
+    Args:
+        code: Python source code of reward_functions.py
+
+    Returns:
+        CodeValidationResult with any issues found
+    """
+    result = validate_python_syntax(code, "reward_functions.py")
+    if not result.is_valid:
+        return result
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return result
+
+    found_functions = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            found_functions.add(node.name)
+
+    if not found_functions:
+        result.warnings.append("No reward functions defined")
+
+    return result
+
+
+def validate_generated_isaac_lab_code(
+    saved_files: Dict[str, str]
+) -> CodeValidationResult:
+    """
+    Validate all generated Isaac Lab code files.
+
+    Args:
+        saved_files: Dict mapping filenames to their content
+
+    Returns:
+        Combined CodeValidationResult for all files
+    """
+    result = CodeValidationResult(is_valid=True)
+
+    validators = {
+        "env_cfg.py": validate_isaac_lab_env_config,
+        "reward_functions.py": validate_reward_functions,
+    }
+
+    for filename, content in saved_files.items():
+        if filename.endswith(".py"):
+            # Use specific validator if available
+            if filename in validators:
+                file_result = validators[filename](content)
+            elif filename.startswith("task_"):
+                file_result = validate_isaac_lab_task(content)
+            else:
+                file_result = validate_python_syntax(content, filename)
+
+            # Merge results
+            if not file_result.is_valid:
+                result.is_valid = False
+            result.errors.extend([f"[{filename}] {e}" for e in file_result.errors])
+            result.warnings.extend([f"[{filename}] {w}" for w in file_result.warnings])
+
+    return result
 
 GCS_ROOT = Path("/mnt/gcs")
 
@@ -209,6 +415,23 @@ def run_isaac_lab_job(
     except Exception as e:
         print(f"[ISAAC-LAB-JOB] ERROR: Failed to save task files: {e}")
         return 1
+
+    # Validate generated code
+    print("[ISAAC-LAB-JOB] Validating generated code...")
+    validation_result = validate_generated_isaac_lab_code(saved_files)
+
+    if validation_result.warnings:
+        print(f"[ISAAC-LAB-JOB] Validation warnings ({len(validation_result.warnings)}):")
+        for warning in validation_result.warnings:
+            print(f"[ISAAC-LAB-JOB]   WARNING: {warning}")
+
+    if not validation_result.is_valid:
+        print(f"[ISAAC-LAB-JOB] ERROR: Code validation failed ({len(validation_result.errors)} errors):")
+        for error in validation_result.errors:
+            print(f"[ISAAC-LAB-JOB]   ERROR: {error}")
+        return 1
+
+    print("[ISAAC-LAB-JOB] Code validation passed")
 
     # Write metadata
     metadata = {

@@ -695,6 +695,38 @@ Where:
     return prompt
 
 
+def estimate_scale_gemini(
+    client: "genai.Client",
+    obj: Dict[str, Any],
+    reference_image: "Image.Image",
+    class_name: Optional[str] = None,
+) -> Optional[List[float]]:
+    """
+    Estimate real-world scale of an object using Gemini vision.
+
+    This is a convenience wrapper around call_gemini_for_dimensions that
+    works with a single reference image.
+
+    Args:
+        client: Gemini API client
+        obj: Object dict with metadata
+        reference_image: PIL Image of the object
+        class_name: Optional class name override
+
+    Returns:
+        [width, height, depth] in meters, or None if estimation fails
+    """
+    if client is None or reference_image is None:
+        return None
+
+    # Add class_name to obj if provided
+    obj_copy = dict(obj)
+    if class_name:
+        obj_copy["class_name"] = class_name
+
+    return call_gemini_for_dimensions(client, obj_copy, [reference_image])
+
+
 def call_gemini_for_dimensions(
     client: "genai.Client",
     obj: Dict[str, Any],
@@ -1058,6 +1090,113 @@ def call_gemini_for_object(
         return base_cfg
 
 
+# ---------- Physics configuration builders ----------
+
+
+def build_physics_config(
+    obj: Dict[str, Any],
+    bounds: Dict[str, Any],
+    mesh_bounds: Optional[List[float]] = None,
+    mesh_center: Optional[List[float]] = None,
+    gemini_client: Optional["genai.Client"] = None,
+    reference_image: Optional["Image.Image"] = None,
+) -> Dict[str, Any]:
+    """
+    Build complete physics configuration for an object.
+
+    This function orchestrates physics estimation using:
+    1. Gemini AI (if client and reference image available)
+    2. Fallback to heuristic defaults based on size/metadata
+
+    Args:
+        obj: Object dict with metadata
+        bounds: Computed bounds dict with size_m, center_m, volume_m3
+        mesh_bounds: Optional mesh bounds from metadata [w, h, d]
+        mesh_center: Optional mesh center from metadata [x, y, z]
+        gemini_client: Optional Gemini API client for AI estimation
+        reference_image: Optional PIL image for Gemini
+
+    Returns:
+        Complete physics configuration dict
+    """
+    # Try Gemini-based estimation first
+    if gemini_client is not None and have_gemini():
+        try:
+            physics_cfg = call_gemini_for_object(
+                client=gemini_client,
+                oid=obj.get("id"),
+                obj=obj,
+                bounds=bounds,
+                reference_image=reference_image,
+            )
+            # Store mesh bounds info for catalog
+            if mesh_bounds:
+                physics_cfg["mesh_bounds"] = {
+                    "size": mesh_bounds,
+                    "center": mesh_center or [0.0, 0.0, 0.0],
+                }
+            return physics_cfg
+        except Exception as e:
+            print(f"[SIMREADY] WARNING: Gemini physics estimation failed: {e}", file=sys.stderr)
+
+    # Fallback to heuristic defaults
+    physics_cfg = estimate_default_physics(obj, bounds)
+
+    # Store mesh bounds info for catalog
+    if mesh_bounds:
+        physics_cfg["mesh_bounds"] = {
+            "size": mesh_bounds,
+            "center": mesh_center or [0.0, 0.0, 0.0],
+        }
+
+    return physics_cfg
+
+
+def emit_usd(
+    visual_path: Path,
+    physics_cfg: Dict[str, Any],
+    bounds: Optional[Dict[str, Any]] = None,
+) -> Path:
+    """
+    Emit a simready USD file for an asset.
+
+    This function writes a USD wrapper with physics properties
+    next to the visual asset.
+
+    Args:
+        visual_path: Path to the visual USD/USDZ asset
+        physics_cfg: Physics configuration dict
+        bounds: Optional bounds dict (extracted from physics_cfg if not provided)
+
+    Returns:
+        Path to the written simready.usda file
+    """
+    # Determine output path (sibling to visual asset)
+    out_path = visual_path.parent / "simready.usda"
+
+    # Compute asset reference relative to output location
+    asset_rel = "./" + visual_path.name
+
+    # Extract or compute bounds
+    if bounds is None:
+        # Try to reconstruct bounds from physics config
+        mesh_bounds_info = physics_cfg.get("mesh_bounds", {})
+        size = mesh_bounds_info.get("size") or [0.1, 0.1, 0.1]
+        center = mesh_bounds_info.get("center") or [0.0, 0.0, 0.0]
+        volume = size[0] * size[1] * size[2]
+        bounds = {
+            "size_m": size,
+            "center_m": center,
+            "volume_m3": volume,
+            "source": "physics_cfg",
+        }
+
+    # Write the simready USD
+    write_simready_usd(out_path, asset_rel, physics_cfg, bounds)
+
+    return out_path
+
+
 # ---------- USD writing ----------
 
 def choose_static_visual_asset(assets_root: Path, oid: Any) -> Optional[Tuple[Path, str]]:
@@ -1386,6 +1525,7 @@ def prepare_simready_assets_job(
         obb_bounds, obb_center = extract_obb_bounds_from_obj(obj)
 
         gemini_estimated_size = None
+        ref_img = None
         ref_image = choose_reference_image_path(root, obj)
         if ref_image:
             ref_img = load_image_for_gemini(ref_image)
@@ -1394,28 +1534,29 @@ def prepare_simready_assets_job(
                     client, obj, ref_img, obj_metadata.get("class_name")
                 )
 
+        # Compute bounds using metadata and Gemini estimates
         bounds = compute_bounds(
             obj=obj,
             metadata=obj_metadata,
-            obb_bounds=obb_bounds,
-            obb_center=obb_center,
-            mesh_bounds_metadata=mesh_bounds_metadata,
-            mesh_center_metadata=mesh_center_metadata,
             gemini_estimated_size=gemini_estimated_size,
         )
 
+        # Build physics config with Gemini AI or heuristics
         physics_cfg = build_physics_config(
             obj=obj,
             bounds=bounds,
             mesh_bounds=mesh_bounds_metadata,
             mesh_center=mesh_center_metadata,
+            gemini_client=client,
+            reference_image=ref_img,
         )
 
         # Compute sim2real distribution ranges for domain randomization
         physics_distributions = compute_physics_distributions(physics_cfg, bounds)
         physics_cfg.update(physics_distributions)
 
-        sim_path = emit_usd(visual_path, physics_cfg)
+        # Emit the simready USD with physics
+        sim_path = emit_usd(visual_path, physics_cfg, bounds)
 
         if catalog_client:
             try:

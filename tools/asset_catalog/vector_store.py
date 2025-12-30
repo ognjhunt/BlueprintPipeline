@@ -129,6 +129,385 @@ class InMemoryVectorStore(BaseVectorStore):
         return [rec for rec in bucket if all(rec.metadata.get(k) == v for k, v in filter_metadata.items())]
 
 
+class PgVectorStore(BaseVectorStore):
+    """
+    PostgreSQL + pgvector based vector store.
+
+    Requires:
+    - PostgreSQL with pgvector extension installed
+    - psycopg2 or asyncpg driver
+    """
+
+    def __init__(self, connection_uri: str, collection: str = "embeddings", dimension: int = 1536):
+        self.connection_uri = connection_uri
+        self.collection = collection
+        self.dimension = dimension
+        self._conn = None
+
+    def _get_connection(self):
+        """Get or create database connection."""
+        if self._conn is not None:
+            return self._conn
+
+        try:
+            import psycopg2
+            from psycopg2.extras import execute_values
+        except ImportError:
+            raise RuntimeError("psycopg2 is required for pgvector. Install with: pip install psycopg2-binary")
+
+        self._conn = psycopg2.connect(self.connection_uri)
+
+        # Ensure table exists
+        with self._conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.collection} (
+                    id TEXT PRIMARY KEY,
+                    embedding vector({self.dimension}),
+                    metadata JSONB
+                )
+            """)
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS {self.collection}_embedding_idx
+                ON {self.collection} USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = 100)
+            """)
+            self._conn.commit()
+
+        return self._conn
+
+    def upsert(self, records: Iterable[VectorRecord], namespace: Optional[str] = None) -> None:
+        """Upsert records into pgvector."""
+        import json as json_module
+
+        conn = self._get_connection()
+        records_list = list(records)
+        if not records_list:
+            return
+
+        with conn.cursor() as cur:
+            for record in records_list:
+                embedding_str = "[" + ",".join(str(x) for x in record.embedding.tolist()) + "]"
+                metadata_json = json_module.dumps(record.metadata)
+                cur.execute(
+                    f"""
+                    INSERT INTO {self.collection} (id, embedding, metadata)
+                    VALUES (%s, %s::vector, %s::jsonb)
+                    ON CONFLICT (id) DO UPDATE SET
+                        embedding = EXCLUDED.embedding,
+                        metadata = EXCLUDED.metadata
+                    """,
+                    (record.id, embedding_str, metadata_json),
+                )
+            conn.commit()
+
+    def query(
+        self,
+        embedding: np.ndarray,
+        top_k: int = 10,
+        namespace: Optional[str] = None,
+        filter_metadata: Optional[dict[str, Any]] = None,
+    ) -> List[VectorRecord]:
+        """Query similar vectors using cosine similarity."""
+        import json as json_module
+
+        conn = self._get_connection()
+        embedding_str = "[" + ",".join(str(x) for x in embedding.tolist()) + "]"
+
+        # Build filter clause
+        filter_clause = ""
+        filter_params: List[Any] = [embedding_str, top_k]
+        if filter_metadata:
+            conditions = []
+            for key, value in filter_metadata.items():
+                conditions.append(f"metadata->>%s = %s")
+                filter_params.insert(-1, key)
+                filter_params.insert(-1, str(value))
+            if conditions:
+                filter_clause = "WHERE " + " AND ".join(conditions)
+
+        query = f"""
+            SELECT id, embedding, metadata, 1 - (embedding <=> %s::vector) as score
+            FROM {self.collection}
+            {filter_clause}
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """
+
+        # Adjust params for the query
+        final_params = [embedding_str]
+        if filter_metadata:
+            for key, value in filter_metadata.items():
+                final_params.append(key)
+                final_params.append(str(value))
+        final_params.extend([embedding_str, top_k])
+
+        with conn.cursor() as cur:
+            cur.execute(query, final_params)
+            rows = cur.fetchall()
+
+        results = []
+        for row in rows:
+            record_id, emb_data, metadata, score = row
+            # Parse embedding from pgvector format
+            if isinstance(emb_data, str):
+                emb_values = [float(x) for x in emb_data.strip("[]").split(",")]
+            else:
+                emb_values = list(emb_data)
+
+            results.append(
+                VectorRecord(
+                    id=record_id,
+                    embedding=np.array(emb_values),
+                    metadata=metadata if isinstance(metadata, dict) else json_module.loads(metadata),
+                    score=float(score),
+                )
+            )
+
+        return results
+
+    def fetch(self, ids: Iterable[str], namespace: Optional[str] = None) -> List[VectorRecord]:
+        """Fetch records by ID."""
+        import json as json_module
+
+        conn = self._get_connection()
+        ids_list = list(ids)
+        if not ids_list:
+            return []
+
+        with conn.cursor() as cur:
+            placeholders = ",".join(["%s"] * len(ids_list))
+            cur.execute(
+                f"SELECT id, embedding, metadata FROM {self.collection} WHERE id IN ({placeholders})",
+                ids_list,
+            )
+            rows = cur.fetchall()
+
+        results = []
+        for row in rows:
+            record_id, emb_data, metadata = row
+            if isinstance(emb_data, str):
+                emb_values = [float(x) for x in emb_data.strip("[]").split(",")]
+            else:
+                emb_values = list(emb_data)
+
+            results.append(
+                VectorRecord(
+                    id=record_id,
+                    embedding=np.array(emb_values),
+                    metadata=metadata if isinstance(metadata, dict) else json_module.loads(metadata),
+                )
+            )
+
+        return results
+
+    def list(
+        self, namespace: Optional[str] = None, filter_metadata: Optional[dict[str, Any]] = None
+    ) -> List[VectorRecord]:
+        """List all records, optionally filtered."""
+        import json as json_module
+
+        conn = self._get_connection()
+
+        filter_clause = ""
+        params: List[Any] = []
+        if filter_metadata:
+            conditions = []
+            for key, value in filter_metadata.items():
+                conditions.append(f"metadata->>%s = %s")
+                params.append(key)
+                params.append(str(value))
+            if conditions:
+                filter_clause = "WHERE " + " AND ".join(conditions)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, embedding, metadata FROM {self.collection} {filter_clause}",
+                params,
+            )
+            rows = cur.fetchall()
+
+        results = []
+        for row in rows:
+            record_id, emb_data, metadata = row
+            if isinstance(emb_data, str):
+                emb_values = [float(x) for x in emb_data.strip("[]").split(",")]
+            else:
+                emb_values = list(emb_data)
+
+            results.append(
+                VectorRecord(
+                    id=record_id,
+                    embedding=np.array(emb_values),
+                    metadata=metadata if isinstance(metadata, dict) else json_module.loads(metadata),
+                )
+            )
+
+        return results
+
+
+class VertexAIVectorStore(BaseVectorStore):
+    """
+    Google Cloud Vertex AI Vector Search based vector store.
+
+    Requires:
+    - google-cloud-aiplatform package
+    - Valid GCP project with Vertex AI enabled
+    - Pre-created Vector Search index and deployed endpoint
+    """
+
+    def __init__(
+        self,
+        project_id: str,
+        location: str,
+        index_endpoint_name: str,
+        deployed_index_id: str,
+        index_name: Optional[str] = None,
+    ):
+        self.project_id = project_id
+        self.location = location
+        self.index_endpoint_name = index_endpoint_name
+        self.deployed_index_id = deployed_index_id
+        self.index_name = index_name
+        self._endpoint = None
+        self._index = None
+        self._metadata_store: Dict[str, Dict[str, Any]] = {}  # Local metadata cache
+
+    def _get_endpoint(self):
+        """Get or create endpoint client."""
+        if self._endpoint is not None:
+            return self._endpoint
+
+        try:
+            from google.cloud import aiplatform
+        except ImportError:
+            raise RuntimeError(
+                "google-cloud-aiplatform is required for Vertex AI Vector Search. "
+                "Install with: pip install google-cloud-aiplatform"
+            )
+
+        aiplatform.init(project=self.project_id, location=self.location)
+
+        self._endpoint = aiplatform.MatchingEngineIndexEndpoint(
+            index_endpoint_name=self.index_endpoint_name
+        )
+
+        if self.index_name:
+            self._index = aiplatform.MatchingEngineIndex(index_name=self.index_name)
+
+        return self._endpoint
+
+    def upsert(self, records: Iterable[VectorRecord], namespace: Optional[str] = None) -> None:
+        """
+        Upsert records into Vertex AI Vector Search.
+
+        Note: Vertex AI Vector Search requires batch updates to the index.
+        This method stores metadata locally and requires index rebuild for new vectors.
+        """
+        if self._index is None:
+            raise RuntimeError("Index name required for upsert operations")
+
+        try:
+            from google.cloud import aiplatform
+        except ImportError:
+            raise RuntimeError("google-cloud-aiplatform is required")
+
+        records_list = list(records)
+        if not records_list:
+            return
+
+        # Store metadata locally (Vertex AI doesn't store metadata natively)
+        for record in records_list:
+            self._metadata_store[record.id] = record.metadata
+
+        # Prepare datapoints for upsert
+        datapoints = []
+        for record in records_list:
+            datapoints.append({
+                "datapoint_id": record.id,
+                "feature_vector": record.embedding.tolist(),
+            })
+
+        # Upsert to index
+        self._index.upsert_datapoints(datapoints=datapoints)
+
+    def query(
+        self,
+        embedding: np.ndarray,
+        top_k: int = 10,
+        namespace: Optional[str] = None,
+        filter_metadata: Optional[dict[str, Any]] = None,
+    ) -> List[VectorRecord]:
+        """Query similar vectors using Vertex AI Vector Search."""
+        endpoint = self._get_endpoint()
+
+        # Perform the query
+        response = endpoint.find_neighbors(
+            deployed_index_id=self.deployed_index_id,
+            queries=[embedding.tolist()],
+            num_neighbors=top_k,
+        )
+
+        results = []
+        if response and len(response) > 0:
+            for neighbor in response[0]:
+                record_id = neighbor.id
+                score = 1.0 - neighbor.distance  # Convert distance to similarity
+
+                # Get metadata from local cache
+                metadata = self._metadata_store.get(record_id, {})
+
+                # Apply metadata filter if provided
+                if filter_metadata:
+                    matches = all(metadata.get(k) == v for k, v in filter_metadata.items())
+                    if not matches:
+                        continue
+
+                results.append(
+                    VectorRecord(
+                        id=record_id,
+                        embedding=np.zeros(1),  # Vertex AI doesn't return embeddings
+                        metadata=metadata,
+                        score=score,
+                    )
+                )
+
+        return results
+
+    def fetch(self, ids: Iterable[str], namespace: Optional[str] = None) -> List[VectorRecord]:
+        """Fetch records by ID (metadata only, embeddings not returned by Vertex AI)."""
+        results = []
+        for record_id in ids:
+            if record_id in self._metadata_store:
+                results.append(
+                    VectorRecord(
+                        id=record_id,
+                        embedding=np.zeros(1),
+                        metadata=self._metadata_store[record_id],
+                    )
+                )
+        return results
+
+    def list(
+        self, namespace: Optional[str] = None, filter_metadata: Optional[dict[str, Any]] = None
+    ) -> List[VectorRecord]:
+        """List all records from metadata cache."""
+        results = []
+        for record_id, metadata in self._metadata_store.items():
+            if filter_metadata:
+                if not all(metadata.get(k) == v for k, v in filter_metadata.items()):
+                    continue
+
+            results.append(
+                VectorRecord(
+                    id=record_id,
+                    embedding=np.zeros(1),
+                    metadata=metadata,
+                )
+            )
+        return results
+
+
 class VectorStoreClient:
     """Convenience wrapper that hides provider-specific details."""
 
@@ -142,13 +521,36 @@ class VectorStoreClient:
             return InMemoryVectorStore()
 
         if provider == "pgvector":
-            raise NotImplementedError(
-                "pgvector provider requires a connection URI and integration with a Postgres driver"
+            if not config.connection_uri:
+                raise ValueError("pgvector provider requires connection_uri in config")
+            return PgVectorStore(
+                connection_uri=config.connection_uri,
+                collection=config.collection,
+                dimension=config.dimension or 1536,
             )
 
         if provider in {"vertex", "vertex-ai", "vertexai"}:
-            raise NotImplementedError(
-                "Vertex AI Vector Search requires the google-cloud-aiplatform dependency and project configuration"
+            if not config.project_id or not config.location:
+                raise ValueError("Vertex AI provider requires project_id and location in config")
+            # For Vertex AI, we need additional config
+            # These would typically come from environment or extended config
+            import os
+            index_endpoint = os.getenv("VERTEX_INDEX_ENDPOINT", "")
+            deployed_index_id = os.getenv("VERTEX_DEPLOYED_INDEX_ID", "")
+            index_name = os.getenv("VERTEX_INDEX_NAME", "")
+
+            if not index_endpoint or not deployed_index_id:
+                raise ValueError(
+                    "Vertex AI provider requires VERTEX_INDEX_ENDPOINT and "
+                    "VERTEX_DEPLOYED_INDEX_ID environment variables"
+                )
+
+            return VertexAIVectorStore(
+                project_id=config.project_id,
+                location=config.location,
+                index_endpoint_name=index_endpoint,
+                deployed_index_id=deployed_index_id,
+                index_name=index_name or None,
             )
 
         raise ValueError(f"Unsupported vector store provider: {config.provider}")
