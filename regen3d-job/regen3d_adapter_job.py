@@ -198,7 +198,14 @@ def enrich_inventory_with_gemini(
 ) -> Dict[str, Any]:
     """Use Gemini to enrich inventory with better categories and descriptions.
 
-    This is optional but improves downstream policy targeting.
+    This uses Gemini's vision capabilities to analyze the source image and
+    provide more accurate:
+    - Object categories (e.g., "microwave" instead of "appliance")
+    - Detailed descriptions for downstream policy targeting
+    - sim_role classifications (static, interactive, manipulable_object, etc.)
+    - articulation_hint values (revolute, prismatic, etc.)
+
+    Returns the enriched inventory with updated object metadata.
     """
     if not HAVE_GEMINI or not os.getenv("GEMINI_API_KEY"):
         print("[REGEN3D-JOB] Gemini not available, skipping enrichment")
@@ -209,12 +216,153 @@ def enrich_inventory_with_gemini(
         print("[REGEN3D-JOB] No source image for enrichment")
         return inventory
 
-    # This is a placeholder - in production, you'd call Gemini with the
-    # source image and ask it to categorize and describe each object
-    # based on their approximate locations and the scene context.
+    print(f"[REGEN3D-JOB] Enriching inventory with Gemini vision...")
 
-    print("[REGEN3D-JOB] Gemini enrichment available (placeholder)")
-    return inventory
+    try:
+        # Import LLM client
+        from tools.llm_client.client import create_llm_client, LLMProvider
+
+        # Create Gemini client
+        client = create_llm_client(provider=LLMProvider.GEMINI)
+
+        # Build the object list for the prompt
+        objects_for_prompt = []
+        for obj in inventory.get("objects", []):
+            if obj.get("id") == "scene_background":
+                continue
+            objects_for_prompt.append({
+                "id": obj["id"],
+                "current_category": obj.get("category", "unknown"),
+                "approx_location": obj.get("approx_location"),
+                "bounds_size": obj.get("bounds", {}).get("size", [1, 1, 1]),
+                "is_floor_contact": obj.get("is_floor_contact", False),
+            })
+
+        if not objects_for_prompt:
+            print("[REGEN3D-JOB] No objects to enrich")
+            return inventory
+
+        # Build the enrichment prompt
+        environment_type = inventory.get("environment_type", "generic")
+        prompt = _build_gemini_enrichment_prompt(objects_for_prompt, environment_type)
+
+        # Call Gemini with the image
+        response = client.generate(
+            prompt=prompt,
+            image=source_image_path,
+            json_output=True,
+            temperature=0.3,  # Lower temperature for more consistent categorization
+        )
+
+        # Parse response
+        enrichment_data = response.parse_json()
+        enriched_objects = enrichment_data.get("objects", [])
+
+        # Create lookup by ID
+        enrichment_by_id = {obj["id"]: obj for obj in enriched_objects}
+
+        # Merge enrichments into inventory
+        enriched_count = 0
+        for obj in inventory.get("objects", []):
+            obj_id = obj.get("id")
+            if obj_id in enrichment_by_id:
+                enrichment = enrichment_by_id[obj_id]
+
+                # Update category if provided and more specific
+                if enrichment.get("category") and enrichment["category"] != "unknown":
+                    obj["category"] = enrichment["category"]
+
+                # Update description if provided
+                if enrichment.get("description"):
+                    obj["short_description"] = enrichment["description"]
+
+                # Update sim_role if provided
+                if enrichment.get("sim_role"):
+                    obj["sim_role"] = enrichment["sim_role"]
+
+                # Update articulation_hint if provided
+                if enrichment.get("articulation_hint"):
+                    obj["articulation_hint"] = enrichment["articulation_hint"]
+
+                # Add affordances if provided
+                if enrichment.get("affordances"):
+                    obj["affordances"] = enrichment["affordances"]
+
+                # Add confidence score from Gemini
+                if enrichment.get("confidence"):
+                    obj["gemini_confidence"] = enrichment["confidence"]
+
+                enriched_count += 1
+
+        # Update metadata
+        inventory.setdefault("metadata", {})
+        inventory["metadata"]["gemini_enriched"] = True
+        inventory["metadata"]["gemini_enriched_count"] = enriched_count
+        inventory["metadata"]["gemini_model"] = response.model
+
+        print(f"[REGEN3D-JOB] Enriched {enriched_count}/{len(objects_for_prompt)} objects with Gemini")
+        return inventory
+
+    except ImportError as e:
+        print(f"[REGEN3D-JOB] LLM client not available: {e}")
+        return inventory
+    except Exception as e:
+        print(f"[REGEN3D-JOB] Gemini enrichment failed: {e}")
+        # Return original inventory on failure (non-fatal)
+        return inventory
+
+
+def _build_gemini_enrichment_prompt(objects: List[Dict], environment_type: str) -> str:
+    """Build the prompt for Gemini object enrichment.
+
+    The prompt instructs Gemini to analyze the image and provide enriched
+    metadata for each detected object.
+    """
+    objects_json = json.dumps(objects, indent=2)
+
+    return f'''Analyze this image of a {environment_type} scene and enrich the metadata for each object.
+
+The scene contains the following detected objects:
+{objects_json}
+
+For each object, provide:
+1. **category**: The most specific object category (e.g., "microwave_oven" not just "appliance")
+2. **description**: A concise description (1-2 sentences) useful for robotics simulation
+3. **sim_role**: One of:
+   - "static": Non-moving scene elements (tables, counters, walls)
+   - "interactive": Objects that can be interacted with but not picked up (doors, drawers, switches)
+   - "manipulable_object": Objects a robot can pick up and move (dishes, bottles, food items)
+   - "articulated_furniture": Furniture with joints (cabinets with doors, drawers)
+   - "articulated_appliance": Appliances with joints (ovens, dishwashers, refrigerators)
+   - "clutter": Small objects for scene variation
+   - "background": Scene shell/background mesh
+4. **articulation_hint**: If articulated, one of:
+   - "revolute": Rotating joints (doors, lids, hinges)
+   - "prismatic": Sliding joints (drawers, sliding doors)
+   - null: Not articulated
+5. **affordances**: List of possible interactions (e.g., ["openable", "graspable", "heatable"])
+6. **confidence**: Your confidence in this classification (0.0 to 1.0)
+
+Respond with JSON in this exact format:
+{{
+  "objects": [
+    {{
+      "id": "obj_0",
+      "category": "microwave_oven",
+      "description": "Countertop microwave oven with digital display and rotating turntable",
+      "sim_role": "articulated_appliance",
+      "articulation_hint": "revolute",
+      "affordances": ["openable", "heatable"],
+      "confidence": 0.95
+    }}
+  ],
+  "scene_analysis": {{
+    "environment_confirmed": "{environment_type}",
+    "notable_features": ["brief notes about the scene"]
+  }}
+}}
+
+Only include objects from the provided list. Match object IDs exactly.'''
 
 
 # =============================================================================
