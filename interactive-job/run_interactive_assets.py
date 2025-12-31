@@ -437,6 +437,370 @@ def call_particulate_service(
 # URDF Generation and Parsing
 # =============================================================================
 
+
+class URDFValidationResult:
+    """Result of URDF validation."""
+
+    def __init__(self):
+        self.is_valid = True
+        self.errors: List[str] = []
+        self.warnings: List[str] = []
+        self.repairs_made: List[str] = []
+
+    def add_error(self, msg: str):
+        self.errors.append(msg)
+        self.is_valid = False
+
+    def add_warning(self, msg: str):
+        self.warnings.append(msg)
+
+    def add_repair(self, msg: str):
+        self.repairs_made.append(msg)
+
+
+def validate_urdf(urdf_path: Path, mesh_dir: Optional[Path] = None) -> URDFValidationResult:
+    """
+    Validate a URDF file for common issues.
+
+    Checks:
+    - XML syntax validity
+    - Required robot element and name
+    - Link structure (at least one link, base_link present)
+    - Joint references (parent/child links must exist)
+    - Mesh file references (if mesh_dir provided)
+    - Inertial properties (mass > 0, valid inertia matrix)
+    - Joint limits (lower < upper for limited joints)
+
+    Args:
+        urdf_path: Path to the URDF file
+        mesh_dir: Optional directory to check mesh file references
+
+    Returns:
+        URDFValidationResult with errors, warnings, and repair info
+    """
+    result = URDFValidationResult()
+
+    if not urdf_path.is_file():
+        result.add_error(f"URDF file does not exist: {urdf_path}")
+        return result
+
+    # Parse XML
+    try:
+        tree = ET.parse(urdf_path)
+        root = tree.getroot()
+    except ET.ParseError as e:
+        result.add_error(f"XML parse error: {e}")
+        return result
+
+    # Check root element
+    if root.tag != "robot":
+        result.add_error(f"Root element must be 'robot', found '{root.tag}'")
+        return result
+
+    robot_name = root.attrib.get("name", "")
+    if not robot_name:
+        result.add_warning("Robot has no name attribute")
+
+    # Collect link names
+    link_names = set()
+    for link in root.findall("link"):
+        link_name = link.attrib.get("name")
+        if not link_name:
+            result.add_error("Found link without name attribute")
+            continue
+        if link_name in link_names:
+            result.add_warning(f"Duplicate link name: {link_name}")
+        link_names.add(link_name)
+
+    if not link_names:
+        result.add_error("URDF has no links defined")
+        return result
+
+    if "base_link" not in link_names:
+        result.add_warning("No 'base_link' found (recommended for Isaac Sim)")
+
+    # Validate links
+    for link in root.findall("link"):
+        link_name = link.attrib.get("name", "unknown")
+
+        # Check visual geometry
+        visual = link.find("visual")
+        if visual is not None:
+            geom = visual.find("geometry")
+            if geom is not None:
+                mesh = geom.find("mesh")
+                if mesh is not None and mesh_dir:
+                    mesh_file = mesh.attrib.get("filename", "")
+                    if mesh_file:
+                        mesh_path = mesh_dir / mesh_file
+                        if not mesh_path.is_file():
+                            result.add_warning(f"Link '{link_name}': mesh file not found: {mesh_file}")
+
+        # Check inertial
+        inertial = link.find("inertial")
+        if inertial is not None:
+            mass = inertial.find("mass")
+            if mass is not None:
+                try:
+                    mass_val = float(mass.attrib.get("value", "0"))
+                    if mass_val <= 0:
+                        result.add_warning(f"Link '{link_name}': mass must be positive, got {mass_val}")
+                except ValueError:
+                    result.add_error(f"Link '{link_name}': invalid mass value")
+
+            inertia = inertial.find("inertia")
+            if inertia is not None:
+                # Check for positive diagonal elements
+                for attr in ["ixx", "iyy", "izz"]:
+                    try:
+                        val = float(inertia.attrib.get(attr, "0"))
+                        if val < 0:
+                            result.add_warning(f"Link '{link_name}': {attr} should be non-negative")
+                    except ValueError:
+                        result.add_error(f"Link '{link_name}': invalid {attr} value")
+
+    # Validate joints
+    for joint in root.findall("joint"):
+        joint_name = joint.attrib.get("name", "unnamed")
+        joint_type = joint.attrib.get("type", "")
+
+        if not joint_type:
+            result.add_error(f"Joint '{joint_name}': missing type attribute")
+            continue
+
+        valid_types = ["revolute", "continuous", "prismatic", "fixed", "floating", "planar"]
+        if joint_type not in valid_types:
+            result.add_warning(f"Joint '{joint_name}': unknown type '{joint_type}'")
+
+        # Check parent/child references
+        parent = joint.find("parent")
+        child = joint.find("child")
+
+        if parent is None:
+            result.add_error(f"Joint '{joint_name}': missing parent element")
+        else:
+            parent_link = parent.attrib.get("link", "")
+            if parent_link not in link_names:
+                result.add_error(f"Joint '{joint_name}': parent link '{parent_link}' not defined")
+
+        if child is None:
+            result.add_error(f"Joint '{joint_name}': missing child element")
+        else:
+            child_link = child.attrib.get("link", "")
+            if child_link not in link_names:
+                result.add_error(f"Joint '{joint_name}': child link '{child_link}' not defined")
+
+        # Check joint limits for limited types
+        if joint_type in ["revolute", "prismatic"]:
+            limit = joint.find("limit")
+            if limit is None:
+                result.add_warning(f"Joint '{joint_name}': {joint_type} joint should have limits")
+            else:
+                try:
+                    lower = float(limit.attrib.get("lower", "0"))
+                    upper = float(limit.attrib.get("upper", "0"))
+                    if lower >= upper:
+                        result.add_warning(f"Joint '{joint_name}': lower limit ({lower}) >= upper limit ({upper})")
+                except ValueError:
+                    result.add_error(f"Joint '{joint_name}': invalid limit values")
+
+        # Check axis for non-fixed joints
+        if joint_type not in ["fixed"]:
+            axis = joint.find("axis")
+            if axis is not None:
+                xyz = axis.attrib.get("xyz", "")
+                if xyz:
+                    try:
+                        vals = [float(v) for v in xyz.split()]
+                        if len(vals) != 3:
+                            result.add_error(f"Joint '{joint_name}': axis xyz must have 3 values")
+                        elif all(v == 0 for v in vals):
+                            result.add_warning(f"Joint '{joint_name}': axis is zero vector")
+                    except ValueError:
+                        result.add_error(f"Joint '{joint_name}': invalid axis xyz values")
+
+    return result
+
+
+def repair_urdf(urdf_path: Path, output_path: Optional[Path] = None) -> Tuple[bool, URDFValidationResult]:
+    """
+    Attempt to repair common URDF issues.
+
+    Repairs:
+    - Missing inertial elements (adds reasonable defaults)
+    - Zero or negative mass (sets to 1.0)
+    - Missing joint limits (adds defaults based on type)
+    - Zero axis vectors (sets to 0 0 1)
+
+    Args:
+        urdf_path: Path to the URDF file to repair
+        output_path: Path to write repaired URDF (defaults to overwrite)
+
+    Returns:
+        (success, validation_result) tuple
+    """
+    result = URDFValidationResult()
+    output_path = output_path or urdf_path
+
+    if not urdf_path.is_file():
+        result.add_error(f"URDF file does not exist: {urdf_path}")
+        return False, result
+
+    try:
+        tree = ET.parse(urdf_path)
+        root = tree.getroot()
+    except ET.ParseError as e:
+        result.add_error(f"Cannot parse URDF for repair: {e}")
+        return False, result
+
+    if root.tag != "robot":
+        result.add_error("Cannot repair: root is not 'robot'")
+        return False, result
+
+    modified = False
+
+    # Repair links
+    for link in root.findall("link"):
+        link_name = link.attrib.get("name", "unknown")
+
+        # Add missing inertial
+        inertial = link.find("inertial")
+        if inertial is None:
+            inertial = ET.SubElement(link, "inertial")
+            ET.SubElement(inertial, "mass", {"value": "1.0"})
+            ET.SubElement(inertial, "inertia", {
+                "ixx": "0.1", "ixy": "0", "ixz": "0",
+                "iyy": "0.1", "iyz": "0", "izz": "0.1"
+            })
+            result.add_repair(f"Added default inertial to link '{link_name}'")
+            modified = True
+        else:
+            # Fix zero/negative mass
+            mass = inertial.find("mass")
+            if mass is not None:
+                try:
+                    mass_val = float(mass.attrib.get("value", "0"))
+                    if mass_val <= 0:
+                        mass.set("value", "1.0")
+                        result.add_repair(f"Fixed non-positive mass in link '{link_name}'")
+                        modified = True
+                except ValueError:
+                    mass.set("value", "1.0")
+                    result.add_repair(f"Fixed invalid mass in link '{link_name}'")
+                    modified = True
+            else:
+                ET.SubElement(inertial, "mass", {"value": "1.0"})
+                result.add_repair(f"Added missing mass to link '{link_name}'")
+                modified = True
+
+            # Add missing inertia
+            inertia = inertial.find("inertia")
+            if inertia is None:
+                ET.SubElement(inertial, "inertia", {
+                    "ixx": "0.1", "ixy": "0", "ixz": "0",
+                    "iyy": "0.1", "iyz": "0", "izz": "0.1"
+                })
+                result.add_repair(f"Added default inertia to link '{link_name}'")
+                modified = True
+
+    # Repair joints
+    for joint in root.findall("joint"):
+        joint_name = joint.attrib.get("name", "unnamed")
+        joint_type = joint.attrib.get("type", "fixed")
+
+        # Fix missing axis for non-fixed joints
+        if joint_type not in ["fixed"]:
+            axis = joint.find("axis")
+            if axis is None:
+                ET.SubElement(joint, "axis", {"xyz": "0 0 1"})
+                result.add_repair(f"Added default axis to joint '{joint_name}'")
+                modified = True
+            else:
+                xyz = axis.attrib.get("xyz", "")
+                if xyz:
+                    try:
+                        vals = [float(v) for v in xyz.split()]
+                        if all(v == 0 for v in vals):
+                            axis.set("xyz", "0 0 1")
+                            result.add_repair(f"Fixed zero axis in joint '{joint_name}'")
+                            modified = True
+                    except ValueError:
+                        axis.set("xyz", "0 0 1")
+                        result.add_repair(f"Fixed invalid axis in joint '{joint_name}'")
+                        modified = True
+
+        # Add missing limits for limited joints
+        if joint_type in ["revolute", "prismatic"]:
+            limit = joint.find("limit")
+            if limit is None:
+                if joint_type == "revolute":
+                    # Default to ±90 degrees
+                    ET.SubElement(joint, "limit", {
+                        "lower": "-1.57", "upper": "1.57",
+                        "effort": "100", "velocity": "1.0"
+                    })
+                else:  # prismatic
+                    # Default to 0-0.5m
+                    ET.SubElement(joint, "limit", {
+                        "lower": "0", "upper": "0.5",
+                        "effort": "100", "velocity": "0.5"
+                    })
+                result.add_repair(f"Added default limits to joint '{joint_name}'")
+                modified = True
+
+    if modified:
+        # Write repaired URDF
+        tree.write(output_path, encoding="unicode", xml_declaration=True)
+        result.is_valid = True
+        log(f"Repaired URDF: {len(result.repairs_made)} fixes applied")
+    else:
+        result.is_valid = True  # No repairs needed
+
+    return True, result
+
+
+def validate_and_repair_urdf(
+    urdf_path: Path,
+    mesh_dir: Optional[Path] = None,
+    auto_repair: bool = True,
+    obj_id: str = ""
+) -> URDFValidationResult:
+    """
+    Validate URDF and optionally repair common issues.
+
+    This is the main entry point for URDF validation in the pipeline.
+
+    Args:
+        urdf_path: Path to the URDF file
+        mesh_dir: Optional directory to check mesh references
+        auto_repair: If True, attempt to repair issues
+        obj_id: Object ID for logging
+
+    Returns:
+        Combined validation result
+    """
+    # First validation pass
+    result = validate_urdf(urdf_path, mesh_dir)
+
+    if result.errors:
+        log(f"URDF validation errors: {result.errors}", "ERROR", obj_id)
+    if result.warnings:
+        log(f"URDF validation warnings: {result.warnings}", "WARNING", obj_id)
+
+    # Attempt repair if needed and allowed
+    if auto_repair and (result.errors or result.warnings):
+        log("Attempting URDF repair...", "INFO", obj_id)
+        success, repair_result = repair_urdf(urdf_path)
+
+        if success and repair_result.repairs_made:
+            # Re-validate after repair
+            result = validate_urdf(urdf_path, mesh_dir)
+            result.repairs_made = repair_result.repairs_made
+            log(f"URDF repairs applied: {repair_result.repairs_made}", "INFO", obj_id)
+
+    return result
+
+
 def parse_urdf_summary(urdf_path: Path) -> Dict[str, List[Dict]]:
     """Extract joint/link summary from URDF file."""
     summary: Dict[str, List[Dict]] = {"joints": [], "links": []}
@@ -748,6 +1112,14 @@ def process_object(
         result["urdf_path"] = str(urdf_path)
         return result
 
+    # Validate and repair URDF
+    urdf_validation = validate_and_repair_urdf(
+        urdf_path,
+        mesh_dir=output_dir,
+        auto_repair=True,
+        obj_id=obj_name
+    )
+
     # Parse URDF for joint information
     joint_summary = parse_urdf_summary(urdf_path)
     joint_count = len(joint_summary.get("joints", []))
@@ -758,18 +1130,22 @@ def process_object(
         "object_name": obj_name,
         "class_name": obj_class,
         "generator": meta.get("generator", "physx-anything"),
-        "endpoint": endpoint,
+        "endpoint": particulate_endpoint,
         "mesh_path": mesh_path.name,
         "urdf_path": urdf_path.name,
         "is_articulated": joint_count > 0,
         "joint_summary": joint_summary,
         "input_mode": mode,
+        "urdf_validation": {
+            "is_valid": urdf_validation.is_valid,
+            "errors": urdf_validation.errors,
+            "warnings": urdf_validation.warnings,
+            "repairs_made": urdf_validation.repairs_made,
+        },
     }
 
     if glb_path:
         manifest["input_glb"] = str(glb_path)
-    if image_path:
-        manifest["input_image"] = str(image_path)
 
     # Save manifest
     manifest_path = output_dir / "interactive_manifest.json"
@@ -782,8 +1158,10 @@ def process_object(
     result["manifest_path"] = str(manifest_path)
     result["joint_count"] = joint_count
     result["is_articulated"] = joint_count > 0
+    result["urdf_valid"] = urdf_validation.is_valid
+    result["urdf_repairs"] = len(urdf_validation.repairs_made)
 
-    log(f"Completed: {joint_count} joints detected, articulated={joint_count > 0}", obj_id=obj_name)
+    log(f"Completed: {joint_count} joints detected, articulated={joint_count > 0}, urdf_valid={urdf_validation.is_valid}", obj_id=obj_name)
 
     return result
 
