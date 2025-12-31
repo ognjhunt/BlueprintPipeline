@@ -597,3 +597,508 @@ def transfer_materials(
         return success, materials
 
     return False, []
+
+
+# =============================================================================
+# Enhanced Material Processing
+# =============================================================================
+
+
+def optimize_texture(
+    texture_path: Path,
+    output_path: Path,
+    max_resolution: int = 2048,
+    generate_mipmaps: bool = True,
+    target_format: str = "png",
+) -> Optional[Path]:
+    """
+    Optimize a texture for simulation use.
+
+    Args:
+        texture_path: Input texture path
+        output_path: Output texture path
+        max_resolution: Maximum resolution (textures larger than this are downscaled)
+        generate_mipmaps: Whether to generate mipmaps
+        target_format: Target format (png, jpg)
+
+    Returns:
+        Path to optimized texture, or None on failure
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        print("[MATERIAL] PIL not available, skipping texture optimization")
+        shutil.copy(texture_path, output_path)
+        return output_path
+
+    try:
+        img = Image.open(texture_path)
+
+        # Resize if needed
+        if img.width > max_resolution or img.height > max_resolution:
+            ratio = min(max_resolution / img.width, max_resolution / img.height)
+            new_size = (int(img.width * ratio), int(img.height * ratio))
+            # Ensure power of 2 for better GPU performance
+            new_size = (
+                _nearest_power_of_2(new_size[0]),
+                _nearest_power_of_2(new_size[1])
+            )
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+            print(f"[MATERIAL] Resized texture to {new_size}")
+
+        # Convert mode if needed
+        if target_format == "jpg" and img.mode == "RGBA":
+            img = img.convert("RGB")
+
+        # Save optimized texture
+        img.save(output_path, format=target_format.upper())
+
+        # Generate mipmaps if requested (save additional files)
+        if generate_mipmaps:
+            _generate_mipmap_chain(img, output_path)
+
+        return output_path
+
+    except Exception as e:
+        print(f"[MATERIAL] Texture optimization failed: {e}")
+        shutil.copy(texture_path, output_path)
+        return output_path
+
+
+def _nearest_power_of_2(n: int) -> int:
+    """Round to nearest power of 2."""
+    if n <= 0:
+        return 1
+    power = 1
+    while power < n:
+        power *= 2
+    if power - n > n - power // 2:
+        return power // 2
+    return power
+
+
+def _generate_mipmap_chain(img, base_path: Path, min_size: int = 16) -> List[Path]:
+    """Generate a chain of mipmap textures."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return []
+
+    mipmaps = []
+    current_size = (img.width, img.height)
+    level = 1
+
+    while current_size[0] > min_size and current_size[1] > min_size:
+        current_size = (current_size[0] // 2, current_size[1] // 2)
+        mip_img = img.resize(current_size, Image.Resampling.LANCZOS)
+
+        mip_path = base_path.parent / f"{base_path.stem}_mip{level}{base_path.suffix}"
+        mip_img.save(mip_path)
+        mipmaps.append(mip_path)
+        level += 1
+
+    return mipmaps
+
+
+def process_normal_map(
+    normal_texture_path: Path,
+    output_path: Path,
+    flip_y: bool = False,
+    normalize: bool = True,
+) -> Optional[Path]:
+    """
+    Process a normal map for correct simulation rendering.
+
+    Different 3D software uses different conventions for normal maps:
+    - OpenGL style: Y+ is up (green channel points up)
+    - DirectX style: Y- is up (green channel points down)
+
+    Isaac Sim uses OpenGL-style normal maps.
+
+    Args:
+        normal_texture_path: Input normal map path
+        output_path: Output normal map path
+        flip_y: If True, flip the Y (green) channel for DirectX->OpenGL conversion
+        normalize: If True, re-normalize the normal vectors
+
+    Returns:
+        Path to processed normal map, or None on failure
+    """
+    try:
+        from PIL import Image
+        import numpy as np
+    except ImportError:
+        print("[MATERIAL] PIL/numpy not available, copying normal map as-is")
+        shutil.copy(normal_texture_path, output_path)
+        return output_path
+
+    try:
+        img = Image.open(normal_texture_path)
+        img_array = np.array(img, dtype=np.float32) / 255.0
+
+        # Handle different channel counts
+        if len(img_array.shape) == 2:
+            # Grayscale - probably not a valid normal map
+            print("[MATERIAL] Warning: Normal map appears to be grayscale")
+            shutil.copy(normal_texture_path, output_path)
+            return output_path
+
+        if flip_y:
+            # Flip green channel
+            img_array[:, :, 1] = 1.0 - img_array[:, :, 1]
+
+        if normalize:
+            # Convert from [0,1] to [-1,1]
+            normals = img_array[:, :, :3] * 2.0 - 1.0
+
+            # Normalize vectors
+            length = np.sqrt(np.sum(normals ** 2, axis=2, keepdims=True))
+            length = np.maximum(length, 1e-6)  # Avoid division by zero
+            normals = normals / length
+
+            # Convert back to [0,1]
+            img_array[:, :, :3] = (normals + 1.0) / 2.0
+
+        # Convert back to uint8
+        img_array = (img_array * 255).astype(np.uint8)
+        result_img = Image.fromarray(img_array)
+        result_img.save(output_path)
+
+        return output_path
+
+    except Exception as e:
+        print(f"[MATERIAL] Normal map processing failed: {e}")
+        shutil.copy(normal_texture_path, output_path)
+        return output_path
+
+
+def bind_material_to_mesh(
+    usd_path: Path,
+    mesh_prim_path: str,
+    material_name: str,
+    materials_scope: str = "/World/Materials",
+) -> bool:
+    """
+    Bind a material to a specific mesh prim in USD.
+
+    Args:
+        usd_path: Path to USD file
+        mesh_prim_path: Prim path of the mesh
+        material_name: Name of the material to bind
+        materials_scope: Scope where materials are defined
+
+    Returns:
+        True if successful
+    """
+    try:
+        from pxr import Usd, UsdShade
+    except ImportError:
+        print("[MATERIAL] pxr not available")
+        return False
+
+    try:
+        stage = Usd.Stage.Open(str(usd_path))
+        mesh_prim = stage.GetPrimAtPath(mesh_prim_path)
+
+        if not mesh_prim.IsValid():
+            print(f"[MATERIAL] Mesh prim not found: {mesh_prim_path}")
+            return False
+
+        material_path = f"{materials_scope}/{material_name}"
+        material_prim = stage.GetPrimAtPath(material_path)
+
+        if not material_prim.IsValid():
+            print(f"[MATERIAL] Material not found: {material_path}")
+            return False
+
+        material = UsdShade.Material(material_prim)
+        binding_api = UsdShade.MaterialBindingAPI.Apply(mesh_prim)
+        binding_api.Bind(material)
+
+        stage.GetRootLayer().Save()
+        return True
+
+    except Exception as e:
+        print(f"[MATERIAL] Material binding failed: {e}")
+        return False
+
+
+def create_usd_material_with_textures(
+    stage,
+    material_name: str,
+    material: PBRMaterial,
+    materials_scope: str = "/World/Materials",
+    textures_relative_path: str = "./textures",
+) -> bool:
+    """
+    Create a complete USD material with all texture bindings.
+
+    This creates a UsdPreviewSurface material with proper texture
+    reader connections for all available texture maps.
+
+    Args:
+        stage: USD stage
+        material_name: Name for the material
+        material: PBRMaterial definition
+        materials_scope: USD path for materials
+        textures_relative_path: Relative path to textures directory
+
+    Returns:
+        True if successful
+    """
+    try:
+        from pxr import UsdShade, Sdf, Gf
+    except ImportError:
+        return False
+
+    mat_path = f"{materials_scope}/{material_name}"
+
+    # Create material
+    usd_material = UsdShade.Material.Define(stage, mat_path)
+
+    # Create PBR shader
+    shader_path = f"{mat_path}/PBRShader"
+    shader = UsdShade.Shader.Define(stage, shader_path)
+    shader.CreateIdAttr("UsdPreviewSurface")
+
+    # Create ST reader for UV coordinates
+    st_reader_path = f"{mat_path}/STReader"
+    st_reader = UsdShade.Shader.Define(stage, st_reader_path)
+    st_reader.CreateIdAttr("UsdPrimvarReader_float2")
+    st_reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
+    st_output = st_reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+    # Base color
+    if material.base_color_texture and material.base_color_texture.path.is_file():
+        tex_path = f"{textures_relative_path}/{material.base_color_texture.path.name}"
+        _create_texture_reader(
+            stage, f"{mat_path}/BaseColorTex", tex_path, st_output,
+            shader, "diffuseColor", Sdf.ValueTypeNames.Color3f
+        )
+    else:
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(*material.base_color[:3])
+        )
+
+    # Metallic-Roughness
+    if material.metallic_roughness_texture and material.metallic_roughness_texture.path.is_file():
+        tex_path = f"{textures_relative_path}/{material.metallic_roughness_texture.path.name}"
+        # Metallic from blue channel
+        _create_texture_reader(
+            stage, f"{mat_path}/MetallicTex", tex_path, st_output,
+            shader, "metallic", Sdf.ValueTypeNames.Float, channel="b"
+        )
+        # Roughness from green channel
+        _create_texture_reader(
+            stage, f"{mat_path}/RoughnessTex", tex_path, st_output,
+            shader, "roughness", Sdf.ValueTypeNames.Float, channel="g"
+        )
+    else:
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(material.metallic)
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(material.roughness)
+
+    # Normal map
+    if material.normal_texture and material.normal_texture.path.is_file():
+        tex_path = f"{textures_relative_path}/{material.normal_texture.path.name}"
+        normal_tex_path = f"{mat_path}/NormalTex"
+        normal_tex = UsdShade.Shader.Define(stage, normal_tex_path)
+        normal_tex.CreateIdAttr("UsdUVTexture")
+        normal_tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(tex_path)
+        normal_tex.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+        normal_tex.CreateInput("scale", Sdf.ValueTypeNames.Float4).Set(
+            Gf.Vec4f(2.0, 2.0, 2.0, 1.0)
+        )
+        normal_tex.CreateInput("bias", Sdf.ValueTypeNames.Float4).Set(
+            Gf.Vec4f(-1.0, -1.0, -1.0, 0.0)
+        )
+        normal_output = normal_tex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+
+        shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(
+            normal_output
+        )
+
+    # Occlusion
+    if material.occlusion_texture and material.occlusion_texture.path.is_file():
+        tex_path = f"{textures_relative_path}/{material.occlusion_texture.path.name}"
+        _create_texture_reader(
+            stage, f"{mat_path}/OcclusionTex", tex_path, st_output,
+            shader, "occlusion", Sdf.ValueTypeNames.Float, channel="r"
+        )
+    else:
+        shader.CreateInput("occlusion", Sdf.ValueTypeNames.Float).Set(
+            material.occlusion_strength
+        )
+
+    # Emissive
+    if material.emissive_texture and material.emissive_texture.path.is_file():
+        tex_path = f"{textures_relative_path}/{material.emissive_texture.path.name}"
+        _create_texture_reader(
+            stage, f"{mat_path}/EmissiveTex", tex_path, st_output,
+            shader, "emissiveColor", Sdf.ValueTypeNames.Color3f
+        )
+    elif any(c > 0 for c in material.emissive_color):
+        shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(*material.emissive_color)
+        )
+
+    # Opacity for transparent materials
+    if material.alpha_mode != "OPAQUE":
+        shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(
+            material.base_color[3] if len(material.base_color) > 3 else 1.0
+        )
+        if material.alpha_mode == "MASK":
+            shader.CreateInput("opacityThreshold", Sdf.ValueTypeNames.Float).Set(
+                material.alpha_cutoff
+            )
+
+    # Connect shader to material surface
+    usd_material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+
+    return True
+
+
+def _create_texture_reader(
+    stage,
+    tex_reader_path: str,
+    texture_file: str,
+    st_output,
+    target_shader,
+    input_name: str,
+    input_type,
+    channel: str = "rgb"
+):
+    """Helper to create a texture reader and connect it to a shader input."""
+    try:
+        from pxr import UsdShade, Sdf
+    except ImportError:
+        return
+
+    tex_reader = UsdShade.Shader.Define(stage, tex_reader_path)
+    tex_reader.CreateIdAttr("UsdUVTexture")
+    tex_reader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_file)
+    tex_reader.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(st_output)
+
+    if channel == "rgb":
+        output = tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+    elif channel in ("r", "g", "b", "a"):
+        output = tex_reader.CreateOutput(channel, Sdf.ValueTypeNames.Float)
+    else:
+        output = tex_reader.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+
+    target_shader.CreateInput(input_name, input_type).ConnectToSource(output)
+
+
+class EnhancedMaterialTransferPipeline(MaterialTransferPipeline):
+    """
+    Enhanced material transfer with texture optimization and advanced binding.
+
+    Usage:
+        pipeline = EnhancedMaterialTransferPipeline(source_glb, output_dir)
+        pipeline.extract()
+        pipeline.optimize_textures(max_resolution=2048)
+        pipeline.apply_to_usd_enhanced(usd_path)
+    """
+
+    def __init__(
+        self,
+        source_path: Path,
+        output_dir: Path,
+        optimize_textures: bool = True,
+        max_texture_resolution: int = 2048,
+    ):
+        super().__init__(source_path, output_dir)
+        self.optimize = optimize_textures
+        self.max_resolution = max_texture_resolution
+        self.optimized_textures: Dict[str, Path] = {}
+
+    def optimize_all_textures(self) -> Dict[str, Path]:
+        """Optimize all extracted textures."""
+        if not self.materials:
+            return {}
+
+        optimized_dir = self.output_dir / "textures_optimized"
+        optimized_dir.mkdir(parents=True, exist_ok=True)
+
+        for mat in self.materials:
+            # Base color texture
+            if mat.base_color_texture and mat.base_color_texture.path.is_file():
+                opt_path = optimized_dir / mat.base_color_texture.path.name
+                optimize_texture(
+                    mat.base_color_texture.path,
+                    opt_path,
+                    max_resolution=self.max_resolution,
+                )
+                self.optimized_textures[str(mat.base_color_texture.path)] = opt_path
+                mat.base_color_texture.path = opt_path
+
+            # Normal map (with special processing)
+            if mat.normal_texture and mat.normal_texture.path.is_file():
+                opt_path = optimized_dir / mat.normal_texture.path.name
+                process_normal_map(mat.normal_texture.path, opt_path)
+                self.optimized_textures[str(mat.normal_texture.path)] = opt_path
+                mat.normal_texture.path = opt_path
+
+            # Other textures
+            for tex_attr in ['metallic_roughness_texture', 'emissive_texture', 'occlusion_texture']:
+                tex_info = getattr(mat, tex_attr, None)
+                if tex_info and tex_info.path.is_file():
+                    opt_path = optimized_dir / tex_info.path.name
+                    optimize_texture(tex_info.path, opt_path, max_resolution=self.max_resolution)
+                    self.optimized_textures[str(tex_info.path)] = opt_path
+                    tex_info.path = opt_path
+
+        print(f"[MATERIAL] Optimized {len(self.optimized_textures)} textures")
+        return self.optimized_textures
+
+    def apply_to_usd_enhanced(self, usd_path: Path) -> bool:
+        """Apply materials with full texture support."""
+        try:
+            from pxr import Usd
+        except ImportError:
+            print("[MATERIAL] pxr not available")
+            return super().apply_to_usd(usd_path)
+
+        try:
+            stage = Usd.Stage.Open(str(usd_path))
+
+            # Create materials scope
+            materials_scope = "/World/Materials"
+            if not stage.GetPrimAtPath(materials_scope):
+                stage.DefinePrim(materials_scope, "Scope")
+
+            # Create textures directory next to USD
+            textures_dir = usd_path.parent / "textures"
+            textures_dir.mkdir(parents=True, exist_ok=True)
+
+            for mat in self.materials:
+                # Copy textures to USD directory
+                self._copy_material_textures(mat, textures_dir)
+
+                # Create full material with textures
+                create_usd_material_with_textures(
+                    stage,
+                    mat.name,
+                    mat,
+                    materials_scope=materials_scope,
+                    textures_relative_path="./textures",
+                )
+
+            stage.GetRootLayer().Save()
+            print(f"[MATERIAL] Applied {len(self.materials)} enhanced materials to {usd_path}")
+            return True
+
+        except Exception as e:
+            print(f"[MATERIAL] Enhanced material application failed: {e}")
+            return super().apply_to_usd(usd_path)
+
+    def _copy_material_textures(self, mat: PBRMaterial, dest_dir: Path) -> None:
+        """Copy all material textures to destination directory."""
+        for tex_attr in [
+            'base_color_texture', 'metallic_roughness_texture',
+            'normal_texture', 'emissive_texture', 'occlusion_texture'
+        ]:
+            tex_info = getattr(mat, tex_attr, None)
+            if tex_info and tex_info.path.is_file():
+                dest_path = dest_dir / tex_info.path.name
+                if not dest_path.exists():
+                    shutil.copy(tex_info.path, dest_path)
