@@ -97,6 +97,27 @@ from sim_validator import (
     QualityMetrics,
 )
 
+# Sensor data capture (enhanced pipeline)
+try:
+    from sensor_data_capture import (
+        SensorDataConfig,
+        DataPackTier,
+        IsaacSimSensorCapture,
+        MockSensorCapture,
+        EpisodeSensorData,
+        create_sensor_capture,
+    )
+    from data_pack_config import (
+        DataPackConfig,
+        get_data_pack_config,
+        data_pack_from_string,
+    )
+    HAVE_SENSOR_CAPTURE = True
+except ImportError:
+    HAVE_SENSOR_CAPTURE = False
+    SensorDataConfig = None
+    DataPackTier = None
+
 # Pipeline imports
 try:
     from dwm_preparation_job.scene_analyzer import SceneAnalyzer, SceneAnalysisResult
@@ -140,6 +161,13 @@ class EpisodeGenerationConfig:
     validate_trajectories: bool = True
     include_failed: bool = False
 
+    # Data pack configuration (Core/Plus/Full)
+    data_pack_tier: str = "core"  # "core", "plus", "full"
+    num_cameras: int = 1
+    image_resolution: Tuple[int, int] = (640, 480)
+    capture_sensor_data: bool = True  # Enable visual observation capture
+    use_mock_capture: bool = False  # Use mock capture (no Isaac Sim)
+
     # Output
     output_dir: Path = Path("./episodes")
 
@@ -172,6 +200,12 @@ class GeneratedEpisode:
     # Augmentation info (new)
     augmentation_method: str = "direct"  # "direct", "cpgen"
     seed_episode_id: Optional[str] = None
+
+    # Sensor data (enhanced - visual observations + ground-truth)
+    sensor_data: Optional[Any] = None  # EpisodeSensorData when available
+
+    # Object metadata for ground-truth
+    object_metadata: Dict[str, Any] = field(default_factory=dict)
 
     # Legacy
     validation_errors: List[str] = field(default_factory=list)
@@ -532,6 +566,27 @@ class EpisodeGenerator:
             verbose=verbose,
         ) if config.use_validation else None
 
+        # Sensor data capture (enhanced pipeline)
+        self.sensor_capture = None
+        if HAVE_SENSOR_CAPTURE and config.capture_sensor_data:
+            try:
+                # Parse data pack tier
+                tier = data_pack_from_string(config.data_pack_tier)
+
+                self.sensor_capture = create_sensor_capture(
+                    data_pack=tier,
+                    num_cameras=config.num_cameras,
+                    resolution=config.image_resolution,
+                    fps=config.fps,
+                    use_mock=config.use_mock_capture,
+                    verbose=verbose,
+                )
+                self.sensor_capture.initialize()
+                self.log(f"Sensor capture initialized: {config.data_pack_tier} pack, {config.num_cameras} cameras")
+            except Exception as e:
+                self.log(f"Sensor capture initialization failed: {e}", "WARNING")
+                self.sensor_capture = None
+
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
             print(f"[EPISODE-GENERATOR] [{level}] {msg}")
@@ -559,6 +614,9 @@ class EpisodeGenerator:
         self.log(f"CP-Gen Augmentation: {self.config.use_cpgen}")
         self.log(f"Simulation Validation: {self.config.use_validation}")
         self.log(f"Min Quality Score: {self.config.min_quality_score}")
+        self.log(f"Data Pack: {self.config.data_pack_tier}")
+        self.log(f"Cameras: {self.config.num_cameras}")
+        self.log(f"Sensor Capture: {'enabled' if self.sensor_capture else 'disabled'}")
         self.log("=" * 70)
 
         output = EpisodeGenerationOutput(
@@ -612,11 +670,17 @@ class EpisodeGenerator:
         ]
         self.log(f"  {len(valid_episodes)}/{len(validated_episodes)} episodes passed validation")
 
-        # Step 7: Export to LeRobot format
+        # Step 7: Export to LeRobot format (with data pack configuration)
         self.log("\nStep 5: Exporting LeRobot dataset...")
-        lerobot_config = LeRobotDatasetConfig(
+        self.log(f"  Data Pack: {self.config.data_pack_tier}")
+
+        # Use data pack-aware configuration
+        lerobot_config = LeRobotDatasetConfig.from_data_pack(
             dataset_name=f"{self.config.scene_id}_episodes",
+            data_pack_tier=self.config.data_pack_tier,
             robot_type=self.config.robot_type,
+            num_cameras=self.config.num_cameras,
+            resolution=self.config.image_resolution,
             fps=self.config.fps,
             output_dir=self.config.output_dir / "lerobot",
         )
@@ -630,6 +694,9 @@ class EpisodeGenerator:
                     scene_id=self.config.scene_id,
                     variation_index=episode.variation_index,
                     success=episode.is_valid,
+                    quality_score=episode.quality_score,
+                    sensor_data=episode.sensor_data,
+                    object_metadata=episode.object_metadata,
                 )
 
                 # Track task coverage
@@ -733,6 +800,31 @@ class EpisodeGenerator:
                 # Solve trajectory
                 trajectory = self.trajectory_solver.solve(motion_plan)
 
+                # Capture sensor data during trajectory execution (if available)
+                sensor_data = None
+                object_metadata = {}
+                if self.sensor_capture:
+                    try:
+                        # Get scene objects for metadata
+                        scene_objects = manifest.get("objects", [])
+                        object_metadata = {
+                            obj.get("id", obj.get("name", "")): {
+                                "category": obj.get("category", "object"),
+                                "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
+                                "position": obj.get("position", [0, 0, 0]),
+                            }
+                            for obj in scene_objects
+                        }
+
+                        sensor_data = self.sensor_capture.capture_episode(
+                            episode_id=f"seed_{task['task_id']}",
+                            trajectory_states=trajectory.states,
+                            scene_objects=scene_objects,
+                        )
+                        self.log(f"    Captured sensor data: {sensor_data.num_frames} frames")
+                    except Exception as e:
+                        self.log(f"    Sensor capture failed: {e}", "WARNING")
+
                 episode = GeneratedEpisode(
                     episode_id=f"seed_{task['task_id']}",
                     task_name=task["task_name"],
@@ -744,11 +836,14 @@ class EpisodeGenerator:
                     variation_index=0,
                     is_seed=True,
                     augmentation_method="direct",
+                    sensor_data=sensor_data,
+                    object_metadata=object_metadata,
                     generation_time_seconds=time.time() - start_time,
                 )
 
                 seed_episodes.append(episode)
-                self.log(f"    Created seed: {task['task_name']}")
+                visual_info = f" (visual: {sensor_data.num_frames}f)" if sensor_data else ""
+                self.log(f"    Created seed: {task['task_name']}{visual_info}")
 
             except Exception as e:
                 self.log(f"    Failed seed {task['task_name']}: {e}", "WARNING")
@@ -805,6 +900,18 @@ class EpisodeGenerator:
                             # Solve trajectory for augmented plan
                             trajectory = self.trajectory_solver.solve(augmented.motion_plan)
 
+                            # Capture sensor data for augmented episode
+                            sensor_data = None
+                            if self.sensor_capture:
+                                try:
+                                    sensor_data = self.sensor_capture.capture_episode(
+                                        episode_id=augmented.episode_id,
+                                        trajectory_states=trajectory.states,
+                                        scene_objects=updated_obstacles,
+                                    )
+                                except Exception as e:
+                                    self.log(f"    Sensor capture failed for variation {var_idx}: {e}", "WARNING")
+
                             episode = GeneratedEpisode(
                                 episode_id=augmented.episode_id,
                                 task_name=seed.task_name,
@@ -817,6 +924,8 @@ class EpisodeGenerator:
                                 is_seed=False,
                                 augmentation_method="cpgen",
                                 seed_episode_id=seed.episode_id,
+                                sensor_data=sensor_data,
+                                object_metadata=seed.object_metadata,
                                 quality_score=augmented.constraint_satisfaction,
                                 is_valid=augmented.collision_free,
                                 generation_time_seconds=augmented.generation_time_seconds,
@@ -880,6 +989,18 @@ class EpisodeGenerator:
 
                     trajectory = self.trajectory_solver.solve(motion_plan)
 
+                    # Capture sensor data for simple variation
+                    sensor_data = None
+                    if self.sensor_capture:
+                        try:
+                            sensor_data = self.sensor_capture.capture_episode(
+                                episode_id=f"{seed.task_name}_var{var_idx}",
+                                trajectory_states=trajectory.states,
+                                scene_objects=varied_manifest.get("objects", []),
+                            )
+                        except Exception as e:
+                            self.log(f"    Sensor capture failed for simple var {var_idx}: {e}", "WARNING")
+
                     episode = GeneratedEpisode(
                         episode_id=f"{seed.task_name}_var{var_idx}_{uuid.uuid4().hex[:8]}",
                         task_name=seed.task_name,
@@ -890,6 +1011,8 @@ class EpisodeGenerator:
                         variation_index=var_idx,
                         augmentation_method="simple",
                         seed_episode_id=seed.episode_id,
+                        sensor_data=sensor_data,
+                        object_metadata=seed.object_metadata,
                     )
                     all_episodes.append(episode)
 
@@ -992,6 +1115,31 @@ class EpisodeGenerator:
 
         return episodes
 
+    def _get_data_pack_includes(self) -> List[str]:
+        """Get list of data streams included in the configured data pack."""
+        tier = self.config.data_pack_tier.lower()
+
+        includes = ["rgb", "robot_state", "actions", "episode_metadata", "quality_metrics"]
+
+        if tier in ["plus", "full"]:
+            includes.extend([
+                "depth",
+                "semantic_segmentation",
+                "instance_segmentation",
+                "bounding_box_2d",
+                "bounding_box_3d",
+            ])
+
+        if tier == "full":
+            includes.extend([
+                "object_poses",
+                "contact_info",
+                "surface_normals",
+                "privileged_state",
+            ])
+
+        return includes
+
     def _write_manifest(
         self,
         episodes: List[GeneratedEpisode],
@@ -1001,6 +1149,9 @@ class EpisodeGenerator:
         """Write generation manifest."""
         manifest_dir = self.config.output_dir / "manifests"
         manifest_dir.mkdir(parents=True, exist_ok=True)
+
+        # Count episodes with sensor data
+        episodes_with_sensor_data = sum(1 for e in episodes if e.sensor_data is not None)
 
         # Generation manifest
         manifest = {
@@ -1014,11 +1165,20 @@ class EpisodeGenerator:
                 "use_validation": self.config.use_validation,
                 "min_quality_score": self.config.min_quality_score,
             },
+            "data_pack": {
+                "tier": self.config.data_pack_tier,
+                "num_cameras": self.config.num_cameras,
+                "image_resolution": list(self.config.image_resolution),
+                "capture_enabled": self.config.capture_sensor_data,
+                "episodes_with_visual_obs": episodes_with_sensor_data,
+                "includes": self._get_data_pack_includes(),
+            },
             "pipeline_version": "2.0.0-sota",  # SOTA version
             "methodology": {
                 "task_specification": "Gemini-powered (top of stack)",
                 "augmentation": "CP-Gen style constraint-preserving",
                 "validation": "Simulation-verified with quality scoring",
+                "sensor_data": "Isaac Sim Replicator integration",
                 "references": [
                     "CP-Gen (CoRL 2025): https://cp-gen.github.io/",
                     "DemoGen (RSS 2025): https://demo-generation.github.io/",
@@ -1114,6 +1274,11 @@ def run_episode_generation_job(
     use_llm: bool = True,
     use_cpgen: bool = True,
     min_quality_score: float = 0.7,
+    data_pack_tier: str = "core",
+    num_cameras: int = 1,
+    image_resolution: Tuple[int, int] = (640, 480),
+    capture_sensor_data: bool = True,
+    use_mock_capture: bool = False,
 ) -> int:
     """
     Run the episode generation job (SOTA Pipeline).
@@ -1130,6 +1295,11 @@ def run_episode_generation_job(
         use_llm: Enable Gemini for task specification
         use_cpgen: Enable CP-Gen augmentation
         min_quality_score: Minimum quality score for export
+        data_pack_tier: Data pack tier ("core", "plus", "full")
+        num_cameras: Number of cameras to capture
+        image_resolution: Image resolution (width, height)
+        capture_sensor_data: Enable visual observation capture
+        use_mock_capture: Use mock capture (no Isaac Sim)
 
     Returns:
         0 on success, 1 on failure
@@ -1141,6 +1311,10 @@ def run_episode_generation_job(
     print(f"[EPISODE-GEN-JOB] Episodes per variation: {episodes_per_variation}")
     print(f"[EPISODE-GEN-JOB] CP-Gen augmentation: {use_cpgen}")
     print(f"[EPISODE-GEN-JOB] Min quality score: {min_quality_score}")
+    print(f"[EPISODE-GEN-JOB] Data pack: {data_pack_tier}")
+    print(f"[EPISODE-GEN-JOB] Cameras: {num_cameras}")
+    print(f"[EPISODE-GEN-JOB] Resolution: {image_resolution}")
+    print(f"[EPISODE-GEN-JOB] Sensor capture: {capture_sensor_data}")
 
     assets_dir = root / assets_prefix
     output_dir = root / episodes_prefix
@@ -1170,6 +1344,11 @@ def run_episode_generation_job(
         use_llm=use_llm,
         use_cpgen=use_cpgen,
         min_quality_score=min_quality_score,
+        data_pack_tier=data_pack_tier,
+        num_cameras=num_cameras,
+        image_resolution=image_resolution,
+        capture_sensor_data=capture_sensor_data,
+        use_mock_capture=use_mock_capture,
         output_dir=output_dir,
     )
 
@@ -1223,10 +1402,21 @@ def main():
     use_cpgen = os.getenv("USE_CPGEN", "true").lower() == "true"
     min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
 
+    # Data pack configuration (Core/Plus/Full)
+    data_pack_tier = os.getenv("DATA_PACK_TIER", "core")
+    num_cameras = int(os.getenv("NUM_CAMERAS", "1"))
+    resolution_str = os.getenv("IMAGE_RESOLUTION", "640,480")
+    image_resolution = tuple(map(int, resolution_str.split(",")))
+    capture_sensor_data = os.getenv("CAPTURE_SENSOR_DATA", "true").lower() == "true"
+    use_mock_capture = os.getenv("USE_MOCK_CAPTURE", "false").lower() == "true"
+
     print(f"[EPISODE-GEN-JOB] Configuration:")
     print(f"[EPISODE-GEN-JOB]   Bucket: {bucket}")
     print(f"[EPISODE-GEN-JOB]   Scene ID: {scene_id}")
     print(f"[EPISODE-GEN-JOB]   Pipeline: SOTA (CP-Gen + Validation)")
+    print(f"[EPISODE-GEN-JOB]   Data Pack: {data_pack_tier}")
+    print(f"[EPISODE-GEN-JOB]   Cameras: {num_cameras}")
+    print(f"[EPISODE-GEN-JOB]   Resolution: {image_resolution}")
 
     GCS_ROOT = Path("/mnt/gcs")
 
@@ -1242,6 +1432,11 @@ def main():
         use_llm=use_llm,
         use_cpgen=use_cpgen,
         min_quality_score=min_quality_score,
+        data_pack_tier=data_pack_tier,
+        num_cameras=num_cameras,
+        image_resolution=image_resolution,
+        capture_sensor_data=capture_sensor_data,
+        use_mock_capture=use_mock_capture,
     )
 
     sys.exit(exit_code)
