@@ -234,6 +234,35 @@ class JobRegistry:
             ),
         )
 
+        self._jobs["episode-generation-job"] = JobInfo(
+            name="episode-generation-job",
+            description="Generates training-ready robotic episodes in LeRobot format",
+            status=JobStatus.NEW,
+            category=JobCategory.TRAINING,
+            entry_script="episode-generation-job/generate_episodes.py",
+            docker_image="episode-generation-job",
+            required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX", "EPISODES_PREFIX"],
+            optional_env_vars=[
+                "ROBOT_TYPE",            # franka, ur10, fetch (default: franka)
+                "EPISODES_PER_VARIATION",  # default: 10
+                "MAX_VARIATIONS",        # default: all
+                "FPS",                   # default: 30
+                "USE_LLM",               # default: true
+                "GEMINI_API_KEY",
+            ],
+            depends_on=["replicator-job", "isaac-lab-job"],
+            outputs=[
+                "episodes/lerobot/meta/info.json",
+                "episodes/lerobot/data/chunk-*/episode_*.parquet",
+                "episodes/manifests/generation_manifest.json",
+            ],
+            migration_notes=(
+                "Generates manipulation episodes for each scene variation. "
+                "Uses AI (Gemini) for motion planning, outputs LeRobot v2.0 format. "
+                "Sellable alongside scenes for plug-and-play RL training."
+            ),
+        )
+
         self._jobs["scale-job"] = JobInfo(
             name="scale-job",
             description="Scale calibration and reference object detection",
@@ -295,6 +324,7 @@ class JobRegistry:
             "replicator-job",
             "variation-gen-job",
             "isaac-lab-job",
+            "episode-generation-job",  # Generates training episodes
         ]
 
     def print_status_report(self):
