@@ -212,6 +212,104 @@ def validate_reward_functions(code: str) -> CodeValidationResult:
     return result
 
 
+def validate_randomizations(code: str) -> CodeValidationResult:
+    """
+    Validate randomizations module.
+
+    Checks for:
+    - Valid Python syntax
+    - Event-compatible function signatures
+    - Required imports
+
+    Args:
+        code: Python source code of randomizations.py
+
+    Returns:
+        CodeValidationResult with any issues found
+    """
+    result = validate_python_syntax(code, "randomizations.py")
+    if not result.is_valid:
+        return result
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return result
+
+    found_functions = set()
+    found_imports = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            found_functions.add(node.name)
+            # Check for env parameter (EventManager compatible)
+            if node.args.args:
+                first_arg = node.args.args[0].arg
+                if first_arg != "env":
+                    result.warnings.append(
+                        f"Function '{node.name}' should have 'env' as first parameter for EventManager"
+                    )
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            found_imports.add(node.module)
+
+    if not found_functions:
+        result.warnings.append("No randomization functions defined")
+
+    return result
+
+
+def validate_train_config_yaml(content: str) -> CodeValidationResult:
+    """
+    Validate training configuration YAML.
+
+    Checks for:
+    - Valid YAML syntax
+    - Required sections (runner, experiment, etc.)
+
+    Args:
+        content: YAML content
+
+    Returns:
+        CodeValidationResult with any issues found
+    """
+    result = CodeValidationResult(is_valid=True)
+
+    try:
+        import yaml
+        config = yaml.safe_load(content)
+    except ImportError:
+        # yaml module not available, skip validation
+        result.warnings.append("YAML module not available, skipping validation")
+        return result
+    except yaml.YAMLError as e:
+        result.add_error(f"YAML parse error: {e}")
+        result.is_valid = False
+        return result
+
+    if not isinstance(config, dict):
+        result.add_error("Training config must be a dictionary")
+        result.is_valid = False
+        return result
+
+    # Check for expected top-level keys
+    expected_keys = {"runner", "experiment"}
+    optional_keys = {"algorithm", "observation", "reward", "policy"}
+
+    for key in expected_keys:
+        if key not in config:
+            result.warnings.append(f"Missing expected key: {key}")
+
+    # Check runner config
+    runner = config.get("runner", {})
+    if runner:
+        if "num_envs" not in runner:
+            result.warnings.append("runner.num_envs not specified")
+        if "max_iterations" not in runner:
+            result.warnings.append("runner.max_iterations not specified")
+
+    return result
+
+
 def validate_generated_isaac_lab_code(
     saved_files: Dict[str, str]
 ) -> CodeValidationResult:
@@ -226,22 +324,38 @@ def validate_generated_isaac_lab_code(
     """
     result = CodeValidationResult(is_valid=True)
 
-    validators = {
+    # Python file validators
+    python_validators = {
         "env_cfg.py": validate_isaac_lab_env_config,
         "reward_functions.py": validate_reward_functions,
+        "randomizations.py": validate_randomizations,
+    }
+
+    # YAML file validators
+    yaml_validators = {
+        "train_cfg.yaml": validate_train_config_yaml,
     }
 
     for filename, content in saved_files.items():
+        file_result = None
+
         if filename.endswith(".py"):
             # Use specific validator if available
-            if filename in validators:
-                file_result = validators[filename](content)
+            if filename in python_validators:
+                file_result = python_validators[filename](content)
             elif filename.startswith("task_"):
                 file_result = validate_isaac_lab_task(content)
             else:
                 file_result = validate_python_syntax(content, filename)
 
-            # Merge results
+        elif filename.endswith(".yaml") or filename.endswith(".yml"):
+            # Use specific YAML validator if available
+            if filename in yaml_validators:
+                file_result = yaml_validators[filename](content)
+            # else: skip generic YAML validation to avoid dependency issues
+
+        # Merge results if we got any
+        if file_result:
             if not file_result.is_valid:
                 result.is_valid = False
             result.errors.extend([f"[{filename}] {e}" for e in file_result.errors])
@@ -406,19 +520,9 @@ def run_isaac_lab_job(
         traceback.print_exc()
         return 1
 
-    # Save task files
-    try:
-        saved_files = generator.save(task, str(isaac_lab_dir))
-        print(f"[ISAAC-LAB-JOB] Saved {len(saved_files)} files:")
-        for filename in saved_files:
-            print(f"[ISAAC-LAB-JOB]   - {filename}")
-    except Exception as e:
-        print(f"[ISAAC-LAB-JOB] ERROR: Failed to save task files: {e}")
-        return 1
-
-    # Validate generated code
+    # Validate generated code BEFORE writing files
     print("[ISAAC-LAB-JOB] Validating generated code...")
-    validation_result = validate_generated_isaac_lab_code(saved_files)
+    validation_result = validate_generated_isaac_lab_code(task.files)
 
     if validation_result.warnings:
         print(f"[ISAAC-LAB-JOB] Validation warnings ({len(validation_result.warnings)}):")
@@ -429,9 +533,20 @@ def run_isaac_lab_job(
         print(f"[ISAAC-LAB-JOB] ERROR: Code validation failed ({len(validation_result.errors)} errors):")
         for error in validation_result.errors:
             print(f"[ISAAC-LAB-JOB]   ERROR: {error}")
+        print("[ISAAC-LAB-JOB] Files NOT written due to validation errors")
         return 1
 
     print("[ISAAC-LAB-JOB] Code validation passed")
+
+    # Save task files (only after validation passes)
+    try:
+        saved_files = generator.save(task, str(isaac_lab_dir))
+        print(f"[ISAAC-LAB-JOB] Saved {len(saved_files)} files:")
+        for filename in saved_files:
+            print(f"[ISAAC-LAB-JOB]   - {filename}")
+    except Exception as e:
+        print(f"[ISAAC-LAB-JOB] ERROR: Failed to save task files: {e}")
+        return 1
 
     # Write metadata
     metadata = {
