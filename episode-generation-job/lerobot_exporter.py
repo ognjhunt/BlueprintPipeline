@@ -289,6 +289,104 @@ class LeRobotExporter:
         if self.verbose:
             print(f"[LEROBOT-EXPORTER] [{level}] {msg}")
 
+    def _get_data_source_info(self) -> Dict[str, Any]:
+        """
+        Determine the data source and quality information.
+
+        This checks:
+        - Whether Isaac Sim was used for physics
+        - Whether sensor data is from simulation or mock
+        - Whether validation was physics-based or heuristic
+
+        Returns:
+            Dict with physics_validated, sensor_source, validation_type, etc.
+        """
+        import os
+
+        warnings = []
+
+        # Check for Isaac Sim availability
+        try:
+            from isaac_sim_integration import is_isaac_sim_available, is_physx_available
+            isaac_sim_available = is_isaac_sim_available()
+            physx_available = is_physx_available()
+        except ImportError:
+            isaac_sim_available = False
+            physx_available = False
+
+        # Determine sensor source from episodes
+        sensor_source = "unknown"
+        if self.episodes:
+            sample_episode = self.episodes[0]
+            if sample_episode.sensor_data is not None:
+                # Check if sensor data has source annotation
+                if hasattr(sample_episode.sensor_data, 'frames') and sample_episode.sensor_data.frames:
+                    frame = sample_episode.sensor_data.frames[0]
+                    if hasattr(frame, 'privileged_state') and frame.privileged_state:
+                        source = frame.privileged_state.get('data_source', 'unknown')
+                        if source == 'simulation':
+                            sensor_source = "isaac_sim_replicator"
+                        elif source == 'input_fallback':
+                            sensor_source = "mock_random"
+                            warnings.append("Sensor data from mock capture - random noise images")
+                        else:
+                            sensor_source = source
+                    else:
+                        # Check if it's a mock sensor class
+                        sensor_class = sample_episode.sensor_data.__class__.__name__
+                        if 'Mock' in sensor_class:
+                            sensor_source = "mock_random"
+                            warnings.append("Sensor data from mock capture - random noise images")
+                        else:
+                            sensor_source = "simulation"
+            else:
+                sensor_source = "none"
+                if self.config.include_images:
+                    warnings.append("No sensor data captured despite images being requested")
+
+        # Determine validation type from episodes
+        validation_type = "unknown"
+        physics_validated = False
+        if self.episodes:
+            sample_episode = self.episodes[0]
+            if sample_episode.validation_result is not None:
+                val_result = sample_episode.validation_result
+                if hasattr(val_result, 'validation_type'):
+                    validation_type = val_result.validation_type
+                elif hasattr(val_result, 'physics_checked') and val_result.physics_checked:
+                    validation_type = "physx"
+                else:
+                    validation_type = "heuristic"
+                    warnings.append("Validation was heuristic-based, not physics-verified")
+
+                physics_validated = validation_type == "physx"
+            else:
+                validation_type = "none"
+                warnings.append("No validation performed on episodes")
+
+        # Check environment indicators
+        is_production = (
+            os.getenv("KUBERNETES_SERVICE_HOST") is not None or
+            os.getenv("K_SERVICE") is not None or
+            os.path.exists("/.dockerenv")
+        )
+
+        if not isaac_sim_available and is_production:
+            warnings.append("Running in production without Isaac Sim")
+
+        if not physx_available:
+            warnings.append("PhysX not available - physics not validated")
+
+        return {
+            "physics_validated": physics_validated,
+            "sensor_source": sensor_source,
+            "validation_type": validation_type,
+            "isaac_sim_used": isaac_sim_available,
+            "physx_available": physx_available,
+            "warnings": warnings,
+            "production_mode": is_production,
+        }
+
     def add_episode(
         self,
         trajectory: JointTrajectory,
@@ -693,6 +791,10 @@ class LeRobotExporter:
                 "format": "physics_state",
             }
 
+        # Check data source for validation
+        # This determines if the data was generated with real physics or mock
+        data_source_info = self._get_data_source_info()
+
         info = {
             "codebase_version": "v2.0",
             "robot_type": self.config.robot_type,
@@ -723,6 +825,14 @@ class LeRobotExporter:
                 "includes_object_poses": self.config.include_object_poses,
                 "includes_contacts": self.config.include_contacts,
                 "includes_privileged_state": self.config.include_privileged_state,
+            },
+            # Data quality and source information
+            "data_quality": {
+                "physics_validated": data_source_info["physics_validated"],
+                "sensor_source": data_source_info["sensor_source"],
+                "validation_type": data_source_info["validation_type"],
+                "isaac_sim_used": data_source_info["isaac_sim_used"],
+                "warnings": data_source_info["warnings"],
             },
             "splits": {
                 "train": f"0:{len(self.episodes)}",

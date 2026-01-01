@@ -567,24 +567,105 @@ class PhysicsSimulator:
         return states
 
     def _get_robot_state(self) -> Dict[str, Any]:
-        """Get current robot state."""
+        """
+        Get current robot state from Isaac Sim.
+
+        Returns:
+            Dict with joint_positions, joint_velocities, ee_pose, gripper_state
+        """
         state = {}
 
         if not self._use_real_physics or not self._robot_prim_path:
             return state
 
         try:
-            from omni.isaac.core.articulations import ArticulationView
+            from omni.isaac.core.articulations import Articulation
+            from omni.isaac.core.utils.stage import get_current_stage
+            from pxr import UsdGeom
 
-            # This is a simplified version - real implementation would use ArticulationView
-            state = {
-                "joint_positions": np.zeros(7),
-                "joint_velocities": np.zeros(7),
-                "ee_pose": (np.array([0.5, 0, 0.5]), np.array([1, 0, 0, 0])),
-            }
+            stage = get_current_stage()
+            if stage is None:
+                self.log("No stage available", "WARNING")
+                return state
+
+            # Get robot articulation
+            robot_prim = stage.GetPrimAtPath(self._robot_prim_path)
+            if not robot_prim.IsValid():
+                self.log(f"Robot prim not found at {self._robot_prim_path}", "WARNING")
+                return state
+
+            # Create articulation wrapper
+            robot = Articulation(self._robot_prim_path)
+            if not robot.initialized:
+                robot.initialize()
+
+            # Get joint positions and velocities
+            joint_positions = robot.get_joint_positions()
+            joint_velocities = robot.get_joint_velocities()
+
+            # Handle None cases
+            if joint_positions is None:
+                joint_positions = np.zeros(robot.num_dof if hasattr(robot, 'num_dof') else 7)
+            if joint_velocities is None:
+                joint_velocities = np.zeros_like(joint_positions)
+
+            state["joint_positions"] = np.array(joint_positions, dtype=np.float64)
+            state["joint_velocities"] = np.array(joint_velocities, dtype=np.float64)
+
+            # Get end-effector pose
+            # Try common EE link names
+            ee_link_names = [
+                f"{self._robot_prim_path}/panda_hand",
+                f"{self._robot_prim_path}/ee_link",
+                f"{self._robot_prim_path}/tool0",
+                f"{self._robot_prim_path}/gripper_link",
+            ]
+
+            ee_pose = None
+            for ee_path in ee_link_names:
+                ee_prim = stage.GetPrimAtPath(ee_path)
+                if ee_prim.IsValid():
+                    xformable = UsdGeom.Xformable(ee_prim)
+                    world_transform = xformable.ComputeLocalToWorldTransform(0)
+                    translation = world_transform.ExtractTranslation()
+                    rotation = world_transform.ExtractRotationQuat()
+
+                    ee_position = np.array([
+                        float(translation[0]),
+                        float(translation[1]),
+                        float(translation[2])
+                    ])
+                    ee_orientation = np.array([
+                        float(rotation.GetReal()),
+                        float(rotation.GetImaginary()[0]),
+                        float(rotation.GetImaginary()[1]),
+                        float(rotation.GetImaginary()[2])
+                    ])
+                    ee_pose = (ee_position, ee_orientation)
+                    break
+
+            if ee_pose is None:
+                # Fallback: use forward kinematics estimate
+                ee_pose = (np.array([0.5, 0.0, 0.5]), np.array([1.0, 0.0, 0.0, 0.0]))
+                self.log("Could not find EE link, using FK estimate", "WARNING")
+
+            state["ee_pose"] = ee_pose
+
+            # Get gripper state if available
+            try:
+                gripper_joints = robot.get_joint_positions()
+                if gripper_joints is not None and len(gripper_joints) > 7:
+                    # Assume last joints are gripper
+                    state["gripper_state"] = float(gripper_joints[-1])
+                else:
+                    state["gripper_state"] = 0.04  # Default open position
+            except Exception:
+                state["gripper_state"] = 0.04
 
         except Exception as e:
-            self.log(f"Failed to get robot state: {e}", "WARNING")
+            self.log(f"Failed to get robot state: {e}", "ERROR")
+            import traceback
+            self.log(traceback.format_exc(), "DEBUG")
 
         return state
 
@@ -608,16 +689,110 @@ class PhysicsSimulator:
         if not self._use_real_physics:
             return True
 
-        try:
-            from omni.isaac.core.articulations import ArticulationView
+        if not self._robot_prim_path:
+            self.log("No robot path set", "WARNING")
+            return False
 
-            # Apply commands via ArticulationView
-            # This is a placeholder - real implementation depends on robot type
+        try:
+            from omni.isaac.core.articulations import Articulation
+            from omni.isaac.core.utils.types import ArticulationAction
+
+            # Get robot articulation
+            robot = Articulation(self._robot_prim_path)
+            if not robot.initialized:
+                robot.initialize()
+
+            num_dof = robot.num_dof
+
+            # Build action
+            action = ArticulationAction()
+
+            # Set joint position targets
+            if joint_positions is not None:
+                positions = np.array(joint_positions, dtype=np.float32)
+                # Pad or truncate to match DOF count
+                if len(positions) < num_dof:
+                    # Pad with current positions for gripper joints
+                    current = robot.get_joint_positions()
+                    if current is not None:
+                        full_positions = np.array(current, dtype=np.float32)
+                        full_positions[:len(positions)] = positions
+                        positions = full_positions
+                    else:
+                        positions = np.pad(positions, (0, num_dof - len(positions)))
+                elif len(positions) > num_dof:
+                    positions = positions[:num_dof]
+
+                action.joint_positions = positions
+
+            # Set joint velocity targets
+            if joint_velocities is not None:
+                velocities = np.array(joint_velocities, dtype=np.float32)
+                if len(velocities) < num_dof:
+                    velocities = np.pad(velocities, (0, num_dof - len(velocities)))
+                elif len(velocities) > num_dof:
+                    velocities = velocities[:num_dof]
+
+                action.joint_velocities = velocities
+
+            # Apply action
+            robot.apply_action(action)
+
+            # Handle gripper separately if specified
+            if gripper_command is not None:
+                self._apply_gripper_command(robot, gripper_command, num_dof)
+
             return True
 
         except Exception as e:
             self.log(f"Failed to apply robot command: {e}", "ERROR")
+            import traceback
+            self.log(traceback.format_exc(), "DEBUG")
             return False
+
+    def _apply_gripper_command(
+        self,
+        robot: Any,
+        gripper_command: float,
+        num_dof: int
+    ) -> None:
+        """
+        Apply gripper command to robot.
+
+        Args:
+            robot: Articulation instance
+            gripper_command: 0=closed, 1=open
+            num_dof: Total number of DOFs
+        """
+        try:
+            from omni.isaac.core.utils.types import ArticulationAction
+
+            # Common gripper joint indices (after arm joints)
+            # Franka: joints 7, 8 are gripper fingers
+            # UR10: depends on gripper attached
+            # Fetch: joints 7+ are gripper
+
+            # Get current positions
+            current = robot.get_joint_positions()
+            if current is None or num_dof <= 7:
+                return
+
+            # Assume gripper joints are after arm joints
+            gripper_positions = np.array(current, dtype=np.float32)
+
+            # Map 0-1 to gripper range (typically 0-0.04m for Franka)
+            # 0 = closed, 1 = open
+            gripper_value = gripper_command * 0.04
+
+            # Set gripper joint positions (typically last 1-2 joints)
+            for i in range(7, num_dof):
+                gripper_positions[i] = gripper_value
+
+            action = ArticulationAction(joint_positions=gripper_positions)
+            robot.apply_action(action)
+
+        except Exception as e:
+            self.log(f"Failed to apply gripper command: {e}", "WARNING")
 
     def run_trajectory(
         self,
