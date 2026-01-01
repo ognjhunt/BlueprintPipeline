@@ -4,17 +4,16 @@ Generate First 10 Scenes - End-to-End Pipeline Runner
 
 This script provides a complete workflow for generating the first 10 scenes
 through BlueprintPipeline with:
-- Alternative 3D reconstruction (Manual CAD upload)
 - Quality gates with human-in-the-loop validation
 - Sim-to-real tracking setup
 - Customer success metrics
 
-Usage:
-    # With manual CAD files
-    python tools/run_first_10_scenes.py --input-dir ./my_scenes --mode manual-cad
+Prerequisites:
+- 3D-RE-GEN outputs must be available (scene_manifest.json, meshes, etc.)
 
-    # With images (MASt3R reconstruction)
-    python tools/run_first_10_scenes.py --input-dir ./scene_images --mode mast3r
+Usage:
+    # With 3D-RE-GEN outputs
+    python tools/run_first_10_scenes.py --input-dir ./regen3d_outputs
 
     # Test mode (uses mock data)
     python tools/run_first_10_scenes.py --test-mode
@@ -37,12 +36,6 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Import pipeline components
-from tools.reconstruction import (
-    ReconstructionManager,
-    ReconstructionBackendType,
-    ReconstructionResult,
-    ManualCADBackend,
-)
 from tools.quality_gates import (
     QualityGateRegistry,
     QualityGateCheckpoint,
@@ -99,7 +92,6 @@ class First10ScenesRunner:
     def __init__(
         self,
         output_base: Path,
-        reconstruction_mode: str = "manual-cad",
         notify_email: str = "ohstnhunt@gmail.com",
         notify_phone: str = "9196389913",
         customer_id: str = "internal_validation",
@@ -108,21 +100,11 @@ class First10ScenesRunner:
     ):
         self.output_base = Path(output_base)
         self.output_base.mkdir(parents=True, exist_ok=True)
-        self.reconstruction_mode = reconstruction_mode
         self.customer_id = customer_id
         self.dry_run = dry_run
         self.verbose = verbose
 
         # Initialize components
-        self.reconstruction_manager = ReconstructionManager(
-            preferred_backend=(
-                ReconstructionBackendType.MANUAL_CAD
-                if reconstruction_mode == "manual-cad"
-                else ReconstructionBackendType.MAST3R
-            ),
-            verbose=verbose,
-        )
-
         self.quality_gates = QualityGateRegistry(verbose=verbose)
 
         self.notifications = NotificationService(
@@ -152,7 +134,6 @@ class First10ScenesRunner:
             List of pipeline results
         """
         self.log(f"Starting pipeline for {len(scenes)} scenes")
-        self.log(f"Reconstruction mode: {self.reconstruction_mode}")
         self.log(f"Output directory: {self.output_base}")
         self.log("")
 
@@ -186,7 +167,10 @@ class First10ScenesRunner:
         return self.results
 
     def _process_scene(self, scene: SceneConfig) -> PipelineResult:
-        """Process a single scene through the pipeline."""
+        """Process a single scene through the pipeline.
+
+        Expects 3D-RE-GEN outputs to be available at scene.input_path.
+        """
         start_time = time.time()
 
         output_dir = self.output_base / scene.scene_id
@@ -200,26 +184,27 @@ class First10ScenesRunner:
         )
         update_pipeline_status(delivery_id, "processing")
 
-        # Step 1: 3D Reconstruction
-        self.log("Step 1: 3D Reconstruction")
-        recon_result = self._run_reconstruction(scene, output_dir)
+        # Step 1: Validate 3D-RE-GEN outputs exist
+        self.log("Step 1: Checking 3D-RE-GEN outputs")
+        manifest_path = scene.input_path / "scene_manifest.json"
+        if not manifest_path.exists():
+            # Also check assets subdirectory
+            manifest_path = scene.input_path / "assets" / "scene_manifest.json"
 
-        if not recon_result.success:
+        if not manifest_path.exists():
             return PipelineResult(
                 scene_id=scene.scene_id,
                 success=False,
-                error=f"Reconstruction failed: {recon_result.error}",
+                error="3D-RE-GEN outputs not found (missing scene_manifest.json)",
                 delivery_id=delivery_id,
             )
 
-        # Create pipeline inputs
-        self.reconstruction_manager.create_pipeline_inputs(recon_result, output_dir)
+        manifest = json.loads(manifest_path.read_text())
+        object_count = len(manifest.get("objects", []))
+        self.log(f"  Found manifest with {object_count} objects")
 
         # Step 2: Quality Gate - Manifest Validation
         self.log("Step 2: Quality Gate - Manifest Validation")
-        manifest_path = output_dir / "assets" / "scene_manifest.json"
-        manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-
         gate_results = self.quality_gates.run_checkpoint(
             QualityGateCheckpoint.MANIFEST_VALIDATED,
             context={"scene_id": scene.scene_id, "manifest": manifest},
@@ -239,8 +224,6 @@ class First10ScenesRunner:
         # Step 3: SimReady (Mock for now - would call actual job)
         self.log("Step 3: SimReady Processing (physics estimation)")
         if not self.dry_run:
-            # In production, this would call the simready-job
-            # For now, create placeholder physics data
             self._create_mock_simready(output_dir, manifest)
 
         gate_results = self.quality_gates.run_checkpoint(
@@ -326,7 +309,7 @@ class First10ScenesRunner:
             checkpoint="scene_ready",
             scene_id=scene.scene_id,
             context_data={
-                "object_count": len(manifest.get("objects", [])),
+                "object_count": object_count,
                 "episode_count": episode_count,
                 "environment_type": scene.environment_type,
             },
@@ -360,7 +343,7 @@ class First10ScenesRunner:
         # Track delivery completion
         track_scene_delivery(
             delivery_id=delivery_id,
-            object_count=len(recon_result.objects),
+            object_count=object_count,
             episode_count=episode_count,
             quality_score=0.82,  # From episode stats
             processing_time_hours=processing_time / 3600,
@@ -371,23 +354,12 @@ class First10ScenesRunner:
             success=True,
             processing_time_seconds=processing_time,
             output_dir=output_dir,
-            object_count=len(recon_result.objects),
+            object_count=object_count,
             episode_count=episode_count,
             quality_gates_passed=sum(1 for r in self.quality_gates.results if r.passed),
             quality_gates_failed=sum(1 for r in self.quality_gates.results if not r.passed),
             delivery_id=delivery_id,
             sim2real_experiment_id=experiment.experiment_id,
-        )
-
-    def _run_reconstruction(
-        self, scene: SceneConfig, output_dir: Path
-    ) -> ReconstructionResult:
-        """Run 3D reconstruction."""
-        return self.reconstruction_manager.reconstruct(
-            input_path=scene.input_path,
-            output_dir=output_dir,
-            scene_id=scene.scene_id,
-            environment_type=scene.environment_type,
         )
 
     def _create_mock_simready(self, output_dir: Path, manifest: Dict) -> None:
@@ -565,13 +537,13 @@ class {task.title().replace("_", "")}Task:
 
 
 def create_test_scenes(output_dir: Path) -> List[SceneConfig]:
-    """Create test scene configurations with mock data."""
+    """Create test scene configurations with mock 3D-RE-GEN outputs."""
     test_dir = output_dir / "test_inputs"
     test_dir.mkdir(parents=True, exist_ok=True)
 
     scenes = []
 
-    # Create 10 test scenes with mock manifests
+    # Create 10 test scenes with mock 3D-RE-GEN outputs
     scene_types = [
         ("kitchen_001", "kitchen", ["pick_place", "open_drawer"]),
         ("kitchen_002", "kitchen", ["pick_place", "pour"]),
@@ -589,31 +561,34 @@ def create_test_scenes(output_dir: Path) -> List[SceneConfig]:
         scene_dir = test_dir / scene_id
         scene_dir.mkdir(exist_ok=True)
 
-        # Create mock manifest
+        # Create mock 3D-RE-GEN manifest
         manifest = {
+            "version": "1.0.0",
             "scene_id": scene_id,
-            "environment_type": env_type,
+            "scene": {
+                "coordinate_frame": "y_up",
+                "meters_per_unit": 1.0,
+                "environment_type": env_type,
+            },
             "objects": [
                 {
                     "id": f"obj_{i}",
-                    "mesh_file": f"objects/obj_{i}/mesh.glb",
-                    "category": "object",
-                    "position": {"x": i * 0.5, "y": 0, "z": 0},
+                    "sim_role": "manipulable_object",
+                    "asset": {
+                        "path": f"objects/obj_{i}/mesh.glb",
+                        "format": "glb",
+                        "source": "3d-re-gen",
+                    },
+                    "transform": {
+                        "position": {"x": i * 0.5, "y": 0, "z": 0},
+                        "rotation_quaternion": {"w": 1, "x": 0, "y": 0, "z": 0},
+                        "scale": {"x": 1, "y": 1, "z": 1},
+                    },
                 }
                 for i in range(5)
             ],
         }
-        (scene_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-
-        # Create mock objects directory
-        objects_dir = scene_dir / "objects"
-        objects_dir.mkdir(exist_ok=True)
-
-        for i in range(5):
-            obj_dir = objects_dir / f"obj_{i}"
-            obj_dir.mkdir(exist_ok=True)
-            # Create empty GLB (just for testing structure)
-            (obj_dir / "mesh.glb").write_bytes(b"")
+        (scene_dir / "scene_manifest.json").write_text(json.dumps(manifest, indent=2))
 
         scenes.append(SceneConfig(
             scene_id=scene_id,
@@ -632,19 +607,13 @@ def main():
     parser.add_argument(
         "--input-dir",
         type=Path,
-        help="Directory with scene inputs",
+        help="Directory with 3D-RE-GEN outputs",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("./pipeline_output"),
         help="Output directory",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["manual-cad", "mast3r"],
-        default="manual-cad",
-        help="Reconstruction mode",
     )
     parser.add_argument(
         "--test-mode",
@@ -680,10 +649,10 @@ def main():
 
     # Get scenes to process
     if args.test_mode:
-        print("Running in TEST MODE with mock data\n")
+        print("Running in TEST MODE with mock 3D-RE-GEN data\n")
         scenes = create_test_scenes(args.output_dir)
     elif args.input_dir:
-        # Discover scenes in input directory
+        # Discover scenes in input directory (expect 3D-RE-GEN outputs)
         scenes = []
         for scene_dir in sorted(args.input_dir.iterdir()):
             if scene_dir.is_dir():
@@ -708,7 +677,6 @@ def main():
     # Run pipeline
     runner = First10ScenesRunner(
         output_base=args.output_dir,
-        reconstruction_mode=args.mode,
         notify_email=args.email,
         notify_phone=args.phone,
         dry_run=args.dry_run,
