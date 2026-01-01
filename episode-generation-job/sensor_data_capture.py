@@ -619,92 +619,306 @@ class IsaacSimSensorCapture:
     def _capture_object_poses(
         self, scene_objects: List[Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
-        """Capture object poses from simulation."""
+        """
+        Capture object poses from simulation.
+
+        Args:
+            scene_objects: List of scene objects with metadata
+
+        Returns:
+            Dict mapping object_id to pose data (position, rotation, velocities)
+        """
         poses = {}
+        fallback_used = False
+        sim_query_count = 0
 
         try:
             # Try to get poses from Isaac Sim
             if self._omni is not None:
+                from pxr import UsdGeom, UsdPhysics
                 import omni.isaac.core.utils.stage as stage_utils
+                from omni.isaac.core.utils.stage import get_current_stage
 
-                for obj in scene_objects:
-                    obj_id = obj.get("id", obj.get("name", ""))
-                    prim_path = obj.get("prim_path", f"/World/Objects/{obj_id}")
+                stage = get_current_stage()
+                if stage is None:
+                    self.log("No stage available for object pose capture", "WARNING")
+                    fallback_used = True
+                else:
+                    for obj in scene_objects:
+                        obj_id = obj.get("id", obj.get("name", ""))
+                        prim_path = obj.get("prim_path", f"/World/Objects/{obj_id}")
 
-                    try:
-                        prim = stage_utils.get_prim_at_path(prim_path)
-                        if prim.IsValid():
-                            xform = prim.GetAttribute("xformOp:transform").Get()
-                            if xform:
+                        try:
+                            prim = stage.GetPrimAtPath(prim_path)
+                            if prim.IsValid():
+                                xformable = UsdGeom.Xformable(prim)
+                                world_transform = xformable.ComputeLocalToWorldTransform(0)
+
+                                # Extract position
+                                translation = world_transform.ExtractTranslation()
+                                position = [
+                                    float(translation[0]),
+                                    float(translation[1]),
+                                    float(translation[2])
+                                ]
+
+                                # Extract rotation quaternion
+                                rotation = world_transform.ExtractRotationQuat()
+                                rotation_quat = [
+                                    float(rotation.GetReal()),
+                                    float(rotation.GetImaginary()[0]),
+                                    float(rotation.GetImaginary()[1]),
+                                    float(rotation.GetImaginary()[2])
+                                ]
+
+                                # Try to get velocities from rigid body
+                                linear_velocity = [0.0, 0.0, 0.0]
+                                angular_velocity = [0.0, 0.0, 0.0]
+
+                                if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                                    try:
+                                        from omni.isaac.core.prims import RigidPrim
+                                        rigid = RigidPrim(prim_path)
+                                        vel = rigid.get_linear_velocity()
+                                        ang_vel = rigid.get_angular_velocity()
+                                        if vel is not None:
+                                            linear_velocity = [float(v) for v in vel]
+                                        if ang_vel is not None:
+                                            angular_velocity = [float(v) for v in ang_vel]
+                                    except Exception:
+                                        pass  # Velocities not critical
+
                                 poses[obj_id] = {
-                                    "position": list(xform.GetTranslation()),
-                                    "rotation_quat": list(xform.GetRotation().GetQuat()),
+                                    "position": position,
+                                    "rotation_quat": rotation_quat,
+                                    "linear_velocity": linear_velocity,
+                                    "angular_velocity": angular_velocity,
                                     "prim_path": prim_path,
+                                    "source": "simulation",
                                 }
-                    except Exception:
-                        pass
+                                sim_query_count += 1
 
-        except Exception:
-            # Fallback: use positions from scene_objects
-            for obj in scene_objects:
-                obj_id = obj.get("id", obj.get("name", ""))
+                        except Exception as e:
+                            self.log(f"Failed to get pose for {obj_id}: {e}", "DEBUG")
+
+        except Exception as e:
+            self.log(f"Isaac Sim object pose query failed: {e}", "WARNING")
+            fallback_used = True
+
+        # Fallback for objects not found in simulation
+        for obj in scene_objects:
+            obj_id = obj.get("id", obj.get("name", ""))
+            if obj_id not in poses:
+                fallback_used = True
                 position = obj.get("position", [0, 0, 0])
                 rotation = obj.get("rotation", [1, 0, 0, 0])
 
                 poses[obj_id] = {
                     "position": [float(x) for x in position],
                     "rotation_quat": [float(x) for x in rotation],
+                    "linear_velocity": [0.0, 0.0, 0.0],
+                    "angular_velocity": [0.0, 0.0, 0.0],
+                    "source": "input_fallback",
                 }
+
+        # Log summary
+        if fallback_used and sim_query_count > 0:
+            self.log(
+                f"Object poses: {sim_query_count} from sim, "
+                f"{len(poses) - sim_query_count} from fallback",
+                "WARNING"
+            )
+        elif fallback_used:
+            self.log(
+                "All object poses from input fallback (not from simulation)",
+                "WARNING"
+            )
 
         return poses
 
     def _capture_contacts(self) -> List[Dict[str, Any]]:
-        """Capture contact information from physics simulation."""
+        """
+        Capture contact information from physics simulation.
+
+        Returns:
+            List of contact dictionaries with body names, positions, normals, forces
+        """
         contacts = []
 
+        if self._omni is None:
+            self.log("Cannot capture contacts: omni not available", "DEBUG")
+            return contacts
+
         try:
-            if self._omni is not None:
-                import omni.physx as physx
+            import omni.physx as physx
+            from omni.physx import get_physx_interface
 
-                # Get contact report
-                contact_data = physx.get_physx_interface().get_contact_report()
+            physx_interface = get_physx_interface()
+            if physx_interface is None:
+                self.log("PhysX interface not available for contact capture", "WARNING")
+                return contacts
 
-                for contact in contact_data:
+            # Get contact report
+            contact_data = physx_interface.get_contact_report()
+
+            if contact_data is None:
+                self.log("Contact report returned None", "DEBUG")
+                return contacts
+
+            for contact in contact_data:
+                try:
                     contacts.append({
-                        "body_a": contact.get("actor0", ""),
-                        "body_b": contact.get("actor1", ""),
-                        "position": list(contact.get("position", [0, 0, 0])),
-                        "normal": list(contact.get("normal", [0, 0, 1])),
+                        "body_a": str(contact.get("actor0", "")),
+                        "body_b": str(contact.get("actor1", "")),
+                        "position": [
+                            float(x) for x in contact.get("position", [0, 0, 0])
+                        ],
+                        "normal": [
+                            float(x) for x in contact.get("normal", [0, 0, 1])
+                        ],
                         "force_magnitude": float(contact.get("impulse", 0)),
+                        "separation": float(contact.get("separation", 0)),
                     })
+                except (TypeError, ValueError) as e:
+                    self.log(f"Failed to parse contact data: {e}", "DEBUG")
 
-        except Exception:
-            pass
+            self.log(f"Captured {len(contacts)} contacts", "DEBUG")
+
+        except ImportError as e:
+            self.log(f"PhysX import failed: {e}", "WARNING")
+        except AttributeError as e:
+            self.log(f"PhysX API error: {e}", "WARNING")
+        except Exception as e:
+            self.log(f"Unexpected error capturing contacts: {e}", "ERROR")
+            import traceback
+            self.log(traceback.format_exc(), "DEBUG")
 
         return contacts
 
     def _capture_privileged_state(
         self, scene_objects: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
-        """Capture full privileged physics state."""
+        """
+        Capture full privileged physics state from simulation.
+
+        This includes ground-truth information not available to the robot:
+        - Object poses and velocities
+        - Robot internal state
+        - Contact information
+        - Scene metadata
+
+        Args:
+            scene_objects: List of scene objects for pose lookup
+
+        Returns:
+            Dict with object_states, robot_state, scene_state, contacts
+        """
         state = {
             "object_states": {},
             "robot_state": {},
             "scene_state": {},
+            "contacts": [],
+            "data_source": "simulation" if self._omni is not None else "input_fallback",
         }
 
-        # Object states with velocities
+        # Capture contacts first
+        state["contacts"] = self._capture_contacts()
+
+        # Check for active grasps based on contacts
+        active_grasps = set()
+        gripper_keywords = ["hand", "finger", "gripper", "panda_leftfinger", "panda_rightfinger"]
+        for contact in state["contacts"]:
+            body_a = contact.get("body_a", "").lower()
+            body_b = contact.get("body_b", "").lower()
+            # If gripper is in contact with something
+            for kw in gripper_keywords:
+                if kw in body_a:
+                    active_grasps.add(body_b.split("/")[-1])
+                if kw in body_b:
+                    active_grasps.add(body_a.split("/")[-1])
+
+        # Capture object states
         if scene_objects:
+            # First try to get poses from simulation
+            sim_poses = self._capture_object_poses(scene_objects)
+
             for obj in scene_objects:
                 obj_id = obj.get("id", obj.get("name", ""))
-                state["object_states"][obj_id] = {
-                    "position": obj.get("position", [0, 0, 0]),
-                    "rotation": obj.get("rotation", [1, 0, 0, 0]),
-                    "linear_velocity": obj.get("linear_velocity", [0, 0, 0]),
-                    "angular_velocity": obj.get("angular_velocity", [0, 0, 0]),
-                    "is_grasped": obj.get("is_grasped", False),
-                    "in_contact": obj.get("in_contact", False),
-                }
+
+                # Use simulation data if available
+                if obj_id in sim_poses:
+                    pose_data = sim_poses[obj_id]
+                    state["object_states"][obj_id] = {
+                        "position": pose_data.get("position", [0, 0, 0]),
+                        "rotation": pose_data.get("rotation_quat", [1, 0, 0, 0]),
+                        "linear_velocity": pose_data.get("linear_velocity", [0, 0, 0]),
+                        "angular_velocity": pose_data.get("angular_velocity", [0, 0, 0]),
+                        "is_grasped": obj_id.lower() in active_grasps,
+                        "in_contact": any(
+                            obj_id.lower() in c.get("body_a", "").lower() or
+                            obj_id.lower() in c.get("body_b", "").lower()
+                            for c in state["contacts"]
+                        ),
+                        "data_source": pose_data.get("source", "unknown"),
+                    }
+                else:
+                    # Fallback to input data
+                    state["object_states"][obj_id] = {
+                        "position": obj.get("position", [0, 0, 0]),
+                        "rotation": obj.get("rotation", [1, 0, 0, 0]),
+                        "linear_velocity": [0.0, 0.0, 0.0],
+                        "angular_velocity": [0.0, 0.0, 0.0],
+                        "is_grasped": False,
+                        "in_contact": False,
+                        "data_source": "input_fallback",
+                    }
+
+        # Capture robot state
+        if self._omni is not None:
+            try:
+                from omni.isaac.core.articulations import Articulation
+                from omni.isaac.core.utils.stage import get_current_stage
+
+                stage = get_current_stage()
+                if stage is not None:
+                    # Try common robot paths
+                    robot_paths = ["/World/Robot", "/World/Franka", "/World/Panda"]
+                    for robot_path in robot_paths:
+                        robot_prim = stage.GetPrimAtPath(robot_path)
+                        if robot_prim.IsValid():
+                            try:
+                                robot = Articulation(robot_path)
+                                if not robot.initialized:
+                                    robot.initialize()
+
+                                joint_pos = robot.get_joint_positions()
+                                joint_vel = robot.get_joint_velocities()
+
+                                state["robot_state"] = {
+                                    "prim_path": robot_path,
+                                    "joint_positions": [
+                                        float(x) for x in (joint_pos if joint_pos is not None else [])
+                                    ],
+                                    "joint_velocities": [
+                                        float(x) for x in (joint_vel if joint_vel is not None else [])
+                                    ],
+                                    "num_dof": robot.num_dof if hasattr(robot, "num_dof") else 0,
+                                    "data_source": "simulation",
+                                }
+                                break
+                            except Exception as e:
+                                self.log(f"Failed to get robot state from {robot_path}: {e}", "DEBUG")
+
+            except Exception as e:
+                self.log(f"Failed to capture robot state: {e}", "WARNING")
+
+        # Scene state metadata
+        state["scene_state"] = {
+            "num_objects": len(scene_objects) if scene_objects else 0,
+            "num_contacts": len(state["contacts"]),
+            "num_active_grasps": len(active_grasps),
+            "physics_enabled": self._omni is not None,
+        }
 
         return state
 
