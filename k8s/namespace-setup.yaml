@@ -1,0 +1,111 @@
+# =============================================================================
+# Kubernetes Namespace and RBAC Setup for BlueprintPipeline
+# =============================================================================
+# Sets up namespace, service account, and permissions for pipeline jobs.
+#
+# Apply first:
+#   kubectl apply -f namespace-setup.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: blueprint
+  labels:
+    app: blueprint-pipeline
+
+---
+# Service Account for pipeline jobs
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: blueprint-pipeline-sa
+  namespace: blueprint
+  annotations:
+    # For Workload Identity (GKE)
+    iam.gke.io/gcp-service-account: blueprint-pipeline@${PROJECT_ID}.iam.gserviceaccount.com
+
+---
+# Role for managing jobs within namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: blueprint-pipeline-role
+  namespace: blueprint
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list"]
+
+---
+# Bind role to service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: blueprint-pipeline-binding
+  namespace: blueprint
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: blueprint-pipeline-role
+subjects:
+  - kind: ServiceAccount
+    name: blueprint-pipeline-sa
+    namespace: blueprint
+
+---
+# ResourceQuota to prevent runaway costs
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: blueprint-quota
+  namespace: blueprint
+spec:
+  hard:
+    # Limit total GPUs in use
+    requests.nvidia.com/gpu: "4"
+    limits.nvidia.com/gpu: "4"
+    # Limit total CPU/Memory
+    requests.cpu: "32"
+    requests.memory: "128Gi"
+    limits.cpu: "64"
+    limits.memory: "256Gi"
+    # Limit number of jobs
+    count/jobs.batch: "10"
+
+---
+# LimitRange for default resource limits
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: blueprint-limits
+  namespace: blueprint
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "2"
+        memory: "8Gi"
+      defaultRequest:
+        cpu: "1"
+        memory: "4Gi"
+      max:
+        cpu: "16"
+        memory: "64Gi"
+        nvidia.com/gpu: "1"
+
+---
+# PriorityClass for GPU jobs
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: blueprint-gpu-priority
+value: 1000000
+globalDefault: false
+description: "High priority for GPU-based episode generation jobs"

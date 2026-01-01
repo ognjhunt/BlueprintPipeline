@@ -1,0 +1,158 @@
+# =============================================================================
+# Isaac Sim Episode Generation Dockerfile
+# =============================================================================
+# This Dockerfile builds a production-ready container for running episode
+# generation with real physics simulation and sensor capture.
+#
+# Base Image: NVIDIA Isaac Sim 4.2.0 (latest stable as of 2025)
+# GPU Required: Yes (NVIDIA GPU with 8GB+ VRAM recommended)
+#
+# Usage:
+#   # Build
+#   docker build -f Dockerfile.isaacsim -t blueprint-episode-gen:isaacsim .
+#
+#   # Run (requires nvidia-docker)
+#   docker run --gpus all \
+#     -e SCENE_ID=kitchen_001 \
+#     -e BUCKET=my-bucket \
+#     -v /path/to/scenes:/mnt/gcs \
+#     blueprint-episode-gen:isaacsim
+# =============================================================================
+
+# Use NVIDIA Isaac Sim as base
+# Note: Requires NGC authentication for pulling
+# docker login nvcr.io
+# Username: $oauthtoken
+# Password: <your-ngc-api-key>
+ARG ISAAC_SIM_VERSION=4.2.0
+FROM nvcr.io/nvidia/isaac-sim:${ISAAC_SIM_VERSION} AS base
+
+# =============================================================================
+# Environment Setup
+# =============================================================================
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Isaac Sim paths
+ENV ISAAC_SIM_PATH=/isaac-sim
+ENV CARB_APP_PATH=${ISAAC_SIM_PATH}/kit
+ENV EXP_PATH=${ISAAC_SIM_PATH}/apps
+
+# Application paths
+ENV APP_DIR=/app
+ENV PYTHONPATH=${APP_DIR}:${ISAAC_SIM_PATH}/exts:${PYTHONPATH}
+
+# Runtime configuration
+ENV ACCEPT_EULA=Y
+ENV PRIVACY_CONSENT=Y
+
+# Headless mode by default (no display required)
+ENV HEADLESS=1
+ENV DISPLAY=""
+
+# =============================================================================
+# System Dependencies
+# =============================================================================
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # GCS/Cloud tools
+    curl \
+    gnupg \
+    ca-certificates \
+    # Build tools (for pip packages)
+    gcc \
+    g++ \
+    python3-dev \
+    # Utilities
+    htop \
+    vim \
+    jq \
+    # Video encoding for episode capture
+    ffmpeg \
+    libavcodec-dev \
+    libavformat-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install gcsfuse for GCS bucket mounting
+RUN echo "deb https://packages.cloud.google.com/apt gcsfuse-bookworm main" | tee /etc/apt/sources.list.d/gcsfuse.list \
+    && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - \
+    && apt-get update \
+    && apt-get install -y gcsfuse \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Google Cloud SDK (for gcloud auth)
+RUN curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts --install-dir=/opt \
+    && ln -s /opt/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud \
+    && ln -s /opt/google-cloud-sdk/bin/gsutil /usr/local/bin/gsutil
+
+# =============================================================================
+# Python Dependencies
+# =============================================================================
+
+WORKDIR ${APP_DIR}
+
+# Copy requirements first for caching
+COPY episode-generation-job/requirements.txt ./requirements.txt
+COPY episode-generation-job/requirements-isaacsim.txt ./requirements-isaacsim.txt
+
+# Install Python dependencies using Isaac Sim's Python
+# Isaac Sim uses its own Python environment
+RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir --upgrade pip \
+    && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir -r requirements.txt \
+    && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir -r requirements-isaacsim.txt
+
+# =============================================================================
+# Application Code
+# =============================================================================
+
+# Copy episode generation job
+COPY episode-generation-job/ ./episode-generation-job/
+
+# Copy shared tools and modules
+COPY tools/ ./tools/
+COPY policy_configs/ ./policy_configs/
+COPY dwm-preparation-job/ ./dwm_preparation_job/
+
+# Copy Isaac Lab job (for task generation integration)
+COPY isaac-lab-job/ ./isaac-lab-job/
+
+# =============================================================================
+# Runtime Configuration
+# =============================================================================
+
+# Create directories
+RUN mkdir -p /mnt/gcs /output /logs /tmp/isaac_cache
+
+# Set permissions
+RUN chmod -R 755 ${APP_DIR}
+
+# Copy entrypoint script
+COPY episode-generation-job/scripts/docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD ${ISAAC_SIM_PATH}/python.sh -c "import omni.isaac.core; print('healthy')" || exit 1
+
+# =============================================================================
+# Entrypoint
+# =============================================================================
+
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Default command: run episode generation
+CMD ["generate"]
+
+# =============================================================================
+# Labels
+# =============================================================================
+
+LABEL maintainer="BlueprintPipeline Team"
+LABEL description="Isaac Sim-based Episode Generation for Robotics Training Data"
+LABEL isaac_sim_version="${ISAAC_SIM_VERSION}"
+LABEL gpu_required="true"
