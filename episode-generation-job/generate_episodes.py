@@ -572,6 +572,17 @@ class EpisodeGenerator:
 
         # Sensor data capture (enhanced pipeline)
         self.sensor_capture = None
+        self._sensor_capture_is_mock = False
+
+        # Detect if running in production environment
+        is_production = (
+            os.getenv("KUBERNETES_SERVICE_HOST") is not None or
+            os.getenv("K_SERVICE") is not None or
+            os.path.exists("/.dockerenv") or
+            os.getenv("PRODUCTION", "false").lower() == "true"
+        )
+        require_real_sensors = is_production and not config.use_mock_capture
+
         if HAVE_SENSOR_CAPTURE and config.capture_sensor_data:
             try:
                 # Parse data pack tier
@@ -585,11 +596,29 @@ class EpisodeGenerator:
                     use_mock=config.use_mock_capture,
                     verbose=verbose,
                 )
-                self.sensor_capture.initialize()
+                success = self.sensor_capture.initialize()
+
+                # Check if we got mock capture when we needed real
+                if hasattr(self.sensor_capture, '__class__'):
+                    self._sensor_capture_is_mock = 'Mock' in self.sensor_capture.__class__.__name__
+
+                if self._sensor_capture_is_mock and require_real_sensors:
+                    raise RuntimeError(
+                        "Sensor capture fell back to mock mode in production. "
+                        "Isaac Sim/Replicator is required for real sensor data."
+                    )
+
                 self.log(f"Sensor capture initialized: {config.data_pack_tier} pack, {config.num_cameras} cameras")
+                if self._sensor_capture_is_mock:
+                    self.log("Using MOCK sensor capture - images will be random noise!", "WARNING")
+
             except Exception as e:
-                self.log(f"Sensor capture initialization failed: {e}", "WARNING")
-                self.sensor_capture = None
+                if require_real_sensors:
+                    self.log(f"FATAL: Sensor capture initialization failed in production: {e}", "ERROR")
+                    raise RuntimeError(f"Sensor capture required in production: {e}")
+                else:
+                    self.log(f"Sensor capture initialization failed: {e}", "WARNING")
+                    self.sensor_capture = None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -1384,25 +1413,71 @@ def run_episode_generation_job(
 
 def main():
     """Main entry point."""
-    # Check if we're running in production mode (require real physics)
-    require_real_physics = os.getenv("REQUIRE_REAL_PHYSICS", "false").lower() == "true"
+    # Detect if running in production environment
+    # Production indicators: running in container, K8s, or Cloud Run
+    is_production = (
+        os.getenv("KUBERNETES_SERVICE_HOST") is not None or  # K8s
+        os.getenv("K_SERVICE") is not None or  # Cloud Run
+        os.path.exists("/.dockerenv") or  # Docker
+        os.getenv("PRODUCTION", "false").lower() == "true"
+    )
 
-    if require_real_physics and require_isaac_sim_or_fail is not None:
-        # Production mode - fail if Isaac Sim is not available
-        try:
-            require_isaac_sim_or_fail()
-        except RuntimeError as e:
-            print(str(e))
-            sys.exit(1)
-    elif check_sensor_capture_environment is not None:
-        # Development mode - show environment status
+    # In production, require real physics by default unless explicitly disabled
+    # In development, allow mock data by default unless explicitly required
+    if is_production:
+        default_require_real = "true"
+    else:
+        default_require_real = "false"
+
+    require_real_physics = os.getenv("REQUIRE_REAL_PHYSICS", default_require_real).lower() == "true"
+    allow_mock_data = os.getenv("ALLOW_MOCK_DATA", "false").lower() == "true"
+
+    # Check environment
+    if check_sensor_capture_environment is not None:
         status = check_sensor_capture_environment()
-        if not status["isaac_sim_available"]:
+        isaac_sim_available = status.get("isaac_sim_available", False)
+    else:
+        isaac_sim_available = False
+
+    # Enforce production requirements
+    if require_real_physics and not isaac_sim_available:
+        if allow_mock_data:
             print("\n[EPISODE-GEN-JOB] ========================================")
-            print("[EPISODE-GEN-JOB] WARNING: Isaac Sim not available")
-            print("[EPISODE-GEN-JOB] Running with MOCK DATA (random noise)")
-            print("[EPISODE-GEN-JOB] For real data: /isaac-sim/python.sh")
+            print("[EPISODE-GEN-JOB] WARNING: ALLOW_MOCK_DATA override active")
+            print("[EPISODE-GEN-JOB] Proceeding with mock data despite production mode")
             print("[EPISODE-GEN-JOB] ========================================\n")
+        else:
+            print("\n" + "=" * 70)
+            print("FATAL ERROR: Isaac Sim not available in production mode")
+            print("=" * 70)
+            print("")
+            print("Episode generation requires Isaac Sim for:")
+            print("  - Real physics simulation (PhysX)")
+            print("  - Actual sensor data capture (Replicator)")
+            print("  - Physics-validated trajectories")
+            print("")
+            print("Without Isaac Sim, the pipeline would generate:")
+            print("  - Random noise RGB images (not real visual data)")
+            print("  - Heuristic-based validation (not physics-verified)")
+            print("  - Mock contact/collision data")
+            print("")
+            print("To fix this:")
+            print("  1. Run with Isaac Sim: /isaac-sim/python.sh your_script.py")
+            print("  2. Or use the Isaac Sim container (see docs/ISAAC_SIM_SETUP.md)")
+            print("")
+            print("To override (NOT RECOMMENDED for training data):")
+            print("  export ALLOW_MOCK_DATA=true")
+            print("  export REQUIRE_REAL_PHYSICS=false")
+            print("=" * 70 + "\n")
+            sys.exit(1)
+
+    # Development mode warning
+    if not isaac_sim_available and not require_real_physics:
+        print("\n[EPISODE-GEN-JOB] ========================================")
+        print("[EPISODE-GEN-JOB] WARNING: Isaac Sim not available")
+        print("[EPISODE-GEN-JOB] Running with MOCK DATA (random noise)")
+        print("[EPISODE-GEN-JOB] For real data: /isaac-sim/python.sh")
+        print("[EPISODE-GEN-JOB] ========================================\n")
 
     # Get configuration from environment
     bucket = os.getenv("BUCKET", "")
