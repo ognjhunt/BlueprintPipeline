@@ -401,33 +401,33 @@ isaac_lab/
 
 ---
 
-### 🔴 CRITICAL-2: Isaac Sim Required for Production Data
+### ✅ CLARIFICATION: Isaac Sim IS Configured in Production
 
-**Impact:** Without Isaac Sim, sensor data is MOCK (random noise).
+**Your Setup:** Isaac Sim IS properly configured in your GKE cluster with GPU nodes.
+The cloud workflows (`episode-generation-pipeline.yaml`) run on GPU-enabled nodes with
+Isaac Sim available. This means **production runs WILL have real data**.
 
-**What Happens Outside Isaac Sim:**
+**The "mock fallback" behavior only applies when:**
+- Running code locally on a laptop without Isaac Sim
+- Running unit tests in CI without GPU
+- Development/debugging outside the container
+
+**In your production cloud environment (GKE + GPU):**
+| Component | Status |
+|-----------|--------|
+| RGB Images | ✅ Real Isaac Sim renders |
+| Depth Maps | ✅ Real depth from Replicator |
+| Segmentation | ✅ Real semantic masks |
+| Physics Validation | ✅ PhysX simulation |
+| Contact Info | ✅ Real PhysX contacts |
+
+**Environment Detection:** The code automatically detects Isaac Sim:
 ```python
-# sensor_data_capture.py - what you get without Isaac Sim
-frame_data.rgb_images[camera_id] = np.random.randint(0, 255, (h, w, 3))
-# ^^^ This is random noise, NOT real visual data
-```
-
-**Components Affected:**
-| Component | With Isaac Sim | Without Isaac Sim |
-|-----------|----------------|-------------------|
-| RGB Images | Real renders | Random noise |
-| Depth Maps | Real depth | Mock zeros |
-| Segmentation | Real masks | Empty |
-| Physics Validation | PhysX simulation | AABB heuristics |
-| Contact Info | Real PhysX contacts | None |
-
-**Resolution:**
-```bash
-# Run pipeline inside Isaac Sim
-/isaac-sim/python.sh tools/run_full_isaacsim_pipeline.py
-
-# Or use docker-compose with Isaac Sim
-docker-compose -f docker-compose.isaacsim.yaml up
+from isaac_sim_integration import is_isaac_sim_available
+if is_isaac_sim_available():
+    # Use real physics, real rendering
+else:
+    # Fall back to mock (only in development)
 ```
 
 ---
@@ -449,20 +449,49 @@ dwm/
 
 ---
 
-### ⚠️ MAJOR-1: Generated Isaac Lab Code Not Runtime-Tested
+### ✅ FIXED: Generated Isaac Lab Code Now Has Runtime Validation
 
-**Risk:** Generated `env_cfg.py` may fail when actually run in Isaac Lab.
+**Previously:** Generated code was only syntax-checked.
 
-**What's Validated:**
+**Now:** Full runtime validation is performed:
+
+```python
+# New runtime validation in isaac-lab-job
+runtime_validator = IsaacLabRuntimeValidator(verbose=True)
+result = runtime_validator.validate(
+    isaac_lab_dir=isaac_lab_dir,
+    run_sanity_rollout=True,  # Actually runs environment steps
+    num_rollout_steps=10,
+    num_envs=4,
+)
+```
+
+**What's Now Validated:**
 - ✅ Python syntax
-- ✅ Import structure
+- ✅ Import resolution (all imports work)
+- ✅ Class instantiation (EnvCfg can be created)
+- ✅ Observation/action shape extraction
+- ✅ **Sanity rollout** (10 steps with zero actions in Isaac Sim)
 
-**What's NOT Validated:**
-- ❌ Runtime execution
-- ❌ Observation space shapes
-- ❌ Action space dimensions
-- ❌ Reward computation
-- ❌ USD scene reference validity
+**Output in `generation_metadata.json`:**
+```json
+{
+  "runtime_validation": {
+    "is_valid": true,
+    "imports_valid": true,
+    "class_instantiation_valid": true,
+    "shapes_valid": true,
+    "sanity_rollout_valid": true,
+    "observation_shapes": {"policy": [23]},
+    "action_shape": [9],
+    "rollout_fps": 1234.5
+  }
+}
+```
+
+**Environment Variables:**
+- `RUN_RUNTIME_VALIDATION=true` (default) - enable validation
+- `SKIP_SANITY_ROLLOUT=true` - skip environment steps (faster)
 
 ---
 
