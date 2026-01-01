@@ -65,6 +65,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from trajectory_solver import JointTrajectory, JointState, RobotConfig, ROBOT_CONFIGS
 
+# Import reward computation
+try:
+    from reward_computation import RewardComputer, RewardConfig, compute_episode_reward
+    HAVE_REWARD_COMPUTATION = True
+except ImportError:
+    HAVE_REWARD_COMPUTATION = False
+    RewardComputer = None
+
 # Try to import pyarrow for Parquet support
 try:
     import pyarrow as pa
@@ -134,8 +142,15 @@ class LeRobotEpisode:
 
     # Metadata
     success: bool = True
-    total_reward: float = 1.0
+    total_reward: float = 0.0  # Computed by RewardComputer
     quality_score: float = 1.0
+
+    # Reward breakdown (for interpretability)
+    reward_components: Dict[str, float] = field(default_factory=dict)
+
+    # Source motion plan (for reward computation)
+    motion_plan: Optional[Any] = None
+    validation_result: Optional[Any] = None
 
     # Ground-truth metadata
     object_metadata: Dict[str, Any] = field(default_factory=dict)
@@ -284,6 +299,8 @@ class LeRobotExporter:
         quality_score: float = 1.0,
         sensor_data: Optional[Any] = None,
         object_metadata: Optional[Dict[str, Any]] = None,
+        motion_plan: Optional[Any] = None,
+        validation_result: Optional[Any] = None,
     ) -> int:
         """
         Add an episode to the dataset.
@@ -297,6 +314,8 @@ class LeRobotExporter:
             quality_score: Quality score from validation (0.0-1.0)
             sensor_data: EpisodeSensorData with visual observations (optional)
             object_metadata: Object metadata for ground-truth (optional)
+            motion_plan: Original motion plan for reward computation (optional)
+            validation_result: Validation result with physics data (optional)
 
         Returns:
             Episode index
@@ -311,6 +330,28 @@ class LeRobotExporter:
 
         episode_index = len(self.episodes)
 
+        # Compute reward using RewardComputer if available
+        total_reward = 0.0
+        reward_components = {}
+
+        if HAVE_REWARD_COMPUTATION and motion_plan is not None:
+            try:
+                reward_computer = RewardComputer(verbose=False)
+                total_reward, components = reward_computer.compute_episode_reward(
+                    trajectory=trajectory,
+                    motion_plan=motion_plan,
+                    validation_result=validation_result,
+                )
+                reward_components = components.to_dict()
+            except Exception as e:
+                self.log(f"Reward computation failed: {e}", "WARNING")
+                # Fallback to heuristic
+                total_reward = 0.7 if success else 0.0
+        else:
+            # Fallback: use success + quality_score
+            total_reward = quality_score * (1.0 if success else 0.3)
+            reward_components = {"fallback": True, "success": float(success), "quality": quality_score}
+
         episode = LeRobotEpisode(
             episode_index=episode_index,
             task_index=task_index,
@@ -319,8 +360,12 @@ class LeRobotExporter:
             scene_id=scene_id,
             variation_index=variation_index,
             success=success,
+            total_reward=total_reward,
             quality_score=quality_score,
+            reward_components=reward_components,
             sensor_data=sensor_data,
+            motion_plan=motion_plan,
+            validation_result=validation_result,
             object_metadata=object_metadata or {},
         )
 
@@ -333,7 +378,9 @@ class LeRobotExporter:
             cameras = sensor_data.camera_ids if hasattr(sensor_data, 'camera_ids') else []
             visual_info = f" [visual: {num_frames} frames, {len(cameras)} cameras]"
 
-        self.log(f"Added episode {episode_index}: {task_description[:50]}...{visual_info}")
+        reward_info = f" [reward: {total_reward:.2f}]"
+
+        self.log(f"Added episode {episode_index}: {task_description[:50]}...{visual_info}{reward_info}")
 
         return episode_index
 
