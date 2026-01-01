@@ -35,16 +35,16 @@ def classify_type(class_name: str, phrase: str | None, interactive_ids, obj_id, 
 
     # First check sim_role (most authoritative)
     if sim_role in ("articulated_furniture", "articulated_appliance", "manipulable_object"):
-        return "interactive", "physx"
+        return "interactive", "particulate"
 
     # Fallback to manual interactive_ids
     text = (class_name or "").lower()
     if phrase:
         text += " " + phrase.lower()
     if obj_id in interactive_ids:
-        return "interactive", "physx"
+        return "interactive", "particulate"
     if any(k in text for k in INTERACTIVE_KEYWORDS):
-        return "interactive", "physx"
+        return "interactive", "particulate"
     return "static", static_pipeline
 
 
@@ -108,7 +108,7 @@ def main():
     layout_file = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
     interactive_ids_env = os.getenv("INTERACTIVE_OBJECT_IDS", "")
     static_pipeline = os.getenv("STATIC_ASSET_PIPELINE", "sam3d")
-    physx_endpoint = os.getenv("PHYSX_ENDPOINT")
+    particulate_endpoint = os.getenv("PARTICULATE_ENDPOINT")
     skip_interactive = os.getenv("SKIP_INTERACTIVE_JOB", "0").lower() in ("1", "true", "yes", "on")
 
     if not (multiview_prefix and assets_prefix):
@@ -153,8 +153,8 @@ def main():
     print(f"[ASSETS] interactive_ids={interactive_ids}")
     print(f"[ASSETS] static_pipeline={static_pipeline}")
     print(f"[ASSETS] skip_interactive={skip_interactive}")
-    if physx_endpoint:
-        print(f"[ASSETS] physx_endpoint={physx_endpoint}")
+    if particulate_endpoint:
+        print(f"[ASSETS] particulate_endpoint={particulate_endpoint}")
 
     with layout_path.open("r") as f:
         layout = json.load(f)
@@ -205,8 +205,8 @@ def main():
             entry["approx_location"] = approx_location
         if obj_type == "interactive":
             entry["interactive_output"] = f"{assets_prefix}/interactive/obj_{oid}"
-            if physx_endpoint:
-                entry["physx_endpoint"] = physx_endpoint
+            if particulate_endpoint:
+                entry["particulate_endpoint"] = particulate_endpoint
         else:
             entry["asset_path"] = f"{assets_prefix}/obj_{oid}/asset.glb"
         plan_objects.append(entry)
@@ -216,7 +216,7 @@ def main():
     plan = {
         "scene_id": scene_id,
         "objects": plan_objects,
-        "physx_endpoint": physx_endpoint,
+        "particulate_endpoint": particulate_endpoint,
         "interactive_count": sum(1 for o in plan_objects if o["type"] == "interactive"),
     }
     with out_path.open("w") as f:

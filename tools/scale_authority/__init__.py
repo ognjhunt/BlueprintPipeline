@@ -6,7 +6,7 @@ All jobs that deal with physical dimensions should use this module to ensure con
 Scale Authority Hierarchy (from most to least authoritative):
 1. User-provided scale anchor (e.g., known reference object dimension)
 2. Calibrated scale factor from scale-job
-3. ZeroScene scale (if trusted)
+3. 3D-RE-GEN scale (if trusted)
 4. Default heuristics (e.g., door height ~2m, countertop ~0.9m)
 
 Key Outputs:

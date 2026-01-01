@@ -73,28 +73,23 @@ Source Image → 3D-RE-GEN → regen3d-job → [interactive-job] → simready-jo
 | Status | Feature |
 |--------|---------|
 | ✅ READY | Particulate backend integration (fast, ~10s/object) |
-| ✅ READY | PhysX-Anything backend integration (slow, 5-15min/object) |
 | ✅ READY | Multi-view mesh rendering for VLM |
 | ✅ READY | URDF generation and parsing |
 | ✅ READY | Retry logic with exponential backoff |
-| ⚠️ EXTERNAL DEPENDENCY | Requires running Particulate or PhysX service |
-| ⚠️ INCOMPLETE | Joint axis/limits often incorrect from PhysX |
+| ⚠️ EXTERNAL DEPENDENCY | Requires running Particulate service |
 
 **Code Location:** `interactive-job/run_interactive_assets.py`
 
 **Gap Analysis:**
-- **PhysX-Anything cold start**: 2-5 minutes, currently mitigated with 10-minute timeout
-- **Articulation accuracy**: Joint axes and limits are approximate; often require manual correction
+- **Articulation accuracy**: Joint axes and limits are approximate; may require manual correction
 - **No validation**: Generated URDFs are not tested in simulation before downstream use
 
 **What's Needed for 100%:**
-1. Deploy Particulate service (faster, more reliable than PhysX)
+1. Deploy Particulate service
 2. Add URDF validation step (load in PyBullet/Isaac Sim, verify joint control)
 3. Implement articulation refinement via manifest hints from scene understanding
 
-**Scaling Concern:** PhysX-Anything is the #1 bottleneck:
-- 5-15 min per object × 10 articulated objects = 50-150 min per scene
-- At 1000 scenes/day: need 35-105 GPU-hours/day just for articulation
+**Scaling:** With Particulate, articulation is no longer a bottleneck (~10s/object)
 
 ---
 
@@ -281,9 +276,8 @@ EventArc (GCS trigger) → Cloud Workflows → Cloud Run Jobs (sequential)
 
 #### 🔴 Critical Bottlenecks (Blocking 1000+/day)
 
-1. **Interactive Job (PhysX-Anything)**: 5-15 min/object × ~10 objects = 50-150 min/scene
-   - **Solution**: Use Particulate exclusively (~10s/object), reserve PhysX for edge cases
-   - **Impact**: 10-50× speedup on articulation
+1. **Interactive Job (Particulate)**: ~10s/object × ~10 objects = ~100s/scene
+   - With Particulate, articulation is no longer a bottleneck
 
 2. **3D-RE-GEN (External)**: Not controllable
    - **Solution**: Run multiple 3D-RE-GEN instances, batch processing

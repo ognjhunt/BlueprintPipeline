@@ -10,11 +10,11 @@ python tools/verify_workflow_triggers_and_dryrun.py
 The script performs checks on:
 
 1. **USD assembly trigger** – confirms `workflows/usd-assembly-pipeline.yaml`
-   filters on finalized `scenes/*/assets/.zeroscene_complete` objects and invokes
+   filters on finalized `scenes/*/assets/.regen3d_complete` objects and invokes
    the simready-job, followed by the final USD assembly run.
-2. **ZeroScene trigger** – confirms the zeroscene workflow listens for
-   ZeroScene outputs and writes the `.zeroscene_complete` marker.
-3. **Dry run** – simulates a `.zeroscene_complete` finalize event, showing the
+2. **3D-RE-GEN trigger** – confirms the regen3d workflow listens for
+   3D-RE-GEN outputs and writes the `.regen3d_complete` marker.
+3. **Dry run** – simulates a `.regen3d_complete` finalize event, showing the
    expected sequence of actions (simready-job → USD assembly → replicator-job)
    that should occur automatically after the completion marker appears.
 

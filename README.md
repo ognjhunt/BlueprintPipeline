@@ -57,7 +57,7 @@ The pipeline runs on Google Cloud using:
 | Job | Purpose | Inputs | Outputs |
 |-----|---------|--------|---------|
 | `regen3d-job` | Adapt 3D-RE-GEN outputs | 3D-RE-GEN meshes + poses | `scene_manifest.json`, `scene_layout_scaled.json` |
-| `interactive-job` | Add articulation (PhysX-Anything) | GLB meshes | URDF + segmented meshes |
+| `interactive-job` | Add articulation (Particulate) | GLB meshes | URDF + segmented meshes |
 | `simready-job` | Add physics properties | Manifest | `simready.usda` per object |
 | `usd-assembly-job` | Build final USD scene | Manifest + layout | `scene.usda` |
 | `replicator-job` | Generate domain randomization | Manifest + inventory | `placement_regions.usda`, policy scripts |
@@ -145,7 +145,7 @@ report = run_qa_validation(scene_dir=Path("scenes/scene_123"))
 | `REPLICATOR_PREFIX` | Replicator path | `scenes/{id}/replicator` |
 | `REGEN3D_PREFIX` | 3D-RE-GEN path | `scenes/{id}/regen3d` |
 | `ENVIRONMENT_TYPE` | Environment hint | `generic` |
-| `PHYSX_ENDPOINT` | PhysX-Anything service URL | - |
+| `PARTICULATE_ENDPOINT` | Particulate articulation service URL | - |
 | `LLM_PROVIDER` | LLM provider (`gemini`/`openai`/`auto`) | `auto` |
 
 ## Testing
@@ -192,7 +192,7 @@ for step in range(1000):
   - Paper: https://arxiv.org/abs/2512.17459
   - Project: https://3dregen.jdihlmann.com/
   - GitHub: https://github.com/cgtuebingen/3D-RE-GEN
-- **PhysX-Anything**: Articulation detection ([github.com/ziangcao0312/PhysX-Anything](https://github.com/ziangcao0312/PhysX-Anything))
+- **Particulate**: Fast mesh articulation detection (~10s per object)
 - **Isaac Sim/Lab**: NVIDIA simulation platform
 - **Omniverse Replicator**: Synthetic data generation
 

@@ -1,4 +1,4 @@
-"""Asset Catalog - Tools for indexing and searching NVIDIA/ZeroScene asset packs."""
+"""Asset Catalog - Tools for indexing and searching NVIDIA/3D-RE-GEN asset packs."""
 from .catalog_builder import AssetCatalogBuilder
 from .asset_matcher import AssetMatcher, AssetMatch, MatchResult
 from .embeddings import AssetEmbeddings, EmbeddingConfig
