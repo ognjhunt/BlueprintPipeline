@@ -587,7 +587,14 @@ Object info (cropped to relevant fields):
 
 
 def have_gemini() -> bool:
-    return genai is not None and types is not None and bool(os.getenv("GEMINI_API_KEY"))
+    """Check if Gemini is available. Supports both GEMINI_API_KEY and GOOGLE_API_KEY."""
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    return genai is not None and types is not None and bool(api_key)
+
+
+def get_gemini_api_key() -> Optional[str]:
+    """Get Gemini API key from environment. Checks both GEMINI_API_KEY and GOOGLE_API_KEY."""
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 def have_openai() -> bool:
@@ -742,25 +749,21 @@ def call_gemini_for_dimensions(
     prompt = make_dimension_estimation_prompt(obj, has_multiple_views=len(images) > 1)
 
     try:
-        model_name = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
-        if model_name.startswith("gemini-1") or model_name.startswith("gemini-2"):
-            print(
-                f"[SIMREADY] Overriding legacy Gemini model '{model_name}' with gemini-3-pro-preview",
-                file=sys.stderr,
-            )
-            model_name = "gemini-3-pro-preview"
+        # Use the latest Gemini model for best physics estimation
+        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro-preview-06-05")
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
         }
 
-        # Enable grounding for Gemini 3.x models
-        grounding_enabled = os.getenv("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
-        if model_name.startswith("gemini-3") and grounding_enabled:
-            if hasattr(types, "GroundingConfig") and hasattr(types, "GoogleSearch"):
-                cfg_kwargs["grounding"] = types.GroundingConfig(
-                    google_search=types.GoogleSearch()
-                )
+        # Enable grounding for supported Gemini models (2.5+)
+        grounding_enabled = os.getenv("GEMINI_GROUNDING_ENABLED", "false").lower() in {"1", "true", "yes"}
+        if grounding_enabled:
+            if hasattr(types, "Tool") and hasattr(types, "GoogleSearch"):
+                try:
+                    cfg_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                except Exception:
+                    pass  # Grounding not supported for this model
 
         try:
             config = types.GenerateContentConfig(**cfg_kwargs)
@@ -834,29 +837,21 @@ def call_gemini_for_object(
     prompt = make_gemini_prompt(oid, obj, bounds, base_cfg, has_image=reference_image is not None)
 
     try:
-        model_name = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+        # Use latest Gemini model for physics estimation
+        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro-preview-06-05")
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
         }
 
-        # Enable grounding for Gemini 3.x models (default: enabled)
-        grounding_enabled = os.getenv("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
-        if model_name.startswith("gemini-3") and grounding_enabled:
-            if hasattr(types, "GroundingConfig") and hasattr(types, "GoogleSearch"):
-                cfg_kwargs["grounding"] = types.GroundingConfig(
-                    google_search=types.GoogleSearch()
-                )
-
-        # Only use thinking_config when the SDK exposes it
-        if hasattr(types, "ThinkingConfig"):
-            ThinkingConfig = getattr(types, "ThinkingConfig")
-            ThinkingLevel = getattr(types, "ThinkingLevel", None)
-
-            if model_name.startswith("gemini-3") and ThinkingLevel is not None:
-                cfg_kwargs["thinking_config"] = ThinkingConfig(
-                    thinking_level=getattr(ThinkingLevel, "HIGH", "HIGH")
-                )
+        # Enable grounding if requested (disabled by default for physics estimation)
+        grounding_enabled = os.getenv("GEMINI_GROUNDING_ENABLED", "false").lower() in {"1", "true", "yes"}
+        if grounding_enabled:
+            if hasattr(types, "Tool") and hasattr(types, "GoogleSearch"):
+                try:
+                    cfg_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                except Exception:
+                    pass  # Grounding not supported
 
         try:
             config = types.GenerateContentConfig(**cfg_kwargs)
@@ -1493,11 +1488,21 @@ def prepare_simready_assets_job(
 
     client = None
     if have_gemini():
-        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-        print("[SIMREADY] Gemini client initialized")
+        api_key = get_gemini_api_key()
+        client = genai.Client(api_key=api_key)
+        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro-preview-06-05")
+        print(f"[SIMREADY] Gemini client initialized (model: {model_name})")
     else:
         print(
-            "[SIMREADY] GEMINI_API_KEY not set or google-genai unavailable; using heuristic defaults only",
+            "[SIMREADY] WARNING: No Gemini API key found!",
+            file=sys.stderr,
+        )
+        print(
+            "[SIMREADY] Set GOOGLE_API_KEY or GEMINI_API_KEY for AI-powered physics estimation.",
+            file=sys.stderr,
+        )
+        print(
+            "[SIMREADY] Falling back to heuristics (degraded quality).",
             file=sys.stderr,
         )
 
