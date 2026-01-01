@@ -44,6 +44,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.isaac_lab_tasks.task_generator import IsaacLabTaskGenerator
+from tools.isaac_lab_tasks.runtime_validator import (
+    IsaacLabRuntimeValidator,
+    RuntimeValidationResult,
+)
 
 
 # =============================================================================
@@ -422,6 +426,8 @@ def run_isaac_lab_job(
     policy_id: Optional[str] = None,
     robot_type: str = "franka",
     num_envs: int = 1024,
+    run_runtime_validation: bool = True,
+    skip_sanity_rollout: bool = False,
 ) -> int:
     """Run the Isaac Lab task generation job.
 
@@ -548,6 +554,41 @@ def run_isaac_lab_job(
         print(f"[ISAAC-LAB-JOB] ERROR: Failed to save task files: {e}")
         return 1
 
+    # ==========================================================================
+    # RUNTIME VALIDATION - Actually test that the generated code works
+    # ==========================================================================
+    runtime_result: Optional[RuntimeValidationResult] = None
+
+    if run_runtime_validation:
+        print("[ISAAC-LAB-JOB] Running runtime validation...")
+        runtime_validator = IsaacLabRuntimeValidator(verbose=True)
+
+        runtime_result = runtime_validator.validate(
+            isaac_lab_dir=isaac_lab_dir,
+            run_sanity_rollout=not skip_sanity_rollout,
+            num_rollout_steps=10,
+            num_envs=4,  # Use small number for validation
+        )
+
+        if not runtime_result.is_valid:
+            print(f"[ISAAC-LAB-JOB] ERROR: Runtime validation failed!")
+            for error in runtime_result.errors:
+                print(f"[ISAAC-LAB-JOB]   ERROR: {error}")
+            for warning in runtime_result.warnings:
+                print(f"[ISAAC-LAB-JOB]   WARNING: {warning}")
+            # Don't fail the job - mark it as partial success
+            # Generated code is syntactically valid but may not run
+            print("[ISAAC-LAB-JOB] WARNING: Code generated but runtime validation failed")
+            print("[ISAAC-LAB-JOB] The generated code may need manual adjustments")
+        else:
+            print("[ISAAC-LAB-JOB] ✓ Runtime validation passed!")
+            if runtime_result.rollout_fps > 0:
+                print(f"[ISAAC-LAB-JOB]   Rollout FPS: {runtime_result.rollout_fps:.1f}")
+            if runtime_result.observation_shapes:
+                print(f"[ISAAC-LAB-JOB]   Observation shapes: {runtime_result.observation_shapes}")
+            if runtime_result.action_shape:
+                print(f"[ISAAC-LAB-JOB]   Action shape: {runtime_result.action_shape}")
+
     # Write metadata
     metadata = {
         "scene_id": scene_id,
@@ -559,6 +600,7 @@ def run_isaac_lab_job(
         "files": list(saved_files.keys()),
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "generator_version": "1.0.0",
+        "runtime_validation": runtime_result.to_dict() if runtime_result else None,
     }
     metadata_path = isaac_lab_dir / "generation_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2))
@@ -571,6 +613,8 @@ def run_isaac_lab_job(
         "task_name": task.task_name,
         "policy_id": policy_id,
         "completed_at": datetime.utcnow().isoformat() + "Z",
+        "runtime_validated": runtime_result.is_valid if runtime_result else None,
+        "validation_errors": runtime_result.errors if runtime_result else [],
     }
     marker_path.write_text(json.dumps(marker_content, indent=2))
 
@@ -605,9 +649,17 @@ def main():
     robot_type = os.getenv("ROBOT_TYPE", "franka")
     num_envs = int(os.getenv("NUM_ENVS", "1024"))
 
+    # Runtime validation settings
+    # Set RUN_RUNTIME_VALIDATION=false to skip validation
+    # Set SKIP_SANITY_ROLLOUT=true to skip environment steps (faster, less thorough)
+    run_runtime_validation = os.getenv("RUN_RUNTIME_VALIDATION", "true").lower() == "true"
+    skip_sanity_rollout = os.getenv("SKIP_SANITY_ROLLOUT", "false").lower() == "true"
+
     print(f"[ISAAC-LAB-JOB] Configuration:")
     print(f"[ISAAC-LAB-JOB]   Bucket: {bucket}")
     print(f"[ISAAC-LAB-JOB]   Scene ID: {scene_id}")
+    print(f"[ISAAC-LAB-JOB]   Runtime validation: {run_runtime_validation}")
+    print(f"[ISAAC-LAB-JOB]   Skip sanity rollout: {skip_sanity_rollout}")
 
     exit_code = run_isaac_lab_job(
         root=GCS_ROOT,
@@ -620,6 +672,8 @@ def main():
         policy_id=policy_id,
         robot_type=robot_type,
         num_envs=num_envs,
+        run_runtime_validation=run_runtime_validation,
+        skip_sanity_rollout=skip_sanity_rollout,
     )
 
     sys.exit(exit_code)
