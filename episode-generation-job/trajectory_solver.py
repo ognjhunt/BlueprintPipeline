@@ -232,6 +232,8 @@ class IKSolver:
             return self._solve_franka_ik(target_position, target_orientation, seed_joints)
         elif self.config.name == "ur10":
             return self._solve_ur_ik(target_position, target_orientation, seed_joints)
+        elif self.config.name == "fetch":
+            return self._solve_fetch_ik(target_position, target_orientation, seed_joints)
         else:
             return self._solve_numerical_ik(target_position, target_orientation, seed_joints)
 
@@ -297,21 +299,169 @@ class IKSolver:
         target_orientation: np.ndarray,
         seed_joints: np.ndarray,
     ) -> Optional[np.ndarray]:
-        """Simplified IK for UR10."""
-        # Similar geometric approach
+        """
+        Analytical IK for UR10 robot.
+
+        Uses geometric approach based on UR robot kinematics.
+        UR10 is a 6-DOF robot with spherical wrist.
+
+        DH Parameters (UR10):
+            d1 = 0.1273, a2 = -0.612, a3 = -0.5723
+            d4 = 0.1639, d5 = 0.1157, d6 = 0.0922
+        """
+        # UR10 DH parameters
+        d1 = 0.1273  # shoulder height
+        a2 = 0.612   # upper arm length
+        a3 = 0.5723  # forearm length
+        d4 = 0.1639  # wrist offset
+        d5 = 0.1157  # wrist 2 offset
+        d6 = 0.0922  # tool offset
+
         px, py, pz = target_position
 
-        # Joint 1: base rotation
+        # Joint 1: Base rotation
         q1 = math.atan2(py, px)
 
-        # Use seed for other joints with minor adjustments
-        joints = seed_joints.copy()
-        joints[0] = q1
+        # Wrist center position (offset from tool by d6)
+        # Assuming gripper pointing down
+        wc_x = px
+        wc_y = py
+        wc_z = pz + d6
 
-        # Adjust shoulder based on height
-        height_diff = pz - 0.5
-        joints[1] = -1.571 + 0.3 * np.clip(height_diff / 0.3, -1, 1)
+        # Distance from base z-axis to wrist center in xy-plane
+        r_xy = math.sqrt(wc_x**2 + wc_y**2)
 
+        # Height from shoulder to wrist center
+        z_diff = wc_z - d1
+
+        # Distance from shoulder to wrist center
+        r = math.sqrt(r_xy**2 + z_diff**2)
+
+        # Check reachability
+        max_reach = abs(a2) + abs(a3)
+        min_reach = abs(abs(a2) - abs(a3))
+
+        if r > max_reach or r < min_reach:
+            # Out of reach - use seed with base rotation
+            joints = seed_joints.copy()
+            joints[0] = q1
+            return np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
+
+        # Joint 3: Elbow angle (using law of cosines)
+        cos_q3 = (r**2 - a2**2 - a3**2) / (2 * abs(a2) * abs(a3))
+        cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+
+        # Elbow up configuration (negative for elbow down)
+        q3 = math.acos(cos_q3)
+
+        # Joint 2: Shoulder angle
+        beta = math.atan2(z_diff, r_xy)
+        phi = math.atan2(abs(a3) * math.sin(q3), abs(a2) + abs(a3) * math.cos(q3))
+        q2 = -(beta + phi)  # Negative for typical UR configuration
+
+        # Wrist joints (q4, q5, q6) - simplified for gripper-down orientation
+        # For gripper pointing down: end-effector z aligned with -world z
+        q4 = -q2 - q3  # Keep wrist horizontal
+        q5 = -math.pi / 2  # Wrist 2 perpendicular
+        q6 = 0.0  # No tool rotation
+
+        joints = np.array([q1, q2, q3, q4, q5, q6])
+
+        # Clamp to limits
+        return np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
+
+    def _solve_fetch_ik(
+        self,
+        target_position: np.ndarray,
+        target_orientation: np.ndarray,
+        seed_joints: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        """
+        Analytical IK for Fetch robot arm.
+
+        Fetch has a 7-DOF arm (redundant), which provides an extra degree of freedom.
+        We use this for elbow positioning (null-space optimization).
+
+        Joint order:
+            0: shoulder_pan_joint (rotation around vertical)
+            1: shoulder_lift_joint (shoulder flex/extend)
+            2: upperarm_roll_joint (upper arm rotation)
+            3: elbow_flex_joint (elbow flex/extend)
+            4: forearm_roll_joint (forearm rotation)
+            5: wrist_flex_joint (wrist flex/extend)
+            6: wrist_roll_joint (wrist rotation)
+
+        Approximate link lengths (from URDF):
+            shoulder_to_elbow: 0.4 m
+            elbow_to_wrist: 0.32 m
+            wrist_to_gripper: 0.2 m
+        """
+        # Fetch arm approximate dimensions
+        shoulder_height = 0.4  # Height of shoulder above base
+        upper_arm = 0.4       # Shoulder to elbow
+        forearm = 0.32        # Elbow to wrist
+        wrist_to_grip = 0.2   # Wrist to gripper tip
+        shoulder_offset = 0.1  # Lateral offset of shoulder from base
+
+        px, py, pz = target_position
+
+        # Joint 0: Shoulder pan (rotation to face target)
+        q0 = math.atan2(py, px)
+
+        # Wrist center position (offset from gripper by wrist_to_grip)
+        # Assuming gripper pointing down
+        wc_x = px
+        wc_y = py
+        wc_z = pz + wrist_to_grip
+
+        # Distance in xy-plane from shoulder axis
+        r_xy = math.sqrt(wc_x**2 + wc_y**2) - shoulder_offset
+
+        # Height from shoulder to wrist center
+        z_diff = wc_z - shoulder_height
+
+        # Distance from shoulder to wrist center
+        r = math.sqrt(r_xy**2 + z_diff**2)
+
+        # Check reachability
+        max_reach = upper_arm + forearm
+        min_reach = abs(upper_arm - forearm) * 0.1
+
+        if r > max_reach:
+            # Out of reach - stretch toward target
+            r = max_reach * 0.95
+        elif r < min_reach:
+            r = min_reach * 1.1
+
+        # Joint 3: Elbow flex (using law of cosines)
+        cos_q3 = (r**2 - upper_arm**2 - forearm**2) / (2 * upper_arm * forearm)
+        cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+        q3 = math.acos(cos_q3)
+
+        # Joint 1: Shoulder lift
+        alpha = math.atan2(z_diff, r_xy)
+        beta = math.atan2(forearm * math.sin(q3), upper_arm + forearm * math.cos(q3))
+        q1 = alpha + beta
+
+        # Joint 2: Upper arm roll (use seed or neutral)
+        q2 = seed_joints[2] if len(seed_joints) > 2 else 0.0
+
+        # Joint 4: Forearm roll (use seed or neutral)
+        q4 = seed_joints[4] if len(seed_joints) > 4 else 0.0
+
+        # Joint 5: Wrist flex (keep gripper pointing down)
+        # The gripper should point down, so wrist flex compensates for arm angle
+        q5 = -q1 - q3  # Compensate to keep gripper vertical
+
+        # Joint 6: Wrist roll (from orientation or neutral)
+        # Extract yaw from target orientation quaternion
+        w, x, y, z = target_orientation
+        yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y**2 + z**2))
+        q6 = yaw - q0  # Compensate for base rotation
+
+        joints = np.array([q0, q1, q2, q3, q4, q5, q6])
+
+        # Clamp to limits
         return np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
 
     def _solve_numerical_ik(

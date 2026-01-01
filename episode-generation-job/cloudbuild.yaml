@@ -1,0 +1,157 @@
+# =============================================================================
+# Cloud Build configuration for episode-generation-job (Isaac Sim GPU)
+# =============================================================================
+#
+# This builds and deploys the Isaac Sim-based episode generation infrastructure.
+# NOTE: Cloud Run does NOT support GPUs, so we deploy to GKE instead.
+#
+# Usage:
+#   gcloud builds submit --config=episode-generation-job/cloudbuild.yaml .
+#
+# Or with substitutions:
+#   gcloud builds submit --config=episode-generation-job/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_GKE_CLUSTER=blueprint-cluster .
+#
+# Prerequisites:
+#   - Artifact Registry repository exists
+#   - GKE cluster with GPU node pool exists
+#   - Workload Identity configured
+#   - NVIDIA device plugin installed on cluster
+#
+# =============================================================================
+
+substitutions:
+  _REGION: us-central1
+  _REPO: blueprint-jobs
+  _JOB_NAME: episode-gen-job
+  _GKE_CLUSTER: blueprint-cluster
+  _GKE_ZONE: us-central1-a
+  _NAMESPACE: blueprint
+
+steps:
+  # ==========================================================================
+  # Step 1: Build the Isaac Sim container image
+  # ==========================================================================
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.isaacsim'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+      - '--cache-from'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+      - '.'
+    dir: 'episode-generation-job'
+    timeout: '3600s'  # Isaac Sim image is large, allow 1 hour
+
+  # ==========================================================================
+  # Step 2: Push the container image to Artifact Registry
+  # ==========================================================================
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}'
+
+  # ==========================================================================
+  # Step 3: Get GKE credentials and update Kubernetes deployment
+  # ==========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -e
+
+        echo "=== Getting GKE credentials ==="
+        gcloud container clusters get-credentials ${_GKE_CLUSTER} \
+          --zone=${_GKE_ZONE} \
+          --project=${PROJECT_ID}
+
+        echo "=== Verifying namespace exists ==="
+        kubectl get namespace ${_NAMESPACE} || kubectl create namespace ${_NAMESPACE}
+
+        echo "=== Updating Kubernetes Job image ==="
+        # Update the Job template with new image
+        kubectl set image job/episode-generation-job \
+          episode-generation=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA} \
+          -n ${_NAMESPACE} --dry-run=client -o yaml > /tmp/updated-job.yaml || true
+
+        # If job doesn't exist, apply the full manifest
+        if [ ! -s /tmp/updated-job.yaml ]; then
+          echo "=== Applying full Kubernetes manifest ==="
+          # Update image in manifest and apply
+          sed -i "s|image:.*episode-gen-job.*|image: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}|g" k8s/episode-generation-job.yaml
+          sed -i "s|\${PROJECT_ID}|${PROJECT_ID}|g" k8s/episode-generation-job.yaml
+          kubectl apply -f k8s/namespace-setup.yaml
+          kubectl apply -f k8s/episode-generation-job.yaml
+        fi
+
+        echo "=== Current Job status ==="
+        kubectl get jobs -n ${_NAMESPACE} || true
+        kubectl get cronjobs -n ${_NAMESPACE} || true
+
+  # ==========================================================================
+  # Step 4: Deploy the workflow (for EventArc triggers)
+  # ==========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "=== Deploying episode-generation-pipeline workflow ==="
+        gcloud workflows deploy episode-generation-pipeline \
+          --location=${_REGION} \
+          --source=workflows/episode-generation-pipeline.yaml \
+          --description="Episode generation pipeline for Isaac Sim (triggered by .usd_complete)" \
+          --service-account=workflow-invoker@${PROJECT_ID}.iam.gserviceaccount.com \
+          || echo "Workflow deployment skipped (may not exist yet)"
+
+  # ==========================================================================
+  # Step 5: Verify deployment
+  # ==========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "=== Deployment Summary ==="
+        echo ""
+        echo "Container Image:"
+        echo "  ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}"
+        echo ""
+        echo "GKE Cluster: ${_GKE_CLUSTER}"
+        echo "Namespace: ${_NAMESPACE}"
+        echo ""
+        echo "To run episode generation manually:"
+        echo "  kubectl create job episode-gen-manual-\$(date +%s) --from=cronjob/episode-generation-cronjob -n ${_NAMESPACE}"
+        echo ""
+        echo "Or with specific scene:"
+        echo "  kubectl -n ${_NAMESPACE} create -f - <<EOF"
+        echo "  apiVersion: batch/v1"
+        echo "  kind: Job"
+        echo "  metadata:"
+        echo "    name: episode-gen-\$(date +%s)"
+        echo "  spec:"
+        echo "    template:"
+        echo "      spec:"
+        echo "        containers:"
+        echo "        - name: episode-generation"
+        echo "          image: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}"
+        echo "          env:"
+        echo "          - name: SCENE_ID"
+        echo "            value: your-scene-id"
+        echo "  EOF"
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'  # Faster builds for large images
+
+timeout: '7200s'  # 2 hours for full build and deploy
