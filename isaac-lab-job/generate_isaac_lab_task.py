@@ -6,7 +6,7 @@ Generates complete Isaac Lab task packages from BlueprintPipeline scenes.
 This is the final step in the pipeline, producing RL training-ready packages.
 
 Pipeline Position:
-    zeroscene → simready → usd-assembly → replicator → [THIS JOB]
+    3D-RE-GEN → simready → usd-assembly → replicator → [THIS JOB]
 
 Outputs:
     isaac_lab/

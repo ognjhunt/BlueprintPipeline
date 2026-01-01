@@ -1,7 +1,6 @@
 # Cloud Build configuration for Particulate Service
 #
 # This builds and deploys the Particulate articulation service.
-# Much faster than PhysX-Anything (no large VLM model to download).
 #
 # Usage:
 #   gcloud builds submit --config particulate-service/cloudbuild.yaml
@@ -59,7 +58,6 @@ steps:
       - 'PARTICULATE_DEBUG=1'
       - '--allow-unauthenticated'
 
-# Shorter timeout than PhysX-Anything (no large model download)
 timeout: 1800s  # 30 minutes
 
 options:

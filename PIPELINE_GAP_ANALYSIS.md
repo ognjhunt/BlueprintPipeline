@@ -38,7 +38,7 @@ BlueprintPipeline is an ambitious, architecturally sophisticated system that con
 │          ▼                                                                     │ │
 │  ┌────────────────┐                                                            │ │
 │  │ interactive-   │ Status: ⚠️ NEEDS EXTERNAL SERVICE                          │ │
-│  │ job (Optional) │ PhysX-Anything or Particulate required                    │ │
+│  │ job (Optional) │ Particulate service required                              │ │
 │  └───────┬────────┘ for articulation detection                                │ │
 │          │ URDF files for articulated objects                                  │ │
 │          ▼                                                                     │ │
@@ -284,19 +284,20 @@ def validate_isaac_lab_env_config(code: str) -> CodeValidationResult:
 
 ---
 
-### ⚠️ MAJOR-3: Articulation Detection Missing
+### ⚠️ MAJOR-3: Articulation Detection Needs Particulate Service
 
-**Location:** `interactive-job/` (references PhysX-Anything, Particulate)
-**Impact:** Doors/drawers won't be articulated
+**Location:** `interactive-job/`
+**Impact:** Doors/drawers won't be articulated without Particulate
 
-The pipeline references:
-- **PhysX-Anything:** External service for articulation detection
-- **Particulate:** Alternative service (10× faster)
+The pipeline uses:
+- **Particulate:** Fast articulation detection service (~10s/object)
 
-Neither is deployed or integrated. Result:
+When Particulate is not deployed:
 - Cabinets, drawers, doors will be **static meshes**
 - Robots cannot open/close articulated objects
 - Training for articulated manipulation is impossible
+
+**Solution:** Deploy Particulate service (see `particulate-service/BUILD_AND_DEPLOY.md`)
 
 ---
 
@@ -468,8 +469,8 @@ scenes/{scene_id}/
    - Use NVIDIA cuRobo for motion planning
    - Enable GPU-accelerated collision checking
 
-2. **Deploy Articulation Service**
-   - Setup Particulate or PhysX-Anything
+2. **Deploy Particulate Service**
+   - Setup Particulate service
    - Enable articulated object detection
 
 3. **Add Runtime Validation**

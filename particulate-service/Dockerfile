@@ -24,10 +24,10 @@
 # ----------------------------------------------------------
 #
 # IMPORTANT NOTES:
-# - Much faster than PhysX-Anything (~10s vs 5-15min per object)
-# - Smaller memory footprint (16Gi vs 32Gi)
+# - Fast inference: ~10s per object
+# - Memory efficient: 16Gi
 # - Model checkpoint auto-downloaded from HuggingFace (~100MB)
-# - Cold starts are fast (~1-2 min vs 10-15min)
+# - Fast cold starts: ~1-2 min
 #
 
 FROM nvidia/cuda:12.4.0-cudnn-devel-ubuntu22.04
