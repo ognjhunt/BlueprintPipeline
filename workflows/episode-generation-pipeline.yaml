@@ -1,0 +1,328 @@
+# episode-generation-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that:
+#   1. Triggers on completion marker file from usd-assembly-job (.usd_complete)
+#   2. Runs episode-generation-job on GKE with GPU (Isaac Sim)
+#   3. Generates real physics-validated training episodes
+#   4. Writes .episodes_complete marker when finished
+#
+# NOTE: Unlike other pipeline jobs, episode generation requires GPU (Isaac Sim)
+# so it runs on GKE instead of Cloud Run.
+#
+# Trigger: Cloud Storage object finalized event for .usd_complete
+#
+# EventArc Setup:
+#   gcloud eventarc triggers create episode-generation-trigger \
+#     --location=us-central1 \
+#     --service-account="${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+#     --destination-workflow=episode-generation-pipeline \
+#     --destination-workflow-location=us-central1 \
+#     --event-filters="type=google.cloud.storage.object.v1.finalized" \
+#     --event-filters="bucket=${BUCKET}" \
+#     --event-data-content-type="application/json"
+#
+# Or run manually:
+#   gcloud workflows run episode-generation-pipeline \
+#     --location=us-central1 \
+#     --data='{"data":{"bucket":"your-bucket","name":"scenes/kitchen_001/usd/.usd_complete"}}'
+
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: '${event}'
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: "us-central1"
+          - gkeCluster: "blueprint-cluster"
+          - gkeZone: "us-central1-a"
+          - namespace: "blueprint"
+        next: filter_completion_markers
+
+    # Filter for .usd_complete marker files (from USD assembly job)
+    - filter_completion_markers:
+        switch:
+          - condition: '${text.match_regex(object, "^scenes/.+/usd/\\.usd_complete$")}'
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
+          - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
+          - episodesPrefix: '${"scenes/" + sceneId + "/episodes"}'
+          - episodeJobName: "episode-generation-job"
+          - episodesCompleteMarker: '${"scenes/" + sceneId + "/episodes/.episodes_complete"}'
+        next: check_already_processed
+
+    # Check if episodes already generated (idempotence)
+    - check_already_processed:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${episodesCompleteMarker}
+          result: existingMarker
+        except:
+          as: e
+          steps:
+            - check_not_found:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: log_start
+                next: raise_check_error
+        next: skip_already_processed
+
+    - skip_already_processed:
+        call: sys.log
+        args:
+          text: '${"Episodes already generated for scene " + sceneId + " - skipping"}'
+          severity: "INFO"
+        next: skip
+
+    - raise_check_error:
+        raise: '${e}'
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Episode generation triggered for scene " + sceneId + " (Isaac Sim GPU job)"}'
+          severity: "INFO"
+        next: create_gke_job
+
+    # Create a Kubernetes Job on GKE for episode generation
+    # This uses the GKE API to create a Job with GPU resources
+    - create_gke_job:
+        call: http.post
+        args:
+          url: '${"https://container.googleapis.com/v1/projects/" + projectId + "/zones/" + gkeZone + "/clusters/" + gkeCluster + ":setMasterAuth"}'
+          auth:
+            type: OAuth2
+          # For GKE job creation, we use kubectl via Cloud Build or a sidecar
+          # Here we'll use a simpler approach: trigger a Cloud Build that creates the job
+        result: gkeAuth
+        next: run_episode_job_via_cloudbuild
+
+    # Alternative: Run episode generation via Cloud Build (which can access GKE)
+    - run_episode_job_via_cloudbuild:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${projectId}
+          body:
+            steps:
+              - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+                entrypoint: 'bash'
+                args:
+                  - '-c'
+                  - |
+                    set -e
+
+                    # Get GKE credentials
+                    gcloud container clusters get-credentials ${gkeCluster} \
+                      --zone=${gkeZone} \
+                      --project=${projectId}
+
+                    # Create unique job name
+                    JOB_NAME="episode-gen-${sceneId}-$(date +%s)"
+
+                    # Create the Kubernetes Job
+                    cat <<EOFK8S | kubectl apply -f -
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      name: ${JOB_NAME}
+                      namespace: ${namespace}
+                      labels:
+                        app: episode-generation
+                        scene-id: ${sceneId}
+                        triggered-by: workflow
+                    spec:
+                      backoffLimit: 2
+                      activeDeadlineSeconds: 21600  # 6 hours max
+                      template:
+                        metadata:
+                          labels:
+                            app: episode-generation
+                        spec:
+                          restartPolicy: Never
+                          serviceAccountName: blueprint-pipeline-sa
+                          nodeSelector:
+                            cloud.google.com/gke-accelerator: nvidia-tesla-t4
+                          tolerations:
+                          - key: nvidia.com/gpu
+                            operator: Equal
+                            value: present
+                            effect: NoSchedule
+                          containers:
+                          - name: episode-generation
+                            image: ${region}-docker.pkg.dev/${projectId}/blueprint-jobs/episode-gen-job:latest
+                            env:
+                            - name: BUCKET
+                              value: ${bucket}
+                            - name: SCENE_ID
+                              value: ${sceneId}
+                            - name: ASSETS_PREFIX
+                              value: ${assetsPrefix}
+                            - name: USD_PREFIX
+                              value: ${usdPrefix}
+                            - name: EPISODES_PREFIX
+                              value: ${episodesPrefix}
+                            - name: HEADLESS
+                              value: "1"
+                            - name: DATA_PACK_TIER
+                              value: "core"
+                            - name: EPISODES_PER_VARIATION
+                              value: "10"
+                            - name: REQUIRE_REAL_PHYSICS
+                              value: "true"
+                            - name: GOOGLE_APPLICATION_CREDENTIALS
+                              value: /secrets/gcs/key.json
+                            resources:
+                              requests:
+                                cpu: "4"
+                                memory: 16Gi
+                                nvidia.com/gpu: "1"
+                              limits:
+                                cpu: "8"
+                                memory: 32Gi
+                                nvidia.com/gpu: "1"
+                            volumeMounts:
+                            - name: gcs-credentials
+                              mountPath: /secrets/gcs
+                              readOnly: true
+                            - name: dshm
+                              mountPath: /dev/shm
+                          volumes:
+                          - name: gcs-credentials
+                            secret:
+                              secretName: gcs-service-account
+                          - name: dshm
+                            emptyDir:
+                              medium: Memory
+                              sizeLimit: 16Gi
+                    EOFK8S
+
+                    echo "Created Kubernetes Job: ${JOB_NAME}"
+
+                    # Wait for job to complete (poll every 30 seconds)
+                    echo "Waiting for job completion..."
+                    while true; do
+                      STATUS=$(kubectl get job ${JOB_NAME} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
+                      FAILED=$(kubectl get job ${JOB_NAME} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
+
+                      if [ "$STATUS" == "True" ]; then
+                        echo "Job completed successfully!"
+                        exit 0
+                      elif [ "$FAILED" == "True" ]; then
+                        echo "Job failed!"
+                        kubectl logs job/${JOB_NAME} -n ${namespace} --tail=100 || true
+                        exit 1
+                      fi
+
+                      echo "Job still running... ($(date))"
+                      sleep 30
+                    done
+            timeout: '21600s'  # 6 hours
+            options:
+              logging: CLOUD_LOGGING_ONLY
+        result: buildResult
+        next: wait_for_build
+
+    - wait_for_build:
+        call: sys.sleep
+        args:
+          seconds: 30
+        next: check_build_status
+
+    - check_build_status:
+        call: googleapis.cloudbuild.v1.projects.builds.get
+        args:
+          projectId: ${projectId}
+          id: ${buildResult.metadata.build.id}
+        result: buildStatus
+        next: build_status_switch
+
+    - build_status_switch:
+        switch:
+          - condition: '${buildStatus.status == "FAILURE" or buildStatus.status == "TIMEOUT" or buildStatus.status == "CANCELLED"}'
+            next: episode_job_failed
+          - condition: '${buildStatus.status == "SUCCESS"}'
+            next: log_episode_complete
+        next: wait_for_build_poll
+
+    - wait_for_build_poll:
+        call: sys.sleep
+        args:
+          seconds: 30
+        next: check_build_status
+
+    - log_episode_complete:
+        call: sys.log
+        args:
+          text: '${"Episode generation completed for scene " + sceneId}'
+          severity: "INFO"
+        next: write_completion_marker
+
+    # Write completion marker for downstream processes
+    - write_completion_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${episodesCompleteMarker}
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\", \"physics_validated\": true}"}'
+        result: markerResult
+        next: done
+
+    - episode_job_failed:
+        # Episode generation failure is concerning but not fatal
+        call: sys.log
+        args:
+          text: '${"ERROR: Episode generation failed for scene " + sceneId}'
+          severity: "ERROR"
+        next: write_failure_marker
+
+    - write_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: '${"scenes/" + sceneId + "/episodes/.episodes_failed"}'
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        result: failMarkerResult
+        next: done_with_failure
+
+    # =========================================================================
+    # Completion
+    # =========================================================================
+
+    - done:
+        return:
+          status: "SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"Episode generation completed for scene " + sceneId}'
+          outputs:
+            episodes_path: '${episodesPrefix}'
+            completion_marker: ${episodesCompleteMarker}
+            physics_validated: true
+
+    - done_with_failure:
+        return:
+          status: "FAILED"
+          scene_id: ${sceneId}
+          message: '${"Episode generation failed for scene " + sceneId}'
+
+    - skip:
+        return:
+          status: "SKIPPED"
+          message: '${"Not a USD completion marker file: " + object}'

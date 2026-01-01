@@ -771,12 +771,52 @@ class MockSensorCapture(IsaacSimSensorCapture):
     Mock sensor capture for testing without Isaac Sim.
 
     Generates placeholder data with correct shapes and formats.
+
+    WARNING: Mock data is NOT suitable for production training!
+    - RGB images are random noise
+    - Depth maps are synthetic random values
+    - Segmentation masks are random labels
+    - Physics are not validated
+
+    For real training data, run with: /isaac-sim/python.sh
     """
+
+    # Class-level warning tracker to avoid spam
+    _warning_shown = False
 
     def initialize(self, scene_path: Optional[str] = None) -> bool:
         self.initialized = True
+        self._using_mock = True
+
+        # Show prominent warning on first use
+        if not MockSensorCapture._warning_shown:
+            MockSensorCapture._warning_shown = True
+            self._show_mock_warning()
+
         self.log("Using mock sensor capture (no Isaac Sim)")
         return True
+
+    def _show_mock_warning(self) -> None:
+        """Show a prominent warning about mock data."""
+        warning = """
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        ⚠️  MOCK DATA WARNING  ⚠️                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  You are running WITHOUT Isaac Sim. Sensor data will be MOCK (random noise). ║
+║                                                                              ║
+║  Mock data is NOT suitable for:                                              ║
+║    • Training robot policies                                                 ║
+║    • Production datasets                                                     ║
+║    • Selling episode data                                                    ║
+║                                                                              ║
+║  For real sensor data and physics validation, run with:                      ║
+║    /isaac-sim/python.sh your_script.py                                       ║
+║                                                                              ║
+║  Or use the Isaac Sim Docker container:                                      ║
+║    docker run --gpus all nvcr.io/nvidia/isaac-sim:4.2.0 python.sh script.py  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+        print(warning)
 
     def capture_frame(
         self,
@@ -1271,16 +1311,49 @@ def create_sensor_capture(
                 "Run with: /isaac-sim/python.sh your_script.py\n"
                 "Or set require_real=False to allow mock capture."
             )
-        # Fall back to mock
-        if verbose:
-            print(
-                "[SENSOR-CAPTURE] [WARNING] Isaac Sim not available.\n"
-                "                          Using MockSensorCapture (placeholder data).\n"
-                "                          For real data: /isaac-sim/python.sh your_script.py"
-            )
+        # Fall back to mock (warning shown by MockSensorCapture.initialize)
         capture = MockSensorCapture(config, verbose=verbose)
         capture.initialize()
         return capture
+
+
+def require_isaac_sim_or_fail() -> None:
+    """
+    Raise an error if Isaac Sim is not available.
+
+    Use this at the start of production scripts to prevent running
+    with mock data accidentally.
+    """
+    if not is_isaac_sim_available():
+        error_msg = """
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                     ❌  ISAAC SIM REQUIRED  ❌                                ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  This script requires Isaac Sim for real physics and sensor data.            ║
+║                                                                              ║
+║  You are currently running with standard Python, which will produce          ║
+║  MOCK DATA (random noise images, heuristic validation).                      ║
+║                                                                              ║
+║  To run with real Isaac Sim:                                                 ║
+║    /isaac-sim/python.sh your_script.py                                       ║
+║                                                                              ║
+║  Or use Docker:                                                              ║
+║    docker run --gpus all \\                                                  ║
+║      nvcr.io/nvidia/isaac-sim:4.2.0 \\                                       ║
+║      python.sh /app/your_script.py                                           ║
+║                                                                              ║
+║  If you want to test with mock data anyway, set:                             ║
+║    ALLOW_MOCK_DATA=true                                                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+        # Check if user explicitly allows mock data
+        import os
+        if os.environ.get("ALLOW_MOCK_DATA", "").lower() in ("true", "1", "yes"):
+            print(error_msg.replace("❌  ISAAC SIM REQUIRED  ❌", "⚠️  MOCK DATA MODE  ⚠️"))
+            print("[WARNING] ALLOW_MOCK_DATA=true - Proceeding with mock data")
+            return
+
+        raise RuntimeError(error_msg)
 
 
 def check_sensor_capture_environment() -> Dict[str, Any]:

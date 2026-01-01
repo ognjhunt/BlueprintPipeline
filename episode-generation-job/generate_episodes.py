@@ -106,6 +106,8 @@ try:
         MockSensorCapture,
         EpisodeSensorData,
         create_sensor_capture,
+        require_isaac_sim_or_fail,
+        check_sensor_capture_environment,
     )
     from data_pack_config import (
         DataPackConfig,
@@ -117,6 +119,8 @@ except ImportError:
     HAVE_SENSOR_CAPTURE = False
     SensorDataConfig = None
     DataPackTier = None
+    require_isaac_sim_or_fail = None
+    check_sensor_capture_environment = None
 
 # Pipeline imports
 try:
@@ -1380,6 +1384,26 @@ def run_episode_generation_job(
 
 def main():
     """Main entry point."""
+    # Check if we're running in production mode (require real physics)
+    require_real_physics = os.getenv("REQUIRE_REAL_PHYSICS", "false").lower() == "true"
+
+    if require_real_physics and require_isaac_sim_or_fail is not None:
+        # Production mode - fail if Isaac Sim is not available
+        try:
+            require_isaac_sim_or_fail()
+        except RuntimeError as e:
+            print(str(e))
+            sys.exit(1)
+    elif check_sensor_capture_environment is not None:
+        # Development mode - show environment status
+        status = check_sensor_capture_environment()
+        if not status["isaac_sim_available"]:
+            print("\n[EPISODE-GEN-JOB] ========================================")
+            print("[EPISODE-GEN-JOB] WARNING: Isaac Sim not available")
+            print("[EPISODE-GEN-JOB] Running with MOCK DATA (random noise)")
+            print("[EPISODE-GEN-JOB] For real data: /isaac-sim/python.sh")
+            print("[EPISODE-GEN-JOB] ========================================\n")
+
     # Get configuration from environment
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
