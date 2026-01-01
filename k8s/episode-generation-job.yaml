@@ -1,0 +1,258 @@
+# =============================================================================
+# Kubernetes Job: Episode Generation with Isaac Sim
+# =============================================================================
+# Deploy on GKE with GPU nodes for Isaac Sim-based episode generation.
+#
+# Prerequisites:
+#   1. GKE cluster with GPU node pool (T4 or better)
+#   2. NVIDIA GPU device plugin installed
+#   3. Secret with GCS service account credentials
+#   4. ConfigMap with scene configuration
+#
+# Create GPU node pool:
+#   gcloud container node-pools create gpu-pool \
+#     --cluster=your-cluster \
+#     --machine-type=n1-standard-8 \
+#     --accelerator=type=nvidia-tesla-t4,count=1 \
+#     --num-nodes=1 \
+#     --enable-autoscaling --min-nodes=0 --max-nodes=10
+#
+# Apply:
+#   kubectl apply -f episode-generation-job.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: episode-gen-config
+  namespace: blueprint
+data:
+  # Scene configuration
+  ROBOT_TYPE: "franka"
+  ENVIRONMENT_TYPE: "kitchen"
+  DATA_PACK_TIER: "core"
+  EPISODES_PER_VARIATION: "10"
+  FPS: "30"
+  NUM_CAMERAS: "1"
+  IMAGE_RESOLUTION: "640,480"
+  MIN_QUALITY_SCORE: "0.7"
+
+  # Pipeline features
+  USE_LLM: "true"
+  USE_CPGEN: "true"
+  CAPTURE_SENSOR_DATA: "true"
+  USE_MOCK_CAPTURE: "false"
+
+  # Headless mode
+  HEADLESS: "1"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: episode-gen-secrets
+  namespace: blueprint
+type: Opaque
+stringData:
+  # Add your API keys here (base64 encoded in production)
+  GEMINI_API_KEY: ""
+  OPENAI_API_KEY: ""
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: episode-generation
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: episode-generation
+spec:
+  # Retry failed jobs up to 3 times
+  backoffLimit: 3
+  # Keep completed jobs for 1 hour
+  ttlSecondsAfterFinished: 3600
+  # Timeout after 6 hours
+  activeDeadlineSeconds: 21600
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: episode-generation
+      annotations:
+        # Prevent eviction during episode generation
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      # Schedule on GPU nodes
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-tesla-t4
+
+      # Tolerate GPU node taints
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      # Service account for GCS access
+      serviceAccountName: blueprint-pipeline-sa
+
+      # Init container to validate GPU
+      initContainers:
+        - name: gpu-check
+          image: nvidia/cuda:12.1.0-base-ubuntu22.04
+          command:
+            - sh
+            - -c
+            - |
+              echo "Checking GPU availability..."
+              nvidia-smi
+              if [ $? -ne 0 ]; then
+                echo "GPU not available!"
+                exit 1
+              fi
+              echo "GPU check passed"
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+
+      containers:
+        - name: episode-generator
+          image: gcr.io/${PROJECT_ID}/blueprint-episode-gen:isaacsim
+          imagePullPolicy: Always
+
+          # Run episode generation
+          command: ["/entrypoint.sh", "generate"]
+
+          # Environment from ConfigMap and Secrets
+          envFrom:
+            - configMapRef:
+                name: episode-gen-config
+            - secretRef:
+                name: episode-gen-secrets
+
+          env:
+            # Scene-specific configuration (set via job parameters)
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: ASSETS_PREFIX
+              value: "scenes/${SCENE_ID}/assets"
+            - name: EPISODES_PREFIX
+              value: "scenes/${SCENE_ID}/episodes"
+
+            # GCS credentials
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+              nvidia.com/gpu: 1
+
+          volumeMounts:
+            # GCS credentials
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            # Shared memory for Isaac Sim
+            - name: dshm
+              mountPath: /dev/shm
+            # Local cache
+            - name: isaac-cache
+              mountPath: /root/.cache/ov
+            # Output directory
+            - name: output
+              mountPath: /output
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: isaac-cache
+          emptyDir:
+            sizeLimit: 50Gi
+        - name: output
+          emptyDir:
+            sizeLimit: 100Gi
+
+---
+# =============================================================================
+# CronJob: Scheduled Episode Generation
+# =============================================================================
+# Runs episode generation on a schedule (e.g., for batch processing)
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: episode-generation-scheduled
+  namespace: blueprint
+spec:
+  # Run daily at 2 AM UTC
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  suspend: true  # Enable when ready
+
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 21600
+      template:
+        spec:
+          restartPolicy: OnFailure
+          nodeSelector:
+            cloud.google.com/gke-accelerator: nvidia-tesla-t4
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          serviceAccountName: blueprint-pipeline-sa
+
+          containers:
+            - name: episode-generator
+              image: gcr.io/${PROJECT_ID}/blueprint-episode-gen:isaacsim
+              command: ["/entrypoint.sh", "generate"]
+              envFrom:
+                - configMapRef:
+                    name: episode-gen-config
+                - secretRef:
+                    name: episode-gen-secrets
+              env:
+                - name: SCENE_ID
+                  value: "batch-${JOB_ID}"
+                - name: BUCKET
+                  value: "${BUCKET}"
+              resources:
+                requests:
+                  nvidia.com/gpu: 1
+                limits:
+                  nvidia.com/gpu: 1
+              volumeMounts:
+                - name: gcs-credentials
+                  mountPath: /secrets/gcs
+                  readOnly: true
+                - name: dshm
+                  mountPath: /dev/shm
+
+          volumes:
+            - name: gcs-credentials
+              secret:
+                secretName: gcs-service-account
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Gi

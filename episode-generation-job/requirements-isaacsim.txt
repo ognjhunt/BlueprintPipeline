@@ -1,0 +1,40 @@
+# Additional requirements for Isaac Sim environment
+# These complement the base requirements.txt
+
+# Video/Image processing for sensor capture
+opencv-python-headless>=4.8.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.8
+
+# LeRobot format export
+h5py>=3.9.0
+zarr>=2.16.0
+
+# Enhanced serialization
+msgpack>=1.0.5
+orjson>=3.9.0
+
+# Async operations for parallel capture
+aiofiles>=23.2.0
+
+# Progress and monitoring
+rich>=13.4.0
+
+# USD tools (may be provided by Isaac Sim, but listed for clarity)
+# Note: pxr package is provided by Isaac Sim's Python environment
+
+# Robot kinematics (backup when cuRobo unavailable)
+roboticstoolbox-python>=1.1.0
+spatialmath-python>=1.1.0
+
+# For enhanced motion planning
+networkx>=3.1
+rtree>=1.0.0
+
+# Numerical optimization
+cvxpy>=1.4.0
+
+# Telemetry and monitoring (optional)
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+prometheus-client>=0.17.0

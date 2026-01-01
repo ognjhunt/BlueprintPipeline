@@ -1,0 +1,301 @@
+# =============================================================================
+# BlueprintPipeline - Isaac Sim Docker Compose
+# =============================================================================
+# Full pipeline orchestration with Isaac Sim for real physics and sensor data.
+#
+# Prerequisites:
+#   - NVIDIA GPU with 8GB+ VRAM
+#   - nvidia-docker installed
+#   - NGC authentication for Isaac Sim image
+#
+# Usage:
+#   # Set required environment variables
+#   export SCENE_ID=kitchen_001
+#   export BUCKET=your-gcs-bucket  # Optional: for GCS storage
+#   export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+#
+#   # Build images
+#   docker-compose -f docker-compose.isaacsim.yaml build
+#
+#   # Run episode generation
+#   docker-compose -f docker-compose.isaacsim.yaml up episode-generation
+#
+#   # Run full pipeline
+#   docker-compose -f docker-compose.isaacsim.yaml up
+#
+#   # Interactive shell
+#   docker-compose -f docker-compose.isaacsim.yaml run --rm episode-generation shell
+# =============================================================================
+
+version: "3.8"
+
+# =============================================================================
+# Shared Configuration
+# =============================================================================
+
+x-common-env: &common-env
+  SCENE_ID: ${SCENE_ID:?SCENE_ID is required}
+  BUCKET: ${BUCKET:-}
+  GOOGLE_APPLICATION_CREDENTIALS: /credentials/service-account.json
+  ROBOT_TYPE: ${ROBOT_TYPE:-franka}
+  ENVIRONMENT_TYPE: ${ENVIRONMENT_TYPE:-kitchen}
+
+x-gpu-config: &gpu-config
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "100m"
+      max-file: "3"
+
+# =============================================================================
+# Services
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # Episode Generation with Isaac Sim
+  # ===========================================================================
+  episode-generation:
+    build:
+      context: .
+      dockerfile: episode-generation-job/Dockerfile.isaacsim
+      args:
+        ISAAC_SIM_VERSION: "4.2.0"
+    image: blueprint-episode-gen:isaacsim
+    container_name: blueprint-episode-gen
+
+    <<: [*gpu-config, *logging]
+
+    environment:
+      <<: *common-env
+      # Episode generation settings
+      DATA_PACK_TIER: ${DATA_PACK_TIER:-core}
+      EPISODES_PER_VARIATION: ${EPISODES_PER_VARIATION:-10}
+      MAX_VARIATIONS: ${MAX_VARIATIONS:-}
+      FPS: ${FPS:-30}
+      NUM_CAMERAS: ${NUM_CAMERAS:-1}
+      IMAGE_RESOLUTION: ${IMAGE_RESOLUTION:-640,480}
+      MIN_QUALITY_SCORE: ${MIN_QUALITY_SCORE:-0.7}
+
+      # Pipeline features
+      USE_LLM: ${USE_LLM:-true}
+      USE_CPGEN: ${USE_CPGEN:-true}
+      CAPTURE_SENSOR_DATA: "true"
+      USE_MOCK_CAPTURE: "false"
+
+      # Headless mode
+      HEADLESS: "1"
+
+      # LLM API keys (for task specification)
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+    volumes:
+      # Local scene data (if not using GCS)
+      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
+      # Output directory
+      - ${OUTPUT_DIR:-./output}:/output:rw
+      # GCS credentials
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      # Cache for Isaac Sim
+      - isaac-sim-cache:/root/.cache/ov
+      - isaac-sim-data:/root/.local/share/ov
+      # Logs
+      - ./logs/episode-gen:/logs:rw
+
+    # Shared memory for Isaac Sim
+    shm_size: "16gb"
+
+    # Allow privileged for gcsfuse
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+
+    # Device access
+    devices:
+      - /dev/fuse
+
+    networks:
+      - blueprint-net
+
+    # Default command
+    command: ["generate"]
+
+  # ===========================================================================
+  # Replicator Job (Domain Randomization Setup)
+  # ===========================================================================
+  replicator:
+    build:
+      context: ./replicator-job
+      dockerfile: Dockerfile
+    image: blueprint-replicator:latest
+    container_name: blueprint-replicator
+
+    <<: *logging
+
+    environment:
+      <<: *common-env
+      SEG_PREFIX: ${SEG_PREFIX:-scenes/${SCENE_ID}/seg}
+      ASSETS_PREFIX: ${ASSETS_PREFIX:-scenes/${SCENE_ID}/assets}
+      USD_PREFIX: ${USD_PREFIX:-scenes/${SCENE_ID}/usd}
+      REPLICATOR_PREFIX: ${REPLICATOR_PREFIX:-scenes/${SCENE_ID}/replicator}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY required for replicator}
+
+    volumes:
+      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+
+    networks:
+      - blueprint-net
+
+  # ===========================================================================
+  # Isaac Lab Task Generation
+  # ===========================================================================
+  isaac-lab:
+    build:
+      context: .
+      dockerfile: isaac-lab-job/Dockerfile
+    image: blueprint-isaac-lab:latest
+    container_name: blueprint-isaac-lab
+
+    <<: *logging
+
+    environment:
+      <<: *common-env
+      ASSETS_PREFIX: ${ASSETS_PREFIX:-scenes/${SCENE_ID}/assets}
+      USD_PREFIX: ${USD_PREFIX:-scenes/${SCENE_ID}/usd}
+      REPLICATOR_PREFIX: ${REPLICATOR_PREFIX:-scenes/${SCENE_ID}/replicator}
+      ISAAC_LAB_PREFIX: ${ISAAC_LAB_PREFIX:-scenes/${SCENE_ID}/isaac_lab}
+      NUM_ENVS: ${NUM_ENVS:-1024}
+
+    volumes:
+      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+
+    networks:
+      - blueprint-net
+
+  # ===========================================================================
+  # USD Assembly Job
+  # ===========================================================================
+  usd-assembly:
+    build:
+      context: .
+      dockerfile: usd-assembly-job/Dockerfile
+    image: blueprint-usd-assembly:latest
+    container_name: blueprint-usd-assembly
+
+    <<: *logging
+
+    environment:
+      <<: *common-env
+      ASSETS_PREFIX: ${ASSETS_PREFIX:-scenes/${SCENE_ID}/assets}
+      LAYOUT_PREFIX: ${LAYOUT_PREFIX:-scenes/${SCENE_ID}/layout}
+      USD_PREFIX: ${USD_PREFIX:-scenes/${SCENE_ID}/usd}
+
+    volumes:
+      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+
+    networks:
+      - blueprint-net
+
+  # ===========================================================================
+  # SimReady Job (Physics Properties)
+  # ===========================================================================
+  simready:
+    build:
+      context: .
+      dockerfile: simready-job/Dockerfile
+    image: blueprint-simready:latest
+    container_name: blueprint-simready
+
+    <<: *logging
+
+    environment:
+      <<: *common-env
+      ASSETS_PREFIX: ${ASSETS_PREFIX:-scenes/${SCENE_ID}/assets}
+
+    volumes:
+      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+
+    networks:
+      - blueprint-net
+
+  # ===========================================================================
+  # Full Pipeline Orchestrator
+  # ===========================================================================
+  pipeline:
+    build:
+      context: .
+      dockerfile: episode-generation-job/Dockerfile.isaacsim
+    image: blueprint-episode-gen:isaacsim
+    container_name: blueprint-pipeline
+
+    <<: [*gpu-config, *logging]
+
+    environment:
+      <<: *common-env
+      # Full pipeline mode
+      RUN_FULL_PIPELINE: "true"
+      VALIDATE_OUTPUT: "true"
+      # All generation settings
+      DATA_PACK_TIER: ${DATA_PACK_TIER:-full}
+      EPISODES_PER_VARIATION: ${EPISODES_PER_VARIATION:-20}
+      NUM_CAMERAS: ${NUM_CAMERAS:-4}
+      IMAGE_RESOLUTION: ${IMAGE_RESOLUTION:-1280,720}
+
+    volumes:
+      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
+      - ${OUTPUT_DIR:-./output}:/output:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - isaac-sim-cache:/root/.cache/ov
+      - isaac-sim-data:/root/.local/share/ov
+      - ./logs/pipeline:/logs:rw
+
+    shm_size: "16gb"
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+
+    networks:
+      - blueprint-net
+
+    command: ["custom", "/app/tools/run_full_isaacsim_pipeline.py"]
+
+# =============================================================================
+# Networks
+# =============================================================================
+
+networks:
+  blueprint-net:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
+
+volumes:
+  # Isaac Sim cache for faster startup
+  isaac-sim-cache:
+    driver: local
+  isaac-sim-data:
+    driver: local
