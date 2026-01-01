@@ -1,13 +1,11 @@
 # interactive-job/Dockerfile
 #
-# Interactive Asset Pipeline for ZeroScene Integration
+# Interactive Asset Pipeline for 3D-RE-GEN Integration
 #
-# This job processes 3D assets from ZeroScene to add articulation data
-# using Particulate (default) or PhysX-Anything (fallback).
+# This job processes 3D assets from 3D-RE-GEN to add articulation data
+# using the Particulate service (~10s per object).
 #
-# Articulation backends:
-# - Particulate (default): Fast feed-forward mesh articulation (~10s)
-# - PhysX-Anything: VLM-based image-to-articulation (5-15min)
+# Particulate: Fast feed-forward mesh articulation detection
 #
 # CLOUD RUN JOB SETTINGS:
 # ----------------------------------------------------------

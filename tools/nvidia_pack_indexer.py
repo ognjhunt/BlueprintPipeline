@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Index NVIDIA pack metadata and ZeroScene assets into Firestore.
+"""Index NVIDIA pack metadata and 3D-RE-GEN assets into Firestore.
 
 This tool builds canonical ``assets`` and ``scenes`` collection entries without
 requiring meshes to be present locally. It computes optional text embeddings
@@ -158,7 +158,7 @@ def map_type_to_role(obj: Dict[str, Any]) -> List[str]:
     return [role] if role else []
 
 
-def index_zeroscene_assets(
+def index_regen3d_assets(
     assets_prefix: str,
     scene_id: Optional[str],
     client: AssetCatalogClient,
@@ -187,10 +187,10 @@ def index_zeroscene_assets(
             "physics": obj.get("physics"),
             "articulation": obj.get("articulation"),
         }
-        doc = build_asset_document(entry, source="zeroscene")
+        doc = build_asset_document(entry, source="regen3d")
         client.upsert_asset_document(doc)
         registered.append(doc.asset_id)
-        print(f"[INDEXER] Registered ZeroScene asset {doc.asset_id} ({doc.class_name})")
+        print(f"[INDEXER] Registered 3D-RE-GEN asset {doc.asset_id} ({doc.class_name})")
 
     if scene_id:
         scene_doc = SceneDocument(
@@ -205,10 +205,10 @@ def index_zeroscene_assets(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Index pack metadata and ZeroScene assets")
+    parser = argparse.ArgumentParser(description="Index pack metadata and 3D-RE-GEN assets")
     parser.add_argument("--pack-metadata", type=Path, help="Path to NVIDIA pack metadata JSON", required=False)
-    parser.add_argument("--assets-prefix", type=str, help="ZeroScene assets prefix (e.g., scenes/123/assets)")
-    parser.add_argument("--scene-id", type=str, default=None, help="Scene identifier for ZeroScene registration")
+    parser.add_argument("--assets-prefix", type=str, help="3D-RE-GEN assets prefix (e.g., scenes/123/assets)")
+    parser.add_argument("--scene-id", type=str, default=None, help="Scene identifier for 3D-RE-GEN registration")
     parser.add_argument("--root", type=Path, default=GCS_ROOT, help="Root path for storage")
     return parser.parse_args()
 
@@ -222,7 +222,7 @@ def main() -> int:
         registered.extend(index_pack(args.pack_metadata, client))
 
     if args.assets_prefix:
-        registered.extend(index_zeroscene_assets(args.assets_prefix, args.scene_id, client, args.root))
+        registered.extend(index_regen3d_assets(args.assets_prefix, args.scene_id, client, args.root))
 
     if not registered:
         print("[INDEXER] No assets registered")

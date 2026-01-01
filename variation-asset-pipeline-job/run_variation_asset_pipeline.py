@@ -903,7 +903,7 @@ def run_sam3d_reconstruction(
     Run SAM3D reconstruction on a reference image.
 
     This is a simplified inline version that uses the SAM3D inference directly.
-    In production, this would use the ZeroScene pipeline or Inference class.
+    In production, this would use the 3D-RE-GEN pipeline or Inference class.
 
     Returns: (success, glb_path, error_message)
     """

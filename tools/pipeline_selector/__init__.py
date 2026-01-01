@@ -1,7 +1,7 @@
 """
 Pipeline Selector for BlueprintPipeline.
 
-Provides routing logic for choosing between ZeroScene and Gemini pipelines,
+Provides routing logic for choosing between 3D-RE-GEN and Gemini pipelines,
 with automatic fallback handling.
 
 Usage:
@@ -14,9 +14,9 @@ Usage:
     # Get job sequence for selected pipeline
     jobs = selector.get_job_sequence()
 
-    # Check if ZeroScene output exists
-    if selector.has_zeroscene_output(scene_dir):
-        jobs = selector.get_zeroscene_jobs()
+    # Check if 3D-RE-GEN output exists
+    if selector.has_regen3d_output(scene_dir):
+        jobs = selector.get_regen3d_jobs()
     else:
         jobs = selector.get_gemini_jobs()
 """

@@ -319,4 +319,4 @@ SCENE_ID=test_scene DRY_RUN=1 python run_variation_asset_pipeline.py
 - **replicator-job**: Creates the manifest consumed by this job
 - **variation-gen-job**: Reference image generation
 - **simready-job**: Standalone physics property assignment
-- **zeroscene-job**: ZeroScene adapter for mesh generation
+- **regen3d-job**: 3D-RE-GEN adapter for mesh generation
