@@ -194,9 +194,11 @@ class GeminiClient(LLMClient):
     ):
         super().__init__(model=model, **kwargs)
 
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
-            raise ValueError("GEMINI_API_KEY environment variable is required")
+            raise ValueError(
+                "Gemini API key required. Set GOOGLE_API_KEY or GEMINI_API_KEY environment variable."
+            )
 
         try:
             from google import genai
@@ -209,7 +211,7 @@ class GeminiClient(LLMClient):
 
     @property
     def default_model(self) -> str:
-        return os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+        return os.getenv("GEMINI_MODEL", "gemini-2.5-pro-preview-06-05")
 
     @property
     def default_image_model(self) -> str:
