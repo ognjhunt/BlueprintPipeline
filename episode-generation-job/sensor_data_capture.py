@@ -15,6 +15,11 @@ Isaac Sim Replicator Integration:
 - Configurable camera setups (wrist, overhead, side views)
 - All annotations generated per-frame during trajectory execution
 
+IMPORTANT: For real sensor capture, this module MUST be run from within
+Isaac Sim's Python environment (/isaac-sim/python.sh). When running outside
+Isaac Sim, the module will use MockSensorCapture which generates placeholder
+data - useful for testing but NOT for production training data.
+
 Compatible with:
 - LeRobot v2.0 format (images as separate video files)
 - RLDS format (observation dict with image keys)
@@ -35,6 +40,22 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+# Import Isaac Sim integration for availability checking
+try:
+    from isaac_sim_integration import (
+        is_isaac_sim_available,
+        is_replicator_available,
+        print_availability_report,
+        get_availability_status,
+    )
+    _HAVE_INTEGRATION_MODULE = True
+except ImportError:
+    _HAVE_INTEGRATION_MODULE = False
+    def is_isaac_sim_available() -> bool:
+        return False
+    def is_replicator_available() -> bool:
+        return False
 
 
 # =============================================================================
@@ -302,6 +323,19 @@ class IsaacSimSensorCapture:
 
     Integrates with omni.replicator for efficient synthetic data generation.
     Supports all annotation types in Isaac Sim Replicator.
+
+    IMPORTANT: This class requires Isaac Sim to be running for real sensor capture.
+    When running outside Isaac Sim, initialization will fail and the caller should
+    use MockSensorCapture instead.
+
+    Usage (inside Isaac Sim):
+        capture = IsaacSimSensorCapture(config)
+        if capture.initialize():
+            frame_data = capture.capture_frame(0, 0.0, scene_objects)
+        else:
+            # Fall back to mock capture
+            capture = MockSensorCapture(config)
+            capture.initialize()
     """
 
     def __init__(
@@ -312,15 +346,21 @@ class IsaacSimSensorCapture:
         self.config = config
         self.verbose = verbose
         self.initialized = False
+        self._using_mock = False
 
         # Replicator handles (set during initialization)
         self._render_products: Dict[str, Any] = {}
         self._annotators: Dict[str, Dict[str, Any]] = {}
         self._writer = None
 
-        # Try to import Isaac Sim modules
+        # Isaac Sim module references
         self._rep = None
         self._omni = None
+        self._physx = None
+
+        # Check Isaac Sim availability upfront
+        self._isaac_sim_available = is_isaac_sim_available()
+        self._replicator_available = is_replicator_available()
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -334,30 +374,59 @@ class IsaacSimSensorCapture:
             scene_path: Optional USD scene path to load
 
         Returns:
-            True if initialization successful
+            True if initialization successful (with real Isaac Sim),
+            False if Isaac Sim is not available (caller should use MockSensorCapture)
         """
+        # First, check if we're in Isaac Sim environment
+        if not self._isaac_sim_available:
+            self.log(
+                "ERROR: Not running inside Isaac Sim environment!\n"
+                "       Real sensor capture requires Isaac Sim.\n"
+                "       Run with: /isaac-sim/python.sh your_script.py\n"
+                "       Or use MockSensorCapture for testing.",
+                "ERROR"
+            )
+            return False
+
+        # Try to import and initialize Replicator
         try:
             import omni.replicator.core as rep
-
+            import omni.usd
             self._rep = rep
-            self.log("Isaac Sim Replicator initialized")
-        except ImportError:
-            self.log("Isaac Sim Replicator not available - using mock capture", "WARNING")
-            self.initialized = True
-            return True
+            self.log("Isaac Sim Replicator initialized successfully")
+        except ImportError as e:
+            self.log(
+                f"Failed to import Replicator: {e}\n"
+                "       Ensure Isaac Sim 2023.1+ with Replicator extension enabled.",
+                "ERROR"
+            )
+            return False
 
+        # Load scene if provided
+        if scene_path:
+            try:
+                import omni.usd
+                self.log(f"Loading scene: {scene_path}")
+                omni.usd.get_context().open_stage(scene_path)
+            except Exception as e:
+                self.log(f"Failed to load scene: {e}", "WARNING")
+
+        # Set up cameras and annotators
         try:
-            # Set up cameras and annotators
             for camera_config in self.config.cameras:
                 self._setup_camera(camera_config)
 
             self.initialized = True
-            self.log(f"Initialized {len(self.config.cameras)} cameras")
+            self.log(f"Initialized {len(self.config.cameras)} cameras for real capture")
             return True
 
         except Exception as e:
-            self.log(f"Initialization failed: {e}", "ERROR")
+            self.log(f"Camera initialization failed: {e}", "ERROR")
             return False
+
+    def is_using_real_capture(self) -> bool:
+        """Check if using real Isaac Sim capture (not mock)."""
+        return self.initialized and self._rep is not None
 
     def _setup_camera(self, camera_config: CameraConfig) -> None:
         """Set up a camera with its annotators."""
@@ -1129,21 +1198,31 @@ def create_sensor_capture(
     resolution: Tuple[int, int] = (640, 480),
     fps: float = 30.0,
     use_mock: bool = False,
+    require_real: bool = False,
     verbose: bool = True,
 ) -> IsaacSimSensorCapture:
     """
-    Create a sensor capture instance.
+    Create a sensor capture instance with automatic fallback.
+
+    This factory function creates the appropriate sensor capture based on
+    the runtime environment:
+    - If running inside Isaac Sim: Creates real IsaacSimSensorCapture
+    - If running outside Isaac Sim: Creates MockSensorCapture (unless require_real=True)
 
     Args:
         data_pack: Data pack tier ("core", "plus", "full") or DataPackTier enum
         num_cameras: Number of cameras to configure
         resolution: Image resolution (width, height)
         fps: Frames per second
-        use_mock: Use mock capture instead of Isaac Sim
+        use_mock: Force mock capture (for testing)
+        require_real: Raise error if real capture unavailable (for production)
         verbose: Print progress
 
     Returns:
-        Configured sensor capture instance
+        Configured sensor capture instance (real or mock)
+
+    Raises:
+        RuntimeError: If require_real=True but Isaac Sim is not available
     """
     if isinstance(data_pack, str):
         data_pack = DataPackTier(data_pack.lower())
@@ -1155,10 +1234,82 @@ def create_sensor_capture(
         fps=fps,
     )
 
+    # User explicitly requested mock
     if use_mock:
-        return MockSensorCapture(config, verbose=verbose)
+        if verbose:
+            print("[SENSOR-CAPTURE] Using MockSensorCapture (explicitly requested)")
+        capture = MockSensorCapture(config, verbose=verbose)
+        capture.initialize()
+        return capture
+
+    # Check if Isaac Sim is available
+    isaac_available = is_isaac_sim_available()
+
+    if isaac_available:
+        # Try real capture
+        capture = IsaacSimSensorCapture(config, verbose=verbose)
+        if capture.initialize():
+            return capture
+        else:
+            # Initialization failed
+            if require_real:
+                raise RuntimeError(
+                    "Isaac Sim sensor capture initialization failed. "
+                    "Ensure Isaac Sim is running with Replicator extension."
+                )
+            # Fall back to mock
+            if verbose:
+                print("[SENSOR-CAPTURE] [WARNING] Real capture init failed, falling back to mock")
+            capture = MockSensorCapture(config, verbose=verbose)
+            capture.initialize()
+            return capture
     else:
-        return IsaacSimSensorCapture(config, verbose=verbose)
+        # Isaac Sim not available
+        if require_real:
+            raise RuntimeError(
+                "Isaac Sim is not available but require_real=True.\n"
+                "Run with: /isaac-sim/python.sh your_script.py\n"
+                "Or set require_real=False to allow mock capture."
+            )
+        # Fall back to mock
+        if verbose:
+            print(
+                "[SENSOR-CAPTURE] [WARNING] Isaac Sim not available.\n"
+                "                          Using MockSensorCapture (placeholder data).\n"
+                "                          For real data: /isaac-sim/python.sh your_script.py"
+            )
+        capture = MockSensorCapture(config, verbose=verbose)
+        capture.initialize()
+        return capture
+
+
+def check_sensor_capture_environment() -> Dict[str, Any]:
+    """
+    Check the sensor capture environment and return a status report.
+
+    Returns:
+        Dict with:
+        - isaac_sim_available: bool
+        - replicator_available: bool
+        - recommended_capture: str ("real" or "mock")
+        - warnings: List[str]
+    """
+    status = {
+        "isaac_sim_available": is_isaac_sim_available(),
+        "replicator_available": is_replicator_available(),
+        "recommended_capture": "mock",
+        "warnings": [],
+    }
+
+    if status["isaac_sim_available"] and status["replicator_available"]:
+        status["recommended_capture"] = "real"
+    else:
+        status["warnings"].append(
+            "Running outside Isaac Sim - sensor data will be placeholder (mock) data. "
+            "For production training data, run with /isaac-sim/python.sh"
+        )
+
+    return status
 
 
 # =============================================================================

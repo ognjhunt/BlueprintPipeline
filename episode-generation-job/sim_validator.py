@@ -3,18 +3,22 @@
 Simulation Validator for Episode Generation.
 
 This module validates generated episodes by:
-1. Executing trajectories in simulation
-2. Scoring success/failure
-3. Computing quality metrics
+1. Executing trajectories in ACTUAL physics simulation (PhysX via Isaac Sim)
+2. Scoring success/failure based on real physics results
+3. Computing quality metrics from simulation data
 4. Filtering out failed episodes
 
 This is what makes episodes "sellable" - verified, quality-scored data.
 
+IMPORTANT: For production validation, this module should be run inside Isaac Sim
+to use actual PhysX simulation. When running outside Isaac Sim, it falls back
+to heuristic-based validation (less accurate but useful for testing).
+
 Key Metrics (from research recommendations):
-- Success/failure rate
-- Collision count
-- Joint limit violations
-- Contact stability
+- Success/failure rate (from actual simulation)
+- Collision count (from PhysX contact reports)
+- Joint limit violations (checked during execution)
+- Contact stability (gripper force monitoring)
 - Time-to-completion distribution
 
 Reference:
@@ -29,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -40,6 +44,23 @@ if str(REPO_ROOT) not in sys.path:
 
 from motion_planner import MotionPlan, Waypoint
 from trajectory_solver import JointTrajectory, JointState, ROBOT_CONFIGS
+
+# Import Isaac Sim integration
+try:
+    from isaac_sim_integration import (
+        is_isaac_sim_available,
+        is_physx_available,
+        PhysicsSimulator,
+        PhysicsStepResult,
+        get_isaac_sim_session,
+    )
+    _HAVE_PHYSICS_INTEGRATION = True
+except ImportError:
+    _HAVE_PHYSICS_INTEGRATION = False
+    def is_isaac_sim_available() -> bool:
+        return False
+    def is_physx_available() -> bool:
+        return False
 
 
 # =============================================================================
@@ -289,23 +310,85 @@ class ValidationConfig:
 
 class SimulationValidator:
     """
-    Validates episodes through simulation.
+    Validates episodes through physics simulation.
 
-    In production, this would interface with Isaac Lab/Sim.
-    For now, provides physics-based validation using
-    the trajectory data.
+    This validator supports two modes:
+    1. **Real Physics Mode** (Isaac Sim available): Runs actual PhysX simulation
+       to validate trajectories, getting real collision data and physics feedback.
+    2. **Heuristic Mode** (fallback): Uses geometric checks and kinematic analysis
+       when Isaac Sim is not available.
+
+    For production training data, always use Real Physics Mode.
+
+    Usage:
+        validator = SimulationValidator(robot_type="franka")
+
+        # Check what mode we're in
+        if validator.is_using_real_physics():
+            print("Using Isaac Sim PhysX for validation")
+        else:
+            print("Using heuristic validation (less accurate)")
+
+        # Validate
+        result = validator.validate(trajectory, motion_plan, scene_objects)
     """
 
     def __init__(
         self,
         robot_type: str = "franka",
         config: Optional[ValidationConfig] = None,
+        scene_usd_path: Optional[str] = None,
         verbose: bool = True,
     ):
+        """
+        Initialize the simulation validator.
+
+        Args:
+            robot_type: Robot type (franka, ur10, fetch)
+            config: Validation configuration
+            scene_usd_path: Path to USD scene for physics simulation
+            verbose: Print debug info
+        """
         self.robot_type = robot_type
         self.robot_config = ROBOT_CONFIGS.get(robot_type, ROBOT_CONFIGS["franka"])
         self.config = config or ValidationConfig()
         self.verbose = verbose
+        self._scene_usd_path = scene_usd_path
+
+        # Check physics availability
+        self._physics_available = _HAVE_PHYSICS_INTEGRATION and is_physx_available()
+        self._physics_sim: Optional["PhysicsSimulator"] = None
+
+        if self._physics_available:
+            self.log("PhysX available - using real physics validation")
+            self._init_physics_simulator()
+        else:
+            self.log("PhysX not available - using heuristic validation", "WARNING")
+            self.log("For production data, run with: /isaac-sim/python.sh", "WARNING")
+
+    def _init_physics_simulator(self) -> None:
+        """Initialize the physics simulator."""
+        if not self._physics_available:
+            return
+
+        try:
+            self._physics_sim = PhysicsSimulator(
+                dt=1.0 / 240.0,  # 240 Hz physics
+                substeps=4,
+                verbose=self.verbose,
+            )
+
+            if self._scene_usd_path:
+                self._physics_sim.load_scene(self._scene_usd_path)
+                self.log(f"Loaded scene for physics: {self._scene_usd_path}")
+
+        except Exception as e:
+            self.log(f"Failed to initialize physics simulator: {e}", "ERROR")
+            self._physics_available = False
+
+    def is_using_real_physics(self) -> bool:
+        """Check if using real PhysX simulation."""
+        return self._physics_available and self._physics_sim is not None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -316,10 +399,13 @@ class SimulationValidator:
         trajectory: JointTrajectory,
         motion_plan: MotionPlan,
         scene_objects: List[Dict[str, Any]],
-        task_success_checker: Optional[callable] = None,
+        task_success_checker: Optional[Callable] = None,
     ) -> ValidationResult:
         """
         Validate an episode trajectory.
+
+        If PhysX is available, runs actual physics simulation.
+        Otherwise, uses heuristic-based validation.
 
         Args:
             trajectory: Joint trajectory to validate
@@ -334,18 +420,23 @@ class SimulationValidator:
 
         episode_id = trajectory.trajectory_id
         self.log(f"Validating episode: {episode_id}")
+        self.log(f"  Mode: {'PhysX Simulation' if self.is_using_real_physics() else 'Heuristic'}")
 
         result = ValidationResult(
             episode_id=episode_id,
             status=ValidationStatus.PENDING,
         )
 
-        # Run validation checks
-        self._check_joint_limits(trajectory, result)
-        self._check_velocities(trajectory, result)
-        self._check_collisions(trajectory, motion_plan, scene_objects, result)
-        self._check_trajectory_smoothness(trajectory, result)
-        self._check_task_success(trajectory, motion_plan, scene_objects, result, task_success_checker)
+        # Use real physics if available
+        if self.is_using_real_physics():
+            result = self._validate_with_physics(
+                trajectory, motion_plan, scene_objects, result, task_success_checker
+            )
+        else:
+            # Fall back to heuristic validation
+            result = self._validate_heuristic(
+                trajectory, motion_plan, scene_objects, result, task_success_checker
+            )
 
         # Compute quality score
         result.metrics.compute_overall_score()
@@ -361,6 +452,158 @@ class SimulationValidator:
         self.log(f"  Score: {result.metrics.overall_score:.2f}")
         if result.failure_reasons:
             self.log(f"  Failures: {[r.value for r in result.failure_reasons]}")
+
+        return result
+
+    def _validate_with_physics(
+        self,
+        trajectory: JointTrajectory,
+        motion_plan: MotionPlan,
+        scene_objects: List[Dict[str, Any]],
+        result: ValidationResult,
+        task_success_checker: Optional[Callable],
+    ) -> ValidationResult:
+        """
+        Validate using actual PhysX simulation.
+
+        This is the gold standard for validation - runs the trajectory
+        through real physics and captures actual collisions, forces, etc.
+        """
+        self.log("  Running PhysX simulation...")
+
+        # Set up tracking for objects
+        for obj in scene_objects:
+            obj_id = obj.get("id", obj.get("name", ""))
+            prim_path = obj.get("prim_path", f"/World/Objects/{obj_id}")
+            self._physics_sim.add_tracked_object(obj_id, prim_path)
+
+        # Set robot tracking
+        robot_prim = f"/World/Robots/{self.robot_type}"
+        self._physics_sim.set_robot(robot_prim)
+
+        # Get joint trajectory as array
+        joint_positions = trajectory.get_joint_positions_array()
+        gripper_positions = trajectory.get_gripper_positions()
+
+        # Run simulation
+        try:
+            physics_results = self._physics_sim.run_trajectory(
+                joint_trajectory=joint_positions,
+                dt=1.0 / trajectory.fps,
+                gripper_trajectory=gripper_positions,
+            )
+
+            # Analyze physics results
+            self._analyze_physics_results(
+                physics_results, trajectory, motion_plan, scene_objects, result
+            )
+
+        except Exception as e:
+            self.log(f"  Physics simulation failed: {e}", "ERROR")
+            result.failure_reasons.append(FailureReason.TIMEOUT)
+            result.failure_details = str(e)
+
+        # Also run kinematic checks
+        self._check_joint_limits(trajectory, result)
+        self._check_velocities(trajectory, result)
+        self._check_trajectory_smoothness(trajectory, result)
+
+        # Task success check
+        if task_success_checker:
+            result.metrics.task_success = task_success_checker(trajectory, motion_plan)
+        else:
+            # Infer from physics results
+            result.metrics.task_success = (
+                len(result.failure_reasons) == 0 and
+                result.metrics.unexpected_collisions == 0
+            )
+
+        return result
+
+    def _analyze_physics_results(
+        self,
+        physics_results: List["PhysicsStepResult"],
+        trajectory: JointTrajectory,
+        motion_plan: MotionPlan,
+        scene_objects: List[Dict[str, Any]],
+        result: ValidationResult,
+    ) -> None:
+        """Analyze results from physics simulation."""
+
+        target_obj_id = motion_plan.target_object_id
+        total_collisions = 0
+        unexpected_collisions = 0
+        max_collision_force = 0.0
+
+        for step_result in physics_results:
+            for contact in step_result.contacts:
+                body_a = contact.get("body_a", "")
+                body_b = contact.get("body_b", "")
+                impulse = contact.get("impulse", 0)
+
+                # Check if collision is expected (gripper-target during grasp)
+                is_expected = (
+                    ("gripper" in body_a.lower() or "gripper" in body_b.lower()) and
+                    (target_obj_id in body_a or target_obj_id in body_b)
+                )
+
+                total_collisions += 1
+                if not is_expected:
+                    unexpected_collisions += 1
+
+                    # Record collision event
+                    event = CollisionEvent(
+                        frame_idx=step_result.step_index,
+                        timestamp=step_result.simulation_time,
+                        body_a=body_a,
+                        body_b=body_b,
+                        contact_point=np.array(contact.get("position", [0, 0, 0])),
+                        contact_force=impulse,
+                        is_expected=is_expected,
+                    )
+                    result.collision_events.append(event)
+
+                max_collision_force = max(max_collision_force, impulse)
+
+        result.metrics.total_collisions = total_collisions
+        result.metrics.unexpected_collisions = unexpected_collisions
+        result.metrics.max_collision_force = max_collision_force
+
+        if unexpected_collisions > self.config.max_unexpected_collisions:
+            result.failure_reasons.append(FailureReason.COLLISION)
+
+        # Check object stability at end
+        if physics_results and target_obj_id:
+            final_states = physics_results[-1].object_states
+            if target_obj_id in final_states:
+                obj_state = final_states[target_obj_id]
+                velocity = np.linalg.norm(obj_state.get("linear_velocity", [0, 0, 0]))
+                result.metrics.object_stable_at_end = velocity < self.config.stability_threshold
+
+        self.log(f"  Physics: {total_collisions} contacts, {unexpected_collisions} unexpected")
+
+    def _validate_heuristic(
+        self,
+        trajectory: JointTrajectory,
+        motion_plan: MotionPlan,
+        scene_objects: List[Dict[str, Any]],
+        result: ValidationResult,
+        task_success_checker: Optional[Callable],
+    ) -> ValidationResult:
+        """
+        Validate using heuristic checks (fallback when PhysX unavailable).
+
+        This uses geometric collision checking and kinematic analysis.
+        Less accurate than real physics but useful for testing.
+        """
+        self.log("  Running heuristic validation...")
+
+        # Run all heuristic checks
+        self._check_joint_limits(trajectory, result)
+        self._check_velocities(trajectory, result)
+        self._check_collisions(trajectory, motion_plan, scene_objects, result)
+        self._check_trajectory_smoothness(trajectory, result)
+        self._check_task_success(trajectory, motion_plan, scene_objects, result, task_success_checker)
 
         return result
 
