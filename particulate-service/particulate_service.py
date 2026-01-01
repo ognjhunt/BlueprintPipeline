@@ -5,11 +5,11 @@ Particulate Service for Cloud Run.
 This service wraps the Particulate model (Li et al., arXiv:2512.11798) to provide
 mesh → articulation inference for 3D assets.
 
-Unlike PhysX-Anything (image → sim-ready asset), Particulate:
+Particulate features:
 - Takes a 3D mesh as input (GLB/OBJ)
 - Outputs articulated structure (parts, joints, kinematic tree)
-- Runs in ~10 seconds (much faster than VLM-based approaches)
-- Better for internal parts detection
+- Fast inference: ~10 seconds per object
+- Excellent for internal parts detection
 
 The service:
 1. Accepts GLB mesh input (base64 encoded)

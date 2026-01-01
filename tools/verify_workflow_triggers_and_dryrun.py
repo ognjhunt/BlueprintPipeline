@@ -2,8 +2,8 @@
 """Offline checks for workflow triggers and a dry-run simulation.
 
 This script validates that:
-- usd-assembly-pipeline listens for ZeroScene completion markers.
-- A dry-run simulation shows the ZeroScene pipeline flow.
+- usd-assembly-pipeline listens for 3D-RE-GEN completion markers.
+- A dry-run simulation shows the 3D-RE-GEN pipeline flow.
 
 It is meant to give confidence in the wiring without needing Cloud access.
 """
@@ -32,7 +32,7 @@ def check_patterns(path: Path, expectations: Iterable[Tuple[str, str]]) -> List[
 
 
 def verify_usd_assembly() -> List[str]:
-    """Confirm usd-assembly-pipeline.yaml watches zeroscene completion markers."""
+    """Confirm usd-assembly-pipeline.yaml watches regen3d completion markers."""
     path = REPO_ROOT / "workflows" / "usd-assembly-pipeline.yaml"
     if not path.exists():
         return [f"USD assembly pipeline not found: {path}"]
@@ -54,8 +54,8 @@ def verify_usd_assembly() -> List[str]:
     return check_patterns(path, expectations)
 
 
-def dry_run_zeroscene_pipeline(scene_id: str = "demo", bucket: str = "demo-bucket") -> List[str]:
-    """Simulate the ZeroScene pipeline flow.
+def dry_run_regen3d_pipeline(scene_id: str = "demo", bucket: str = "demo-bucket") -> List[str]:
+    """Simulate the 3D-RE-GEN pipeline flow.
 
     This is a lightweight representation of the orchestration steps; it
     creates temporary marker files to prove the ordering of actions.
@@ -68,15 +68,15 @@ def dry_run_zeroscene_pipeline(scene_id: str = "demo", bucket: str = "demo-bucke
         assets_dir = bucket_root / assets_prefix
         assets_dir.mkdir(parents=True, exist_ok=True)
 
-        # Simulate ZeroScene reconstruction completion
-        zeroscene_dir = bucket_root / f"scenes/{scene_id}/zeroscene"
-        zeroscene_dir.mkdir(parents=True, exist_ok=True)
-        marker = zeroscene_dir / "scene_info.json"
+        # Simulate 3D-RE-GEN reconstruction completion
+        regen3d_dir = bucket_root / f"scenes/{scene_id}/regen3d"
+        regen3d_dir.mkdir(parents=True, exist_ok=True)
+        marker = regen3d_dir / "scene_info.json"
         marker.write_text("{}\n")
-        actions.append(f"Detected ZeroScene output at {marker.relative_to(bucket_root)} in bucket {bucket}")
+        actions.append(f"Detected 3D-RE-GEN output at {marker.relative_to(bucket_root)} in bucket {bucket}")
 
-        # ZeroScene adapter job
-        actions.append("Would invoke zeroscene-job to convert ZeroScene outputs")
+        # 3D-RE-GEN adapter job
+        actions.append("Would invoke regen3d-job to convert 3D-RE-GEN outputs")
 
         # Scale job (optional)
         actions.append("Would invoke scale-job for scale calibration (optional)")
@@ -111,7 +111,7 @@ def main() -> int:
     if usd_errors:
         errors.extend(["USD assembly: " + e for e in usd_errors])
 
-    dry_run_actions = dry_run_zeroscene_pipeline()
+    dry_run_actions = dry_run_regen3d_pipeline()
 
     if errors:
         print("FAILED checks:\n- " + "\n- ".join(errors))
@@ -119,7 +119,7 @@ def main() -> int:
 
     print("Verified triggers and actions:")
     print("- usd-assembly-pipeline watches completion markers")
-    print("\nZeroScene Pipeline Dry run (simulated flow):")
+    print("\n3D-RE-GEN Pipeline Dry run (simulated flow):")
     for action in dry_run_actions:
         print(f"  * {action}")
 

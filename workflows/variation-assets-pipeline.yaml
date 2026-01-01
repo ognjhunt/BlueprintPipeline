@@ -7,7 +7,7 @@
 #   2. Runs variation-gen-job to generate variation asset specifications
 #   3. Runs simready-job to add physics properties to the assets
 #
-# Note: With ZeroScene pipeline, 3D model generation is handled by zeroscene-job.
+# Note: With 3D-RE-GEN pipeline, 3D model generation is handled by regen3d-job.
 #
 # Trigger: Cloud Storage object finalized event for .replicator_complete
 #

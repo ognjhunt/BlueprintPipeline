@@ -59,7 +59,7 @@ class AssetDocument:
 
     asset_id: str
     logical_id: Optional[str] = None
-    source: str = "unknown"  # "nvidia_pack", "zeroscene", "generated", ...
+    source: str = "unknown"  # "nvidia_pack", "regen3d", "generated", ...
     usd_path: Optional[str] = None
     gcs_uri: Optional[str] = None
     thumbnail_uri: Optional[str] = None

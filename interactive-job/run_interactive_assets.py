@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Interactive Asset Pipeline for ZeroScene Integration.
+Interactive Asset Pipeline for 3D-RE-GEN Integration.
 
-This job processes 3D assets (GLB meshes) from ZeroScene to add articulation
+This job processes 3D assets (GLB meshes) from 3D-RE-GEN to add articulation
 data using Particulate - a fast feed-forward mesh articulation model (~10s per object).
 
 The pipeline:
-1. Receives GLB meshes from ZeroScene (or crop images as fallback)
+1. Receives GLB meshes from 3D-RE-GEN (or crop images as fallback)
 2. Sends GLB directly to Particulate for articulation
 3. Outputs URDF with articulation data + segmented meshes
 
-Designed for the ZeroScene pipeline:
-    ZeroScene → interactive-job → simready-job → usd-assembly-job
+Designed for the 3D-RE-GEN pipeline:
+    3D-RE-GEN → interactive-job → simready-job → usd-assembly-job
 
 Environment Variables:
     BUCKET: GCS bucket name
     SCENE_ID: Scene identifier
     ASSETS_PREFIX: Path to assets (contains scene_assets.json)
     PARTICULATE_ENDPOINT: Particulate Cloud Run service URL
-    ZEROSCENE_PREFIX: Optional path to ZeroScene outputs (default: same as ASSETS_PREFIX)
+    REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
 """
 import base64
@@ -50,7 +50,7 @@ PARTICULATE_REQUEST_TIMEOUT = 120  # 2 min (inference takes ~10s)
 MAX_RETRIES = 3
 
 # Processing modes
-MODE_GLB = "glb"      # ZeroScene GLB mesh input (default)
+MODE_GLB = "glb"      # 3D-RE-GEN GLB mesh input (default)
 MODE_IMAGE = "image"  # Legacy crop image input
 
 
@@ -91,10 +91,10 @@ def find_glb_file(obj_dir: Path, obj_id: str) -> Optional[Path]:
     """
     Find GLB mesh file for an object.
 
-    ZeroScene outputs meshes as:
+    3D-RE-GEN outputs meshes as:
     - obj_{id}.glb (direct output)
     - mesh.glb (alternative naming)
-    - part.glb (from PhysX-Anything)
+    - part.glb (from Particulate)
     """
     candidates = [
         obj_dir / f"obj_{obj_id}.glb",
@@ -309,7 +309,7 @@ def wait_for_particulate_ready(endpoint: str, max_wait: int = PARTICULATE_WARMUP
     """
     Wait for Particulate service to be ready.
 
-    Particulate has much faster cold starts than PhysX-Anything (~1-2 min vs 10+ min).
+    Particulate has fast cold starts (~1-2 min).
     """
     log(f"Waiting for Particulate service to be ready (max {max_wait}s)...")
     start_time = time.time()
@@ -867,7 +867,7 @@ def generate_static_urdf(obj_id: str, mesh_filename: str = "mesh.glb") -> str:
     """
     Generate a static URDF for objects without articulation.
 
-    This is used as a fallback when PhysX-Anything doesn't detect any joints.
+    This is used as a fallback when Particulate doesn't detect any joints.
     """
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <robot name="{obj_id}">
@@ -973,7 +973,7 @@ def materialize_articulation_response(
 def process_object(
     obj: dict,
     assets_root: Path,
-    zeroscene_root: Path,
+    regen3d_root: Path,
     multiview_root: Path,
     particulate_endpoint: Optional[str],
     mode: str,
@@ -984,7 +984,7 @@ def process_object(
     Process a single interactive object using Particulate.
 
     Pipeline:
-    1. Find GLB mesh from ZeroScene
+    1. Find GLB mesh from 3D-RE-GEN
     2. Send GLB to Particulate for articulation
     3. Materialize outputs (mesh + URDF)
     4. Generate manifest with joint summary
@@ -1017,18 +1017,18 @@ def process_object(
         "is_articulated": False,
     }
 
-    # Find GLB mesh from ZeroScene
+    # Find GLB mesh from 3D-RE-GEN
     glb_path: Optional[Path] = None
 
     if mode == MODE_GLB:
-        zeroscene_obj_dir = zeroscene_root / obj_name
-        glb_path = find_glb_file(zeroscene_obj_dir, obj_id)
+        regen3d_obj_dir = regen3d_root / obj_name
+        glb_path = find_glb_file(regen3d_obj_dir, obj_id)
 
         if glb_path:
             log(f"Found GLB: {glb_path}", obj_id=obj_name)
             result["input_glb"] = str(glb_path)
         else:
-            log(f"No GLB found in {zeroscene_obj_dir}", "WARNING", obj_name)
+            log(f"No GLB found in {regen3d_obj_dir}", "WARNING", obj_name)
 
     # Particulate requires GLB - if not found, try alternative locations
     if not glb_path or not glb_path.is_file():
@@ -1129,7 +1129,7 @@ def process_object(
         "object_id": obj_id,
         "object_name": obj_name,
         "class_name": obj_class,
-        "generator": meta.get("generator", "physx-anything"),
+        "generator": meta.get("generator", "particulate"),
         "endpoint": particulate_endpoint,
         "mesh_path": mesh_path.name,
         "urdf_path": urdf_path.name,
@@ -1178,7 +1178,7 @@ def main() -> None:
     scene_id = os.getenv("SCENE_ID", "")
     assets_prefix = os.getenv("ASSETS_PREFIX", "")
     multiview_prefix = os.getenv("MULTIVIEW_PREFIX", "")
-    zeroscene_prefix = os.getenv("ZEROSCENE_PREFIX", "")  # ZeroScene output path
+    regen3d_prefix = os.getenv("REGEN3D_PREFIX", "")  # 3D-RE-GEN output path
 
     # Particulate endpoint
     particulate_endpoint = os.getenv("PARTICULATE_ENDPOINT", "")
@@ -1193,7 +1193,7 @@ def main() -> None:
     root = Path("/mnt/gcs")
     assets_root = root / assets_prefix
     multiview_root = root / multiview_prefix if multiview_prefix else assets_root / "multiview"
-    zeroscene_root = root / zeroscene_prefix if zeroscene_prefix else assets_root / "zeroscene"
+    regen3d_root = root / regen3d_prefix if regen3d_prefix else assets_root / "regen3d"
 
     # Load scene assets manifest (prefer canonical scene_manifest.json)
     scene_assets = load_manifest_or_scene_assets(assets_root)
@@ -1217,7 +1217,7 @@ def main() -> None:
     log(f"Bucket: {bucket}")
     log(f"Scene ID: {scene_id}")
     log(f"Assets: {assets_root}")
-    log(f"ZeroScene: {zeroscene_root}")
+    log(f"3D-RE-GEN: {regen3d_root}")
     log(f"Multiview: {multiview_root}")
     log(f"Particulate Endpoint: {particulate_endpoint or '(none - static mode)'}")
     log(f"Mode: {mode}")
@@ -1257,7 +1257,7 @@ def main() -> None:
             result = process_object(
                 obj=obj,
                 assets_root=assets_root,
-                zeroscene_root=zeroscene_root,
+                regen3d_root=regen3d_root,
                 multiview_root=multiview_root,
                 particulate_endpoint=particulate_endpoint,
                 mode=mode,

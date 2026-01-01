@@ -19,7 +19,7 @@ Usage:
 Pipeline Steps:
     1. regen3d   - Adapt 3D-RE-GEN outputs to BlueprintPipeline format
     2. scale     - (Optional) Scale calibration
-    3. interactive - PhysX-Anything articulation (requires PHYSX_ENDPOINT)
+    3. interactive - Particulate articulation (requires PARTICULATE_ENDPOINT)
     4. simready  - Prepare physics-ready assets
     5. usd       - Assemble scene.usda
     6. replicator - Generate Replicator bundle
@@ -352,22 +352,22 @@ class LocalPipelineRunner:
     def _run_interactive(self) -> StepResult:
         """Run interactive asset processing."""
         if self.skip_interactive:
-            self.log("Interactive job skipped (requires PHYSX_ENDPOINT)")
+            self.log("Interactive job skipped (requires PARTICULATE_ENDPOINT)")
             return StepResult(
                 step=PipelineStep.INTERACTIVE,
                 success=True,
                 duration_seconds=0,
-                message="Skipped (no PHYSX_ENDPOINT)",
+                message="Skipped (no PARTICULATE_ENDPOINT)",
             )
 
-        # Would need PHYSX_ENDPOINT to run
-        endpoint = os.getenv("PHYSX_ENDPOINT")
+        # Would need PARTICULATE_ENDPOINT to run
+        endpoint = os.getenv("PARTICULATE_ENDPOINT")
         if not endpoint:
             return StepResult(
                 step=PipelineStep.INTERACTIVE,
                 success=True,
                 duration_seconds=0,
-                message="Skipped (PHYSX_ENDPOINT not set)",
+                message="Skipped (PARTICULATE_ENDPOINT not set)",
             )
 
         # TODO: Import and run interactive job
@@ -964,7 +964,7 @@ def main():
     parser.add_argument(
         "--with-interactive",
         action="store_true",
-        help="Run interactive job (requires PHYSX_ENDPOINT)",
+        help="Run interactive job (requires PARTICULATE_ENDPOINT)",
     )
     parser.add_argument(
         "-q", "--quiet",

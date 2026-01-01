@@ -6,15 +6,15 @@ Feed-forward 3D object articulation service based on [Particulate](https://arxiv
 
 Particulate takes a 3D mesh as input and infers its articulated structure (parts, kinematic tree, joint types, axes, ranges) in a single feed-forward pass (~10 seconds).
 
-**Key differences from PhysX-Anything:**
+**Key features:**
 
-| Feature | Particulate | PhysX-Anything |
-|---------|-------------|----------------|
-| Input | 3D mesh (GLB) | Image (PNG/JPEG) |
-| Speed | ~10 seconds | 5-15 minutes |
-| Memory | 16GB | 32GB |
-| Cold Start | 1-2 minutes | 10-15 minutes |
-| Strengths | Internal parts, batch processing | Physical properties, in-the-wild |
+| Feature | Particulate |
+|---------|-------------|
+| Input | 3D mesh (GLB) |
+| Speed | ~10 seconds |
+| Memory | 16GB |
+| Cold Start | 1-2 minutes |
+| Strengths | Internal parts detection, batch processing |
 
 ## API
 
@@ -69,15 +69,10 @@ gcloud run deploy particulate-service \
 
 ## Integration
 
-Set these environment variables in interactive-job:
+Set this environment variable in interactive-job:
 
 ```bash
-# Use Particulate as the default backend
-ARTICULATION_BACKEND=particulate
 PARTICULATE_ENDPOINT=https://particulate-service-xxx.run.app
-
-# PhysX as fallback
-PHYSX_ENDPOINT=https://physx-service-xxx.run.app
 ```
 
 ## References
