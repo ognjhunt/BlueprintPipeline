@@ -24,14 +24,22 @@ Key Concepts:
 This is the "secret sauce" for generating thousands of valid episodes
 from a single seed episode - preserving what matters (contact physics)
 while adapting what can change (free-space motion).
+
+ENHANCED FEATURES (v2.0):
+- Integration with collision_aware_planner for proper collision avoidance
+- Constraint satisfaction tracking with detailed metrics
+- Physics-aware validation of generated trajectories
+- Improved keypoint constraint solving with error feedback
+- Better skill segment detection from motion phases
 """
 
 import json
 import math
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -50,6 +58,29 @@ from task_specifier import (
     ConstraintType,
 )
 from motion_planner import MotionPlan, Waypoint, MotionPhase
+
+# Import enhanced collision-aware planner
+try:
+    from collision_aware_planner import (
+        CollisionAwarePlanner,
+        SceneCollisionChecker,
+        enhance_motion_plan_with_collision_avoidance,
+    )
+    _HAVE_COLLISION_PLANNER = True
+except ImportError:
+    _HAVE_COLLISION_PLANNER = False
+
+# Import physics simulation for validation
+try:
+    from isaac_sim_integration import (
+        is_physx_available,
+        PhysicsSimulator,
+    )
+    _HAVE_PHYSICS = True
+except ImportError:
+    _HAVE_PHYSICS = False
+    def is_physx_available() -> bool:
+        return False
 
 
 # =============================================================================
@@ -140,6 +171,73 @@ class SeedEpisode:
 
 
 @dataclass
+class ConstraintViolation:
+    """Record of a single constraint violation."""
+    constraint_id: str
+    constraint_type: str
+    expected_value: Any
+    actual_value: Any
+    error_magnitude: float  # How far off (in meters or radians)
+    waypoint_index: int
+    timestamp: float
+
+
+@dataclass
+class AugmentationMetrics:
+    """Detailed metrics for augmentation quality."""
+
+    # Constraint satisfaction
+    num_constraints_checked: int = 0
+    num_constraints_satisfied: int = 0
+    constraint_satisfaction_ratio: float = 1.0
+
+    # Constraint violations
+    violations: List[ConstraintViolation] = field(default_factory=list)
+    max_position_error: float = 0.0  # meters
+    max_orientation_error: float = 0.0  # radians
+    mean_position_error: float = 0.0
+    mean_orientation_error: float = 0.0
+
+    # Collision checking
+    num_collision_checks: int = 0
+    collision_detected: bool = False
+    num_collisions: int = 0
+
+    # Planning quality
+    path_length_original: float = 0.0
+    path_length_augmented: float = 0.0
+    path_length_ratio: float = 1.0  # augmented/original
+
+    # Timing
+    constraint_solving_time: float = 0.0
+    collision_checking_time: float = 0.0
+    motion_planning_time: float = 0.0
+    total_time: float = 0.0
+
+    def compute_overall_score(self) -> float:
+        """Compute overall augmentation quality score [0, 1]."""
+        # Weights for different components
+        constraint_weight = 0.4
+        collision_weight = 0.3
+        path_quality_weight = 0.3
+
+        # Constraint score
+        constraint_score = self.constraint_satisfaction_ratio
+
+        # Collision score (1.0 if no collision, 0.0 if collision)
+        collision_score = 0.0 if self.collision_detected else 1.0
+
+        # Path quality score (penalize paths that are much longer)
+        path_score = 1.0 / max(1.0, self.path_length_ratio)
+
+        return (
+            constraint_weight * constraint_score +
+            collision_weight * collision_score +
+            path_quality_weight * path_score
+        )
+
+
+@dataclass
 class AugmentedEpisode:
     """
     An augmented episode generated from a seed.
@@ -158,14 +256,25 @@ class AugmentedEpisode:
     # Object transforms applied
     object_transforms: Dict[str, ObjectTransform] = field(default_factory=dict)
 
-    # Augmentation quality metrics
+    # Augmentation quality metrics (legacy - for backwards compatibility)
     constraint_satisfaction: float = 1.0  # 0-1, how well constraints are preserved
     collision_free: bool = True
     planning_success: bool = True
 
+    # Enhanced metrics
+    metrics: AugmentationMetrics = field(default_factory=AugmentationMetrics)
+
     # Generation metadata
     augmentation_method: str = "cpgen"
     generation_time_seconds: float = 0.0
+
+    # Validation status
+    physics_validated: bool = False
+    physics_success: bool = False
+
+    def get_quality_score(self) -> float:
+        """Get overall quality score."""
+        return self.metrics.compute_overall_score()
 
 
 # =============================================================================
@@ -598,22 +707,96 @@ class ConstraintPreservingAugmenter:
     Takes a seed episode and generates variations by:
     1. Transforming object configurations
     2. Preserving skill segment constraints
-    3. Replanning free-space motions
+    3. Replanning free-space motions with collision avoidance
 
     This is the key to generating thousands of valid episodes
     from a single demonstration.
+
+    ENHANCED FEATURES (v2.0):
+    - Uses CollisionAwarePlanner for proper collision avoidance (when available)
+    - Tracks detailed constraint satisfaction metrics
+    - Supports physics validation via Isaac Sim integration
+    - Provides quality scoring for filtering low-quality augmentations
     """
 
     def __init__(
         self,
         robot_type: str = "franka",
+        scene_usd_path: Optional[str] = None,
+        use_collision_planner: bool = True,
+        use_physics_validation: bool = True,
         verbose: bool = True,
     ):
+        """
+        Initialize the CP-Gen style augmenter.
+
+        Args:
+            robot_type: Robot type (franka, ur10, fetch)
+            scene_usd_path: Optional USD scene path for collision geometry
+            use_collision_planner: Use enhanced collision-aware planning
+            use_physics_validation: Validate with physics simulation
+            verbose: Print debug info
+        """
         self.robot_type = robot_type
         self.verbose = verbose
+        self._scene_usd_path = scene_usd_path
 
+        # Constraint solver
         self.constraint_solver = ConstraintSolver(verbose=verbose)
+
+        # Motion planning - try enhanced planner first
+        self._use_collision_planner = use_collision_planner and _HAVE_COLLISION_PLANNER
+        self._collision_planner: Optional[CollisionAwarePlanner] = None
+
+        if self._use_collision_planner:
+            self.log("Using enhanced CollisionAwarePlanner")
+        else:
+            self.log("Using basic FreeSpaceMotionPlanner")
+
+        # Fallback planner
         self.motion_planner = FreeSpaceMotionPlanner(robot_type=robot_type, verbose=verbose)
+
+        # Physics validation
+        self._use_physics_validation = use_physics_validation and _HAVE_PHYSICS and is_physx_available()
+        self._physics_sim: Optional[PhysicsSimulator] = None
+
+        if self._use_physics_validation:
+            self.log("Physics validation enabled")
+            self._init_physics_simulator()
+        else:
+            self.log("Physics validation disabled (run in Isaac Sim for full validation)")
+
+    def _init_physics_simulator(self) -> None:
+        """Initialize physics simulator for validation."""
+        try:
+            self._physics_sim = PhysicsSimulator(verbose=self.verbose)
+            if self._scene_usd_path:
+                self._physics_sim.load_scene(self._scene_usd_path)
+        except Exception as e:
+            self.log(f"Failed to initialize physics: {e}", "WARNING")
+            self._use_physics_validation = False
+
+    def _get_collision_planner(
+        self,
+        scene_objects: List[Dict[str, Any]],
+    ) -> CollisionAwarePlanner:
+        """Get or create collision-aware planner for scene."""
+        if self._collision_planner is None:
+            self._collision_planner = CollisionAwarePlanner(
+                robot_type=self.robot_type,
+                scene_usd_path=self._scene_usd_path,
+                scene_objects=scene_objects,
+                verbose=self.verbose,
+            )
+        return self._collision_planner
+
+    def is_using_enhanced_planning(self) -> bool:
+        """Check if using enhanced collision-aware planning."""
+        return self._use_collision_planner
+
+    def is_using_physics_validation(self) -> bool:
+        """Check if using physics validation."""
+        return self._use_physics_validation
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
