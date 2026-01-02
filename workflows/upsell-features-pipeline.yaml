@@ -1,33 +1,30 @@
 # upsell-features-pipeline.yaml
 #
-# Google Cloud Workflows pipeline that:
-#   1. Triggers on completion marker file from episode-generation-job (.episodes_complete)
-#   2. Runs upsell-features-job based on bundle tier
-#   3. Writes .upsell_complete marker when finished
+# Google Cloud Workflows pipeline for RETROACTIVE upsell processing.
 #
-# This workflow is an OPTIONAL secondary trigger. Upsell features are also
-# automatically run by episode-generation-job when BUNDLE_TIER != standard.
-# Use this workflow for:
+# IMPORTANT: This workflow should NOT be auto-triggered by EventArc!
+#
+# Upsell features are automatically processed INLINE by episode-generation-job
+# when BUNDLE_TIER != standard. This eliminates duplicate processing and
+# ensures upsell features are applied immediately after episode generation.
+#
+# This workflow is for MANUAL/RETROACTIVE use only:
 #   - Retroactive upsell processing on existing episodes
-#   - Manual upsell tier upgrades
-#   - Standalone upsell processing
+#   - Tier upgrades after initial generation
+#   - Re-processing after upsell module updates
+#   - Testing and debugging
 #
-# Trigger: Cloud Storage object finalized event for .episodes_complete
-#
-# EventArc Setup:
-#   gcloud eventarc triggers create upsell-features-trigger \
-#     --location=us-central1 \
-#     --service-account="${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
-#     --destination-workflow=upsell-features-pipeline \
-#     --destination-workflow-location=us-central1 \
-#     --event-filters="type=google.cloud.storage.object.v1.finalized" \
-#     --event-filters="bucket=${BUCKET}" \
-#     --event-data-content-type="application/json"
-#
-# Or run manually:
+# DO NOT configure EventArc auto-trigger for this workflow!
+# Instead, run manually when needed:
 #   gcloud workflows run upsell-features-pipeline \
 #     --location=us-central1 \
-#     --data='{"data":{"bucket":"your-bucket","name":"scenes/kitchen_001/episodes/.episodes_complete"},"bundle_tier":"pro"}'
+#     --data='{"data":{"bucket":"your-bucket","name":"scenes/kitchen_001/episodes/.episodes_complete"},"bundle_tier":"pro","force_reprocess":true}'
+#
+# The workflow checks for existing upsell_complete markers and skips if found
+# unless force_reprocess=true is passed.
+#
+# If you previously created an EventArc trigger, remove it with:
+#   gcloud eventarc triggers delete upsell-features-trigger --location=us-central1
 
 main:
   params: [event]
@@ -47,6 +44,8 @@ main:
           - region: "us-central1"
           # Bundle tier can be passed in event or defaults to standard
           - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
+          # Force reprocessing even if already completed
+          - forceReprocess: '${default(map.get(event, "force_reprocess"), false)}'
         next: filter_completion_markers
 
     # Filter for .episodes_complete marker files
@@ -81,7 +80,21 @@ main:
         next: done_standard
 
     # Check if upsell features already processed (idempotence)
+    # Can be bypassed with force_reprocess=true
     - check_already_processed:
+        switch:
+          - condition: ${forceReprocess == true}
+            next: log_force_reprocess
+        next: check_existing_marker
+
+    - log_force_reprocess:
+        call: sys.log
+        args:
+          text: '${"Force reprocessing enabled for scene " + sceneId}'
+          severity: "INFO"
+        next: log_start
+
+    - check_existing_marker:
         try:
           call: googleapis.storage.v1.objects.get
           args:
@@ -101,7 +114,7 @@ main:
     - skip_already_processed:
         call: sys.log
         args:
-          text: '${"Upsell features already processed for scene " + sceneId + " - skipping"}'
+          text: '${"Upsell features already processed for scene " + sceneId + " - skipping (use force_reprocess=true to override)"}'
           severity: "INFO"
         next: skip
 
