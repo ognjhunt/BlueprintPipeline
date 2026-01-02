@@ -48,6 +48,14 @@ main:
           # Bundle tier for upsell features (standard, pro, enterprise, foundation)
           # Can be passed in event or read from scene config
           - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
+          # Data pack tier derived from bundle tier:
+          # standard -> core, pro -> plus, enterprise/foundation -> full
+          - dataPackTier: '${if(bundleTier == "standard", "core", if(bundleTier == "pro", "plus", "full"))}'
+          # Episodes per variation scales with bundle tier
+          - episodesPerVariation: '${if(bundleTier == "foundation", "25", "10")}'
+          # Audio/subtitle defaults (can be overridden by scene config)
+          - audioNarrationEnabled: false
+          - subtitleGenerationEnabled: false
         next: filter_completion_markers
 
     # Filter for .usd_complete marker files (from USD assembly job)
@@ -66,6 +74,59 @@ main:
           - episodesPrefix: '${"scenes/" + sceneId + "/episodes"}'
           - episodeJobName: "episode-generation-job"
           - episodesCompleteMarker: '${"scenes/" + sceneId + "/episodes/.episodes_complete"}'
+          - sceneConfigPath: '${"scenes/" + sceneId + "/config.json"}'
+        next: lookup_scene_config
+
+    # Lookup scene config from GCS to get customer-specific bundle tier
+    - lookup_scene_config:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${sceneConfigPath}
+            alt: "media"
+          result: sceneConfigRaw
+        except:
+          as: e
+          steps:
+            - log_no_config:
+                call: sys.log
+                args:
+                  text: '${"No scene config found for " + sceneId + ", using event tier or defaults"}'
+                  severity: "INFO"
+                next: check_already_processed
+        next: parse_scene_config
+
+    # Parse scene config and override bundle tier if specified
+    - parse_scene_config:
+        try:
+          assign:
+            # If scene config has bundle_tier, use it (customer-specific)
+            - sceneConfig: ${json.decode(sceneConfigRaw)}
+            - configBundleTier: '${default(map.get(sceneConfig, "bundle_tier"), "")}'
+            # Override bundleTier if config specifies one
+            - bundleTier: '${if(configBundleTier != "", configBundleTier, bundleTier)}'
+            # Re-derive dependent variables after bundle tier update
+            - dataPackTier: '${if(bundleTier == "standard", "core", if(bundleTier == "pro", "plus", "full"))}'
+            - episodesPerVariation: '${if(bundleTier == "foundation", "25", "10")}'
+            # Get audio/subtitle settings from config
+            - audioNarrationEnabled: '${default(map.get(sceneConfig, "audio_narration_enabled"), false)}'
+            - subtitleGenerationEnabled: '${default(map.get(sceneConfig, "subtitle_generation_enabled"), false)}'
+        except:
+          as: e
+          steps:
+            - log_parse_error:
+                call: sys.log
+                args:
+                  text: '${"Error parsing scene config: " + e.message}'
+                  severity: "WARNING"
+        next: log_config_resolved
+
+    - log_config_resolved:
+        call: sys.log
+        args:
+          text: '${"Scene " + sceneId + " resolved config - tier: " + bundleTier + ", data_pack: " + dataPackTier}'
+          severity: "INFO"
         next: check_already_processed
 
     # Check if episodes already generated (idempotence)
@@ -183,13 +244,17 @@ main:
                             - name: HEADLESS
                               value: "1"
                             - name: DATA_PACK_TIER
-                              value: "core"
+                              value: ${dataPackTier}
                             - name: EPISODES_PER_VARIATION
-                              value: "10"
+                              value: ${episodesPerVariation}
                             - name: REQUIRE_REAL_PHYSICS
                               value: "true"
                             - name: BUNDLE_TIER
                               value: ${bundleTier}
+                            - name: AUDIO_NARRATION_ENABLED
+                              value: '${if(audioNarrationEnabled, "true", "false")}'
+                            - name: SUBTITLE_GENERATION_ENABLED
+                              value: '${if(subtitleGenerationEnabled, "true", "false")}'
                             - name: GOOGLE_APPLICATION_CREDENTIALS
                               value: /secrets/gcs/key.json
                             resources:

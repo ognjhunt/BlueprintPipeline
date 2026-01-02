@@ -84,6 +84,13 @@ class BundleFeatures:
     # DWM
     dwm_conditioning: bool = False
 
+    # Audio and Subtitle features
+    audio_narration: bool = False
+    audio_voice_preset: str = "narrator"  # narrator, instructor, robot
+    subtitle_generation: bool = False
+    subtitle_style: str = "descriptive"  # minimal, descriptive, technical, instructional
+    subtitle_formats: List[str] = field(default_factory=lambda: ["srt", "vtt", "json"])
+
     # Support
     priority_support: bool = False
     dedicated_support: bool = False
@@ -136,6 +143,15 @@ class BundleFeatures:
             "dwm": {
                 "conditioning_enabled": self.dwm_conditioning,
             },
+            "audio": {
+                "narration_enabled": self.audio_narration,
+                "voice_preset": self.audio_voice_preset,
+            },
+            "subtitles": {
+                "enabled": self.subtitle_generation,
+                "style": self.subtitle_style,
+                "formats": self.subtitle_formats,
+            },
             "support": {
                 "priority": self.priority_support,
                 "dedicated": self.dedicated_support,
@@ -184,6 +200,11 @@ BUNDLE_CONFIGS: Dict[BundleTier, BundleFeatures] = {
         # Quality - enhanced
         min_quality_score=0.8,
         isaac_lab_runtime_validation=True,
+        # Audio/Subtitles - NEW
+        audio_narration=True,
+        audio_voice_preset="narrator",
+        subtitle_generation=True,
+        subtitle_style="descriptive",
         # Support
         priority_support=True,
     ),
@@ -220,6 +241,11 @@ BUNDLE_CONFIGS: Dict[BundleTier, BundleFeatures] = {
         isaac_lab_runtime_validation=True,
         # DWM
         dwm_conditioning=True,
+        # Audio/Subtitles - Enhanced
+        audio_narration=True,
+        audio_voice_preset="instructor",
+        subtitle_generation=True,
+        subtitle_style="instructional",
         # Support
         priority_support=True,
         dedicated_support=True,
@@ -262,6 +288,12 @@ BUNDLE_CONFIGS: Dict[BundleTier, BundleFeatures] = {
         isaac_lab_runtime_validation=True,
         # DWM
         dwm_conditioning=True,
+        # Audio/Subtitles - Full
+        audio_narration=True,
+        audio_voice_preset="instructor",
+        subtitle_generation=True,
+        subtitle_style="instructional",
+        subtitle_formats=["srt", "vtt", "json"],
         # Support
         priority_support=True,
         dedicated_support=True,
@@ -487,6 +519,8 @@ class BundleConfigManager:
             ("Language Annotations", lambda f, t: "Yes" if f.language_annotations else "No"),
             ("VLA Package", lambda f, t: "Yes" if f.vla_finetuning_package else "No"),
             ("VLA Models", lambda f, t: str(len(f.vla_models)) if f.vla_models else "-"),
+            ("Audio Narration", lambda f, t: f.audio_voice_preset if f.audio_narration else "No"),
+            ("Subtitles", lambda f, t: f.subtitle_style if f.subtitle_generation else "No"),
             ("Sim2Real Validation", lambda f, t: f.sim2real_tier if f.sim2real_validation else "No"),
             ("Contact-Rich Tasks", lambda f, t: "Yes" if f.contact_rich_tasks else "No"),
             ("Tactile Simulation", lambda f, t: "Yes" if f.tactile_simulation else "No"),
