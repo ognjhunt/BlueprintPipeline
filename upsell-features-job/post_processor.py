@@ -64,6 +64,12 @@ class TierFeatures:
     deformable_objects: bool = False
     bimanual: bool = False
     custom_robot: bool = False
+    # Audio and subtitle features
+    audio_narration: bool = False
+    audio_voice_preset: str = "narrator"
+    subtitle_generation: bool = False
+    subtitle_style: str = "descriptive"
+    subtitle_formats: List[str] = field(default_factory=lambda: ["srt", "vtt", "json"])
 
 
 # Tier configurations
@@ -76,6 +82,11 @@ TIER_CONFIGS = {
         num_language_variations=10,
         vla_finetuning=True,
         vla_models=["openvla", "smolvla"],
+        # Pro tier includes audio/subtitles
+        audio_narration=True,
+        audio_voice_preset="narrator",
+        subtitle_generation=True,
+        subtitle_style="descriptive",
     ),
     BundleTier.ENTERPRISE: TierFeatures(
         language_annotations=True,
@@ -87,6 +98,11 @@ TIER_CONFIGS = {
         contact_rich_tasks=True,
         tactile_simulation=True,
         tactile_sensor_type="gelslim",
+        # Enterprise includes enhanced audio/subtitles
+        audio_narration=True,
+        audio_voice_preset="instructor",
+        subtitle_generation=True,
+        subtitle_style="instructional",
     ),
     BundleTier.FOUNDATION: TierFeatures(
         language_annotations=True,
@@ -102,6 +118,12 @@ TIER_CONFIGS = {
         deformable_objects=True,
         bimanual=True,
         custom_robot=True,
+        # Foundation includes all audio/subtitle options
+        audio_narration=True,
+        audio_voice_preset="instructor",
+        subtitle_generation=True,
+        subtitle_style="instructional",
+        subtitle_formats=["srt", "vtt", "json"],
     ),
 }
 
@@ -208,10 +230,18 @@ class UpsellPostProcessor:
             if self.features.tactile_simulation:
                 self._add_tactile_data()
 
-            # 6. Advanced Capabilities
+            # 6. Audio Narration
+            if self.features.audio_narration:
+                self._generate_audio_narration()
+
+            # 7. Subtitle Generation
+            if self.features.subtitle_generation:
+                self._generate_subtitles()
+
+            # 8. Advanced Capabilities
             self._apply_advanced_capabilities()
 
-            # 7. Write manifest
+            # 9. Write manifest
             self._write_upsell_manifest()
 
             success = len(self.errors) == 0
@@ -521,6 +551,127 @@ class UpsellPostProcessor:
         except Exception as e:
             self.errors.append(f"Contact-rich generation failed: {e}")
             self.log(f"  Failed: {e}", "ERROR")
+
+    def _generate_audio_narration(self) -> None:
+        """Generate audio narrations for episodes."""
+        self.log(f"Generating audio narration (voice: {self.features.audio_voice_preset})...")
+
+        try:
+            from audio_narrator import AudioNarrator
+
+            audio_dir = self.upsell_dir / "audio_narration"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+
+            narrator = AudioNarrator(
+                voice_preset=self.features.audio_voice_preset,
+                verbose=self.verbose,
+            )
+
+            result = narrator.generate_scene_narrations(
+                episodes_dir=self.episodes_dir,
+                output_dir=audio_dir,
+                max_episodes=50,  # Limit for performance
+            )
+
+            self.features_applied.append("audio_narration")
+            self.outputs["audio_narration"] = str(audio_dir)
+            self.metrics["audio_narration"] = {
+                "episodes_narrated": result.episodes_narrated,
+                "total_duration_seconds": result.total_audio_duration_seconds,
+                "voice_preset": self.features.audio_voice_preset,
+            }
+            self.log(f"  Generated {result.episodes_narrated} audio narrations")
+
+        except ImportError as e:
+            self.log(f"  Audio narrator not available: {e}", "WARNING")
+            self._create_placeholder_audio()
+        except Exception as e:
+            self.errors.append(f"Audio narration failed: {e}")
+            self.log(f"  Failed: {e}", "ERROR")
+
+    def _create_placeholder_audio(self) -> None:
+        """Create placeholder audio metadata when TTS not available."""
+        audio_dir = self.upsell_dir / "audio_narration"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        placeholder = {
+            "status": "placeholder",
+            "note": "Full audio narration requires Google Cloud TTS or pyttsx3",
+            "voice_preset": self.features.audio_voice_preset,
+            "scene_id": self.scene_dir.name,
+        }
+
+        with open(audio_dir / "audio_manifest.json", "w") as f:
+            json.dump(placeholder, f, indent=2)
+
+        self.features_applied.append("audio_narration")
+        self.outputs["audio_narration"] = str(audio_dir)
+        self.metrics["audio_narration"] = {
+            "method": "placeholder",
+            "voice_preset": self.features.audio_voice_preset,
+        }
+
+    def _generate_subtitles(self) -> None:
+        """Generate subtitles for episodes."""
+        self.log(f"Generating subtitles (style: {self.features.subtitle_style})...")
+
+        try:
+            from subtitle_generator import SubtitleGenerator
+
+            subtitle_dir = self.upsell_dir / "subtitles"
+            subtitle_dir.mkdir(parents=True, exist_ok=True)
+
+            generator = SubtitleGenerator(
+                style=self.features.subtitle_style,
+                output_formats=self.features.subtitle_formats,
+                verbose=self.verbose,
+            )
+
+            result = generator.generate_scene_subtitles(
+                episodes_dir=self.episodes_dir,
+                output_dir=subtitle_dir,
+                max_episodes=100,  # Subtitles are lightweight, can do more
+            )
+
+            self.features_applied.append("subtitle_generation")
+            self.outputs["subtitles"] = str(subtitle_dir)
+            self.metrics["subtitles"] = {
+                "episodes_subtitled": result.episodes_subtitled,
+                "total_cues": result.total_cues,
+                "formats": result.formats_generated,
+                "style": self.features.subtitle_style,
+            }
+            self.log(f"  Generated subtitles for {result.episodes_subtitled} episodes ({result.total_cues} cues)")
+
+        except ImportError as e:
+            self.log(f"  Subtitle generator not available: {e}", "WARNING")
+            self._create_placeholder_subtitles()
+        except Exception as e:
+            self.errors.append(f"Subtitle generation failed: {e}")
+            self.log(f"  Failed: {e}", "ERROR")
+
+    def _create_placeholder_subtitles(self) -> None:
+        """Create placeholder subtitle metadata."""
+        subtitle_dir = self.upsell_dir / "subtitles"
+        subtitle_dir.mkdir(parents=True, exist_ok=True)
+
+        placeholder = {
+            "status": "placeholder",
+            "note": "Full subtitle generation requires subtitle_generator module",
+            "style": self.features.subtitle_style,
+            "formats": self.features.subtitle_formats,
+            "scene_id": self.scene_dir.name,
+        }
+
+        with open(subtitle_dir / "subtitle_manifest.json", "w") as f:
+            json.dump(placeholder, f, indent=2)
+
+        self.features_applied.append("subtitle_generation")
+        self.outputs["subtitles"] = str(subtitle_dir)
+        self.metrics["subtitles"] = {
+            "method": "placeholder",
+            "style": self.features.subtitle_style,
+        }
 
     def _add_tactile_data(self) -> None:
         """Add tactile sensor simulation data."""
