@@ -45,6 +45,9 @@ main:
           - gkeCluster: "blueprint-cluster"
           - gkeZone: "us-central1-a"
           - namespace: "blueprint"
+          # Bundle tier for upsell features (standard, pro, enterprise, foundation)
+          # Can be passed in event or read from scene config
+          - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
         next: filter_completion_markers
 
     # Filter for .usd_complete marker files (from USD assembly job)
@@ -185,6 +188,8 @@ main:
                               value: "10"
                             - name: REQUIRE_REAL_PHYSICS
                               value: "true"
+                            - name: BUNDLE_TIER
+                              value: ${bundleTier}
                             - name: GOOGLE_APPLICATION_CREDENTIALS
                               value: /secrets/gcs/key.json
                             resources:
