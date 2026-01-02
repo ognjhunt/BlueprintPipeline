@@ -66,6 +66,8 @@ class PipelineStep(str, Enum):
     ISAAC_LAB = "isaac-lab"
     DWM = "dwm"  # Dexterous World Model preparation
     DWM_INFERENCE = "dwm-inference"  # Run DWM model on prepared bundles
+    DREAM2FLOW = "dream2flow"  # Dream2Flow preparation (arXiv:2512.24766)
+    DREAM2FLOW_INFERENCE = "dream2flow-inference"  # Run Dream2Flow inference
     VALIDATE = "validate"
 
 
@@ -95,6 +97,8 @@ class LocalPipelineRunner:
         PipelineStep.ISAAC_LAB,
         PipelineStep.DWM,  # DWM conditioning data generation
         PipelineStep.DWM_INFERENCE,  # Run DWM model on bundles
+        PipelineStep.DREAM2FLOW,  # Dream2Flow conditioning data (arXiv:2512.24766)
+        PipelineStep.DREAM2FLOW_INFERENCE,  # Run Dream2Flow inference
     ]
 
     def __init__(
@@ -129,6 +133,7 @@ class LocalPipelineRunner:
         self.replicator_dir = self.scene_dir / "replicator"
         self.isaac_lab_dir = self.scene_dir / "isaac_lab"
         self.dwm_dir = self.scene_dir / "dwm"  # DWM conditioning data
+        self.dream2flow_dir = self.scene_dir / "dream2flow"  # Dream2Flow conditioning data
 
         self.results: List[StepResult] = []
 
@@ -182,7 +187,7 @@ class LocalPipelineRunner:
         # Create output directories
         for d in [self.assets_dir, self.layout_dir, self.seg_dir,
                   self.usd_dir, self.replicator_dir, self.isaac_lab_dir,
-                  self.dwm_dir]:
+                  self.dwm_dir, self.dream2flow_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
         # Run each step
@@ -227,6 +232,10 @@ class LocalPipelineRunner:
                 result = self._run_dwm()
             elif step == PipelineStep.DWM_INFERENCE:
                 result = self._run_dwm_inference()
+            elif step == PipelineStep.DREAM2FLOW:
+                result = self._run_dream2flow()
+            elif step == PipelineStep.DREAM2FLOW_INFERENCE:
+                result = self._run_dream2flow_inference()
             elif step == PipelineStep.VALIDATE:
                 result = self._run_validation()
             else:
@@ -864,6 +873,141 @@ class LocalPipelineRunner:
         except Exception as e:
             return StepResult(
                 step=PipelineStep.DWM_INFERENCE,
+                success=False,
+                duration_seconds=0,
+                message=f"Error: {e}\n{traceback.format_exc()}",
+            )
+
+    def _run_dream2flow(self) -> StepResult:
+        """
+        Run Dream2Flow preparation.
+
+        Generates Dream2Flow bundles from scene for video-to-flow robot control:
+        - Task instructions from scene manifest
+        - Initial RGB-D observations
+        - Generated task videos (via video diffusion)
+        - 3D object flow extraction
+        - Robot tracking targets
+
+        Reference: Dream2Flow paper (arXiv:2512.24766)
+        """
+        try:
+            sys.path.insert(0, str(REPO_ROOT / "dream2flow-preparation-job"))
+            from prepare_dream2flow_bundle import run_dream2flow_preparation
+
+            # Check prerequisites
+            manifest_path = self.assets_dir / "scene_manifest.json"
+            if not manifest_path.is_file():
+                return StepResult(
+                    step=PipelineStep.DREAM2FLOW,
+                    success=False,
+                    duration_seconds=0,
+                    message="Manifest not found - run regen3d step first",
+                )
+
+            # Run Dream2Flow preparation
+            output = run_dream2flow_preparation(
+                scene_dir=self.scene_dir,
+                output_dir=self.dream2flow_dir,
+                num_tasks=5,  # Default number of tasks
+                verbose=self.verbose,
+            )
+
+            if output.success:
+                marker_path = self.dream2flow_dir / ".dream2flow_complete"
+                self._write_marker(marker_path, status="completed")
+
+                return StepResult(
+                    step=PipelineStep.DREAM2FLOW,
+                    success=True,
+                    duration_seconds=output.generation_time_seconds,
+                    message=f"Generated {len(output.bundles)} Dream2Flow bundles",
+                    outputs={
+                        "bundles_count": len(output.bundles),
+                        "output_dir": str(output.output_dir),
+                        "manifest": str(output.manifest_path) if output.manifest_path else None,
+                        "completion_marker": str(marker_path),
+                    },
+                )
+            else:
+                return StepResult(
+                    step=PipelineStep.DREAM2FLOW,
+                    success=False,
+                    duration_seconds=output.generation_time_seconds,
+                    message=f"Dream2Flow generation failed: {output.errors[:1] if output.errors else 'Unknown error'}",
+                    outputs={"errors": output.errors},
+                )
+
+        except ImportError as e:
+            return StepResult(
+                step=PipelineStep.DREAM2FLOW,
+                success=False,
+                duration_seconds=0,
+                message=f"Import error (Dream2Flow job not found): {e}",
+            )
+        except Exception as e:
+            return StepResult(
+                step=PipelineStep.DREAM2FLOW,
+                success=False,
+                duration_seconds=0,
+                message=f"Error: {e}\n{traceback.format_exc()}",
+            )
+
+    def _run_dream2flow_inference(self) -> StepResult:
+        """Run the Dream2Flow inference job on prepared bundles."""
+        try:
+            sys.path.insert(0, str(REPO_ROOT / "dream2flow-preparation-job"))
+            from dream2flow_inference_job import run_dream2flow_inference
+
+            manifest_path = self.dream2flow_dir / "dream2flow_bundles_manifest.json"
+            if not manifest_path.is_file():
+                return StepResult(
+                    step=PipelineStep.DREAM2FLOW_INFERENCE,
+                    success=False,
+                    duration_seconds=0,
+                    message="Dream2Flow bundles manifest not found - run dream2flow step first",
+                )
+
+            output = run_dream2flow_inference(
+                bundles_dir=self.dream2flow_dir,
+                api_endpoint=os.environ.get("DREAM2FLOW_API_ENDPOINT"),
+                checkpoint_path=os.environ.get("DREAM2FLOW_CHECKPOINT_PATH"),
+                verbose=self.verbose,
+            )
+
+            if output.success:
+                marker_path = self.dream2flow_dir / ".dream2flow_inference_complete"
+                self._write_marker(marker_path, status="completed")
+                return StepResult(
+                    step=PipelineStep.DREAM2FLOW_INFERENCE,
+                    success=True,
+                    duration_seconds=0,
+                    message=f"Generated flow extractions for {len(output.bundles_processed)} bundles",
+                    outputs={
+                        "bundles": len(output.bundles_processed),
+                        "manifest": str(output.manifest_path) if output.manifest_path else None,
+                        "completion_marker": str(marker_path),
+                    },
+                )
+
+            return StepResult(
+                step=PipelineStep.DREAM2FLOW_INFERENCE,
+                success=False,
+                duration_seconds=0,
+                message=f"Dream2Flow inference failed: {output.errors[:1] if output.errors else 'Unknown error'}",
+                outputs={"errors": output.errors},
+            )
+
+        except ImportError as e:
+            return StepResult(
+                step=PipelineStep.DREAM2FLOW_INFERENCE,
+                success=False,
+                duration_seconds=0,
+                message=f"Import error (Dream2Flow inference job not found): {e}",
+            )
+        except Exception as e:
+            return StepResult(
+                step=PipelineStep.DREAM2FLOW_INFERENCE,
                 success=False,
                 duration_seconds=0,
                 message=f"Error: {e}\n{traceback.format_exc()}",
