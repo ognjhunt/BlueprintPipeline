@@ -1,0 +1,33 @@
+# Dream2Flow Preparation Job Dependencies
+# Based on Dream2Flow (arXiv:2512.24766)
+
+# Core
+numpy>=1.24.0
+Pillow>=9.0.0
+
+# Cloud
+google-cloud-storage>=2.10.0
+
+# Video processing
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.8
+
+# HTTP client (for API calls)
+requests>=2.28.0
+
+# Optional: Vision foundation models (uncomment when integrating)
+# torch>=2.0.0
+# torchvision>=0.15.0
+# transformers>=4.30.0
+
+# Optional: Point tracking (CoTracker, TAPIR)
+# cotracker>=2.0.0
+
+# Optional: Depth estimation (DepthAnything, ZoeDepth)
+# depth-anything>=1.0.0
+
+# Optional: Segmentation (SAM)
+# segment-anything>=1.0.0
+
+# Optional: Isaac Lab integration
+# isaacsim>=2023.1.0
