@@ -8,8 +8,20 @@ This module provides unified access to Isaac Sim/Isaac Lab features:
 - Motion planning via cuRobo (when available)
 - Scene management via USD
 
-IMPORTANT: This module must be imported from within Isaac Sim's Python environment.
-Running outside Isaac Sim will result in graceful fallbacks with clear warnings.
+DEPLOYMENT ARCHITECTURE:
+========================
+PRODUCTION (Cloud Run / Docker):
+  - Uses Dockerfile.isaacsim which extends NVIDIA Isaac Sim container
+  - Isaac Sim IS available via omni.isaac.core imports
+  - GPU acceleration enabled (L4/A100 GPUs)
+  - docker-compose.isaacsim.yaml sets USE_MOCK_CAPTURE="false"
+
+LOCAL DEVELOPMENT (without GPU/Isaac Sim):
+  - Falls back to mock implementations for testing
+  - Set USE_MOCK_CAPTURE="true" or run without Isaac Sim Python
+  - Useful for CI/CD, unit tests, and development iteration
+
+The production path is Isaac Sim. Mock mode is ONLY for development.
 
 Usage:
     from isaac_sim_integration import (

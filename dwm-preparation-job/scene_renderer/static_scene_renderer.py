@@ -5,10 +5,25 @@ Renders the static 3D scene along camera trajectories to produce
 conditioning videos for DWM. The scene is rendered "frozen" - no
 dynamics, just the static geometry from the reconstruction.
 
-Supports multiple rendering backends:
-- Isaac Sim (production quality, GPU-accelerated)
+DEPLOYMENT ARCHITECTURE:
+========================
+PRODUCTION (Cloud Run / Docker with GPU):
+  - Uses ISAAC_SIM backend (RenderBackend.ISAAC_SIM)
+  - Isaac Sim IS deployed via Dockerfile.isaacsim
+  - GPU-accelerated rendering (L4/A100)
+  - docker-compose.isaacsim.yaml configures the production environment
+
+LOCAL DEVELOPMENT (without GPU):
+  - Falls back to PYRENDER, TRIMESH, or MOCK backends
+  - MockRenderer generates placeholder frames for testing
+  - Set environment or use for CI/CD iteration
+
+Supported rendering backends:
+- Isaac Sim (PRODUCTION - GPU-accelerated, highest quality)
 - PyRender (CPU/OpenGL, good for development)
+- Trimesh (built-in renderer)
 - Blender (optional, high quality offline)
+- Mock (placeholder for testing)
 
 Based on DWM paper:
 - Static scene video: frames rendered from static 3D scene along camera trajectory
