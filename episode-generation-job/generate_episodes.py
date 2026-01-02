@@ -1312,6 +1312,7 @@ def run_episode_generation_job(
     image_resolution: Tuple[int, int] = (640, 480),
     capture_sensor_data: bool = True,
     use_mock_capture: bool = False,
+    bundle_tier: str = "standard",
 ) -> int:
     """
     Run the episode generation job (SOTA Pipeline).
@@ -1333,11 +1334,13 @@ def run_episode_generation_job(
         image_resolution: Image resolution (width, height)
         capture_sensor_data: Enable visual observation capture
         use_mock_capture: Use mock capture (no Isaac Sim)
+        bundle_tier: Bundle tier for upsell features (standard, pro, enterprise, foundation)
 
     Returns:
         0 on success, 1 on failure
     """
     print(f"[EPISODE-GEN-JOB] Starting SOTA episode generation for scene: {scene_id}")
+    print(f"[EPISODE-GEN-JOB] Bundle tier: {bundle_tier}")
     print(f"[EPISODE-GEN-JOB] Assets prefix: {assets_prefix}")
     print(f"[EPISODE-GEN-JOB] Episodes prefix: {episodes_prefix}")
     print(f"[EPISODE-GEN-JOB] Robot type: {robot_type}")
@@ -1398,6 +1401,43 @@ def run_episode_generation_job(
             print(f"[EPISODE-GEN-JOB]   Total frames: {output.total_frames}")
             print(f"[EPISODE-GEN-JOB]   Duration: {output.total_duration_seconds:.1f}s")
             print(f"[EPISODE-GEN-JOB]   Output: {output.output_dir}")
+
+            # Run upsell post-processing if bundle tier is not standard
+            if bundle_tier != "standard":
+                print(f"\n[EPISODE-GEN-JOB] Running upsell post-processing ({bundle_tier} tier)...")
+                try:
+                    # Import upsell post-processor
+                    upsell_module_path = REPO_ROOT / "upsell-features-job"
+                    if str(upsell_module_path) not in sys.path:
+                        sys.path.insert(0, str(upsell_module_path))
+
+                    from post_processor import run_upsell_post_processing
+
+                    # Run post-processing on the scene directory
+                    scene_dir = root / f"scenes/{scene_id}"
+                    upsell_result = run_upsell_post_processing(
+                        scene_dir=scene_dir,
+                        tier=bundle_tier,
+                        robot_type=robot_type,
+                        verbose=True,
+                    )
+
+                    if upsell_result.get("success"):
+                        print("[EPISODE-GEN-JOB] Upsell post-processing completed successfully")
+                        features = upsell_result.get("features_applied", [])
+                        if features:
+                            print(f"[EPISODE-GEN-JOB]   Features applied: {', '.join(features)}")
+                    else:
+                        print("[EPISODE-GEN-JOB] WARNING: Upsell post-processing had errors")
+                        for err in upsell_result.get("errors", []):
+                            print(f"[EPISODE-GEN-JOB]     - {err}")
+
+                except ImportError as e:
+                    print(f"[EPISODE-GEN-JOB] WARNING: Upsell module not available: {e}")
+                except Exception as e:
+                    print(f"[EPISODE-GEN-JOB] WARNING: Upsell post-processing failed: {e}")
+                    # Don't fail the job for upsell errors
+
             return 0
         else:
             print(f"[EPISODE-GEN-JOB] ERROR: Generation failed with {len(output.errors)} errors")
@@ -1509,11 +1549,15 @@ def main():
     capture_sensor_data = os.getenv("CAPTURE_SENSOR_DATA", "true").lower() == "true"
     use_mock_capture = os.getenv("USE_MOCK_CAPTURE", "false").lower() == "true"
 
+    # Bundle tier for upsell features (standard, pro, enterprise, foundation)
+    bundle_tier = os.getenv("BUNDLE_TIER", "standard")
+
     print(f"[EPISODE-GEN-JOB] Configuration:")
     print(f"[EPISODE-GEN-JOB]   Bucket: {bucket}")
     print(f"[EPISODE-GEN-JOB]   Scene ID: {scene_id}")
     print(f"[EPISODE-GEN-JOB]   Pipeline: SOTA (CP-Gen + Validation)")
     print(f"[EPISODE-GEN-JOB]   Data Pack: {data_pack_tier}")
+    print(f"[EPISODE-GEN-JOB]   Bundle Tier: {bundle_tier}")
     print(f"[EPISODE-GEN-JOB]   Cameras: {num_cameras}")
     print(f"[EPISODE-GEN-JOB]   Resolution: {image_resolution}")
 
@@ -1536,6 +1580,7 @@ def main():
         image_resolution=image_resolution,
         capture_sensor_data=capture_sensor_data,
         use_mock_capture=use_mock_capture,
+        bundle_tier=bundle_tier,
     )
 
     sys.exit(exit_code)
