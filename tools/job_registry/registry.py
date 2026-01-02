@@ -277,6 +277,68 @@ class JobRegistry:
             ),
         )
 
+        # =====================================================================
+        # DREAM2FLOW PIPELINE JOBS (arXiv:2512.24766)
+        # =====================================================================
+
+        self._jobs["dream2flow-preparation-job"] = JobInfo(
+            name="dream2flow-preparation-job",
+            description="Dream2Flow bundle preparation (video generation, 3D flow extraction)",
+            status=JobStatus.NEW,
+            category=JobCategory.TRAINING,
+            entry_script="dream2flow-preparation-job/entrypoint.py",
+            docker_image="dream2flow-preparation-job",
+            required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX", "DREAM2FLOW_PREFIX"],
+            optional_env_vars=[
+                "USD_PREFIX",
+                "NUM_TASKS",
+                "RESOLUTION_WIDTH",
+                "RESOLUTION_HEIGHT",
+                "NUM_FRAMES",
+                "FPS",
+                "ROBOT",
+                "VIDEO_API_ENDPOINT",
+            ],
+            depends_on=["regen3d-job"],
+            outputs=[
+                "dream2flow/*/manifest.json",
+                "dream2flow/*/video/*.mp4",
+                "dream2flow/*/flow/*.json",
+                "dream2flow/*/trajectory/*.json",
+                "dream2flow/dream2flow_bundles_manifest.json",
+            ],
+            migration_notes=(
+                "Dream2Flow (arXiv:2512.24766) uses video diffusion to imagine task "
+                "execution, then extracts 3D object flow as embodiment-agnostic goal/reward. "
+                "Scaffolding ready - full implementation pending model release."
+            ),
+        )
+
+        self._jobs["dream2flow-inference-job"] = JobInfo(
+            name="dream2flow-inference-job",
+            description="Dream2Flow model inference (video generation + flow extraction)",
+            status=JobStatus.NEW,
+            category=JobCategory.TRAINING,
+            entry_script="dream2flow-preparation-job/dream2flow_inference_job.py",
+            docker_image="dream2flow-preparation-job",
+            required_env_vars=["BUCKET", "SCENE_ID", "DREAM2FLOW_PREFIX"],
+            optional_env_vars=[
+                "VIDEO_API_ENDPOINT",
+                "VIDEO_CHECKPOINT_PATH",
+                "OVERWRITE",
+            ],
+            depends_on=["dream2flow-preparation-job"],
+            outputs=[
+                "dream2flow/*/inference_video.mp4",
+                "dream2flow/.dream2flow_inference_complete",
+            ],
+            migration_notes=(
+                "Runs Dream2Flow model inference on prepared bundles. "
+                "Currently uses placeholder generation - will be updated when "
+                "Dream2Flow model is publicly released."
+            ),
+        )
+
     def get_job(self, name: str) -> Optional[JobInfo]:
         """Get job information by name."""
         return self._jobs.get(name)
@@ -323,6 +385,8 @@ class JobRegistry:
             "variation-gen-job",
             "isaac-lab-job",
             "episode-generation-job",  # Generates training episodes
+            "dwm-preparation-job",  # DWM conditioning data (parallel)
+            "dream2flow-preparation-job",  # Dream2Flow bundles (parallel)
         ]
 
     def print_status_report(self):
