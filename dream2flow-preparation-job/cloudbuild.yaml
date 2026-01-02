@@ -1,0 +1,108 @@
+# Cloud Build configuration for Dream2Flow Preparation Job
+#
+# Builds and deploys the Dream2Flow preparation pipeline:
+# 1. Builds Docker image
+# 2. Pushes to Artifact Registry
+# 3. Creates/updates Cloud Run Job
+# 4. Deploys Cloud Workflow
+#
+# Usage:
+#   gcloud builds submit --config=dream2flow-preparation-job/cloudbuild.yaml .
+#
+# Substitutions:
+#   _REGION: Deployment region (default: us-central1)
+#   _REPOSITORY: Artifact Registry repository (default: blueprint-pipeline)
+
+substitutions:
+  _REGION: us-central1
+  _REPOSITORY: blueprint-pipeline
+
+steps:
+  # Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dream2flow-preparation-job:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dream2flow-preparation-job:latest'
+      - '-f'
+      - 'dream2flow-preparation-job/Dockerfile'
+      - '.'
+
+  # Push Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dream2flow-preparation-job'
+
+  # Create or update Cloud Run Job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud run jobs describe dream2flow-preparation-job \
+          --region=${_REGION} \
+          --format="value(name)" 2>/dev/null && \
+        gcloud run jobs update dream2flow-preparation-job \
+          --region=${_REGION} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dream2flow-preparation-job:${SHORT_SHA} \
+          --memory=8Gi \
+          --cpu=4 \
+          --task-timeout=3600s \
+          --max-retries=1 || \
+        gcloud run jobs create dream2flow-preparation-job \
+          --region=${_REGION} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dream2flow-preparation-job:${SHORT_SHA} \
+          --memory=8Gi \
+          --cpu=4 \
+          --task-timeout=3600s \
+          --max-retries=1
+
+  # Deploy Dream2Flow inference job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud run jobs describe dream2flow-inference-job \
+          --region=${_REGION} \
+          --format="value(name)" 2>/dev/null && \
+        gcloud run jobs update dream2flow-inference-job \
+          --region=${_REGION} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dream2flow-preparation-job:${SHORT_SHA} \
+          --command=python \
+          --args="-c,from dream2flow_inference_job import *; import sys; sys.exit(0)" \
+          --memory=16Gi \
+          --cpu=4 \
+          --task-timeout=7200s \
+          --max-retries=1 || \
+        gcloud run jobs create dream2flow-inference-job \
+          --region=${_REGION} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dream2flow-preparation-job:${SHORT_SHA} \
+          --command=python \
+          --args="-c,from dream2flow_inference_job import *; import sys; sys.exit(0)" \
+          --memory=16Gi \
+          --cpu=4 \
+          --task-timeout=7200s \
+          --max-retries=1
+
+  # Deploy Cloud Workflow
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    args:
+      - 'gcloud'
+      - 'workflows'
+      - 'deploy'
+      - 'dream2flow-preparation-pipeline'
+      - '--location=${_REGION}'
+      - '--source=workflows/dream2flow-preparation-pipeline.yaml'
+      - '--description=Dream2Flow preparation pipeline (arXiv:2512.24766)'
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dream2flow-preparation-job:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dream2flow-preparation-job:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
