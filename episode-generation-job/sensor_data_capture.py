@@ -15,10 +15,20 @@ Isaac Sim Replicator Integration:
 - Configurable camera setups (wrist, overhead, side views)
 - All annotations generated per-frame during trajectory execution
 
-IMPORTANT: For real sensor capture, this module MUST be run from within
-Isaac Sim's Python environment (/isaac-sim/python.sh). When running outside
-Isaac Sim, the module will use MockSensorCapture which generates placeholder
-data - useful for testing but NOT for production training data.
+DEPLOYMENT ARCHITECTURE:
+========================
+PRODUCTION (Cloud Run / Docker with GPU):
+  - Isaac Sim IS available and IS the expected runtime
+  - Uses Dockerfile.isaacsim (extends NVIDIA Isaac Sim 4.2.0)
+  - docker-compose.isaacsim.yaml explicitly sets USE_MOCK_CAPTURE="false"
+  - Real physics, real sensor data, production-quality episodes
+
+LOCAL DEVELOPMENT (without GPU/Isaac Sim):
+  - MockSensorCapture generates placeholder data for testing
+  - Set USE_MOCK_CAPTURE="true" for development iteration
+  - NOT for production training data
+
+The production deployment DOES use Isaac Sim. Mock mode is development-only.
 
 Compatible with:
 - LeRobot v2.0 format (images as separate video files)
