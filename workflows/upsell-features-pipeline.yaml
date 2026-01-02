@@ -1,0 +1,237 @@
+# upsell-features-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that:
+#   1. Triggers on completion marker file from episode-generation-job (.episodes_complete)
+#   2. Runs upsell-features-job based on bundle tier
+#   3. Writes .upsell_complete marker when finished
+#
+# This workflow is an OPTIONAL secondary trigger. Upsell features are also
+# automatically run by episode-generation-job when BUNDLE_TIER != standard.
+# Use this workflow for:
+#   - Retroactive upsell processing on existing episodes
+#   - Manual upsell tier upgrades
+#   - Standalone upsell processing
+#
+# Trigger: Cloud Storage object finalized event for .episodes_complete
+#
+# EventArc Setup:
+#   gcloud eventarc triggers create upsell-features-trigger \
+#     --location=us-central1 \
+#     --service-account="${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+#     --destination-workflow=upsell-features-pipeline \
+#     --destination-workflow-location=us-central1 \
+#     --event-filters="type=google.cloud.storage.object.v1.finalized" \
+#     --event-filters="bucket=${BUCKET}" \
+#     --event-data-content-type="application/json"
+#
+# Or run manually:
+#   gcloud workflows run upsell-features-pipeline \
+#     --location=us-central1 \
+#     --data='{"data":{"bucket":"your-bucket","name":"scenes/kitchen_001/episodes/.episodes_complete"},"bundle_tier":"pro"}'
+
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: '${event}'
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: "us-central1"
+          # Bundle tier can be passed in event or defaults to standard
+          - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
+        next: filter_completion_markers
+
+    # Filter for .episodes_complete marker files
+    - filter_completion_markers:
+        switch:
+          - condition: '${text.match_regex(object, "^scenes/.+/episodes/\\.episodes_complete$")}'
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - scenePath: '${"scenes/" + sceneId}'
+          - episodesPrefix: '${"scenes/" + sceneId + "/episodes"}'
+          - upsellOutputPrefix: '${"scenes/" + sceneId + "/episodes/upsell_outputs"}'
+          - upsellCompleteMarker: '${"scenes/" + sceneId + "/episodes/upsell_outputs/.upsell_complete"}'
+        next: check_bundle_tier
+
+    # Skip if standard tier (no upsell features)
+    - check_bundle_tier:
+        switch:
+          - condition: '${bundleTier == "standard"}'
+            next: skip_standard_tier
+        next: check_already_processed
+
+    - skip_standard_tier:
+        call: sys.log
+        args:
+          text: '${"Standard tier - no upsell features to apply for scene " + sceneId}'
+          severity: "INFO"
+        next: done_standard
+
+    # Check if upsell features already processed (idempotence)
+    - check_already_processed:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${upsellCompleteMarker}
+          result: existingMarker
+        except:
+          as: e
+          steps:
+            - check_not_found:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: log_start
+                next: raise_check_error
+        next: skip_already_processed
+
+    - skip_already_processed:
+        call: sys.log
+        args:
+          text: '${"Upsell features already processed for scene " + sceneId + " - skipping"}'
+          severity: "INFO"
+        next: skip
+
+    - raise_check_error:
+        raise: '${e}'
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Upsell features processing triggered for scene " + sceneId + " (tier: " + bundleTier + ")"}'
+          severity: "INFO"
+        next: run_upsell_job
+
+    # Run upsell features job via Cloud Run
+    - run_upsell_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/upsell-features-job"}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: BUNDLE_TIER
+                      value: ${bundleTier}
+                    - name: SCENE_PATH
+                      value: ${scenePath}
+        result: jobResult
+        next: wait_for_job
+
+    - wait_for_job:
+        call: sys.sleep
+        args:
+          seconds: 30
+        next: check_job_status
+
+    - check_job_status:
+        # For Cloud Run Jobs, we check the execution status
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.executions.get
+          args:
+            name: ${jobResult.metadata.name}
+          result: executionStatus
+        except:
+          as: e
+          steps:
+            - log_status_error:
+                call: sys.log
+                args:
+                  text: '${"Error checking job status: " + e.message}'
+                  severity: "WARNING"
+                next: wait_for_job
+        next: job_status_switch
+
+    - job_status_switch:
+        switch:
+          - condition: '${executionStatus.completionTime != null and executionStatus.succeededCount > 0}'
+            next: log_upsell_complete
+          - condition: '${executionStatus.completionTime != null and executionStatus.failedCount > 0}'
+            next: upsell_job_failed
+        next: wait_for_job
+
+    - log_upsell_complete:
+        call: sys.log
+        args:
+          text: '${"Upsell features processing completed for scene " + sceneId}'
+          severity: "INFO"
+        next: write_completion_marker
+
+    # Write completion marker for downstream processes
+    - write_completion_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${upsellCompleteMarker}
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"bundle_tier\": \"" + bundleTier + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        result: markerResult
+        next: done
+
+    - upsell_job_failed:
+        # Upsell failure is concerning but not fatal
+        call: sys.log
+        args:
+          text: '${"ERROR: Upsell features processing failed for scene " + sceneId}'
+          severity: "ERROR"
+        next: write_failure_marker
+
+    - write_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: '${"scenes/" + sceneId + "/episodes/upsell_outputs/.upsell_failed"}'
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"bundle_tier\": \"" + bundleTier + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        result: failMarkerResult
+        next: done_with_failure
+
+    # =========================================================================
+    # Completion
+    # =========================================================================
+
+    - done:
+        return:
+          status: "SUCCESS"
+          scene_id: ${sceneId}
+          bundle_tier: ${bundleTier}
+          message: '${"Upsell features processing completed for scene " + sceneId}'
+          outputs:
+            upsell_path: ${upsellOutputPrefix}
+            completion_marker: ${upsellCompleteMarker}
+
+    - done_standard:
+        return:
+          status: "SKIPPED"
+          scene_id: ${sceneId}
+          bundle_tier: ${bundleTier}
+          message: '${"Standard tier - no upsell features for scene " + sceneId}'
+
+    - done_with_failure:
+        return:
+          status: "FAILED"
+          scene_id: ${sceneId}
+          bundle_tier: ${bundleTier}
+          message: '${"Upsell features processing failed for scene " + sceneId}'
+
+    - skip:
+        return:
+          status: "SKIPPED"
+          message: '${"Not an episodes completion marker file: " + object}'
