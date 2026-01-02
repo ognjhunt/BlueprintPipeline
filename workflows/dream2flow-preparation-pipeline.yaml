@@ -1,0 +1,322 @@
+# dream2flow-preparation-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that:
+#   1. Triggers on completion marker file from regen3d-job (.regen3d_complete)
+#   2. Runs dream2flow-preparation-job to generate Dream2Flow bundles
+#   3. Writes .dream2flow_complete marker when finished
+#   4. Optionally runs dream2flow-inference-job for full pipeline
+#
+# Trigger: Cloud Storage object finalized event for .regen3d_complete
+#
+# Dream2Flow (arXiv:2512.24766) pipeline:
+#   - Input: RGB-D observation + language instruction
+#   - Video generation: Generate "dreamed" task execution video
+#   - Flow extraction: Extract 3D object flow (masks, depth, point tracking)
+#   - Robot control: Use flow as goal/reward for trajectory optimization or RL
+#
+# Reference: https://arxiv.org/abs/2512.24766
+#
+# EventArc Setup:
+#   gcloud eventarc triggers create dream2flow-preparation-trigger \
+#     --location=us-central1 \
+#     --service-account="${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+#     --destination-workflow=dream2flow-preparation-pipeline \
+#     --destination-workflow-location=us-central1 \
+#     --event-filters="type=google.cloud.storage.object.v1.finalized" \
+#     --event-filters="bucket=${BUCKET}" \
+#     --event-data-content-type="application/json"
+
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: "us-central1"
+        next: filter_completion_markers
+
+    # Filter for .regen3d_complete marker files
+    # This runs in parallel with other pipelines on the same trigger
+    - filter_completion_markers:
+        switch:
+          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.regen3d_complete$")}'
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
+          - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
+          - dream2flowPrefix: '${"scenes/" + sceneId + "/dream2flow"}'
+          - dream2flowJobName: "dream2flow-preparation-job"
+          - dream2flowCompleteMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_complete"}'
+          - dream2flowInferenceJobName: "dream2flow-inference-job"
+          - dream2flowInferenceCompleteMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_inference_complete"}'
+        next: check_already_processed
+
+    # Check if Dream2Flow bundles already generated (idempotence)
+    - check_already_processed:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${dream2flowCompleteMarker}
+          result: existingMarker
+        except:
+          as: e
+          steps:
+            - check_not_found:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: log_start
+                next: raise_check_error
+        next: skip_already_processed
+
+    - skip_already_processed:
+        call: sys.log
+        args:
+          text: '${"Dream2Flow bundles already generated for scene " + sceneId + " - skipping"}'
+          severity: "INFO"
+        next: skip
+
+    - raise_check_error:
+        raise: '${e}'
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Dream2Flow preparation triggered for scene " + sceneId}'
+          severity: "INFO"
+        next: run_dream2flow_job
+
+    # Run the Dream2Flow preparation job
+    - run_dream2flow_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dream2flowJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: USD_PREFIX
+                      value: ${usdPrefix}
+                    - name: DREAM2FLOW_PREFIX
+                      value: ${dream2flowPrefix}
+                    - name: NUM_TASKS
+                      value: "5"
+                    - name: RESOLUTION_WIDTH
+                      value: "720"
+                    - name: RESOLUTION_HEIGHT
+                      value: "480"
+                    - name: NUM_FRAMES
+                      value: "49"
+                    - name: FPS
+                      value: "24"
+                    - name: ROBOT
+                      value: "franka_panda"
+        result: dream2flowExec
+        next: set_dream2flow_execution_name
+
+    - set_dream2flow_execution_name:
+        assign:
+          - dream2flowExecutionName: '${if(dream2flowExec.metadata != null and dream2flowExec.metadata.name != null, dream2flowExec.metadata.name, dream2flowExec.name)}'
+        next: wait_for_dream2flow
+
+    # Poll for job completion
+    - wait_for_dream2flow:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${dream2flowExecutionName}
+        result: dream2flowStatus
+        next: check_dream2flow_status
+
+    - check_dream2flow_status:
+        assign:
+          - dream2flowState: '${if(dream2flowStatus.state != null, dream2flowStatus.state, if(dream2flowStatus.status != null, dream2flowStatus.status.state, null))}'
+          - dream2flowFailedCount: '${if(dream2flowStatus.failedCount != null, dream2flowStatus.failedCount, if(dream2flowStatus.status != null, dream2flowStatus.status.failedCount, null))}'
+          - dream2flowSucceededCount: '${if(dream2flowStatus.succeededCount != null, dream2flowStatus.succeededCount, if(dream2flowStatus.status != null, dream2flowStatus.status.succeededCount, null))}'
+        next: dream2flow_status_switch
+
+    - dream2flow_status_switch:
+        switch:
+          - condition: '${dream2flowState == "FAILED" or (dream2flowFailedCount != null and dream2flowFailedCount > 0)}'
+            next: dream2flow_failed
+          - condition: '${dream2flowState == "SUCCEEDED" or (dream2flowSucceededCount != null and dream2flowSucceededCount > 0)}'
+            next: log_dream2flow_complete
+        next: wait_dream2flow_poll
+
+    - wait_dream2flow_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_dream2flow
+
+    - log_dream2flow_complete:
+        call: sys.log
+        args:
+          text: '${"Dream2Flow preparation completed for scene " + sceneId}'
+          severity: "INFO"
+        next: write_completion_marker
+
+    # Write completion marker for downstream processes
+    - write_completion_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${dream2flowCompleteMarker}
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        result: markerResult
+        next: log_inference_start
+
+    - log_inference_start:
+        call: sys.log
+        args:
+          text: '${"Starting Dream2Flow inference for scene " + sceneId}'
+          severity: "INFO"
+        next: run_dream2flow_inference_job
+
+    # Run the Dream2Flow inference job
+    - run_dream2flow_inference_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dream2flowInferenceJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: DREAM2FLOW_PREFIX
+                      value: ${dream2flowPrefix}
+        result: dream2flowInferenceExec
+        next: set_dream2flow_inference_execution_name
+
+    - set_dream2flow_inference_execution_name:
+        assign:
+          - dream2flowInferenceExecutionName: '${if(dream2flowInferenceExec.metadata != null and dream2flowInferenceExec.metadata.name != null, dream2flowInferenceExec.metadata.name, dream2flowInferenceExec.name)}'
+        next: wait_for_dream2flow_inference
+
+    - wait_for_dream2flow_inference:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${dream2flowInferenceExecutionName}
+        result: dream2flowInferenceStatus
+        next: check_dream2flow_inference_status
+
+    - check_dream2flow_inference_status:
+        assign:
+          - dream2flowInferenceState: '${if(dream2flowInferenceStatus.state != null, dream2flowInferenceStatus.state, if(dream2flowInferenceStatus.status != null, dream2flowInferenceStatus.status.state, null))}'
+          - dream2flowInferenceFailedCount: '${if(dream2flowInferenceStatus.failedCount != null, dream2flowInferenceStatus.failedCount, if(dream2flowInferenceStatus.status != null, dream2flowInferenceStatus.status.failedCount, null))}'
+          - dream2flowInferenceSucceededCount: '${if(dream2flowInferenceStatus.succeededCount != null, dream2flowInferenceStatus.succeededCount, if(dream2flowInferenceStatus.status != null, dream2flowInferenceStatus.status.succeededCount, null))}'
+        next: dream2flow_inference_status_switch
+
+    - dream2flow_inference_status_switch:
+        switch:
+          - condition: '${dream2flowInferenceState == "FAILED" or (dream2flowInferenceFailedCount != null and dream2flowInferenceFailedCount > 0)}'
+            next: dream2flow_inference_failed
+          - condition: '${dream2flowInferenceState == "SUCCEEDED" or (dream2flowInferenceSucceededCount != null and dream2flowInferenceSucceededCount > 0)}'
+            next: log_dream2flow_inference_complete
+        next: wait_inference_poll
+
+    - wait_inference_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_dream2flow_inference
+
+    - log_dream2flow_inference_complete:
+        call: sys.log
+        args:
+          text: '${"Dream2Flow inference completed for scene " + sceneId}'
+          severity: "INFO"
+        next: write_inference_completion_marker
+
+    - write_inference_completion_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${dream2flowInferenceCompleteMarker}
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        next: done
+
+    - dream2flow_inference_failed:
+        call: sys.log
+        args:
+          text: '${"WARNING: Dream2Flow inference failed for scene " + sceneId}'
+          severity: "WARNING"
+        next: write_inference_failure_marker
+
+    - write_inference_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_inference_failed"}'
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        next: done_with_failure
+
+    - dream2flow_failed:
+        # Dream2Flow failure is non-fatal - scene is still usable for other purposes
+        call: sys.log
+        args:
+          text: '${"WARNING: Dream2Flow preparation failed for scene " + sceneId + " - scene still usable for simulation"}'
+          severity: "WARNING"
+        next: write_failure_marker
+
+    - write_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_failed"}'
+          uploadType: "media"
+          body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
+        result: failMarkerResult
+        next: done_with_failure
+
+    # =========================================================================
+    # Completion
+    # =========================================================================
+
+    - done:
+        return:
+          status: "SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"Dream2Flow preparation and inference completed for scene " + sceneId}'
+          dream2flow_execution: ${dream2flowExec.name}
+          outputs:
+            dream2flow_bundles: '${"scenes/" + sceneId + "/dream2flow/"}'
+            completion_marker: ${dream2flowCompleteMarker}
+            inference_marker: ${dream2flowInferenceCompleteMarker}
+
+    - done_with_failure:
+        return:
+          status: "FAILED"
+          scene_id: ${sceneId}
+          message: '${"Dream2Flow preparation failed for scene " + sceneId}'
+          dream2flow_execution: ${dream2flowExec.name}
+
+    - skip:
+        return:
+          status: "SKIPPED"
+          message: '${"Not a completion marker file: " + object}'
