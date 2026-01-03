@@ -91,11 +91,351 @@ FETCH_CONFIG = RobotConfig(
     gripper_limits=(0.0, 0.05),
 )
 
+# =============================================================================
+# Additional Robot Configurations (Multi-Robot Support)
+# =============================================================================
+
+UR5_CONFIG = RobotConfig(
+    name="ur5",
+    num_joints=6,
+    joint_names=[
+        "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+        "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
+    ],
+    joint_limits_lower=np.array([-2*np.pi, -2*np.pi, -np.pi, -2*np.pi, -2*np.pi, -2*np.pi]),
+    joint_limits_upper=np.array([2*np.pi, 2*np.pi, np.pi, 2*np.pi, 2*np.pi, 2*np.pi]),
+    default_joint_positions=np.array([0.0, -1.571, 1.571, -1.571, -1.571, 0.0]),
+    gripper_joint_names=[],
+    gripper_limits=(0.0, 0.05),
+)
+
+UR5E_CONFIG = RobotConfig(
+    name="ur5e",
+    num_joints=6,
+    joint_names=[
+        "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+        "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
+    ],
+    joint_limits_lower=np.array([-2*np.pi, -2*np.pi, -np.pi, -2*np.pi, -2*np.pi, -2*np.pi]),
+    joint_limits_upper=np.array([2*np.pi, 2*np.pi, np.pi, 2*np.pi, 2*np.pi, 2*np.pi]),
+    default_joint_positions=np.array([0.0, -1.571, 1.571, -1.571, -1.571, 0.0]),
+    gripper_joint_names=[],
+    gripper_limits=(0.0, 0.05),
+)
+
+UR10E_CONFIG = RobotConfig(
+    name="ur10e",
+    num_joints=6,
+    joint_names=[
+        "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+        "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
+    ],
+    joint_limits_lower=np.array([-2*np.pi, -2*np.pi, -np.pi, -2*np.pi, -2*np.pi, -2*np.pi]),
+    joint_limits_upper=np.array([2*np.pi, 2*np.pi, np.pi, 2*np.pi, 2*np.pi, 2*np.pi]),
+    default_joint_positions=np.array([0.0, -1.571, 1.571, -1.571, -1.571, 0.0]),
+    gripper_joint_names=[],
+    gripper_limits=(0.0, 0.05),
+)
+
+KUKA_IIWA_CONFIG = RobotConfig(
+    name="kuka_iiwa",
+    num_joints=7,
+    joint_names=[
+        "iiwa_joint_1", "iiwa_joint_2", "iiwa_joint_3", "iiwa_joint_4",
+        "iiwa_joint_5", "iiwa_joint_6", "iiwa_joint_7",
+    ],
+    joint_limits_lower=np.array([-2.967, -2.094, -2.967, -2.094, -2.967, -2.094, -3.054]),
+    joint_limits_upper=np.array([2.967, 2.094, 2.967, 2.094, 2.967, 2.094, 3.054]),
+    default_joint_positions=np.array([0.0, 0.0, 0.0, -1.571, 0.0, 1.571, 0.0]),
+    gripper_joint_names=[],
+    gripper_limits=(0.0, 0.04),
+)
+
+KUKA_IIWA14_CONFIG = RobotConfig(
+    name="kuka_iiwa14",
+    num_joints=7,
+    joint_names=[
+        "iiwa_joint_1", "iiwa_joint_2", "iiwa_joint_3", "iiwa_joint_4",
+        "iiwa_joint_5", "iiwa_joint_6", "iiwa_joint_7",
+    ],
+    joint_limits_lower=np.array([-2.967, -2.094, -2.967, -2.094, -2.967, -2.094, -3.054]),
+    joint_limits_upper=np.array([2.967, 2.094, 2.967, 2.094, 2.967, 2.094, 3.054]),
+    default_joint_positions=np.array([0.0, 0.0, 0.0, -1.571, 0.0, 1.571, 0.0]),
+    gripper_joint_names=[],
+    gripper_limits=(0.0, 0.04),
+)
+
+SAWYER_CONFIG = RobotConfig(
+    name="sawyer",
+    num_joints=7,
+    joint_names=[
+        "right_j0", "right_j1", "right_j2", "right_j3",
+        "right_j4", "right_j5", "right_j6",
+    ],
+    joint_limits_lower=np.array([-3.0503, -3.8095, -3.0426, -3.0439, -2.9761, -2.9761, -4.7124]),
+    joint_limits_upper=np.array([3.0503, 2.2736, 3.0426, 3.0439, 2.9761, 2.9761, 4.7124]),
+    default_joint_positions=np.array([0.0, -1.18, 0.0, 2.18, 0.0, 0.57, 3.14]),
+    gripper_joint_names=["right_gripper_l_finger_joint", "right_gripper_r_finger_joint"],
+    gripper_limits=(0.0, 0.041),
+)
+
+BAXTER_LEFT_CONFIG = RobotConfig(
+    name="baxter_left",
+    num_joints=7,
+    joint_names=[
+        "left_s0", "left_s1", "left_e0", "left_e1",
+        "left_w0", "left_w1", "left_w2",
+    ],
+    joint_limits_lower=np.array([-1.7016, -2.147, -3.0541, -0.05, -3.059, -1.5707, -3.059]),
+    joint_limits_upper=np.array([1.7016, 1.047, 3.0541, 2.618, 3.059, 2.094, 3.059]),
+    default_joint_positions=np.array([0.0, -0.55, 0.0, 0.75, 0.0, 1.26, 0.0]),
+    gripper_joint_names=["left_gripper_l_finger_joint", "left_gripper_r_finger_joint"],
+    gripper_limits=(0.0, 0.04),
+)
+
+BAXTER_RIGHT_CONFIG = RobotConfig(
+    name="baxter_right",
+    num_joints=7,
+    joint_names=[
+        "right_s0", "right_s1", "right_e0", "right_e1",
+        "right_w0", "right_w1", "right_w2",
+    ],
+    joint_limits_lower=np.array([-1.7016, -2.147, -3.0541, -0.05, -3.059, -1.5707, -3.059]),
+    joint_limits_upper=np.array([1.7016, 1.047, 3.0541, 2.618, 3.059, 2.094, 3.059]),
+    default_joint_positions=np.array([0.0, -0.55, 0.0, 0.75, 0.0, 1.26, 0.0]),
+    gripper_joint_names=["right_gripper_l_finger_joint", "right_gripper_r_finger_joint"],
+    gripper_limits=(0.0, 0.04),
+)
+
+KINOVA_GEN3_CONFIG = RobotConfig(
+    name="kinova_gen3",
+    num_joints=7,
+    joint_names=[
+        "joint_1", "joint_2", "joint_3", "joint_4",
+        "joint_5", "joint_6", "joint_7",
+    ],
+    joint_limits_lower=np.array([-np.inf, -2.41, -np.inf, -2.66, -np.inf, -2.23, -np.inf]),
+    joint_limits_upper=np.array([np.inf, 2.41, np.inf, 2.66, np.inf, 2.23, np.inf]),
+    default_joint_positions=np.array([0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]),
+    gripper_joint_names=["finger_joint", "right_outer_knuckle_joint"],
+    gripper_limits=(0.0, 0.04),
+)
+
+XARM7_CONFIG = RobotConfig(
+    name="xarm7",
+    num_joints=7,
+    joint_names=[
+        "joint1", "joint2", "joint3", "joint4",
+        "joint5", "joint6", "joint7",
+    ],
+    joint_limits_lower=np.array([-6.28, -2.059, -6.28, -0.19, -6.28, -1.69, -6.28]),
+    joint_limits_upper=np.array([6.28, 2.0944, 6.28, 3.927, 6.28, 3.14, 6.28]),
+    default_joint_positions=np.array([0.0, 0.0, 0.0, 1.571, 0.0, 1.571, 0.0]),
+    gripper_joint_names=["drive_joint"],
+    gripper_limits=(0.0, 0.04),
+)
+
+XARM6_CONFIG = RobotConfig(
+    name="xarm6",
+    num_joints=6,
+    joint_names=[
+        "joint1", "joint2", "joint3", "joint4",
+        "joint5", "joint6",
+    ],
+    joint_limits_lower=np.array([-6.28, -2.059, -6.28, -0.19, -6.28, -6.28]),
+    joint_limits_upper=np.array([6.28, 2.0944, 6.28, 3.927, 6.28, 6.28]),
+    default_joint_positions=np.array([0.0, 0.0, 0.0, 1.571, 0.0, 0.0]),
+    gripper_joint_names=["drive_joint"],
+    gripper_limits=(0.0, 0.04),
+)
+
+FANUC_LR_MATE_CONFIG = RobotConfig(
+    name="fanuc_lr_mate",
+    num_joints=6,
+    joint_names=[
+        "joint_1", "joint_2", "joint_3", "joint_4",
+        "joint_5", "joint_6",
+    ],
+    joint_limits_lower=np.array([-2.96, -1.57, -2.36, -3.49, -2.09, -6.28]),
+    joint_limits_upper=np.array([2.96, 2.79, 4.54, 3.49, 2.09, 6.28]),
+    default_joint_positions=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    gripper_joint_names=[],
+    gripper_limits=(0.0, 0.05),
+)
+
+ABB_IRB120_CONFIG = RobotConfig(
+    name="abb_irb120",
+    num_joints=6,
+    joint_names=[
+        "joint_1", "joint_2", "joint_3", "joint_4",
+        "joint_5", "joint_6",
+    ],
+    joint_limits_lower=np.array([-2.87, -1.92, -1.22, -5.03, -2.09, -6.98]),
+    joint_limits_upper=np.array([2.87, 1.57, 2.88, 5.03, 2.09, 6.98]),
+    default_joint_positions=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    gripper_joint_names=[],
+    gripper_limits=(0.0, 0.04),
+)
+
+YASKAWA_GP8_CONFIG = RobotConfig(
+    name="yaskawa_gp8",
+    num_joints=6,
+    joint_names=[
+        "joint_1_s", "joint_2_l", "joint_3_u", "joint_4_r",
+        "joint_5_b", "joint_6_t",
+    ],
+    joint_limits_lower=np.array([-2.96, -1.05, -1.22, -3.32, -2.18, -6.28]),
+    joint_limits_upper=np.array([2.96, 2.79, 2.44, 3.32, 2.18, 6.28]),
+    default_joint_positions=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    gripper_joint_names=[],
+    gripper_limits=(0.0, 0.05),
+)
+
+# Mobile manipulators
+STRETCH_CONFIG = RobotConfig(
+    name="stretch",
+    num_joints=4,  # Arm joints only (excluding mobile base)
+    joint_names=[
+        "joint_lift", "joint_arm_l0", "joint_arm_l1", "joint_wrist_yaw",
+    ],
+    joint_limits_lower=np.array([0.0, 0.0, 0.0, -1.38]),
+    joint_limits_upper=np.array([1.1, 0.13, 0.13, 4.58]),
+    default_joint_positions=np.array([0.5, 0.0, 0.0, 0.0]),
+    gripper_joint_names=["joint_gripper_finger_left", "joint_gripper_finger_right"],
+    gripper_limits=(0.0, 0.05),
+)
+
+TIAGO_CONFIG = RobotConfig(
+    name="tiago",
+    num_joints=7,
+    joint_names=[
+        "arm_1_joint", "arm_2_joint", "arm_3_joint", "arm_4_joint",
+        "arm_5_joint", "arm_6_joint", "arm_7_joint",
+    ],
+    joint_limits_lower=np.array([0.0, -1.5, -3.46, -0.32, -2.07, -1.39, -2.07]),
+    joint_limits_upper=np.array([2.68, 1.02, 1.57, 2.29, 2.07, 1.39, 2.07]),
+    default_joint_positions=np.array([0.2, -1.34, -0.2, 1.94, -1.57, 1.37, 0.0]),
+    gripper_joint_names=["gripper_left_finger_joint", "gripper_right_finger_joint"],
+    gripper_limits=(0.0, 0.044),
+)
+
+# =============================================================================
+# Robot Configuration Registry
+# =============================================================================
+
 ROBOT_CONFIGS = {
+    # Franka Robotics
     "franka": FRANKA_CONFIG,
+    "franka_panda": FRANKA_CONFIG,
+    "panda": FRANKA_CONFIG,
+
+    # Universal Robots
+    "ur5": UR5_CONFIG,
+    "ur5e": UR5E_CONFIG,
     "ur10": UR10_CONFIG,
+    "ur10e": UR10E_CONFIG,
+
+    # KUKA
+    "kuka_iiwa": KUKA_IIWA_CONFIG,
+    "kuka_iiwa7": KUKA_IIWA_CONFIG,
+    "kuka_iiwa14": KUKA_IIWA14_CONFIG,
+    "iiwa": KUKA_IIWA_CONFIG,
+    "iiwa7": KUKA_IIWA_CONFIG,
+    "iiwa14": KUKA_IIWA14_CONFIG,
+
+    # Rethink Robotics
+    "sawyer": SAWYER_CONFIG,
+    "baxter_left": BAXTER_LEFT_CONFIG,
+    "baxter_right": BAXTER_RIGHT_CONFIG,
+
+    # Kinova
+    "kinova_gen3": KINOVA_GEN3_CONFIG,
+    "kinova_gen3_7dof": KINOVA_GEN3_CONFIG,
+    "gen3": KINOVA_GEN3_CONFIG,
+
+    # UFACTORY
+    "xarm7": XARM7_CONFIG,
+    "xarm6": XARM6_CONFIG,
+
+    # Fanuc
+    "fanuc_lr_mate": FANUC_LR_MATE_CONFIG,
+    "lr_mate": FANUC_LR_MATE_CONFIG,
+
+    # ABB
+    "abb_irb120": ABB_IRB120_CONFIG,
+    "irb120": ABB_IRB120_CONFIG,
+
+    # Yaskawa
+    "yaskawa_gp8": YASKAWA_GP8_CONFIG,
+    "gp8": YASKAWA_GP8_CONFIG,
+
+    # Mobile Manipulators
     "fetch": FETCH_CONFIG,
+    "stretch": STRETCH_CONFIG,
+    "hello_robot_stretch": STRETCH_CONFIG,
+    "tiago": TIAGO_CONFIG,
 }
+
+
+def get_robot_config(robot_type: str) -> RobotConfig:
+    """
+    Get robot configuration by name.
+
+    Args:
+        robot_type: Robot name (case-insensitive)
+
+    Returns:
+        RobotConfig for the specified robot
+
+    Raises:
+        ValueError: If robot type is not supported
+    """
+    robot_key = robot_type.lower().replace("-", "_").replace(" ", "_")
+
+    if robot_key not in ROBOT_CONFIGS:
+        available = sorted(set(ROBOT_CONFIGS.keys()))
+        raise ValueError(
+            f"Unknown robot type: '{robot_type}'. "
+            f"Supported robots: {available}"
+        )
+
+    return ROBOT_CONFIGS[robot_key]
+
+
+def list_supported_robots() -> List[str]:
+    """Get list of supported robot types."""
+    # Return unique robot names (removing aliases)
+    unique_robots = set()
+    for config in ROBOT_CONFIGS.values():
+        unique_robots.add(config.name)
+    return sorted(unique_robots)
+
+
+def get_robot_info(robot_type: str) -> Dict[str, Any]:
+    """
+    Get detailed information about a robot.
+
+    Args:
+        robot_type: Robot name
+
+    Returns:
+        Dictionary with robot specifications
+    """
+    config = get_robot_config(robot_type)
+
+    return {
+        "name": config.name,
+        "num_joints": config.num_joints,
+        "joint_names": config.joint_names,
+        "has_gripper": len(config.gripper_joint_names) > 0,
+        "gripper_joints": config.gripper_joint_names,
+        "gripper_max_width": config.gripper_limits[1],
+        "joint_limits": {
+            "lower": config.joint_limits_lower.tolist(),
+            "upper": config.joint_limits_upper.tolist(),
+        },
+        "default_pose": config.default_joint_positions.tolist(),
+    }
 
 
 # =============================================================================
