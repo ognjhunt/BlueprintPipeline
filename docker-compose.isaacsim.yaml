@@ -281,6 +281,120 @@ services:
 
     command: ["custom", "/app/tools/run_full_isaacsim_pipeline.py"]
 
+  # ===========================================================================
+  # DWM Preparation with Isaac Sim (Dexterous World Models)
+  # ===========================================================================
+  dwm-preparation:
+    build:
+      context: .
+      dockerfile: dwm-preparation-job/Dockerfile.isaacsim
+      args:
+        ISAAC_SIM_VERSION: "4.2.0"
+    image: blueprint-dwm:isaacsim
+    container_name: blueprint-dwm
+
+    <<: [*gpu-config, *logging]
+
+    environment:
+      <<: *common-env
+      # DWM settings
+      ASSETS_PREFIX: ${ASSETS_PREFIX:-scenes/${SCENE_ID}/assets}
+      USD_PREFIX: ${USD_PREFIX:-scenes/${SCENE_ID}/usd}
+      DWM_PREFIX: ${DWM_PREFIX:-scenes/${SCENE_ID}/dwm}
+      NUM_TRAJECTORIES: ${NUM_TRAJECTORIES:-5}
+      RESOLUTION_WIDTH: ${RESOLUTION_WIDTH:-720}
+      RESOLUTION_HEIGHT: ${RESOLUTION_HEIGHT:-480}
+      NUM_FRAMES: ${NUM_FRAMES:-49}
+      FPS: ${FPS:-24}
+
+      # Force Isaac Sim rendering
+      RENDER_BACKEND: "isaac_sim"
+
+      # Headless mode
+      HEADLESS: "1"
+
+      # LLM for task generation
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+
+    volumes:
+      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
+      - ${OUTPUT_DIR:-./output}:/output:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - isaac-sim-cache:/root/.cache/ov
+      - isaac-sim-data:/root/.local/share/ov
+      - ./logs/dwm:/logs:rw
+
+    shm_size: "16gb"
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+
+    networks:
+      - blueprint-net
+
+    command: ["generate"]
+
+  # ===========================================================================
+  # Dream2Flow Preparation with Isaac Sim (3D Object Flow)
+  # ===========================================================================
+  dream2flow-preparation:
+    build:
+      context: .
+      dockerfile: dream2flow-preparation-job/Dockerfile.isaacsim
+      args:
+        ISAAC_SIM_VERSION: "4.2.0"
+    image: blueprint-dream2flow:isaacsim
+    container_name: blueprint-dream2flow
+
+    <<: [*gpu-config, *logging]
+
+    environment:
+      <<: *common-env
+      # Dream2Flow settings
+      ASSETS_PREFIX: ${ASSETS_PREFIX:-scenes/${SCENE_ID}/assets}
+      USD_PREFIX: ${USD_PREFIX:-scenes/${SCENE_ID}/usd}
+      DREAM2FLOW_PREFIX: ${DREAM2FLOW_PREFIX:-scenes/${SCENE_ID}/dream2flow}
+      NUM_TASKS: ${NUM_TASKS:-5}
+      RESOLUTION_WIDTH: ${RESOLUTION_WIDTH:-720}
+      RESOLUTION_HEIGHT: ${RESOLUTION_HEIGHT:-480}
+      NUM_FRAMES: ${NUM_FRAMES:-49}
+      FPS: ${FPS:-24}
+      ROBOT: ${ROBOT_TYPE:-franka_panda}
+
+      # Video generation API (optional)
+      VIDEO_API_ENDPOINT: ${VIDEO_API_ENDPOINT:-}
+
+      # Force Isaac Sim rendering
+      RENDER_BACKEND: "isaac_sim"
+
+      # Headless mode
+      HEADLESS: "1"
+
+      # LLM for task generation
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+
+    volumes:
+      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
+      - ${OUTPUT_DIR:-./output}:/output:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - isaac-sim-cache:/root/.cache/ov
+      - isaac-sim-data:/root/.local/share/ov
+      - ./logs/dream2flow:/logs:rw
+
+    shm_size: "16gb"
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+
+    networks:
+      - blueprint-net
+
+    command: ["generate"]
+
 # =============================================================================
 # Networks
 # =============================================================================

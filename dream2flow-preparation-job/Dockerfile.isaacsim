@@ -1,0 +1,156 @@
+# =============================================================================
+# Isaac Sim Dream2Flow Preparation Dockerfile
+# =============================================================================
+# Production container for Dream2Flow bundle generation with GPU acceleration.
+#
+# Base Image: NVIDIA Isaac Sim 4.2.0
+# GPU Required: Yes (NVIDIA GPU with 8GB+ VRAM recommended)
+#
+# Based on Dream2Flow (arXiv:2512.24766):
+# - 3D object flow extraction for embodiment-agnostic robot control
+# - Task video generation
+# - Point tracking and depth estimation
+#
+# Usage:
+#   # Build
+#   docker build -f Dockerfile.isaacsim -t blueprint-dream2flow:isaacsim .
+#
+#   # Run (requires nvidia-docker)
+#   docker run --gpus all \
+#     -e SCENE_ID=kitchen_001 \
+#     -e BUCKET=my-bucket \
+#     blueprint-dream2flow:isaacsim
+# =============================================================================
+
+# Use NVIDIA Isaac Sim as base
+ARG ISAAC_SIM_VERSION=4.2.0
+FROM nvcr.io/nvidia/isaac-sim:${ISAAC_SIM_VERSION} AS base
+
+# =============================================================================
+# Environment Setup
+# =============================================================================
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Isaac Sim paths
+ENV ISAAC_SIM_PATH=/isaac-sim
+ENV CARB_APP_PATH=${ISAAC_SIM_PATH}/kit
+ENV EXP_PATH=${ISAAC_SIM_PATH}/apps
+
+# Application paths
+ENV APP_DIR=/app
+ENV PYTHONPATH=${APP_DIR}:${ISAAC_SIM_PATH}/exts:${PYTHONPATH}
+
+# Runtime configuration
+ENV ACCEPT_EULA=Y
+ENV PRIVACY_CONSENT=Y
+
+# Headless mode by default
+ENV HEADLESS=1
+ENV DISPLAY=""
+
+# Force Isaac Sim rendering backend
+ENV RENDER_BACKEND=isaac_sim
+
+# =============================================================================
+# System Dependencies
+# =============================================================================
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # GCS/Cloud tools
+    curl \
+    gnupg \
+    ca-certificates \
+    # Build tools
+    gcc \
+    g++ \
+    python3-dev \
+    # Utilities
+    htop \
+    vim \
+    jq \
+    # Video encoding
+    ffmpeg \
+    libavcodec-dev \
+    libavformat-dev \
+    # OpenGL dependencies
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install gcsfuse for GCS bucket mounting
+RUN echo "deb https://packages.cloud.google.com/apt gcsfuse-bookworm main" | tee /etc/apt/sources.list.d/gcsfuse.list \
+    && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - \
+    && apt-get update \
+    && apt-get install -y gcsfuse \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Google Cloud SDK
+RUN curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts --install-dir=/opt \
+    && ln -s /opt/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud \
+    && ln -s /opt/google-cloud-sdk/bin/gsutil /usr/local/bin/gsutil
+
+# =============================================================================
+# Python Dependencies
+# =============================================================================
+
+WORKDIR ${APP_DIR}
+
+# Copy requirements
+COPY dream2flow-preparation-job/requirements.txt ./requirements.txt
+COPY dream2flow-preparation-job/requirements-isaacsim.txt ./requirements-isaacsim.txt
+
+# Install using Isaac Sim's Python
+RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir --upgrade pip \
+    && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir -r requirements.txt \
+    && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir -r requirements-isaacsim.txt
+
+# =============================================================================
+# Application Code
+# =============================================================================
+
+# Copy Dream2Flow preparation job
+COPY dream2flow-preparation-job/ ./dream2flow-preparation-job/
+
+# Copy shared tools
+COPY tools/ ./tools/
+COPY policy_configs/ ./policy_configs/
+
+# =============================================================================
+# Runtime Configuration
+# =============================================================================
+
+# Create directories
+RUN mkdir -p /mnt/gcs /output /logs /tmp/isaac_cache /models
+
+# Set permissions
+RUN chmod -R 755 ${APP_DIR}
+
+# Copy entrypoint script
+COPY dream2flow-preparation-job/scripts/docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD ${ISAAC_SIM_PATH}/python.sh -c "import omni.isaac.core; print('healthy')" || exit 1
+
+# =============================================================================
+# Entrypoint
+# =============================================================================
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["generate"]
+
+# =============================================================================
+# Labels
+# =============================================================================
+
+LABEL maintainer="BlueprintPipeline Team"
+LABEL description="Isaac Sim-based Dream2Flow Preparation for 3D Object Flow"
+LABEL isaac_sim_version="${ISAAC_SIM_VERSION}"
+LABEL gpu_required="true"
+LABEL paper="arXiv:2512.24766"
