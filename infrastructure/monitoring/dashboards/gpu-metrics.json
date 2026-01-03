@@ -1,0 +1,178 @@
+{
+  "displayName": "BlueprintPipeline - GPU Metrics",
+  "mosaicLayout": {
+    "columns": 12,
+    "tiles": [
+      {
+        "xPos": 0,
+        "yPos": 0,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "GPU Utilization by Node",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "resource.type=\"k8s_node\" AND metric.type=\"kubernetes.io/node/accelerator/duty_cycle\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "${resource.labels.node_name}"
+              }
+            ],
+            "yAxis": {
+              "scale": "LINEAR",
+              "label": "Duty Cycle %"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 0,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "GPU Memory Usage",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "resource.type=\"k8s_node\" AND metric.type=\"kubernetes.io/node/accelerator/memory_used\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "${resource.labels.node_name}"
+              }
+            ],
+            "yAxis": {
+              "scale": "LINEAR",
+              "label": "Bytes"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 4,
+        "width": 4,
+        "height": 4,
+        "widget": {
+          "title": "GPU Node Count",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "timeSeriesFilter": {
+                "filter": "resource.type=\"k8s_node\" AND metric.type=\"kubernetes.io/node/accelerator/memory_total\"",
+                "aggregation": {
+                  "alignmentPeriod": "60s",
+                  "perSeriesAligner": "ALIGN_COUNT"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "xPos": 4,
+        "yPos": 4,
+        "width": 4,
+        "height": 4,
+        "widget": {
+          "title": "Average GPU Utilization",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "timeSeriesFilter": {
+                "filter": "resource.type=\"k8s_node\" AND metric.type=\"kubernetes.io/node/accelerator/duty_cycle\"",
+                "aggregation": {
+                  "alignmentPeriod": "300s",
+                  "perSeriesAligner": "ALIGN_MEAN",
+                  "crossSeriesReducer": "REDUCE_MEAN"
+                }
+              }
+            },
+            "thresholds": [
+              {
+                "value": 30,
+                "color": "GREEN",
+                "direction": "BELOW",
+                "label": "Low"
+              },
+              {
+                "value": 80,
+                "color": "YELLOW",
+                "direction": "ABOVE",
+                "label": "High"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 8,
+        "yPos": 4,
+        "width": 4,
+        "height": 4,
+        "widget": {
+          "title": "GPU Jobs Running",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "timeSeriesFilter": {
+                "filter": "resource.type=\"k8s_container\" AND resource.labels.namespace_name=\"blueprint\" AND metric.type=\"kubernetes.io/container/accelerator/request\"",
+                "aggregation": {
+                  "alignmentPeriod": "60s",
+                  "perSeriesAligner": "ALIGN_COUNT"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 8,
+        "width": 12,
+        "height": 4,
+        "widget": {
+          "title": "GPU Memory Bandwidth",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "resource.type=\"k8s_node\" AND metric.type=\"kubernetes.io/node/accelerator/memory_bandwidth_used\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "${resource.labels.node_name}"
+              }
+            ],
+            "yAxis": {
+              "scale": "LINEAR",
+              "label": "Bandwidth"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "labels": {
+    "environment": "",
+    "project": "blueprint-pipeline",
+    "focus": "gpu"
+  }
+}
