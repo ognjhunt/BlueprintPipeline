@@ -1,0 +1,24 @@
+# Additional requirements for Isaac Sim environment
+# These complement the base requirements.txt
+
+# Video/Image processing
+opencv-python-headless>=4.8.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.8
+
+# Enhanced serialization
+orjson>=3.9.0
+
+# Progress and monitoring
+rich>=13.4.0
+
+# Mesh processing (for hand rendering)
+trimesh>=4.0.0
+scipy>=1.10.0
+
+# MANO hand model support (optional - works with geometric fallback)
+# smplx>=0.1.28  # Uncomment if MANO models available
+
+# Telemetry (optional)
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0

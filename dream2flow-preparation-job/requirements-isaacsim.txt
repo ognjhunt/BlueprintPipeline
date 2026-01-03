@@ -1,0 +1,36 @@
+# Additional requirements for Isaac Sim environment
+# These complement the base requirements.txt
+
+# Video/Image processing
+opencv-python-headless>=4.8.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.8
+
+# Enhanced serialization
+orjson>=3.9.0
+
+# Progress and monitoring
+rich>=13.4.0
+
+# Mesh and geometry processing
+trimesh>=4.0.0
+scipy>=1.10.0
+
+# Vision foundation models for flow extraction
+# Note: These are optional - Dream2Flow can use API endpoints instead
+# torch>=2.0.0
+# torchvision>=0.15.0
+# transformers>=4.30.0
+
+# Point tracking (CoTracker)
+# cotracker>=2.0.0
+
+# Depth estimation (DepthAnything)
+# depth-anything>=1.0.0
+
+# Segmentation (SAM)
+# segment-anything>=1.0.0
+
+# Telemetry (optional)
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
