@@ -1,0 +1,238 @@
+{
+  "displayName": "BlueprintPipeline - Overview",
+  "gridLayout": {
+    "columns": "2",
+    "widgets": [
+      {
+        "title": "Pipeline Job Success Rate",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"k8s_container\" AND resource.labels.namespace_name=\"blueprint\" AND metric.type=\"kubernetes.io/container/restart_count\"",
+                  "aggregation": {
+                    "alignmentPeriod": "300s",
+                    "perSeriesAligner": "ALIGN_RATE",
+                    "crossSeriesReducer": "REDUCE_SUM",
+                    "groupByFields": ["resource.labels.container_name"]
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "${resource.labels.container_name}"
+            }
+          ],
+          "yAxis": {
+            "scale": "LINEAR"
+          },
+          "chartOptions": {
+            "mode": "COLOR"
+          }
+        }
+      },
+      {
+        "title": "GPU Utilization",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"k8s_node\" AND metric.type=\"kubernetes.io/node/accelerator/duty_cycle\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_MEAN",
+                    "crossSeriesReducer": "REDUCE_MEAN",
+                    "groupByFields": ["resource.labels.node_name"]
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "${resource.labels.node_name}"
+            }
+          ],
+          "yAxis": {
+            "scale": "LINEAR",
+            "label": "Duty Cycle %"
+          },
+          "thresholds": [
+            {
+              "value": 80,
+              "color": "YELLOW",
+              "direction": "ABOVE",
+              "label": "High Usage"
+            },
+            {
+              "value": 95,
+              "color": "RED",
+              "direction": "ABOVE",
+              "label": "Critical"
+            }
+          ]
+        }
+      },
+      {
+        "title": "Episode Generation Jobs",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"k8s_job\" AND resource.labels.namespace_name=\"blueprint\" AND resource.labels.job_name=starts_with(\"episode-gen\")",
+                  "aggregation": {
+                    "alignmentPeriod": "3600s",
+                    "perSeriesAligner": "ALIGN_COUNT",
+                    "crossSeriesReducer": "REDUCE_COUNT",
+                    "groupByFields": ["metric.labels.status"]
+                  }
+                }
+              },
+              "plotType": "STACKED_BAR",
+              "legendTemplate": "${metric.labels.status}"
+            }
+          ],
+          "yAxis": {
+            "scale": "LINEAR",
+            "label": "Jobs"
+          }
+        }
+      },
+      {
+        "title": "GCS Storage Usage",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"gcs_bucket\" AND metric.type=\"storage.googleapis.com/storage/total_bytes\"",
+                  "aggregation": {
+                    "alignmentPeriod": "3600s",
+                    "perSeriesAligner": "ALIGN_MEAN",
+                    "crossSeriesReducer": "REDUCE_SUM",
+                    "groupByFields": ["resource.labels.bucket_name"]
+                  }
+                }
+              },
+              "plotType": "STACKED_AREA",
+              "legendTemplate": "${resource.labels.bucket_name}"
+            }
+          ],
+          "yAxis": {
+            "scale": "LINEAR",
+            "label": "Bytes"
+          }
+        }
+      },
+      {
+        "title": "Container CPU Usage",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"k8s_container\" AND resource.labels.namespace_name=\"blueprint\" AND metric.type=\"kubernetes.io/container/cpu/core_usage_time\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_RATE",
+                    "crossSeriesReducer": "REDUCE_MEAN",
+                    "groupByFields": ["resource.labels.container_name"]
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "${resource.labels.container_name}"
+            }
+          ],
+          "yAxis": {
+            "scale": "LINEAR",
+            "label": "CPU Cores"
+          }
+        }
+      },
+      {
+        "title": "Container Memory Usage",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"k8s_container\" AND resource.labels.namespace_name=\"blueprint\" AND metric.type=\"kubernetes.io/container/memory/used_bytes\"",
+                  "aggregation": {
+                    "alignmentPeriod": "60s",
+                    "perSeriesAligner": "ALIGN_MEAN",
+                    "crossSeriesReducer": "REDUCE_MEAN",
+                    "groupByFields": ["resource.labels.container_name"]
+                  }
+                }
+              },
+              "plotType": "LINE",
+              "legendTemplate": "${resource.labels.container_name}"
+            }
+          ],
+          "yAxis": {
+            "scale": "LINEAR",
+            "label": "Bytes"
+          }
+        }
+      },
+      {
+        "title": "Dead Letter Queue Size",
+        "scorecard": {
+          "timeSeriesQuery": {
+            "timeSeriesFilter": {
+              "filter": "resource.type=\"gcs_bucket\" AND resource.labels.bucket_name=ends_with(\"-dead-letter\") AND metric.type=\"storage.googleapis.com/storage/object_count\"",
+              "aggregation": {
+                "alignmentPeriod": "300s",
+                "perSeriesAligner": "ALIGN_MEAN"
+              }
+            }
+          },
+          "thresholds": [
+            {
+              "value": 10,
+              "color": "YELLOW",
+              "direction": "ABOVE",
+              "label": "Warning"
+            },
+            {
+              "value": 50,
+              "color": "RED",
+              "direction": "ABOVE",
+              "label": "Critical"
+            }
+          ]
+        }
+      },
+      {
+        "title": "Workflow Executions",
+        "xyChart": {
+          "dataSets": [
+            {
+              "timeSeriesQuery": {
+                "timeSeriesFilter": {
+                  "filter": "resource.type=\"workflows.googleapis.com/Workflow\" AND metric.type=\"workflows.googleapis.com/finished_execution_count\"",
+                  "aggregation": {
+                    "alignmentPeriod": "3600s",
+                    "perSeriesAligner": "ALIGN_SUM",
+                    "crossSeriesReducer": "REDUCE_SUM",
+                    "groupByFields": ["metric.labels.status"]
+                  }
+                }
+              },
+              "plotType": "STACKED_BAR",
+              "legendTemplate": "${metric.labels.status}"
+            }
+          ],
+          "yAxis": {
+            "scale": "LINEAR",
+            "label": "Executions"
+          }
+        }
+      }
+    ]
+  },
+  "labels": {
+    "environment": "",
+    "project": "blueprint-pipeline"
+  }
+}

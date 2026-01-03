@@ -1,0 +1,280 @@
+# =============================================================================
+# BlueprintPipeline - Alert Policies
+# =============================================================================
+# Cloud Monitoring alert policies for production monitoring.
+#
+# Deploy with:
+#   gcloud alpha monitoring policies create --policy-from-file=alert-policies.yaml
+# =============================================================================
+
+---
+# High GPU Utilization Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-gpu-high-utilization
+spec:
+  displayName: "[Blueprint] High GPU Utilization"
+  documentation:
+    content: |
+      GPU utilization is above 90% for extended period.
+
+      This may indicate:
+      - Job queue backing up
+      - Need for additional GPU nodes
+      - Inefficient GPU usage in jobs
+
+      Actions:
+      1. Check GKE node autoscaler status
+      2. Review job queue and pending jobs
+      3. Consider increasing GPU node pool max size
+    mimeType: text/markdown
+  conditions:
+    - displayName: GPU Utilization > 90%
+      conditionThreshold:
+        filter: >
+          resource.type="k8s_node" AND
+          metric.type="kubernetes.io/node/accelerator/duty_cycle"
+        comparison: COMPARISON_GT
+        thresholdValue: 90
+        duration: 600s  # 10 minutes
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_MEAN
+            crossSeriesReducer: REDUCE_MEAN
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+  alertStrategy:
+    autoClose: 1800s  # 30 minutes
+
+---
+# Job Failure Rate Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-job-failure-rate
+spec:
+  displayName: "[Blueprint] High Job Failure Rate"
+  documentation:
+    content: |
+      Job failure rate is above acceptable threshold.
+
+      This may indicate:
+      - Issues with scene data
+      - Infrastructure problems
+      - Isaac Sim container issues
+      - API quota exhaustion
+
+      Actions:
+      1. Check dead letter queue for failed jobs
+      2. Review container logs for errors
+      3. Verify API keys and quotas
+      4. Check scene manifest validity
+    mimeType: text/markdown
+  conditions:
+    - displayName: Job Failures > 3 in 15 minutes
+      conditionThreshold:
+        filter: >
+          resource.type="k8s_job" AND
+          resource.labels.namespace_name="blueprint" AND
+          metric.type="kubernetes.io/job/failed_containers"
+        comparison: COMPARISON_GT
+        thresholdValue: 3
+        duration: 900s  # 15 minutes
+        aggregations:
+          - alignmentPeriod: 300s
+            perSeriesAligner: ALIGN_SUM
+            crossSeriesReducer: REDUCE_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Dead Letter Queue Growing Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-dlq-growing
+spec:
+  displayName: "[Blueprint] Dead Letter Queue Growing"
+  documentation:
+    content: |
+      Dead letter queue has more than 10 messages.
+
+      Failed jobs are accumulating and need attention.
+
+      Actions:
+      1. Review DLQ messages: gsutil ls gs://${BUCKET}-dead-letter/pending/
+      2. Identify common failure patterns
+      3. Fix root cause issues
+      4. Retry or abandon stale messages
+    mimeType: text/markdown
+  conditions:
+    - displayName: DLQ Objects > 10
+      conditionThreshold:
+        filter: >
+          resource.type="gcs_bucket" AND
+          resource.labels.bucket_name=ends_with("-dead-letter") AND
+          metric.type="storage.googleapis.com/storage/object_count"
+        comparison: COMPARISON_GT
+        thresholdValue: 10
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_MEAN
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Container OOM Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-container-oom
+spec:
+  displayName: "[Blueprint] Container Out of Memory"
+  documentation:
+    content: |
+      Container was killed due to out of memory.
+
+      Isaac Sim containers require significant memory (16GB+ shared memory).
+
+      Actions:
+      1. Review container resource limits
+      2. Check shared memory allocation
+      3. Increase memory limits if needed
+      4. Consider splitting work into smaller batches
+    mimeType: text/markdown
+  conditions:
+    - displayName: OOM Kill Detected
+      conditionThreshold:
+        filter: >
+          resource.type="k8s_container" AND
+          resource.labels.namespace_name="blueprint" AND
+          metric.type="kubernetes.io/container/restart_count"
+        comparison: COMPARISON_GT
+        thresholdValue: 0
+        duration: 60s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_DELTA
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+  alertStrategy:
+    autoClose: 3600s  # 1 hour
+
+---
+# Workflow Execution Failure Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-workflow-failure
+spec:
+  displayName: "[Blueprint] Workflow Execution Failed"
+  documentation:
+    content: |
+      A Cloud Workflow execution has failed.
+
+      This may indicate:
+      - GCS access issues
+      - Cloud Run job failures
+      - GKE job scheduling problems
+      - Configuration errors
+
+      Actions:
+      1. Check workflow execution logs
+      2. Review Cloud Run job logs
+      3. Verify EventArc triggers
+      4. Check service account permissions
+    mimeType: text/markdown
+  conditions:
+    - displayName: Workflow Failed
+      conditionThreshold:
+        filter: >
+          resource.type="workflows.googleapis.com/Workflow" AND
+          metric.type="workflows.googleapis.com/finished_execution_count" AND
+          metric.labels.status="FAILED"
+        comparison: COMPARISON_GT
+        thresholdValue: 0
+        duration: 60s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Storage Quota Warning
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-storage-quota
+spec:
+  displayName: "[Blueprint] Storage Usage High"
+  documentation:
+    content: |
+      Storage usage is approaching quota limits.
+
+      Actions:
+      1. Review storage usage by bucket
+      2. Clean up old/unused scenes
+      3. Archive completed datasets to Coldline
+      4. Request quota increase if needed
+    mimeType: text/markdown
+  conditions:
+    - displayName: Storage > 100GB
+      conditionThreshold:
+        filter: >
+          resource.type="gcs_bucket" AND
+          resource.labels.bucket_name=contains("blueprint") AND
+          metric.type="storage.googleapis.com/storage/total_bytes"
+        comparison: COMPARISON_GT
+        thresholdValue: 107374182400  # 100GB
+        duration: 3600s
+        aggregations:
+          - alignmentPeriod: 3600s
+            perSeriesAligner: ALIGN_MEAN
+            crossSeriesReducer: REDUCE_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# API Quota Alert (Gemini/OpenAI)
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-api-quota
+spec:
+  displayName: "[Blueprint] API Rate Limit Warning"
+  documentation:
+    content: |
+      API rate limiting may be affecting pipeline performance.
+
+      Actions:
+      1. Review API usage patterns
+      2. Implement request batching
+      3. Add request throttling
+      4. Consider API quota increase
+    mimeType: text/markdown
+  conditions:
+    - displayName: High Error Rate from External APIs
+      conditionThreshold:
+        filter: >
+          resource.type="k8s_container" AND
+          resource.labels.namespace_name="blueprint" AND
+          metric.type="logging.googleapis.com/log_entry_count" AND
+          metric.labels.severity="ERROR"
+        comparison: COMPARISON_GT
+        thresholdValue: 10
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
