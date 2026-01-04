@@ -9,9 +9,15 @@ needed for domain randomization in Isaac Sim Replicator:
 2. Check asset library for existing assets (optional optimization)
 3. For missing assets:
    a. Generate reference images using Gemini 3.0 Pro Image (Nano Banana Pro)
-   b. Convert to 3D using SAM3D (fast) or Hunyuan (quality)
+   b. Convert to 3D using SAM3D (fast), Hunyuan (quality), or UltraShape (ultra)
    c. Add physics properties inline (mass, friction, COM, collision)
 4. Output: SimReady USDZ assets ready for Replicator placement
+
+3D Backend Options:
+    - SAM3D: Fast, good for simple objects (30-60 seconds per asset)
+    - Hunyuan: High quality, slower (2-5 minutes per asset)
+    - UltraShape: Highest quality via Hunyuan + diffusion refinement (5-10 minutes per asset)
+      Reference: https://github.com/PKU-YuanGroup/UltraShape-1.0
 
 Pipeline Flow:
     replicator-job manifest.json
@@ -26,14 +32,19 @@ Configuration (Environment Variables):
     REPLICATOR_PREFIX: Path to replicator bundle (default: scenes/{SCENE_ID}/replicator)
     VARIATION_ASSETS_PREFIX: Output path (default: scenes/{SCENE_ID}/variation_assets)
 
-    3D_BACKEND: "sam3d" | "hunyuan" | "auto" (default: "auto")
-    QUALITY_MODE: "fast" | "balanced" | "quality" (default: "balanced")
+    3D_BACKEND: "sam3d" | "hunyuan" | "ultrashape" | "auto" (default: "auto")
+    QUALITY_MODE: "fast" | "balanced" | "quality" | "ultra" (default: "balanced")
     MAX_ASSETS: Maximum number of assets to generate (default: all)
     PRIORITY_FILTER: "required" | "recommended" | "optional" | "" (default: "")
 
     ASSET_LIBRARY_PATH: Path to shared asset library (optional)
     SKIP_EXISTING: Skip assets that already exist (default: "1")
     DRY_RUN: Skip actual generation (default: "0")
+
+    # UltraShape-specific configuration
+    ULTRASHAPE_REPO_PATH: Path to UltraShape repository (default: /app/UltraShape-1.0)
+    ULTRASHAPE_CHECKPOINT: Path to UltraShape checkpoint (default: /app/ultrashape/checkpoints/ultrashape_v1.pt)
+    ULTRASHAPE_CONFIG: Path to UltraShape config (default: /app/ultrashape/configs/infer_dit_refine.yaml)
 """
 
 import json
@@ -79,6 +90,8 @@ QUALITY_PRESETS = {
         "sam3d_normalize": True,
         "hunyuan_render_size": 512,
         "hunyuan_texture_size": 1024,
+        "ultrashape_steps": 30,
+        "ultrashape_octree_resolution": 128,
     },
     "balanced": {
         "3d_backend": "auto",  # SAM3D for simple, Hunyuan for complex
@@ -86,6 +99,8 @@ QUALITY_PRESETS = {
         "sam3d_normalize": True,
         "hunyuan_render_size": 1024,
         "hunyuan_texture_size": 2048,
+        "ultrashape_steps": 50,
+        "ultrashape_octree_resolution": 256,
     },
     "quality": {
         "3d_backend": "hunyuan",
@@ -93,6 +108,17 @@ QUALITY_PRESETS = {
         "sam3d_normalize": True,
         "hunyuan_render_size": 2048,
         "hunyuan_texture_size": 4096,
+        "ultrashape_steps": 50,
+        "ultrashape_octree_resolution": 256,
+    },
+    "ultra": {
+        "3d_backend": "ultrashape",  # Hunyuan + UltraShape refinement
+        "image_size": 2048,
+        "sam3d_normalize": True,
+        "hunyuan_render_size": 2048,
+        "hunyuan_texture_size": 4096,
+        "ultrashape_steps": 75,
+        "ultrashape_octree_resolution": 384,
     },
 }
 
@@ -175,6 +201,7 @@ PHYSICS_DEFAULTS = {
 class Backend3D(str, Enum):
     SAM3D = "sam3d"
     HUNYUAN = "hunyuan"
+    ULTRASHAPE = "ultrashape"  # Hunyuan + UltraShape refinement
     AUTO = "auto"
 
 
@@ -1049,6 +1076,144 @@ def run_hunyuan_reconstruction(
         return False, None, f"Hunyuan error: {str(e)}"
 
 
+def run_ultrashape_reconstruction(
+    image_path: Path,
+    output_dir: Path,
+    asset_name: str,
+    render_size: int = 2048,
+    texture_size: int = 4096,
+    ultrashape_steps: int = 50,
+    ultrashape_octree_resolution: int = 256,
+    dry_run: bool = False
+) -> Tuple[bool, Optional[Path], Optional[str]]:
+    """
+    Run UltraShape reconstruction on a reference image.
+
+    UltraShape is a two-stage pipeline:
+    1. First generates a coarse mesh using Hunyuan3D-2.1
+    2. Then refines the mesh using UltraShape diffusion model
+
+    This produces the highest quality 3D reconstructions, but is slower.
+
+    Reference: https://github.com/PKU-YuanGroup/UltraShape-1.0
+
+    Returns: (success, glb_path, error_message)
+    """
+    if dry_run:
+        print(f"[VAR-PIPELINE] [DRY-RUN] Would run UltraShape for: {asset_name}")
+        return True, output_dir / safe_name(asset_name) / "model.glb", None
+
+    try:
+        # Stage 1: Generate coarse mesh with Hunyuan3D
+        print(f"[VAR-PIPELINE] UltraShape Stage 1: Generating coarse mesh with Hunyuan3D")
+
+        success, coarse_mesh_path, error = run_hunyuan_reconstruction(
+            image_path=image_path,
+            output_dir=output_dir,
+            asset_name=f"{asset_name}_coarse",
+            render_size=render_size,
+            texture_size=texture_size,
+            dry_run=False,
+        )
+
+        if not success:
+            return False, None, f"UltraShape Stage 1 (Hunyuan) failed: {error}"
+
+        # Stage 2: Refine with UltraShape
+        print(f"[VAR-PIPELINE] UltraShape Stage 2: Refining mesh with UltraShape")
+
+        try:
+            # Try to import UltraShape refiner
+            ULTRASHAPE_REPO_PATH = Path(os.getenv("ULTRASHAPE_REPO_PATH", "/app/UltraShape-1.0"))
+            sys.path.insert(0, str(ULTRASHAPE_REPO_PATH))
+
+            # Add the project's ultrashape module
+            project_ultrashape = Path(__file__).parent.parent / "ultrashape"
+            if project_ultrashape.is_dir():
+                sys.path.insert(0, str(project_ultrashape.parent))
+
+            from ultrashape.ultrashape_refiner import UltraShapeRefiner, UltraShapeConfig
+
+            # Configure UltraShape
+            config = UltraShapeConfig(
+                checkpoint_path=os.getenv(
+                    "ULTRASHAPE_CHECKPOINT",
+                    "/app/ultrashape/checkpoints/ultrashape_v1.pt"
+                ),
+                config_path=os.getenv(
+                    "ULTRASHAPE_CONFIG",
+                    "/app/ultrashape/configs/infer_dit_refine.yaml"
+                ),
+                diffusion_steps=ultrashape_steps,
+                octree_resolution=ultrashape_octree_resolution,
+            )
+
+            refiner = UltraShapeRefiner(
+                config=config,
+                ultrashape_repo_path=str(ULTRASHAPE_REPO_PATH),
+            )
+
+            # Check if UltraShape is available
+            if not refiner.is_available():
+                print("[VAR-PIPELINE] UltraShape not available, using Hunyuan output directly")
+                # Rename coarse mesh to final output
+                asset_out_dir = output_dir / safe_name(asset_name)
+                asset_out_dir.mkdir(parents=True, exist_ok=True)
+                final_glb_path = asset_out_dir / "model.glb"
+
+                import shutil
+                shutil.copy(coarse_mesh_path, final_glb_path)
+
+                return True, final_glb_path, None
+
+            # Run refinement
+            asset_out_dir = output_dir / safe_name(asset_name)
+            asset_out_dir.mkdir(parents=True, exist_ok=True)
+            refined_glb_path = asset_out_dir / "model.glb"
+
+            success, output_path, error = refiner.refine(
+                image_path=image_path,
+                coarse_mesh_path=coarse_mesh_path,
+                output_path=refined_glb_path,
+                diffusion_steps=ultrashape_steps,
+            )
+
+            if not success:
+                print(f"[VAR-PIPELINE] UltraShape refinement failed: {error}")
+                print("[VAR-PIPELINE] Falling back to Hunyuan output")
+
+                import shutil
+                shutil.copy(coarse_mesh_path, refined_glb_path)
+                return True, refined_glb_path, None
+
+            # Cleanup coarse mesh
+            try:
+                coarse_dir = output_dir / safe_name(f"{asset_name}_coarse")
+                if coarse_dir.is_dir():
+                    import shutil
+                    shutil.rmtree(coarse_dir)
+            except Exception:
+                pass  # Ignore cleanup errors
+
+            print(f"[VAR-PIPELINE] UltraShape complete: {asset_name} -> {refined_glb_path}")
+            return True, refined_glb_path, None
+
+        except ImportError as e:
+            print(f"[VAR-PIPELINE] UltraShape not available ({e}), using Hunyuan output")
+            # Copy coarse mesh to final output
+            asset_out_dir = output_dir / safe_name(asset_name)
+            asset_out_dir.mkdir(parents=True, exist_ok=True)
+            final_glb_path = asset_out_dir / "model.glb"
+
+            import shutil
+            shutil.copy(coarse_mesh_path, final_glb_path)
+
+            return True, final_glb_path, None
+
+    except Exception as e:
+        return False, None, f"UltraShape error: {str(e)}"
+
+
 def convert_glb_to_usdz(glb_path: Path, usdz_path: Path) -> bool:
     """Convert GLB to USDZ using usd_from_gltf if available."""
     usd_from_gltf = shutil.which("usd_from_gltf")
@@ -1259,7 +1424,19 @@ def process_single_asset(
 
     preset = QUALITY_PRESETS.get(config.quality_mode, QUALITY_PRESETS["balanced"])
 
-    if backend == "hunyuan":
+    if backend == "ultrashape":
+        # UltraShape: Hunyuan + refinement for highest quality
+        success, glb_path, error = run_ultrashape_reconstruction(
+            image_path=image_path,
+            output_dir=output_dir,
+            asset_name=asset.name,
+            render_size=preset["hunyuan_render_size"],
+            texture_size=preset["hunyuan_texture_size"],
+            ultrashape_steps=preset.get("ultrashape_steps", 50),
+            ultrashape_octree_resolution=preset.get("ultrashape_octree_resolution", 256),
+            dry_run=config.dry_run,
+        )
+    elif backend == "hunyuan":
         success, glb_path, error = run_hunyuan_reconstruction(
             image_path=image_path,
             output_dir=output_dir,
