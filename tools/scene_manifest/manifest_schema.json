@@ -225,7 +225,42 @@
               "instance_id": {"type": "string"},
               "affordances": {
                 "type": "array",
-                "items": {"type": "string"}
+                "items": {"type": "string"},
+                "description": "Isaac Lab-Arena affordance types (Openable, Graspable, Turnable, etc.)"
+              },
+              "affordance_params": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "description": "Parameters for each affordance type",
+                  "properties": {
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "source": {"type": "string", "enum": ["detected", "manual", "llm", "heuristic", "fallback"]},
+                    "joint_type": {"type": "string", "enum": ["revolute", "prismatic"]},
+                    "joint_name": {"type": "string"},
+                    "open_angle": {"type": "number"},
+                    "open_distance": {"type": "number"},
+                    "close_angle": {"type": "number"},
+                    "close_distance": {"type": "number"},
+                    "rotation_axis": {"type": "string"},
+                    "rotation_range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                    "press_depth": {"type": "number"},
+                    "toggle": {"type": "boolean"},
+                    "button_ids": {"type": "array", "items": {"type": "string"}},
+                    "grasp_width_range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                    "approach_direction": {"type": "string"},
+                    "preferred_grasp_points": {"type": "array"},
+                    "insertion_axis": {"type": "string"},
+                    "insertion_depth": {"type": "number"},
+                    "receptacle_tolerance": {"type": "number"},
+                    "stack_axis": {"type": "string"},
+                    "max_stack_height": {"type": "integer"},
+                    "pour_axis": {"type": "string"},
+                    "capacity_liters": {"type": "number"},
+                    "notes": {"type": "string"}
+                  }
+                },
+                "description": "Affordance-specific parameters for Arena task generation"
               },
               "tags": {
                 "type": "array",

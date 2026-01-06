@@ -278,6 +278,41 @@ class JobRegistry:
         )
 
         # =====================================================================
+        # ISAAC LAB-ARENA INTEGRATION JOBS
+        # =====================================================================
+
+        self._jobs["arena-export-job"] = JobInfo(
+            name="arena-export-job",
+            description="Export scene to Isaac Lab-Arena format with affordances",
+            status=JobStatus.NEW,
+            category=JobCategory.TRAINING,
+            entry_script="arena-export-job/arena_export_job.py",
+            docker_image="arena-export-job",
+            required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX"],
+            optional_env_vars=[
+                "USE_LLM_AFFORDANCES",    # Enable Gemini for affordance detection
+                "ENABLE_HUB_REGISTRATION",  # Register with LeRobot Hub
+                "HUB_NAMESPACE",          # Hugging Face namespace
+                "GEMINI_API_KEY",
+                "HF_TOKEN",               # For Hub registration
+            ],
+            depends_on=["isaac-lab-job", "usd-assembly-job"],
+            outputs=[
+                "arena/arena_manifest.json",
+                "arena/scene_module.py",
+                "arena/tasks/*.py",
+                "arena/asset_registry.json",
+                "arena/hub_config.yaml",
+            ],
+            migration_notes=(
+                "Isaac Lab-Arena integration for standardized policy evaluation. "
+                "Detects affordances (Openable, Graspable, Turnable, etc.) and "
+                "generates Arena-compatible tasks. Supports LeRobot Hub registration. "
+                "Reference: https://developer.nvidia.com/isaac/lab-arena"
+            ),
+        )
+
+        # =====================================================================
         # DREAM2FLOW PIPELINE JOBS (arXiv:2512.24766)
         # =====================================================================
 
@@ -384,6 +419,7 @@ class JobRegistry:
             "replicator-job",
             "variation-gen-job",
             "isaac-lab-job",
+            "arena-export-job",  # Isaac Lab-Arena integration (affordances + tasks)
             "episode-generation-job",  # Generates training episodes
             "dwm-preparation-job",  # DWM conditioning data (parallel)
             "dream2flow-preparation-job",  # Dream2Flow bundles (parallel)
