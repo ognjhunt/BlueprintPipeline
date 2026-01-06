@@ -1,0 +1,14 @@
+# Arena Export Job Dependencies
+
+# Core dependencies
+pyyaml>=6.0
+jsonschema>=4.0
+
+# Google Cloud (for GCS access)
+google-cloud-storage>=2.10.0
+
+# Gemini API for LLM-based affordance detection (optional)
+google-genai>=0.5.0
+
+# Hugging Face Hub for LeRobot registration (optional)
+huggingface-hub>=0.20.0
