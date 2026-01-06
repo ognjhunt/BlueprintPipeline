@@ -1,0 +1,185 @@
+# arena-export-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that exports Blueprint scenes to Isaac Lab-Arena format.
+#
+# This pipeline:
+#   1. Triggers on completion marker from usd-assembly or isaac-lab jobs
+#   2. Runs arena-export-job to detect affordances and generate Arena format
+#   3. Optionally registers the environment with LeRobot Hub
+#
+# Trigger: Cloud Storage object finalized event for .usd_complete or .isaac_lab_complete
+#
+# Isaac Lab-Arena is NVIDIA's open-source framework for robot policy evaluation
+# at scale using standardized affordances and benchmarks.
+# Reference: https://developer.nvidia.com/isaac/lab-arena
+
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: "us-central1"
+        next: filter_completion_markers
+
+    - filter_completion_markers:
+        switch:
+          # Trigger on Isaac Lab completion (preferred - has all assets)
+          - condition: '${text.match_regex(object, "^scenes/.+/isaac_lab/\\.isaac_lab_complete$")}'
+            next: derive_from_isaac_lab
+          # Also trigger on USD completion (fallback - minimal requirement)
+          - condition: '${text.match_regex(object, "^scenes/.+/usd/\\.usd_complete$")}'
+            next: derive_from_usd
+        next: skip
+
+    - derive_from_isaac_lab:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
+          - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
+          - arenaPrefix: '${"scenes/" + sceneId + "/arena"}'
+          - arenaJobName: "arena-export-job"
+          - triggerSource: "isaac_lab"
+        next: log_start
+
+    - derive_from_usd:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
+          - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
+          - arenaPrefix: '${"scenes/" + sceneId + "/arena"}'
+          - arenaJobName: "arena-export-job"
+          - triggerSource: "usd"
+        next: log_start
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Arena export triggered for scene " + sceneId + " (source: " + triggerSource + ") - detecting affordances and generating Arena format"}'
+          severity: "INFO"
+        next: run_arena_export_job
+
+    # =========================================================================
+    # Arena Export Job - Generate Isaac Lab-Arena compatible format
+    # =========================================================================
+
+    - run_arena_export_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + arenaJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: USD_PREFIX
+                      value: ${usdPrefix}
+                    - name: ARENA_PREFIX
+                      value: ${arenaPrefix}
+                    # Enable LLM-based affordance detection
+                    - name: USE_LLM_AFFORDANCES
+                      value: "true"
+                    # Enable Hub registration (requires HF_TOKEN secret)
+                    - name: ENABLE_HUB_REGISTRATION
+                      value: '${sys.get_env("ENABLE_HUB_REGISTRATION", "false")}'
+                    - name: HUB_NAMESPACE
+                      value: '${sys.get_env("HUB_NAMESPACE", "blueprint-robotics")}'
+        result: arenaExec
+        next: set_arena_execution_name
+
+    - set_arena_execution_name:
+        assign:
+          - arenaExecutionName: '${if(arenaExec.metadata != null and arenaExec.metadata.name != null, arenaExec.metadata.name, arenaExec.name)}'
+        next: wait_for_arena
+
+    - wait_for_arena:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${arenaExecutionName}
+        result: arenaStatus
+        next: check_arena_status
+
+    - check_arena_status:
+        assign:
+          - arenaState: '${if(arenaStatus.state != null, arenaStatus.state, if(arenaStatus.status != null, arenaStatus.status.state, null))}'
+          - arenaFailedCount: '${if(arenaStatus.failedCount != null, arenaStatus.failedCount, if(arenaStatus.status != null, arenaStatus.status.failedCount, null))}'
+          - arenaSucceededCount: '${if(arenaStatus.succeededCount != null, arenaStatus.succeededCount, if(arenaStatus.status != null, arenaStatus.status.succeededCount, null))}'
+        next: arena_status_switch
+
+    - arena_status_switch:
+        switch:
+          - condition: '${arenaState == "FAILED" or (arenaFailedCount != null and arenaFailedCount > 0)}'
+            next: arena_failed
+          - condition: '${arenaState == "SUCCEEDED" or (arenaSucceededCount != null and arenaSucceededCount > 0)}'
+            next: log_arena_complete
+        next: wait_arena_poll
+
+    - wait_arena_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_arena
+
+    - log_arena_complete:
+        call: sys.log
+        args:
+          text: '${"Arena export completed for scene " + sceneId + " - affordances detected and Arena format generated"}'
+          severity: "INFO"
+        next: done
+
+    - arena_failed:
+        # Arena export failure is non-fatal - scene is still usable without Arena format
+        call: sys.log
+        args:
+          text: '${"WARNING: Arena export failed for scene " + sceneId + " - scene is still usable but without Arena evaluation support"}'
+          severity: "WARNING"
+        next: done_without_arena
+
+    # =========================================================================
+    # Completion
+    # =========================================================================
+
+    - done:
+        return:
+          status: "SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"Arena export completed for scene " + sceneId}'
+          trigger_source: ${triggerSource}
+          arena_execution: ${arenaExec.name}
+          outputs:
+            arena_manifest: '${"scenes/" + sceneId + "/arena/arena_manifest.json"}'
+            scene_module: '${"scenes/" + sceneId + "/arena/scene_module.py"}'
+            tasks_dir: '${"scenes/" + sceneId + "/arena/tasks/"}'
+            hub_config: '${"scenes/" + sceneId + "/arena/hub_config.yaml"}'
+            asset_registry: '${"scenes/" + sceneId + "/arena/asset_registry.json"}'
+
+    - done_without_arena:
+        return:
+          status: "PARTIAL_SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"Scene " + sceneId + " available without Arena export"}'
+          trigger_source: ${triggerSource}
+          arena_execution: ${arenaExec.name}
+          outputs:
+            scene_usda: '${"scenes/" + sceneId + "/usd/scene.usda"}'
+
+    - skip:
+        return:
+          status: "SKIPPED"
+          message: '${"Not an Arena trigger marker file: " + object}'
