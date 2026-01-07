@@ -35,13 +35,18 @@ BlueprintPipeline                          Genie Sim 3.0
 
 ## Usage
 
-### Enable Genie Sim Mode
+### Genie Sim Mode (Default)
 
-Set environment variable to route pipeline to Genie Sim:
+Genie Sim is enabled by default. To customize robot type:
 
 ```bash
-export USE_GENIESIM=true
 export GENIESIM_ROBOT_TYPE=franka  # or g2, ur10
+```
+
+To disable Genie Sim and use BlueprintPipeline's own episode generation:
+
+```bash
+export USE_GENIESIM=false
 ```
 
 ### Run Locally
