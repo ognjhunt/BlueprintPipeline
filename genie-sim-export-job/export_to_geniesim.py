@@ -74,6 +74,8 @@ def run_geniesim_export_job(
     enable_bimanual: bool = True,  # DEFAULT: ENABLED
     enable_vla_packages: bool = True,  # DEFAULT: ENABLED
     enable_rich_annotations: bool = True,  # DEFAULT: ENABLED
+    variation_assets_prefix: Optional[str] = None,  # Path to variation assets
+    replicator_prefix: Optional[str] = None,  # Path to replicator bundle
 ) -> int:
     """
     Run the Genie Sim export job.
@@ -93,6 +95,8 @@ def run_geniesim_export_job(
         enable_bimanual: Generate bimanual task configs (DEFAULT: True)
         enable_vla_packages: Generate VLA fine-tuning configs (DEFAULT: True)
         enable_rich_annotations: Generate rich annotation configs (DEFAULT: True)
+        variation_assets_prefix: Path to variation assets (YOUR commercial assets)
+        replicator_prefix: Path to replicator bundle
 
     Returns:
         0 on success, 1 on failure
@@ -100,6 +104,8 @@ def run_geniesim_export_job(
     print(f"[GENIESIM-EXPORT-JOB] Starting Genie Sim export for scene: {scene_id}")
     print(f"[GENIESIM-EXPORT-JOB] Assets prefix: {assets_prefix}")
     print(f"[GENIESIM-EXPORT-JOB] Output prefix: {geniesim_prefix}")
+    print(f"[GENIESIM-EXPORT-JOB] Variation assets prefix: {variation_assets_prefix}")
+    print(f"[GENIESIM-EXPORT-JOB] Replicator prefix: {replicator_prefix}")
     print(f"[GENIESIM-EXPORT-JOB] Primary robot type: {robot_type}")
     print(f"[GENIESIM-EXPORT-JOB] Max tasks: {max_tasks}")
     print(f"[GENIESIM-EXPORT-JOB] Generate embeddings: {generate_embeddings}")
@@ -119,6 +125,40 @@ def run_geniesim_export_job(
         print(f"[GENIESIM-EXPORT-JOB] ERROR: Manifest not found: {manifest_path}")
         return 1
 
+    # Load and merge variation assets (YOUR commercial assets for domain randomization)
+    # This is CRITICAL for commercial use - Genie Sim's assets are CC BY-NC-SA 4.0
+    variation_assets_dir = None
+    if variation_assets_prefix:
+        variation_assets_dir = root / variation_assets_prefix
+        variation_assets_json = variation_assets_dir / "variation_assets.json"
+        if variation_assets_json.is_file():
+            print(f"[GENIESIM-EXPORT-JOB] Loading variation assets from: {variation_assets_json}")
+            try:
+                with open(variation_assets_json) as f:
+                    variation_data = json.load(f)
+                variation_objects = variation_data.get("objects", [])
+                print(f"[GENIESIM-EXPORT-JOB] Found {len(variation_objects)} variation assets")
+
+                # Mark these as YOUR commercial assets
+                for obj in variation_objects:
+                    if "asset" not in obj:
+                        obj["asset"] = {}
+                    obj["asset"]["source"] = "blueprintpipeline_generated"
+                    obj["asset"]["commercial_ok"] = True
+                    obj["is_variation_asset"] = True
+
+                # We'll merge these with the manifest later
+            except Exception as e:
+                print(f"[GENIESIM-EXPORT-JOB] WARNING: Failed to load variation assets: {e}")
+                variation_objects = []
+        else:
+            print(f"[GENIESIM-EXPORT-JOB] No variation assets found at: {variation_assets_json}")
+            variation_objects = []
+    else:
+        variation_objects = []
+        print("[GENIESIM-EXPORT-JOB] WARNING: No variation_assets_prefix specified")
+        print("[GENIESIM-EXPORT-JOB] WARNING: Without YOUR variation assets, you cannot sell the data commercially!")
+
     # Find USD source directory
     usd_source_dir = None
     for possible_usd_dir in [
@@ -130,6 +170,40 @@ def run_geniesim_export_job(
             usd_source_dir = possible_usd_dir
             print(f"[GENIESIM-EXPORT-JOB] Found USD directory: {usd_source_dir}")
             break
+
+    # Load manifest and merge with variation assets
+    print(f"[GENIESIM-EXPORT-JOB] Loading manifest: {manifest_path}")
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    original_object_count = len(manifest.get("objects", []))
+    print(f"[GENIESIM-EXPORT-JOB] Original manifest has {original_object_count} objects")
+
+    # Merge variation assets into manifest
+    if variation_objects:
+        print(f"[GENIESIM-EXPORT-JOB] Merging {len(variation_objects)} variation assets into manifest")
+        if "objects" not in manifest:
+            manifest["objects"] = []
+        manifest["objects"].extend(variation_objects)
+
+        # Also add to a separate key for reference
+        manifest["variation_assets"] = {
+            "count": len(variation_objects),
+            "source": "variation-gen-job",
+            "commercial_ok": True,
+        }
+        print(f"[GENIESIM-EXPORT-JOB] Merged manifest now has {len(manifest['objects'])} objects")
+    else:
+        print("[GENIESIM-EXPORT-JOB] WARNING: No variation assets to merge")
+        print("[GENIESIM-EXPORT-JOB] WARNING: Scene will only have original objects")
+        print("[GENIESIM-EXPORT-JOB] WARNING: For domain randomization in commercial use, you need variation assets!")
+
+    # Write merged manifest to output directory for the exporter
+    output_dir.mkdir(parents=True, exist_ok=True)
+    merged_manifest_path = output_dir / "merged_scene_manifest.json"
+    with open(merged_manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"[GENIESIM-EXPORT-JOB] Wrote merged manifest to: {merged_manifest_path}")
 
     # Configure exporter with enhanced features
     config = GenieSimExportConfig(
@@ -149,8 +223,9 @@ def run_geniesim_export_job(
 
     try:
         exporter = GenieSimExporter(config, verbose=True)
+        # Use merged manifest that includes YOUR variation assets
         result = exporter.export(
-            manifest_path=manifest_path,
+            manifest_path=merged_manifest_path,
             output_dir=output_dir,
             usd_source_dir=usd_source_dir if copy_usd else None,
         )
@@ -171,11 +246,14 @@ def run_geniesim_export_job(
                 "scene_id": scene_id,
                 "robot_type": robot_type,
                 "success": True,
+                "commercial_data": filter_commercial,
                 "stats": {
                     "nodes": result.num_nodes,
                     "edges": result.num_edges,
                     "assets": result.num_assets,
                     "tasks": result.num_tasks,
+                    "original_objects": original_object_count,
+                    "variation_assets": len(variation_objects),
                 },
             }, indent=2))
 
@@ -205,6 +283,9 @@ def main():
     # Prefixes with defaults
     assets_prefix = os.getenv("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
     geniesim_prefix = os.getenv("GENIESIM_PREFIX", f"scenes/{scene_id}/geniesim")
+    # IMPORTANT: variation_assets_prefix contains YOUR commercial assets
+    variation_assets_prefix = os.getenv("VARIATION_ASSETS_PREFIX", f"scenes/{scene_id}/variation_assets")
+    replicator_prefix = os.getenv("REPLICATOR_PREFIX", f"scenes/{scene_id}/replicator")
 
     # Configuration
     robot_type = os.getenv("ROBOT_TYPE", "franka")
@@ -224,12 +305,15 @@ def main():
     print("[GENIESIM-EXPORT-JOB] Configuration:")
     print(f"[GENIESIM-EXPORT-JOB]   Bucket: {bucket}")
     print(f"[GENIESIM-EXPORT-JOB]   Scene ID: {scene_id}")
+    print(f"[GENIESIM-EXPORT-JOB]   Variation Assets: {variation_assets_prefix}")
+    print(f"[GENIESIM-EXPORT-JOB]   Replicator Bundle: {replicator_prefix}")
     print(f"[GENIESIM-EXPORT-JOB]   Primary Robot Type: {robot_type}")
     print(f"[GENIESIM-EXPORT-JOB]   Max Tasks: {max_tasks}")
     print(f"[GENIESIM-EXPORT-JOB]   Multi-Robot: {enable_multi_robot}")
     print(f"[GENIESIM-EXPORT-JOB]   Bimanual: {enable_bimanual}")
     print(f"[GENIESIM-EXPORT-JOB]   VLA Packages: {enable_vla_packages}")
     print(f"[GENIESIM-EXPORT-JOB]   Rich Annotations: {enable_rich_annotations}")
+    print(f"[GENIESIM-EXPORT-JOB]   Commercial Filter: {filter_commercial}")
 
     GCS_ROOT = Path("/mnt/gcs")
 
@@ -249,6 +333,9 @@ def main():
         enable_bimanual=enable_bimanual,
         enable_vla_packages=enable_vla_packages,
         enable_rich_annotations=enable_rich_annotations,
+        # YOUR commercial assets for domain randomization
+        variation_assets_prefix=variation_assets_prefix,
+        replicator_prefix=replicator_prefix,
     )
 
     sys.exit(exit_code)
