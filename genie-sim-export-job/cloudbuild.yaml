@@ -1,0 +1,123 @@
+# =============================================================================
+# Cloud Build configuration for genie-sim-export-job
+# =============================================================================
+#
+# This builds and deploys the Genie Sim export job to Cloud Run.
+# The job converts BlueprintPipeline scenes to Genie Sim 3.0 format.
+#
+# Usage:
+#   gcloud builds submit --config=genie-sim-export-job/cloudbuild.yaml .
+#
+# Or with substitutions:
+#   gcloud builds submit --config=genie-sim-export-job/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1 .
+#
+# =============================================================================
+
+substitutions:
+  _REGION: us-central1
+  _REPO: blueprint-jobs
+  _JOB_NAME: genie-sim-export-job
+
+steps:
+  # ==========================================================================
+  # Step 1: Build the container image
+  # ==========================================================================
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'genie-sim-export-job/Dockerfile'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+      - '--cache-from'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+      - '.'
+    timeout: '600s'
+
+  # ==========================================================================
+  # Step 2: Push the container image to Artifact Registry
+  # ==========================================================================
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}'
+
+  # ==========================================================================
+  # Step 3: Deploy to Cloud Run Jobs
+  # ==========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'jobs'
+      - 'deploy'
+      - '${_JOB_NAME}'
+      - '--image'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+      - '--region'
+      - '${_REGION}'
+      - '--memory'
+      - '4Gi'
+      - '--cpu'
+      - '2'
+      - '--task-timeout'
+      - '30m'
+      - '--max-retries'
+      - '1'
+      - '--set-env-vars'
+      - 'FILTER_COMMERCIAL=true'
+      - '--service-account'
+      - 'pipeline-jobs@${PROJECT_ID}.iam.gserviceaccount.com'
+
+  # ==========================================================================
+  # Step 4: Deploy the workflow
+  # ==========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "=== Deploying genie-sim-export-pipeline workflow ==="
+        gcloud workflows deploy genie-sim-export-pipeline \
+          --location=${_REGION} \
+          --source=workflows/genie-sim-export-pipeline.yaml \
+          --description="Genie Sim export pipeline (triggered by .replicator_complete)" \
+          --service-account=workflow-invoker@${PROJECT_ID}.iam.gserviceaccount.com \
+          || echo "Workflow deployment skipped (may not exist yet)"
+
+  # ==========================================================================
+  # Step 5: Verify deployment
+  # ==========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "=== Deployment Summary ==="
+        echo ""
+        echo "Container Image:"
+        echo "  ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}"
+        echo ""
+        echo "Cloud Run Job: ${_JOB_NAME}"
+        echo "Region: ${_REGION}"
+        echo ""
+        echo "Default Settings:"
+        echo "  FILTER_COMMERCIAL=true (only use your own assets)"
+        echo ""
+        echo "To run manually:"
+        echo "  gcloud run jobs execute ${_JOB_NAME} \\"
+        echo "    --region=${_REGION} \\"
+        echo "    --update-env-vars=SCENE_ID=your-scene-id,BUCKET=your-bucket"
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: '1200s'
