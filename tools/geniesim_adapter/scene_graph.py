@@ -1,0 +1,767 @@
+"""
+Scene Graph Converter for Genie Sim 3.0.
+
+Converts BlueprintPipeline's scene_manifest.json to Genie Sim's hierarchical
+scene graph format with nodes (objects) and edges (spatial relations).
+
+Genie Sim Scene Graph Structure:
+    - Nodes: Objects encoded with asset_id, semantic, size, pose, task_tag
+    - Edges: Spatial relations: on, in, adjacent, aligned, stacked
+
+References:
+    - Genie Sim 3.0 Paper: https://arxiv.org/html/2601.02078v1
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
+
+# =============================================================================
+# Data Models
+# =============================================================================
+
+
+@dataclass
+class Pose:
+    """6-DOF pose in Genie Sim format."""
+
+    position: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    orientation: List[float] = field(default_factory=lambda: [1.0, 0.0, 0.0, 0.0])  # wxyz quaternion
+
+    def to_dict(self) -> Dict[str, List[float]]:
+        return {
+            "position": self.position,
+            "orientation": self.orientation,
+        }
+
+
+@dataclass
+class GenieSimNode:
+    """A node in the Genie Sim scene graph representing an object."""
+
+    asset_id: str
+    semantic: str
+    size: List[float]  # [width, depth, height]
+    pose: Pose
+    task_tag: List[str]
+    usd_path: str
+    properties: Dict[str, Any] = field(default_factory=dict)
+
+    # BlueprintPipeline-specific metadata (preserved for traceability)
+    bp_metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "asset_id": self.asset_id,
+            "semantic": self.semantic,
+            "size": self.size,
+            "pose": self.pose.to_dict(),
+            "task_tag": self.task_tag,
+            "usd_path": self.usd_path,
+            "properties": self.properties,
+            "bp_metadata": self.bp_metadata,
+        }
+
+
+@dataclass
+class GenieSimEdge:
+    """An edge in the Genie Sim scene graph representing a spatial relation."""
+
+    source: str  # source object asset_id
+    target: str  # target object asset_id
+    relation: str  # on, in, adjacent, aligned, stacked
+    confidence: float = 1.0  # Confidence of inferred relation
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "source": self.source,
+            "target": self.target,
+            "relation": self.relation,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass
+class GenieSimSceneGraph:
+    """Complete Genie Sim scene graph."""
+
+    scene_id: str
+    coordinate_system: str  # y_up or z_up
+    meters_per_unit: float
+    nodes: List[GenieSimNode]
+    edges: List[GenieSimEdge]
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "scene_id": self.scene_id,
+            "coordinate_system": self.coordinate_system,
+            "meters_per_unit": self.meters_per_unit,
+            "nodes": [n.to_dict() for n in self.nodes],
+            "edges": [e.to_dict() for e in self.edges],
+            "metadata": self.metadata,
+        }
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), indent=indent)
+
+    def save(self, path: Path) -> None:
+        """Save scene graph to JSON file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(self.to_json())
+
+
+# =============================================================================
+# Task Tag Mapping
+# =============================================================================
+
+# Maps (sim_role, affordance) -> task_tags
+TASK_TAG_MAPPING = {
+    # Manipulable objects
+    ("manipulable_object", "Graspable"): ["pick", "place"],
+    ("manipulable_object", "Stackable"): ["pick", "place", "stack"],
+    ("manipulable_object", "Pourable"): ["pick", "pour"],
+    ("manipulable_object", "Insertable"): ["pick", "insert"],
+    ("manipulable_object", "Hangable"): ["pick", "hang"],
+
+    # Articulated furniture
+    ("articulated_furniture", "Openable"): ["open", "close"],
+    ("articulated_furniture", "Slidable"): ["pull", "push"],
+
+    # Articulated appliances
+    ("articulated_appliance", "Turnable"): ["turn"],
+    ("articulated_appliance", "Pressable"): ["press"],
+    ("articulated_appliance", "Openable"): ["open", "close"],
+
+    # Interactive objects
+    ("interactive", None): ["interact"],
+
+    # Static/surfaces
+    ("static", "Supportable"): ["place_on"],
+    ("static", "Placeable"): ["place_on"],
+
+    # Containers
+    ("manipulable_object", "Containable"): ["pick", "place", "fill"],
+    ("manipulable_object", "Fillable"): ["pour_into", "fill"],
+}
+
+# Default task tags by sim_role
+DEFAULT_TASK_TAGS = {
+    "manipulable_object": ["pick", "place"],
+    "articulated_furniture": ["open", "close"],
+    "articulated_appliance": ["interact"],
+    "interactive": ["interact"],
+    "static": [],
+    "clutter": ["pick", "place"],
+    "background": [],
+    "scene_shell": [],
+    "unknown": [],
+}
+
+
+# =============================================================================
+# Relation Inference
+# =============================================================================
+
+# Relationship type mapping from BlueprintPipeline to Genie Sim
+RELATION_TYPE_MAPPING = {
+    "on_top_of": "on",
+    "on": "on",
+    "inside": "in",
+    "in": "in",
+    "contains": "in",  # inverse
+    "next_to": "adjacent",
+    "beside": "adjacent",
+    "near": "adjacent",
+    "adjacent": "adjacent",
+    "aligned_with": "aligned",
+    "aligned": "aligned",
+    "stacked_on": "stacked",
+    "stacked": "stacked",
+    "under": "on",  # inverse (target is on source)
+    "above": "on",  # (source is on target)
+}
+
+
+class RelationInferencer:
+    """Infers spatial relations between objects when not explicitly provided."""
+
+    # Thresholds for inference
+    VERTICAL_PROXIMITY_THRESHOLD = 0.05  # 5cm
+    HORIZONTAL_PROXIMITY_THRESHOLD = 0.15  # 15cm
+    ALIGNMENT_ANGLE_THRESHOLD = 5.0  # 5 degrees
+    CONTAINMENT_MARGIN = 0.02  # 2cm margin for containment check
+
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
+
+    def log(self, msg: str) -> None:
+        if self.verbose:
+            print(f"[RELATION-INFERENCER] {msg}")
+
+    def infer_relations(
+        self,
+        nodes: List[GenieSimNode],
+    ) -> List[GenieSimEdge]:
+        """
+        Infer spatial relations between nodes.
+
+        Inference rules:
+        1. Vertical proximity + not floor contact → "on" edge
+        2. Bounds containment → "in" edge
+        3. Horizontal proximity (< threshold) → "adjacent" edge
+        4. Similar rotation (< angle threshold) → "aligned" edge
+        """
+        edges = []
+
+        for i, node_a in enumerate(nodes):
+            for j, node_b in enumerate(nodes):
+                if i >= j:
+                    continue
+
+                # Check for "on" relation
+                on_edge = self._check_on_relation(node_a, node_b)
+                if on_edge:
+                    edges.append(on_edge)
+                    continue
+
+                # Check for "in" relation
+                in_edge = self._check_in_relation(node_a, node_b)
+                if in_edge:
+                    edges.append(in_edge)
+                    continue
+
+                # Check for "adjacent" relation
+                adj_edge = self._check_adjacent_relation(node_a, node_b)
+                if adj_edge:
+                    edges.append(adj_edge)
+
+                # Check for "aligned" relation (can coexist with others)
+                aligned_edge = self._check_aligned_relation(node_a, node_b)
+                if aligned_edge:
+                    edges.append(aligned_edge)
+
+        self.log(f"Inferred {len(edges)} relations from {len(nodes)} nodes")
+        return edges
+
+    def _check_on_relation(
+        self,
+        node_a: GenieSimNode,
+        node_b: GenieSimNode,
+    ) -> Optional[GenieSimEdge]:
+        """Check if node_a is ON node_b (or vice versa)."""
+        pos_a = np.array(node_a.pose.position)
+        pos_b = np.array(node_b.pose.position)
+        size_a = np.array(node_a.size)
+        size_b = np.array(node_b.size)
+
+        # Vertical separation
+        vertical_diff = pos_a[2] - pos_b[2]
+
+        # Check if A is above B
+        if vertical_diff > 0:
+            # A's bottom should be near B's top
+            a_bottom = pos_a[2] - size_a[2] / 2
+            b_top = pos_b[2] + size_b[2] / 2
+
+            if abs(a_bottom - b_top) < self.VERTICAL_PROXIMITY_THRESHOLD:
+                # Check horizontal overlap
+                if self._has_horizontal_overlap(node_a, node_b):
+                    return GenieSimEdge(
+                        source=node_a.asset_id,
+                        target=node_b.asset_id,
+                        relation="on",
+                        confidence=0.8,
+                    )
+
+        # Check if B is above A
+        elif vertical_diff < 0:
+            b_bottom = pos_b[2] - size_b[2] / 2
+            a_top = pos_a[2] + size_a[2] / 2
+
+            if abs(b_bottom - a_top) < self.VERTICAL_PROXIMITY_THRESHOLD:
+                if self._has_horizontal_overlap(node_a, node_b):
+                    return GenieSimEdge(
+                        source=node_b.asset_id,
+                        target=node_a.asset_id,
+                        relation="on",
+                        confidence=0.8,
+                    )
+
+        return None
+
+    def _check_in_relation(
+        self,
+        node_a: GenieSimNode,
+        node_b: GenieSimNode,
+    ) -> Optional[GenieSimEdge]:
+        """Check if node_a is IN node_b (or vice versa)."""
+        # Get bounds
+        bounds_a = self._get_bounds(node_a)
+        bounds_b = self._get_bounds(node_b)
+
+        # Check if A is inside B (with margin)
+        if self._is_inside(bounds_a, bounds_b, self.CONTAINMENT_MARGIN):
+            return GenieSimEdge(
+                source=node_a.asset_id,
+                target=node_b.asset_id,
+                relation="in",
+                confidence=0.9,
+            )
+
+        # Check if B is inside A
+        if self._is_inside(bounds_b, bounds_a, self.CONTAINMENT_MARGIN):
+            return GenieSimEdge(
+                source=node_b.asset_id,
+                target=node_a.asset_id,
+                relation="in",
+                confidence=0.9,
+            )
+
+        return None
+
+    def _check_adjacent_relation(
+        self,
+        node_a: GenieSimNode,
+        node_b: GenieSimNode,
+    ) -> Optional[GenieSimEdge]:
+        """Check if node_a and node_b are adjacent."""
+        pos_a = np.array(node_a.pose.position)
+        pos_b = np.array(node_b.pose.position)
+        size_a = np.array(node_a.size)
+        size_b = np.array(node_b.size)
+
+        # Horizontal distance (ignoring vertical)
+        horiz_dist = np.linalg.norm(pos_a[:2] - pos_b[:2])
+
+        # Expected separation if adjacent
+        expected_sep = (size_a[0] + size_b[0]) / 2  # Use width as proxy
+
+        # Check if close but not overlapping
+        if horiz_dist < expected_sep + self.HORIZONTAL_PROXIMITY_THRESHOLD:
+            if horiz_dist > expected_sep * 0.5:  # Not overlapping too much
+                return GenieSimEdge(
+                    source=node_a.asset_id,
+                    target=node_b.asset_id,
+                    relation="adjacent",
+                    confidence=0.7,
+                )
+
+        return None
+
+    def _check_aligned_relation(
+        self,
+        node_a: GenieSimNode,
+        node_b: GenieSimNode,
+    ) -> Optional[GenieSimEdge]:
+        """Check if node_a and node_b are aligned (similar orientation)."""
+        quat_a = np.array(node_a.pose.orientation)
+        quat_b = np.array(node_b.pose.orientation)
+
+        # Calculate angle between quaternions
+        dot = np.abs(np.dot(quat_a, quat_b))
+        dot = min(1.0, max(-1.0, dot))
+        angle_rad = 2 * math.acos(dot)
+        angle_deg = math.degrees(angle_rad)
+
+        if angle_deg < self.ALIGNMENT_ANGLE_THRESHOLD:
+            return GenieSimEdge(
+                source=node_a.asset_id,
+                target=node_b.asset_id,
+                relation="aligned",
+                confidence=0.6,
+            )
+
+        return None
+
+    def _has_horizontal_overlap(
+        self,
+        node_a: GenieSimNode,
+        node_b: GenieSimNode,
+    ) -> bool:
+        """Check if two nodes overlap horizontally."""
+        pos_a = np.array(node_a.pose.position)
+        pos_b = np.array(node_b.pose.position)
+        size_a = np.array(node_a.size)
+        size_b = np.array(node_b.size)
+
+        # Check X overlap
+        x_overlap = (
+            pos_a[0] - size_a[0] / 2 < pos_b[0] + size_b[0] / 2 and
+            pos_a[0] + size_a[0] / 2 > pos_b[0] - size_b[0] / 2
+        )
+
+        # Check Y overlap
+        y_overlap = (
+            pos_a[1] - size_a[1] / 2 < pos_b[1] + size_b[1] / 2 and
+            pos_a[1] + size_a[1] / 2 > pos_b[1] - size_b[1] / 2
+        )
+
+        return x_overlap and y_overlap
+
+    def _get_bounds(
+        self,
+        node: GenieSimNode,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Get (min, max) bounds for a node."""
+        pos = np.array(node.pose.position)
+        half_size = np.array(node.size) / 2
+        return pos - half_size, pos + half_size
+
+    def _is_inside(
+        self,
+        inner_bounds: Tuple[np.ndarray, np.ndarray],
+        outer_bounds: Tuple[np.ndarray, np.ndarray],
+        margin: float,
+    ) -> bool:
+        """Check if inner bounds are inside outer bounds."""
+        inner_min, inner_max = inner_bounds
+        outer_min, outer_max = outer_bounds
+
+        return (
+            np.all(inner_min >= outer_min - margin) and
+            np.all(inner_max <= outer_max + margin)
+        )
+
+
+# =============================================================================
+# Scene Graph Converter
+# =============================================================================
+
+
+class SceneGraphConverter:
+    """
+    Converts BlueprintPipeline scene manifests to Genie Sim scene graphs.
+
+    Usage:
+        converter = SceneGraphConverter()
+        scene_graph = converter.convert(manifest_dict)
+        scene_graph.save(Path("output/scene_graph.json"))
+    """
+
+    def __init__(self, verbose: bool = True):
+        self.verbose = verbose
+        self.relation_inferencer = RelationInferencer(verbose=verbose)
+
+    def log(self, msg: str, level: str = "INFO") -> None:
+        if self.verbose:
+            print(f"[SCENE-GRAPH-CONVERTER] [{level}] {msg}")
+
+    def convert(
+        self,
+        manifest: Dict[str, Any],
+        usd_base_path: Optional[str] = None,
+    ) -> GenieSimSceneGraph:
+        """
+        Convert BlueprintPipeline manifest to Genie Sim scene graph.
+
+        Args:
+            manifest: BlueprintPipeline scene_manifest.json as dict
+            usd_base_path: Base path for USD files (if relative paths needed)
+
+        Returns:
+            GenieSimSceneGraph ready for Genie Sim
+        """
+        self.log("Converting BlueprintPipeline manifest to Genie Sim scene graph")
+
+        scene_id = manifest.get("scene_id", "unknown")
+        scene_config = manifest.get("scene", {})
+        objects = manifest.get("objects", [])
+
+        # Extract coordinate system
+        coord_frame = scene_config.get("coordinate_frame", "y_up")
+        meters_per_unit = scene_config.get("meters_per_unit", 1.0)
+
+        self.log(f"Scene: {scene_id}, {len(objects)} objects, coord={coord_frame}")
+
+        # Convert nodes
+        nodes = []
+        for obj in objects:
+            node = self._convert_object_to_node(obj, usd_base_path)
+            if node:
+                nodes.append(node)
+
+        self.log(f"Converted {len(nodes)} nodes")
+
+        # Extract explicit edges from relationships
+        explicit_edges = self._extract_explicit_edges(objects)
+        self.log(f"Found {len(explicit_edges)} explicit relationships")
+
+        # Infer additional edges
+        inferred_edges = self.relation_inferencer.infer_relations(nodes)
+
+        # Merge edges (explicit edges take priority)
+        edges = self._merge_edges(explicit_edges, inferred_edges)
+        self.log(f"Total edges: {len(edges)}")
+
+        # Create scene graph
+        scene_graph = GenieSimSceneGraph(
+            scene_id=scene_id,
+            coordinate_system=coord_frame,
+            meters_per_unit=meters_per_unit,
+            nodes=nodes,
+            edges=edges,
+            metadata={
+                "source": "blueprintpipeline",
+                "environment_type": scene_config.get("environment_type"),
+                "room_bounds": scene_config.get("room", {}).get("bounds"),
+            },
+        )
+
+        return scene_graph
+
+    def _convert_object_to_node(
+        self,
+        obj: Dict[str, Any],
+        usd_base_path: Optional[str],
+    ) -> Optional[GenieSimNode]:
+        """Convert a BlueprintPipeline object to a Genie Sim node."""
+        try:
+            obj_id = str(obj.get("id", ""))
+            if not obj_id:
+                return None
+
+            # Skip background/shell objects
+            sim_role = obj.get("sim_role", "unknown")
+            if sim_role in ["background", "scene_shell"]:
+                return None
+
+            # Build semantic description
+            category = obj.get("category", "object")
+            description = obj.get("description", "")
+            name = obj.get("name", obj_id)
+            semantic = f"{category}: {name}"
+            if description:
+                semantic = f"{category}: {description}"
+
+            # Extract size
+            dimensions = obj.get("dimensions_est", {})
+            if isinstance(dimensions, dict):
+                size = [
+                    dimensions.get("width", 0.1),
+                    dimensions.get("depth", 0.1),
+                    dimensions.get("height", 0.1),
+                ]
+            elif isinstance(dimensions, list):
+                size = dimensions[:3] if len(dimensions) >= 3 else [0.1, 0.1, 0.1]
+            else:
+                size = [0.1, 0.1, 0.1]
+
+            # Extract pose
+            transform = obj.get("transform", {})
+            position = transform.get("position", {})
+            pos = [
+                position.get("x", 0.0),
+                position.get("y", 0.0),
+                position.get("z", 0.0),
+            ]
+
+            # Get orientation (quaternion preferred)
+            if "rotation_quaternion" in transform and transform["rotation_quaternion"]:
+                rot_q = transform["rotation_quaternion"]
+                orientation = [
+                    rot_q.get("w", 1.0),
+                    rot_q.get("x", 0.0),
+                    rot_q.get("y", 0.0),
+                    rot_q.get("z", 0.0),
+                ]
+            elif "rotation_euler" in transform and transform["rotation_euler"]:
+                rot_e = transform["rotation_euler"]
+                orientation = self._euler_to_quaternion(
+                    rot_e.get("roll", 0.0),
+                    rot_e.get("pitch", 0.0),
+                    rot_e.get("yaw", 0.0),
+                )
+            else:
+                orientation = [1.0, 0.0, 0.0, 0.0]
+
+            pose = Pose(position=pos, orientation=orientation)
+
+            # Get task tags from sim_role and affordances
+            task_tags = self._get_task_tags(obj)
+
+            # Get USD path
+            asset = obj.get("asset", {})
+            usd_path = asset.get("path", "")
+            if usd_base_path and usd_path and not usd_path.startswith("/"):
+                usd_path = f"{usd_base_path}/{usd_path}"
+
+            # Extract physics properties
+            physics = obj.get("physics", {})
+            physics_hints = obj.get("physics_hints", {})
+            properties = {
+                "mass": physics.get("mass", 0.5),
+                "friction": physics.get("friction", physics_hints.get("roughness", 0.5)),
+                "restitution": physics.get("restitution", 0.1),
+            }
+
+            # Preserve BlueprintPipeline metadata
+            bp_metadata = {
+                "sim_role": sim_role,
+                "category": category,
+                "affordances": obj.get("semantics", {}).get("affordances", []),
+                "articulation": obj.get("articulation", {}),
+                "placement_region": obj.get("placement_region"),
+            }
+
+            return GenieSimNode(
+                asset_id=obj_id,
+                semantic=semantic,
+                size=size,
+                pose=pose,
+                task_tag=task_tags,
+                usd_path=usd_path,
+                properties=properties,
+                bp_metadata=bp_metadata,
+            )
+
+        except Exception as e:
+            self.log(f"Failed to convert object {obj.get('id', 'unknown')}: {e}", "WARNING")
+            return None
+
+    def _get_task_tags(self, obj: Dict[str, Any]) -> List[str]:
+        """Get task tags from object's sim_role and affordances."""
+        sim_role = obj.get("sim_role", "unknown")
+        semantics = obj.get("semantics", {})
+        affordances = semantics.get("affordances", [])
+
+        # Handle affordances that are strings or dicts
+        affordance_names = []
+        for aff in affordances:
+            if isinstance(aff, str):
+                affordance_names.append(aff)
+            elif isinstance(aff, dict):
+                affordance_names.append(aff.get("type", ""))
+
+        # Collect task tags
+        task_tags = set()
+
+        for aff_name in affordance_names:
+            key = (sim_role, aff_name)
+            if key in TASK_TAG_MAPPING:
+                task_tags.update(TASK_TAG_MAPPING[key])
+
+        # Add default tags if no affordance matches
+        if not task_tags:
+            task_tags.update(DEFAULT_TASK_TAGS.get(sim_role, []))
+
+        return list(task_tags)
+
+    def _euler_to_quaternion(
+        self,
+        roll: float,
+        pitch: float,
+        yaw: float,
+    ) -> List[float]:
+        """Convert Euler angles (radians) to quaternion [w, x, y, z]."""
+        cr = math.cos(roll / 2)
+        sr = math.sin(roll / 2)
+        cp = math.cos(pitch / 2)
+        sp = math.sin(pitch / 2)
+        cy = math.cos(yaw / 2)
+        sy = math.sin(yaw / 2)
+
+        w = cr * cp * cy + sr * sp * sy
+        x = sr * cp * cy - cr * sp * sy
+        y = cr * sp * cy + sr * cp * sy
+        z = cr * cp * sy - sr * sp * cy
+
+        return [w, x, y, z]
+
+    def _extract_explicit_edges(
+        self,
+        objects: List[Dict[str, Any]],
+    ) -> List[GenieSimEdge]:
+        """Extract explicit relationships from object definitions."""
+        edges = []
+
+        for obj in objects:
+            obj_id = str(obj.get("id", ""))
+            relationships = obj.get("relationships", [])
+
+            for rel in relationships:
+                rel_type = rel.get("type", "")
+                subject_id = rel.get("subject_id", obj_id)
+                object_id = rel.get("object_id", "")
+
+                if not object_id:
+                    continue
+
+                # Map to Genie Sim relation type
+                geniesim_relation = RELATION_TYPE_MAPPING.get(rel_type.lower())
+                if not geniesim_relation:
+                    continue
+
+                edges.append(GenieSimEdge(
+                    source=subject_id,
+                    target=object_id,
+                    relation=geniesim_relation,
+                    confidence=1.0,  # Explicit = high confidence
+                ))
+
+        return edges
+
+    def _merge_edges(
+        self,
+        explicit: List[GenieSimEdge],
+        inferred: List[GenieSimEdge],
+    ) -> List[GenieSimEdge]:
+        """Merge explicit and inferred edges, preferring explicit."""
+        # Create set of explicit edge keys
+        explicit_keys = set()
+        for e in explicit:
+            explicit_keys.add((e.source, e.target, e.relation))
+            explicit_keys.add((e.target, e.source, e.relation))  # Bidirectional check
+
+        # Add explicit edges
+        merged = list(explicit)
+
+        # Add inferred edges that don't conflict
+        for e in inferred:
+            key = (e.source, e.target, e.relation)
+            reverse_key = (e.target, e.source, e.relation)
+            if key not in explicit_keys and reverse_key not in explicit_keys:
+                merged.append(e)
+
+        return merged
+
+
+# =============================================================================
+# Convenience Functions
+# =============================================================================
+
+
+def convert_manifest_to_scene_graph(
+    manifest_path: Path,
+    output_path: Optional[Path] = None,
+    verbose: bool = True,
+) -> GenieSimSceneGraph:
+    """
+    Convenience function to convert a manifest file to scene graph.
+
+    Args:
+        manifest_path: Path to scene_manifest.json
+        output_path: Optional path to save scene_graph.json
+        verbose: Print progress
+
+    Returns:
+        GenieSimSceneGraph
+    """
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    converter = SceneGraphConverter(verbose=verbose)
+    scene_graph = converter.convert(manifest)
+
+    if output_path:
+        scene_graph.save(output_path)
+
+    return scene_graph
