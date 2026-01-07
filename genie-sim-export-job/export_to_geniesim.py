@@ -180,7 +180,8 @@ def main():
     urdf_path = os.getenv("URDF_PATH")  # Optional custom URDF
     max_tasks = int(os.getenv("MAX_TASKS", "50"))
     generate_embeddings = os.getenv("GENERATE_EMBEDDINGS", "false").lower() == "true"
-    filter_commercial = os.getenv("FILTER_COMMERCIAL", "false").lower() == "true"
+    # Default to TRUE for commercial use - only use your own assets
+    filter_commercial = os.getenv("FILTER_COMMERCIAL", "true").lower() == "true"
     copy_usd = os.getenv("COPY_USD", "true").lower() == "true"
 
     print("[GENIESIM-EXPORT-JOB] Configuration:")

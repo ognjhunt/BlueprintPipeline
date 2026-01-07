@@ -40,7 +40,12 @@ from .task_config import TaskConfigGenerator, GenieSimTaskConfig
 
 @dataclass
 class GenieSimExportConfig:
-    """Configuration for Genie Sim export."""
+    """Configuration for Genie Sim export.
+
+    IMPORTANT: By default, filter_commercial_only=True to ensure you only use
+    your own assets and can sell the generated data. Set to False only for
+    research/non-commercial use.
+    """
 
     # Robot configuration
     robot_type: str = "franka"  # franka, g2, ur10
@@ -55,8 +60,9 @@ class GenieSimExportConfig:
     copy_usd_files: bool = True  # Copy USD files to output directory
     usd_relative_paths: bool = True  # Use relative paths in output
 
-    # Commercial filtering
-    filter_commercial_only: bool = False  # Only include commercially-usable assets
+    # Commercial filtering - DEFAULT TRUE for sellable data
+    # Set to False only for research/non-commercial use
+    filter_commercial_only: bool = True  # Only include commercially-usable assets
 
     # Output options
     pretty_json: bool = True
@@ -219,9 +225,25 @@ class GenieSimExporter:
             self.log("\nStep 2: Building asset index...")
             asset_index = self.asset_index_builder.build(manifest, usd_base_path)
 
-            if self.config.filter_commercial_only:
-                asset_index = asset_index.filter_commercial()
-                self.log(f"  Filtered to commercial-only: {len(asset_index.assets)} assets")
+            # Check for non-commercial assets and warn
+            nc_assets = [a for a in asset_index.assets if not a.commercial_ok]
+            if nc_assets:
+                nc_sources = set(a.source for a in nc_assets)
+                if self.config.filter_commercial_only:
+                    result.warnings.append(
+                        f"Filtered out {len(nc_assets)} non-commercial assets from sources: {nc_sources}"
+                    )
+                    asset_index = asset_index.filter_commercial()
+                    self.log(f"  Filtered to commercial-only: {len(asset_index.assets)} assets")
+                else:
+                    # WARN: Non-commercial assets included
+                    warning_msg = (
+                        f"WARNING: {len(nc_assets)} non-commercial assets included from {nc_sources}. "
+                        "Generated data CANNOT be sold commercially. "
+                        "Set filter_commercial_only=True to exclude these assets."
+                    )
+                    result.warnings.append(warning_msg)
+                    self.log(warning_msg, "WARNING")
 
             result.num_assets = len(asset_index.assets)
             self.log(f"  Assets: {result.num_assets}")

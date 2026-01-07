@@ -294,44 +294,65 @@ scenes/{scene_id}/episodes/
 
 ## Licensing Considerations
 
-### Commercial Use Path
+### Commercial Use Path (DEFAULT)
+
+**By default, BlueprintPipeline exports only YOUR assets (filter_commercial_only=True).**
 
 1. **Genie Sim Code** (MPL 2.0): Commercial use OK
 2. **Your USD Scenes**: You own these
-3. **Your Assets**: You own these
+3. **Your Assets**: You own these (source="blueprintpipeline")
 4. **Generated Data**: You can sell
 
-### Non-Commercial Assets (DO NOT USE for selling data)
+### Non-Commercial Assets (AUTOMATICALLY FILTERED OUT)
 
-1. **GenieSimAssets** (CC BY-NC-SA 4.0): Non-commercial only
-2. If any generated data contains renders of NC-licensed assets, it inherits NC restriction
+1. **GenieSimAssets** (CC BY-NC-SA 4.0): Non-commercial only - **FILTERED OUT BY DEFAULT**
+2. **External NC assets** (source="external_nc"): **FILTERED OUT BY DEFAULT**
+3. If any generated data contains renders of NC-licensed assets, it inherits NC restriction
 
-### Recommended Practice
+### Default Behavior
 
-```python
-# In asset registration, flag commercial status
-asset_entry = {
-    "asset_id": "my_mug_001",
-    "commercial_ok": True,  # Your asset
-    "license": "proprietary",
-    "source": "blueprintpipeline_generated"
-}
+```bash
+# FILTER_COMMERCIAL=true is the default
+# Only your own assets (source="blueprintpipeline") are included
+# GenieSimAssets and other NC sources are automatically excluded
 
-# Never mix with NC assets for sellable data
-assert all(a["commercial_ok"] for a in scene_assets)
+# To include NC assets (research only, NOT for selling):
+export FILTER_COMMERCIAL=false
+```
+
+### Asset Source Classification
+
+| Source Value | Commercial OK | Included by Default |
+|-------------|--------------|-------------------|
+| `blueprintpipeline` | ✅ Yes | ✅ Yes |
+| `blueprintpipeline_generated` | ✅ Yes | ✅ Yes |
+| `geniesim_assets` | ❌ No (CC BY-NC-SA) | ❌ No |
+| `external_nc` | ❌ No | ❌ No |
+
+### Verification
+
+The export job will warn if non-commercial assets are detected:
+
+```
+WARNING: 2 non-commercial assets included from {'geniesim_assets'}.
+Generated data CANNOT be sold commercially.
+Set filter_commercial_only=True to exclude these assets.
 ```
 
 ## Implementation Checklist
 
-- [ ] Create `tools/geniesim_adapter/` module
-- [ ] Implement `SceneGraphConverter` class
-- [ ] Implement `AssetIndexBuilder` class
-- [ ] Implement `TaskConfigGenerator` class
-- [ ] Create `genie-sim-export-job/` Cloud Run job
-- [ ] Update `pipeline_selector/` to route to Genie Sim
-- [ ] Add Genie Sim output path to `storage_layout/`
-- [ ] Create integration tests
-- [ ] Document robot configuration mapping (Franka ↔ G2)
+- [x] Create `tools/geniesim_adapter/` module
+- [x] Implement `SceneGraphConverter` class
+- [x] Implement `AssetIndexBuilder` class
+- [x] Implement `TaskConfigGenerator` class
+- [x] Create `genie-sim-export-job/` Cloud Run job
+- [x] Update `pipeline_selector/` to route to Genie Sim (default mode)
+- [x] Add Genie Sim output path to `storage_layout/`
+- [x] Create integration tests (`tests/test_geniesim_adapter.py`)
+- [x] Document robot configuration mapping (Franka ↔ G2)
+- [x] Create `cloudbuild.yaml` for deployment
+- [x] Create `workflows/genie-sim-export-pipeline.yaml`
+- [x] Default to commercial-only assets (FILTER_COMMERCIAL=true)
 
 ## Robot Configuration Mapping
 
