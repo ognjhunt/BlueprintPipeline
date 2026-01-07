@@ -12,6 +12,19 @@ This job converts BlueprintPipeline's `scene_manifest.json` and USD scene into f
 - **VLM-based evaluation**
 - **LeRobot v0.3.3 dataset export**
 
+## Enhanced Features (DEFAULT: ENABLED)
+
+Beyond base Genie Sim, BlueprintPipeline adds these features by default:
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| **Multi-Robot** | Generate data for multiple robot types (franka, g2, ur10, gr1, fetch) | ✅ ON |
+| **Bimanual** | Bimanual manipulation tasks (coordinated lift, lid opening) | ✅ ON |
+| **VLA Packages** | Fine-tuning configs for OpenVLA, Pi0, SmolVLA, GR00T | ✅ ON |
+| **Rich Annotations** | 2D/3D boxes, segmentation, depth GT, 6DoF poses | ✅ ON |
+| **Multi-Robot Coordination** | Robot-to-robot handoffs, collaborative assembly | ✅ ON |
+| **Commercial Filter** | Only include YOUR assets (exclude NC-licensed) | ✅ ON |
+
 ## Architecture
 
 ```
@@ -84,14 +97,25 @@ scenes/{scene_id}/geniesim/
 
 ## Configuration
 
+### Core Settings
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCENE_ID` | (required) | Scene identifier |
-| `ROBOT_TYPE` | `franka` | Robot type: `franka`, `g2`, `ur10` |
+| `ROBOT_TYPE` | `franka` | Primary robot type: `franka`, `g2`, `ur10` |
 | `MAX_TASKS` | `50` | Maximum suggested tasks |
 | `GENERATE_EMBEDDINGS` | `false` | Generate semantic embeddings |
-| `FILTER_COMMERCIAL` | `false` | Only include commercial-use assets |
+| `FILTER_COMMERCIAL` | `true` | Only include commercial-use assets |
 | `COPY_USD` | `true` | Copy USD files to output |
+
+### Enhanced Features (NEW)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_MULTI_ROBOT` | `true` | Generate configs for multiple robot types |
+| `ENABLE_BIMANUAL` | `true` | Generate bimanual manipulation configs |
+| `ENABLE_VLA_PACKAGES` | `true` | Generate VLA fine-tuning packages |
+| `ENABLE_RICH_ANNOTATIONS` | `true` | Generate rich annotation configs |
 
 ## Schema Mapping
 
