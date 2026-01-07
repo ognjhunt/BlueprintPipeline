@@ -31,6 +31,15 @@ from typing import Any, Dict, List, Optional
 from .scene_graph import SceneGraphConverter, GenieSimSceneGraph
 from .asset_index import AssetIndexBuilder, GenieSimAssetIndex
 from .task_config import TaskConfigGenerator, GenieSimTaskConfig
+from .multi_robot_config import (
+    MultiRobotConfig,
+    RobotType,
+    RobotCategory,
+    ROBOT_SPECS,
+    DEFAULT_MULTI_ROBOT_CONFIG,
+    get_geniesim_robot_config,
+    save_multi_robot_config,
+)
 
 
 # =============================================================================
@@ -45,11 +54,18 @@ class GenieSimExportConfig:
     IMPORTANT: By default, filter_commercial_only=True to ensure you only use
     your own assets and can sell the generated data. Set to False only for
     research/non-commercial use.
+
+    MULTI-ROBOT: By default, generates data for multiple robot types per scene
+    (not just one). This maximizes the value of each scene for customers.
     """
 
-    # Robot configuration
-    robot_type: str = "franka"  # franka, g2, ur10
+    # Robot configuration - MULTI-ROBOT BY DEFAULT
+    robot_type: str = "franka"  # Primary robot (franka, g2, ur10)
     urdf_path: Optional[str] = None
+
+    # Multi-robot configuration (DEFAULT: ENABLED)
+    enable_multi_robot: bool = True  # Generate data for multiple robot types
+    multi_robot_config: Optional[MultiRobotConfig] = None  # Uses DEFAULT if None
 
     # Export options
     generate_embeddings: bool = False
@@ -64,9 +80,22 @@ class GenieSimExportConfig:
     # Set to False only for research/non-commercial use
     filter_commercial_only: bool = True  # Only include commercially-usable assets
 
+    # Enhanced features (DEFAULT: ENABLED)
+    # These add value beyond what Genie Sim alone produces
+    enable_rich_annotations: bool = True  # 2D/3D boxes, segmentation, depth GT
+    enable_vla_packages: bool = True      # VLA fine-tuning configs post-processing
+    enable_bimanual: bool = True          # Bimanual manipulation data
+    enable_multi_robot_coordination: bool = True  # Robot-to-robot handoffs
+
     # Output options
     pretty_json: bool = True
     include_metadata: bool = True
+
+    def get_multi_robot_config(self) -> MultiRobotConfig:
+        """Get multi-robot configuration, using default if not specified."""
+        if self.multi_robot_config is not None:
+            return self.multi_robot_config
+        return DEFAULT_MULTI_ROBOT_CONFIG
 
 
 @dataclass
@@ -286,8 +315,27 @@ class GenieSimExporter:
                 usd_output_dir = output_dir / "usd"
                 self._copy_usd_files(usd_source_dir, usd_output_dir)
 
-            # Step 6: Write export manifest
-            self.log("\nStep 6: Writing export manifest...")
+            # Step 6: Generate multi-robot configuration (DEFAULT: ENABLED)
+            if self.config.enable_multi_robot:
+                self.log("\nStep 6: Generating multi-robot configuration...")
+                multi_robot_config = self.config.get_multi_robot_config()
+                multi_robot_path = output_dir / "multi_robot_config.json"
+                save_multi_robot_config(multi_robot_config, multi_robot_path)
+                self.log(f"  Primary robots: {[r.value for r in multi_robot_config.primary_robots]}")
+                self.log(f"  All robots: {[r.value for r in multi_robot_config.get_all_robots()]}")
+                self.log(f"  Bimanual enabled: {multi_robot_config.enable_bimanual}")
+                self.log(f"  Multi-robot coordination: {multi_robot_config.enable_multi_robot_coordination}")
+
+            # Step 7: Generate enhanced features configuration
+            self.log("\nStep 7: Generating enhanced features configuration...")
+            enhanced_features_path = output_dir / "enhanced_features.json"
+            self._write_enhanced_features_config(
+                manifest=manifest,
+                output_path=enhanced_features_path,
+            )
+
+            # Step 8: Write export manifest
+            self.log("\nStep 8: Writing export manifest...")
             export_manifest_path = output_dir / "export_manifest.json"
             self._write_export_manifest(
                 result=result,
@@ -451,6 +499,104 @@ source:
 
         with open(output_path, "w") as f:
             json.dump(manifest, f, indent=2)
+
+    def _write_enhanced_features_config(
+        self,
+        manifest: Dict[str, Any],
+        output_path: Path,
+    ) -> None:
+        """Write enhanced features configuration.
+
+        These features are BlueprintPipeline-specific enhancements that run
+        alongside or after Genie Sim data generation. They add value beyond
+        what Genie Sim alone produces.
+        """
+        # Get multi-robot config
+        multi_robot_config = self.config.get_multi_robot_config()
+
+        # Build configuration
+        enhanced_config = {
+            "version": "1.0.0",
+            "description": "BlueprintPipeline enhanced features for Genie Sim 3.0 output",
+
+            # Multi-robot data generation
+            "multi_robot": {
+                "enabled": self.config.enable_multi_robot,
+                "robots": [r.value for r in multi_robot_config.get_all_robots()],
+                "categories": {
+                    "humanoid": [r.value for r in multi_robot_config.get_robots_by_category(RobotCategory.HUMANOID)],
+                    "arm": [r.value for r in multi_robot_config.get_robots_by_category(RobotCategory.ARM)],
+                    "mobile": [r.value for r in multi_robot_config.get_robots_by_category(RobotCategory.MOBILE_MANIPULATOR)],
+                    "dual_arm": [r.value for r in multi_robot_config.get_robots_by_category(RobotCategory.DUAL_ARM)],
+                },
+            },
+
+            # Bimanual manipulation
+            "bimanual": {
+                "enabled": self.config.enable_bimanual and multi_robot_config.enable_bimanual,
+                "robots": [r.value for r in multi_robot_config.bimanual_robots] if multi_robot_config.enable_bimanual else [],
+                "task_types": ["coordinated_lift", "hold_and_manipulate", "lid_opening", "handoff"],
+            },
+
+            # Multi-robot coordination
+            "multi_robot_coordination": {
+                "enabled": self.config.enable_multi_robot_coordination and multi_robot_config.enable_multi_robot_coordination,
+                "pairs": [
+                    {"robot_a": r1.value, "robot_b": r2.value}
+                    for r1, r2 in multi_robot_config.coordination_pairs
+                ] if multi_robot_config.enable_multi_robot_coordination else [],
+                "scenarios": ["handoff", "collaborative_assembly", "fleet_coordination"],
+            },
+
+            # Rich ground truth annotations
+            "rich_annotations": {
+                "enabled": self.config.enable_rich_annotations,
+                "types": [
+                    "bounding_boxes_2d",
+                    "bounding_boxes_3d",
+                    "instance_segmentation",
+                    "semantic_segmentation",
+                    "object_poses_6dof",
+                    "depth_ground_truth",
+                    "surface_normals",
+                    "material_properties",
+                ] if self.config.enable_rich_annotations else [],
+                "formats": ["json", "coco", "pascal_voc"],
+            },
+
+            # VLA fine-tuning packages (post-processing on Genie Sim episodes)
+            "vla_finetuning": {
+                "enabled": self.config.enable_vla_packages,
+                "models": ["openvla", "pi0", "smolvla", "groot_n1"] if self.config.enable_vla_packages else [],
+                "includes": [
+                    "training_config",
+                    "lora_config",
+                    "data_adapter",
+                    "train_script",
+                ] if self.config.enable_vla_packages else [],
+            },
+
+            # Metadata about what's enhanced vs base Genie Sim
+            "enhancement_summary": {
+                "genie_sim_provides": [
+                    "episodes_lerobot_format",
+                    "visual_observations",
+                    "robot_states_actions",
+                    "llm_task_generation",
+                    "vlm_evaluation",
+                ],
+                "blueprintpipeline_adds": [
+                    "multi_robot_embodiment_data",
+                    "bimanual_manipulation_data",
+                    "multi_robot_coordination_data",
+                    "rich_ground_truth_annotations",
+                    "vla_finetuning_packages",
+                ],
+            },
+        }
+
+        with open(output_path, "w") as f:
+            json.dump(enhanced_config, f, indent=2)
 
 
 # =============================================================================
