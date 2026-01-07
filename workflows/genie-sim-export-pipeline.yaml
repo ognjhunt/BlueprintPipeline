@@ -1,7 +1,7 @@
 # genie-sim-export-pipeline.yaml
 #
 # Google Cloud Workflows pipeline that:
-#   1. Triggers on completion marker file from replicator-job (.replicator_complete)
+#   1. Triggers on completion marker file from variation-assets-pipeline (.variation_pipeline_complete)
 #   2. Runs genie-sim-export-job to convert scene to Genie Sim 3.0 format
 #   3. Writes .geniesim_complete marker when finished
 #
@@ -16,7 +16,15 @@
 # IMPORTANT: Only uses YOUR assets (FILTER_COMMERCIAL=true by default)
 # to ensure commercial rights to generated data.
 #
-# Trigger: Cloud Storage object finalized event for .replicator_complete
+# COMMERCIAL USE REQUIREMENT:
+#   This pipeline triggers AFTER variation-assets-pipeline completes, ensuring
+#   that YOUR OWN generated assets are ready before export. Genie Sim's built-in
+#   assets are CC BY-NC-SA 4.0 (non-commercial) and cannot be used for selling data.
+#
+# Pipeline Order:
+#   replicator-job → variation-assets-pipeline → [THIS PIPELINE] → Genie Sim
+#
+# Trigger: Cloud Storage object finalized event for .variation_pipeline_complete
 #
 # EventArc Setup:
 #   gcloud eventarc triggers create genie-sim-export-trigger \
@@ -31,7 +39,7 @@
 # Or run manually:
 #   gcloud workflows run genie-sim-export-pipeline \
 #     --location=us-central1 \
-#     --data='{"data":{"bucket":"your-bucket","name":"scenes/kitchen_001/replicator/.replicator_complete"}}'
+#     --data='{"data":{"bucket":"your-bucket","name":"scenes/kitchen_001/variation_assets/.variation_pipeline_complete"}}'
 
 main:
   params: [event]
@@ -57,10 +65,11 @@ main:
           - maxTasks: '${default(map.get(event, "max_tasks"), "50")}'
         next: filter_completion_markers
 
-    # Filter for .replicator_complete marker files
+    # Filter for .variation_pipeline_complete marker files
+    # This ensures variation assets (YOUR assets) are ready before Genie Sim export
     - filter_completion_markers:
         switch:
-          - condition: '${text.match_regex(object, "^scenes/.+/replicator/\\.replicator_complete$")}'
+          - condition: '${text.match_regex(object, "^scenes/.+/variation_assets/\\.variation_pipeline_complete$")}'
             next: derive
         next: skip
 
@@ -70,6 +79,8 @@ main:
           - sceneId: ${parts[1]}
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
+          - variationAssetsPrefix: '${"scenes/" + sceneId + "/variation_assets"}'
+          - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
           - geniesimPrefix: '${"scenes/" + sceneId + "/geniesim"}'
           - geniesimJobName: "genie-sim-export-job"
           - geniesimCompleteMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_complete"}'
@@ -162,6 +173,7 @@ main:
         next: run_geniesim_job
 
     # Run the Genie Sim export job
+    # NOTE: This job uses YOUR variation assets (from variation-gen-job), NOT Genie Sim's assets
     - run_geniesim_job:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
@@ -178,6 +190,10 @@ main:
                       value: ${assetsPrefix}
                     - name: GENIESIM_PREFIX
                       value: ${geniesimPrefix}
+                    - name: VARIATION_ASSETS_PREFIX
+                      value: ${variationAssetsPrefix}
+                    - name: REPLICATOR_PREFIX
+                      value: ${replicatorPrefix}
                     - name: ROBOT_TYPE
                       value: ${robotType}
                     - name: MAX_TASKS
@@ -185,6 +201,11 @@ main:
                     - name: FILTER_COMMERCIAL
                       value: "true"
                     - name: COPY_USD
+                      value: "true"
+                    # Enable all enhanced features for commercial data generation
+                    - name: ENABLE_MULTI_ROBOT
+                      value: "true"
+                    - name: ENABLE_VLA_PACKAGES
                       value: "true"
         result: geniesimExec
         next: set_execution_name

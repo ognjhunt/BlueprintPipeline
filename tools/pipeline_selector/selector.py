@@ -215,6 +215,10 @@ class PipelineSelector:
 
         Data generation (tasks, trajectories, episodes, evaluation) happens
         in Genie Sim 3.0, not in BlueprintPipeline.
+
+        IMPORTANT: variation-gen-job is REQUIRED for commercial use!
+        Genie Sim's built-in assets are CC BY-NC-SA 4.0 (non-commercial).
+        You MUST generate your own assets to sell the resulting data.
         """
         return [
             # 3D-RE-GEN reconstruction runs externally
@@ -223,11 +227,12 @@ class PipelineSelector:
             "interactive-job",     # Articulation for doors/drawers
             "simready-job",        # Physics properties
             "usd-assembly-job",    # Assemble scene.usda
-            "replicator-job",      # Domain randomization (still useful for scene variants)
-            # NOTE: variation-gen-job removed - Genie Sim handles asset variations
+            "replicator-job",      # Domain randomization regions + asset manifest
+            "variation-gen-job",   # REQUIRED: Generate YOUR OWN assets for commercial use
+                                   # (Genie Sim assets are CC BY-NC-SA 4.0 - non-commercial!)
             # NOTE: isaac-lab-job removed - Genie Sim handles task generation
             # NOTE: episode-generation-job removed - Genie Sim handles data collection
-            "genie-sim-export-job",  # Export to Genie Sim format
+            "genie-sim-export-job",  # Export to Genie Sim format (uses YOUR assets)
             # After this, Genie Sim takes over for:
             # - LLM task generation
             # - cuRobo trajectory planning
