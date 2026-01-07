@@ -1,0 +1,11 @@
+# Genie Sim Export Job Dependencies
+
+# Core
+numpy>=1.24.0
+
+# JSON Schema validation
+jsonschema>=4.17.0
+
+# Optional: Embedding generation (if GENERATE_EMBEDDINGS=true)
+# sentence-transformers>=2.2.0  # For local embeddings
+# openai>=1.0.0                 # For API-based embeddings
