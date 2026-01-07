@@ -6,6 +6,9 @@ This document specifies the integration between BlueprintPipeline and AGIBOT's G
 for hybrid synthetic data generation. BlueprintPipeline handles scene creation while Genie Sim
 handles data generation (tasks, trajectories, episodes, evaluation).
 
+**Genie Sim is the default data generation backend.** To use BlueprintPipeline's own episode
+generation instead, set `USE_GENIESIM=false`.
+
 ## Architecture
 
 ```
@@ -344,8 +347,9 @@ Genie Sim is optimized for the G2 humanoid robot. For other robots:
 ## Environment Variables
 
 ```bash
-# Genie Sim connection
-GENIESIM_ENABLED=true
+# Genie Sim connection (enabled by default)
+# Set USE_GENIESIM=false to disable and use BlueprintPipeline episode generation
+USE_GENIESIM=true  # (default, can be omitted)
 GENIESIM_ASSETS_PATH=/path/to/geniesim/assets
 GENIESIM_CHROMADB_PATH=/path/to/chromadb
 GENIESIM_EMBEDDING_MODEL=qwen-text-embedding-v4

@@ -1,18 +1,21 @@
 """
 Pipeline Selector Implementation.
 
-Handles 3D-RE-GEN pipeline execution and job routing, including support
-for Genie Sim 3.0 data generation.
+Handles 3D-RE-GEN pipeline execution and job routing, with Genie Sim 3.0
+as the default backend for data generation.
 
 3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
 "image → sim-ready 3D reconstruction" with explicit physical constraints.
 
-Genie Sim 3.0 Integration:
-When USE_GENIESIM=true, the pipeline routes to Genie Sim for:
+Genie Sim 3.0 Integration (DEFAULT):
+By default, the pipeline routes to Genie Sim 3.0 for:
 - Task generation (LLM)
 - Trajectory planning (cuRobo)
 - Data collection (automated + teleop)
 - Evaluation (VLM)
+- LeRobot v0.3.3 dataset export
+
+To use BlueprintPipeline's own episode generation instead, set USE_GENIESIM=false.
 
 Reference:
 - 3D-RE-GEN Paper: https://arxiv.org/abs/2512.17459
@@ -21,7 +24,7 @@ Reference:
 
 Environment Variables:
     REGEN3D_AVAILABLE: "true" | "false" (override auto-detection)
-    USE_GENIESIM: "true" | "false" (use Genie Sim for data generation)
+    USE_GENIESIM: "true" (default) | "false" (use BlueprintPipeline episode generation)
     GENIESIM_ROBOT_TYPE: Robot type for Genie Sim (franka, g2, ur10)
 """
 
@@ -36,14 +39,14 @@ from typing import List, Optional, Dict
 
 class PipelineMode(str, Enum):
     """Pipeline execution mode."""
-    REGEN3D_FIRST = "regen3d_first"  # Use 3D-RE-GEN pipeline (default)
-    GENIESIM = "geniesim"  # Use Genie Sim 3.0 for data generation
+    REGEN3D_FIRST = "regen3d_first"  # Use 3D-RE-GEN with BlueprintPipeline episode generation
+    GENIESIM = "geniesim"  # Use Genie Sim 3.0 for data generation (default)
 
 
 class DataGenerationBackend(str, Enum):
     """Backend for episode/data generation."""
-    BLUEPRINTPIPELINE = "blueprintpipeline"  # Our own episode-generation-job
-    GENIESIM = "geniesim"  # AGIBOT Genie Sim 3.0
+    BLUEPRINTPIPELINE = "blueprintpipeline"  # Our own episode-generation-job (USE_GENIESIM=false)
+    GENIESIM = "geniesim"  # AGIBOT Genie Sim 3.0 (default)
 
 
 @dataclass
@@ -86,15 +89,23 @@ class PipelineSelector:
         self.scene_root = Path(scene_root) if scene_root else None
 
     def get_mode(self) -> PipelineMode:
-        """Get the configured pipeline mode."""
-        use_geniesim = os.getenv("USE_GENIESIM", "false").lower() == "true"
+        """Get the configured pipeline mode.
+
+        Returns GENIESIM by default. Set USE_GENIESIM=false to use
+        BlueprintPipeline's own episode generation instead.
+        """
+        use_geniesim = os.getenv("USE_GENIESIM", "true").lower() == "true"
         if use_geniesim:
             return PipelineMode.GENIESIM
         return PipelineMode.REGEN3D_FIRST
 
     def get_data_backend(self) -> DataGenerationBackend:
-        """Get the configured data generation backend."""
-        use_geniesim = os.getenv("USE_GENIESIM", "false").lower() == "true"
+        """Get the configured data generation backend.
+
+        Returns GENIESIM by default. Set USE_GENIESIM=false to use
+        BlueprintPipeline's own episode generation instead.
+        """
+        use_geniesim = os.getenv("USE_GENIESIM", "true").lower() == "true"
         if use_geniesim:
             return DataGenerationBackend.GENIESIM
         return DataGenerationBackend.BLUEPRINTPIPELINE
@@ -276,5 +287,8 @@ def get_data_generation_backend() -> DataGenerationBackend:
 
 
 def is_geniesim_enabled() -> bool:
-    """Check if Genie Sim integration is enabled."""
-    return os.getenv("USE_GENIESIM", "false").lower() == "true"
+    """Check if Genie Sim integration is enabled.
+
+    Returns True by default. Set USE_GENIESIM=false to disable.
+    """
+    return os.getenv("USE_GENIESIM", "true").lower() == "true"
