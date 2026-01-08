@@ -444,8 +444,87 @@ def get_robot_info(robot_type: str) -> Dict[str, Any]:
 
 
 @dataclass
+class IMUReading:
+    """
+    IMU sensor reading for mobile robots.
+
+    Contains accelerometer, gyroscope, and orientation data.
+    Important for Fetch, TIAGo, Spot and other mobile manipulation platforms.
+    """
+
+    # Linear acceleration (m/s^2) in robot base frame
+    linear_acceleration: np.ndarray  # [ax, ay, az]
+
+    # Angular velocity (rad/s) in robot base frame
+    angular_velocity: np.ndarray  # [wx, wy, wz]
+
+    # Orientation quaternion (from IMU fusion) [w, x, y, z]
+    orientation: Optional[np.ndarray] = None
+
+    # Timestamp (may differ from main trajectory if IMU runs at higher rate)
+    timestamp: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
+        result = {
+            "linear_acceleration": self.linear_acceleration.tolist(),
+            "angular_velocity": self.angular_velocity.tolist(),
+        }
+        if self.orientation is not None:
+            result["orientation"] = self.orientation.tolist()
+        if self.timestamp is not None:
+            result["timestamp"] = self.timestamp
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "IMUReading":
+        """Deserialize from dictionary."""
+        return cls(
+            linear_acceleration=np.array(data["linear_acceleration"]),
+            angular_velocity=np.array(data["angular_velocity"]),
+            orientation=np.array(data["orientation"]) if "orientation" in data else None,
+            timestamp=data.get("timestamp"),
+        )
+
+
+@dataclass
+class EEWrench:
+    """
+    End-effector wrench (force/torque) reading.
+
+    Critical for contact-rich manipulation tasks and sim-to-real.
+    """
+
+    # Force in end-effector frame (Newtons)
+    force: np.ndarray  # [fx, fy, fz]
+
+    # Torque in end-effector frame (Newton-meters)
+    torque: np.ndarray  # [tx, ty, tz]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "force": self.force.tolist(),
+            "torque": self.torque.tolist(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EEWrench":
+        """Deserialize from dictionary."""
+        return cls(
+            force=np.array(data["force"]),
+            torque=np.array(data["torque"]),
+        )
+
+
+@dataclass
 class JointState:
-    """A single joint state in the trajectory."""
+    """
+    A single joint state in the trajectory.
+
+    Now includes full dynamics data (torques, efforts, accelerations)
+    for contact-rich manipulation and sim-to-real transfer.
+    """
 
     # Frame index
     frame_idx: int
@@ -459,27 +538,78 @@ class JointState:
     # Joint velocities (optional)
     joint_velocities: Optional[np.ndarray] = None
 
+    # =========================================================================
+    # NEW: Joint dynamics (P1 - Important for contact-rich tasks)
+    # =========================================================================
+
+    # Joint torques from physics simulation (Newton-meters)
+    joint_torques: Optional[np.ndarray] = None
+
+    # Commanded joint efforts (what was commanded, not what was achieved)
+    joint_efforts: Optional[np.ndarray] = None
+
+    # Joint accelerations (derived from velocities, or from physics)
+    joint_accelerations: Optional[np.ndarray] = None
+
+    # =========================================================================
     # Gripper state
-    gripper_position: float = 0.0  # meters (finger separation)
+    # =========================================================================
+
+    # Gripper position (meters, finger separation)
+    gripper_position: float = 0.0
+
+    # Gripper force (Newtons, grasp force)
+    gripper_force: Optional[float] = None
+
+    # =========================================================================
+    # End-effector state
+    # =========================================================================
 
     # End-effector pose (optional, for reference)
     ee_position: Optional[np.ndarray] = None
-    ee_orientation: Optional[np.ndarray] = None
+    ee_orientation: Optional[np.ndarray] = None  # quaternion [w, x, y, z]
 
-    # Motion phase
+    # End-effector velocity (m/s for linear, rad/s for angular)
+    ee_velocity: Optional[np.ndarray] = None  # [vx, vy, vz, wx, wy, wz]
+
+    # End-effector wrench (force/torque)
+    ee_wrench: Optional[EEWrench] = None
+
+    # =========================================================================
+    # Motion phase (for skill segmentation)
+    # =========================================================================
+
     phase: MotionPhase = MotionPhase.APPROACH
+
+    # =========================================================================
+    # IMU data (for mobile robots)
+    # =========================================================================
+
+    imu: Optional[IMUReading] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary."""
-        return {
+        result = {
             "frame_idx": self.frame_idx,
             "timestamp": self.timestamp,
             "joint_positions": self.joint_positions.tolist(),
             "joint_velocities": self.joint_velocities.tolist() if self.joint_velocities is not None else None,
+            # NEW: Joint dynamics
+            "joint_torques": self.joint_torques.tolist() if self.joint_torques is not None else None,
+            "joint_efforts": self.joint_efforts.tolist() if self.joint_efforts is not None else None,
+            "joint_accelerations": self.joint_accelerations.tolist() if self.joint_accelerations is not None else None,
+            # Gripper
             "gripper_position": self.gripper_position,
+            "gripper_force": self.gripper_force,
+            # End-effector
             "ee_position": self.ee_position.tolist() if self.ee_position is not None else None,
             "ee_orientation": self.ee_orientation.tolist() if self.ee_orientation is not None else None,
+            "ee_velocity": self.ee_velocity.tolist() if self.ee_velocity is not None else None,
+            "ee_wrench": self.ee_wrench.to_dict() if self.ee_wrench is not None else None,
+            # Phase (for skill segmentation)
             "phase": self.phase.value,
+            # IMU (for mobile robots)
+            "imu": self.imu.to_dict() if self.imu is not None else None,
         }
 
 
