@@ -82,6 +82,90 @@ class DataPackTier(Enum):
 
 
 @dataclass
+class CameraCalibration:
+    """
+    Full camera calibration data (DROID-style).
+
+    This is what robotics labs expect for proper sim-to-real transfer
+    and multi-view geometry applications.
+    """
+
+    # Intrinsic matrix (3x3) - converts 3D camera coords to 2D pixel coords
+    # [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+    intrinsic_matrix: Optional[np.ndarray] = None
+
+    # Distortion coefficients (OpenCV format: k1, k2, p1, p2, k3, ...)
+    distortion_coeffs: Optional[np.ndarray] = None
+
+    # Extrinsic matrix (4x4) - camera-to-world transform
+    # Transforms points from camera frame to world frame
+    extrinsic_matrix: Optional[np.ndarray] = None
+
+    # Camera-to-robot-base transform (4x4) - useful for eye-in-hand
+    camera_to_robot_base: Optional[np.ndarray] = None
+
+    # Timestamp of calibration (for tracking drift)
+    calibration_timestamp: Optional[str] = None
+
+    def compute_intrinsic_from_params(
+        self,
+        focal_length_mm: float,
+        sensor_width_mm: float,
+        sensor_height_mm: float,
+        resolution: Tuple[int, int],
+    ) -> np.ndarray:
+        """Compute intrinsic matrix from physical camera parameters."""
+        width, height = resolution
+
+        # Focal length in pixels
+        fx = focal_length_mm * width / sensor_width_mm
+        fy = focal_length_mm * height / sensor_height_mm
+
+        # Principal point (assume center)
+        cx = width / 2.0
+        cy = height / 2.0
+
+        self.intrinsic_matrix = np.array([
+            [fx, 0, cx],
+            [0, fy, cy],
+            [0, 0, 1]
+        ], dtype=np.float64)
+
+        return self.intrinsic_matrix
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize calibration data."""
+        result = {}
+        if self.intrinsic_matrix is not None:
+            result["intrinsic_matrix"] = self.intrinsic_matrix.tolist()
+        if self.distortion_coeffs is not None:
+            result["distortion_coeffs"] = self.distortion_coeffs.tolist()
+        if self.extrinsic_matrix is not None:
+            result["extrinsic_matrix"] = self.extrinsic_matrix.tolist()
+        if self.camera_to_robot_base is not None:
+            result["camera_to_robot_base"] = self.camera_to_robot_base.tolist()
+        if self.calibration_timestamp is not None:
+            result["calibration_timestamp"] = self.calibration_timestamp
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CameraCalibration":
+        """Deserialize calibration data."""
+        calib = cls()
+        if "intrinsic_matrix" in data:
+            calib.intrinsic_matrix = np.array(data["intrinsic_matrix"], dtype=np.float64)
+        if "distortion_coeffs" in data:
+            calib.distortion_coeffs = np.array(data["distortion_coeffs"], dtype=np.float64)
+        if "extrinsic_matrix" in data:
+            calib.extrinsic_matrix = np.array(data["extrinsic_matrix"], dtype=np.float64)
+        if "camera_to_robot_base" in data:
+            calib.camera_to_robot_base = np.array(data["camera_to_robot_base"], dtype=np.float64)
+        if "calibration_timestamp" in data:
+            calib.calibration_timestamp = data["calibration_timestamp"]
+        return calib
+
+
+@dataclass
 class CameraConfig:
     """Configuration for a single camera."""
 
@@ -90,6 +174,7 @@ class CameraConfig:
     resolution: Tuple[int, int] = (640, 480)
     focal_length: float = 24.0  # mm
     sensor_width: float = 36.0  # mm
+    sensor_height: float = 24.0  # mm (default 3:2 aspect ratio)
     near_clip: float = 0.01  # meters
     far_clip: float = 100.0  # meters
 
@@ -105,9 +190,53 @@ class CameraConfig:
     capture_bbox_3d: bool = False
     capture_normals: bool = False
 
+    # Full camera calibration (DROID-style)
+    calibration: Optional[CameraCalibration] = None
+
     def get_lerobot_key(self) -> str:
         """Get the LeRobot observation key for this camera."""
         return f"observation.images.{self.camera_type}"
+
+    def get_or_compute_calibration(self) -> CameraCalibration:
+        """Get calibration, computing intrinsics from params if not set."""
+        if self.calibration is None:
+            self.calibration = CameraCalibration()
+
+        if self.calibration.intrinsic_matrix is None:
+            self.calibration.compute_intrinsic_from_params(
+                focal_length_mm=self.focal_length,
+                sensor_width_mm=self.sensor_width,
+                sensor_height_mm=self.sensor_height,
+                resolution=self.resolution,
+            )
+            # Default distortion to zero (simulation has no distortion)
+            self.calibration.distortion_coeffs = np.zeros(5, dtype=np.float64)
+
+        return self.calibration
+
+    def set_extrinsic_from_transform(
+        self,
+        position: np.ndarray,
+        rotation_quat: np.ndarray,
+    ) -> None:
+        """Set extrinsic matrix from position and quaternion."""
+        if self.calibration is None:
+            self.calibration = CameraCalibration()
+
+        # Convert quaternion to rotation matrix
+        # Quaternion format: [w, x, y, z]
+        w, x, y, z = rotation_quat
+
+        rotation_matrix = np.array([
+            [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+            [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+            [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
+        ], dtype=np.float64)
+
+        # Build 4x4 extrinsic matrix (camera-to-world)
+        self.calibration.extrinsic_matrix = np.eye(4, dtype=np.float64)
+        self.calibration.extrinsic_matrix[:3, :3] = rotation_matrix
+        self.calibration.extrinsic_matrix[:3, 3] = position
 
 
 @dataclass

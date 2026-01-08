@@ -36,9 +36,282 @@ class OutputFormat(Enum):
     """Output format options."""
 
     LEROBOT = "lerobot"  # LeRobot v2.0 (default)
-    RLDS = "rlds"  # TensorFlow Datasets format
+    RLDS = "rlds"  # TensorFlow Datasets format (TFDS)
+    HDF5 = "hdf5"  # HDF5 format (robomimic/other academic labs)
     HF_DATASETS = "hf_datasets"  # HuggingFace Datasets
+    ROSBAG = "rosbag"  # ROS bag format (legacy systems)
     RAW = "raw"  # Raw files (images, JSON, etc.)
+
+
+@dataclass
+class DatasetSplitConfig:
+    """
+    Configuration for train/val/test splits.
+
+    This is REQUIRED for proper benchmarking - labs need reproducible
+    splits to compare models fairly.
+
+    DROID and BridgeData provide explicit splits; we should too.
+    """
+
+    train_ratio: float = 0.8
+    val_ratio: float = 0.1
+    test_ratio: float = 0.1
+
+    # Seed for reproducible splits
+    split_seed: int = 42
+
+    # Split strategy
+    # - "random": Random split by episode
+    # - "scene": Split by scene (all episodes from a scene in same split)
+    # - "task": Split by task type (train on some tasks, test on others)
+    split_strategy: str = "random"
+
+    # Optional explicit splits (overrides ratios if provided)
+    # Maps episode_id to split name ("train", "val", "test")
+    explicit_splits: Optional[Dict[str, str]] = None
+
+    def validate(self) -> None:
+        """Validate split configuration."""
+        total = self.train_ratio + self.val_ratio + self.test_ratio
+        if abs(total - 1.0) > 0.001:
+            raise ValueError(f"Split ratios must sum to 1.0, got {total}")
+        if self.split_strategy not in ["random", "scene", "task"]:
+            raise ValueError(f"Unknown split strategy: {self.split_strategy}")
+
+
+@dataclass
+class FailureRolloutConfig:
+    """
+    Configuration for failure rollouts / hard negatives.
+
+    Labs increasingly want failure data for:
+    - Contrastive learning
+    - Learning what NOT to do
+    - Safety-aware policies
+    - Robust error recovery
+
+    Reference: Post-training data in the research AI conversation.
+    """
+
+    # Include failure episodes in dataset
+    include_failures: bool = False
+
+    # Ratio of failures to include (0.0 = none, 1.0 = all failures)
+    failure_ratio: float = 0.1
+
+    # Label failure reasons (collision, grasp_failure, etc.)
+    include_failure_labels: bool = True
+
+    # Include "near-miss" episodes (low quality but not failed)
+    include_near_misses: bool = False
+    near_miss_threshold: float = 0.5  # Quality score threshold
+
+    # Separate failure episodes into own split
+    separate_failure_split: bool = False
+
+
+@dataclass
+class GoalImageConfig:
+    """
+    Configuration for goal images.
+
+    Goal-conditioned policies (like BridgeData V2) need "what success looks like".
+    This captures the final state of successful episodes as goal images.
+    """
+
+    # Enable goal image capture
+    enabled: bool = False
+
+    # Which camera(s) to use for goal images
+    goal_cameras: List[str] = field(default_factory=lambda: ["wrist", "overhead"])
+
+    # Capture goal image at episode end or from separate "goal state"
+    capture_mode: str = "episode_end"  # "episode_end", "explicit_goal", "both"
+
+    # Store as separate files or inline in episode data
+    storage_mode: str = "separate"  # "separate", "inline"
+
+    # Resolution for goal images (can differ from observation resolution)
+    goal_resolution: Optional[Tuple[int, int]] = None  # None = same as observation
+
+
+@dataclass
+class SkillSegmentConfig:
+    """
+    Configuration for skill segment annotations.
+
+    Segments each episode into discrete skills (approach, grasp, lift, etc.).
+    Useful for:
+    - Skill-based learning
+    - Hierarchical policies
+    - Learning from sub-trajectories
+    """
+
+    # Export skill segment annotations
+    enabled: bool = True
+
+    # Include segment boundaries in observation data
+    include_in_observations: bool = True
+
+    # Export as separate annotation file
+    export_separate_file: bool = True
+
+    # Segment types to track
+    segment_types: List[str] = field(default_factory=lambda: [
+        "home", "approach", "pre_grasp", "grasp", "lift",
+        "transport", "pre_place", "place", "release", "retract"
+    ])
+
+
+@dataclass
+class IMUConfig:
+    """
+    Configuration for IMU (Inertial Measurement Unit) data.
+
+    Important for mobile manipulation robots (Fetch, TIAGo, Spot).
+    """
+
+    # Enable IMU capture
+    enabled: bool = False
+
+    # IMU location on robot
+    imu_location: str = "base"  # "base", "torso", "head"
+
+    # Capture rate (Hz)
+    capture_rate: float = 100.0
+
+    # Data to capture
+    capture_linear_acceleration: bool = True
+    capture_angular_velocity: bool = True
+    capture_orientation: bool = True  # Quaternion from IMU fusion
+
+    # Add noise simulation (for sim-to-real)
+    add_noise: bool = True
+    accel_noise_std: float = 0.01  # m/s^2
+    gyro_noise_std: float = 0.001  # rad/s
+
+
+@dataclass
+class PointCloudConfig:
+    """
+    Configuration for point cloud data.
+
+    Useful for:
+    - 3D-aware world models
+    - Point cloud policies (PointNet, etc.)
+    - Geometric reasoning
+    """
+
+    # Enable point cloud capture
+    enabled: bool = False
+
+    # Source for point clouds
+    source: str = "depth"  # "depth" (derive from depth + intrinsics), "lidar", "both"
+
+    # Point cloud parameters
+    max_points: int = 10000
+    subsample_method: str = "random"  # "random", "voxel", "fps"
+
+    # Coordinate frame
+    coordinate_frame: str = "world"  # "world", "camera", "robot_base"
+
+    # Include RGB colors per point
+    include_colors: bool = True
+
+    # Include normals per point
+    include_normals: bool = False
+
+    # Output format
+    output_format: str = "npz"  # "npz", "ply", "pcd"
+
+
+@dataclass
+class TactileIntegrationConfig:
+    """
+    Configuration for tactile sensor integration.
+
+    Research shows tactile + visual policies achieve 81%+ success
+    vs ~50% for vision-only in contact-rich tasks.
+    """
+
+    # Enable tactile sensor simulation
+    enabled: bool = False
+
+    # Sensor type (from upsell-features-job/tactile_sensor_sim.py)
+    sensor_type: str = "gelslim"  # "gelslim", "gelsight", "digit", "magnetic"
+
+    # Dual gripper (both fingers)
+    dual_gripper: bool = True
+
+    # Include tactile images (RGB-like visualization)
+    include_tactile_images: bool = True
+
+    # Include force maps
+    include_force_maps: bool = True
+
+    # Include marker displacements (for marker-based sensors)
+    include_marker_displacements: bool = True
+
+    # Storage format
+    storage_format: str = "npz"  # "npz", "hdf5"
+
+
+@dataclass
+class JointDynamicsConfig:
+    """
+    Configuration for joint dynamics data (torques, efforts).
+
+    Important for contact-rich manipulation and sim-to-real.
+    """
+
+    # Enable joint dynamics capture
+    enabled: bool = True
+
+    # Capture joint torques (from physics simulation)
+    capture_torques: bool = True
+
+    # Capture commanded efforts
+    capture_efforts: bool = True
+
+    # Capture joint velocities (often already captured, but explicit)
+    capture_velocities: bool = True
+
+    # Capture joint accelerations (derived)
+    capture_accelerations: bool = False
+
+    # Include external forces/torques on end-effector
+    capture_ee_wrench: bool = True
+
+
+@dataclass
+class CameraCalibrationConfig:
+    """
+    Configuration for camera calibration data export.
+
+    DROID explicitly calls this out as a key differentiator.
+    """
+
+    # Export camera calibration data
+    enabled: bool = True
+
+    # Export intrinsic matrix (3x3)
+    export_intrinsics: bool = True
+
+    # Export distortion coefficients
+    export_distortion: bool = True
+
+    # Export extrinsic matrix (4x4 camera-to-world)
+    export_extrinsics: bool = True
+
+    # Export per-frame extrinsics (for moving cameras like wrist)
+    export_per_frame_extrinsics: bool = True
+
+    # Export camera-to-robot-base transform
+    export_camera_to_robot: bool = True
+
+    # Output format
+    output_format: str = "json"  # "json", "yaml", "npz"
 
 
 @dataclass
@@ -113,6 +386,17 @@ class DataPackConfig:
 
     This class defines all data streams, formats, and options for
     a specific data pack tier.
+
+    Now includes ALL the data points labs want (per research AI conversation):
+    - Camera calibration (DROID-style)
+    - Train/val/test splits
+    - Joint torques/efforts
+    - Goal images
+    - Failure rollouts
+    - Skill segments
+    - IMU (mobile robots)
+    - Point clouds
+    - Tactile integration
     """
 
     tier: DataPackTier
@@ -127,7 +411,7 @@ class DataPackConfig:
     camera_types: List[str] = field(default_factory=lambda: ["wrist"])
     resolution: Tuple[int, int] = (640, 480)
 
-    # Output format
+    # Output format (now supports RLDS, HDF5, ROS bag)
     output_format: OutputFormat = OutputFormat.LEROBOT
     fps: float = 30.0
 
@@ -141,8 +425,62 @@ class DataPackConfig:
     include_skill_segments: bool = False
 
     # Metadata
-    version: str = "1.0.0"
+    version: str = "2.0.0"  # Bumped for new features
     pricing_tier: str = "standard"
+
+    # =========================================================================
+    # NEW: P0 - Critical for benchmarks (DROID-level quality)
+    # =========================================================================
+
+    # Train/val/test splits - REQUIRED for proper benchmarking
+    split_config: DatasetSplitConfig = field(default_factory=DatasetSplitConfig)
+
+    # Camera calibration - DROID explicitly calls this out
+    camera_calibration_config: CameraCalibrationConfig = field(
+        default_factory=CameraCalibrationConfig
+    )
+
+    # =========================================================================
+    # NEW: P1 - High value for post-training and contact-rich tasks
+    # =========================================================================
+
+    # Joint dynamics (torques, efforts) - important for contact-rich
+    joint_dynamics_config: JointDynamicsConfig = field(
+        default_factory=JointDynamicsConfig
+    )
+
+    # Goal images for goal-conditioned policies
+    goal_image_config: GoalImageConfig = field(default_factory=GoalImageConfig)
+
+    # Failure rollouts for contrastive learning / hard negatives
+    failure_config: FailureRolloutConfig = field(default_factory=FailureRolloutConfig)
+
+    # Tactile sensor integration
+    tactile_config: TactileIntegrationConfig = field(
+        default_factory=TactileIntegrationConfig
+    )
+
+    # =========================================================================
+    # NEW: P2 - Nice to have for specific use cases
+    # =========================================================================
+
+    # Skill segment export (approach, grasp, lift, etc.)
+    skill_segment_config: SkillSegmentConfig = field(
+        default_factory=SkillSegmentConfig
+    )
+
+    # IMU data for mobile robots
+    imu_config: IMUConfig = field(default_factory=IMUConfig)
+
+    # Point cloud generation
+    point_cloud_config: PointCloudConfig = field(default_factory=PointCloudConfig)
+
+    # =========================================================================
+    # Export format helpers
+    # =========================================================================
+
+    # Additional output formats to generate (alongside primary)
+    additional_formats: List[OutputFormat] = field(default_factory=list)
 
     def get_stream(self, stream_id: str) -> Optional[DataStreamConfig]:
         """Get a stream configuration by ID."""
@@ -203,10 +541,13 @@ def create_core_pack(
 
     Core Pack includes:
     - RGB images (1-N cameras)
-    - Robot state (joint positions, gripper)
+    - Robot state (joint positions, velocities, gripper)
     - Actions (joint commands)
     - Episode metadata (task, success, duration)
     - Quality metrics (sim-verified)
+    - Camera calibration (intrinsics + extrinsics) [NEW - P0]
+    - Train/val/test splits [NEW - P0]
+    - Skill segment annotations [NEW - P2]
 
     Target: Labs training visuomotor policies (ACT, Diffusion Policy)
     """
@@ -228,6 +569,7 @@ def create_core_pack(
             metadata={
                 "includes": [
                     "joint_positions",
+                    "joint_velocities",  # NEW
                     "gripper_position",
                     "ee_position",
                 ]
@@ -247,6 +589,25 @@ def create_core_pack(
             format="json",
             metadata={"includes": ["task", "success", "duration", "quality_score"]},
         ),
+        # NEW: Camera calibration stream
+        DataStreamConfig(
+            stream_id="camera_calibration",
+            stream_type="calibration",
+            enabled=True,
+            format="json",
+            per_camera=True,
+            metadata={
+                "includes": ["intrinsic_matrix", "distortion_coeffs", "extrinsic_matrix"]
+            },
+        ),
+        # NEW: Skill segments stream
+        DataStreamConfig(
+            stream_id="skill_segments",
+            stream_type="annotation",
+            enabled=True,
+            format="json",
+            metadata={"type": "skill_segment"},
+        ),
     ]
 
     camera_types = ["wrist"]
@@ -260,7 +621,7 @@ def create_core_pack(
     return DataPackConfig(
         tier=DataPackTier.CORE,
         name="Core Pack",
-        description="RGB observations + robot state + actions + metadata",
+        description="RGB observations + robot state + actions + metadata + calibration + splits",
         streams=streams,
         num_cameras=num_cameras,
         camera_types=camera_types[:num_cameras],
@@ -268,6 +629,23 @@ def create_core_pack(
         fps=fps,
         include_task_descriptions=True,
         pricing_tier="standard",
+        # NEW: Enable P0 features by default
+        split_config=DatasetSplitConfig(
+            train_ratio=0.8,
+            val_ratio=0.1,
+            test_ratio=0.1,
+            split_seed=42,
+        ),
+        camera_calibration_config=CameraCalibrationConfig(enabled=True),
+        skill_segment_config=SkillSegmentConfig(enabled=True),
+        # Joint dynamics basic (velocities only for core)
+        joint_dynamics_config=JointDynamicsConfig(
+            enabled=True,
+            capture_velocities=True,
+            capture_torques=False,  # Plus/Full only
+            capture_efforts=False,
+            capture_ee_wrench=False,
+        ),
     )
 
 
@@ -285,6 +663,10 @@ def create_plus_pack(
     - Instance segmentation masks
     - 2D bounding boxes (COCO format)
     - 3D bounding boxes (camera-space)
+    - Joint torques/efforts [NEW - P1]
+    - Goal images [NEW - P1]
+    - Failure rollouts (optional) [NEW - P1]
+    - Point clouds (derived from depth) [NEW - P2]
 
     Target: Labs training perception + policy, object-centric models
     Best value for most robotics research labs.
@@ -305,6 +687,17 @@ def create_plus_pack(
             stream_type="robot_state",
             enabled=True,
             format="parquet",
+            metadata={
+                "includes": [
+                    "joint_positions",
+                    "joint_velocities",
+                    "joint_torques",  # NEW
+                    "joint_efforts",  # NEW
+                    "gripper_position",
+                    "ee_position",
+                    "ee_wrench",  # NEW
+                ]
+            },
         ),
         DataStreamConfig(
             stream_id="actions",
@@ -317,6 +710,30 @@ def create_plus_pack(
             stream_type="metadata",
             enabled=True,
             format="json",
+        ),
+        # Camera calibration (P0)
+        DataStreamConfig(
+            stream_id="camera_calibration",
+            stream_type="calibration",
+            enabled=True,
+            format="json",
+            per_camera=True,
+            metadata={
+                "includes": [
+                    "intrinsic_matrix",
+                    "distortion_coeffs",
+                    "extrinsic_matrix",
+                    "camera_to_robot_base",
+                ]
+            },
+        ),
+        # Skill segments
+        DataStreamConfig(
+            stream_id="skill_segments",
+            stream_type="annotation",
+            enabled=True,
+            format="json",
+            metadata={"type": "skill_segment"},
         ),
         # Plus streams
         DataStreamConfig(
@@ -372,6 +789,28 @@ def create_plus_pack(
                 "include_orientation": True,
             },
         ),
+        # NEW: Goal images
+        DataStreamConfig(
+            stream_id="goal_images",
+            stream_type="goal_image",
+            enabled=True,
+            format="png",
+            per_camera=True,
+            metadata={"capture_mode": "episode_end"},
+        ),
+        # NEW: Point clouds
+        DataStreamConfig(
+            stream_id="point_clouds",
+            stream_type="point_cloud",
+            enabled=True,
+            format="npz",
+            per_camera=True,
+            metadata={
+                "source": "depth",
+                "max_points": 10000,
+                "include_colors": True,
+            },
+        ),
     ]
 
     camera_types = ["wrist", "overhead"][:num_cameras]
@@ -383,7 +822,7 @@ def create_plus_pack(
     return DataPackConfig(
         tier=DataPackTier.PLUS,
         name="Plus Pack",
-        description="Core + depth + segmentation + 2D/3D bounding boxes",
+        description="Core + depth + segmentation + bboxes + torques + goals + point clouds",
         streams=streams,
         num_cameras=num_cameras,
         camera_types=camera_types[:num_cameras],
@@ -392,6 +831,51 @@ def create_plus_pack(
         include_task_descriptions=True,
         include_skill_segments=True,
         pricing_tier="premium",
+        # P0: Splits and calibration
+        split_config=DatasetSplitConfig(
+            train_ratio=0.8,
+            val_ratio=0.1,
+            test_ratio=0.1,
+            split_seed=42,
+        ),
+        camera_calibration_config=CameraCalibrationConfig(
+            enabled=True,
+            export_per_frame_extrinsics=True,  # Important for wrist camera
+            export_camera_to_robot=True,
+        ),
+        # P1: Joint dynamics with torques
+        joint_dynamics_config=JointDynamicsConfig(
+            enabled=True,
+            capture_velocities=True,
+            capture_torques=True,
+            capture_efforts=True,
+            capture_ee_wrench=True,
+        ),
+        # P1: Goal images
+        goal_image_config=GoalImageConfig(
+            enabled=True,
+            goal_cameras=["wrist", "overhead"],
+            capture_mode="episode_end",
+        ),
+        # P1: Failure rollouts (opt-in)
+        failure_config=FailureRolloutConfig(
+            include_failures=False,  # Opt-in for Plus
+            failure_ratio=0.1,
+            include_failure_labels=True,
+        ),
+        # P2: Skill segments
+        skill_segment_config=SkillSegmentConfig(
+            enabled=True,
+            include_in_observations=True,
+            export_separate_file=True,
+        ),
+        # P2: Point clouds
+        point_cloud_config=PointCloudConfig(
+            enabled=True,
+            source="depth",
+            max_points=10000,
+            include_colors=True,
+        ),
     )
 
 
@@ -399,6 +883,7 @@ def create_full_pack(
     num_cameras: int = 3,
     resolution: Tuple[int, int] = (640, 480),
     fps: float = 30.0,
+    enable_mobile_robot_sensors: bool = False,
 ) -> DataPackConfig:
     """
     Create Full data pack configuration.
@@ -409,6 +894,11 @@ def create_full_pack(
     - Surface normals (per camera)
     - Privileged state (full physics state for evaluation)
     - Language annotations (task descriptions, skill labels)
+    - Tactile sensor simulation [NEW - P1]
+    - Failure rollouts with labels [NEW - P1]
+    - IMU data (for mobile robots) [NEW - P2]
+    - Full point clouds with normals [NEW - P2]
+    - Multiple export formats (RLDS, HDF5) [NEW - P1]
 
     Target: Labs training world models, simulation-to-real transfer,
     full-stack robotics research.
@@ -428,6 +918,21 @@ def create_full_pack(
             stream_type="robot_state",
             enabled=True,
             format="parquet",
+            metadata={
+                "includes": [
+                    "joint_positions",
+                    "joint_velocities",
+                    "joint_torques",
+                    "joint_efforts",
+                    "joint_accelerations",  # NEW - Full only
+                    "gripper_position",
+                    "gripper_force",  # NEW
+                    "ee_position",
+                    "ee_orientation",
+                    "ee_velocity",  # NEW
+                    "ee_wrench",
+                ]
+            },
         ),
         DataStreamConfig(
             stream_id="actions",
@@ -440,6 +945,31 @@ def create_full_pack(
             stream_type="metadata",
             enabled=True,
             format="json",
+        ),
+        # Camera calibration (P0) - Full calibration
+        DataStreamConfig(
+            stream_id="camera_calibration",
+            stream_type="calibration",
+            enabled=True,
+            format="json",
+            per_camera=True,
+            metadata={
+                "includes": [
+                    "intrinsic_matrix",
+                    "distortion_coeffs",
+                    "extrinsic_matrix",
+                    "camera_to_robot_base",
+                    "per_frame_extrinsics",  # For wrist camera
+                ]
+            },
+        ),
+        # Skill segments
+        DataStreamConfig(
+            stream_id="skill_segments",
+            stream_type="annotation",
+            enabled=True,
+            format="json",
+            metadata={"type": "skill_segment", "include_boundaries": True},
         ),
         # Plus streams
         DataStreamConfig(
@@ -478,6 +1008,29 @@ def create_full_pack(
             format="json",
             per_camera=True,
         ),
+        # Goal images
+        DataStreamConfig(
+            stream_id="goal_images",
+            stream_type="goal_image",
+            enabled=True,
+            format="png",
+            per_camera=True,
+            metadata={"capture_mode": "episode_end"},
+        ),
+        # Point clouds with normals
+        DataStreamConfig(
+            stream_id="point_clouds",
+            stream_type="point_cloud",
+            enabled=True,
+            format="npz",
+            per_camera=True,
+            metadata={
+                "source": "depth",
+                "max_points": 20000,  # More points for Full
+                "include_colors": True,
+                "include_normals": True,  # Full only
+            },
+        ),
         # Full streams
         DataStreamConfig(
             stream_id="normals",
@@ -496,6 +1049,7 @@ def create_full_pack(
                 "coordinate_system": "world",
                 "format": "quaternion",
                 "include_velocity": True,
+                "include_acceleration": True,  # Full only
             },
         ),
         DataStreamConfig(
@@ -507,6 +1061,7 @@ def create_full_pack(
                 "include_force_magnitude": True,
                 "include_contact_normal": True,
                 "include_contact_point": True,
+                "include_contact_impulse": True,  # Full only
             },
         ),
         DataStreamConfig(
@@ -520,10 +1075,56 @@ def create_full_pack(
                     "gripper_force",
                     "contact_flags",
                     "grasp_status",
+                    "object_accelerations",  # Full only
+                    "physics_timestep",  # Full only
                 ]
             },
         ),
+        # NEW: Tactile sensors (Full only)
+        DataStreamConfig(
+            stream_id="tactile",
+            stream_type="tactile",
+            enabled=True,
+            format="npz",
+            metadata={
+                "sensor_type": "gelslim",
+                "dual_gripper": True,
+                "include_images": True,
+                "include_force_maps": True,
+                "include_marker_displacements": True,
+            },
+        ),
+        # NEW: Failure labels (when failure rollouts enabled)
+        DataStreamConfig(
+            stream_id="failure_labels",
+            stream_type="annotation",
+            enabled=True,
+            format="json",
+            metadata={
+                "type": "failure_label",
+                "include_reason": True,
+                "include_frame": True,
+            },
+        ),
     ]
+
+    # Add IMU stream for mobile robots
+    if enable_mobile_robot_sensors:
+        streams.append(
+            DataStreamConfig(
+                stream_id="imu",
+                stream_type="imu",
+                enabled=True,
+                format="parquet",
+                metadata={
+                    "location": "base",
+                    "rate_hz": 100.0,
+                    "include_linear_acceleration": True,
+                    "include_angular_velocity": True,
+                    "include_orientation": True,
+                },
+            )
+        )
 
     camera_types = ["wrist", "overhead", "side"][:num_cameras]
     if num_cameras >= 4:
@@ -532,7 +1133,7 @@ def create_full_pack(
     return DataPackConfig(
         tier=DataPackTier.FULL,
         name="Full Pack",
-        description="Plus + object poses + contacts + normals + privileged state",
+        description="Complete data: Plus + poses + contacts + tactile + failures + IMU + multi-format export",
         streams=streams,
         num_cameras=num_cameras,
         camera_types=camera_types[:num_cameras],
@@ -542,6 +1143,79 @@ def create_full_pack(
         include_language_annotations=True,
         include_skill_segments=True,
         pricing_tier="enterprise",
+        # P0: Full splits and calibration
+        split_config=DatasetSplitConfig(
+            train_ratio=0.8,
+            val_ratio=0.1,
+            test_ratio=0.1,
+            split_seed=42,
+        ),
+        camera_calibration_config=CameraCalibrationConfig(
+            enabled=True,
+            export_intrinsics=True,
+            export_distortion=True,
+            export_extrinsics=True,
+            export_per_frame_extrinsics=True,
+            export_camera_to_robot=True,
+        ),
+        # P1: Full joint dynamics
+        joint_dynamics_config=JointDynamicsConfig(
+            enabled=True,
+            capture_velocities=True,
+            capture_torques=True,
+            capture_efforts=True,
+            capture_accelerations=True,  # Full only
+            capture_ee_wrench=True,
+        ),
+        # P1: Goal images from all cameras
+        goal_image_config=GoalImageConfig(
+            enabled=True,
+            goal_cameras=["wrist", "overhead", "side"],
+            capture_mode="episode_end",
+        ),
+        # P1: Failure rollouts ENABLED by default for Full
+        failure_config=FailureRolloutConfig(
+            include_failures=True,  # Enabled for Full pack
+            failure_ratio=0.1,
+            include_failure_labels=True,
+            include_near_misses=True,
+            near_miss_threshold=0.5,
+        ),
+        # P1: Tactile integration
+        tactile_config=TactileIntegrationConfig(
+            enabled=True,
+            sensor_type="gelslim",
+            dual_gripper=True,
+            include_tactile_images=True,
+            include_force_maps=True,
+            include_marker_displacements=True,
+        ),
+        # P2: Full skill segments
+        skill_segment_config=SkillSegmentConfig(
+            enabled=True,
+            include_in_observations=True,
+            export_separate_file=True,
+        ),
+        # P2: IMU for mobile robots
+        imu_config=IMUConfig(
+            enabled=enable_mobile_robot_sensors,
+            imu_location="base",
+            capture_rate=100.0,
+            capture_linear_acceleration=True,
+            capture_angular_velocity=True,
+            capture_orientation=True,
+            add_noise=True,
+        ),
+        # P2: Full point clouds with normals
+        point_cloud_config=PointCloudConfig(
+            enabled=True,
+            source="depth",
+            max_points=20000,
+            include_colors=True,
+            include_normals=True,
+        ),
+        # P1: Additional export formats
+        additional_formats=[OutputFormat.RLDS, OutputFormat.HDF5],
     )
 
 
