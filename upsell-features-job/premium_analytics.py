@@ -14,7 +14,14 @@ Premium Analytics Package includes:
 5. Generalization Analysis - Learning curves & curriculum recommendations
 6. Trajectory Optimality - Path quality & energy efficiency
 
+Isaac Lab Arena Premium Analytics (NEW):
+7. Arena Telemetry Capture - Episode-level metrics, grasp events, collisions
+8. Policy Leaderboard - Multi-policy comparison with confidence intervals
+9. Parallel Eval Capture - GPU-accelerated benchmark metrics
+10. Arena Generalization - Object diversity coverage analysis
+
 Upsell Value: $50,000-$200,000 for complete validation package
+Arena Add-ons: Additional $25,000-$75,000 for Arena-specific analytics
 """
 
 from __future__ import annotations
@@ -58,6 +65,31 @@ from .trajectory_optimality_analyzer import (
     analyze_trajectory_optimality,
 )
 
+# Isaac Lab Arena Premium Analytics Modules
+from .arena_telemetry_capture import (
+    ArenaTelemetryCapture,
+    ParallelEvalBatch,
+    EpisodeTelemetry,
+    create_arena_telemetry_capture,
+)
+from .policy_leaderboard import (
+    PolicyLeaderboardGenerator,
+    PolicyEvalResult,
+    Leaderboard,
+    RankingMetric,
+    create_policy_leaderboard_generator,
+)
+from .parallel_eval_capture import (
+    ParallelEvalCapture,
+    ParallelEvalResults,
+    create_parallel_eval_capture,
+)
+from .arena_generalization_metrics import (
+    ArenaGeneralizationMetrics,
+    GeneralizationReport as ArenaGeneralizationReport,
+    create_arena_generalization_metrics,
+)
+
 
 class AnalyticsTier:
     """Premium analytics tier definitions."""
@@ -65,6 +97,8 @@ class AnalyticsTier:
     STANDARD = "standard"                  # $15k - Core metrics
     COMPREHENSIVE = "comprehensive"        # $35k - Full analysis
     ENTERPRISE = "enterprise"              # $75k+ - Everything + custom
+    ARENA_BENCHMARK = "arena_benchmark"    # $50k - Arena evaluation analytics
+    ARENA_COMPLETE = "arena_complete"      # $100k+ - Full Arena + Premium
 
 
 @dataclass
@@ -119,6 +153,40 @@ TIER_CONFIGS = {
         ],
         description="Complete validation package with multi-robot analysis",
     ),
+    AnalyticsTier.ARENA_BENCHMARK: AnalyticsTierConfig(
+        name="Arena Benchmark Analytics",
+        price_usd=50000,
+        included_analyses=[
+            "arena_telemetry",
+            "policy_leaderboard",
+            "parallel_eval",
+            "arena_generalization",
+            "confidence_intervals",
+        ],
+        description="Isaac Lab Arena evaluation analytics with statistical rigor",
+    ),
+    AnalyticsTier.ARENA_COMPLETE: AnalyticsTierConfig(
+        name="Arena Complete Package",
+        price_usd=125000,
+        included_analyses=[
+            # Core analytics
+            "failure_analysis",
+            "grasp_quality",
+            "generalization",
+            "trajectory_optimality",
+            "fidelity_matrix",
+            "embodiment_transfer",
+            # Arena analytics
+            "arena_telemetry",
+            "policy_leaderboard",
+            "parallel_eval",
+            "arena_generalization",
+            "confidence_intervals",
+            "timeout_collision_breakdown",
+            "custom_reports",
+        ],
+        description="Complete validation + Arena benchmark analytics package",
+    ),
 }
 
 
@@ -130,13 +198,20 @@ class PremiumAnalyticsReport:
     created_at: str
     tier: str
 
-    # Individual reports
+    # Individual reports - Core Analytics
     failure_analysis: Optional[FailureAnalysisReport] = None
     fidelity_matrix: Optional[FidelityMatrix] = None
     embodiment_transfer: Optional[EmbodimentTransferReport] = None
     grasp_quality: Optional[GraspQualityReport] = None
     generalization: Optional[GeneralizationReport] = None
     trajectory_optimality: Optional[TrajectoryOptimalityReport] = None
+
+    # Individual reports - Isaac Lab Arena Analytics
+    arena_telemetry: Optional[Dict[str, Any]] = None
+    policy_leaderboard: Optional[Dict[str, Any]] = None
+    parallel_eval: Optional[Dict[str, Any]] = None
+    arena_generalization: Optional[Dict[str, Any]] = None
+    timeout_collision_breakdown: Optional[Dict[str, Any]] = None
 
     # Executive summary
     executive_summary: Dict[str, Any] = field(default_factory=dict)
@@ -171,13 +246,34 @@ class PremiumAnalyticsReport:
             "recommendations": self.recommendations,
             "estimated_value": self.estimated_value,
             "individual_reports": {
+                # Core Analytics
                 "failure_analysis": "included" if self.failure_analysis else "not_included",
                 "fidelity_matrix": "included" if self.fidelity_matrix else "not_included",
                 "embodiment_transfer": "included" if self.embodiment_transfer else "not_included",
                 "grasp_quality": "included" if self.grasp_quality else "not_included",
                 "generalization": "included" if self.generalization else "not_included",
                 "trajectory_optimality": "included" if self.trajectory_optimality else "not_included",
+                # Arena Analytics
+                "arena_telemetry": "included" if self.arena_telemetry else "not_included",
+                "policy_leaderboard": "included" if self.policy_leaderboard else "not_included",
+                "parallel_eval": "included" if self.parallel_eval else "not_included",
+                "arena_generalization": "included" if self.arena_generalization else "not_included",
+                "timeout_collision_breakdown": "included" if self.timeout_collision_breakdown else "not_included",
             },
+            # Arena Analytics Data (if available)
+            "arena_analytics": {
+                "telemetry": self.arena_telemetry,
+                "leaderboard": self.policy_leaderboard,
+                "parallel_eval": self.parallel_eval,
+                "generalization": self.arena_generalization,
+                "timeout_collision": self.timeout_collision_breakdown,
+            } if any([
+                self.arena_telemetry,
+                self.policy_leaderboard,
+                self.parallel_eval,
+                self.arena_generalization,
+                self.timeout_collision_breakdown
+            ]) else None,
         }
 
 
@@ -210,6 +306,48 @@ class PremiumAnalyticsService:
 
         # Episodes directory
         self.episodes_dir = self.scene_dir / "episodes"
+
+        # Arena analytics modules (lazy initialization)
+        self._arena_telemetry: Optional[ArenaTelemetryCapture] = None
+        self._policy_leaderboard: Optional[PolicyLeaderboardGenerator] = None
+        self._parallel_eval: Optional[ParallelEvalCapture] = None
+        self._arena_generalization: Optional[ArenaGeneralizationMetrics] = None
+
+    @property
+    def arena_telemetry(self) -> ArenaTelemetryCapture:
+        """Get or create Arena telemetry capture instance."""
+        if self._arena_telemetry is None:
+            self._arena_telemetry = create_arena_telemetry_capture(
+                output_dir=str(self.output_dir / "arena_telemetry")
+            )
+        return self._arena_telemetry
+
+    @property
+    def policy_leaderboard(self) -> PolicyLeaderboardGenerator:
+        """Get or create policy leaderboard generator instance."""
+        if self._policy_leaderboard is None:
+            self._policy_leaderboard = create_policy_leaderboard_generator(
+                output_dir=str(self.output_dir / "leaderboards")
+            )
+        return self._policy_leaderboard
+
+    @property
+    def parallel_eval(self) -> ParallelEvalCapture:
+        """Get or create parallel eval capture instance."""
+        if self._parallel_eval is None:
+            self._parallel_eval = create_parallel_eval_capture(
+                output_dir=str(self.output_dir / "parallel_eval")
+            )
+        return self._parallel_eval
+
+    @property
+    def arena_generalization(self) -> ArenaGeneralizationMetrics:
+        """Get or create Arena generalization metrics instance."""
+        if self._arena_generalization is None:
+            self._arena_generalization = create_arena_generalization_metrics(
+                output_dir=str(self.output_dir / "arena_generalization")
+            )
+        return self._arena_generalization
 
     def log(self, msg: str) -> None:
         if self.verbose:
@@ -256,6 +394,27 @@ class PremiumAnalyticsService:
         if "trajectory_optimality" in self.tier_config.included_analyses:
             self.log("Running trajectory optimality analysis...")
             report.trajectory_optimality = self._run_trajectory_analysis()
+
+        # Isaac Lab Arena Analytics
+        if "arena_telemetry" in self.tier_config.included_analyses:
+            self.log("Running Arena telemetry analysis...")
+            report.arena_telemetry = self._run_arena_telemetry_analysis()
+
+        if "policy_leaderboard" in self.tier_config.included_analyses:
+            self.log("Running policy leaderboard analysis...")
+            report.policy_leaderboard = self._run_policy_leaderboard_analysis()
+
+        if "parallel_eval" in self.tier_config.included_analyses:
+            self.log("Running parallel evaluation analysis...")
+            report.parallel_eval = self._run_parallel_eval_analysis()
+
+        if "arena_generalization" in self.tier_config.included_analyses:
+            self.log("Running Arena generalization analysis...")
+            report.arena_generalization = self._run_arena_generalization_analysis()
+
+        if "timeout_collision_breakdown" in self.tier_config.included_analyses:
+            self.log("Running timeout/collision breakdown analysis...")
+            report.timeout_collision_breakdown = self._run_timeout_collision_analysis()
 
         # Generate summary and recommendations
         self.log("Generating executive summary...")
@@ -349,6 +508,303 @@ class PremiumAnalyticsService:
             self.log(f"Trajectory analysis error: {e}")
             return None
 
+    def _run_arena_telemetry_analysis(self) -> Optional[Dict[str, Any]]:
+        """
+        Run Arena telemetry analysis.
+
+        Captures episode-level telemetry including per-step rewards,
+        collisions, and grasp events - NOT captured in standard output.
+        """
+        try:
+            # Load Arena evaluation data if available
+            arena_data_path = self.scene_dir / "arena_eval" / "telemetry.json"
+            if not arena_data_path.exists():
+                arena_data_path = self.scene_dir / "arena_telemetry.json"
+
+            if arena_data_path.exists():
+                with open(arena_data_path) as f:
+                    arena_data = json.load(f)
+
+                # Generate premium report from loaded data
+                return {
+                    "source": str(arena_data_path),
+                    "episodes_analyzed": arena_data.get("total_episodes", 0),
+                    "grasp_events_captured": arena_data.get("grasp_events", 0),
+                    "collision_events_captured": arena_data.get("collision_events", 0),
+                    "telemetry_metrics": {
+                        "per_step_rewards": "captured",
+                        "collision_detection": "captured",
+                        "grasp_timeline": "captured",
+                        "reward_decomposition": "captured",
+                    },
+                    "upsell_value": "$15,000 - $30,000",
+                    "raw_data": arena_data,
+                }
+            else:
+                # Return placeholder indicating capability
+                return {
+                    "status": "arena_data_not_found",
+                    "message": "Arena telemetry capture ready - run Arena evaluation to generate data",
+                    "capabilities": {
+                        "per_step_rewards": "Available with Arena eval",
+                        "collision_detection": "Available with Arena eval",
+                        "grasp_timeline": "Available with Arena eval",
+                        "reward_decomposition": "Available with Arena eval",
+                    },
+                    "upsell_value": "$15,000 - $30,000",
+                }
+        except Exception as e:
+            self.log(f"Arena telemetry analysis error: {e}")
+            return None
+
+    def _run_policy_leaderboard_analysis(self) -> Optional[Dict[str, Any]]:
+        """
+        Run policy leaderboard analysis with confidence intervals.
+
+        Provides multi-policy comparison rankings with statistical
+        significance testing - NOT captured in standard output.
+        """
+        try:
+            # Check for policy evaluation results
+            policies_dir = self.scene_dir / "policies"
+            arena_results_path = self.scene_dir / "arena_eval" / "policy_results.json"
+
+            if arena_results_path.exists():
+                with open(arena_results_path) as f:
+                    results_data = json.load(f)
+
+                # Add policies to leaderboard generator
+                for policy_data in results_data.get("policies", []):
+                    result = PolicyEvalResult(
+                        policy_id=policy_data.get("policy_id", "unknown"),
+                        policy_name=policy_data.get("name", "Unknown Policy"),
+                        policy_version=policy_data.get("version", "1.0"),
+                        task_name=policy_data.get("task", self.scene_id),
+                        total_episodes=policy_data.get("total_episodes", 0),
+                        successful_episodes=policy_data.get("successful_episodes", 0),
+                        success_rate=policy_data.get("success_rate", 0.0),
+                        mean_reward=policy_data.get("mean_reward", 0.0),
+                        std_reward=policy_data.get("std_reward", 0.0),
+                        episode_rewards=policy_data.get("episode_rewards", []),
+                        episode_outcomes=policy_data.get("episode_outcomes", []),
+                    )
+                    self.policy_leaderboard.add_policy_result(result)
+
+                # Generate leaderboard
+                leaderboard = self.policy_leaderboard.generate_leaderboard(
+                    task_name=self.scene_id,
+                    metric=RankingMetric.SUCCESS_RATE,
+                    run_significance_tests=True,
+                )
+
+                # Generate premium report
+                return self.policy_leaderboard.generate_premium_report(self.scene_id)
+            else:
+                return {
+                    "status": "policy_data_not_found",
+                    "message": "Policy leaderboard ready - run multi-policy Arena evaluation to generate rankings",
+                    "capabilities": {
+                        "confidence_intervals": "Wilson score & bootstrap methods",
+                        "significance_testing": "t-test & Mann-Whitney U",
+                        "rank_stability": "Bootstrap estimation",
+                        "pairwise_comparison": "Full comparison matrix",
+                    },
+                    "upsell_value": "$20,000 - $40,000",
+                }
+        except Exception as e:
+            self.log(f"Policy leaderboard analysis error: {e}")
+            return None
+
+    def _run_parallel_eval_analysis(self) -> Optional[Dict[str, Any]]:
+        """
+        Run parallel evaluation analysis.
+
+        Captures GPU-accelerated parallel evaluation metrics for
+        1000+ environment benchmarks - NOT captured in standard output.
+        """
+        try:
+            parallel_results_path = self.scene_dir / "arena_eval" / "parallel_results.json"
+
+            if parallel_results_path.exists():
+                with open(parallel_results_path) as f:
+                    results_data = json.load(f)
+
+                return {
+                    "source": str(parallel_results_path),
+                    "num_environments": results_data.get("num_environments", 0),
+                    "gpus_used": results_data.get("num_gpus", 1),
+                    "throughput": {
+                        "episodes_per_second": results_data.get("episodes_per_second", 0),
+                        "steps_per_second": results_data.get("steps_per_second", 0),
+                        "realtime_factor": results_data.get("sim_to_real_ratio", 1.0),
+                    },
+                    "reproducibility": {
+                        "score": results_data.get("reproducibility_score", 0),
+                        "inter_env_variance": results_data.get("inter_env_reward_variance", 0),
+                    },
+                    "gpu_efficiency": {
+                        "utilization": results_data.get("gpu_utilization_mean", 0),
+                        "memory_efficiency": results_data.get("gpu_memory_efficiency", 0),
+                        "power_efficiency": results_data.get("power_efficiency", 0),
+                    },
+                    "upsell_value": "$25,000 - $50,000",
+                    "raw_data": results_data,
+                }
+            else:
+                return {
+                    "status": "parallel_eval_not_found",
+                    "message": "Parallel eval capture ready - run GPU-accelerated Arena benchmark to generate metrics",
+                    "capabilities": {
+                        "parallel_environments": "Up to 4096+ environments",
+                        "throughput_analysis": "Episodes/steps per second tracking",
+                        "reproducibility_scoring": "Cross-environment variance analysis",
+                        "gpu_efficiency": "Utilization & power metrics",
+                    },
+                    "upsell_value": "$25,000 - $50,000",
+                }
+        except Exception as e:
+            self.log(f"Parallel eval analysis error: {e}")
+            return None
+
+    def _run_arena_generalization_analysis(self) -> Optional[Dict[str, Any]]:
+        """
+        Run Arena generalization analysis.
+
+        Captures object diversity coverage and generalization metrics
+        NOT captured in standard output.
+        """
+        try:
+            gen_results_path = self.scene_dir / "arena_eval" / "generalization.json"
+
+            if gen_results_path.exists():
+                with open(gen_results_path) as f:
+                    results_data = json.load(f)
+
+                return {
+                    "source": str(gen_results_path),
+                    "overall_score": results_data.get("overall_generalization_score", 0),
+                    "dimension_scores": results_data.get("dimension_scores", {}),
+                    "coverage_analysis": {
+                        "object_diversity": results_data.get("object_coverage", {}),
+                        "pose_diversity": results_data.get("pose_coverage", {}),
+                        "lighting_diversity": results_data.get("lighting_coverage", {}),
+                        "clutter_diversity": results_data.get("clutter_coverage", {}),
+                    },
+                    "failure_patterns": results_data.get("failure_patterns", []),
+                    "training_recommendations": results_data.get("training_recommendations", []),
+                    "upsell_value": "$15,000 - $35,000",
+                }
+            else:
+                return {
+                    "status": "generalization_data_not_found",
+                    "message": "Arena generalization analysis ready - run diversity evaluation to generate metrics",
+                    "capabilities": {
+                        "object_coverage": "Track unique objects and categories tested",
+                        "pose_coverage": "Analyze position/rotation variation coverage",
+                        "visual_coverage": "Lighting and appearance variation tracking",
+                        "difficulty_analysis": "Success rate by difficulty level",
+                    },
+                    "upsell_value": "$15,000 - $35,000",
+                }
+        except Exception as e:
+            self.log(f"Arena generalization analysis error: {e}")
+            return None
+
+    def _run_timeout_collision_analysis(self) -> Optional[Dict[str, Any]]:
+        """
+        Run timeout vs collision failure breakdown analysis.
+
+        Provides detailed breakdown of failure types - NOT captured
+        in standard output.
+        """
+        try:
+            telemetry_path = self.scene_dir / "arena_eval" / "telemetry.json"
+
+            if telemetry_path.exists():
+                with open(telemetry_path) as f:
+                    telemetry_data = json.load(f)
+
+                # Compute breakdown if raw data available
+                termination_counts = telemetry_data.get("termination_counts", {})
+                total_failures = sum(
+                    count for term_type, count in termination_counts.items()
+                    if term_type != "success"
+                )
+
+                return {
+                    "source": str(telemetry_path),
+                    "total_failures": total_failures,
+                    "breakdown": {
+                        "timeout": {
+                            "count": termination_counts.get("timeout", 0),
+                            "percentage": (termination_counts.get("timeout", 0) / total_failures * 100) if total_failures > 0 else 0,
+                            "by_phase": telemetry_data.get("timeout_by_phase", {}),
+                        },
+                        "collision": {
+                            "count": termination_counts.get("collision", 0),
+                            "percentage": (termination_counts.get("collision", 0) / total_failures * 100) if total_failures > 0 else 0,
+                            "by_type": telemetry_data.get("collision_by_type", {}),
+                        },
+                        "other": {
+                            "count": sum(
+                                count for term_type, count in termination_counts.items()
+                                if term_type not in ["success", "timeout", "collision"]
+                            ),
+                            "types": {
+                                k: v for k, v in termination_counts.items()
+                                if k not in ["success", "timeout", "collision"]
+                            },
+                        },
+                    },
+                    "insights": self._generate_failure_insights(termination_counts, total_failures),
+                    "upsell_value": "Included in Arena Telemetry package",
+                }
+            else:
+                return {
+                    "status": "telemetry_not_found",
+                    "message": "Timeout/collision breakdown ready - run Arena evaluation to generate failure analysis",
+                    "capabilities": {
+                        "timeout_analysis": "Phase-by-phase timeout breakdown",
+                        "collision_types": "Self/table/object/environment collision tracking",
+                        "failure_insights": "Actionable optimization recommendations",
+                    },
+                    "upsell_value": "Included in Arena Telemetry package",
+                }
+        except Exception as e:
+            self.log(f"Timeout/collision analysis error: {e}")
+            return None
+
+    def _generate_failure_insights(
+        self,
+        termination_counts: Dict[str, int],
+        total_failures: int
+    ) -> List[str]:
+        """Generate insights from failure breakdown."""
+        insights = []
+
+        if total_failures == 0:
+            return ["No failures recorded - excellent performance!"]
+
+        timeout_pct = (termination_counts.get("timeout", 0) / total_failures * 100) if total_failures > 0 else 0
+        collision_pct = (termination_counts.get("collision", 0) / total_failures * 100) if total_failures > 0 else 0
+
+        if timeout_pct > 50:
+            insights.append(
+                f"High timeout rate ({timeout_pct:.1f}%) - consider trajectory optimization or increasing episode length"
+            )
+
+        if collision_pct > 30:
+            insights.append(
+                f"Significant collision rate ({collision_pct:.1f}%) - motion planning refinement recommended"
+            )
+
+        if timeout_pct < 20 and collision_pct < 20:
+            insights.append(
+                "Diverse failure modes - investigate individual failure types for targeted improvements"
+            )
+
+        return insights
+
     def _generate_executive_summary(
         self,
         report: PremiumAnalyticsReport,
@@ -403,6 +859,45 @@ class PremiumAnalyticsService:
                     report.embodiment_transfer.best_overall.value
                     if report.embodiment_transfer.best_overall else "N/A"
                 ),
+            }
+
+        # Isaac Lab Arena Analytics
+        if report.arena_telemetry:
+            summary["arena_telemetry"] = {
+                "status": report.arena_telemetry.get("status", "captured"),
+                "episodes_analyzed": report.arena_telemetry.get("episodes_analyzed", 0),
+                "grasp_events": report.arena_telemetry.get("grasp_events_captured", 0),
+                "collision_events": report.arena_telemetry.get("collision_events_captured", 0),
+            }
+
+        if report.policy_leaderboard:
+            summary["policy_leaderboard"] = {
+                "status": report.policy_leaderboard.get("status", "generated"),
+                "policies_compared": report.policy_leaderboard.get("summary", {}).get("total_policies", 0),
+                "best_policy": report.policy_leaderboard.get("summary", {}).get("best_policy_by_success"),
+            }
+
+        if report.parallel_eval:
+            summary["parallel_eval"] = {
+                "status": report.parallel_eval.get("status", "captured"),
+                "environments": report.parallel_eval.get("num_environments", 0),
+                "throughput_eps": report.parallel_eval.get("throughput", {}).get("episodes_per_second", 0),
+                "reproducibility": report.parallel_eval.get("reproducibility", {}).get("score", 0),
+            }
+
+        if report.arena_generalization:
+            summary["arena_generalization"] = {
+                "status": report.arena_generalization.get("status", "analyzed"),
+                "overall_score": report.arena_generalization.get("overall_score", 0),
+                "dimension_scores": report.arena_generalization.get("dimension_scores", {}),
+            }
+
+        if report.timeout_collision_breakdown:
+            breakdown = report.timeout_collision_breakdown.get("breakdown", {})
+            summary["failure_breakdown"] = {
+                "timeout_pct": breakdown.get("timeout", {}).get("percentage", 0),
+                "collision_pct": breakdown.get("collision", {}).get("percentage", 0),
+                "insights": report.timeout_collision_breakdown.get("insights", []),
             }
 
         return summary
@@ -745,9 +1240,16 @@ if __name__ == "__main__":
     parser.add_argument("scene_dir", type=Path, help="Path to scene directory")
     parser.add_argument(
         "--tier",
-        choices=["quick_insights", "standard", "comprehensive", "enterprise"],
+        choices=[
+            "quick_insights",
+            "standard",
+            "comprehensive",
+            "enterprise",
+            "arena_benchmark",
+            "arena_complete",
+        ],
         default="comprehensive",
-        help="Analytics tier",
+        help="Analytics tier (arena_benchmark and arena_complete include Isaac Lab Arena analytics)",
     )
     parser.add_argument("--robot-type", default="franka", help="Robot type")
 
@@ -771,3 +1273,40 @@ if __name__ == "__main__":
     print(f"\nKey Findings: {len(report.key_findings)}")
     print(f"Recommendations: {len(report.recommendations)}")
     print(f"\nValue: {report.estimated_value.get('estimated_dataset_value', 'N/A')}")
+
+    # Arena Analytics Summary
+    if any([report.arena_telemetry, report.policy_leaderboard,
+            report.parallel_eval, report.arena_generalization]):
+        print(f"\n{'='*60}")
+        print("ISAAC LAB ARENA ANALYTICS")
+        print(f"{'='*60}")
+
+        if report.arena_telemetry:
+            status = report.arena_telemetry.get("status", "captured")
+            if status == "captured":
+                print(f"  Telemetry: {report.arena_telemetry.get('episodes_analyzed', 0)} episodes analyzed")
+            else:
+                print(f"  Telemetry: Ready (run Arena eval to generate)")
+
+        if report.policy_leaderboard:
+            status = report.policy_leaderboard.get("status", "generated")
+            if "summary" in report.policy_leaderboard:
+                print(f"  Leaderboard: {report.policy_leaderboard['summary'].get('total_policies', 0)} policies compared")
+            else:
+                print(f"  Leaderboard: Ready (run multi-policy eval to generate)")
+
+        if report.parallel_eval:
+            status = report.parallel_eval.get("status", "captured")
+            if status == "captured":
+                eps = report.parallel_eval.get("throughput", {}).get("episodes_per_second", 0)
+                print(f"  Parallel Eval: {report.parallel_eval.get('num_environments', 0)} envs @ {eps:.1f} eps/sec")
+            else:
+                print(f"  Parallel Eval: Ready (run GPU benchmark to generate)")
+
+        if report.arena_generalization:
+            status = report.arena_generalization.get("status", "analyzed")
+            if status == "analyzed":
+                score = report.arena_generalization.get("overall_score", 0)
+                print(f"  Generalization: {score*100:.0f}% coverage score")
+            else:
+                print(f"  Generalization: Ready (run diversity eval to generate)")
