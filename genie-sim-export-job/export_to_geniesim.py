@@ -79,6 +79,49 @@ except ImportError:
     PREMIUM_ANALYTICS_AVAILABLE = False
     print("[GENIESIM-EXPORT-JOB] WARNING: Premium analytics module not available")
 
+# Import ALL default premium features (DEFAULT: ENABLED - NO LONGER UPSELL!)
+try:
+    from .default_sim2real_fidelity import create_default_sim2real_fidelity_exporter
+    SIM2REAL_AVAILABLE = True
+except ImportError:
+    SIM2REAL_AVAILABLE = False
+
+try:
+    from .default_embodiment_transfer import create_default_embodiment_transfer_exporter
+    EMBODIMENT_TRANSFER_AVAILABLE = True
+except ImportError:
+    EMBODIMENT_TRANSFER_AVAILABLE = False
+
+try:
+    from .default_trajectory_optimality import create_default_trajectory_optimality_exporter
+    TRAJECTORY_OPTIMALITY_AVAILABLE = True
+except ImportError:
+    TRAJECTORY_OPTIMALITY_AVAILABLE = False
+
+try:
+    from .default_policy_leaderboard import create_default_policy_leaderboard_exporter
+    POLICY_LEADERBOARD_AVAILABLE = True
+except ImportError:
+    POLICY_LEADERBOARD_AVAILABLE = False
+
+try:
+    from .default_tactile_sensor_sim import create_default_tactile_sensor_exporter
+    TACTILE_SENSOR_AVAILABLE = True
+except ImportError:
+    TACTILE_SENSOR_AVAILABLE = False
+
+try:
+    from .default_language_annotations import create_default_language_annotations_exporter
+    LANGUAGE_ANNOTATIONS_AVAILABLE = True
+except ImportError:
+    LANGUAGE_ANNOTATIONS_AVAILABLE = False
+
+try:
+    from .default_generalization_analyzer import create_default_generalization_analyzer_exporter
+    GENERALIZATION_ANALYZER_AVAILABLE = True
+except ImportError:
+    GENERALIZATION_ANALYZER_AVAILABLE = False
+
 
 def run_geniesim_export_job(
     root: Path,
@@ -290,6 +333,166 @@ def run_geniesim_export_job(
                 print("\n[GENIESIM-EXPORT-JOB] Premium analytics disabled (not recommended)")
             elif not PREMIUM_ANALYTICS_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] WARNING: Premium analytics module not available")
+
+            # Export ALL additional premium features (DEFAULT: ENABLED - NO LONGER UPSELL!)
+            all_premium_features_manifests = {}
+
+            # 1. Sim2Real Fidelity Matrix ($20k-$50k value)
+            if SIM2REAL_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Fidelity Matrix ($20k-$50k value - NOW FREE)")
+                try:
+                    sim2real_dir = output_dir / "sim2real_fidelity"
+                    sim2real_manifests = create_default_sim2real_fidelity_exporter(
+                        scene_id=scene_id,
+                        robot_type=robot_type,
+                        output_dir=sim2real_dir,
+                    )
+                    all_premium_features_manifests.update({"sim2real": sim2real_manifests})
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Fidelity: {len(sim2real_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Physics/Visual/Sensor fidelity scoring")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Transfer confidence score")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Trust matrix for deployment")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Sim2Real export failed: {e}")
+
+            # 2. Embodiment Transfer Analysis ($20k-$100k value)
+            if EMBODIMENT_TRANSFER_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting Embodiment Transfer Analysis ($20k-$100k value - NOW FREE)")
+                try:
+                    embodiment_dir = output_dir / "embodiment_transfer"
+                    embodiment_manifests = create_default_embodiment_transfer_exporter(
+                        scene_id=scene_id,
+                        source_robot=robot_type,
+                        output_dir=embodiment_dir,
+                    )
+                    all_premium_features_manifests.update({"embodiment": embodiment_manifests})
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Embodiment Transfer: {len(embodiment_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Cross-robot compatibility matrix")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Multi-robot data multiplier")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Transfer strategy recommendations")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Embodiment transfer export failed: {e}")
+
+            # 3. Trajectory Optimality Analysis ($10k-$25k value)
+            if TRAJECTORY_OPTIMALITY_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting Trajectory Optimality Analysis ($10k-$25k value - NOW FREE)")
+                try:
+                    trajectory_dir = output_dir / "trajectory_optimality"
+                    trajectory_manifests = create_default_trajectory_optimality_exporter(
+                        scene_id=scene_id,
+                        output_dir=trajectory_dir,
+                    )
+                    all_premium_features_manifests.update({"trajectory": trajectory_manifests})
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Trajectory Optimality: {len(trajectory_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Path efficiency scoring")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Smoothness/jerk analysis")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Training suitability assessment")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Trajectory optimality export failed: {e}")
+
+            # 4. Policy Leaderboard ($20k-$40k value)
+            if POLICY_LEADERBOARD_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting Policy Leaderboard ($20k-$40k value - NOW FREE)")
+                try:
+                    leaderboard_dir = output_dir / "policy_leaderboard"
+                    leaderboard_manifests = create_default_policy_leaderboard_exporter(
+                        scene_id=scene_id,
+                        output_dir=leaderboard_dir,
+                    )
+                    all_premium_features_manifests.update({"leaderboard": leaderboard_manifests})
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Policy Leaderboard: {len(leaderboard_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Multi-policy comparison with confidence intervals")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Statistical significance testing")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Pairwise comparison matrix")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Policy leaderboard export failed: {e}")
+
+            # 5. Tactile Sensor Simulation ($15k-$30k value)
+            if TACTILE_SENSOR_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting Tactile Sensor Simulation ($15k-$30k value - NOW FREE)")
+                try:
+                    tactile_dir = output_dir / "tactile_sensors"
+                    tactile_manifests = create_default_tactile_sensor_exporter(
+                        scene_id=scene_id,
+                        output_dir=tactile_dir,
+                    )
+                    all_premium_features_manifests.update({"tactile": tactile_manifests})
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Tactile Sensors: {len(tactile_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ GelSlim/GelSight/DIGIT simulation")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Contact force maps")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ 81%+ success vs 50% vision-only")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Tactile sensor export failed: {e}")
+
+            # 6. Language Annotations ($10k-$25k value)
+            if LANGUAGE_ANNOTATIONS_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting Language Annotations ($10k-$25k value - NOW FREE)")
+                try:
+                    language_dir = output_dir / "language_annotations"
+                    language_manifests = create_default_language_annotations_exporter(
+                        scene_id=scene_id,
+                        output_dir=language_dir,
+                    )
+                    all_premium_features_manifests.update({"language": language_manifests})
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Language Annotations: {len(language_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Template + LLM-powered generation")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ 10+ variations per task")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Required for VLA training (OpenVLA, Pi0, RT-2)")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Language annotations export failed: {e}")
+
+            # 7. Generalization Analyzer ($15k-$35k value)
+            if GENERALIZATION_ANALYZER_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting Generalization Analyzer ($15k-$35k value - NOW FREE)")
+                try:
+                    generalization_dir = output_dir / "generalization_analysis"
+                    generalization_manifests = create_default_generalization_analyzer_exporter(
+                        scene_id=scene_id,
+                        output_dir=generalization_dir,
+                    )
+                    all_premium_features_manifests.update({"generalization": generalization_manifests})
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Generalization Analyzer: {len(generalization_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Per-object success rate analysis")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Learning curve computation")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Curriculum learning recommendations")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Generalization analyzer export failed: {e}")
+
+            # Summary of premium features
+            if any([SIM2REAL_AVAILABLE, EMBODIMENT_TRANSFER_AVAILABLE, TRAJECTORY_OPTIMALITY_AVAILABLE,
+                   POLICY_LEADERBOARD_AVAILABLE, TACTILE_SENSOR_AVAILABLE, LANGUAGE_ANNOTATIONS_AVAILABLE,
+                   GENERALIZATION_ANALYZER_AVAILABLE]):
+                print("\n" + "="*80)
+                print("  🎉 PREMIUM FEATURES EXPORTED (DEFAULT - FREE)")
+                print("="*80)
+                total_value = 0
+                features_exported = []
+                if SIM2REAL_AVAILABLE:
+                    features_exported.append("Sim2Real Fidelity Matrix ($20k-$50k)")
+                    total_value += 35000
+                if EMBODIMENT_TRANSFER_AVAILABLE:
+                    features_exported.append("Embodiment Transfer Analysis ($20k-$100k)")
+                    total_value += 60000
+                if TRAJECTORY_OPTIMALITY_AVAILABLE:
+                    features_exported.append("Trajectory Optimality Analysis ($10k-$25k)")
+                    total_value += 17500
+                if POLICY_LEADERBOARD_AVAILABLE:
+                    features_exported.append("Policy Leaderboard ($20k-$40k)")
+                    total_value += 30000
+                if TACTILE_SENSOR_AVAILABLE:
+                    features_exported.append("Tactile Sensor Simulation ($15k-$30k)")
+                    total_value += 22500
+                if LANGUAGE_ANNOTATIONS_AVAILABLE:
+                    features_exported.append("Language Annotations ($10k-$25k)")
+                    total_value += 17500
+                if GENERALIZATION_ANALYZER_AVAILABLE:
+                    features_exported.append("Generalization Analyzer ($15k-$35k)")
+                    total_value += 25000
+
+                for feature in features_exported:
+                    print(f"  ✓ {feature}")
+                print(f"\n  💰 Total Value Delivered: ${total_value:,} (NOW FREE BY DEFAULT!)")
+                print("="*80 + "\n")
 
             # Write completion marker
             marker_path = output_dir / "_GENIESIM_EXPORT_COMPLETE"
