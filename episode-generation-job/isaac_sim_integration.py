@@ -39,6 +39,7 @@ Usage:
         result = physics.step()
 """
 
+import logging
 import os
 import sys
 import time
@@ -48,6 +49,24 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Add repo root to path for imports
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# Import timeout utilities
+try:
+    from tools.error_handling.timeout import timeout, TimeoutError as CustomTimeoutError, TimeoutManager
+    HAVE_TIMEOUT_TOOLS = True
+except ImportError:
+    HAVE_TIMEOUT_TOOLS = False
+    CustomTimeoutError = TimeoutError
+    logger.warning("Timeout tools not available - Isaac Sim operations may hang")
 
 # =============================================================================
 # Isaac Sim Availability Detection
@@ -454,7 +473,11 @@ class PhysicsSimulator:
         return result
 
     def _step_real_physics(self, result: PhysicsStepResult) -> PhysicsStepResult:
-        """Perform a real physics step using PhysX."""
+        """
+        Perform a real physics step using PhysX.
+
+        GAP-EH-005 FIX: Add timeout to prevent hung Isaac Sim operations.
+        """
         try:
             from omni.isaac.core import World
 
@@ -464,8 +487,19 @@ class PhysicsSimulator:
                 result.error_message = "World not initialized"
                 return result
 
-            # Step physics
-            world.step(render=False)
+            # GAP-EH-005 FIX: Step physics with timeout (10s default)
+            if HAVE_TIMEOUT_TOOLS:
+                try:
+                    with timeout(10.0, "Physics step timed out after 10s"):
+                        world.step(render=False)
+                except CustomTimeoutError as e:
+                    result.success = False
+                    result.error_message = f"Physics step timeout: {e}"
+                    logger.error(f"Physics step timed out: {e}")
+                    return result
+            else:
+                # No timeout protection available - fall back to direct call
+                world.step(render=False)
 
             # Get contacts
             result.contacts = self._get_contacts()

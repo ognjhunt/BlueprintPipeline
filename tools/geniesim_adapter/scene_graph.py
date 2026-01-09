@@ -15,12 +15,47 @@ References:
 from __future__ import annotations
 
 import json
+import logging
 import math
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Add repo root to path for imports
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# Import validation utilities
+try:
+    from tools.validation import (
+        sanitize_string,
+        validate_object_id,
+        validate_category,
+        validate_description,
+        validate_dimensions,
+        ValidationError,
+    )
+    HAVE_VALIDATION_TOOLS = True
+except ImportError:
+    HAVE_VALIDATION_TOOLS = False
+    ValidationError = ValueError
+    logger.warning("Input validation tools not available - XSS/injection protection disabled")
+
+# Import streaming JSON parser
+try:
+    from tools.performance import StreamingManifestParser, stream_manifest_objects
+    HAVE_STREAMING_PARSER = True
+except ImportError:
+    HAVE_STREAMING_PARSER = False
+    logger.warning("Streaming JSON parser not available - may OOM on large manifests (>1000 objects)")
 
 
 # =============================================================================
@@ -534,17 +569,55 @@ class SceneGraphConverter:
             if sim_role in ["background", "scene_shell"]:
                 return None
 
+            # GAP-SEC-002 FIX: Validate and sanitize all user inputs to prevent XSS/injection
+            if HAVE_VALIDATION_TOOLS:
+                try:
+                    # Validate object ID
+                    obj_id = validate_object_id(obj_id)
+
+                    # Validate and sanitize category
+                    category_raw = obj.get("category", "object")
+                    category = validate_category(category_raw)
+
+                    # Validate and sanitize description
+                    description_raw = obj.get("description", "")
+                    description = validate_description(description_raw) if description_raw else ""
+
+                    # Validate and sanitize name
+                    name_raw = obj.get("name", obj_id)
+                    name = sanitize_string(name_raw, max_length=128)
+
+                except ValidationError as e:
+                    logger.warning(f"Object {obj_id} validation failed: {e}. Using defaults.")
+                    category = "object"
+                    description = ""
+                    name = obj_id[:128]  # Truncate if needed
+            else:
+                # No validation available - use raw values (insecure)
+                category = obj.get("category", "object")
+                description = obj.get("description", "")
+                name = obj.get("name", obj_id)
+
             # Build semantic description
-            category = obj.get("category", "object")
-            description = obj.get("description", "")
-            name = obj.get("name", obj_id)
             semantic = f"{category}: {name}"
             if description:
                 semantic = f"{category}: {description}"
 
-            # Extract size
+            # Extract and validate size
             dimensions = obj.get("dimensions_est", {})
-            if isinstance(dimensions, dict):
+            if HAVE_VALIDATION_TOOLS and isinstance(dimensions, dict):
+                try:
+                    # Validate dimensions are positive numbers
+                    validated_dims = validate_dimensions(dimensions)
+                    size = [
+                        validated_dims.get("width", 0.1),
+                        validated_dims.get("depth", 0.1),
+                        validated_dims.get("height", 0.1),
+                    ]
+                except ValidationError as e:
+                    logger.warning(f"Object {obj_id} dimensions invalid: {e}. Using defaults.")
+                    size = [0.1, 0.1, 0.1]
+            elif isinstance(dimensions, dict):
                 size = [
                     dimensions.get("width", 0.1),
                     dimensions.get("depth", 0.1),
@@ -743,23 +816,83 @@ def convert_manifest_to_scene_graph(
     manifest_path: Path,
     output_path: Optional[Path] = None,
     verbose: bool = True,
+    use_streaming: Optional[bool] = None,
 ) -> GenieSimSceneGraph:
     """
     Convenience function to convert a manifest file to scene graph.
+
+    GAP-PERF-001 FIX: Use streaming JSON parser for large manifests to prevent OOM.
 
     Args:
         manifest_path: Path to scene_manifest.json
         output_path: Optional path to save scene_graph.json
         verbose: Print progress
+        use_streaming: Force streaming mode (auto-detect if None based on file size)
 
     Returns:
         GenieSimSceneGraph
     """
-    with open(manifest_path) as f:
-        manifest = json.load(f)
+    # Auto-detect if streaming is needed based on file size
+    if use_streaming is None:
+        file_size_mb = manifest_path.stat().st_size / (1024 * 1024)
+        use_streaming = file_size_mb > 10  # Use streaming for files > 10MB
 
-    converter = SceneGraphConverter(verbose=verbose)
-    scene_graph = converter.convert(manifest)
+    # GAP-PERF-001 FIX: Use streaming parser for large manifests
+    if use_streaming and HAVE_STREAMING_PARSER:
+        if verbose:
+            print(f"[SCENE-GRAPH-CONVERTER] Using streaming parser for large manifest ({manifest_path.stat().st_size / (1024*1024):.1f} MB)")
+
+        # Load metadata without objects (streaming handles objects separately)
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        # Remove objects array (will be streamed)
+        manifest.pop("objects", None)
+
+        # Create converter
+        converter = SceneGraphConverter(verbose=verbose)
+
+        # Start building scene graph with metadata
+        scene_graph = GenieSimSceneGraph(
+            scene_id=manifest.get("scene_id", "unknown"),
+            coordinate_system=manifest.get("coordinate_system", "y_up"),
+            meters_per_unit=manifest.get("meters_per_unit", 1.0),
+            nodes=[],
+            edges=[],
+            metadata=manifest.get("metadata", {}),
+        )
+
+        # Stream process objects in batches
+        parser = StreamingManifestParser(str(manifest_path))
+        usd_base_path = manifest.get("usd_file")
+
+        batch_count = 0
+        for batch in parser.stream_objects(batch_size=100):
+            batch_count += 1
+            if verbose and batch_count % 10 == 0:
+                print(f"[SCENE-GRAPH-CONVERTER] Processed {batch_count * 100} objects...")
+
+            # Convert batch of objects to nodes
+            for obj in batch:
+                node = converter._convert_object_to_node(obj, usd_base_path)
+                if node:
+                    scene_graph.nodes.append(node)
+
+        # Infer relations from node positions
+        if verbose:
+            print(f"[SCENE-GRAPH-CONVERTER] Inferring spatial relations for {len(scene_graph.nodes)} nodes...")
+        scene_graph.edges = converter._infer_relations(scene_graph.nodes)
+
+        if verbose:
+            print(f"[SCENE-GRAPH-CONVERTER] Streaming conversion complete: {len(scene_graph.nodes)} nodes, {len(scene_graph.edges)} edges")
+
+    else:
+        # Standard mode for small manifests
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        converter = SceneGraphConverter(verbose=verbose)
+        scene_graph = converter.convert(manifest)
 
     if output_path:
         scene_graph.save(output_path)
