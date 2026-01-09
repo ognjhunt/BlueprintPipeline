@@ -106,6 +106,18 @@ try:
 except ImportError:
     GENERALIZATION_ANALYZER_AVAILABLE = False
 
+try:
+    from .default_sim2real_validation import create_default_sim2real_validation_exporter
+    SIM2REAL_VALIDATION_AVAILABLE = True
+except ImportError:
+    SIM2REAL_VALIDATION_AVAILABLE = False
+
+try:
+    from .default_audio_narration import create_default_audio_narration_exporter
+    AUDIO_NARRATION_AVAILABLE = True
+except ImportError:
+    AUDIO_NARRATION_AVAILABLE = False
+
 # Default paths
 GCS_ROOT = Path("/mnt/gcs")
 
@@ -387,6 +399,28 @@ def run_arena_export(
             print(f"[ARENA]   ✓ Generalization Analyzer: {len(generalization_manifests)} manifests")
         except Exception as e:
             print(f"[ARENA] WARNING: Generalization analyzer failed: {e}")
+
+    if SIM2REAL_VALIDATION_AVAILABLE:
+        try:
+            sim2real_validation_dir = output_dir / "arena" / "sim2real_validation"
+            sim2real_validation_manifests = create_default_sim2real_validation_exporter(
+                scene_id=scene_id, robot_type=robot_type, output_dir=sim2real_validation_dir
+            )
+            result["files_generated"].extend([str(p) for p in sim2real_validation_manifests.values()])
+            print(f"[ARENA]   ✓ Sim2Real Validation: {len(sim2real_validation_manifests)} manifests")
+            print("[ARENA]   ✓ Real-world validation trial tracking ($5k-$25k/study - NOW FREE)")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Sim2Real validation failed: {e}")
+
+    if AUDIO_NARRATION_AVAILABLE:
+        try:
+            audio_narration_dir = output_dir / "arena" / "audio_narration"
+            audio_narration_manifests = create_default_audio_narration_exporter(scene_id=scene_id, output_dir=audio_narration_dir)
+            result["files_generated"].extend([str(p) for p in audio_narration_manifests.values()])
+            print(f"[ARENA]   ✓ Audio Narration: {len(audio_narration_manifests)} manifests")
+            print("[ARENA]   ✓ TTS narration for VLA training ($5k-$15k - NOW FREE)")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Audio narration failed: {e}")
 
     # Write completion marker
     marker_path = output_dir / "arena" / ".arena_export_complete"

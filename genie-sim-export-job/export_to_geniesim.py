@@ -122,6 +122,18 @@ try:
 except ImportError:
     GENERALIZATION_ANALYZER_AVAILABLE = False
 
+try:
+    from .default_sim2real_validation import create_default_sim2real_validation_exporter
+    SIM2REAL_VALIDATION_AVAILABLE = True
+except ImportError:
+    SIM2REAL_VALIDATION_AVAILABLE = False
+
+try:
+    from .default_audio_narration import create_default_audio_narration_exporter
+    AUDIO_NARRATION_AVAILABLE = True
+except ImportError:
+    AUDIO_NARRATION_AVAILABLE = False
+
 
 def run_geniesim_export_job(
     root: Path,
@@ -458,10 +470,47 @@ def run_geniesim_export_job(
                 except Exception as e:
                     print(f"[GENIESIM-EXPORT-JOB] WARNING: Generalization analyzer export failed: {e}")
 
+            # 8. Sim2Real Validation Service ($5k-$25k/study value)
+            if SIM2REAL_VALIDATION_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Validation Service ($5k-$25k/study - NOW FREE)")
+                try:
+                    sim2real_validation_dir = output_dir / "sim2real_validation"
+                    sim2real_validation_manifests = create_default_sim2real_validation_exporter(
+                        scene_id=scene_id,
+                        robot_type=robot_type,
+                        output_dir=sim2real_validation_dir,
+                    )
+                    all_premium_features_manifests.update({"sim2real_validation": sim2real_validation_manifests})
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Validation: {len(sim2real_validation_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Real-world validation trial tracking")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Sim vs real success rate comparison")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Quality guarantee certificates (50%/70%/85%)")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Failure mode comparison (sim vs real)")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Sim2Real validation export failed: {e}")
+
+            # 9. Audio Narration ($5k-$15k value)
+            if AUDIO_NARRATION_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting Audio Narration ($5k-$15k value - NOW FREE)")
+                try:
+                    audio_narration_dir = output_dir / "audio_narration"
+                    audio_narration_manifests = create_default_audio_narration_exporter(
+                        scene_id=scene_id,
+                        output_dir=audio_narration_dir,
+                    )
+                    all_premium_features_manifests.update({"audio_narration": audio_narration_manifests})
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Audio Narration: {len(audio_narration_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Text-to-speech narration (Google Cloud TTS + local)")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Multi-voice presets (narrator, instructor, casual, robot)")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ MP3/WAV/OGG audio output")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ VLA audio modality training (RT-2, PaLM-E)")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Audio narration export failed: {e}")
+
             # Summary of premium features
             if any([SIM2REAL_AVAILABLE, EMBODIMENT_TRANSFER_AVAILABLE, TRAJECTORY_OPTIMALITY_AVAILABLE,
                    POLICY_LEADERBOARD_AVAILABLE, TACTILE_SENSOR_AVAILABLE, LANGUAGE_ANNOTATIONS_AVAILABLE,
-                   GENERALIZATION_ANALYZER_AVAILABLE]):
+                   GENERALIZATION_ANALYZER_AVAILABLE, SIM2REAL_VALIDATION_AVAILABLE, AUDIO_NARRATION_AVAILABLE]):
                 print("\n" + "="*80)
                 print("  🎉 PREMIUM FEATURES EXPORTED (DEFAULT - FREE)")
                 print("="*80)
@@ -488,6 +537,12 @@ def run_geniesim_export_job(
                 if GENERALIZATION_ANALYZER_AVAILABLE:
                     features_exported.append("Generalization Analyzer ($15k-$35k)")
                     total_value += 25000
+                if SIM2REAL_VALIDATION_AVAILABLE:
+                    features_exported.append("Sim2Real Validation Service ($5k-$25k/study)")
+                    total_value += 15000
+                if AUDIO_NARRATION_AVAILABLE:
+                    features_exported.append("Audio Narration ($5k-$15k)")
+                    total_value += 10000
 
                 for feature in features_exported:
                     print(f"  ✓ {feature}")
