@@ -54,6 +54,23 @@ from .errors import (
     ConfigurationError,
 )
 
+from .timeout import (
+    TimeoutError,
+    timeout,
+    timeout_thread,
+    with_timeout,
+    TimeoutManager,
+    monitored_timeout,
+)
+
+from .partial_failure import (
+    PartialFailureResult,
+    PartialFailureError,
+    PartialFailureHandler,
+    process_with_partial_failure,
+    save_successful_items,
+)
+
 __all__ = [
     # Retry
     "retry_with_backoff",
@@ -77,4 +94,17 @@ __all__ = [
     "ExternalServiceError",
     "ResourceExhaustedError",
     "ConfigurationError",
+    # Timeout
+    "TimeoutError",
+    "timeout",
+    "timeout_thread",
+    "with_timeout",
+    "TimeoutManager",
+    "monitored_timeout",
+    # Partial Failure
+    "PartialFailureResult",
+    "PartialFailureError",
+    "PartialFailureHandler",
+    "process_with_partial_failure",
+    "save_successful_items",
 ]

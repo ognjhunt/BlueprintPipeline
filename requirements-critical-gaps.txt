@@ -1,0 +1,20 @@
+# Requirements for Critical Gaps Implementation
+# Install with: pip install -r requirements-critical-gaps.txt
+
+# Pydantic for configuration validation (GAP-CM-001)
+pydantic>=2.0.0,<3.0.0
+
+# Google Cloud Secret Manager for API keys (GAP-SEC-001)
+google-cloud-secret-manager>=2.16.0,<3.0.0
+
+# ijson for streaming JSON parsing (GAP-PERF-001)
+ijson>=3.2.0,<4.0.0
+
+# Requests for external service calls (GAP-EH-001)
+requests>=2.31.0,<3.0.0
+
+# Google Cloud Storage for failure markers (GAP-EH-003)
+google-cloud-storage>=2.10.0,<3.0.0
+
+# Optional: python-json-logger for structured logging
+python-json-logger>=2.0.7,<3.0.0
