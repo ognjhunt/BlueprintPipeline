@@ -2,7 +2,36 @@
 
 ## 🎉🎉🎉 ALL PREMIUM FEATURES NOW INCLUDED BY DEFAULT 🎉🎉🎉
 
-**BREAKING CHANGE**: Previously **$320,000-$585,000 in premium upsell features** are now **FREE and included by default** in the Genie Sim 3.0 & Isaac Lab Arena pipelines!
+**BREAKING CHANGE**: Previously **$345,000-$625,000 in premium upsell features** are now **FREE and included by default** in the Genie Sim 3.0 & Isaac Lab Arena pipelines!
+
+## 🆕 NEW: Tier 4 - Validation & Media Features ($10k-$40k) - NOW FREE
+
+### Sim2Real Validation Service ($5k-$25k/study) ✅ DEFAULT
+Real-world validation trial tracking and quality guarantees:
+- ✅ Real-world validation trial tracking configuration
+- ✅ Sim vs real success rate comparison framework
+- ✅ Transfer gap calculation with 95% confidence intervals
+- ✅ Quality guarantee certificates (50%/70%/85% success rate levels)
+- ✅ Failure mode comparison (sim failures vs real failures)
+- ✅ Partner lab integration configuration
+- ✅ Automated report generation (JSON + Markdown)
+- ✅ Experiment tracking templates
+- ✅ Three validation tiers: Basic (20 trials), Comprehensive (50 trials), Certification (100 trials)
+
+Labs need this because: They want **proof** that sim data works on real robots, not just estimates!
+
+### Audio Narration ($5k-$15k) ✅ DEFAULT
+Text-to-speech narration for VLA training and accessibility:
+- ✅ Text-to-speech narration synchronized with episodes
+- ✅ Multi-voice presets (narrator, instructor, casual, robot)
+- ✅ MP3/WAV/OGG audio output configuration
+- ✅ Google Cloud TTS + local TTS fallback support
+- ✅ Per-episode + combined audio generation
+- ✅ Task-specific narration templates (pick_place, open_drawer, pour, generic)
+- ✅ VLA audio modality training support (RT-2, PaLM-E)
+- ✅ LeRobot integration (audio column, timestamps, transcripts)
+
+Labs need this because: VLA models like RT-2 and PaLM-E can benefit from audio modality training!
 
 ## Tier 1: Essential Features ($40k-$75k) - NOW FREE
 
