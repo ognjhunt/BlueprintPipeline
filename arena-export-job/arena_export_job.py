@@ -63,6 +63,49 @@ except ImportError:
     PREMIUM_ANALYTICS_AVAILABLE = False
     print("[ARENA] WARNING: Premium analytics module not available")
 
+# Import ALL default premium features (DEFAULT: ENABLED - NO LONGER UPSELL!)
+try:
+    from .default_sim2real_fidelity import create_default_sim2real_fidelity_exporter
+    SIM2REAL_AVAILABLE = True
+except ImportError:
+    SIM2REAL_AVAILABLE = False
+
+try:
+    from .default_embodiment_transfer import create_default_embodiment_transfer_exporter
+    EMBODIMENT_TRANSFER_AVAILABLE = True
+except ImportError:
+    EMBODIMENT_TRANSFER_AVAILABLE = False
+
+try:
+    from .default_trajectory_optimality import create_default_trajectory_optimality_exporter
+    TRAJECTORY_OPTIMALITY_AVAILABLE = True
+except ImportError:
+    TRAJECTORY_OPTIMALITY_AVAILABLE = False
+
+try:
+    from .default_policy_leaderboard import create_default_policy_leaderboard_exporter
+    POLICY_LEADERBOARD_AVAILABLE = True
+except ImportError:
+    POLICY_LEADERBOARD_AVAILABLE = False
+
+try:
+    from .default_tactile_sensor_sim import create_default_tactile_sensor_exporter
+    TACTILE_SENSOR_AVAILABLE = True
+except ImportError:
+    TACTILE_SENSOR_AVAILABLE = False
+
+try:
+    from .default_language_annotations import create_default_language_annotations_exporter
+    LANGUAGE_ANNOTATIONS_AVAILABLE = True
+except ImportError:
+    LANGUAGE_ANNOTATIONS_AVAILABLE = False
+
+try:
+    from .default_generalization_analyzer import create_default_generalization_analyzer_exporter
+    GENERALIZATION_ANALYZER_AVAILABLE = True
+except ImportError:
+    GENERALIZATION_ANALYZER_AVAILABLE = False
+
 # Default paths
 GCS_ROOT = Path("/mnt/gcs")
 
@@ -278,6 +321,72 @@ def run_arena_export(
         print("\n[ARENA] Step 4: Premium analytics disabled (not recommended)")
     elif not PREMIUM_ANALYTICS_AVAILABLE:
         print("\n[ARENA] WARNING: Premium analytics module not available")
+
+    # Export ALL additional premium features (DEFAULT: ENABLED - NO LONGER UPSELL!)
+    # Same pattern as genie-sim-export-job
+    robot_type = os.getenv("ROBOT_TYPE", "franka")
+    if SIM2REAL_AVAILABLE:
+        try:
+            sim2real_dir = output_dir / "arena" / "sim2real_fidelity"
+            sim2real_manifests = create_default_sim2real_fidelity_exporter(scene_id=scene_id, robot_type=robot_type, output_dir=sim2real_dir)
+            result["files_generated"].extend([str(p) for p in sim2real_manifests.values()])
+            print(f"[ARENA]   ✓ Sim2Real Fidelity: {len(sim2real_manifests)} manifests")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Sim2Real export failed: {e}")
+
+    if EMBODIMENT_TRANSFER_AVAILABLE:
+        try:
+            embodiment_dir = output_dir / "arena" / "embodiment_transfer"
+            embodiment_manifests = create_default_embodiment_transfer_exporter(scene_id=scene_id, source_robot=robot_type, output_dir=embodiment_dir)
+            result["files_generated"].extend([str(p) for p in embodiment_manifests.values()])
+            print(f"[ARENA]   ✓ Embodiment Transfer: {len(embodiment_manifests)} manifests")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Embodiment transfer failed: {e}")
+
+    if TRAJECTORY_OPTIMALITY_AVAILABLE:
+        try:
+            trajectory_dir = output_dir / "arena" / "trajectory_optimality"
+            trajectory_manifests = create_default_trajectory_optimality_exporter(scene_id=scene_id, output_dir=trajectory_dir)
+            result["files_generated"].extend([str(p) for p in trajectory_manifests.values()])
+            print(f"[ARENA]   ✓ Trajectory Optimality: {len(trajectory_manifests)} manifests")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Trajectory optimality failed: {e}")
+
+    if POLICY_LEADERBOARD_AVAILABLE:
+        try:
+            leaderboard_dir = output_dir / "arena" / "policy_leaderboard"
+            leaderboard_manifests = create_default_policy_leaderboard_exporter(scene_id=scene_id, output_dir=leaderboard_dir)
+            result["files_generated"].extend([str(p) for p in leaderboard_manifests.values()])
+            print(f"[ARENA]   ✓ Policy Leaderboard: {len(leaderboard_manifests)} manifests")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Policy leaderboard failed: {e}")
+
+    if TACTILE_SENSOR_AVAILABLE:
+        try:
+            tactile_dir = output_dir / "arena" / "tactile_sensors"
+            tactile_manifests = create_default_tactile_sensor_exporter(scene_id=scene_id, output_dir=tactile_dir)
+            result["files_generated"].extend([str(p) for p in tactile_manifests.values()])
+            print(f"[ARENA]   ✓ Tactile Sensors: {len(tactile_manifests)} manifests")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Tactile sensor failed: {e}")
+
+    if LANGUAGE_ANNOTATIONS_AVAILABLE:
+        try:
+            language_dir = output_dir / "arena" / "language_annotations"
+            language_manifests = create_default_language_annotations_exporter(scene_id=scene_id, output_dir=language_dir)
+            result["files_generated"].extend([str(p) for p in language_manifests.values()])
+            print(f"[ARENA]   ✓ Language Annotations: {len(language_manifests)} manifests")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Language annotations failed: {e}")
+
+    if GENERALIZATION_ANALYZER_AVAILABLE:
+        try:
+            generalization_dir = output_dir / "arena" / "generalization_analysis"
+            generalization_manifests = create_default_generalization_analyzer_exporter(scene_id=scene_id, output_dir=generalization_dir)
+            result["files_generated"].extend([str(p) for p in generalization_manifests.values()])
+            print(f"[ARENA]   ✓ Generalization Analyzer: {len(generalization_manifests)} manifests")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Generalization analyzer failed: {e}")
 
     # Write completion marker
     marker_path = output_dir / "arena" / ".arena_export_complete"

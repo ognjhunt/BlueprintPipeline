@@ -1,8 +1,85 @@
 # Genie Sim 3.0 Integration Specification
 
-## 🎉 Premium Analytics Now Included By Default
+## 🎉🎉🎉 ALL PREMIUM FEATURES NOW INCLUDED BY DEFAULT 🎉🎉🎉
 
-**MAJOR UPDATE**: All premium analytics features are now **captured by default** in the Genie Sim 3.0 pipeline. These features were previously priced at **$115,000-$260,000 as upsells** but are now standard output.
+**BREAKING CHANGE**: Previously **$320,000-$585,000 in premium upsell features** are now **FREE and included by default** in the Genie Sim 3.0 & Isaac Lab Arena pipelines!
+
+## Tier 1: Essential Features ($40k-$75k) - NOW FREE
+
+### Sim2Real Fidelity Matrix ($20k-$50k) ✅ DEFAULT
+Tells you which sim aspects transfer to real robots:
+- ✅ Physics fidelity scoring (friction, mass/inertia, contact dynamics, rigid body)
+- ✅ Visual fidelity scoring (textures, lighting, materials, geometry)
+- ✅ Sensor fidelity scoring (RGB camera, depth, proprioception, force/torque)
+- ✅ Robot model fidelity (kinematics, dynamics, control, gripper)
+- ✅ Domain randomization coverage analysis
+- ✅ Transfer confidence score (0-100% likelihood sim→real transfer)
+- ✅ Trust matrix (what to trust for training vs. validate before deployment)
+- ✅ Benchmark comparison (vs RoboMimic, BridgeData v2, RLBench)
+
+### Embodiment Transfer Analysis ($20k-$100k) ✅ DEFAULT
+Answers: "Will my Franka data help train my UR10?"
+- ✅ Cross-robot compatibility matrix (franka→ur10, franka→gr1, etc.)
+- ✅ Kinematic similarity scoring
+- ✅ Action space compatibility analysis
+- ✅ Workspace overlap computation
+- ✅ Predicted success rate when transferring to different robot
+- ✅ Transfer efficiency score (3-5x data value multiplier for multi-robot)
+- ✅ Multi-robot training strategy recommendations
+- ✅ Data multiplier calculation
+
+## Tier 2: Optimization Features ($30k-$65k) - NOW FREE
+
+### Trajectory Optimality Analysis ($10k-$25k) ✅ DEFAULT
+Ensures your training data has high-quality trajectories:
+- ✅ Path length efficiency (actual vs optimal)
+- ✅ Jerk analysis (smoothness scoring)
+- ✅ Energy efficiency metrics
+- ✅ Velocity profile analysis
+- ✅ Training suitability score
+- ✅ Outlier trajectory detection
+
+### Policy Leaderboard ($20k-$40k) ✅ DEFAULT
+Multi-policy comparison with statistical rigor:
+- ✅ Policy rankings with confidence intervals (Wilson score, bootstrap)
+- ✅ Statistical significance testing (t-test, Mann-Whitney U)
+- ✅ Performance comparison across tasks and conditions
+- ✅ Rank stability analysis
+- ✅ Pairwise comparison matrix
+
+### Generalization Analyzer ($15k-$35k) ✅ DEFAULT
+Tells you "Do I have enough data? What should I collect next?"
+- ✅ Per-object success rate analysis
+- ✅ Task difficulty stratification (easy/medium/hard/expert)
+- ✅ Scene variation impact analysis
+- ✅ Learning curve computation
+- ✅ Curriculum learning recommendations
+- ✅ Data efficiency metrics
+
+## Tier 3: Premium Features ($25k-$60k) - NOW FREE
+
+### Tactile Sensor Simulation ($15k-$30k) ✅ DEFAULT
+Research shows: 81%+ success with tactile vs ~50% vision-only!
+- ✅ GelSight/GelSlim marker tracking
+- ✅ DIGIT optical tactile simulation
+- ✅ Magnetic tactile sensors
+- ✅ Contact force maps (high-resolution 160x120 to 640x480)
+- ✅ Depth/deformation maps
+- ✅ Marker displacement tracking
+- ✅ Contact metrics (area, centroid, force distribution)
+
+### Language Annotations ($10k-$25k) ✅ DEFAULT
+Required for VLA training (OpenVLA, Pi0, RT-2, PaLM-E):
+- ✅ Template-based instruction generation
+- ✅ LLM-powered variation generation (Gemini)
+- ✅ Multi-style annotations (imperative, descriptive, casual, detailed, minimal)
+- ✅ 10+ variations per task
+- ✅ Automatic LeRobot integration
+- ✅ Natural language task descriptions
+
+## Legacy: Original Premium Analytics ($115k-$260k) - ALREADY DEFAULT
+
+**MAJOR UPDATE**: All premium analytics features below are now **captured by default** in the Genie Sim 3.0 pipeline.
 
 ### Default Captured Analytics (No Additional Cost):
 
