@@ -1,5 +1,41 @@
 # Genie Sim 3.0 Integration Specification
 
+## 🎉 Premium Analytics Now Included By Default
+
+**MAJOR UPDATE**: All premium analytics features are now **captured by default** in the Genie Sim 3.0 pipeline. These features were previously priced at **$115,000-$260,000 as upsells** but are now standard output.
+
+### Default Captured Analytics (No Additional Cost):
+
+#### Per-Step Telemetry:
+- ✅ Per-step rewards + reward decomposition
+- ✅ Per-step collision detection (force, bodies, contact point)
+- ✅ Per-step grasp events (approach→contact→grasp→lift→slip→release)
+- ✅ Per-step end-effector force/torque
+- ✅ Per-step joint torques
+
+#### Failure Analysis:
+- ✅ Timeout vs Collision breakdown
+- ✅ Phase-level failure location (approach/grasp/lift/transport/place)
+- ✅ Collision type distribution (self/table/object/gripper)
+- ✅ Average collision force + locations
+- ✅ Progress-at-timeout metrics
+
+#### Grasp Analytics:
+- ✅ Grasp event timeline
+- ✅ Time-to-first-contact, time-to-grasp, time-to-lift, time-to-place
+- ✅ Grasp force profile (max/mean/variance)
+- ✅ Contact point tracking
+
+#### Parallel Evaluation Metrics:
+- ✅ GPU utilization during parallel eval
+- ✅ Cross-environment variance
+- ✅ Episodes/second throughput
+- ✅ Statistical significance calculations
+
+**To disable (not recommended):** Set `ENABLE_PREMIUM_ANALYTICS=false`
+
+---
+
 ## Overview
 
 This document specifies the integration between BlueprintPipeline and AGIBOT's Genie Sim 3.0
