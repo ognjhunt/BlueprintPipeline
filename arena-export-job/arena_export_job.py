@@ -19,6 +19,15 @@ Environment Variables:
     GEMINI_API_KEY: (Optional) For LLM-based affordance detection
     HF_TOKEN: (Optional) For LeRobot Hub registration
     ENABLE_HUB_REGISTRATION: (Optional) Enable auto-registration with Hub
+    ENABLE_PREMIUM_ANALYTICS: (Optional) Enable premium analytics capture - default: true (NO LONGER UPSELL!)
+
+Premium Analytics (DEFAULT: ENABLED - NO LONGER UPSELL!):
+    - Per-step telemetry (rewards, collisions, grasps, forces, torques)
+    - Failure analysis (timeout/collision breakdown, phase-level tracking)
+    - Grasp analytics (event timeline, force profiles, contact tracking)
+    - Parallel eval metrics (GPU utilization, cross-env variance, throughput)
+
+    Previously $115k-$260k upsell - NOW INCLUDED BY DEFAULT!
 """
 
 import argparse
@@ -42,6 +51,17 @@ from tools.arena_integration import (
     HubConfig,
 )
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
+
+# Import default premium analytics (DEFAULT: ENABLED)
+try:
+    from .default_premium_analytics import (
+        create_default_premium_analytics_exporter,
+        DefaultPremiumAnalyticsConfig,
+    )
+    PREMIUM_ANALYTICS_AVAILABLE = True
+except ImportError:
+    PREMIUM_ANALYTICS_AVAILABLE = False
+    print("[ARENA] WARNING: Premium analytics module not available")
 
 # Default paths
 GCS_ROOT = Path("/mnt/gcs")
@@ -100,6 +120,7 @@ def run_arena_export(
     use_llm: bool = True,
     enable_hub_registration: bool = False,
     hub_namespace: str = "blueprint-robotics",
+    enable_premium_analytics: bool = True,  # DEFAULT: ENABLED (NO LONGER UPSELL!)
 ) -> dict[str, Any]:
     """
     Run Arena export for a scene.
@@ -110,6 +131,7 @@ def run_arena_export(
         use_llm: Use Gemini for affordance detection
         enable_hub_registration: Register with LeRobot Hub
         hub_namespace: Hugging Face namespace for Hub
+        enable_premium_analytics: Enable premium analytics capture (DEFAULT: True - NO LONGER UPSELL!)
 
     Returns:
         Export result dictionary
@@ -122,6 +144,8 @@ def run_arena_export(
         "affordance_count": 0,
         "task_count": 0,
         "hub_registration": None,
+        "premium_analytics_enabled": False,
+        "premium_analytics_manifests": 0,
         "errors": [],
     }
 
@@ -225,6 +249,36 @@ def run_arena_export(
     else:
         print("[ARENA] Step 3: Hub registration skipped (disabled or no HF_TOKEN)")
 
+    # Step 4: Export premium analytics manifests (DEFAULT: ENABLED)
+    premium_analytics_manifests = {}
+    if enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE:
+        print("\n[ARENA] Step 4: Exporting premium analytics manifests (DEFAULT - NO LONGER UPSELL)")
+        try:
+            analytics_dir = output_dir / "arena" / "premium_analytics"
+            analytics_config = DefaultPremiumAnalyticsConfig(enabled=True)
+            analytics_exporter = create_default_premium_analytics_exporter(
+                scene_id=scene_id,
+                output_dir=analytics_dir,
+                config=analytics_config,
+            )
+            premium_analytics_manifests = analytics_exporter.export_all_manifests()
+            result["premium_analytics_enabled"] = True
+            result["premium_analytics_manifests"] = len(premium_analytics_manifests)
+            result["files_generated"].extend([str(p) for p in premium_analytics_manifests.values()])
+            print(f"[ARENA]   ✓ Premium analytics: {len(premium_analytics_manifests)} manifests exported")
+            print("[ARENA]   ✓ Per-step telemetry capture enabled")
+            print("[ARENA]   ✓ Failure analysis enabled")
+            print("[ARENA]   ✓ Grasp analytics enabled")
+            print("[ARENA]   ✓ Parallel eval metrics enabled")
+        except Exception as e:
+            print(f"[ARENA] WARNING: Premium analytics export failed: {e}")
+            import traceback
+            traceback.print_exc()
+    elif not enable_premium_analytics:
+        print("\n[ARENA] Step 4: Premium analytics disabled (not recommended)")
+    elif not PREMIUM_ANALYTICS_AVAILABLE:
+        print("\n[ARENA] WARNING: Premium analytics module not available")
+
     # Write completion marker
     marker_path = output_dir / "arena" / ".arena_export_complete"
     marker_content = {
@@ -233,6 +287,8 @@ def run_arena_export(
         "task_count": result["task_count"],
         "affordance_count": result["affordance_count"],
         "files_generated": len(result["files_generated"]),
+        "premium_analytics_enabled": result["premium_analytics_enabled"],
+        "premium_analytics_manifests": result["premium_analytics_manifests"],
     }
     save_json(marker_content, marker_path)
     result["files_generated"].append(str(marker_path))
@@ -260,6 +316,7 @@ def run_from_env(root: Path = GCS_ROOT) -> int:
     use_llm = os.getenv("USE_LLM_AFFORDANCES", "true").lower() in ("true", "1", "yes")
     enable_hub = os.getenv("ENABLE_HUB_REGISTRATION", "false").lower() in ("true", "1", "yes")
     hub_namespace = os.getenv("HUB_NAMESPACE", "blueprint-robotics")
+    enable_premium_analytics = os.getenv("ENABLE_PREMIUM_ANALYTICS", "true").lower() in ("true", "1", "yes")
 
     if not assets_prefix:
         print("[ARENA] ERROR: ASSETS_PREFIX is required", file=sys.stderr)
@@ -279,12 +336,14 @@ def run_from_env(root: Path = GCS_ROOT) -> int:
     print(f"[ARENA]   Scene dir: {scene_dir}")
     print(f"[ARENA]   Use LLM: {use_llm}")
     print(f"[ARENA]   Hub registration: {enable_hub}")
+    print(f"[ARENA]   Premium analytics: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
 
     result = run_arena_export(
         scene_dir=scene_dir,
         use_llm=use_llm,
         enable_hub_registration=enable_hub,
         hub_namespace=hub_namespace,
+        enable_premium_analytics=enable_premium_analytics,
     )
 
     if result["success"]:
@@ -329,6 +388,11 @@ def main():
         help="Hugging Face namespace for Hub registration",
     )
     parser.add_argument(
+        "--disable-premium-analytics",
+        action="store_true",
+        help="Disable premium analytics capture (not recommended - previously $115k-$260k upsell)",
+    )
+    parser.add_argument(
         "--env-mode",
         action="store_true",
         help="Run in environment variable mode (Cloud Run Job)",
@@ -351,6 +415,7 @@ def main():
         use_llm=not args.no_llm,
         enable_hub_registration=args.enable_hub,
         hub_namespace=args.hub_namespace,
+        enable_premium_analytics=not args.disable_premium_analytics,
     )
 
     # Print summary

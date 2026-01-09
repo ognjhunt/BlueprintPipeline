@@ -12,7 +12,8 @@ This job:
 4. Generates task configuration hints
 5. Generates MULTI-ROBOT configuration (DEFAULT: ENABLED)
 6. Generates enhanced features config (VLA, annotations, bimanual)
-7. Outputs files ready for Genie Sim data generation
+7. Generates PREMIUM ANALYTICS manifests (DEFAULT: ENABLED - NO LONGER UPSELL!)
+8. Outputs files ready for Genie Sim data generation
 
 Pipeline Position:
     3D-RE-GEN → simready → usd-assembly → replicator → [THIS JOB] → Genie Sim
@@ -23,6 +24,14 @@ Enhanced Features (DEFAULT: ENABLED):
     - Multi-robot coordination scenarios
     - Rich ground truth annotations
     - VLA fine-tuning package configs
+
+Premium Analytics (DEFAULT: ENABLED - NO LONGER UPSELL!):
+    - Per-step telemetry (rewards, collisions, grasps, forces, torques)
+    - Failure analysis (timeout/collision breakdown, phase-level tracking)
+    - Grasp analytics (event timeline, force profiles, contact tracking)
+    - Parallel eval metrics (GPU utilization, cross-env variance, throughput)
+
+    Previously $115k-$260k upsell - NOW INCLUDED BY DEFAULT!
 
 Environment Variables:
     BUCKET: GCS bucket name
@@ -38,6 +47,7 @@ Environment Variables:
     ENABLE_BIMANUAL: Generate bimanual tasks - default: true
     ENABLE_VLA_PACKAGES: Generate VLA fine-tuning configs - default: true
     ENABLE_RICH_ANNOTATIONS: Generate rich annotation configs - default: true
+    ENABLE_PREMIUM_ANALYTICS: Enable premium analytics capture - default: true (NO LONGER UPSELL!)
 """
 
 import json
@@ -58,6 +68,17 @@ from tools.geniesim_adapter import (
     GenieSimExportResult,
 )
 
+# Import default premium analytics (DEFAULT: ENABLED)
+try:
+    from .default_premium_analytics import (
+        create_default_premium_analytics_exporter,
+        DefaultPremiumAnalyticsConfig,
+    )
+    PREMIUM_ANALYTICS_AVAILABLE = True
+except ImportError:
+    PREMIUM_ANALYTICS_AVAILABLE = False
+    print("[GENIESIM-EXPORT-JOB] WARNING: Premium analytics module not available")
+
 
 def run_geniesim_export_job(
     root: Path,
@@ -76,6 +97,7 @@ def run_geniesim_export_job(
     enable_rich_annotations: bool = True,  # DEFAULT: ENABLED
     variation_assets_prefix: Optional[str] = None,  # Path to variation assets
     replicator_prefix: Optional[str] = None,  # Path to replicator bundle
+    enable_premium_analytics: bool = True,  # DEFAULT: ENABLED (no longer upsell!)
 ) -> int:
     """
     Run the Genie Sim export job.
@@ -97,6 +119,7 @@ def run_geniesim_export_job(
         enable_rich_annotations: Generate rich annotation configs (DEFAULT: True)
         variation_assets_prefix: Path to variation assets (YOUR commercial assets)
         replicator_prefix: Path to replicator bundle
+        enable_premium_analytics: Enable premium analytics capture (DEFAULT: True - NO LONGER UPSELL!)
 
     Returns:
         0 on success, 1 on failure
@@ -115,6 +138,7 @@ def run_geniesim_export_job(
     print(f"[GENIESIM-EXPORT-JOB] Bimanual enabled: {enable_bimanual}")
     print(f"[GENIESIM-EXPORT-JOB] VLA packages enabled: {enable_vla_packages}")
     print(f"[GENIESIM-EXPORT-JOB] Rich annotations enabled: {enable_rich_annotations}")
+    print(f"[GENIESIM-EXPORT-JOB] Premium analytics enabled: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
 
     assets_dir = root / assets_prefix
     output_dir = root / geniesim_prefix
@@ -240,6 +264,33 @@ def run_geniesim_export_job(
             print(f"[GENIESIM-EXPORT-JOB]   Assets: {result.num_assets}")
             print(f"[GENIESIM-EXPORT-JOB]   Tasks: {result.num_tasks}")
 
+            # Export premium analytics manifests (DEFAULT: ENABLED)
+            premium_analytics_manifests = {}
+            if enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] Exporting premium analytics manifests (DEFAULT - NO LONGER UPSELL)")
+                try:
+                    analytics_dir = output_dir / "premium_analytics"
+                    analytics_config = DefaultPremiumAnalyticsConfig(enabled=True)
+                    analytics_exporter = create_default_premium_analytics_exporter(
+                        scene_id=scene_id,
+                        output_dir=analytics_dir,
+                        config=analytics_config,
+                    )
+                    premium_analytics_manifests = analytics_exporter.export_all_manifests()
+                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Premium analytics: {len(premium_analytics_manifests)} manifests exported")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Per-step telemetry capture enabled")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Failure analysis enabled")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Grasp analytics enabled")
+                    print("[GENIESIM-EXPORT-JOB]   ✓ Parallel eval metrics enabled")
+                except Exception as e:
+                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Premium analytics export failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+            elif not enable_premium_analytics:
+                print("\n[GENIESIM-EXPORT-JOB] Premium analytics disabled (not recommended)")
+            elif not PREMIUM_ANALYTICS_AVAILABLE:
+                print("\n[GENIESIM-EXPORT-JOB] WARNING: Premium analytics module not available")
+
             # Write completion marker
             marker_path = output_dir / "_GENIESIM_EXPORT_COMPLETE"
             marker_path.write_text(json.dumps({
@@ -247,6 +298,8 @@ def run_geniesim_export_job(
                 "robot_type": robot_type,
                 "success": True,
                 "commercial_data": filter_commercial,
+                "premium_analytics_enabled": enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE,
+                "premium_analytics_manifests": len(premium_analytics_manifests),
                 "stats": {
                     "nodes": result.num_nodes,
                     "edges": result.num_edges,
@@ -302,6 +355,9 @@ def main():
     enable_vla_packages = os.getenv("ENABLE_VLA_PACKAGES", "true").lower() == "true"
     enable_rich_annotations = os.getenv("ENABLE_RICH_ANNOTATIONS", "true").lower() == "true"
 
+    # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
+    enable_premium_analytics = os.getenv("ENABLE_PREMIUM_ANALYTICS", "true").lower() == "true"
+
     print("[GENIESIM-EXPORT-JOB] Configuration:")
     print(f"[GENIESIM-EXPORT-JOB]   Bucket: {bucket}")
     print(f"[GENIESIM-EXPORT-JOB]   Scene ID: {scene_id}")
@@ -314,6 +370,7 @@ def main():
     print(f"[GENIESIM-EXPORT-JOB]   VLA Packages: {enable_vla_packages}")
     print(f"[GENIESIM-EXPORT-JOB]   Rich Annotations: {enable_rich_annotations}")
     print(f"[GENIESIM-EXPORT-JOB]   Commercial Filter: {filter_commercial}")
+    print(f"[GENIESIM-EXPORT-JOB]   Premium Analytics: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
 
     GCS_ROOT = Path("/mnt/gcs")
 
@@ -336,6 +393,8 @@ def main():
         # YOUR commercial assets for domain randomization
         variation_assets_prefix=variation_assets_prefix,
         replicator_prefix=replicator_prefix,
+        # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
+        enable_premium_analytics=enable_premium_analytics,
     )
 
     sys.exit(exit_code)
