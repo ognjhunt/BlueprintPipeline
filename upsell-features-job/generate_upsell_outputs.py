@@ -7,6 +7,7 @@ This job generates all the high-value outputs that robotics labs pay for:
 2. asset_provenance.json - Legal audit trail
 3. baseline_benchmarks.json - Success rate baselines
 4. PyTorch DataLoaders - Plug-and-play training code
+5. Premium Analytics (NEW) - Comprehensive data quality validation
 
 Run this job AFTER episode generation to produce the complete deliverable package.
 
@@ -19,9 +20,18 @@ Output Structure:
     │   └── asset_provenance.json   # License audit trail
     ├── baselines/
     │   └── baseline_benchmarks.json # Expected success rates
-    └── dataloaders/
-        ├── README.md               # Usage instructions
-        └── example_training.py     # Example training script
+    ├── dataloaders/
+    │   ├── README.md               # Usage instructions
+    │   └── example_training.py     # Example training script
+    └── premium_analytics/          # NEW - High-value analytics
+        ├── premium_analytics_report.json
+        ├── EXECUTIVE_SUMMARY.md
+        ├── failure_analysis/
+        ├── fidelity_matrix/
+        ├── embodiment_transfer/
+        ├── grasp_quality/
+        ├── generalization/
+        └── trajectory_optimality/
 """
 
 from __future__ import annotations
@@ -53,6 +63,11 @@ class UpsellOutputConfig:
     generate_provenance: bool = True
     generate_baselines: bool = True
     generate_dataloader_examples: bool = True
+
+    # Premium Analytics options (NEW - HIGH VALUE)
+    generate_premium_analytics: bool = False
+    premium_analytics_tier: str = "comprehensive"  # quick_insights, standard, comprehensive, enterprise
+    robot_type: str = "franka"
 
     # Options
     run_baseline_evaluations: bool = False  # Actually run Isaac Sim
@@ -115,7 +130,13 @@ class UpsellOutputGenerator:
             dataloader_dir = self._generate_dataloader_examples()
             outputs["dataloaders"] = dataloader_dir
 
-        # 5. Generate summary manifest
+        # 5. Premium Analytics (NEW - HIGH VALUE)
+        if self.config.generate_premium_analytics:
+            self.log("Generating premium analytics...")
+            analytics_dir = self._generate_premium_analytics()
+            outputs["premium_analytics"] = analytics_dir
+
+        # 6. Generate summary manifest
         manifest_path = self._generate_upsell_manifest(outputs)
         outputs["manifest"] = manifest_path
 
@@ -376,6 +397,57 @@ if __name__ == "__main__":
 
         return dataloader_dir
 
+    def _generate_premium_analytics(self) -> Path:
+        """Generate premium analytics reports.
+
+        This is the HIGH-VALUE upsell that robotics labs pay premium for:
+        - Failure Mode Analysis ($10k-$50k)
+        - Sim-to-Real Fidelity Matrix ($20k-$50k)
+        - Embodiment Transfer Analysis ($20k-$100k)
+        - Grasp Quality Metrics ($15k-$50k)
+        - Generalization Analysis ($10k-$30k)
+        - Trajectory Optimality ($10k-$25k)
+
+        Total premium analytics value: $50k-$200k
+        """
+        from .premium_analytics import (
+            PremiumAnalyticsService,
+            AnalyticsTier,
+        )
+
+        # Map tier string to enum
+        tier_map = {
+            "quick_insights": AnalyticsTier.QUICK_INSIGHTS,
+            "standard": AnalyticsTier.STANDARD,
+            "comprehensive": AnalyticsTier.COMPREHENSIVE,
+            "enterprise": AnalyticsTier.ENTERPRISE,
+        }
+        tier = tier_map.get(
+            self.config.premium_analytics_tier,
+            AnalyticsTier.COMPREHENSIVE
+        )
+
+        service = PremiumAnalyticsService(
+            scene_dir=self.config.scene_dir,
+            tier=tier,
+            robot_type=self.config.robot_type,
+            verbose=self.config.verbose,
+        )
+
+        report = service.run_all_analyses()
+
+        self.results["premium_analytics"] = {
+            "tier": self.config.premium_analytics_tier,
+            "data_quality_score": report.data_quality_score,
+            "training_readiness_score": report.training_readiness_score,
+            "deployment_readiness_score": report.deployment_readiness_score,
+            "key_findings_count": len(report.key_findings),
+            "recommendations_count": len(report.recommendations),
+            "estimated_value": report.estimated_value,
+        }
+
+        return self.config.scene_dir / "premium_analytics"
+
     def _generate_upsell_manifest(self, outputs: Dict[str, Path]) -> Path:
         """Generate manifest of all upsell outputs."""
         manifest = {
@@ -418,6 +490,27 @@ if __name__ == "__main__":
             value["quality_premium"] = 1000
             total += 1000
 
+        # Premium Analytics value (HIGH VALUE)
+        if "premium_analytics" in self.results:
+            analytics = self.results["premium_analytics"]
+            tier = analytics.get("tier", "standard")
+
+            # Tier-based pricing
+            tier_values = {
+                "quick_insights": 5000,
+                "standard": 15000,
+                "comprehensive": 35000,
+                "enterprise": 75000,
+            }
+            analytics_value = tier_values.get(tier, 35000)
+
+            # Bonus for high data quality
+            if analytics.get("data_quality_score", 0) >= 0.85:
+                analytics_value = int(analytics_value * 1.2)
+
+            value["premium_analytics"] = analytics_value
+            total += analytics_value
+
         value["total_estimated_value"] = total
         value["currency"] = "USD"
 
@@ -428,6 +521,9 @@ def generate_upsell_outputs(
     scene_dir: Path,
     episodes_dir: Optional[Path] = None,
     run_evaluations: bool = False,
+    include_premium_analytics: bool = False,
+    premium_analytics_tier: str = "comprehensive",
+    robot_type: str = "franka",
     verbose: bool = True,
 ) -> Dict[str, Path]:
     """
@@ -437,6 +533,9 @@ def generate_upsell_outputs(
         scene_dir: Path to scene directory
         episodes_dir: Optional path to episodes (defaults to scene_dir/episodes)
         run_evaluations: Whether to run actual Isaac Sim evaluations
+        include_premium_analytics: Whether to run premium analytics (HIGH VALUE)
+        premium_analytics_tier: Analytics tier (quick_insights, standard, comprehensive, enterprise)
+        robot_type: Robot type for analysis
         verbose: Print progress
 
     Returns:
@@ -446,6 +545,9 @@ def generate_upsell_outputs(
         scene_dir=scene_dir,
         episodes_dir=episodes_dir,
         run_baseline_evaluations=run_evaluations,
+        generate_premium_analytics=include_premium_analytics,
+        premium_analytics_tier=premium_analytics_tier,
+        robot_type=robot_type,
         verbose=verbose,
     )
 
@@ -462,12 +564,33 @@ if __name__ == "__main__":
     parser.add_argument("--run-eval", action="store_true", help="Run Isaac Sim evaluations")
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
 
+    # Premium Analytics options (NEW)
+    parser.add_argument(
+        "--premium-analytics",
+        action="store_true",
+        help="Generate premium analytics reports (HIGH VALUE - $50k-$200k)"
+    )
+    parser.add_argument(
+        "--analytics-tier",
+        choices=["quick_insights", "standard", "comprehensive", "enterprise"],
+        default="comprehensive",
+        help="Premium analytics tier (default: comprehensive)"
+    )
+    parser.add_argument(
+        "--robot-type",
+        default="franka",
+        help="Robot type for analysis (default: franka)"
+    )
+
     args = parser.parse_args()
 
     outputs = generate_upsell_outputs(
         scene_dir=args.scene_dir,
         episodes_dir=args.episodes_dir,
         run_evaluations=args.run_eval,
+        include_premium_analytics=args.premium_analytics,
+        premium_analytics_tier=args.analytics_tier,
+        robot_type=args.robot_type,
         verbose=not args.quiet,
     )
 
@@ -475,3 +598,11 @@ if __name__ == "__main__":
     print("=" * 50)
     for name, path in outputs.items():
         print(f"  {name}: {path}")
+
+    # Print premium analytics summary if generated
+    if args.premium_analytics:
+        print("\n" + "=" * 50)
+        print("PREMIUM ANALYTICS SUMMARY")
+        print("=" * 50)
+        print(f"Tier: {args.analytics_tier}")
+        print("Check premium_analytics/EXECUTIVE_SUMMARY.md for full report")
