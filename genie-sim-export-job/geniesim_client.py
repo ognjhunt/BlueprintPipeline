@@ -36,6 +36,21 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiohttp
 import requests
 
+# Add repo root to path for imports
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# Import resilience infrastructure
+try:
+    from tools.secrets import get_secret_or_env, SecretIds
+    from tools.external_services import ServiceClient, ServiceClientConfig, RateLimiter
+    from tools.error_handling import CircuitBreaker
+    HAVE_RESILIENCE_TOOLS = True
+except ImportError:
+    HAVE_RESILIENCE_TOOLS = False
+    logger.warning("Resilience tools not available - using basic retry logic")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -199,7 +214,19 @@ class GenieSimClient:
             timeout: Request timeout in seconds
             max_retries: Maximum retries for failed requests
         """
-        self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
+        # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
+        if HAVE_RESILIENCE_TOOLS:
+            try:
+                self.api_key = api_key or get_secret_or_env(
+                    SecretIds.GENIE_SIM_API_KEY,
+                    env_var="GENIE_SIM_API_KEY"
+                )
+            except Exception as e:
+                logger.warning(f"Secret Manager unavailable, falling back to env var: {e}")
+                self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
+        else:
+            self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
+
         if not self.api_key:
             raise GenieSimAuthenticationError(
                 "API key required. Set GENIE_SIM_API_KEY environment variable or pass api_key parameter."
@@ -213,6 +240,19 @@ class GenieSimClient:
 
         self._session: Optional[requests.Session] = None
         self._async_session: Optional[aiohttp.ClientSession] = None
+
+        # GAP-EH-002 FIX: Add circuit breaker to prevent cascading failures
+        if HAVE_RESILIENCE_TOOLS:
+            self._circuit_breaker = CircuitBreaker(
+                failure_threshold=5,
+                recovery_timeout=60.0,
+                expected_exception=GenieSimAPIError
+            )
+            # GAP-SEC-003 FIX: Add rate limiting (10 requests/second)
+            self._rate_limiter = RateLimiter(calls_per_second=10.0)
+        else:
+            self._circuit_breaker = None
+            self._rate_limiter = None
 
     @property
     def session(self) -> requests.Session:
@@ -625,25 +665,50 @@ class GenieSimClient:
         url: str,
         **kwargs,
     ) -> requests.Response:
-        """Make HTTP request with exponential backoff retry."""
-        for attempt in range(self.max_retries):
-            try:
-                response = self.session.request(
-                    method,
-                    url,
-                    timeout=self.timeout,
-                    **kwargs,
-                )
-                response.raise_for_status()
-                return response
+        """
+        Make HTTP request with exponential backoff retry, circuit breaker, and rate limiting.
 
-            except requests.exceptions.RequestException as e:
-                if attempt == self.max_retries - 1:
-                    raise GenieSimAPIError(f"Request failed after {self.max_retries} retries: {e}")
+        GAP-EH-001 FIX: Enhanced retry logic with jitter
+        GAP-EH-002 FIX: Circuit breaker to prevent cascading failures
+        GAP-SEC-003 FIX: Rate limiting to prevent quota exhaustion
+        """
+        # Apply rate limiting before making request
+        if self._rate_limiter:
+            self._rate_limiter.acquire()
 
-                wait_time = 2 ** attempt  # Exponential backoff
-                logger.warning(f"Request failed (attempt {attempt + 1}/{self.max_retries}), retrying in {wait_time}s...")
-                time.sleep(wait_time)
+        # Define the actual request function
+        def make_request():
+            for attempt in range(self.max_retries):
+                try:
+                    response = self.session.request(
+                        method,
+                        url,
+                        timeout=self.timeout,
+                        **kwargs,
+                    )
+                    response.raise_for_status()
+                    return response
+
+                except requests.exceptions.RequestException as e:
+                    if attempt == self.max_retries - 1:
+                        raise GenieSimAPIError(f"Request failed after {self.max_retries} retries: {e}")
+
+                    # Enhanced exponential backoff with jitter
+                    base_wait = 2 ** attempt
+                    jitter = base_wait * 0.1 * (2 * time.time() % 1 - 0.5)  # ±5% jitter
+                    wait_time = min(base_wait + jitter, 60.0)  # Cap at 60s
+
+                    logger.warning(
+                        f"Request failed (attempt {attempt + 1}/{self.max_retries}), "
+                        f"retrying in {wait_time:.1f}s... Error: {e}"
+                    )
+                    time.sleep(wait_time)
+
+        # Use circuit breaker if available
+        if self._circuit_breaker:
+            return self._circuit_breaker.call(make_request)
+        else:
+            return make_request()
 
     def cancel_job(self, job_id: str) -> bool:
         """
