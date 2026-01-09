@@ -4,6 +4,7 @@
 #   1. Triggers on completion marker file from variation-assets-pipeline (.variation_pipeline_complete)
 #   2. Runs genie-sim-export-job to convert scene to Genie Sim 3.0 format
 #   3. Writes .geniesim_complete marker when finished
+#   4. Triggers arena-export-pipeline for policy evaluation infrastructure
 #
 # This pipeline replaces episode-generation-pipeline and isaac-lab-job when
 # USE_GENIESIM=true (default). Genie Sim handles:
@@ -12,6 +13,12 @@
 #   - Automated/teleop data collection
 #   - VLM evaluation
 #   - LeRobot v0.3.3 export
+#
+# ARENA INTEGRATION:
+#   After .geniesim_complete is written, arena-export-pipeline automatically triggers.
+#   This ensures you have BOTH:
+#     - Training DATA (episodes from Genie Sim)
+#     - Evaluation INFRASTRUCTURE (Arena benchmarks) to test trained policies
 #
 # IMPORTANT: Only uses YOUR assets (FILTER_COMMERCIAL=true by default)
 # to ensure commercial rights to generated data.
@@ -23,6 +30,8 @@
 #
 # Pipeline Order:
 #   replicator-job → variation-assets-pipeline → [THIS PIPELINE] → Genie Sim
+#                                                       ↓
+#                                              arena-export-pipeline (automatic)
 #
 # Trigger: Cloud Storage object finalized event for .variation_pipeline_complete
 #
@@ -294,9 +303,11 @@ main:
             task_config: '${"scenes/" + sceneId + "/geniesim/task_config.json"}'
             scene_config: '${"scenes/" + sceneId + "/geniesim/scene_config.yaml"}'
           next_steps:
+            - "Arena export will auto-trigger for policy evaluation infrastructure"
             - "Run Genie Sim data collection on your infrastructure"
             - "Episodes will be generated in LeRobot v0.3.3 format"
             - "VLM evaluation included with 100k+ scenarios"
+            - "Use Arena benchmarks to evaluate trained policies"
 
     - done_with_failure:
         return:
