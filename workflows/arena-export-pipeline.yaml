@@ -3,11 +3,22 @@
 # Google Cloud Workflows pipeline that exports Blueprint scenes to Isaac Lab-Arena format.
 #
 # This pipeline:
-#   1. Triggers on completion marker from usd-assembly or isaac-lab jobs
+#   1. Triggers on completion markers from multiple upstream jobs
 #   2. Runs arena-export-job to detect affordances and generate Arena format
 #   3. Optionally registers the environment with LeRobot Hub
 #
-# Trigger: Cloud Storage object finalized event for .usd_complete or .isaac_lab_complete
+# IMPORTANT: Arena export now runs in BOTH paths:
+#   - Path A (Isaac Lab mode): Triggers on .isaac_lab_complete or .usd_complete
+#   - Path B (Genie Sim mode): Triggers on .geniesim_complete
+#
+# This ensures you always have:
+#   - Training DATA (from Genie Sim or Isaac Lab episode generation)
+#   - Evaluation INFRASTRUCTURE (from Arena) to benchmark trained policies
+#
+# Trigger: Cloud Storage object finalized event for:
+#   - .usd_complete (fallback)
+#   - .isaac_lab_complete (Isaac Lab path)
+#   - .geniesim_complete (Genie Sim path - NEW)
 #
 # Isaac Lab-Arena is NVIDIA's open-source framework for robot policy evaluation
 # at scale using standardized affordances and benchmarks.
@@ -36,6 +47,9 @@ main:
           # Trigger on Isaac Lab completion (preferred - has all assets)
           - condition: '${text.match_regex(object, "^scenes/.+/isaac_lab/\\.isaac_lab_complete$")}'
             next: derive_from_isaac_lab
+          # Trigger on Genie Sim completion (Genie Sim path - enables Arena for both paths)
+          - condition: '${text.match_regex(object, "^scenes/.+/geniesim/\\.geniesim_complete$")}'
+            next: derive_from_geniesim
           # Also trigger on USD completion (fallback - minimal requirement)
           - condition: '${text.match_regex(object, "^scenes/.+/usd/\\.usd_complete$")}'
             next: derive_from_usd
@@ -48,8 +62,23 @@ main:
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - arenaPrefix: '${"scenes/" + sceneId + "/arena"}'
+          - geniesimPrefix: ""
           - arenaJobName: "arena-export-job"
           - triggerSource: "isaac_lab"
+        next: log_start
+
+    - derive_from_geniesim:
+        # Triggered after Genie Sim completes - ensures Arena runs in BOTH paths
+        # This is critical: Genie Sim generates DATA, Arena provides EVALUATION infrastructure
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
+          - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
+          - arenaPrefix: '${"scenes/" + sceneId + "/arena"}'
+          - geniesimPrefix: '${"scenes/" + sceneId + "/geniesim"}'
+          - arenaJobName: "arena-export-job"
+          - triggerSource: "geniesim"
         next: log_start
 
     - derive_from_usd:
@@ -59,6 +88,7 @@ main:
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - arenaPrefix: '${"scenes/" + sceneId + "/arena"}'
+          - geniesimPrefix: ""
           - arenaJobName: "arena-export-job"
           - triggerSource: "usd"
         next: log_start
@@ -92,6 +122,13 @@ main:
                       value: ${usdPrefix}
                     - name: ARENA_PREFIX
                       value: ${arenaPrefix}
+                    # Genie Sim prefix (when triggered from Genie Sim path)
+                    # This allows Arena to reference the generated training data
+                    - name: GENIESIM_PREFIX
+                      value: '${default(geniesimPrefix, "")}'
+                    # Source that triggered this Arena export
+                    - name: TRIGGER_SOURCE
+                      value: ${triggerSource}
                     # Enable LLM-based affordance detection
                     - name: USE_LLM_AFFORDANCES
                       value: "true"
