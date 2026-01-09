@@ -122,6 +122,31 @@ except ImportError:
     require_isaac_sim_or_fail = None
     check_sensor_capture_environment = None
 
+# Isaac Sim enforcement and quality certificates
+try:
+    from isaac_sim_enforcement import (
+        enforce_isaac_sim_for_production,
+        get_environment_capabilities,
+        get_data_quality_level,
+        print_environment_report,
+        IsaacSimRequirementError,
+        ProductionDataQualityError,
+    )
+    from quality_certificate import (
+        QualityCertificate,
+        QualityCertificateGenerator,
+        TrajectoryQualityMetrics,
+        VisualQualityMetrics,
+        TaskQualityMetrics,
+        DiversityMetrics,
+        Sim2RealMetrics,
+        compute_episode_data_hash,
+    )
+    HAVE_QUALITY_SYSTEM = True
+except ImportError:
+    HAVE_QUALITY_SYSTEM = False
+    print("[EPISODE-GEN-JOB] WARNING: Quality certificate system not available")
+
 # Pipeline imports
 try:
     from dwm_preparation_job.scene_analyzer import SceneAnalyzer, SceneAnalysisResult
@@ -210,6 +235,9 @@ class GeneratedEpisode:
 
     # Object metadata for ground-truth
     object_metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Quality certificate (new)
+    quality_certificate: Optional[Any] = None  # QualityCertificate when available
 
     # Legacy
     validation_errors: List[str] = field(default_factory=list)
@@ -1453,52 +1481,87 @@ def run_episode_generation_job(
 
 def main():
     """Main entry point."""
-    # Detect if running in production environment
-    # Production indicators: running in container, K8s, or Cloud Run
-    is_production = (
-        os.getenv("KUBERNETES_SERVICE_HOST") is not None or  # K8s
-        os.getenv("K_SERVICE") is not None or  # Cloud Run
-        os.path.exists("/.dockerenv") or  # Docker
-        os.getenv("PRODUCTION", "false").lower() == "true"
-    )
+    print("\n[EPISODE-GEN-JOB] ================================")
+    print("[EPISODE-GEN-JOB] Episode Generation Job (SOTA)")
+    print("[EPISODE-GEN-JOB] ================================\n")
 
-    # In production, require real physics by default unless explicitly disabled
-    # In development, allow mock data by default unless explicitly required
-    if is_production:
-        default_require_real = "true"
+    # =========================================================================
+    # PHASE 1: Isaac Sim Enforcement + Environment Check
+    # =========================================================================
+
+    capabilities = None
+    if HAVE_QUALITY_SYSTEM:
+        try:
+            # Get environment capabilities
+            capabilities = get_environment_capabilities()
+
+            # Print detailed environment report
+            print_environment_report(capabilities)
+
+            # Enforce Isaac Sim for production
+            required_quality = get_data_quality_level()
+            print(f"[EPISODE-GEN-JOB] Required quality level: {required_quality.value}\n")
+
+            capabilities = enforce_isaac_sim_for_production(required_quality)
+
+            print("[EPISODE-GEN-JOB] ✅ Environment check passed\n")
+
+        except IsaacSimRequirementError as e:
+            print(f"\n❌ ISAAC SIM REQUIREMENT ERROR:\n{e}\n")
+            sys.exit(1)
+        except ProductionDataQualityError as e:
+            print(f"\n❌ PRODUCTION DATA QUALITY ERROR:\n{e}\n")
+            sys.exit(1)
     else:
-        default_require_real = "false"
+        # Fallback to legacy enforcement (quality system unavailable)
+        print("[EPISODE-GEN-JOB] Using legacy Isaac Sim check (quality system unavailable)\n")
 
-    require_real_physics = os.getenv("REQUIRE_REAL_PHYSICS", default_require_real).lower() == "true"
-    allow_mock_data = os.getenv("ALLOW_MOCK_DATA", "false").lower() == "true"
+        # Detect if running in production environment
+        # Production indicators: running in container, K8s, or Cloud Run
+        is_production = (
+            os.getenv("KUBERNETES_SERVICE_HOST") is not None or  # K8s
+            os.getenv("K_SERVICE") is not None or  # Cloud Run
+            os.path.exists("/.dockerenv") or  # Docker
+            os.getenv("PRODUCTION", "false").lower() == "true"
+        )
 
-    # Check environment
-    if check_sensor_capture_environment is not None:
-        status = check_sensor_capture_environment()
-        isaac_sim_available = status.get("isaac_sim_available", False)
-    else:
-        isaac_sim_available = False
-
-    # Enforce production requirements
-    if require_real_physics and not isaac_sim_available:
-        if allow_mock_data:
-            print("\n[EPISODE-GEN-JOB] ========================================")
-            print("[EPISODE-GEN-JOB] WARNING: ALLOW_MOCK_DATA override active")
-            print("[EPISODE-GEN-JOB] Proceeding with mock data despite production mode")
-            print("[EPISODE-GEN-JOB] ========================================\n")
+        # In production, require real physics by default unless explicitly disabled
+        # In development, allow mock data by default unless explicitly required
+        if is_production:
+            default_require_real = "true"
         else:
-            print("\n" + "=" * 70)
-            print("FATAL ERROR: Isaac Sim not available in production mode")
-            print("=" * 70)
-            print("")
-            print("Episode generation requires Isaac Sim for:")
-            print("  - Real physics simulation (PhysX)")
-            print("  - Actual sensor data capture (Replicator)")
-            print("  - Physics-validated trajectories")
-            print("")
-            print("Without Isaac Sim, the pipeline would generate:")
-            print("  - Random noise RGB images (not real visual data)")
-            print("  - Heuristic-based validation (not physics-verified)")
+            default_require_real = "false"
+
+        require_real_physics = os.getenv("REQUIRE_REAL_PHYSICS", default_require_real).lower() == "true"
+        allow_mock_data = os.getenv("ALLOW_MOCK_DATA", "false").lower() == "true"
+
+        # Check environment
+        if check_sensor_capture_environment is not None:
+            status = check_sensor_capture_environment()
+            isaac_sim_available = status.get("isaac_sim_available", False)
+        else:
+            isaac_sim_available = False
+
+        # Enforce production requirements
+        if require_real_physics and not isaac_sim_available:
+            if allow_mock_data:
+                print("\n[EPISODE-GEN-JOB] ========================================")
+                print("[EPISODE-GEN-JOB] WARNING: ALLOW_MOCK_DATA override active")
+                print("[EPISODE-GEN-JOB] Proceeding with mock data despite production mode")
+                print("[EPISODE-GEN-JOB] ========================================\n")
+            else:
+                print("\n" + "=" * 70)
+                print("FATAL ERROR: Isaac Sim not available in production mode")
+                print("=" * 70)
+                print("")
+                print("Episode generation requires Isaac Sim for:")
+                print("  - Real physics simulation (PhysX)")
+                print("  - Actual sensor data capture (Replicator)")
+                print("  - Physics-validated trajectories")
+                print("")
+                print("Without Isaac Sim, the pipeline would generate:")
+                print("  - Random noise RGB images (not real visual data)")
+                print("  - Heuristic-based validation (not physics-verified)")
             print("  - Mock contact/collision data")
             print("")
             print("To fix this:")
