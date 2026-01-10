@@ -164,6 +164,18 @@ class DownloadResult:
     errors: List[str] = field(default_factory=list)
 
 
+@dataclass
+class HealthStatus:
+    """Health status of Genie Sim API."""
+
+    available: bool
+    api_version: Optional[str] = None
+    rate_limit_remaining: Optional[int] = None
+    estimated_queue_time_seconds: Optional[float] = None
+    error: Optional[str] = None
+    checked_at: Optional[str] = None  # ISO 8601 timestamp
+
+
 # =============================================================================
 # API Client
 # =============================================================================
@@ -295,6 +307,111 @@ class GenieSimClient:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+    # =========================================================================
+    # Health Check
+    # =========================================================================
+
+    def health_check(self) -> HealthStatus:
+        """
+        Check Genie Sim API health and availability.
+
+        Returns:
+            HealthStatus with availability and metadata
+
+        This method checks the /health endpoint to verify:
+        - API is reachable
+        - Authentication is valid
+        - Service is operational
+        - Rate limits and queue status
+        """
+        try:
+            response = self._make_request_with_retry(
+                "GET",
+                f"{self.endpoint}/health",
+                json=None,  # GET request has no body
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return HealthStatus(
+                    available=data.get("status") == "healthy",
+                    api_version=data.get("version"),
+                    rate_limit_remaining=data.get("rate_limit_remaining"),
+                    estimated_queue_time_seconds=data.get("estimated_queue_time_seconds"),
+                    checked_at=datetime.utcnow().isoformat() + "Z",
+                )
+            else:
+                return HealthStatus(
+                    available=False,
+                    error=f"HTTP {response.status_code}: {response.text}",
+                    checked_at=datetime.utcnow().isoformat() + "Z",
+                )
+
+        except requests.exceptions.ConnectionError as e:
+            return HealthStatus(
+                available=False,
+                error=f"Connection failed: {str(e)}",
+                checked_at=datetime.utcnow().isoformat() + "Z",
+            )
+        except requests.exceptions.Timeout as e:
+            return HealthStatus(
+                available=False,
+                error=f"Request timed out: {str(e)}",
+                checked_at=datetime.utcnow().isoformat() + "Z",
+            )
+        except Exception as e:
+            return HealthStatus(
+                available=False,
+                error=f"Health check failed: {str(e)}",
+                checked_at=datetime.utcnow().isoformat() + "Z",
+            )
+
+    async def health_check_async(self) -> HealthStatus:
+        """
+        Asynchronous version of health_check().
+
+        Returns:
+            HealthStatus with availability and metadata
+        """
+        try:
+            session = await self._get_async_session()
+            async with session.get(f"{self.endpoint}/health") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return HealthStatus(
+                        available=data.get("status") == "healthy",
+                        api_version=data.get("version"),
+                        rate_limit_remaining=data.get("rate_limit_remaining"),
+                        estimated_queue_time_seconds=data.get("estimated_queue_time_seconds"),
+                        checked_at=datetime.utcnow().isoformat() + "Z",
+                    )
+                else:
+                    text = await response.text()
+                    return HealthStatus(
+                        available=False,
+                        error=f"HTTP {response.status}: {text}",
+                        checked_at=datetime.utcnow().isoformat() + "Z",
+                    )
+
+        except aiohttp.ClientConnectorError as e:
+            return HealthStatus(
+                available=False,
+                error=f"Connection failed: {str(e)}",
+                checked_at=datetime.utcnow().isoformat() + "Z",
+            )
+        except asyncio.TimeoutError as e:
+            return HealthStatus(
+                available=False,
+                error=f"Request timed out: {str(e)}",
+                checked_at=datetime.utcnow().isoformat() + "Z",
+            )
+        except Exception as e:
+            return HealthStatus(
+                available=False,
+                error=f"Health check failed: {str(e)}",
+                checked_at=datetime.utcnow().isoformat() + "Z",
+            )
 
     # =========================================================================
     # Job Submission

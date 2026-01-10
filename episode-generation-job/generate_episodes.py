@@ -103,10 +103,12 @@ try:
     from sensor_data_capture import (
         SensorDataConfig,
         DataPackTier,
+        SensorDataCaptureMode,
         IsaacSimSensorCapture,
         MockSensorCapture,
         EpisodeSensorData,
         create_sensor_capture,
+        get_capture_mode_from_env,
         require_isaac_sim_or_fail,
         check_sensor_capture_environment,
     )
@@ -120,6 +122,8 @@ except ImportError:
     HAVE_SENSOR_CAPTURE = False
     SensorDataConfig = None
     DataPackTier = None
+    SensorDataCaptureMode = None
+    get_capture_mode_from_env = None
     require_isaac_sim_or_fail = None
     check_sensor_capture_environment = None
 
@@ -196,7 +200,8 @@ class EpisodeGenerationConfig:
     num_cameras: int = 1
     image_resolution: Tuple[int, int] = (640, 480)
     capture_sensor_data: bool = True  # Enable visual observation capture
-    use_mock_capture: bool = False  # Use mock capture (no Isaac Sim)
+    use_mock_capture: bool = False  # [DEPRECATED] Use mock capture (use sensor_capture_mode instead)
+    sensor_capture_mode: Optional[str] = None  # "isaac_sim", "mock_dev", "fail_closed" (None = auto-detect)
 
     # Output
     output_dir: Path = Path("./episodes")
@@ -599,55 +604,51 @@ class EpisodeGenerator:
             verbose=verbose,
         ) if config.use_validation else None
 
-        # Sensor data capture (enhanced pipeline)
+        # Sensor data capture (enhanced pipeline with explicit mode control)
         self.sensor_capture = None
         self._sensor_capture_is_mock = False
 
-        # Detect if running in production environment
-        is_production = (
-            os.getenv("KUBERNETES_SERVICE_HOST") is not None or
-            os.getenv("K_SERVICE") is not None or
-            os.path.exists("/.dockerenv") or
-            os.getenv("PRODUCTION", "false").lower() == "true"
-        )
-        require_real_sensors = is_production and not config.use_mock_capture
-
         if HAVE_SENSOR_CAPTURE and config.capture_sensor_data:
             try:
+                # Get capture mode from environment or config
+                if hasattr(config, 'sensor_capture_mode') and config.sensor_capture_mode:
+                    capture_mode = config.sensor_capture_mode
+                elif config.use_mock_capture:
+                    # Legacy support: use_mock_capture -> MOCK_DEV
+                    capture_mode = SensorDataCaptureMode.MOCK_DEV
+                else:
+                    # Default: get from environment (defaults to fail_closed)
+                    capture_mode = get_capture_mode_from_env()
+
+                self.log(f"Sensor capture mode: {capture_mode.value}")
+
                 # Parse data pack tier
                 tier = data_pack_from_string(config.data_pack_tier)
 
+                # Create sensor capture with explicit mode
                 self.sensor_capture = create_sensor_capture(
                     data_pack=tier,
                     num_cameras=config.num_cameras,
                     resolution=config.image_resolution,
                     fps=config.fps,
-                    use_mock=config.use_mock_capture,
+                    capture_mode=capture_mode,
                     verbose=verbose,
                 )
-                success = self.sensor_capture.initialize()
 
-                # Check if we got mock capture when we needed real
+                # Check if we got mock capture
                 if hasattr(self.sensor_capture, '__class__'):
                     self._sensor_capture_is_mock = 'Mock' in self.sensor_capture.__class__.__name__
 
-                if self._sensor_capture_is_mock and require_real_sensors:
-                    raise RuntimeError(
-                        "Sensor capture fell back to mock mode in production. "
-                        "Isaac Sim/Replicator is required for real sensor data."
-                    )
-
                 self.log(f"Sensor capture initialized: {config.data_pack_tier} pack, {config.num_cameras} cameras")
                 if self._sensor_capture_is_mock:
-                    self.log("Using MOCK sensor capture - images will be random noise!", "WARNING")
+                    self.log("⚠️  Using MOCK sensor capture - NOT suitable for production training!", "WARNING")
+                else:
+                    self.log("✅ Using Isaac Sim Replicator - production quality data")
 
             except Exception as e:
-                if require_real_sensors:
-                    self.log(f"FATAL: Sensor capture initialization failed in production: {e}", "ERROR")
-                    raise RuntimeError(f"Sensor capture required in production: {e}")
-                else:
-                    self.log(f"Sensor capture initialization failed: {e}", "WARNING")
-                    self.sensor_capture = None
+                # Sensor capture creation failed - this is expected to raise in fail_closed mode
+                self.log(f"Sensor capture initialization failed: {e}", "ERROR")
+                raise
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
