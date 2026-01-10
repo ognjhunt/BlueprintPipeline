@@ -308,6 +308,82 @@ class USDBuilder:
                 if not is_child:
                     self._process_node(i, root_path)
 
+    def _filter_degenerate_triangles(
+        self, indices: list, points: list, mesh_name: str, epsilon: float = 1e-6
+    ) -> list:
+        """
+        Filter out degenerate triangles from the index list.
+
+        GAP-GEOMETRY-001 FIX: Detect and remove degenerate triangles that would cause
+        rendering or physics issues.
+
+        A triangle is degenerate if:
+        - Any two vertices are the same (duplicate indices)
+        - All three vertices are collinear (zero area)
+
+        Args:
+            indices: List of vertex indices (must be divisible by 3)
+            points: List of Gf.Vec3f points
+            mesh_name: Name for logging
+            epsilon: Tolerance for zero-area check
+
+        Returns:
+            Filtered index list with degenerate triangles removed
+        """
+        if len(indices) % 3 != 0:
+            logger.warning(f"Mesh '{mesh_name}': Index count {len(indices)} not divisible by 3")
+            return indices
+
+        filtered_indices = []
+        degenerate_count = 0
+
+        for i in range(0, len(indices), 3):
+            i0, i1, i2 = indices[i], indices[i + 1], indices[i + 2]
+
+            # Check for duplicate indices
+            if i0 == i1 or i1 == i2 or i0 == i2:
+                degenerate_count += 1
+                continue
+
+            # Check bounds
+            if i0 >= len(points) or i1 >= len(points) or i2 >= len(points):
+                degenerate_count += 1
+                logger.warning(
+                    f"Mesh '{mesh_name}': Triangle {i//3} has out-of-bounds index "
+                    f"({i0}, {i1}, {i2}) >= {len(points)}"
+                )
+                continue
+
+            # Check for zero-area triangle (collinear vertices)
+            p0, p1, p2 = points[i0], points[i1], points[i2]
+
+            # Calculate triangle area using cross product
+            edge1 = Gf.Vec3f(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+            edge2 = Gf.Vec3f(p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2])
+
+            # Cross product magnitude = 2 * area
+            cross = Gf.Vec3f(
+                edge1[1] * edge2[2] - edge1[2] * edge2[1],
+                edge1[2] * edge2[0] - edge1[0] * edge2[2],
+                edge1[0] * edge2[1] - edge1[1] * edge2[0],
+            )
+            area = 0.5 * (cross[0] ** 2 + cross[1] ** 2 + cross[2] ** 2) ** 0.5
+
+            if area < epsilon:
+                degenerate_count += 1
+                continue
+
+            # Triangle is valid
+            filtered_indices.extend([i0, i1, i2])
+
+        if degenerate_count > 0:
+            logger.warning(
+                f"Mesh '{mesh_name}': Filtered {degenerate_count} degenerate triangles "
+                f"({degenerate_count * 100 // (len(indices) // 3)}% of total)"
+            )
+
+        return filtered_indices
+
     def _process_node(self, node_index: int, parent_path: str) -> None:
         """Recursively process a glTF node and its children."""
         node = self.gltf.nodes[node_index]
@@ -387,19 +463,28 @@ class USDBuilder:
         # Get and set indices
         if primitive.indices is not None:
             indices = self.reader.get_accessor_data(primitive.indices)
-            usd_mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(indices.astype(np.int32).tolist()))
+            indices_list = indices.astype(np.int32).tolist()
+
+            # GAP-GEOMETRY-001 FIX: Filter degenerate triangles
+            indices_list = self._filter_degenerate_triangles(indices_list, points, prim_path)
+
+            usd_mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(indices_list))
 
             # Calculate face vertex counts (assuming triangles)
-            num_faces = len(indices) // 3
+            num_faces = len(indices_list) // 3
             face_counts = [3] * num_faces
             usd_mesh.CreateFaceVertexCountsAttr(Vt.IntArray(face_counts))
         else:
             # No indices - assume triangles with sequential vertices
             num_verts = len(positions)
-            indices = list(range(num_verts))
-            usd_mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(indices))
+            indices_list = list(range(num_verts))
 
-            num_faces = num_verts // 3
+            # GAP-GEOMETRY-001 FIX: Filter degenerate triangles
+            indices_list = self._filter_degenerate_triangles(indices_list, points, prim_path)
+
+            usd_mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(indices_list))
+
+            num_faces = len(indices_list) // 3
             face_counts = [3] * num_faces
             usd_mesh.CreateFaceVertexCountsAttr(Vt.IntArray(face_counts))
 
@@ -504,8 +589,55 @@ class USDBuilder:
             roughness = float(pbr.roughnessFactor) if pbr.roughnessFactor is not None else 1.0
             shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(roughness)
 
-        # Emissive - CRITICAL FIX: Convert to native Python floats
-        if material.emissiveFactor:
+            # GAP-MATERIAL-001 FIX: Handle metallic-roughness texture (packed texture)
+            if hasattr(pbr, 'metallicRoughnessTexture') and pbr.metallicRoughnessTexture:
+                tex_path = self._get_or_create_texture(
+                    pbr.metallicRoughnessTexture.index, mat_path, "metallicRoughnessTexture"
+                )
+                if tex_path:
+                    # Note: This is a packed texture (B=metallic, G=roughness)
+                    # UsdPreviewSurface doesn't directly support packed textures,
+                    # so we use it as roughness input and note the limitation
+                    tex_shader = UsdShade.Shader(self.stage.GetPrimAtPath(tex_path))
+                    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).ConnectToSource(
+                        tex_shader.ConnectableAPI(), "g"
+                    )
+
+        # GAP-MATERIAL-002 FIX: Handle normal map texture
+        if hasattr(material, 'normalTexture') and material.normalTexture:
+            tex_path = self._get_or_create_texture(
+                material.normalTexture.index, mat_path, "normalTexture"
+            )
+            if tex_path:
+                tex_shader = UsdShade.Shader(self.stage.GetPrimAtPath(tex_path))
+                shader.CreateInput("normal", Sdf.ValueTypeNames.Normal3f).ConnectToSource(
+                    tex_shader.ConnectableAPI(), "rgb"
+                )
+
+        # GAP-MATERIAL-003 FIX: Handle occlusion texture (AO)
+        if hasattr(material, 'occlusionTexture') and material.occlusionTexture:
+            tex_path = self._get_or_create_texture(
+                material.occlusionTexture.index, mat_path, "occlusionTexture"
+            )
+            if tex_path:
+                tex_shader = UsdShade.Shader(self.stage.GetPrimAtPath(tex_path))
+                shader.CreateInput("occlusion", Sdf.ValueTypeNames.Float).ConnectToSource(
+                    tex_shader.ConnectableAPI(), "r"
+                )
+
+        # Emissive texture
+        if hasattr(material, 'emissiveTexture') and material.emissiveTexture:
+            tex_path = self._get_or_create_texture(
+                material.emissiveTexture.index, mat_path, "emissiveTexture"
+            )
+            if tex_path:
+                tex_shader = UsdShade.Shader(self.stage.GetPrimAtPath(tex_path))
+                shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+                    tex_shader.ConnectableAPI(), "rgb"
+                )
+
+        # Emissive factor - CRITICAL FIX: Convert to native Python floats
+        if hasattr(material, 'emissiveFactor') and material.emissiveFactor:
             emissive = [float(e) for e in material.emissiveFactor]
             shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(
                 Gf.Vec3f(*emissive)

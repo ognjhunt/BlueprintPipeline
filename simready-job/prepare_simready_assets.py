@@ -940,11 +940,23 @@ def call_gemini_for_object(
             except Exception:
                 pass
 
+        # GAP-PHYSICS-002 FIX: Physics-consistent friction validation
         static_f = _clamp(static_f, 0.0, 2.0)
         dynamic_f = _clamp(dynamic_f, 0.0, 2.0)
+
+        # Enforce physical constraint: dynamic friction <= static friction
         if dynamic_f > static_f:
-            # enforce physically typical relationship
+            logger.warning(
+                f"[SIMREADY] obj_{oid}: Dynamic friction ({dynamic_f:.3f}) > static friction ({static_f:.3f}), "
+                "adjusting dynamic friction"
+            )
             dynamic_f = max(0.0, static_f - 0.05)
+
+        # Additional validation: both should be non-negative
+        if static_f < 0 or dynamic_f < 0:
+            logger.warning(f"[SIMREADY] obj_{oid}: Negative friction detected, resetting to defaults")
+            static_f = 0.6
+            dynamic_f = 0.5
 
         merged["static_friction"] = static_f
         merged["dynamic_friction"] = dynamic_f
@@ -979,8 +991,15 @@ def call_gemini_for_object(
         elif volume > 0.0 and mass_from_density is not None and not have_mass:
             chosen_mass = mass_from_density
 
-        # Clamp mass to wide safety bounds
+        # GAP-PHYSICS-001 FIX: Prevent zero mass which crashes PhysX
+        # Clamp mass to wide safety bounds (minimum 1g to prevent physics errors)
         chosen_mass = _clamp(chosen_mass, 0.001, 1000.0)
+
+        # Additional safety check: if mass is exactly zero or negative, set to minimum
+        if chosen_mass <= 0.0:
+            logger.warning(f"[SIMREADY] obj_{oid}: Invalid mass {chosen_mass}, setting to 0.001kg (1g)")
+            chosen_mass = 0.001
+
         merged["mass_kg"] = float(chosen_mass)
 
         # Recompute effective bulk density for logging/consistency
@@ -1249,6 +1268,50 @@ def choose_static_visual_asset(assets_root: Path, oid: Any) -> Optional[Tuple[Pa
     return None
 
 
+def _validate_simready_usd(usd_path: Path, physics: Dict[str, Any]) -> None:
+    """
+    Validate the written USD file for common physics errors.
+
+    GAP-USD-001 FIX: Validate USD stage after modifications to catch errors early.
+    """
+    if not usd_path.exists():
+        logger.error(f"[SIMREADY] USD file not found after write: {usd_path}")
+        return
+
+    # Basic validation: check file size
+    file_size = usd_path.stat().st_size
+    if file_size == 0:
+        raise ValueError(f"Empty USD file written: {usd_path}")
+    if file_size < 100:  # Suspiciously small
+        logger.warning(f"[SIMREADY] USD file very small ({file_size} bytes): {usd_path}")
+
+    # Validate required physics attributes are present
+    content = usd_path.read_text()
+
+    # Check for required physics attributes
+    mass = physics.get("mass_kg", 0)
+    if mass <= 0:
+        raise ValueError(f"Invalid mass {mass} in physics config for {usd_path}")
+
+    if physics.get("dynamic", True):
+        if "PhysicsRigidBodyAPI" not in content:
+            logger.warning(f"[SIMREADY] Dynamic object missing PhysicsRigidBodyAPI: {usd_path}")
+        if "physics:mass" not in content:
+            logger.warning(f"[SIMREADY] Dynamic object missing physics:mass: {usd_path}")
+        if "PhysicsMassAPI" not in content:
+            logger.warning(f"[SIMREADY] Dynamic object missing PhysicsMassAPI: {usd_path}")
+
+    # Check for physics material
+    if "PhysicsMaterialAPI" not in content:
+        logger.warning(f"[SIMREADY] Missing PhysicsMaterialAPI: {usd_path}")
+
+    # Check for collision API
+    if "PhysicsCollisionAPI" not in content:
+        logger.warning(f"[SIMREADY] Missing PhysicsCollisionAPI: {usd_path}")
+
+    logger.debug(f"[SIMREADY] USD validation passed: {usd_path}")
+
+
 def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], bounds: Dict[str, Any]) -> None:
     """
     Create a small USD wrapper that is actually "sim-ready" in Isaac Sim:
@@ -1463,6 +1526,9 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
     lines.append("")
 
     out_path.write_text("\n".join(lines), encoding="utf-8")
+
+    # GAP-USD-001 FIX: Validate USD after writing
+    _validate_simready_usd(out_path, physics)
 
 
 # ---------- Main pipeline ----------

@@ -1540,7 +1540,7 @@ def process_scene(
         metadata={
             "analysis": analysis_result.get("analysis", {}),
             "source_inventory": str(inventory_path),
-            "source_assets": str(scene_assets_path),
+            "source_assets": str(assets_root),
         }
     )
 
@@ -1772,7 +1772,9 @@ def generate_replicator_bundle_job(
         print(f"[REPLICATOR] ERROR: {exc}", file=sys.stderr)
         raise
 
-    save_bundle(bundle, root / replicator_prefix, analysis_result)
+    # GAP-REPLICATOR-001 FIX: Use correct function name write_replicator_bundle
+    output_dir = root / replicator_prefix
+    write_replicator_bundle(bundle, analysis_result, output_dir)
     print("[REPLICATOR] Bundle generation complete")
     return 0
 
