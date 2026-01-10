@@ -177,19 +177,44 @@ def infer_sim_role(obj, environment_type: str) -> str:
 
 
 def infer_articulation_hint(obj) -> Optional[str]:
-    """Infer articulation type from object category."""
-    category = (obj.category or "").lower()
+    """
+    Infer articulation type from object category.
 
-    if any(k in category for k in ["drawer"]):
-        return "prismatic"
-    if any(k in category for k in ["door", "cabinet", "oven", "microwave", "dishwasher", "fridge"]):
-        return "revolute"
-    if any(k in category for k in ["knob", "dial"]):
-        return "revolute"
-    if any(k in category for k in ["lid", "hatch"]):
-        return "revolute"
+    UPDATED: Now uses enhanced ArticulationDetector for better accuracy.
+    Falls back to simple keyword matching if detector unavailable.
+    """
+    # Try to use enhanced detector
+    try:
+        from tools.articulation.detector import ArticulationDetector, ArticulationType
 
-    return None
+        detector = ArticulationDetector(use_llm=False, verbose=False)  # No LLM for speed
+        obj_dict = {
+            "id": getattr(obj, "id", "unknown"),
+            "category": getattr(obj, "category", ""),
+            "dimensions": getattr(obj, "dimensions", None),
+        }
+
+        result = detector.detect(obj_dict)
+
+        if result.has_articulation and result.confidence >= 0.5:
+            return result.articulation_type.value
+
+        return None
+
+    except ImportError:
+        # Fallback to legacy keyword matching if detector unavailable
+        category = (obj.category or "").lower()
+
+        if any(k in category for k in ["drawer"]):
+            return "prismatic"
+        if any(k in category for k in ["door", "cabinet", "oven", "microwave", "dishwasher", "fridge"]):
+            return "revolute"
+        if any(k in category for k in ["knob", "dial"]):
+            return "revolute"
+        if any(k in category for k in ["lid", "hatch"]):
+            return "revolute"
+
+        return None
 
 
 def enrich_inventory_with_gemini(
