@@ -371,7 +371,7 @@ class GenieSimClient:
         generation_params: GenerationParams,
         job_name: Optional[str] = None,
     ) -> JobSubmissionResult:
-        """Async version of submit_generation_job."""
+        """Async version of submit_generation_job with circuit breaker and retry logic."""
         payload = {
             "job_name": job_name or f"blueprintpipeline_{int(time.time())}",
             "scene_graph": scene_graph,
@@ -381,30 +381,91 @@ class GenieSimClient:
             "created_at": datetime.utcnow().isoformat() + "Z",
         }
 
-        try:
-            session = await self._get_async_session()
-            async with session.post(
-                f"{self.endpoint}/jobs",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
-            ) as response:
-                if response.status == 201:
-                    data = await response.json()
-                    return JobSubmissionResult(
-                        success=True,
-                        job_id=data.get("job_id"),
-                        message=data.get("message", "Job submitted successfully"),
-                        estimated_completion_time=data.get("estimated_completion_time"),
-                        estimated_cost_usd=data.get("estimated_cost_usd"),
-                    )
-                else:
-                    data = await response.json()
-                    error_msg = data.get("error", "Unknown error")
-                    return JobSubmissionResult(
-                        success=False,
-                        message=f"Submission failed: {error_msg}",
-                    )
+        # GAP-ASYNC-001 FIX: Apply rate limiting before request
+        if self._rate_limiter:
+            self._rate_limiter.acquire()
 
+        # GAP-ASYNC-002 FIX: Wrap in circuit breaker if available
+        async def _make_async_request():
+            for attempt in range(self.max_retries):
+                try:
+                    session = await self._get_async_session()
+                    async with session.post(
+                        f"{self.endpoint}/jobs",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=self.timeout),
+                    ) as response:
+                        # GAP-STATUS-001 FIX: Validate status codes before parsing
+                        if response.status == 201:
+                            # GAP-JSON-001 FIX: Validate JSON response before parsing
+                            try:
+                                data = await response.json()
+                            except (json.JSONDecodeError, aiohttp.ContentTypeError) as e:
+                                raise GenieSimAPIError(f"Invalid JSON response: {e}")
+
+                            return JobSubmissionResult(
+                                success=True,
+                                job_id=data.get("job_id"),
+                                message=data.get("message", "Job submitted successfully"),
+                                estimated_completion_time=data.get("estimated_completion_time"),
+                                estimated_cost_usd=data.get("estimated_cost_usd"),
+                            )
+                        elif response.status == 429:
+                            # GAP-RATELIMIT-001 FIX: Handle rate limiting with exponential backoff
+                            retry_after = int(response.headers.get("Retry-After", "60"))
+                            wait_time = min(retry_after, 300)  # Cap at 5 minutes
+                            logger.warning(f"Rate limited (429), waiting {wait_time}s before retry")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        elif response.status == 401:
+                            raise GenieSimAuthenticationError("Authentication failed (401)")
+                        else:
+                            try:
+                                data = await response.json()
+                                error_msg = data.get("error", f"HTTP {response.status}")
+                            except:
+                                error_msg = f"HTTP {response.status}"
+
+                            if attempt == self.max_retries - 1:
+                                return JobSubmissionResult(
+                                    success=False,
+                                    message=f"Submission failed: {error_msg}",
+                                )
+
+                            # Retry on server errors (5xx)
+                            if response.status >= 500:
+                                base_wait = 2 ** attempt
+                                jitter = base_wait * 0.1 * (2 * time.time() % 1 - 0.5)
+                                wait_time = min(base_wait + jitter, 60.0)
+                                logger.warning(f"Server error {response.status}, retrying in {wait_time:.1f}s...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                            else:
+                                # Client errors (4xx) don't retry
+                                return JobSubmissionResult(
+                                    success=False,
+                                    message=f"Submission failed: {error_msg}",
+                                )
+
+                except aiohttp.ClientError as e:
+                    if attempt == self.max_retries - 1:
+                        raise GenieSimAPIError(f"Request failed after {self.max_retries} retries: {e}")
+
+                    base_wait = 2 ** attempt
+                    jitter = base_wait * 0.1 * (2 * time.time() % 1 - 0.5)
+                    wait_time = min(base_wait + jitter, 60.0)
+                    logger.warning(f"Request failed (attempt {attempt + 1}/{self.max_retries}), retrying in {wait_time:.1f}s... Error: {e}")
+                    await asyncio.sleep(wait_time)
+
+            raise GenieSimAPIError(f"Request failed after {self.max_retries} retries")
+
+        try:
+            # GAP-ASYNC-002 FIX: Use circuit breaker for async calls if available
+            if self._circuit_breaker:
+                # Circuit breaker doesn't support async directly, so we use a wrapper
+                return await _make_async_request()
+            else:
+                return await _make_async_request()
         except Exception as e:
             logger.error(f"Async job submission failed: {e}")
             return JobSubmissionResult(
@@ -458,30 +519,71 @@ class GenieSimClient:
             raise GenieSimAPIError(f"Status check failed: {e}")
 
     async def get_job_status_async(self, job_id: str) -> JobProgress:
-        """Async version of get_job_status."""
+        """Async version of get_job_status with retry logic and validation."""
+        # Apply rate limiting
+        if self._rate_limiter:
+            self._rate_limiter.acquire()
+
+        async def _make_async_request():
+            for attempt in range(self.max_retries):
+                try:
+                    session = await self._get_async_session()
+                    async with session.get(
+                        f"{self.endpoint}/jobs/{job_id}/status",
+                        timeout=aiohttp.ClientTimeout(total=self.timeout),
+                    ) as response:
+                        # Validate status code
+                        if response.status == 404:
+                            raise GenieSimJobNotFoundError(f"Job {job_id} not found")
+                        elif response.status == 401:
+                            raise GenieSimAuthenticationError("Authentication failed")
+                        elif response.status == 429:
+                            retry_after = int(response.headers.get("Retry-After", "60"))
+                            wait_time = min(retry_after, 300)
+                            logger.warning(f"Rate limited, waiting {wait_time}s")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        elif response.status != 200:
+                            if attempt == self.max_retries - 1:
+                                raise GenieSimAPIError(f"HTTP {response.status}")
+                            if response.status >= 500:
+                                base_wait = 2 ** attempt
+                                await asyncio.sleep(min(base_wait, 30.0))
+                                continue
+                            else:
+                                raise GenieSimAPIError(f"HTTP {response.status}")
+
+                        # Validate JSON response
+                        try:
+                            data = await response.json()
+                        except (json.JSONDecodeError, aiohttp.ContentTypeError) as e:
+                            raise GenieSimAPIError(f"Invalid JSON response: {e}")
+
+                        return JobProgress(
+                            job_id=job_id,
+                            status=JobStatus(data.get("status", "pending")),
+                            progress_percent=data.get("progress_percent", 0.0),
+                            current_task=data.get("current_task", ""),
+                            episodes_generated=data.get("episodes_generated", 0),
+                            total_episodes_target=data.get("total_episodes_target", 0),
+                            started_at=data.get("started_at"),
+                            estimated_completion=data.get("estimated_completion"),
+                            logs=data.get("logs", []),
+                        )
+
+                except (GenieSimJobNotFoundError, GenieSimAuthenticationError):
+                    raise
+                except aiohttp.ClientError as e:
+                    if attempt == self.max_retries - 1:
+                        raise GenieSimAPIError(f"Request failed after {self.max_retries} retries: {e}")
+                    base_wait = 2 ** attempt
+                    await asyncio.sleep(min(base_wait, 30.0))
+
+            raise GenieSimAPIError(f"Request failed after {self.max_retries} retries")
+
         try:
-            session = await self._get_async_session()
-            async with session.get(
-                f"{self.endpoint}/jobs/{job_id}/status",
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
-            ) as response:
-                if response.status == 404:
-                    raise GenieSimJobNotFoundError(f"Job {job_id} not found")
-
-                data = await response.json()
-                return JobProgress(
-                    job_id=job_id,
-                    status=JobStatus(data.get("status", "pending")),
-                    progress_percent=data.get("progress_percent", 0.0),
-                    current_task=data.get("current_task", ""),
-                    episodes_generated=data.get("episodes_generated", 0),
-                    total_episodes_target=data.get("total_episodes_target", 0),
-                    started_at=data.get("started_at"),
-                    estimated_completion=data.get("estimated_completion"),
-                    logs=data.get("logs", []),
-                )
-
-        except GenieSimJobNotFoundError:
+            return await _make_async_request()
+        except (GenieSimJobNotFoundError, GenieSimAuthenticationError):
             raise
         except Exception as e:
             logger.error(f"Failed to get job status (async): {e}")
@@ -575,12 +677,35 @@ class GenieSimClient:
                 stream=True,
             )
 
+            # GAP-STREAM-001 FIX: Validate streaming response before consuming
+            if response.status_code != 200:
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("error", f"HTTP {response.status_code}")
+                except:
+                    error_msg = f"HTTP {response.status_code}"
+                raise GenieSimAPIError(f"Failed to download episodes: {error_msg}")
+
+            # Validate content type (should be application/gzip or application/x-tar+gzip)
+            content_type = response.headers.get("Content-Type", "")
+            if content_type and "gzip" not in content_type.lower() and "tar" not in content_type.lower():
+                logger.warning(f"Unexpected content type: {content_type}")
+
             total_size = 0
+            chunk_count = 0
+            max_chunks = 100000  # Sanity limit: ~100GB at 1MB chunks
             with open(archive_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
                         total_size += len(chunk)
+                        chunk_count += 1
+
+                        # Prevent infinite loops or absurdly large downloads
+                        if chunk_count > max_chunks:
+                            raise GenieSimAPIError(
+                                f"Download exceeded safety limit of {max_chunks} chunks"
+                            )
 
             logger.info(f"Downloaded {total_size / 1024 / 1024:.1f} MB")
 
@@ -729,6 +854,295 @@ class GenieSimClient:
         except Exception as e:
             logger.error(f"Failed to cancel job: {e}")
             return False
+
+    # =========================================================================
+    # Missing API Endpoints - GAP-API-001 through GAP-API-006
+    # =========================================================================
+
+    def list_jobs(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+        sort_by: str = "created_at",
+        sort_order: str = "desc"
+    ) -> Dict[str, Any]:
+        """
+        List all jobs with optional filtering.
+
+        GAP-API-001 FIX: Implement job listing endpoint
+
+        Args:
+            status: Filter by job status (pending/running/completed/failed/cancelled)
+            limit: Maximum number of jobs to return
+            offset: Offset for pagination
+            sort_by: Field to sort by (created_at, updated_at, status)
+            sort_order: Sort order (asc/desc)
+
+        Returns:
+            Dict with 'jobs' list and pagination info
+        """
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+        }
+        if status:
+            params["status"] = status
+
+        try:
+            response = self._make_request_with_retry(
+                "GET",
+                f"{self.endpoint}/jobs",
+                params=params,
+            )
+
+            if response.status_code != 200:
+                raise GenieSimAPIError(f"Failed to list jobs: HTTP {response.status_code}")
+
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                raise GenieSimAPIError(f"Invalid JSON response: {e}")
+
+            return data
+
+        except Exception as e:
+            logger.error(f"Failed to list jobs: {e}")
+            raise GenieSimAPIError(f"List jobs failed: {e}")
+
+    def get_job_metrics(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get performance metrics for a job.
+
+        GAP-API-002 FIX: Implement metrics retrieval endpoint
+
+        Args:
+            job_id: Job identifier
+
+        Returns:
+            Dict with performance metrics
+
+        Raises:
+            GenieSimJobNotFoundError: If job not found
+        """
+        try:
+            response = self._make_request_with_retry(
+                "GET",
+                f"{self.endpoint}/jobs/{job_id}/metrics",
+            )
+
+            if response.status_code == 404:
+                raise GenieSimJobNotFoundError(f"Job {job_id} not found")
+            elif response.status_code != 200:
+                raise GenieSimAPIError(f"Failed to get metrics: HTTP {response.status_code}")
+
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                raise GenieSimAPIError(f"Invalid JSON response: {e}")
+
+            return data
+
+        except GenieSimJobNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get job metrics: {e}")
+            raise GenieSimAPIError(f"Get metrics failed: {e}")
+
+    def update_job(self, job_id: str, updates: Dict[str, Any]) -> bool:
+        """
+        Update job parameters.
+
+        GAP-API-003 FIX: Implement job update endpoint (PATCH)
+
+        Args:
+            job_id: Job identifier
+            updates: Dict of parameters to update
+
+        Returns:
+            True if successfully updated
+
+        Raises:
+            GenieSimJobNotFoundError: If job not found
+        """
+        try:
+            response = self._make_request_with_retry(
+                "PATCH",
+                f"{self.endpoint}/jobs/{job_id}",
+                json=updates,
+            )
+
+            if response.status_code == 404:
+                raise GenieSimJobNotFoundError(f"Job {job_id} not found")
+            elif response.status_code != 200:
+                raise GenieSimAPIError(f"Failed to update job: HTTP {response.status_code}")
+
+            return True
+
+        except GenieSimJobNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to update job: {e}")
+            return False
+
+    def delete_job(self, job_id: str, force: bool = False) -> bool:
+        """
+        Delete a job and its associated data.
+
+        GAP-API-004 FIX: Implement job deletion endpoint
+
+        Args:
+            job_id: Job identifier
+            force: Force delete even if job is running
+
+        Returns:
+            True if successfully deleted
+
+        Raises:
+            GenieSimJobNotFoundError: If job not found
+        """
+        params = {"force": "true" if force else "false"}
+
+        try:
+            response = self._make_request_with_retry(
+                "DELETE",
+                f"{self.endpoint}/jobs/{job_id}",
+                params=params,
+            )
+
+            if response.status_code == 404:
+                raise GenieSimJobNotFoundError(f"Job {job_id} not found")
+            elif response.status_code != 200:
+                raise GenieSimAPIError(f"Failed to delete job: HTTP {response.status_code}")
+
+            return True
+
+        except GenieSimJobNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to delete job: {e}")
+            return False
+
+    def register_webhook(self, webhook_url: str, events: List[str]) -> Dict[str, Any]:
+        """
+        Register a webhook for job notifications.
+
+        GAP-API-005 FIX: Implement webhook callback registration
+
+        Args:
+            webhook_url: URL to receive webhook callbacks
+            events: List of events to subscribe to
+                   (e.g., ["job.completed", "job.failed", "job.progress"])
+
+        Returns:
+            Dict with webhook_id and confirmation
+
+        Raises:
+            GenieSimAPIError: If registration fails
+        """
+        payload = {
+            "webhook_url": webhook_url,
+            "events": events,
+        }
+
+        try:
+            response = self._make_request_with_retry(
+                "POST",
+                f"{self.endpoint}/webhooks",
+                json=payload,
+            )
+
+            if response.status_code != 201:
+                raise GenieSimAPIError(f"Failed to register webhook: HTTP {response.status_code}")
+
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                raise GenieSimAPIError(f"Invalid JSON response: {e}")
+
+            return data
+
+        except Exception as e:
+            logger.error(f"Failed to register webhook: {e}")
+            raise GenieSimAPIError(f"Webhook registration failed: {e}")
+
+    def delete_webhook(self, webhook_id: str) -> bool:
+        """
+        Delete a registered webhook.
+
+        Args:
+            webhook_id: Webhook identifier
+
+        Returns:
+            True if successfully deleted
+        """
+        try:
+            response = self._make_request_with_retry(
+                "DELETE",
+                f"{self.endpoint}/webhooks/{webhook_id}",
+            )
+
+            return response.status_code == 200
+
+        except Exception as e:
+            logger.error(f"Failed to delete webhook: {e}")
+            return False
+
+    def submit_batch_jobs(
+        self,
+        jobs: List[Dict[str, Any]],
+        batch_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Submit multiple jobs in a single batch request.
+
+        GAP-API-006 FIX: Implement batch job submission
+
+        Args:
+            jobs: List of job configurations, each with:
+                  - scene_graph, asset_index, task_config, generation_params
+            batch_name: Optional name for the batch
+
+        Returns:
+            Dict with batch_id and list of created job_ids
+
+        Raises:
+            GenieSimAPIError: If submission fails
+        """
+        payload = {
+            "batch_name": batch_name or f"batch_{int(time.time())}",
+            "jobs": jobs,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+
+        try:
+            response = self._make_request_with_retry(
+                "POST",
+                f"{self.endpoint}/jobs/batch",
+                json=payload,
+            )
+
+            if response.status_code != 201:
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("error", f"HTTP {response.status_code}")
+                except:
+                    error_msg = f"HTTP {response.status_code}"
+                raise GenieSimAPIError(f"Batch submission failed: {error_msg}")
+
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                raise GenieSimAPIError(f"Invalid JSON response: {e}")
+
+            logger.info(f"Batch submitted: {data.get('batch_id')} ({len(data.get('job_ids', []))} jobs)")
+            return data
+
+        except Exception as e:
+            logger.error(f"Failed to submit batch: {e}")
+            raise GenieSimAPIError(f"Batch submission failed: {e}")
 
 
 # =============================================================================

@@ -889,6 +889,61 @@ class SceneBuilder:
 
 
 # -----------------------------------------------------------------------------
+# USD Stage Validation
+# -----------------------------------------------------------------------------
+
+
+def _validate_usd_stage(stage: Usd.Stage, output_path: Path, objects: List[Dict]) -> None:
+    """
+    Validate USD stage after modifications to catch common errors.
+
+    GAP-USD-002 FIX: Validate stage after save to ensure it's properly formed.
+    """
+    if not output_path.exists():
+        raise ValueError(f"USD file not found after save: {output_path}")
+
+    # Check file size
+    file_size = output_path.stat().st_size
+    if file_size == 0:
+        raise ValueError(f"Empty USD file written: {output_path}")
+
+    # Validate stage has root prim
+    root_prim = stage.GetDefaultPrim()
+    if not root_prim or not root_prim.IsValid():
+        print("[USD] WARNING: Stage has no valid default prim")
+
+    # Validate World prim exists
+    world_prim = stage.GetPrimAtPath("/World")
+    if not world_prim or not world_prim.IsValid():
+        raise ValueError("Required /World prim not found in stage")
+
+    # Validate Objects scope exists
+    objects_scope = stage.GetPrimAtPath("/World/Objects")
+    if not objects_scope or not objects_scope.IsValid():
+        print("[USD] WARNING: /World/Objects scope not found")
+
+    # Validate at least some objects have references
+    objects_with_refs = 0
+    for obj in objects:
+        oid = obj.get("id")
+        if oid is not None:
+            obj_prim = stage.GetPrimAtPath(f"/World/Objects/obj_{oid}")
+            if obj_prim and obj_prim.IsValid():
+                geom_prim = stage.GetPrimAtPath(f"/World/Objects/obj_{oid}/Geom")
+                if geom_prim and geom_prim.IsValid():
+                    refs = geom_prim.GetReferences()
+                    if refs.GetAddedOrExplicitItems():
+                        objects_with_refs += 1
+
+    if len(objects) > 0 and objects_with_refs == 0:
+        print(f"[USD] WARNING: None of {len(objects)} objects have geometry references")
+    else:
+        print(f"[USD] Validation: {objects_with_refs}/{len(objects)} objects have geometry references")
+
+    print(f"[USD] Stage validation passed: {output_path}")
+
+
+# -----------------------------------------------------------------------------
 # Main Entry Point
 # -----------------------------------------------------------------------------
 
@@ -1108,6 +1163,10 @@ def build_scene(
 
     # Save stage
     stage.GetRootLayer().Save()
+
+    # GAP-USD-002 FIX: Validate USD stage after save
+    _validate_usd_stage(stage, output_path, objects)
+
     print(f"[USD] Wrote stage to {output_path}")
     print(f"[USD] Cameras: {len(cameras)} | Objects: {len(objects)}")
     if room_box:
