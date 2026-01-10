@@ -39,6 +39,13 @@ try:
 except ImportError:
     Image = None
 
+# Secret Manager for secure API key storage
+try:
+    from tools.secrets import get_secret_or_env, SecretIds
+    HAVE_SECRET_MANAGER = True
+except ImportError:
+    HAVE_SECRET_MANAGER = False
+
 
 # =============================================================================
 # Enums and Data Classes
@@ -194,7 +201,21 @@ class GeminiClient(LLMClient):
     ):
         super().__init__(model=model, **kwargs)
 
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
+        if api_key is None:
+            if HAVE_SECRET_MANAGER:
+                try:
+                    self.api_key = get_secret_or_env(
+                        SecretIds.GEMINI_API_KEY,
+                        env_var="GEMINI_API_KEY"
+                    )
+                except Exception:
+                    self.api_key = os.getenv("GEMINI_API_KEY")
+            else:
+                self.api_key = os.getenv("GEMINI_API_KEY")
+        else:
+            self.api_key = api_key
+
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY environment variable is required")
 
@@ -399,7 +420,21 @@ class OpenAIClient(LLMClient):
     ):
         super().__init__(model=model, **kwargs)
 
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
+        if api_key is None:
+            if HAVE_SECRET_MANAGER:
+                try:
+                    self.api_key = get_secret_or_env(
+                        SecretIds.OPENAI_API_KEY,
+                        env_var="OPENAI_API_KEY"
+                    )
+                except Exception:
+                    self.api_key = os.getenv("OPENAI_API_KEY")
+            else:
+                self.api_key = os.getenv("OPENAI_API_KEY")
+        else:
+            self.api_key = api_key
+
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
 
@@ -624,7 +659,21 @@ class AnthropicClient(LLMClient):
     ):
         super().__init__(model=model, **kwargs)
 
-        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
+        if api_key is None:
+            if HAVE_SECRET_MANAGER:
+                try:
+                    self.api_key = get_secret_or_env(
+                        SecretIds.ANTHROPIC_API_KEY,
+                        env_var="ANTHROPIC_API_KEY"
+                    )
+                except Exception:
+                    self.api_key = os.getenv("ANTHROPIC_API_KEY")
+            else:
+                self.api_key = os.getenv("ANTHROPIC_API_KEY")
+        else:
+            self.api_key = api_key
+
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable is required")
 
