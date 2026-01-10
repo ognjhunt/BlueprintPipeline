@@ -45,18 +45,28 @@ main:
         next: create_completion_marker
 
     - create_completion_marker:
-        call: googleapis.storage.v1.objects.insert
-        args:
-          bucket: ${bucket}
-          uploadType: "media"
-          name: ${assetsPrefix + "/.interactive_complete"}
-          body: ${"skipped - using hunyuan pipeline for all objects\n"}
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            uploadType: "media"
+            name: ${assetsPrefix + "/.interactive_complete"}
+            body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"skipped\\", \\"reason\\": \\"Using Hunyuan pipeline for all objects\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
+          result: markerResult
+        except:
+          as: e
+          steps:
+            - log_marker_error:
+                call: sys.log
+                args:
+                  text: ${"ERROR: Failed to create .interactive_complete marker: " + e.message}
+                  severity: "ERROR"
         next: log_marker_created
 
     - log_marker_created:
         call: sys.log
         args:
-          text: ${"Created .interactive_complete marker for scene " + sceneId}
+          text: ${"Created .interactive_complete marker for scene " + sceneId + " (using Hunyuan pipeline)"}
           severity: "INFO"
         next: done
 

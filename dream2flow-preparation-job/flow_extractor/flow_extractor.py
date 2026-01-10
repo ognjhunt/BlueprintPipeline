@@ -127,14 +127,26 @@ class FlowExtractor:
         if self._initialized:
             return True
 
-        # TODO: Load actual models when integrating with vision foundation models
-        # - SAM / Grounded-SAM for segmentation
-        # - DepthAnything / ZoeDepth for depth
-        # - CoTracker / TAPIR for point tracking
-
-        self.log("Flow extractor initialized (placeholder mode)")
-        self._initialized = True
-        return True
+        # PLACEHOLDER: Awaiting Dream2Flow model release (arXiv:2512.24766)
+        # When available, implement integration with:
+        # - Segmentation: SAM / Grounded-SAM for semantic object segmentation
+        # - Depth estimation: DepthAnything / ZoeDepth for dense depth prediction
+        # - Point tracking: CoTracker / TAPIR for robust optical flow estimation
+        # - 3D reconstruction: 3D-RE-GEN (arXiv:2512.17459) for SDF scene representation
+        # Expected workflow:
+        # 1. Load and initialize each foundation model
+        # 2. Create inference pipelines with batching support
+        # 3. Validate compatibility between model outputs
+        # 4. Set up GPU memory management
+        try:
+            # from dream2flow.flow_extractor import FlowExtractor  # Not yet available
+            self.log("Flow extractor initialized (placeholder mode - awaiting Dream2Flow release)")
+            self._initialized = True
+            return True
+        except ImportError as e:
+            self.log(f"Dream2Flow not available: {e}", level="WARNING")
+            self._initialized = True  # Still proceed in placeholder mode
+            return True
 
     def extract(
         self,
