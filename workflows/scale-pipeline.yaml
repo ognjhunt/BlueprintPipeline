@@ -56,20 +56,46 @@ main:
         next: run_scale_job
 
     - run_scale_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: LAYOUT_PREFIX
+                        value: ${layoutPrefix}
+          result: scaleExec
+        except:
+          as: e
+          steps:
+            - log_job_error:
+                call: sys.log
+                args:
+                  text: ${"ERROR: Failed to start scale-job: " + e.message}
+                  severity: "ERROR"
+            - write_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${"scenes/" + sceneId + "/layout/.scale_failed"}
+                  uploadType: "media"
+                  body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"failed\\", \\"error\\": \\"" + e.message + "\\"}" }
+        next: mark_scale_complete
+
+    - mark_scale_complete:
+        call: googleapis.storage.v1.objects.insert
         args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: LAYOUT_PREFIX
-                      value: ${layoutPrefix}
-        result: scaleExec
+          bucket: ${bucket}
+          name: ${"scenes/" + sceneId + "/layout/.scale_complete"}
+          uploadType: "media"
+          body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"processing\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
+        result: markerResult
         next: done
 
     - done:

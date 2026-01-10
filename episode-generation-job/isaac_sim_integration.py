@@ -625,8 +625,10 @@ class PhysicsSimulator:
                         "linear_velocity": [0, 0, 0],  # Would need ArticulationView for velocities
                         "angular_velocity": [0, 0, 0],
                     }
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log(f"Failed to get state for object {obj_name}: {e}", "DEBUG")
+                    # Continue to next object instead of failing entire operation
+                    continue
 
         except Exception as e:
             self.log(f"Failed to get object states: {e}", "WARNING")
@@ -726,8 +728,9 @@ class PhysicsSimulator:
                     state["gripper_state"] = float(gripper_joints[-1])
                 else:
                     state["gripper_state"] = 0.04  # Default open position
-            except Exception:
-                state["gripper_state"] = 0.04
+            except Exception as e:
+                self.log(f"Failed to extract gripper state: {e}", "WARNING")
+                state["gripper_state"] = 0.04  # Default open position on error
 
         except Exception as e:
             self.log(f"Failed to get robot state: {e}", "ERROR")

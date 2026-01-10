@@ -379,12 +379,14 @@ class LocalPipelineRunner:
                 message="Skipped (PARTICULATE_ENDPOINT not set)",
             )
 
-        # TODO: Import and run interactive job
+        # Interactive job requires external PARTICULATE service for articulation detection
+        # This is a placeholder that correctly reports the step as not implemented
         return StepResult(
             step=PipelineStep.INTERACTIVE,
-            success=True,
+            success=False,
             duration_seconds=0,
-            message="Interactive processing not implemented in local mode",
+            message="Interactive job not implemented in local mode - requires PARTICULATE service",
+            error="Interactive job requires Cloud Run job execution against PARTICULATE service endpoint",
         )
 
     def _run_simready(self) -> StepResult:
