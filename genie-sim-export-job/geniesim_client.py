@@ -460,13 +460,32 @@ class GenieSimClient:
             raise GenieSimAPIError(f"Request failed after {self.max_retries} retries")
 
         try:
-            # GAP-ASYNC-002 FIX: Use circuit breaker for async calls if available
+            # Use async request with circuit breaker protection
+            # Circuit breaker doesn't support async directly, so we check state before proceeding
+            if self._circuit_breaker and self._circuit_breaker.is_open():
+                raise GenieSimAPIError("Circuit breaker is open - service temporarily unavailable")
+
+            result = await _make_async_request()
+
+            # Mark circuit breaker as healthy on success
+            if self._circuit_breaker and result.success:
+                self._circuit_breaker.mark_success()
+
+            return result
+
+        except GenieSimAPIError as e:
+            # Mark circuit breaker failure
             if self._circuit_breaker:
-                # Circuit breaker doesn't support async directly, so we use a wrapper
-                return await _make_async_request()
-            else:
-                return await _make_async_request()
+                self._circuit_breaker.mark_failure()
+            logger.error(f"Async job submission failed: {e}")
+            return JobSubmissionResult(
+                success=False,
+                message=f"API error during submission: {str(e)}",
+            )
         except Exception as e:
+            # Mark circuit breaker failure for unexpected errors
+            if self._circuit_breaker:
+                self._circuit_breaker.mark_failure()
             logger.error(f"Async job submission failed: {e}")
             return JobSubmissionResult(
                 success=False,
@@ -582,10 +601,31 @@ class GenieSimClient:
             raise GenieSimAPIError(f"Request failed after {self.max_retries} retries")
 
         try:
-            return await _make_async_request()
-        except (GenieSimJobNotFoundError, GenieSimAuthenticationError):
+            # Check circuit breaker before making async request
+            if self._circuit_breaker and self._circuit_breaker.is_open():
+                raise GenieSimAPIError("Circuit breaker is open - service temporarily unavailable")
+
+            result = await _make_async_request()
+
+            # Mark circuit breaker as healthy on success
+            if self._circuit_breaker:
+                self._circuit_breaker.mark_success()
+
+            return result
+
+        except (GenieSimJobNotFoundError, GenieSimAuthenticationError) as e:
+            # Don't mark circuit breaker for client errors
+            raise
+        except GenieSimAPIError as e:
+            # Mark circuit breaker failure
+            if self._circuit_breaker:
+                self._circuit_breaker.mark_failure()
+            logger.error(f"Failed to get job status (async): {e}")
             raise
         except Exception as e:
+            # Mark circuit breaker failure for unexpected errors
+            if self._circuit_breaker:
+                self._circuit_breaker.mark_failure()
             logger.error(f"Failed to get job status (async): {e}")
             raise GenieSimAPIError(f"Status check failed: {e}")
 

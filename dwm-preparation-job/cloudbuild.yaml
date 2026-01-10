@@ -73,6 +73,35 @@ steps:
             --execute-now=false
         fi
 
+  # Deploy the DWM inference job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Check if job exists
+        if gcloud run jobs describe dwm-inference-job --region=${_REGION} --format='value(name)' 2>/dev/null; then
+          echo "Updating existing job dwm-inference-job..."
+          gcloud run jobs update dwm-inference-job \
+            --region=${_REGION} \
+            --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA} \
+            --memory=8Gi \
+            --cpu=4 \
+            --task-timeout=3600s \
+            --max-retries=1 \
+            --execute-now=false
+        else
+          echo "Creating new job dwm-inference-job..."
+          gcloud run jobs create dwm-inference-job \
+            --region=${_REGION} \
+            --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA} \
+            --memory=8Gi \
+            --cpu=4 \
+            --task-timeout=3600s \
+            --max-retries=1 \
+            --execute-now=false
+        fi
+
   # Deploy the workflow
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
