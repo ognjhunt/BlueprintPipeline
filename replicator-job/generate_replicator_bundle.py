@@ -1770,7 +1770,26 @@ def generate_replicator_bundle_job(
         )
     except Exception as exc:
         print(f"[REPLICATOR] ERROR: {exc}", file=sys.stderr)
-        raise
+        import traceback
+        traceback.print_exc()
+
+        # Write failure marker with context
+        from tools.workflow.failure_markers import write_failure_marker
+        write_failure_marker(
+            bucket=bucket,
+            scene_id=scene_id,
+            job_name="replicator-job",
+            exception=exc,
+            failed_step="generate_replicator_bundle",
+            input_params={
+                "seg_prefix": seg_prefix,
+                "assets_prefix": assets_prefix,
+                "usd_prefix": usd_prefix,
+                "replicator_prefix": replicator_prefix,
+                "requested_policies": requested_policies,
+            },
+        )
+        return 1
 
     # GAP-REPLICATOR-001 FIX: Use correct function name write_replicator_bundle
     output_dir = root / replicator_prefix

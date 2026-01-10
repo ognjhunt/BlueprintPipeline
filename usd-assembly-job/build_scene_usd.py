@@ -1201,14 +1201,35 @@ def main() -> None:
         )
         sys.exit(1)
 
-    build_scene(
-        layout_path=layout_path,
-        assets_path=assets_path,
-        output_path=stage_path,
-        root=root,
-        assets_prefix=assets_prefix,
-        usd_prefix=usd_prefix,
-    )
+    try:
+        build_scene(
+            layout_path=layout_path,
+            assets_path=assets_path,
+            output_path=stage_path,
+            root=root,
+            assets_prefix=assets_prefix,
+            usd_prefix=usd_prefix,
+        )
+    except Exception as e:
+        # Write failure marker with context
+        print(f"[USD] ERROR: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+
+        from tools.workflow.failure_markers import write_failure_marker
+        write_failure_marker(
+            bucket=bucket,
+            scene_id=scene_id,
+            job_name="usd-assembly-job",
+            exception=e,
+            failed_step="build_scene_usd",
+            input_params={
+                "layout_prefix": layout_prefix,
+                "assets_prefix": assets_prefix,
+                "usd_prefix": usd_prefix,
+            },
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

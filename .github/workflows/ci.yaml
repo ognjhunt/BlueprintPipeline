@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, claude/*]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install ruff black mypy
+      - name: Lint with ruff
+        run: ruff check .
+      - name: Check formatting
+        run: black --check .
+      - name: Type check (optional failures)
+        run: mypy --ignore-missing-imports . || true
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-critical-gaps.txt
+          pip install pytest pytest-cov
+      - name: Run tests
+        run: |
+          pytest tests/ -v --cov=tools --cov=genie-sim-export-job \
+            --cov-report=xml --cov-report=term
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: coverage.xml
+
+  e2e-mock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Generate mock data
+        run: |
+          python fixtures/generate_mock_regen3d.py \
+            --scene-id ci_test \
+            --output-dir ./test_output
+      - name: Run local pipeline (mock mode)
+        run: |
+          python tools/run_local_pipeline.py \
+            --scene-dir ./test_output/ci_test \
+            --steps regen3d,simready,usd \
+            --validate

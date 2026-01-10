@@ -841,89 +841,110 @@ class EpisodeGenerator:
         tasks_with_specs: List[Tuple[Dict[str, Any], TaskSpecification]],
         manifest: Dict[str, Any],
     ) -> List[GeneratedEpisode]:
-        """Generate seed episodes for each task."""
-        seed_episodes = []
+        """Generate seed episodes for each task with partial failure handling."""
+        from tools.error_handling.partial_failure import process_with_partial_failure
 
-        for task, spec in tasks_with_specs:
-            try:
-                start_time = time.time()
+        # Progress file for checkpointing
+        progress_file = self.config.output_dir / "seed_episodes_progress.json"
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
 
-                # Generate motion plan using constraint-aware planning
-                target_object = {
-                    "id": task["target_object_id"],
-                    "position": task["target_position"],
-                    "dimensions": task["target_dimensions"],
+        # Define the processing function for a single task
+        def process_task(task_spec_tuple: Tuple[Dict[str, Any], TaskSpecification]) -> GeneratedEpisode:
+            """Process a single task and generate seed episode."""
+            task, spec = task_spec_tuple
+            start_time = time.time()
+
+            # Generate motion plan using constraint-aware planning
+            target_object = {
+                "id": task["target_object_id"],
+                "position": task["target_position"],
+                "dimensions": task["target_dimensions"],
+            }
+
+            articulation_info = None
+            if task.get("is_articulated"):
+                articulation_info = {
+                    "handle_position": task["target_position"],
+                    "axis": [-1, 0, 0],
+                    "range": [0, 0.3],
+                    "type": "prismatic",
                 }
 
-                articulation_info = None
-                if task.get("is_articulated"):
-                    articulation_info = {
-                        "handle_position": task["target_position"],
-                        "axis": [-1, 0, 0],
-                        "range": [0, 0.3],
-                        "type": "prismatic",
+            motion_plan = self.motion_planner.plan_motion(
+                task_name=task["task_name"],
+                task_description=task["description"],
+                target_object=target_object,
+                place_position=task.get("place_position"),
+                articulation_info=articulation_info,
+            )
+
+            # Solve trajectory
+            trajectory = self.trajectory_solver.solve(motion_plan)
+
+            # Capture sensor data during trajectory execution (if available)
+            sensor_data = None
+            object_metadata = {}
+            if self.sensor_capture:
+                try:
+                    # Get scene objects for metadata
+                    scene_objects = manifest.get("objects", [])
+                    object_metadata = {
+                        obj.get("id", obj.get("name", "")): {
+                            "category": obj.get("category", "object"),
+                            "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
+                            "position": obj.get("position", [0, 0, 0]),
+                        }
+                        for obj in scene_objects
                     }
 
-                motion_plan = self.motion_planner.plan_motion(
-                    task_name=task["task_name"],
-                    task_description=task["description"],
-                    target_object=target_object,
-                    place_position=task.get("place_position"),
-                    articulation_info=articulation_info,
-                )
+                    sensor_data = self.sensor_capture.capture_episode(
+                        episode_id=f"seed_{task['task_id']}",
+                        trajectory_states=trajectory.states,
+                        scene_objects=scene_objects,
+                    )
+                    self.log(f"    Captured sensor data: {sensor_data.num_frames} frames")
+                except Exception as e:
+                    self.log(f"    Sensor capture failed: {e}", "WARNING")
 
-                # Solve trajectory
-                trajectory = self.trajectory_solver.solve(motion_plan)
+            episode = GeneratedEpisode(
+                episode_id=f"seed_{task['task_id']}",
+                task_name=task["task_name"],
+                task_description=task["description"],
+                trajectory=trajectory,
+                motion_plan=motion_plan,
+                task_spec=spec,
+                scene_id=self.config.scene_id,
+                variation_index=0,
+                is_seed=True,
+                augmentation_method="direct",
+                sensor_data=sensor_data,
+                object_metadata=object_metadata,
+                generation_time_seconds=time.time() - start_time,
+            )
 
-                # Capture sensor data during trajectory execution (if available)
-                sensor_data = None
-                object_metadata = {}
-                if self.sensor_capture:
-                    try:
-                        # Get scene objects for metadata
-                        scene_objects = manifest.get("objects", [])
-                        object_metadata = {
-                            obj.get("id", obj.get("name", "")): {
-                                "category": obj.get("category", "object"),
-                                "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
-                                "position": obj.get("position", [0, 0, 0]),
-                            }
-                            for obj in scene_objects
-                        }
+            visual_info = f" (visual: {sensor_data.num_frames}f)" if sensor_data else ""
+            self.log(f"    Created seed: {task['task_name']}{visual_info}")
 
-                        sensor_data = self.sensor_capture.capture_episode(
-                            episode_id=f"seed_{task['task_id']}",
-                            trajectory_states=trajectory.states,
-                            scene_objects=scene_objects,
-                        )
-                        self.log(f"    Captured sensor data: {sensor_data.num_frames} frames")
-                    except Exception as e:
-                        self.log(f"    Sensor capture failed: {e}", "WARNING")
+            return episode
 
-                episode = GeneratedEpisode(
-                    episode_id=f"seed_{task['task_id']}",
-                    task_name=task["task_name"],
-                    task_description=task["description"],
-                    trajectory=trajectory,
-                    motion_plan=motion_plan,
-                    task_spec=spec,
-                    scene_id=self.config.scene_id,
-                    variation_index=0,
-                    is_seed=True,
-                    augmentation_method="direct",
-                    sensor_data=sensor_data,
-                    object_metadata=object_metadata,
-                    generation_time_seconds=time.time() - start_time,
-                )
+        # Process tasks with partial failure handling (min 50% success rate)
+        result = process_with_partial_failure(
+            items=tasks_with_specs,
+            process_fn=process_task,
+            min_success_rate=0.5,
+            save_progress=True,
+            progress_file=progress_file,
+            item_id_fn=lambda t: t[0]["task_id"],  # Extract task_id from (task, spec) tuple
+        )
 
-                seed_episodes.append(episode)
-                visual_info = f" (visual: {sensor_data.num_frames}f)" if sensor_data else ""
-                self.log(f"    Created seed: {task['task_name']}{visual_info}")
+        self.log(f"  Generated {result.success_count}/{result.total_attempted} seed episodes")
+        if result.failed:
+            self.log(f"  WARNING: {result.failure_count} tasks failed")
+            for failure in result.failed[:5]:  # Show first 5 failures
+                self.log(f"    - {failure.get('item_id', 'unknown')}: {failure.get('error', 'unknown error')}", "WARNING")
 
-            except Exception as e:
-                self.log(f"    Failed seed {task['task_name']}: {e}", "WARNING")
+        return result.successful
 
-        return seed_episodes
 
     def _generate_augmented_episodes(
         self,
@@ -1490,6 +1511,24 @@ def run_episode_generation_job(
     except Exception as e:
         print(f"[EPISODE-GEN-JOB] ERROR: {e}")
         traceback.print_exc()
+
+        # Write failure marker with context
+        from tools.workflow.failure_markers import write_failure_marker
+        write_failure_marker(
+            bucket=bucket,
+            scene_id=scene_id,
+            job_name="episode-generation-job",
+            exception=e,
+            failed_step="generate_episodes",
+            input_params={
+                "robot_type": robot_type,
+                "episodes_per_variation": episodes_per_variation,
+                "max_variations": max_variations,
+                "use_llm": use_llm,
+                "use_cpgen": use_cpgen,
+                "min_quality_score": min_quality_score,
+            },
+        )
         return 1
 
 

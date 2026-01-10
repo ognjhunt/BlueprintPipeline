@@ -583,13 +583,33 @@ def run_geniesim_export_job(
 
 def main():
     """Main entry point."""
-    # Get configuration from environment
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
+    # Validate environment configuration before proceeding
+    from tools.validation.config_schemas import validate_environment_config, EnvironmentConfigError
 
-    if not scene_id:
-        print("[GENIESIM-EXPORT-JOB] ERROR: SCENE_ID is required")
+    try:
+        config = validate_environment_config(
+            required_vars=["SCENE_ID"],
+            optional_vars=[
+                ("BUCKET", ""),
+                ("ASSETS_PREFIX", ""),
+                ("GENIESIM_PREFIX", ""),
+                ("ROBOT_TYPE", "franka"),
+                ("MAX_TASKS", "5"),
+            ],
+            validated_patterns={
+                "SCENE_ID": r"^[a-zA-Z0-9_-]+$",
+            }
+        )
+    except EnvironmentConfigError as e:
+        print(f"[GENIESIM-EXPORT-JOB] Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # Get configuration from validated config
+    bucket = config["BUCKET"]
+    scene_id = config["SCENE_ID"]
+
+    # Import failure markers for error tracking
+    from tools.workflow.failure_markers import write_failure_marker
 
     # Prefixes with defaults
     assets_prefix = os.getenv("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
@@ -632,30 +652,54 @@ def main():
 
     GCS_ROOT = Path("/mnt/gcs")
 
-    exit_code = run_geniesim_export_job(
-        root=GCS_ROOT,
-        scene_id=scene_id,
-        assets_prefix=assets_prefix,
-        geniesim_prefix=geniesim_prefix,
-        robot_type=robot_type,
-        urdf_path=urdf_path,
-        max_tasks=max_tasks,
-        generate_embeddings=generate_embeddings,
-        filter_commercial=filter_commercial,
-        copy_usd=copy_usd,
-        # Enhanced features (DEFAULT: ENABLED)
-        enable_multi_robot=enable_multi_robot,
-        enable_bimanual=enable_bimanual,
-        enable_vla_packages=enable_vla_packages,
-        enable_rich_annotations=enable_rich_annotations,
-        # YOUR commercial assets for domain randomization
-        variation_assets_prefix=variation_assets_prefix,
-        replicator_prefix=replicator_prefix,
-        # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
-        enable_premium_analytics=enable_premium_analytics,
-    )
+    try:
+        exit_code = run_geniesim_export_job(
+            root=GCS_ROOT,
+            scene_id=scene_id,
+            assets_prefix=assets_prefix,
+            geniesim_prefix=geniesim_prefix,
+            robot_type=robot_type,
+            urdf_path=urdf_path,
+            max_tasks=max_tasks,
+            generate_embeddings=generate_embeddings,
+            filter_commercial=filter_commercial,
+            copy_usd=copy_usd,
+            # Enhanced features (DEFAULT: ENABLED)
+            enable_multi_robot=enable_multi_robot,
+            enable_bimanual=enable_bimanual,
+            enable_vla_packages=enable_vla_packages,
+            enable_rich_annotations=enable_rich_annotations,
+            # YOUR commercial assets for domain randomization
+            variation_assets_prefix=variation_assets_prefix,
+            replicator_prefix=replicator_prefix,
+            # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
+            enable_premium_analytics=enable_premium_analytics,
+        )
 
-    sys.exit(exit_code)
+        sys.exit(exit_code)
+
+    except Exception as e:
+        # Write failure marker with context
+        print(f"[GENIESIM-EXPORT-JOB] FATAL ERROR: {e}")
+        traceback.print_exc()
+
+        write_failure_marker(
+            bucket=bucket,
+            scene_id=scene_id,
+            job_name="genie-sim-export-job",
+            exception=e,
+            failed_step="export_to_geniesim",
+            input_params={
+                "robot_type": robot_type,
+                "max_tasks": max_tasks,
+                "filter_commercial": filter_commercial,
+                "enable_multi_robot": enable_multi_robot,
+                "enable_bimanual": enable_bimanual,
+                "enable_vla_packages": enable_vla_packages,
+                "enable_premium_analytics": enable_premium_analytics,
+            },
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
