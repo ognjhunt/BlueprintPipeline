@@ -68,6 +68,15 @@ from tools.geniesim_adapter import (
     GenieSimExportResult,
 )
 
+# P0-5 FIX: Import quality gates for validation before export
+try:
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    from quality_gates.quality_gate import QualityGate, QualityGateSeverity, QualityGateCheckpoint
+    HAVE_QUALITY_GATES = True
+except ImportError:
+    HAVE_QUALITY_GATES = False
+    print("[GENIESIM-EXPORT-JOB] WARNING: Quality gates not available")
+
 # Import default premium analytics (DEFAULT: ENABLED)
 try:
     from .default_premium_analytics import (
@@ -283,6 +292,116 @@ def run_geniesim_export_job(
     with open(merged_manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"[GENIESIM-EXPORT-JOB] Wrote merged manifest to: {merged_manifest_path}")
+
+    # P0-5 FIX: Run quality gates before export
+    if HAVE_QUALITY_GATES:
+        print("\n[GENIESIM-EXPORT-JOB] Running quality gates before export...")
+        quality_gate = QualityGate(
+            checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+            scene_id=scene_id,
+        )
+
+        # Gate 1: Manifest completeness
+        required_fields = ["objects", "scene"]
+        missing_fields = [f for f in required_fields if f not in manifest]
+        if missing_fields:
+            quality_gate.add_check(
+                name="manifest_completeness",
+                passed=False,
+                message=f"Manifest missing required fields: {missing_fields}",
+                severity=QualityGateSeverity.ERROR,
+            )
+        else:
+            quality_gate.add_check(
+                name="manifest_completeness",
+                passed=True,
+                message="Manifest contains all required fields",
+                severity=QualityGateSeverity.INFO,
+            )
+
+        # Gate 2: Asset file existence
+        assets_dir = root / assets_prefix
+        missing_assets = []
+        for obj in manifest.get("objects", []):
+            asset_path = obj.get("asset", {}).get("path")
+            if asset_path:
+                full_path = assets_dir / asset_path
+                if not full_path.exists():
+                    missing_assets.append(asset_path)
+
+        if missing_assets:
+            quality_gate.add_check(
+                name="asset_existence",
+                passed=len(missing_assets) < 5,  # Warn if some missing, error if many
+                message=f"Missing {len(missing_assets)} asset files (first few: {missing_assets[:3]})",
+                severity=QualityGateSeverity.WARNING if len(missing_assets) < 5 else QualityGateSeverity.ERROR,
+            )
+        else:
+            quality_gate.add_check(
+                name="asset_existence",
+                passed=True,
+                message="All asset files exist",
+                severity=QualityGateSeverity.INFO,
+            )
+
+        # Gate 3: Physics properties validation
+        objects_with_physics = sum(1 for obj in manifest.get("objects", []) if obj.get("physics"))
+        if objects_with_physics == 0:
+            quality_gate.add_check(
+                name="physics_properties",
+                passed=False,
+                message="No objects have physics properties - scene may not simulate properly",
+                severity=QualityGateSeverity.WARNING,
+            )
+        else:
+            quality_gate.add_check(
+                name="physics_properties",
+                passed=True,
+                message=f"{objects_with_physics} objects have physics properties",
+                severity=QualityGateSeverity.INFO,
+            )
+
+        # Gate 4: Scale sanity check
+        scale_issues = []
+        for obj in manifest.get("objects", []):
+            scale = obj.get("transform", {}).get("scale", [1, 1, 1])
+            if any(s < 0.001 or s > 1000 for s in scale):
+                scale_issues.append(f"{obj.get('name', 'unknown')}: {scale}")
+
+        if scale_issues:
+            quality_gate.add_check(
+                name="scale_sanity",
+                passed=len(scale_issues) < 3,
+                message=f"Objects with suspicious scale: {scale_issues[:3]}",
+                severity=QualityGateSeverity.WARNING,
+            )
+        else:
+            quality_gate.add_check(
+                name="scale_sanity",
+                passed=True,
+                message="All objects have reasonable scale",
+                severity=QualityGateSeverity.INFO,
+            )
+
+        # Evaluate gates and block if ERROR
+        gate_result = quality_gate.evaluate()
+        print(f"[GENIESIM-EXPORT-JOB] Quality gate result: {gate_result['status']}")
+        print(f"[GENIESIM-EXPORT-JOB]   Passed: {gate_result['checks_passed']}/{gate_result['total_checks']}")
+
+        if gate_result["status"] == "blocked":
+            print("\n[GENIESIM-EXPORT-JOB] ❌ Quality gates BLOCKED export")
+            print(f"[GENIESIM-EXPORT-JOB] Errors: {gate_result['error_count']}")
+            for check in gate_result["checks"]:
+                if check["severity"] == "error":
+                    print(f"[GENIESIM-EXPORT-JOB]   ERROR: {check['name']}: {check['message']}")
+            return 1
+
+        if gate_result["status"] == "warning":
+            print(f"[GENIESIM-EXPORT-JOB] ⚠️  Quality gates passed with warnings ({gate_result['warning_count']})")
+
+        print("[GENIESIM-EXPORT-JOB] ✅ Quality gates passed\n")
+    else:
+        print("[GENIESIM-EXPORT-JOB] ⚠️  Quality gates not available - skipping validation\n")
 
     # Configure exporter with enhanced features
     config = GenieSimExportConfig(
@@ -583,6 +702,20 @@ def run_geniesim_export_job(
 
 def main():
     """Main entry point."""
+    # P0-7 FIX: Validate credentials at startup
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    try:
+        from startup_validation import validate_and_fail_fast
+        # Genie Sim credentials not required for export (only for import)
+        validate_and_fail_fast(
+            job_name="GENIESIM-EXPORT-JOB",
+            require_geniesim=False,
+            require_gemini=False,
+            validate_gcs=True,
+        )
+    except ImportError as e:
+        print(f"[GENIESIM-EXPORT-JOB] WARNING: Startup validation unavailable: {e}")
+
     # Get configuration from environment
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
