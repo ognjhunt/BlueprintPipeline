@@ -1,0 +1,175 @@
+# =============================================================================
+# Genie Sim Import Pipeline
+# =============================================================================
+#
+# Imports generated episodes from Genie Sim 3.0 back into BlueprintPipeline.
+#
+# Trigger Methods:
+# 1. Webhook from Genie Sim (recommended):
+#    POST /webhooks/geniesim/job-complete
+#    Body: {"job_id": "...", "status": "completed"}
+#
+# 2. Manual trigger via Eventarc:
+#    gcloud eventarc triggers create geniesim-import-trigger \
+#      --destination-workflow=genie-sim-import-pipeline \
+#      --event-filters="type=manual.geniesim.job.completed"
+#
+# 3. Scheduled polling (fallback):
+#    Cloud Scheduler → Pub/Sub → Eventarc → Workflow
+#
+# Pipeline Flow:
+#   Genie Sim Job Complete → Import Job → Episode Validation → Training Pipeline
+#
+
+main:
+  params: [event]
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT")}
+          - region: "us-central1"
+          - bucket: ${sys.get_env("GCS_BUCKET", "blueprintpipeline-data")}
+
+    - extract_event:
+        switch:
+          # Webhook payload (direct from Genie Sim)
+          - condition: ${"job_id" in event}
+            assign:
+              - job_id: ${event.job_id}
+              - status: ${event.status}
+              - scene_id: ${default(event.scene_id, "unknown")}
+
+          # Eventarc event (wrapped)
+          - condition: ${"data" in event and "job_id" in event.data}
+            assign:
+              - job_id: ${event.data.job_id}
+              - status: ${event.data.status}
+              - scene_id: ${default(event.data.scene_id, "unknown")}
+
+          # Default/manual trigger
+          - condition: true
+            assign:
+              - job_id: ${event.job_id}
+              - status: ${default(event.status, "completed")}
+              - scene_id: ${default(event.scene_id, "unknown")}
+
+    - validate_inputs:
+        switch:
+          - condition: ${job_id == null or job_id == ""}
+            raise:
+              message: "job_id is required"
+
+    - log_start:
+        call: sys.log
+        args:
+          text: ${"Starting Genie Sim import for job " + job_id + " (scene: " + scene_id + ")"}
+          severity: INFO
+
+    # Check if job completed successfully
+    - check_status:
+        switch:
+          - condition: ${status != "completed"}
+            steps:
+              - log_skip:
+                  call: sys.log
+                  args:
+                    text: ${"Job " + job_id + " status is '" + status + "', skipping import"}
+                    severity: WARNING
+              - return_skipped:
+                  return:
+                    status: "skipped"
+                    job_id: ${job_id}
+                    reason: ${"Job status is " + status}
+
+    # Run import job
+    - run_import_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/genie-sim-import-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - name: "genie-sim-import"
+                  env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: GENIE_SIM_JOB_ID
+                      value: ${job_id}
+                    - name: SCENE_ID
+                      value: ${scene_id}
+                    - name: WAIT_FOR_COMPLETION
+                      value: "true"
+                    - name: MIN_QUALITY_SCORE
+                      value: "0.7"
+                    - name: VALIDATE_EPISODES
+                      value: "true"
+              timeout: "1800s"  # 30 minutes max
+        result: import_job_execution
+
+    - wait_for_import:
+        call: http.get
+        args:
+          url: ${"https://" + region + "-run.googleapis.com/apis/run.googleapis.com/v2/" + import_job_execution.metadata.name + "/executions/" + import_job_execution.name}
+          auth:
+            type: OAuth2
+        result: import_status
+
+    - check_import_success:
+        switch:
+          - condition: ${import_status.body.status.conditions[0].state != "CONDITION_SUCCEEDED"}
+            steps:
+              - log_import_failure:
+                  call: sys.log
+                  args:
+                    text: ${"Import job failed: " + import_status.body.status.conditions[0].message}
+                    severity: ERROR
+              - raise_import_error:
+                  raise:
+                    message: ${"Import failed: " + import_status.body.status.conditions[0].message}
+
+    - log_import_success:
+        call: sys.log
+        args:
+          text: ${"Import job completed successfully for " + job_id}
+          severity: INFO
+
+    # Extract import results
+    - parse_import_output:
+        assign:
+          - episodes_imported: ${default(import_status.body.status.logUri, "0")}  # TODO: Parse from logs
+          - output_path: ${text.replace_all(default(import_status.body.status.logUri, ""), "gs://" + bucket + "/", "")}
+
+    # Trigger downstream training pipeline (optional)
+    - check_training_enabled:
+        switch:
+          - condition: ${default(event.trigger_training, false)}
+            steps:
+              - log_training_trigger:
+                  call: sys.log
+                  args:
+                    text: "Triggering training pipeline for imported episodes"
+                    severity: INFO
+
+              - trigger_training:
+                  call: googleapis.eventarc.v1.projects.locations.channels.events.trigger
+                  args:
+                    parent: ${"projects/" + project_id + "/locations/" + region + "/channels/training-events"}
+                    body:
+                      event:
+                        type: "blueprintpipeline.episodes.imported"
+                        source: "geniesim-import"
+                        data:
+                          job_id: ${job_id}
+                          scene_id: ${scene_id}
+                          output_path: ${output_path}
+                          episode_count: ${episodes_imported}
+
+    # Return success
+    - return_success:
+        return:
+          status: "success"
+          job_id: ${job_id}
+          scene_id: ${scene_id}
+          episodes_imported: ${episodes_imported}
+          output_path: ${output_path}
+          import_execution_id: ${import_job_execution.name}
