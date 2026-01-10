@@ -225,6 +225,7 @@ class SecretIds:
     GENIE_SIM_API_KEY = "genie-sim-api-key"
     GEMINI_API_KEY = "gemini-api-key"
     OPENAI_API_KEY = "openai-api-key"
+    ANTHROPIC_API_KEY = "anthropic-api-key"
     PARTICULATE_API_KEY = "particulate-api-key"
 
 
@@ -251,6 +252,7 @@ def load_pipeline_secrets(project_id: Optional[str] = None) -> SecretCache:
         SecretIds.GENIE_SIM_API_KEY,
         SecretIds.GEMINI_API_KEY,
         SecretIds.OPENAI_API_KEY,
+        SecretIds.ANTHROPIC_API_KEY,
         SecretIds.PARTICULATE_API_KEY,
     ]
 
