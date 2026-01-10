@@ -1553,6 +1553,9 @@ def prepare_simready_assets_job(
     assets_prefix: str,
     root: Path = GCS_ROOT,
 ) -> int:
+    # Import failure markers for error tracking
+    from tools.workflow.failure_markers import write_failure_marker
+
     if not assets_prefix:
         print("[SIMREADY] ASSETS_PREFIX is required", file=sys.stderr)
         return 1
@@ -1565,46 +1568,47 @@ def prepare_simready_assets_job(
     print(f"[SIMREADY] Assets root={assets_root}")
     print(f"[SIMREADY] Loading {manifest_path} (or legacy scene_assets.json)")
 
-    scene_assets = load_manifest_or_scene_assets(assets_root)
-    if scene_assets is None:
-        legacy_path = assets_root / "scene_assets.json"
-        print(
-            f"[SIMREADY] scene manifest missing at {manifest_path} and {legacy_path}",
-            file=sys.stderr,
-        )
-        return 1
-    objects = scene_assets.get("objects", [])
-    print(f"[SIMREADY] Found {len(objects)} objects in manifest")
+    try:
+        scene_assets = load_manifest_or_scene_assets(assets_root)
+        if scene_assets is None:
+            legacy_path = assets_root / "scene_assets.json"
+            print(
+                f"[SIMREADY] scene manifest missing at {manifest_path} and {legacy_path}",
+                file=sys.stderr,
+            )
+            return 1
+        objects = scene_assets.get("objects", [])
+        print(f"[SIMREADY] Found {len(objects)} objects in manifest")
 
-    catalog_client = AssetCatalogClient()
+        catalog_client = AssetCatalogClient()
 
-    client = None
-    if have_gemini():
-        # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
-        if HAVE_SECRET_MANAGER:
-            try:
-                gemini_api_key = get_secret_or_env(
-                    SecretIds.GEMINI_API_KEY,
-                    env_var="GEMINI_API_KEY"
-                )
-            except Exception as e:
-                print(f"[SIMREADY] WARNING: Secret Manager unavailable, falling back to env var: {e}", file=sys.stderr)
+        client = None
+        if have_gemini():
+            # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
+            if HAVE_SECRET_MANAGER:
+                try:
+                    gemini_api_key = get_secret_or_env(
+                        SecretIds.GEMINI_API_KEY,
+                        env_var="GEMINI_API_KEY"
+                    )
+                except Exception as e:
+                    print(f"[SIMREADY] WARNING: Secret Manager unavailable, falling back to env var: {e}", file=sys.stderr)
+                    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+            else:
                 gemini_api_key = os.environ.get("GEMINI_API_KEY")
+
+            client = genai.Client(api_key=gemini_api_key)
+            print("[SIMREADY] Gemini client initialized")
         else:
-            gemini_api_key = os.environ.get("GEMINI_API_KEY")
+            print(
+                "[SIMREADY] GEMINI_API_KEY not set or google-genai unavailable; using heuristic defaults only",
+                file=sys.stderr,
+            )
 
-        client = genai.Client(api_key=gemini_api_key)
-        print("[SIMREADY] Gemini client initialized")
-    else:
-        print(
-            "[SIMREADY] GEMINI_API_KEY not set or google-genai unavailable; using heuristic defaults only",
-            file=sys.stderr,
-        )
+        simready_paths: Dict[Any, str] = {}
 
-    simready_paths: Dict[Any, str] = {}
-
-    # GAP-PERF-002 FIX: Process objects in parallel for 10-50x speedup
-    def process_single_object(obj: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+        # GAP-PERF-002 FIX: Process objects in parallel for 10-50x speedup
+        def process_single_object(obj: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
         """
         Process a single object. Returns (oid, sim_rel, sim_path) or None on failure.
 
@@ -1694,8 +1698,8 @@ def prepare_simready_assets_job(
             print(f"[SIMREADY] ERROR: Failed to process obj {oid}: {e}", file=sys.stderr)
             return None
 
-    # Use parallel processing if available
-    if HAVE_PARALLEL_PROCESSING and len(objects) > 5:  # Only parallelize if >5 objects
+        # Use parallel processing if available
+        if HAVE_PARALLEL_PROCESSING and len(objects) > 5:  # Only parallelize if >5 objects
         print(f"[SIMREADY] Processing {len(objects)} objects in parallel (max 10 workers)...")
         result = process_parallel_threaded(
             objects,
@@ -1716,7 +1720,7 @@ def prepare_simready_assets_job(
 
         print(f"[SIMREADY] Parallel processing complete: {result.success_count}/{result.total_count} succeeded")
 
-    else:
+        else:
         # Sequential fallback for small batches or when parallel processing unavailable
         print(f"[SIMREADY] Processing {len(objects)} objects sequentially...")
         for obj in objects:
@@ -1726,8 +1730,8 @@ def prepare_simready_assets_job(
                 simready_paths[oid] = sim_rel
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
 
-    marker_path = assets_root / ".simready_complete"
-    if simready_paths:
+        marker_path = assets_root / ".simready_complete"
+        if simready_paths:
         marker_content = {
             "status": "complete",
             "simready_assets": simready_paths,
@@ -1736,7 +1740,7 @@ def prepare_simready_assets_job(
         marker_path.write_text(json.dumps(marker_content, indent=2), encoding="utf-8")
         print(f"[SIMREADY] Created completion marker at {marker_path}")
         print(f"[SIMREADY] Generated {len(simready_paths)} simready assets")
-    else:
+        else:
         marker_content = {
             "status": "complete",
             "simready_assets": {},
@@ -1748,6 +1752,24 @@ def prepare_simready_assets_job(
             "[SIMREADY] No simready assets were created; created completion marker anyway",
             file=sys.stderr,
         )
+
+    except Exception as e:
+        # Write failure marker with context
+        print(f"[SIMREADY] ERROR: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+
+        write_failure_marker(
+            bucket=bucket,
+            scene_id=scene_id,
+            job_name="simready-job",
+            exception=e,
+            failed_step="prepare_simready_assets",
+            input_params={
+                "assets_prefix": assets_prefix,
+            },
+        )
+        return 1
 
     return 0
 

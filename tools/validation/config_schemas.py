@@ -526,3 +526,86 @@ def load_and_validate_env_config() -> EnvironmentConfig:
         episodes_per_variation=int(os.getenv("EPISODES_PER_VARIATION", "5")),
         num_variations=int(os.getenv("NUM_VARIATIONS", "3")),
     )
+
+
+# ============================================================================
+# Environment Variable Validation
+# ============================================================================
+
+class EnvironmentConfigError(Exception):
+    """Raised when environment configuration is invalid."""
+    pass
+
+
+def validate_environment_config(
+    required_vars: Optional[List[str]] = None,
+    optional_vars: Optional[List[tuple[str, str]]] = None,
+    validated_patterns: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """
+    Validate environment configuration.
+
+    Args:
+        required_vars: List of required environment variable names
+        optional_vars: List of (name, default_value) tuples for optional variables
+        validated_patterns: Dict of variable_name -> regex pattern for validation
+
+    Returns:
+        Dictionary of validated environment variables
+
+    Raises:
+        EnvironmentConfigError: If required variables are missing or patterns don't match
+
+    Example:
+        config = validate_environment_config(
+            required_vars=["BUCKET", "SCENE_ID"],
+            optional_vars=[("ROBOT_TYPE", "franka"), ("NUM_EPISODES", "100")],
+            validated_patterns={"SCENE_ID": r"^[a-zA-Z0-9_-]+$"},
+        )
+        bucket = config["BUCKET"]
+        scene_id = config["SCENE_ID"]
+        robot_type = config["ROBOT_TYPE"]  # Defaults to "franka" if not set
+    """
+    import os
+    import re
+
+    config = {}
+    required_vars = required_vars or []
+    optional_vars = optional_vars or []
+    validated_patterns = validated_patterns or {}
+
+    # Validate required variables
+    missing_vars = []
+    for var_name in required_vars:
+        value = os.getenv(var_name)
+        if value is None or value == "":
+            missing_vars.append(var_name)
+        else:
+            config[var_name] = value
+
+    if missing_vars:
+        raise EnvironmentConfigError(
+            f"Missing required environment variables: {', '.join(missing_vars)}"
+        )
+
+    # Process optional variables with defaults
+    for var_name, default_value in optional_vars:
+        value = os.getenv(var_name, default_value)
+        config[var_name] = value
+
+    # Validate patterns
+    pattern_errors = []
+    for var_name, pattern in validated_patterns.items():
+        if var_name in config:
+            value = config[var_name]
+            if not re.match(pattern, value):
+                pattern_errors.append(
+                    f"{var_name}='{value}' does not match pattern '{pattern}'"
+                )
+
+    if pattern_errors:
+        raise EnvironmentConfigError(
+            f"Environment variable validation failed:\n  " + "\n  ".join(pattern_errors)
+        )
+
+    return config
