@@ -1503,11 +1503,17 @@ def main():
     # PHASE 1: Isaac Sim Enforcement + Environment Check
     # =========================================================================
 
+    # P0-4 FIX: Explicit Isaac Sim availability check at startup
+    isaac_sim_available = False
+
     capabilities = None
     if HAVE_QUALITY_SYSTEM:
         try:
             # Get environment capabilities
             capabilities = get_environment_capabilities()
+
+            # P0-4 FIX: Extract Isaac Sim availability from capabilities
+            isaac_sim_available = capabilities.get("isaac_sim_available", False) if isinstance(capabilities, dict) else False
 
             # Print detailed environment report
             print_environment_report(capabilities)
@@ -1520,6 +1526,10 @@ def main():
 
             print("[EPISODE-GEN-JOB] ✅ Environment check passed\n")
 
+            # P0-4 FIX: Confirm Isaac Sim is available after enforcement
+            if not isaac_sim_available:
+                print("[EPISODE-GEN-JOB] ⚠️  WARNING: Isaac Sim not confirmed available")
+
         except IsaacSimRequirementError as e:
             print(f"\n❌ ISAAC SIM REQUIREMENT ERROR:\n{e}\n")
             sys.exit(1)
@@ -1529,6 +1539,15 @@ def main():
     else:
         # Fallback to legacy enforcement (quality system unavailable)
         print("[EPISODE-GEN-JOB] Using legacy Isaac Sim check (quality system unavailable)\n")
+
+        # P0-4 FIX: Add explicit check for sensor capture environment
+        if check_sensor_capture_environment is not None:
+            status = check_sensor_capture_environment()
+            isaac_sim_available = status.get("isaac_sim_available", False)
+            print(f"[EPISODE-GEN-JOB] Isaac Sim available: {isaac_sim_available}\n")
+        else:
+            isaac_sim_available = False
+            print("[EPISODE-GEN-JOB] ⚠️  WARNING: Cannot verify Isaac Sim availability\n")
 
         # Detect if running in production environment
         # Production indicators: running in container, K8s, or Cloud Run
@@ -1549,14 +1568,12 @@ def main():
         require_real_physics = os.getenv("REQUIRE_REAL_PHYSICS", default_require_real).lower() == "true"
         allow_mock_data = os.getenv("ALLOW_MOCK_DATA", "false").lower() == "true"
 
-        # Check environment
-        if check_sensor_capture_environment is not None:
-            status = check_sensor_capture_environment()
-            isaac_sim_available = status.get("isaac_sim_available", False)
-        else:
-            isaac_sim_available = False
+        # P0-4 FIX: Log configuration BEFORE checking Isaac Sim
+        print(f"[EPISODE-GEN-JOB] Production mode: {is_production}")
+        print(f"[EPISODE-GEN-JOB] Require real physics: {require_real_physics}")
+        print(f"[EPISODE-GEN-JOB] Allow mock data: {allow_mock_data}")
 
-        # Enforce production requirements
+        # P0-4 FIX: Enforce production requirements - fail loudly if Isaac Sim required but not available
         if require_real_physics and not isaac_sim_available:
             if allow_mock_data:
                 print("\n" + "=" * 80)

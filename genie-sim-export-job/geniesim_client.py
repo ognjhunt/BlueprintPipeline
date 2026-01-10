@@ -263,6 +263,7 @@ class GenieSimClient:
         endpoint: Optional[str] = None,
         timeout: int = 300,
         max_retries: int = 3,
+        validate_on_init: bool = True,
     ):
         """
         Initialize Genie Sim client.
@@ -272,6 +273,7 @@ class GenieSimClient:
             endpoint: API endpoint URL (or from GENIE_SIM_API_URL env var)
             timeout: Request timeout in seconds
             max_retries: Maximum retries for failed requests
+            validate_on_init: Validate endpoint is reachable on initialization (P0-1 FIX)
         """
         # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
         if HAVE_RESILIENCE_TOOLS:
@@ -312,6 +314,10 @@ class GenieSimClient:
         else:
             self._circuit_breaker = None
             self._rate_limiter = None
+
+        # P0-1 FIX: Validate endpoint is reachable on initialization
+        if validate_on_init:
+            self._validate_endpoint()
 
     @property
     def session(self) -> requests.Session:
@@ -354,6 +360,49 @@ class GenieSimClient:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+    # =========================================================================
+    # Endpoint Validation (P0-1 FIX)
+    # =========================================================================
+
+    def _validate_endpoint(self) -> None:
+        """
+        Validate that the Genie Sim API endpoint is reachable and properly configured.
+
+        P0-1 FIX: This method is called during initialization to fail fast if the
+        endpoint is not reachable or misconfigured.
+
+        Raises:
+            GenieSimAPIError: If endpoint is not reachable or returns unexpected response
+            GenieSimAuthenticationError: If authentication fails
+        """
+        logger.info(f"Validating Genie Sim API endpoint: {self.endpoint}")
+
+        try:
+            health_status = self.health_check()
+
+            if not health_status.available:
+                error_msg = f"Genie Sim API endpoint is not available: {health_status.error}"
+                logger.error(error_msg)
+                raise GenieSimAPIError(error_msg)
+
+            logger.info(
+                f"✓ Genie Sim API endpoint validated successfully\n"
+                f"  Endpoint: {self.endpoint}\n"
+                f"  API Version: {health_status.api_version}\n"
+                f"  Rate Limit Remaining: {health_status.rate_limit_remaining}\n"
+                f"  Estimated Queue Time: {health_status.estimated_queue_time_seconds}s"
+            )
+
+        except GenieSimAuthenticationError:
+            logger.error("Authentication failed - check GENIE_SIM_API_KEY")
+            raise
+        except GenieSimAPIError:
+            raise
+        except Exception as e:
+            error_msg = f"Failed to validate Genie Sim API endpoint: {e}"
+            logger.error(error_msg)
+            raise GenieSimAPIError(error_msg) from e
 
     # =========================================================================
     # Health Check
@@ -798,24 +847,52 @@ class GenieSimClient:
         job_id: str,
         poll_interval: int = 30,
         callback: Optional[callable] = None,
+        max_wait_time: Optional[float] = None,
+        use_exponential_backoff: bool = True,
     ) -> JobProgress:
         """
         Wait for job to complete (blocking).
 
+        P0-2 FIX: Added timeout and exponential backoff to prevent infinite polling.
+
         Args:
             job_id: Job identifier
-            poll_interval: Seconds between status checks
+            poll_interval: Initial seconds between status checks
             callback: Optional callback(progress) called on each poll
+            max_wait_time: Maximum wait time in seconds (default: 14400 = 4 hours)
+            use_exponential_backoff: Use exponential backoff for polling interval
 
         Returns:
             Final JobProgress
 
         Raises:
-            GenieSimAPIError: If job fails or is cancelled
+            GenieSimAPIError: If job fails, is cancelled, or times out
         """
-        logger.info(f"Waiting for job {job_id} to complete...")
+        # P0-2 FIX: Set default timeout to 4 hours
+        if max_wait_time is None:
+            max_wait_time = 14400.0  # 4 hours for large jobs
+
+        logger.info(
+            f"Waiting for job {job_id} to complete "
+            f"(max wait time: {max_wait_time/3600:.1f} hours)..."
+        )
+
+        start_time = time.time()
+        current_poll_interval = poll_interval
+        max_poll_interval = 300  # Cap at 5 minutes
 
         while True:
+            # P0-2 FIX: Check if we've exceeded max wait time
+            elapsed_time = time.time() - start_time
+            if elapsed_time > max_wait_time:
+                error_msg = (
+                    f"Job {job_id} timed out after {elapsed_time/3600:.2f} hours. "
+                    f"Max wait time: {max_wait_time/3600:.1f} hours. "
+                    f"Consider increasing max_wait_time or checking job status manually."
+                )
+                logger.error(error_msg)
+                raise GenieSimAPIError(error_msg)
+
             progress = self.get_job_status(job_id)
 
             if callback:
@@ -823,18 +900,26 @@ class GenieSimClient:
             else:
                 logger.info(
                     f"Job {job_id}: {progress.status.value} "
-                    f"({progress.progress_percent:.1f}%) - {progress.current_task}"
+                    f"({progress.progress_percent:.1f}%) - {progress.current_task} "
+                    f"[Elapsed: {elapsed_time/60:.1f}m]"
                 )
 
             if progress.status == JobStatus.COMPLETED:
-                logger.info(f"Job {job_id} completed successfully!")
+                logger.info(
+                    f"Job {job_id} completed successfully after {elapsed_time/60:.1f} minutes!"
+                )
                 return progress
             elif progress.status == JobStatus.FAILED:
                 raise GenieSimAPIError(f"Job {job_id} failed: {progress.current_task}")
             elif progress.status == JobStatus.CANCELLED:
                 raise GenieSimAPIError(f"Job {job_id} was cancelled")
 
-            time.sleep(poll_interval)
+            # P0-2 FIX: Use exponential backoff for polling interval
+            if use_exponential_backoff:
+                # Gradually increase polling interval to reduce API load
+                current_poll_interval = min(current_poll_interval * 1.2, max_poll_interval)
+
+            time.sleep(current_poll_interval)
 
     # =========================================================================
     # Episode Download
