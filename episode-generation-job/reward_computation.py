@@ -29,6 +29,7 @@ References:
 - AnyTask: Task-conditioned rewards
 """
 
+import os
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
@@ -127,14 +128,93 @@ class RewardConfig:
     # Component weights
     weights: Dict[str, float] = field(default_factory=lambda: DEFAULT_REWARD_WEIGHTS.copy())
 
-    # Thresholds
+    # Thresholds (now configurable via environment variables)
     placement_accuracy_threshold: float = 0.05  # meters
     time_bonus_threshold: float = 0.8  # fraction of expected time
     collision_tolerance: int = 0  # number of allowed collisions
+    gripper_close_threshold: float = 0.02  # meters (for grasp detection)
+    max_expected_jerk: float = 500.0  # rad/s^3 (for smoothness computation)
+    collision_penalty_per_event: float = 0.2  # penalty per collision
 
     # Normalization
     normalize_rewards: bool = True
     reward_scale: float = 1.0
+
+    @classmethod
+    def from_environment(cls) -> "RewardConfig":
+        """
+        Create RewardConfig from environment variables.
+
+        Environment variables:
+            REWARD_PLACEMENT_THRESHOLD: Placement accuracy threshold in meters (default: 0.05)
+            REWARD_TIME_BONUS_THRESHOLD: Time bonus threshold as fraction (default: 0.8)
+            REWARD_COLLISION_TOLERANCE: Number of allowed collisions (default: 0)
+            REWARD_GRIPPER_THRESHOLD: Gripper close threshold in meters (default: 0.02)
+            REWARD_MAX_JERK: Maximum expected jerk in rad/s^3 (default: 500.0)
+            REWARD_COLLISION_PENALTY: Penalty per collision event (default: 0.2)
+            REWARD_NORMALIZE: Whether to normalize rewards (default: true)
+            REWARD_SCALE: Reward scale multiplier (default: 1.0)
+        """
+        config = cls()
+
+        # Load thresholds from environment with validation
+        try:
+            if val := os.getenv("REWARD_PLACEMENT_THRESHOLD"):
+                threshold = float(val)
+                if 0.0 < threshold <= 1.0:
+                    config.placement_accuracy_threshold = threshold
+                else:
+                    print(f"[REWARD] Warning: REWARD_PLACEMENT_THRESHOLD must be between 0 and 1, using default")
+
+            if val := os.getenv("REWARD_TIME_BONUS_THRESHOLD"):
+                threshold = float(val)
+                if 0.0 < threshold <= 2.0:
+                    config.time_bonus_threshold = threshold
+                else:
+                    print(f"[REWARD] Warning: REWARD_TIME_BONUS_THRESHOLD must be between 0 and 2, using default")
+
+            if val := os.getenv("REWARD_COLLISION_TOLERANCE"):
+                tolerance = int(val)
+                if 0 <= tolerance <= 10:
+                    config.collision_tolerance = tolerance
+                else:
+                    print(f"[REWARD] Warning: REWARD_COLLISION_TOLERANCE must be between 0 and 10, using default")
+
+            if val := os.getenv("REWARD_GRIPPER_THRESHOLD"):
+                threshold = float(val)
+                if 0.0 < threshold <= 0.1:
+                    config.gripper_close_threshold = threshold
+                else:
+                    print(f"[REWARD] Warning: REWARD_GRIPPER_THRESHOLD must be between 0 and 0.1, using default")
+
+            if val := os.getenv("REWARD_MAX_JERK"):
+                max_jerk = float(val)
+                if max_jerk > 0:
+                    config.max_expected_jerk = max_jerk
+                else:
+                    print(f"[REWARD] Warning: REWARD_MAX_JERK must be positive, using default")
+
+            if val := os.getenv("REWARD_COLLISION_PENALTY"):
+                penalty = float(val)
+                if 0.0 <= penalty <= 1.0:
+                    config.collision_penalty_per_event = penalty
+                else:
+                    print(f"[REWARD] Warning: REWARD_COLLISION_PENALTY must be between 0 and 1, using default")
+
+            if val := os.getenv("REWARD_NORMALIZE"):
+                config.normalize_rewards = val.lower() == "true"
+
+            if val := os.getenv("REWARD_SCALE"):
+                scale = float(val)
+                if scale > 0:
+                    config.reward_scale = scale
+                else:
+                    print(f"[REWARD] Warning: REWARD_SCALE must be positive, using default")
+
+        except (ValueError, TypeError) as e:
+            print(f"[REWARD] Warning: Error parsing environment variables: {e}, using defaults")
+
+        return config
 
 
 class RewardComputer:
@@ -298,7 +378,7 @@ class RewardComputer:
             elif phase in ["grasp", "lift"]:
                 # Reward for maintaining grasp
                 gripper = state.gripper_position if hasattr(state, 'gripper_position') else 0
-                if gripper < 0.02:  # Closed gripper
+                if gripper < self.config.gripper_close_threshold:  # Closed gripper
                     step_reward += 0.5
 
             elif phase in ["transport"]:
@@ -409,7 +489,7 @@ class RewardComputer:
         # Check if gripper is closed during grasp phases
         closed_count = sum(
             1 for s in grasp_states
-            if hasattr(s, 'gripper_position') and s.gripper_position < 0.02
+            if hasattr(s, 'gripper_position') and s.gripper_position < self.config.gripper_close_threshold
         )
 
         return closed_count / len(grasp_states)
@@ -588,9 +668,8 @@ class RewardComputer:
             if unexpected <= tolerance:
                 return 1.0
             else:
-                # Penalize each collision
-                penalty_per_collision = 0.2
-                return max(0.0, 1.0 - (unexpected - tolerance) * penalty_per_collision)
+                # Penalize each collision using configurable penalty
+                return max(0.0, 1.0 - (unexpected - tolerance) * self.config.collision_penalty_per_event)
 
         return 0.8
 
@@ -619,9 +698,8 @@ class RewardComputer:
         mean_jerk = np.mean(np.abs(jerks))
 
         # Normalize: lower jerk = higher smoothness
-        # Typical jerk values are 0-1000 rad/s^3
-        max_expected_jerk = 500.0
-        smoothness = 1.0 - min(1.0, mean_jerk / max_expected_jerk)
+        # Use configurable threshold
+        smoothness = 1.0 - min(1.0, mean_jerk / self.config.max_expected_jerk)
 
         return smoothness
 

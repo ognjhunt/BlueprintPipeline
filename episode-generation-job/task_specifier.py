@@ -24,6 +24,7 @@ Reference:
 
 import json
 import sys
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -969,52 +970,78 @@ class TaskSpecifier:
         - Additional safety constraints
         - Timing adjustments
         - Confidence scoring
+
+        Includes timeout and retry logic for robustness.
         """
-        try:
-            client = self._get_client()
+        max_retries = 3
+        timeout_seconds = 30
 
-            prompt = self._build_enhancement_prompt(spec, scene_objects)
+        for attempt in range(max_retries):
+            try:
+                client = self._get_client()
 
-            response = client.generate(
-                prompt=prompt,
-                json_output=True,
-                temperature=0.3,
-                max_tokens=4000,
-            )
+                prompt = self._build_enhancement_prompt(spec, scene_objects)
 
-            data = response.parse_json()
+                # Call LLM with timeout
+                start_time = time.time()
+                response = client.generate(
+                    prompt=prompt,
+                    json_output=True,
+                    temperature=0.3,
+                    max_tokens=4000,
+                    timeout=timeout_seconds,  # Add timeout parameter
+                )
+                elapsed = time.time() - start_time
 
-            # Apply enhancements
-            if "timing_adjustments" in data:
-                for adj in data["timing_adjustments"]:
-                    seg_id = adj.get("segment_id")
-                    for seg in spec.segments:
-                        if seg.segment_id == seg_id:
-                            if "duration_multiplier" in adj:
-                                duration = seg.end_time - seg.start_time
-                                new_duration = duration * adj["duration_multiplier"]
-                                seg.end_time = seg.start_time + new_duration
+                # Check for timeout
+                if elapsed > timeout_seconds:
+                    raise TimeoutError(f"LLM call exceeded {timeout_seconds}s timeout")
 
-            if "additional_constraints" in data:
-                for constraint_data in data["additional_constraints"]:
-                    constraint = KeypointConstraint(
-                        constraint_id=constraint_data.get("id", f"llm_constraint_{len(spec.constraints)}"),
-                        keypoint_id=constraint_data.get("keypoint_id", "gripper_tip"),
-                        constraint_type=ConstraintType(constraint_data.get("type", "clearance")),
-                        clearance_distance=constraint_data.get("clearance", 0.02),
-                        priority=constraint_data.get("priority", 2),
-                    )
-                    spec.constraints.append(constraint)
+                data = response.parse_json()
 
-            if "confidence" in data:
-                spec.confidence = data["confidence"]
+                # Apply enhancements
+                if "timing_adjustments" in data:
+                    for adj in data["timing_adjustments"]:
+                        seg_id = adj.get("segment_id")
+                        for seg in spec.segments:
+                            if seg.segment_id == seg_id:
+                                if "duration_multiplier" in adj:
+                                    duration = seg.end_time - seg.start_time
+                                    new_duration = duration * adj["duration_multiplier"]
+                                    seg.end_time = seg.start_time + new_duration
 
-            spec.llm_response = json.dumps(data)
+                if "additional_constraints" in data:
+                    for constraint_data in data["additional_constraints"]:
+                        constraint = KeypointConstraint(
+                            constraint_id=constraint_data.get("id", f"llm_constraint_{len(spec.constraints)}"),
+                            keypoint_id=constraint_data.get("keypoint_id", "gripper_tip"),
+                            constraint_type=ConstraintType(constraint_data.get("type", "clearance")),
+                            clearance_distance=constraint_data.get("clearance", 0.02),
+                            priority=constraint_data.get("priority", 2),
+                        )
+                        spec.constraints.append(constraint)
 
-            self.log(f"  LLM enhancement applied: confidence={spec.confidence:.2f}")
+                if "confidence" in data:
+                    spec.confidence = data["confidence"]
 
-        except Exception as e:
-            self.log(f"  LLM enhancement failed: {e}", "WARNING")
+                spec.llm_response = json.dumps(data)
+
+                self.log(f"  LLM enhancement applied: confidence={spec.confidence:.2f}")
+                return spec  # Success!
+
+            except (TimeoutError, ConnectionError, OSError) as e:
+                # Retryable errors
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    self.log(f"  LLM call failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}", "WARNING")
+                    time.sleep(wait_time)
+                else:
+                    self.log(f"  LLM enhancement failed after {max_retries} attempts: {e}", "WARNING")
+
+            except Exception as e:
+                # Non-retryable errors
+                self.log(f"  LLM enhancement failed: {e}", "WARNING")
+                break
 
         return spec
 

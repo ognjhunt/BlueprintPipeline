@@ -432,14 +432,160 @@ class CuRoboMotionPlanner:
         Returns:
             List of planning results (same order as requests)
         """
-        # For now, process sequentially
-        # TODO: Implement true batch planning with cuRobo batch API
-        results = []
-        for request in requests:
-            result = self.plan_to_pose(request)
-            results.append(result)
+        if not requests:
+            return []
 
-        return results
+        # Group requests by world configuration (obstacles)
+        # Requests with same obstacles can be batched together
+        from collections import defaultdict
+        world_groups = defaultdict(list)
+
+        for idx, request in enumerate(requests):
+            # Create hashable key from obstacles
+            obstacle_key = tuple(sorted(
+                f"{obj.object_id}_{obj.position[0]:.3f}_{obj.position[1]:.3f}_{obj.position[2]:.3f}"
+                for obj in request.obstacles
+            ))
+            world_groups[obstacle_key].append((idx, request))
+
+        # Process each world group in batch
+        all_results = [None] * len(requests)
+
+        for obstacle_key, group_requests in world_groups.items():
+            indices, reqs = zip(*group_requests) if group_requests else ([], [])
+
+            # Update world once for this group
+            if reqs and reqs[0].obstacles:
+                self.update_world(reqs[0].obstacles)
+
+            try:
+                # Prepare batch tensors
+                batch_size = len(reqs)
+                start_positions = []
+                goal_poses = []
+                goal_joint_configs = []
+                use_pose_goals = []
+
+                for req in reqs:
+                    start_positions.append(req.start_joint_positions)
+
+                    if req.goal_joint_positions is not None:
+                        goal_joint_configs.append(req.goal_joint_positions)
+                        use_pose_goals.append(False)
+                    else:
+                        goal_poses.append(req.goal_pose)
+                        use_pose_goals.append(True)
+
+                # Convert to tensors
+                start_states_batch = torch.tensor(
+                    start_positions,
+                    dtype=torch.float32,
+                    device=self.tensor_args.device,
+                )
+
+                # Plan batch (use common planning parameters from first request)
+                plan_config = MotionGenPlanConfig(
+                    enable_graph=True,
+                    enable_opt=True,
+                    max_attempts=reqs[0].max_iterations if reqs else 1000,
+                    enable_finetune_trajopt=reqs[0].parallel_finetune if reqs else True,
+                    parallel_finetune=reqs[0].parallel_finetune if reqs else True,
+                    finetune_attempts=reqs[0].batch_size if reqs else 32,
+                    timeout=30.0,
+                )
+
+                start_time = time.time()
+
+                # Process based on goal type
+                # For simplicity, if any request uses pose goal, process sequentially
+                # Full batch implementation would separate pose vs joint goals
+                if any(use_pose_goals):
+                    # Mixed batch - process individually (fallback)
+                    batch_results = []
+                    for req in reqs:
+                        if req.goal_joint_positions is not None:
+                            result = self.plan_to_joint_config(req)
+                        else:
+                            result = self.plan_to_pose(req)
+                        batch_results.append(result)
+                else:
+                    # All joint goals - can batch
+                    goal_states_batch = torch.tensor(
+                        goal_joint_configs,
+                        dtype=torch.float32,
+                        device=self.tensor_args.device,
+                    )
+
+                    # Create batch joint states
+                    start_state = CuRoboState(
+                        position=start_states_batch,
+                        velocity=torch.zeros_like(start_states_batch),
+                        acceleration=torch.zeros_like(start_states_batch),
+                    )
+                    goal_state = CuRoboState(
+                        position=goal_states_batch,
+                        velocity=torch.zeros_like(goal_states_batch),
+                        acceleration=torch.zeros_like(goal_states_batch),
+                    )
+
+                    # Batch plan
+                    result = self.motion_gen.plan_batch_js(
+                        start_state,
+                        goal_state,
+                        plan_config,
+                    )
+
+                    planning_time = (time.time() - start_time) * 1000
+
+                    # Extract results for each request
+                    batch_results = []
+                    for i in range(batch_size):
+                        if result.success[i].item():
+                            joint_traj = result.get_interpolated_plan()
+                            joint_positions = joint_traj.position[i].cpu().numpy()
+                            timesteps = np.arange(len(joint_positions)) * self.interpolation_dt
+
+                            path_length = self._compute_path_length(joint_positions)
+                            smoothness = self._compute_smoothness(joint_positions, timesteps)
+                            trajectory_duration = timesteps[-1] if len(timesteps) > 0 else 0.0
+
+                            collision_free = not result.is_colliding()[i].item()
+
+                            batch_results.append(CuRoboPlanResult(
+                                success=True,
+                                joint_trajectory=joint_positions,
+                                timesteps=timesteps,
+                                planning_time_ms=planning_time / batch_size,  # Amortized time
+                                trajectory_duration_s=trajectory_duration,
+                                path_length=path_length,
+                                smoothness_score=smoothness,
+                                is_collision_free=collision_free,
+                            ))
+                        else:
+                            batch_results.append(CuRoboPlanResult(
+                                success=False,
+                                planning_time_ms=planning_time / batch_size,
+                                error_message="Batch planning failed",
+                            ))
+
+                # Store results in correct order
+                for idx, result in zip(indices, batch_results):
+                    all_results[idx] = result
+
+            except Exception as e:
+                # Fallback: process group sequentially on error
+                print(f"[CUROBO] Batch planning failed, falling back to sequential: {e}")
+                for idx, req in zip(indices, reqs):
+                    try:
+                        result = self.plan_to_pose(req)
+                        all_results[idx] = result
+                    except Exception as seq_error:
+                        all_results[idx] = CuRoboPlanResult(
+                            success=False,
+                            error_message=f"Sequential fallback failed: {seq_error}",
+                        )
+
+        return all_results
 
     # =========================================================================
     # Helper Methods
