@@ -88,6 +88,9 @@ class ImportConfig:
     poll_interval: int = 30
     wait_for_completion: bool = True
 
+    # P0-8 FIX: Error handling for partial failures
+    fail_on_partial_error: bool = False  # If True, fail the job if any episodes failed
+
 
 @dataclass
 class ImportResult:
@@ -139,6 +142,13 @@ class ImportedEpisodeValidator:
         """
         Validate a single episode.
 
+        P0-3 FIX: Enhanced validation with comprehensive checks for:
+        - Required fields
+        - Observation/action shapes
+        - NaN/Inf values
+        - Timestamp monotonicity
+        - Physics plausibility
+
         Args:
             episode_metadata: Episode metadata from Genie Sim
             episode_file: Path to episode file
@@ -169,6 +179,66 @@ class ImportedEpisodeValidator:
             errors.append("Episode file is empty")
         elif actual_size < 1024:  # Less than 1KB
             warnings.append(f"Episode file is suspiciously small: {actual_size} bytes")
+
+        # P0-3 FIX: Load and validate episode data structure
+        try:
+            import pyarrow.parquet as pq
+            table = pq.read_table(episode_file)
+            df = table.to_pandas()
+
+            # P0-3 FIX: Check required fields
+            required_fields = ["observation", "action"]
+            optional_fields = ["reward", "done", "timestamp"]
+
+            for field in required_fields:
+                # Check variations of field names
+                field_variations = [field, f"observation.{field}", f"{field}s"]
+                if not any(variation in df.columns or any(variation in col for col in df.columns) for variation in field_variations):
+                    errors.append(f"Missing required field: {field}")
+
+            # P0-3 FIX: Check for NaN/Inf values
+            for col in df.columns:
+                if df[col].dtype in [np.float32, np.float64]:
+                    if df[col].isna().any():
+                        errors.append(f"Column '{col}' contains NaN values")
+                    if np.isinf(df[col]).any():
+                        errors.append(f"Column '{col}' contains Inf values")
+
+            # P0-3 FIX: Check timestamp monotonicity
+            timestamp_cols = [col for col in df.columns if 'timestamp' in col.lower() or 'time' in col.lower()]
+            for ts_col in timestamp_cols:
+                if df[ts_col].dtype in [np.float32, np.float64, np.int32, np.int64]:
+                    if not df[ts_col].is_monotonic_increasing:
+                        errors.append(f"Timestamps in '{ts_col}' are not monotonic")
+
+            # P0-3 FIX: Check observation shapes are consistent
+            obs_cols = [col for col in df.columns if col.startswith('observation')]
+            for obs_col in obs_cols:
+                if df[obs_col].apply(lambda x: hasattr(x, '__len__')).any():
+                    shapes = df[obs_col].apply(lambda x: np.array(x).shape if hasattr(x, '__len__') else None)
+                    unique_shapes = shapes.dropna().unique()
+                    if len(unique_shapes) > 1:
+                        warnings.append(f"Inconsistent shapes in '{obs_col}': {unique_shapes}")
+
+            # P0-3 FIX: Check action bounds are reasonable
+            action_cols = [col for col in df.columns if 'action' in col.lower()]
+            for action_col in action_cols:
+                if df[action_col].dtype in [np.float32, np.float64]:
+                    action_values = df[action_col].values
+                    if hasattr(action_values[0], '__len__'):
+                        # Multi-dimensional action
+                        action_arr = np.array([np.array(a) for a in action_values])
+                        if np.abs(action_arr).max() > 10.0:  # Reasonable joint limits
+                            warnings.append(f"Action values in '{action_col}' exceed reasonable bounds (max: {np.abs(action_arr).max():.2f})")
+                    else:
+                        # Scalar action
+                        if np.abs(action_values).max() > 10.0:
+                            warnings.append(f"Action values in '{action_col}' exceed reasonable bounds (max: {np.abs(action_values).max():.2f})")
+
+        except ImportError:
+            warnings.append("PyArrow not available - skipping detailed validation")
+        except Exception as e:
+            warnings.append(f"Failed to load episode data for validation: {e}")
 
         # Check quality score
         quality_score = episode_metadata.quality_score
@@ -476,10 +546,73 @@ def run_import_job(
 
         if not download_result.success:
             result.errors.extend(download_result.errors)
+
+            # P0-8 FIX: Write failed episodes details for debugging
+            if download_result.errors:
+                failed_episodes_path = config.output_dir / "failed_episodes.json"
+                failed_episodes_data = {
+                    "job_id": config.job_id,
+                    "total_episodes_attempted": download_result.episode_count,
+                    "failed_count": len(download_result.errors),
+                    "errors": [
+                        {
+                            "error": str(err),
+                            "suggested_remediation": "Check Genie Sim job logs for details",
+                        }
+                        for err in download_result.errors
+                    ],
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+
+                try:
+                    config.output_dir.mkdir(parents=True, exist_ok=True)
+                    with open(failed_episodes_path, "w") as f:
+                        json.dump(failed_episodes_data, f, indent=2)
+                    print(f"[IMPORT] ⚠️  Failed episodes details written to: {failed_episodes_path}")
+                except Exception as e:
+                    print(f"[IMPORT] WARNING: Could not write failed episodes file: {e}")
+
             return result
 
         print(f"[IMPORT] ✅ Downloaded {download_result.episode_count} episodes")
         print(f"[IMPORT]    Total size: {download_result.total_size_bytes / 1024 / 1024:.1f} MB\n")
+
+        # P0-8 FIX: Check for partial failures (some episodes downloaded, others failed)
+        if download_result.errors:
+            print(f"[IMPORT] ⚠️  WARNING: {len(download_result.errors)} episodes had errors during download")
+            result.warnings.extend(download_result.errors)
+
+            # Write failed episodes details
+            failed_episodes_path = config.output_dir / "failed_episodes.json"
+            failed_episodes_data = {
+                "job_id": config.job_id,
+                "total_episodes_attempted": download_result.episode_count + len(download_result.errors),
+                "successful_downloads": download_result.episode_count,
+                "failed_count": len(download_result.errors),
+                "errors": [
+                    {
+                        "error": str(err),
+                        "suggested_remediation": "Check Genie Sim job logs; episodes may have been filtered by quality",
+                    }
+                    for err in download_result.errors
+                ],
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+
+            try:
+                with open(failed_episodes_path, "w") as f:
+                    json.dump(failed_episodes_data, f, indent=2)
+                print(f"[IMPORT]    Failed episodes details: {failed_episodes_path}")
+            except Exception as e:
+                print(f"[IMPORT]    WARNING: Could not write failed episodes file: {e}")
+
+            # P0-8 FIX: Optionally fail on partial errors
+            if config.fail_on_partial_error:
+                result.errors.append(
+                    f"{len(download_result.errors)} episodes failed and fail_on_partial_error=True"
+                )
+                print(f"[IMPORT] ❌ Failing due to partial errors (fail_on_partial_error=True)")
+                return result
 
         result.total_episodes_downloaded = download_result.episode_count
         result.output_dir = download_result.output_dir
@@ -607,6 +740,23 @@ def main():
     """Main entry point for import job."""
     print("\n[GENIE-SIM-IMPORT] Starting import job...")
 
+    # P0-7 FIX: Validate credentials at startup
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    try:
+        from startup_validation import validate_and_fail_fast
+        # Import job REQUIRES Genie Sim credentials
+        validate_and_fail_fast(
+            job_name="GENIE-SIM-IMPORT",
+            require_geniesim=True,
+            require_gemini=False,
+            validate_gcs=True,
+        )
+    except ImportError as e:
+        print(f"[GENIE-SIM-IMPORT] WARNING: Startup validation unavailable: {e}")
+    except SystemExit:
+        # Re-raise to exit immediately
+        raise
+
     # Get configuration from environment
     job_id = os.getenv("GENIE_SIM_JOB_ID")
     if not job_id:
@@ -627,12 +777,16 @@ def main():
     poll_interval = int(os.getenv("GENIE_SIM_POLL_INTERVAL", "30"))
     wait_for_completion = os.getenv("WAIT_FOR_COMPLETION", "true").lower() == "true"
 
+    # P0-8 FIX: Error handling configuration
+    fail_on_partial_error = os.getenv("FAIL_ON_PARTIAL_ERROR", "false").lower() == "true"
+
     print(f"[GENIE-SIM-IMPORT] Configuration:")
     print(f"[GENIE-SIM-IMPORT]   Job ID: {job_id}")
     print(f"[GENIE-SIM-IMPORT]   Output Prefix: {output_prefix}")
     print(f"[GENIE-SIM-IMPORT]   Min Quality: {min_quality_score}")
     print(f"[GENIE-SIM-IMPORT]   Enable Validation: {enable_validation}")
-    print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}\n")
+    print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}")
+    print(f"[GENIE-SIM-IMPORT]   Fail on Partial Error: {fail_on_partial_error}\n")
 
     # Setup paths
     GCS_ROOT = Path("/mnt/gcs")
@@ -648,6 +802,7 @@ def main():
         filter_low_quality=filter_low_quality,
         poll_interval=poll_interval,
         wait_for_completion=wait_for_completion,
+        fail_on_partial_error=fail_on_partial_error,  # P0-8 FIX
     )
 
     # Create client
