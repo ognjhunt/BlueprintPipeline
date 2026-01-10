@@ -57,6 +57,7 @@ Environment Variables:
     MIN_QUALITY_SCORE: Minimum quality score for export - default: 0.7
 """
 
+import gc
 import json
 import os
 import sys
@@ -720,6 +721,9 @@ class EpisodeGenerator:
         )
         output.augmented_episodes = len(all_episodes) - len(seed_episodes)
 
+        # Clean up memory after augmentation (large arrays may have been created)
+        gc.collect()
+
         # Step 5: Validate episodes
         self.log("\nStep 4: Validating episodes in simulation...")
         validated_episodes = self._validate_episodes(all_episodes, manifest)
@@ -730,6 +734,11 @@ class EpisodeGenerator:
             if ep.is_valid and ep.quality_score >= self.config.min_quality_score
         ]
         self.log(f"  {len(valid_episodes)}/{len(validated_episodes)} episodes passed validation")
+
+        # Clean up memory after filtering (remove references to invalid episodes)
+        invalid_episodes = [ep for ep in validated_episodes if not ep.is_valid or ep.quality_score < self.config.min_quality_score]
+        del invalid_episodes
+        gc.collect()
 
         # Step 7: Export to LeRobot format (with data pack configuration)
         self.log("\nStep 5: Exporting LeRobot dataset...")
@@ -769,6 +778,10 @@ class EpisodeGenerator:
             output.lerobot_dataset_path = dataset_path
         except Exception as e:
             output.errors.append(f"LeRobot export failed: {e}")
+
+        # Clean up memory after export
+        del exporter
+        gc.collect()
 
         # Step 8: Write generation manifest
         self.log("\nStep 6: Writing generation manifest and validation report...")
@@ -1545,10 +1558,36 @@ def main():
         # Enforce production requirements
         if require_real_physics and not isaac_sim_available:
             if allow_mock_data:
-                print("\n[EPISODE-GEN-JOB] ========================================")
-                print("[EPISODE-GEN-JOB] WARNING: ALLOW_MOCK_DATA override active")
-                print("[EPISODE-GEN-JOB] Proceeding with mock data despite production mode")
-                print("[EPISODE-GEN-JOB] ========================================\n")
+                print("\n" + "=" * 80)
+                print("⚠️  CRITICAL WARNING: ALLOW_MOCK_DATA OVERRIDE ACTIVE")
+                print("=" * 80)
+                print("")
+                print("You are running in PRODUCTION mode with MOCK DATA.")
+                print("This will generate:")
+                print("  - Random noise RGB images (NOT real sensor data)")
+                print("  - Heuristic-based validation (NOT physics-verified)")
+                print("  - Mock contact/collision data (NOT accurate)")
+                print("")
+                print("This data is NOT suitable for:")
+                print("  - Training production ML models")
+                print("  - Selling as training data")
+                print("  - Real-world robot deployment")
+                print("")
+                print("To disable this override and enforce real physics:")
+                print("  unset ALLOW_MOCK_DATA")
+                print("  OR set ALLOW_MOCK_DATA=false")
+                print("")
+                print("=" * 80 + "\n")
+
+                # Log to a file for audit trail
+                audit_log = Path("/tmp/mock_data_usage.log")
+                try:
+                    with open(audit_log, "a") as f:
+                        from datetime import datetime
+                        f.write(f"{datetime.utcnow().isoformat()}Z - MOCK DATA USED IN PRODUCTION - Scene: {scene_id}\n")
+                except Exception:
+                    pass  # Don't fail the job if we can't write the audit log
+
             else:
                 print("\n" + "=" * 70)
                 print("FATAL ERROR: Isaac Sim not available in production mode")
@@ -1594,21 +1633,71 @@ def main():
     assets_prefix = os.getenv("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
     episodes_prefix = os.getenv("EPISODES_PREFIX", f"scenes/{scene_id}/episodes")
 
-    # Configuration
+    # Configuration with validation
     robot_type = os.getenv("ROBOT_TYPE", "franka")
-    episodes_per_variation = int(os.getenv("EPISODES_PER_VARIATION", "10"))
+
+    try:
+        episodes_per_variation = int(os.getenv("EPISODES_PER_VARIATION", "10"))
+        if episodes_per_variation <= 0:
+            raise ValueError("EPISODES_PER_VARIATION must be positive")
+    except ValueError as e:
+        print(f"[EPISODE-GEN-JOB] ERROR: Invalid EPISODES_PER_VARIATION: {e}")
+        sys.exit(1)
+
     max_variations = os.getenv("MAX_VARIATIONS")
-    max_variations = int(max_variations) if max_variations else None
-    fps = float(os.getenv("FPS", "30"))
+    if max_variations:
+        try:
+            max_variations = int(max_variations)
+            if max_variations <= 0:
+                raise ValueError("MAX_VARIATIONS must be positive")
+        except ValueError as e:
+            print(f"[EPISODE-GEN-JOB] ERROR: Invalid MAX_VARIATIONS: {e}")
+            sys.exit(1)
+    else:
+        max_variations = None
+
+    try:
+        fps = float(os.getenv("FPS", "30"))
+        if fps <= 0 or fps > 240:
+            raise ValueError("FPS must be between 0 and 240")
+    except ValueError as e:
+        print(f"[EPISODE-GEN-JOB] ERROR: Invalid FPS: {e}")
+        sys.exit(1)
+
     use_llm = os.getenv("USE_LLM", "true").lower() == "true"
     use_cpgen = os.getenv("USE_CPGEN", "true").lower() == "true"
-    min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
+
+    try:
+        min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
+        if not (0.0 <= min_quality_score <= 1.0):
+            raise ValueError("MIN_QUALITY_SCORE must be between 0.0 and 1.0")
+    except ValueError as e:
+        print(f"[EPISODE-GEN-JOB] ERROR: Invalid MIN_QUALITY_SCORE: {e}")
+        sys.exit(1)
 
     # Data pack configuration (Core/Plus/Full)
     data_pack_tier = os.getenv("DATA_PACK_TIER", "core")
-    num_cameras = int(os.getenv("NUM_CAMERAS", "1"))
+
+    try:
+        num_cameras = int(os.getenv("NUM_CAMERAS", "1"))
+        if num_cameras < 1 or num_cameras > 8:
+            raise ValueError("NUM_CAMERAS must be between 1 and 8")
+    except ValueError as e:
+        print(f"[EPISODE-GEN-JOB] ERROR: Invalid NUM_CAMERAS: {e}")
+        sys.exit(1)
+
     resolution_str = os.getenv("IMAGE_RESOLUTION", "640,480")
-    image_resolution = tuple(map(int, resolution_str.split(",")))
+    try:
+        resolution_parts = resolution_str.split(",")
+        if len(resolution_parts) != 2:
+            raise ValueError("IMAGE_RESOLUTION must be in format 'width,height'")
+        image_resolution = tuple(map(int, resolution_parts))
+        if image_resolution[0] <= 0 or image_resolution[1] <= 0:
+            raise ValueError("IMAGE_RESOLUTION dimensions must be positive")
+    except (ValueError, TypeError) as e:
+        print(f"[EPISODE-GEN-JOB] ERROR: Invalid IMAGE_RESOLUTION: {e}")
+        sys.exit(1)
+
     capture_sensor_data = os.getenv("CAPTURE_SENSOR_DATA", "true").lower() == "true"
     use_mock_capture = os.getenv("USE_MOCK_CAPTURE", "false").lower() == "true"
 
