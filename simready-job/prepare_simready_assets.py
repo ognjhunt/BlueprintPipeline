@@ -19,6 +19,14 @@ import numpy as np
 from PIL import Image  # type: ignore
 from tools.asset_catalog import AssetCatalogClient
 
+# Secret Manager for secure API key storage
+try:
+    from tools.secrets import get_secret_or_env, SecretIds
+    HAVE_SECRET_MANAGER = True
+except ImportError:  # pragma: no cover
+    HAVE_SECRET_MANAGER = False
+    print("[SIMREADY] WARNING: Secret Manager not available - using env vars only", file=sys.stderr)
+
 try:
     # Google GenAI SDK for Gemini 3.x
     from google import genai
@@ -1572,7 +1580,20 @@ def prepare_simready_assets_job(
 
     client = None
     if have_gemini():
-        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
+        if HAVE_SECRET_MANAGER:
+            try:
+                gemini_api_key = get_secret_or_env(
+                    SecretIds.GEMINI_API_KEY,
+                    env_var="GEMINI_API_KEY"
+                )
+            except Exception as e:
+                print(f"[SIMREADY] WARNING: Secret Manager unavailable, falling back to env var: {e}", file=sys.stderr)
+                gemini_api_key = os.environ.get("GEMINI_API_KEY")
+        else:
+            gemini_api_key = os.environ.get("GEMINI_API_KEY")
+
+        client = genai.Client(api_key=gemini_api_key)
         print("[SIMREADY] Gemini client initialized")
     else:
         print(
