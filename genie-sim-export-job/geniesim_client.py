@@ -199,6 +199,53 @@ class GenieSimJobNotFoundError(GenieSimAPIError):
     pass
 
 
+# =============================================================================
+# Security Utilities
+# =============================================================================
+
+
+def safe_extract_tar(archive_path: Path, output_dir: Path) -> None:
+    """
+    Safely extract tarfile with path traversal protection.
+
+    This function prevents malicious archives from extracting files outside
+    the intended output directory (CWE-22: Path Traversal).
+
+    Args:
+        archive_path: Path to tar.gz archive
+        output_dir: Directory to extract to
+
+    Raises:
+        ValueError: If path traversal is detected
+        tarfile.TarError: If archive is corrupted
+    """
+    import tarfile
+
+    output_dir = Path(output_dir).resolve()
+
+    with tarfile.open(archive_path, "r:gz") as tar:
+        for member in tar.getmembers():
+            # Normalize the member path
+            member_path = (output_dir / member.name).resolve()
+
+            # Check if extracted path would be outside output_dir
+            try:
+                member_path.relative_to(output_dir)
+            except ValueError:
+                raise ValueError(
+                    f"Path traversal detected in archive: {member.name}"
+                )
+
+            # Check for absolute paths or parent directory references
+            if member.name.startswith('/') or member.name.startswith('..'):
+                raise ValueError(
+                    f"Suspicious path in archive: {member.name}"
+                )
+
+        # All members validated - safe to extract
+        tar.extractall(output_dir)
+
+
 class GenieSimClient:
     """
     Client for Genie Sim 3.0 API.
@@ -866,12 +913,9 @@ class GenieSimClient:
 
             logger.info(f"Downloaded {total_size / 1024 / 1024:.1f} MB")
 
-            # Extract archive
+            # Extract archive with path traversal protection
             logger.info("Extracting episodes...")
-            import tarfile
-
-            with tarfile.open(archive_path, "r:gz") as tar:
-                tar.extractall(output_dir)
+            safe_extract_tar(archive_path, output_dir)
 
             # Load manifest
             manifest_path = output_dir / "manifest.json"
