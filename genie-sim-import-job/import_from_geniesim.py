@@ -247,6 +247,163 @@ class ImportedEpisodeValidator:
 
 
 # =============================================================================
+# LeRobot Conversion
+# =============================================================================
+
+
+def convert_to_lerobot(
+    episodes_dir: Path,
+    output_dir: Path,
+    episode_metadata_list: List[GeneratedEpisodeMetadata],
+    min_quality_score: float = 0.7,
+) -> Dict[str, Any]:
+    """
+    Convert Genie Sim episodes to LeRobot format.
+
+    This implements the conversion from Genie Sim's native format to
+    LeRobot's Parquet-based format with proper metadata standardization
+    and quality metrics calculation.
+
+    Args:
+        episodes_dir: Directory containing episode .parquet files
+        output_dir: Output directory for LeRobot dataset
+        episode_metadata_list: List of episode metadata from Genie Sim
+        min_quality_score: Minimum quality score for inclusion
+
+    Returns:
+        Dict with conversion statistics
+    """
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError:
+        raise ImportError("PyArrow is required for LeRobot conversion: pip install pyarrow")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Track conversion statistics
+    converted_count = 0
+    skipped_count = 0
+    total_frames = 0
+
+    # LeRobot dataset metadata
+    dataset_info = {
+        "dataset_type": "lerobot",
+        "format_version": "1.0",
+        "episodes": [],
+        "total_frames": 0,
+        "average_quality_score": 0.0,
+        "source": "genie_sim",
+        "converted_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    quality_scores = []
+
+    for ep_metadata in episode_metadata_list:
+        # Skip low-quality episodes
+        if ep_metadata.quality_score < min_quality_score:
+            skipped_count += 1
+            continue
+
+        episode_file = episodes_dir / f"{ep_metadata.episode_id}.parquet"
+        if not episode_file.exists():
+            skipped_count += 1
+            continue
+
+        try:
+            # Read Genie Sim episode
+            table = pq.read_table(episode_file)
+            df = table.to_pandas()
+
+            # Convert to LeRobot schema
+            # LeRobot expects: observations, actions, rewards, episode metadata
+            lerobot_data = {
+                # Observations (assume RGB images + robot state)
+                "observation.image": df.get("rgb_image", df.get("image", [])),
+                "observation.state": df.get("robot_state", []),
+
+                # Actions (joint positions/velocities)
+                "action": df.get("action", df.get("joint_positions", [])),
+
+                # Episode metadata
+                "episode_index": [converted_count] * len(df),
+                "frame_index": list(range(len(df))),
+                "timestamp": df.get("timestamp", list(range(len(df)))),
+
+                # Quality metrics
+                "quality_score": [ep_metadata.quality_score] * len(df),
+            }
+
+            # Add optional fields if available
+            if "depth_image" in df.columns:
+                lerobot_data["observation.depth"] = df["depth_image"]
+            if "reward" in df.columns:
+                lerobot_data["reward"] = df["reward"]
+            else:
+                # Default reward: 0 for all frames except last (1 if successful)
+                rewards = [0.0] * len(df)
+                if ep_metadata.validation_passed:
+                    rewards[-1] = 1.0
+                lerobot_data["reward"] = rewards
+
+            # Convert to PyArrow table
+            lerobot_table = pa.Table.from_pydict(lerobot_data)
+
+            # Write episode to LeRobot format
+            episode_output = output_dir / f"episode_{converted_count:06d}.parquet"
+            pq.write_table(lerobot_table, episode_output)
+
+            # Update dataset info
+            dataset_info["episodes"].append({
+                "episode_id": ep_metadata.episode_id,
+                "episode_index": converted_count,
+                "num_frames": len(df),
+                "duration_seconds": ep_metadata.duration_seconds,
+                "quality_score": ep_metadata.quality_score,
+                "validation_passed": ep_metadata.validation_passed,
+                "file": str(episode_output.name),
+            })
+
+            converted_count += 1
+            total_frames += len(df)
+            quality_scores.append(ep_metadata.quality_score)
+
+        except Exception as e:
+            print(f"[LEROBOT] Warning: Failed to convert episode {ep_metadata.episode_id}: {e}")
+            skipped_count += 1
+            continue
+
+    # Update dataset statistics
+    dataset_info["total_episodes"] = converted_count
+    dataset_info["total_frames"] = total_frames
+    dataset_info["skipped_episodes"] = skipped_count
+    if quality_scores:
+        dataset_info["average_quality_score"] = float(np.mean(quality_scores))
+        dataset_info["min_quality_score"] = float(np.min(quality_scores))
+        dataset_info["max_quality_score"] = float(np.max(quality_scores))
+
+    # Write dataset metadata
+    metadata_file = output_dir / "dataset_info.json"
+    with open(metadata_file, "w") as f:
+        json.dump(dataset_info, f, indent=2)
+
+    # Write episode index
+    episodes_file = output_dir / "episodes.jsonl"
+    with open(episodes_file, "w") as f:
+        for ep_info in dataset_info["episodes"]:
+            f.write(json.dumps(ep_info) + "\n")
+
+    return {
+        "success": True,
+        "converted_count": converted_count,
+        "skipped_count": skipped_count,
+        "total_frames": total_frames,
+        "output_dir": output_dir,
+        "metadata_file": metadata_file,
+    }
+
+
+# =============================================================================
 # Import Job
 # =============================================================================
 
@@ -387,7 +544,23 @@ def run_import_job(
                 ep.quality_score for ep in download_result.episodes
             ]) if download_result.episodes else 0.0
 
-        # Step 5: Update manifest with import metadata
+        # Step 5: Convert episodes to LeRobot format
+        print(f"[IMPORT] Converting episodes to LeRobot format...")
+        lerobot_dir = config.output_dir / "lerobot"
+        try:
+            convert_result = convert_to_lerobot(
+                episodes_dir=config.output_dir,
+                output_dir=lerobot_dir,
+                episode_metadata_list=download_result.episodes,
+                min_quality_score=config.min_quality_score,
+            )
+            print(f"[IMPORT] ✅ Converted {convert_result['converted_count']} episodes to LeRobot format")
+            print(f"[IMPORT]    Output: {convert_result['output_dir']}\n")
+        except Exception as e:
+            result.warnings.append(f"LeRobot conversion failed: {e}")
+            print(f"[IMPORT] ⚠️  LeRobot conversion failed: {e}\n")
+
+        # Step 6: Update manifest with import metadata
         if result.manifest_path and result.manifest_path.exists():
             with open(result.manifest_path, "r") as f:
                 manifest = json.load(f)
@@ -399,6 +572,7 @@ def run_import_job(
                 "passed_validation": result.episodes_passed_validation,
                 "filtered": result.episodes_filtered,
                 "average_quality_score": result.average_quality_score,
+                "lerobot_converted": convert_result.get('converted_count', 0) if 'convert_result' in locals() else 0,
             }
 
             with open(result.manifest_path, "w") as f:
