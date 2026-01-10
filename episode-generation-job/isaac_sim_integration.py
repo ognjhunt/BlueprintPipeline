@@ -42,6 +42,7 @@ Usage:
 import logging
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -285,6 +286,7 @@ class PhysicsSimulator:
         dt: float = 1.0 / 60.0,
         substeps: int = 4,
         verbose: bool = True,
+        physics_timeout: float = 10.0,
     ):
         """
         Initialize physics simulator.
@@ -293,10 +295,12 @@ class PhysicsSimulator:
             dt: Physics timestep (default 1/60s = 60 Hz)
             substeps: Number of physics substeps per step
             verbose: Print debug info
+            physics_timeout: Timeout for physics operations in seconds (default: 10.0)
         """
         self.dt = dt
         self.substeps = substeps
         self.verbose = verbose
+        self.physics_timeout = physics_timeout
 
         self._simulation_time = 0.0
         self._step_count = 0
@@ -342,6 +346,7 @@ class PhysicsSimulator:
             self._state = SimulationState.STOPPED
             return True
 
+        stage = None
         try:
             import omni.usd
             from omni.isaac.core import World
@@ -353,7 +358,8 @@ class PhysicsSimulator:
 
             # Load scene
             omni.usd.get_context().open_stage(scene_path)
-            self._stage = omni.usd.get_context().get_stage()
+            stage = omni.usd.get_context().get_stage()
+            self._stage = stage
 
             # Get physics context
             from omni.physx import get_physx_interface
@@ -368,6 +374,18 @@ class PhysicsSimulator:
 
         except Exception as e:
             self.log(f"Failed to load scene: {e}", "ERROR")
+            logger.error(f"Scene loading failed: {e}", exc_info=True)
+
+            # Clean up resources on failure
+            if stage is not None:
+                try:
+                    import omni.usd
+                    omni.usd.get_context().close_stage()
+                except Exception as cleanup_error:
+                    self.log(f"Failed to cleanup stage after error: {cleanup_error}", "WARNING")
+
+            self._stage = None
+            self._physics_context = None
             self._state = SimulationState.ERROR
             return False
 
@@ -428,8 +446,9 @@ class PhysicsSimulator:
                 world = World.instance()
                 if world:
                     world.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"Failed to stop physics simulation: {e}", "WARNING")
+                logger.warning(f"Physics simulation stop failed: {e}", exc_info=True)
 
         self._state = SimulationState.STOPPED
         self.log("Simulation stopped")
@@ -442,8 +461,9 @@ class PhysicsSimulator:
                 world = World.instance()
                 if world:
                     world.pause()
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"Failed to pause physics simulation: {e}", "WARNING")
+                logger.warning(f"Physics simulation pause failed: {e}", exc_info=True)
 
         self._state = SimulationState.PAUSED
 
@@ -487,10 +507,10 @@ class PhysicsSimulator:
                 result.error_message = "World not initialized"
                 return result
 
-            # GAP-EH-005 FIX: Step physics with timeout (10s default)
+            # GAP-EH-005 FIX: Step physics with configurable timeout
             if HAVE_TIMEOUT_TOOLS:
                 try:
-                    with timeout(10.0, "Physics step timed out after 10s"):
+                    with timeout(self.physics_timeout, f"Physics step timed out after {self.physics_timeout}s"):
                         world.step(render=False)
                 except CustomTimeoutError as e:
                     result.success = False
@@ -499,6 +519,7 @@ class PhysicsSimulator:
                     return result
             else:
                 # No timeout protection available - fall back to direct call
+                logger.warning("Timeout tools not available - physics step may hang")
                 world.step(render=False)
 
             # Get contacts
@@ -901,6 +922,7 @@ class IsaacSimSession:
     """
 
     _instance: Optional["IsaacSimSession"] = None
+    _lock = threading.Lock()  # Thread-safe singleton lock
 
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
@@ -913,9 +935,12 @@ class IsaacSimSession:
 
     @classmethod
     def get_instance(cls) -> "IsaacSimSession":
-        """Get or create the singleton session instance."""
+        """Get or create the singleton session instance (thread-safe)."""
+        # Double-checked locking pattern for thread safety
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     def log(self, msg: str, level: str = "INFO") -> None:
