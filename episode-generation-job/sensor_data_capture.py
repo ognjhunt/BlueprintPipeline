@@ -81,6 +81,19 @@ class DataPackTier(Enum):
     FULL = "full"  # Plus + poses + contacts + privileged state
 
 
+class SensorDataCaptureMode(Enum):
+    """
+    Sensor data capture mode - controls Isaac Sim enforcement.
+
+    This enum makes it EXPLICIT whether we're capturing real data or mock data,
+    preventing silent degradation to unusable training data.
+    """
+
+    ISAAC_SIM = "isaac_sim"           # Full quality (production) - requires Isaac Sim
+    MOCK_DEV = "mock_dev"             # Explicit dev mode - allows mock data with warnings
+    FAIL_CLOSED = "fail_closed"       # Error if no Isaac Sim (default for production)
+
+
 @dataclass
 class CameraCalibration:
     """
@@ -1585,6 +1598,24 @@ class SensorDataExporter:
 # =============================================================================
 
 
+def get_capture_mode_from_env() -> SensorDataCaptureMode:
+    """
+    Get sensor capture mode from environment variable.
+
+    Returns fail-closed by default for production safety.
+
+    Environment variable: SENSOR_CAPTURE_MODE
+    Values: isaac_sim | mock_dev | fail_closed (default)
+    """
+    mode_str = os.getenv("SENSOR_CAPTURE_MODE", "fail_closed").lower()
+
+    try:
+        return SensorDataCaptureMode(mode_str)
+    except ValueError:
+        print(f"[WARNING] Invalid SENSOR_CAPTURE_MODE='{mode_str}', defaulting to fail_closed")
+        return SensorDataCaptureMode.FAIL_CLOSED
+
+
 def create_sensor_capture(
     data_pack: Union[str, DataPackTier] = DataPackTier.CORE,
     num_cameras: int = 1,
@@ -1592,30 +1623,33 @@ def create_sensor_capture(
     fps: float = 30.0,
     use_mock: bool = False,
     require_real: bool = False,
+    capture_mode: Optional[SensorDataCaptureMode] = None,
     verbose: bool = True,
 ) -> IsaacSimSensorCapture:
     """
-    Create a sensor capture instance with automatic fallback.
+    Create a sensor capture instance with explicit mode control.
 
     This factory function creates the appropriate sensor capture based on
-    the runtime environment:
-    - If running inside Isaac Sim: Creates real IsaacSimSensorCapture
-    - If running outside Isaac Sim: Creates MockSensorCapture (unless require_real=True)
+    the specified capture mode:
+    - ISAAC_SIM: Requires real Isaac Sim (fails if unavailable)
+    - MOCK_DEV: Allows mock capture with prominent warnings
+    - FAIL_CLOSED: Default - fails if Isaac Sim unavailable (production safe)
 
     Args:
         data_pack: Data pack tier ("core", "plus", "full") or DataPackTier enum
         num_cameras: Number of cameras to configure
         resolution: Image resolution (width, height)
         fps: Frames per second
-        use_mock: Force mock capture (for testing)
-        require_real: Raise error if real capture unavailable (for production)
+        use_mock: [DEPRECATED] Force mock capture (use capture_mode=MOCK_DEV instead)
+        require_real: [DEPRECATED] Require real (use capture_mode=ISAAC_SIM instead)
+        capture_mode: Explicit capture mode (recommended over use_mock/require_real)
         verbose: Print progress
 
     Returns:
         Configured sensor capture instance (real or mock)
 
     Raises:
-        RuntimeError: If require_real=True but Isaac Sim is not available
+        RuntimeError: If Isaac Sim required but not available
     """
     if isinstance(data_pack, str):
         data_pack = DataPackTier(data_pack.lower())
@@ -1627,47 +1661,111 @@ def create_sensor_capture(
         fps=fps,
     )
 
-    # User explicitly requested mock
-    if use_mock:
-        if verbose:
-            print("[SENSOR-CAPTURE] Using MockSensorCapture (explicitly requested)")
-        capture = MockSensorCapture(config, verbose=verbose)
-        capture.initialize()
-        return capture
+    # Determine capture mode (prioritize new explicit mode)
+    if capture_mode is None:
+        # Legacy parameter support
+        if use_mock:
+            capture_mode = SensorDataCaptureMode.MOCK_DEV
+        elif require_real:
+            capture_mode = SensorDataCaptureMode.ISAAC_SIM
+        else:
+            # Default: fail-closed (production safe)
+            capture_mode = get_capture_mode_from_env()
 
     # Check if Isaac Sim is available
     isaac_available = is_isaac_sim_available()
 
-    if isaac_available:
-        # Try real capture
-        capture = IsaacSimSensorCapture(config, verbose=verbose)
-        if capture.initialize():
-            return capture
-        else:
-            # Initialization failed
-            if require_real:
-                raise RuntimeError(
-                    "Isaac Sim sensor capture initialization failed. "
-                    "Ensure Isaac Sim is running with Replicator extension."
-                )
-            # Fall back to mock
-            if verbose:
-                print("[SENSOR-CAPTURE] [WARNING] Real capture init failed, falling back to mock")
-            capture = MockSensorCapture(config, verbose=verbose)
-            capture.initialize()
-            return capture
-    else:
-        # Isaac Sim not available
-        if require_real:
+    # Handle each mode
+    if capture_mode == SensorDataCaptureMode.ISAAC_SIM:
+        # Production mode - MUST have Isaac Sim
+        if not isaac_available:
             raise RuntimeError(
-                "Isaac Sim is not available but require_real=True.\n"
-                "Run with: /isaac-sim/python.sh your_script.py\n"
-                "Or set require_real=False to allow mock capture."
+                "╔══════════════════════════════════════════════════════════════════════════════╗\n"
+                "║                   ❌  ISAAC SIM REQUIRED (Production Mode)                   ║\n"
+                "╠══════════════════════════════════════════════════════════════════════════════╣\n"
+                "║  Capture mode: ISAAC_SIM (production quality)                                ║\n"
+                "║  Status: Isaac Sim NOT available                                             ║\n"
+                "║                                                                              ║\n"
+                "║  This mode requires Isaac Sim for real physics and sensor data.              ║\n"
+                "║  Mock data is NOT suitable for training robots.                              ║\n"
+                "║                                                                              ║\n"
+                "║  To run with Isaac Sim:                                                      ║\n"
+                "║    /isaac-sim/python.sh your_script.py                                       ║\n"
+                "║                                                                              ║\n"
+                "║  To allow mock data (development only):                                      ║\n"
+                "║    export SENSOR_CAPTURE_MODE=mock_dev                                       ║\n"
+                "╚══════════════════════════════════════════════════════════════════════════════╝"
             )
-        # Fall back to mock (warning shown by MockSensorCapture.initialize)
+        # Try to initialize real capture
+        capture = IsaacSimSensorCapture(config, verbose=verbose)
+        if not capture.initialize():
+            raise RuntimeError(
+                "Isaac Sim sensor capture initialization failed. "
+                "Ensure Isaac Sim is running with Replicator extension."
+            )
+        if verbose:
+            print("[SENSOR-CAPTURE] ✅ Using IsaacSimSensorCapture (production quality)")
+        return capture
+
+    elif capture_mode == SensorDataCaptureMode.MOCK_DEV:
+        # Development mode - explicitly allow mock
+        if not isaac_available:
+            print("\n" + "=" * 80)
+            print("⚠️  WARNING: MOCK DATA MODE (Development Only)")
+            print("=" * 80)
+            print("Isaac Sim is not available. Using mock sensor data.")
+            print("Mock data includes:")
+            print("  - Random noise RGB images (NOT real sensor data)")
+            print("  - Placeholder depth maps")
+            print("  - No real physics validation")
+            print("")
+            print("This data is NOT suitable for:")
+            print("  - Training production ML models")
+            print("  - Selling as training data")
+            print("  - Real-world robot deployment")
+            print("")
+            print("To use real Isaac Sim:")
+            print("  /isaac-sim/python.sh your_script.py")
+            print("=" * 80 + "\n")
         capture = MockSensorCapture(config, verbose=verbose)
         capture.initialize()
+        if verbose:
+            print("[SENSOR-CAPTURE] ⚠️  Using MockSensorCapture (development only)")
         return capture
+
+    elif capture_mode == SensorDataCaptureMode.FAIL_CLOSED:
+        # Fail-closed mode - require Isaac Sim unless explicitly overridden
+        if not isaac_available:
+            raise RuntimeError(
+                "╔══════════════════════════════════════════════════════════════════════════════╗\n"
+                "║                   ❌  ISAAC SIM REQUIRED (Fail-Closed Mode)                  ║\n"
+                "╠══════════════════════════════════════════════════════════════════════════════╣\n"
+                "║  Capture mode: FAIL_CLOSED (default production safe)                         ║\n"
+                "║  Status: Isaac Sim NOT available                                             ║\n"
+                "║                                                                              ║\n"
+                "║  This mode prevents accidental generation of unusable training data.         ║\n"
+                "║  Isaac Sim is required for production-quality episodes.                      ║\n"
+                "║                                                                              ║\n"
+                "║  To run with Isaac Sim:                                                      ║\n"
+                "║    /isaac-sim/python.sh your_script.py                                       ║\n"
+                "║                                                                              ║\n"
+                "║  For development/testing (allows mock data):                                 ║\n"
+                "║    export SENSOR_CAPTURE_MODE=mock_dev                                       ║\n"
+                "╚══════════════════════════════════════════════════════════════════════════════╝"
+            )
+        # Isaac Sim available - use it
+        capture = IsaacSimSensorCapture(config, verbose=verbose)
+        if not capture.initialize():
+            raise RuntimeError(
+                "Isaac Sim sensor capture initialization failed. "
+                "Ensure Isaac Sim is running with Replicator extension."
+            )
+        if verbose:
+            print("[SENSOR-CAPTURE] ✅ Using IsaacSimSensorCapture (fail-closed mode)")
+        return capture
+
+    else:
+        raise ValueError(f"Unknown capture mode: {capture_mode}")
 
 
 def require_isaac_sim_or_fail() -> None:
