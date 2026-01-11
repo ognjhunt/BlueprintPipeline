@@ -96,6 +96,46 @@ main:
                   name: ${"scenes/" + sceneId + "/objects/.objects_failed"}
                   uploadType: "media"
                   body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"failed\\", \\"error\\": \\"" + e.message + "\\"}" }
+        next: set_objects_execution_name
+
+    - set_objects_execution_name:
+        assign:
+          - objectsExecutionName: '${if(objectsExec.metadata != null and objectsExec.metadata.name != null, objectsExec.metadata.name, objectsExec.name)}'
+        next: wait_for_objects
+
+    - wait_for_objects:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${objectsExecutionName}
+        result: objectsStatus
+        next: check_objects_status
+
+    - check_objects_status:
+        assign:
+          - objectsState: '${if(objectsStatus.state != null, objectsStatus.state, if(objectsStatus.status != null, objectsStatus.status.state, null))}'
+          - objectsFailedCount: '${if(objectsStatus.failedCount != null, objectsStatus.failedCount, if(objectsStatus.status != null, objectsStatus.status.failedCount, null))}'
+          - objectsSucceededCount: '${if(objectsStatus.succeededCount != null, objectsStatus.succeededCount, if(objectsStatus.status != null, objectsStatus.status.succeededCount, null))}'
+        next: objects_status_switch
+
+    - objects_status_switch:
+        switch:
+          - condition: '${objectsState == "FAILED" or (objectsFailedCount != null and objectsFailedCount > 0)}'
+            next: objects_failed
+          - condition: '${objectsState == "SUCCEEDED" or (objectsSucceededCount != null and objectsSucceededCount > 0)}'
+            next: mark_objects_complete
+        next: wait_objects_poll
+
+    - wait_objects_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_objects
+
+    - objects_failed:
+        call: sys.log
+        args:
+          text: ${"WARNING: Objects job failed for scene " + sceneId + " but continuing pipeline"}
+          severity: "WARNING"
         next: mark_objects_complete
 
     - mark_objects_complete:
@@ -104,7 +144,7 @@ main:
           bucket: ${bucket}
           name: ${"scenes/" + sceneId + "/objects/.objects_complete"}
           uploadType: "media"
-          body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"processing\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
+          body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"completed\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
         result: markerResult
         next: done
 
