@@ -13,9 +13,33 @@ service API, enabling bidirectional communication for:
 This completes the missing "import" side of the Genie Sim integration, which
 previously only had export capabilities.
 
+**IMPORTANT: LOCAL FRAMEWORK ALTERNATIVE**
+
+Genie Sim 3.0 is an open-source LOCAL simulation framework, not a hosted API service.
+If you're running the free/default pipeline, use the local framework instead:
+
+    from tools.geniesim_adapter.local_framework import (
+        GenieSimLocalFramework,
+        run_local_data_collection,
+        check_geniesim_availability,
+    )
+
+    # Run data collection locally (no API key required)
+    result = run_local_data_collection(
+        scene_manifest_path=Path("scene_manifest.json"),
+        task_config_path=Path("task_config.json"),
+        output_dir=Path("./output"),
+    )
+
+The local framework runs Genie Sim on your own Isaac Sim installation using gRPC
+for client-server communication. See tools/geniesim_adapter/local_framework.py.
+
+This API client module is preserved for compatibility with any future hosted
+Genie Sim API services.
+
 Environment Variables:
     GENIE_SIM_API_URL: Genie Sim API endpoint (default: https://api.agibot.com/geniesim/v3)
-    GENIE_SIM_API_KEY: API authentication key (required)
+    GENIE_SIM_API_KEY: API authentication key (required for hosted API)
     GENIE_SIM_TIMEOUT: Request timeout in seconds (default: 300)
     GENIE_SIM_MAX_RETRIES: Maximum retries for failed requests (default: 3)
 """
@@ -100,8 +124,8 @@ class GenerationParams:
     use_isaac_sim: bool = True  # Use Isaac Sim rendering
     backend: str = GenerationBackend.HYBRID.value
 
-    # Quality settings
-    min_quality_score: float = 0.7
+    # Quality settings - LABS-BLOCKER-002 FIX: Raised from 0.7 to 0.85
+    min_quality_score: float = 0.85
     enable_validation: bool = True
     filter_failed_episodes: bool = True
 

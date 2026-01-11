@@ -79,8 +79,8 @@ class ImportConfig:
     # Output
     output_dir: Path
 
-    # Quality filtering
-    min_quality_score: float = 0.7
+    # Quality filtering - LABS-BLOCKER-002 FIX: Raised from 0.7 to 0.85
+    min_quality_score: float = 0.85
     enable_validation: bool = True
     filter_low_quality: bool = True
 
@@ -125,7 +125,7 @@ class ImportResult:
 class ImportedEpisodeValidator:
     """Validates imported episodes from Genie Sim."""
 
-    def __init__(self, min_quality_score: float = 0.7):
+    def __init__(self, min_quality_score: float = 0.85):  # LABS-BLOCKER-002 FIX
         """
         Initialize validator.
 
@@ -325,7 +325,7 @@ def convert_to_lerobot(
     episodes_dir: Path,
     output_dir: Path,
     episode_metadata_list: List[GeneratedEpisodeMetadata],
-    min_quality_score: float = 0.7,
+    min_quality_score: float = 0.85,  # LABS-BLOCKER-002 FIX
 ) -> Dict[str, Any]:
     """
     Convert Genie Sim episodes to LeRobot format.
@@ -769,7 +769,8 @@ def main():
     output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
 
     # Quality configuration
-    min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
+    # LABS-BLOCKER-002 FIX: Default raised from 0.7 to 0.85
+    min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
     enable_validation = os.getenv("ENABLE_VALIDATION", "true").lower() == "true"
     filter_low_quality = os.getenv("FILTER_LOW_QUALITY", "true").lower() == "true"
 
