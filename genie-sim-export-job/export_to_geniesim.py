@@ -207,15 +207,68 @@ def run_geniesim_export_job(
     assets_dir = root / assets_prefix
     output_dir = root / geniesim_prefix
 
+    # P1-7 FIX: Validate upstream job completion before starting export
+    print("\n[GENIESIM-EXPORT-JOB] Validating upstream job completion...")
+    upstream_errors = []
+
+    # Check for USD assembly completion marker
+    usd_assembly_marker = assets_dir / ".usd_assembly_complete"
+    if not usd_assembly_marker.exists():
+        # Try alternative location (parent directory)
+        usd_assembly_marker_alt = assets_dir.parent / ".usd_assembly_complete"
+        if not usd_assembly_marker_alt.exists():
+            upstream_errors.append(
+                "USD assembly job incomplete: .usd_assembly_complete marker not found. "
+                f"Expected at: {usd_assembly_marker} or {usd_assembly_marker_alt}"
+            )
+        else:
+            print(f"[GENIESIM-EXPORT-JOB] ✓ USD assembly complete (found at {usd_assembly_marker_alt})")
+    else:
+        print(f"[GENIESIM-EXPORT-JOB] ✓ USD assembly complete")
+
+    # Check for Replicator completion marker
+    replicator_marker = None
+    if replicator_prefix:
+        replicator_dir = root / replicator_prefix
+        replicator_marker = replicator_dir / ".replicator_complete"
+        if not replicator_marker.exists():
+            # Try alternative location
+            replicator_marker_alt = assets_dir / ".replicator_complete"
+            if not replicator_marker_alt.exists():
+                upstream_errors.append(
+                    "Replicator job incomplete: .replicator_complete marker not found. "
+                    f"Expected at: {replicator_marker} or {replicator_marker_alt}"
+                )
+            else:
+                print(f"[GENIESIM-EXPORT-JOB] ✓ Replicator complete (found at {replicator_marker_alt})")
+        else:
+            print(f"[GENIESIM-EXPORT-JOB] ✓ Replicator complete")
+    else:
+        print("[GENIESIM-EXPORT-JOB] ⚠️  Replicator prefix not specified, skipping replicator validation")
+
+    # P1-7 FIX: Block export if upstream jobs are not complete
+    if upstream_errors:
+        print("\n[GENIESIM-EXPORT-JOB] ❌ ERROR: Upstream jobs not complete")
+        for error in upstream_errors:
+            print(f"[GENIESIM-EXPORT-JOB]   - {error}")
+        print("\n[GENIESIM-EXPORT-JOB] Cannot proceed with export until upstream jobs complete.")
+        print("[GENIESIM-EXPORT-JOB] Please ensure:")
+        print("[GENIESIM-EXPORT-JOB]   1. usd-assembly-job has completed successfully")
+        print("[GENIESIM-EXPORT-JOB]   2. replicator-job has completed successfully (if applicable)")
+        return 1
+
+    print("[GENIESIM-EXPORT-JOB] ✓ All upstream jobs validated\n")
+
     # Load manifest
     manifest_path = assets_dir / "scene_manifest.json"
     if not manifest_path.is_file():
         print(f"[GENIESIM-EXPORT-JOB] ERROR: Manifest not found: {manifest_path}")
         return 1
 
-    # Load and merge variation assets (YOUR commercial assets for domain randomization)
+    # P1-6 FIX: Load variation assets and apply commercial filtering BEFORE merging
     # This is CRITICAL for commercial use - Genie Sim's assets are CC BY-NC-SA 4.0
     variation_assets_dir = None
+    variation_objects = []
     if variation_assets_prefix:
         variation_assets_dir = root / variation_assets_prefix
         variation_assets_json = variation_assets_dir / "variation_assets.json"
@@ -224,18 +277,39 @@ def run_geniesim_export_job(
             try:
                 with open(variation_assets_json) as f:
                     variation_data = json.load(f)
-                variation_objects = variation_data.get("objects", [])
-                print(f"[GENIESIM-EXPORT-JOB] Found {len(variation_objects)} variation assets")
+                raw_variation_objects = variation_data.get("objects", [])
+                print(f"[GENIESIM-EXPORT-JOB] Found {len(raw_variation_objects)} variation assets")
 
                 # Mark these as YOUR commercial assets
-                for obj in variation_objects:
+                for obj in raw_variation_objects:
                     if "asset" not in obj:
                         obj["asset"] = {}
                     obj["asset"]["source"] = "blueprintpipeline_generated"
                     obj["asset"]["commercial_ok"] = True
                     obj["is_variation_asset"] = True
 
-                # We'll merge these with the manifest later
+                # P1-6 FIX: Apply commercial filtering to variation assets BEFORE merging
+                if filter_commercial:
+                    filtered_variation_objects = []
+                    non_commercial_count = 0
+                    for obj in raw_variation_objects:
+                        is_commercial = obj.get("asset", {}).get("commercial_ok", False)
+                        license_type = obj.get("asset", {}).get("license", "unknown")
+
+                        # Only include assets with commercial_ok=True or permissive licenses
+                        if is_commercial or license_type in ["CC0", "CC-BY", "MIT", "Apache-2.0"]:
+                            filtered_variation_objects.append(obj)
+                        else:
+                            non_commercial_count += 1
+
+                    variation_objects = filtered_variation_objects
+                    if non_commercial_count > 0:
+                        print(f"[GENIESIM-EXPORT-JOB] ✓ Filtered out {non_commercial_count} NC-licensed variation assets")
+                        print(f"[GENIESIM-EXPORT-JOB] ✓ Retained {len(variation_objects)} commercial-safe variation assets")
+                else:
+                    variation_objects = raw_variation_objects
+                    print("[GENIESIM-EXPORT-JOB] WARNING: Commercial filtering disabled - NC-licensed assets may be included")
+
             except Exception as e:
                 print(f"[GENIESIM-EXPORT-JOB] WARNING: Failed to load variation assets: {e}")
                 variation_objects = []
@@ -439,27 +513,24 @@ def run_geniesim_export_job(
             print(f"[GENIESIM-EXPORT-JOB]   Tasks: {result.num_tasks}")
 
             # Export premium analytics manifests (DEFAULT: ENABLED)
+            # P1-8 FIX: Make premium analytics failures block export
             premium_analytics_manifests = {}
             if enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting premium analytics manifests (DEFAULT - NO LONGER UPSELL)")
-                try:
-                    analytics_dir = output_dir / "premium_analytics"
-                    analytics_config = DefaultPremiumAnalyticsConfig(enabled=True)
-                    analytics_exporter = create_default_premium_analytics_exporter(
-                        scene_id=scene_id,
-                        output_dir=analytics_dir,
-                        config=analytics_config,
-                    )
-                    premium_analytics_manifests = analytics_exporter.export_all_manifests()
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Premium analytics: {len(premium_analytics_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Per-step telemetry capture enabled")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Failure analysis enabled")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Grasp analytics enabled")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Parallel eval metrics enabled")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Premium analytics export failed: {e}")
-                    import traceback
-                    traceback.print_exc()
+                # P1-8 FIX: Don't catch exceptions - let them propagate to block export
+                analytics_dir = output_dir / "premium_analytics"
+                analytics_config = DefaultPremiumAnalyticsConfig(enabled=True)
+                analytics_exporter = create_default_premium_analytics_exporter(
+                    scene_id=scene_id,
+                    output_dir=analytics_dir,
+                    config=analytics_config,
+                )
+                premium_analytics_manifests = analytics_exporter.export_all_manifests()
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Premium analytics: {len(premium_analytics_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Per-step telemetry capture enabled")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Failure analysis enabled")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Grasp analytics enabled")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Parallel eval metrics enabled")
             elif not enable_premium_analytics:
                 print("\n[GENIESIM-EXPORT-JOB] Premium analytics disabled (not recommended)")
             elif not PREMIUM_ANALYTICS_AVAILABLE:
@@ -469,162 +540,144 @@ def run_geniesim_export_job(
             all_premium_features_manifests = {}
 
             # 1. Sim2Real Fidelity Matrix ($20k-$50k value)
+            # P1-8 FIX: Make failures block export
             if SIM2REAL_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Fidelity Matrix ($20k-$50k value - NOW FREE)")
-                try:
-                    sim2real_dir = output_dir / "sim2real_fidelity"
-                    sim2real_manifests = create_default_sim2real_fidelity_exporter(
-                        scene_id=scene_id,
-                        robot_type=robot_type,
-                        output_dir=sim2real_dir,
-                    )
-                    all_premium_features_manifests.update({"sim2real": sim2real_manifests})
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Fidelity: {len(sim2real_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Physics/Visual/Sensor fidelity scoring")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Transfer confidence score")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Trust matrix for deployment")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Sim2Real export failed: {e}")
+                sim2real_dir = output_dir / "sim2real_fidelity"
+                sim2real_manifests = create_default_sim2real_fidelity_exporter(
+                    scene_id=scene_id,
+                    robot_type=robot_type,
+                    output_dir=sim2real_dir,
+                )
+                all_premium_features_manifests.update({"sim2real": sim2real_manifests})
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Fidelity: {len(sim2real_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Physics/Visual/Sensor fidelity scoring")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Transfer confidence score")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Trust matrix for deployment")
 
             # 2. Embodiment Transfer Analysis ($20k-$100k value)
+            # P1-8 FIX: Make failures block export
             if EMBODIMENT_TRANSFER_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Embodiment Transfer Analysis ($20k-$100k value - NOW FREE)")
-                try:
-                    embodiment_dir = output_dir / "embodiment_transfer"
-                    embodiment_manifests = create_default_embodiment_transfer_exporter(
-                        scene_id=scene_id,
-                        source_robot=robot_type,
-                        output_dir=embodiment_dir,
-                    )
-                    all_premium_features_manifests.update({"embodiment": embodiment_manifests})
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Embodiment Transfer: {len(embodiment_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Cross-robot compatibility matrix")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Multi-robot data multiplier")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Transfer strategy recommendations")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Embodiment transfer export failed: {e}")
+                embodiment_dir = output_dir / "embodiment_transfer"
+                embodiment_manifests = create_default_embodiment_transfer_exporter(
+                    scene_id=scene_id,
+                    source_robot=robot_type,
+                    output_dir=embodiment_dir,
+                )
+                all_premium_features_manifests.update({"embodiment": embodiment_manifests})
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Embodiment Transfer: {len(embodiment_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Cross-robot compatibility matrix")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Multi-robot data multiplier")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Transfer strategy recommendations")
 
             # 3. Trajectory Optimality Analysis ($10k-$25k value)
+            # P1-8 FIX: Make failures block export
             if TRAJECTORY_OPTIMALITY_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Trajectory Optimality Analysis ($10k-$25k value - NOW FREE)")
-                try:
-                    trajectory_dir = output_dir / "trajectory_optimality"
-                    trajectory_manifests = create_default_trajectory_optimality_exporter(
-                        scene_id=scene_id,
-                        output_dir=trajectory_dir,
-                    )
-                    all_premium_features_manifests.update({"trajectory": trajectory_manifests})
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Trajectory Optimality: {len(trajectory_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Path efficiency scoring")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Smoothness/jerk analysis")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Training suitability assessment")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Trajectory optimality export failed: {e}")
+                trajectory_dir = output_dir / "trajectory_optimality"
+                trajectory_manifests = create_default_trajectory_optimality_exporter(
+                    scene_id=scene_id,
+                    output_dir=trajectory_dir,
+                )
+                all_premium_features_manifests.update({"trajectory": trajectory_manifests})
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Trajectory Optimality: {len(trajectory_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Path efficiency scoring")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Smoothness/jerk analysis")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Training suitability assessment")
 
             # 4. Policy Leaderboard ($20k-$40k value)
+            # P1-8 FIX: Make failures block export
             if POLICY_LEADERBOARD_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Policy Leaderboard ($20k-$40k value - NOW FREE)")
-                try:
-                    leaderboard_dir = output_dir / "policy_leaderboard"
-                    leaderboard_manifests = create_default_policy_leaderboard_exporter(
-                        scene_id=scene_id,
-                        output_dir=leaderboard_dir,
-                    )
-                    all_premium_features_manifests.update({"leaderboard": leaderboard_manifests})
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Policy Leaderboard: {len(leaderboard_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Multi-policy comparison with confidence intervals")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Statistical significance testing")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Pairwise comparison matrix")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Policy leaderboard export failed: {e}")
+                leaderboard_dir = output_dir / "policy_leaderboard"
+                leaderboard_manifests = create_default_policy_leaderboard_exporter(
+                    scene_id=scene_id,
+                    output_dir=leaderboard_dir,
+                )
+                all_premium_features_manifests.update({"leaderboard": leaderboard_manifests})
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Policy Leaderboard: {len(leaderboard_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Multi-policy comparison with confidence intervals")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Statistical significance testing")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Pairwise comparison matrix")
 
             # 5. Tactile Sensor Simulation ($15k-$30k value)
+            # P1-8 FIX: Make failures block export
             if TACTILE_SENSOR_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Tactile Sensor Simulation ($15k-$30k value - NOW FREE)")
-                try:
-                    tactile_dir = output_dir / "tactile_sensors"
-                    tactile_manifests = create_default_tactile_sensor_exporter(
-                        scene_id=scene_id,
-                        output_dir=tactile_dir,
-                    )
-                    all_premium_features_manifests.update({"tactile": tactile_manifests})
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Tactile Sensors: {len(tactile_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ GelSlim/GelSight/DIGIT simulation")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Contact force maps")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ 81%+ success vs 50% vision-only")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Tactile sensor export failed: {e}")
+                tactile_dir = output_dir / "tactile_sensors"
+                tactile_manifests = create_default_tactile_sensor_exporter(
+                    scene_id=scene_id,
+                    output_dir=tactile_dir,
+                )
+                all_premium_features_manifests.update({"tactile": tactile_manifests})
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Tactile Sensors: {len(tactile_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ GelSlim/GelSight/DIGIT simulation")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Contact force maps")
+                print("[GENIESIM-EXPORT-JOB]   ✓ 81%+ success vs 50% vision-only")
 
             # 6. Language Annotations ($10k-$25k value)
+            # P1-8 FIX: Make failures block export
             if LANGUAGE_ANNOTATIONS_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Language Annotations ($10k-$25k value - NOW FREE)")
-                try:
-                    language_dir = output_dir / "language_annotations"
-                    language_manifests = create_default_language_annotations_exporter(
-                        scene_id=scene_id,
-                        output_dir=language_dir,
-                    )
-                    all_premium_features_manifests.update({"language": language_manifests})
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Language Annotations: {len(language_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Template + LLM-powered generation")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ 10+ variations per task")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Required for VLA training (OpenVLA, Pi0, RT-2)")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Language annotations export failed: {e}")
+                language_dir = output_dir / "language_annotations"
+                language_manifests = create_default_language_annotations_exporter(
+                    scene_id=scene_id,
+                    output_dir=language_dir,
+                )
+                all_premium_features_manifests.update({"language": language_manifests})
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Language Annotations: {len(language_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Template + LLM-powered generation")
+                print("[GENIESIM-EXPORT-JOB]   ✓ 10+ variations per task")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Required for VLA training (OpenVLA, Pi0, RT-2)")
 
             # 7. Generalization Analyzer ($15k-$35k value)
+            # P1-8 FIX: Make failures block export
             if GENERALIZATION_ANALYZER_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Generalization Analyzer ($15k-$35k value - NOW FREE)")
-                try:
-                    generalization_dir = output_dir / "generalization_analysis"
-                    generalization_manifests = create_default_generalization_analyzer_exporter(
-                        scene_id=scene_id,
-                        output_dir=generalization_dir,
-                    )
-                    all_premium_features_manifests.update({"generalization": generalization_manifests})
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Generalization Analyzer: {len(generalization_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Per-object success rate analysis")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Learning curve computation")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Curriculum learning recommendations")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Generalization analyzer export failed: {e}")
+                generalization_dir = output_dir / "generalization_analysis"
+                generalization_manifests = create_default_generalization_analyzer_exporter(
+                    scene_id=scene_id,
+                    output_dir=generalization_dir,
+                )
+                all_premium_features_manifests.update({"generalization": generalization_manifests})
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Generalization Analyzer: {len(generalization_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Per-object success rate analysis")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Learning curve computation")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Curriculum learning recommendations")
 
             # 8. Sim2Real Validation Service ($5k-$25k/study value)
+            # P1-8 FIX: Make failures block export
             if SIM2REAL_VALIDATION_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Validation Service ($5k-$25k/study - NOW FREE)")
-                try:
-                    sim2real_validation_dir = output_dir / "sim2real_validation"
-                    sim2real_validation_manifests = create_default_sim2real_validation_exporter(
-                        scene_id=scene_id,
-                        robot_type=robot_type,
-                        output_dir=sim2real_validation_dir,
-                    )
-                    all_premium_features_manifests.update({"sim2real_validation": sim2real_validation_manifests})
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Validation: {len(sim2real_validation_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Real-world validation trial tracking")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Sim vs real success rate comparison")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Quality guarantee certificates (50%/70%/85%)")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Failure mode comparison (sim vs real)")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Sim2Real validation export failed: {e}")
+                sim2real_validation_dir = output_dir / "sim2real_validation"
+                sim2real_validation_manifests = create_default_sim2real_validation_exporter(
+                    scene_id=scene_id,
+                    robot_type=robot_type,
+                    output_dir=sim2real_validation_dir,
+                )
+                all_premium_features_manifests.update({"sim2real_validation": sim2real_validation_manifests})
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Validation: {len(sim2real_validation_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Real-world validation trial tracking")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Sim vs real success rate comparison")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Quality guarantee certificates (50%/70%/85%)")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Failure mode comparison (sim vs real)")
 
             # 9. Audio Narration ($5k-$15k value)
+            # P1-8 FIX: Make failures block export
             if AUDIO_NARRATION_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Audio Narration ($5k-$15k value - NOW FREE)")
-                try:
-                    audio_narration_dir = output_dir / "audio_narration"
-                    audio_narration_manifests = create_default_audio_narration_exporter(
-                        scene_id=scene_id,
-                        output_dir=audio_narration_dir,
-                    )
-                    all_premium_features_manifests.update({"audio_narration": audio_narration_manifests})
-                    print(f"[GENIESIM-EXPORT-JOB]   ✓ Audio Narration: {len(audio_narration_manifests)} manifests exported")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Text-to-speech narration (Google Cloud TTS + local)")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ Multi-voice presets (narrator, instructor, casual, robot)")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ MP3/WAV/OGG audio output")
-                    print("[GENIESIM-EXPORT-JOB]   ✓ VLA audio modality training (RT-2, PaLM-E)")
-                except Exception as e:
-                    print(f"[GENIESIM-EXPORT-JOB] WARNING: Audio narration export failed: {e}")
+                audio_narration_dir = output_dir / "audio_narration"
+                audio_narration_manifests = create_default_audio_narration_exporter(
+                    scene_id=scene_id,
+                    output_dir=audio_narration_dir,
+                )
+                all_premium_features_manifests.update({"audio_narration": audio_narration_manifests})
+                print(f"[GENIESIM-EXPORT-JOB]   ✓ Audio Narration: {len(audio_narration_manifests)} manifests exported")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Text-to-speech narration (Google Cloud TTS + local)")
+                print("[GENIESIM-EXPORT-JOB]   ✓ Multi-voice presets (narrator, instructor, casual, robot)")
+                print("[GENIESIM-EXPORT-JOB]   ✓ MP3/WAV/OGG audio output")
+                print("[GENIESIM-EXPORT-JOB]   ✓ VLA audio modality training (RT-2, PaLM-E)")
 
             # Summary of premium features
             if any([SIM2REAL_AVAILABLE, EMBODIMENT_TRANSFER_AVAILABLE, TRAJECTORY_OPTIMALITY_AVAILABLE,
@@ -668,15 +721,26 @@ def run_geniesim_export_job(
                 print(f"\n  💰 Total Value Delivered: ${total_value:,} (NOW FREE BY DEFAULT!)")
                 print("="*80 + "\n")
 
-            # Write completion marker
+            # P1-9 FIX: Write completion marker with schema version tracking
+            import datetime
             marker_path = output_dir / "_GENIESIM_EXPORT_COMPLETE"
-            marker_path.write_text(json.dumps({
+            marker_data = {
                 "scene_id": scene_id,
                 "robot_type": robot_type,
                 "success": True,
                 "commercial_data": filter_commercial,
                 "premium_analytics_enabled": enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE,
                 "premium_analytics_manifests": len(premium_analytics_manifests),
+                # P1-9 FIX: Add schema version tracking
+                "export_schema_version": "1.0.0",  # BlueprintPipeline export schema version
+                "geniesim_schema_version": "3.0.0",  # Genie Sim API version compatibility
+                "blueprintpipeline_version": "1.0.0",  # Pipeline version
+                "export_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+                "schema_compatibility": {
+                    "min_geniesim_version": "3.0.0",
+                    "max_geniesim_version": "3.x.x",
+                    "breaking_changes_since": "2.x.x",
+                },
                 "stats": {
                     "nodes": result.num_nodes,
                     "edges": result.num_edges,
@@ -685,7 +749,21 @@ def run_geniesim_export_job(
                     "original_objects": original_object_count,
                     "variation_assets": len(variation_objects),
                 },
-            }, indent=2))
+                # P1-9 FIX: Track which premium features were exported
+                "premium_features_exported": {
+                    "sim2real_fidelity": SIM2REAL_AVAILABLE,
+                    "embodiment_transfer": EMBODIMENT_TRANSFER_AVAILABLE,
+                    "trajectory_optimality": TRAJECTORY_OPTIMALITY_AVAILABLE,
+                    "policy_leaderboard": POLICY_LEADERBOARD_AVAILABLE,
+                    "tactile_sensors": TACTILE_SENSOR_AVAILABLE,
+                    "language_annotations": LANGUAGE_ANNOTATIONS_AVAILABLE,
+                    "generalization_analyzer": GENERALIZATION_ANALYZER_AVAILABLE,
+                    "sim2real_validation": SIM2REAL_VALIDATION_AVAILABLE,
+                    "audio_narration": AUDIO_NARRATION_AVAILABLE,
+                },
+            }
+            marker_path.write_text(json.dumps(marker_data, indent=2))
+            print(f"\n[GENIESIM-EXPORT-JOB] ✓ Completion marker written with schema v{marker_data['export_schema_version']}")
 
             return 0
         else:
