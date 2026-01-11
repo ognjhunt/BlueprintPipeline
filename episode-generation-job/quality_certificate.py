@@ -152,6 +152,89 @@ class Sim2RealMetrics:
 
 
 @dataclass
+class QualityWeights:
+    """
+    P2-2 FIX: Configurable weights for quality score computation.
+
+    Allows tuning quality scoring for different use cases:
+    - Production training (prioritize safety and task success)
+    - Research (prioritize diversity and sim2real)
+    - Visualization (prioritize visual quality)
+    """
+    # Overall quality weights (sum should be 1.0)
+    trajectory: float = 0.30
+    task: float = 0.30
+    visual: float = 0.20
+    sim2real: float = 0.15
+    diversity: float = 0.05
+
+    # Trajectory sub-weights
+    smoothness: float = 0.4
+    safety: float = 0.4
+    feasibility: float = 0.2
+
+    # Task sub-weights
+    goal_achievement: float = 0.7
+    skill_correctness: float = 0.2
+    constraint_satisfaction: float = 0.1
+
+    # Visual sub-weights
+    target_visibility: float = 0.6
+    image_sharpness: float = 0.25
+    viewpoint_diversity: float = 0.15
+
+    # Sim2Real sub-weights
+    physics_plausibility: float = 0.5
+    timing_realism: float = 0.5
+
+    # Diversity sub-weights
+    trajectory_novelty: float = 0.5
+    state_space_coverage: float = 0.5
+
+    def __post_init__(self):
+        """Validate that weights sum to approximately 1.0."""
+        total = self.trajectory + self.task + self.visual + self.sim2real + self.diversity
+        if not (0.99 <= total <= 1.01):
+            raise ValueError(f"Quality weights must sum to 1.0, got {total:.3f}")
+
+    @classmethod
+    def for_production_training(cls) -> "QualityWeights":
+        """Weights optimized for production training datasets."""
+        return cls(
+            trajectory=0.35,  # Higher weight on trajectory quality
+            task=0.35,       # Higher weight on task success
+            visual=0.15,     # Moderate visual quality
+            sim2real=0.10,   # Moderate sim2real
+            diversity=0.05,  # Low diversity
+            smoothness=0.35, # More emphasis on smoothness
+            safety=0.50,     # Maximum emphasis on safety
+            feasibility=0.15,
+        )
+
+    @classmethod
+    def for_research(cls) -> "QualityWeights":
+        """Weights optimized for research datasets."""
+        return cls(
+            trajectory=0.25,
+            task=0.25,
+            visual=0.20,
+            sim2real=0.20,   # Higher sim2real weight
+            diversity=0.10,  # Higher diversity weight
+        )
+
+    @classmethod
+    def for_visualization(cls) -> "QualityWeights":
+        """Weights optimized for visualization/demo datasets."""
+        return cls(
+            trajectory=0.25,
+            task=0.25,
+            visual=0.40,     # Highest visual quality
+            sim2real=0.05,
+            diversity=0.05,
+        )
+
+
+@dataclass
 class QualityCertificate:
     """
     Comprehensive quality certificate for a generated episode.
@@ -185,6 +268,9 @@ class QualityCertificate:
     diversity_metrics: DiversityMetrics = field(default_factory=DiversityMetrics)
     sim2real_metrics: Sim2RealMetrics = field(default_factory=Sim2RealMetrics)
 
+    # P2-2 FIX: Configurable quality weights
+    quality_weights: QualityWeights = field(default_factory=QualityWeights)
+
     # Overall scores
     overall_quality_score: float = 0.0  # Weighted average of all metrics (0-1)
     confidence_score: float = 0.0  # Confidence in quality assessment (0-1)
@@ -201,22 +287,12 @@ class QualityCertificate:
 
     def compute_overall_quality_score(self) -> float:
         """
-        Compute overall quality score as weighted average.
+        P2-2 FIX: Compute overall quality score using configurable weights.
 
-        Weights based on importance for robot learning:
-        - Trajectory: 30% (smooth, feasible trajectories critical)
-        - Task: 30% (goal achievement is primary objective)
-        - Visual: 20% (important for vision-based policies)
-        - Sim2Real: 15% (transferability matters)
-        - Diversity: 5% (nice to have)
+        Uses the quality_weights field to determine relative importance of
+        different quality aspects. Allows tuning for different use cases.
         """
-        weights = {
-            "trajectory": 0.30,
-            "task": 0.30,
-            "visual": 0.20,
-            "sim2real": 0.15,
-            "diversity": 0.05,
-        }
+        w = self.quality_weights
 
         scores = {
             "trajectory": self._compute_trajectory_score(),
@@ -226,69 +302,74 @@ class QualityCertificate:
             "diversity": self._compute_diversity_score(),
         }
 
-        overall = sum(weights[k] * scores[k] for k in weights)
+        overall = (
+            w.trajectory * scores["trajectory"] +
+            w.task * scores["task"] +
+            w.visual * scores["visual"] +
+            w.sim2real * scores["sim2real"] +
+            w.diversity * scores["diversity"]
+        )
         self.overall_quality_score = overall
         return overall
 
     def _compute_trajectory_score(self) -> float:
-        """Compute trajectory quality score (0-1)."""
+        """P2-2 FIX: Compute trajectory quality score using configurable weights."""
         tm = self.trajectory_metrics
+        w = self.quality_weights
 
-        # Smoothness component (40%)
+        # Smoothness component
         smoothness = tm.smoothness_score
 
-        # Safety component (40%)
+        # Safety component
         safety = 1.0
         if tm.collision_count > 0:
             safety *= 0.5  # Collisions are bad
         if tm.self_collision_count > 0:
             safety *= 0.7  # Self-collisions are worse
 
-        # Feasibility component (20%)
+        # Feasibility component
         feasibility = tm.dynamics_feasibility
 
-        return 0.4 * smoothness + 0.4 * safety + 0.2 * feasibility
+        return w.smoothness * smoothness + w.safety * safety + w.feasibility * feasibility
 
     def _compute_task_score(self) -> float:
-        """Compute task quality score (0-1)."""
+        """P2-2 FIX: Compute task quality score using configurable weights."""
         tm = self.task_metrics
+        w = self.quality_weights
 
-        # Goal achievement is primary (70%)
         goal = tm.goal_achievement_score
-
-        # Skill correctness (20%)
         skill = tm.skill_correctness_ratio
-
-        # Constraint satisfaction (10%)
         constraints = tm.constraint_satisfaction_score
 
-        return 0.7 * goal + 0.2 * skill + 0.1 * constraints
+        return w.goal_achievement * goal + w.skill_correctness * skill + w.constraint_satisfaction * constraints
 
     def _compute_visual_score(self) -> float:
-        """Compute visual quality score (0-1)."""
+        """P2-2 FIX: Compute visual quality score using configurable weights."""
         vm = self.visual_metrics
+        w = self.quality_weights
 
-        # Target visibility (60%)
+        # Target visibility
         visibility = vm.target_visibility_ratio
 
-        # Image quality (25%)
-        # Normalize sharpness (Laplacian variance typically 0-1000)
+        # Image quality (normalize sharpness - Laplacian variance typically 0-1000)
         sharpness = min(1.0, vm.mean_sharpness / 100.0)
 
-        # Viewpoint diversity (15%)
+        # Viewpoint diversity
         diversity = vm.viewpoint_diversity
 
-        return 0.6 * visibility + 0.25 * sharpness + 0.15 * diversity
+        return w.target_visibility * visibility + w.image_sharpness * sharpness + w.viewpoint_diversity * diversity
 
     def _compute_sim2real_score(self) -> float:
-        """Compute sim-to-real quality score (0-1)."""
+        """P2-2 FIX: Compute sim-to-real quality score using configurable weights."""
         s2r = self.sim2real_metrics
-        return 0.5 * s2r.physics_plausibility_score + 0.5 * s2r.timing_realism_score
+        w = self.quality_weights
+        return w.physics_plausibility * s2r.physics_plausibility_score + w.timing_realism * s2r.timing_realism_score
 
     def _compute_diversity_score(self) -> float:
-        """Compute diversity score (0-1)."""
+        """P2-2 FIX: Compute diversity score using configurable weights."""
         dm = self.diversity_metrics
-        return 0.5 * dm.trajectory_novelty + 0.5 * dm.state_space_coverage
+        w = self.quality_weights
+        return w.trajectory_novelty * dm.trajectory_novelty + w.state_space_coverage * dm.state_space_coverage
 
     def assess_training_suitability(self) -> str:
         """Assess training suitability based on quality and source."""
