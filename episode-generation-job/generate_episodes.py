@@ -413,12 +413,18 @@ class ManipulationTaskGenerator:
         """Create minimal task specification without LLM."""
         from task_specifier import SkillSegment
 
+        # P2-1 FIX: Get default position from task, or compute from robot workspace
+        goal_position = task.get("place_position")
+        if goal_position is None:
+            # Compute sensible default from robot workspace and task context
+            goal_position = self._compute_default_goal_position(task, objects, robot_type)
+
         return TaskSpecification(
             spec_id=f"spec_{task['task_id']}",
             task_name=task["task_name"],
             task_description=task["description"],
             goal_object_id=task.get("target_object_id"),
-            goal_position=np.array(task.get("place_position", [0.3, 0.2, 0.85])),
+            goal_position=np.array(goal_position),
             segments=[
                 SkillSegment(
                     segment_id=f"seg_{task['task_id']}_main",
@@ -468,6 +474,10 @@ class ManipulationTaskGenerator:
         """Convert TaskPlannerOutput to task definitions."""
         tasks = []
 
+        # P2-1 FIX: Get workspace defaults from manifest or robot config
+        robot_config = manifest.get("robot_config", {})
+        workspace_center = robot_config.get("workspace_center", [0.5, 0.0, 0.85])
+
         for episode in plan.episodes:
             # Find target object info
             target_id = episode.source_objects[0] if episode.source_objects else None
@@ -483,7 +493,7 @@ class ManipulationTaskGenerator:
                 "task_name": episode.task_name,
                 "description": episode.description,
                 "target_object_id": target_id,
-                "target_position": target_obj.get("position", [0.5, 0, 0.85]) if target_obj else [0.5, 0, 0.85],
+                "target_position": target_obj.get("position", workspace_center) if target_obj else workspace_center,
                 "target_dimensions": target_obj.get("dimensions", [0.1, 0.1, 0.1]) if target_obj else [0.1, 0.1, 0.1],
                 "place_position": self._calculate_place_position(target_obj, manifest),
                 "is_articulated": episode.source_template.requires_articulation if episode.source_template else False,
@@ -494,14 +504,18 @@ class ManipulationTaskGenerator:
         return tasks
 
     def _generate_simplified_tasks(self, manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Generate tasks from object categories (fallback)."""
+        """P2-1 FIX: Generate tasks from object categories (fallback)."""
         tasks = []
         objects = manifest.get("objects", [])
+
+        # P2-1 FIX: Get workspace defaults from manifest or robot config
+        robot_config = manifest.get("robot_config", {})
+        workspace_center = robot_config.get("workspace_center", [0.5, 0.0, 0.85])
 
         for obj in objects:
             category = obj.get("category", "object").lower()
             obj_id = obj.get("id", obj.get("name", "unknown"))
-            position = obj.get("position", [0.5, 0, 0.85])
+            position = obj.get("position", workspace_center)
             dimensions = obj.get("dimensions", obj.get("bbox", [0.1, 0.1, 0.1]))
 
             # Find matching task templates
@@ -537,20 +551,71 @@ class ManipulationTaskGenerator:
         self.log(f"Generated {len(tasks)} tasks from object categories")
         return tasks
 
+    def _compute_default_goal_position(
+        self,
+        task: Dict[str, Any],
+        objects: List[Dict[str, Any]],
+        robot_type: str,
+    ) -> List[float]:
+        """
+        P2-1 FIX: Compute sensible default goal position from task context and robot workspace.
+
+        Strategy:
+        1. If task has explicit goal_position in manifest, use it
+        2. If task has target object, compute offset from object position
+        3. Otherwise, use robot workspace center with safe height
+        """
+        # Check if task has explicit goal_position
+        if "goal_position" in task:
+            return task["goal_position"]
+
+        # Get robot workspace bounds (robot-specific)
+        robot_config = ROBOT_CONFIGS.get(robot_type, ROBOT_CONFIGS["franka"])
+        workspace_center = getattr(robot_config, "workspace_center", [0.5, 0.0, 0.85])
+
+        # If task has target object, compute offset from object
+        target_obj_id = task.get("target_object_id")
+        if target_obj_id:
+            # Find target object in scene
+            target_obj = None
+            for obj in objects:
+                if obj.get("id") == target_obj_id or obj.get("name") == target_obj_id:
+                    target_obj = obj
+                    break
+
+            if target_obj:
+                pos = target_obj.get("position", workspace_center)
+                if isinstance(pos, np.ndarray):
+                    pos = pos.tolist()
+
+                # Offset placement position (place nearby, not on top)
+                return [pos[0] - 0.2, pos[1] + 0.15, pos[2]]
+
+        # Fallback: use workspace center
+        return workspace_center
+
     def _calculate_place_position(
         self,
         obj: Optional[Dict[str, Any]],
         manifest: Dict[str, Any],
     ) -> List[float]:
-        """Calculate a sensible place position for an object."""
-        if obj is None:
-            return [0.3, 0.2, 0.85]
+        """
+        P2-1 FIX: Calculate a sensible place position for an object.
 
-        pos = obj.get("position", [0.5, 0, 0.85])
+        Now uses workspace-aware computation instead of hardcoded defaults.
+        """
+        # Get robot workspace center from manifest if available
+        robot_config = manifest.get("robot_config", {})
+        workspace_center = robot_config.get("workspace_center", [0.5, 0.0, 0.85])
+
+        if obj is None:
+            return workspace_center
+
+        pos = obj.get("position", workspace_center)
         if isinstance(pos, np.ndarray):
             pos = pos.tolist()
 
-        # Offset placement position
+        # Offset placement position (place nearby, not on top)
         return [pos[0] - 0.2, pos[1] + 0.15, pos[2]]
 
 
@@ -1106,10 +1171,14 @@ class EpisodeGenerator:
         manifest: Dict[str, Any],
         num_variations: int,
     ) -> List[GeneratedEpisode]:
-        """Simple variation without CP-Gen (fallback)."""
+        """P2-1 FIX: Simple variation without CP-Gen (fallback)."""
         all_episodes = list(seed_episodes)
         objects = manifest.get("objects", [])
         failed_variations = []
+
+        # P2-1 FIX: Get workspace defaults from manifest or robot config
+        robot_config = manifest.get("robot_config", {})
+        workspace_center = robot_config.get("workspace_center", [0.5, 0.0, 0.85])
 
         for seed in seed_episodes:
             # Skip seeds with uninitialized task spec or motion plan
@@ -1131,10 +1200,10 @@ class EpisodeGenerator:
                                 offset[2] = 0
                                 obj["position"] = [p + o for p, o in zip(pos, offset)]
 
-                    # Regenerate episode for this variation
+                    # P2-1 FIX: Regenerate episode for this variation
                     target_object = {
                         "id": seed.motion_plan.target_object_id if seed.motion_plan else "target",
-                        "position": seed.motion_plan.target_object_position.tolist() if seed.motion_plan and seed.motion_plan.target_object_position is not None else [0.5, 0, 0.85],
+                        "position": seed.motion_plan.target_object_position.tolist() if seed.motion_plan and seed.motion_plan.target_object_position is not None else workspace_center,
                         "dimensions": seed.motion_plan.target_object_dimensions.tolist() if seed.motion_plan and seed.motion_plan.target_object_dimensions is not None else [0.08, 0.08, 0.1],
                     }
 
