@@ -1001,6 +1001,7 @@ class IsaacSimSensorCapture:
             "scene_state": {},
             "contacts": [],
             "data_source": "simulation" if self._omni is not None else "input_fallback",
+            "is_mock": self.is_mock(),  # P0-5 FIX: Explicit flag for mock data
         }
 
         # Capture contacts first
