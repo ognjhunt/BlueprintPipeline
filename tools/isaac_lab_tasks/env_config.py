@@ -5,8 +5,35 @@ This module generates environment configurations compatible with
 Isaac Lab's ManagerBasedEnv architecture.
 """
 
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
+
+
+def get_isaac_asset_path(robot_type: str, isaac_version: str | None = None) -> str:
+    """
+    Get Isaac Sim asset path with configurable version.
+
+    Args:
+        robot_type: Type of robot (franka, ur10, fetch)
+        isaac_version: Isaac Sim version (e.g., "2023.1.1"). If None, uses environment
+                      variable ISAAC_SIM_VERSION or defaults to "2023.1.1"
+
+    Returns:
+        Full USD path for the robot asset
+    """
+    if isaac_version is None:
+        isaac_version = os.environ.get("ISAAC_SIM_VERSION", "2023.1.1")
+
+    base_path = f"omniverse://localhost/NVIDIA/Assets/Isaac/{isaac_version}/Isaac/Robots"
+
+    paths = {
+        "franka": f"{base_path}/Franka/franka_instanceable.usd",
+        "ur10": f"{base_path}/UniversalRobots/ur10/ur10.usd",
+        "fetch": f"{base_path}/Fetch/fetch.usd",
+    }
+
+    return paths.get(robot_type, paths["franka"])
 
 
 @dataclass
@@ -78,11 +105,20 @@ class EnvConfigGenerator:
             use_gpu_pipeline=True
         )
 
-    def get_robot_config(self, robot_type: str) -> dict[str, Any]:
-        """Get configuration for a specific robot type."""
+    def get_robot_config(self, robot_type: str, isaac_version: str | None = None) -> dict[str, Any]:
+        """
+        Get configuration for a specific robot type.
+
+        Args:
+            robot_type: Type of robot (franka, ur10, fetch)
+            isaac_version: Isaac Sim version (optional, defaults to env var or 2023.1.1)
+
+        Returns:
+            Robot configuration dict with USD path, DOFs, frames, etc.
+        """
         configs = {
             "franka": {
-                "usd_path": "omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/Franka/franka_instanceable.usd",
+                "usd_path": get_isaac_asset_path("franka", isaac_version),
                 "num_dofs": 7,
                 "gripper_dofs": 2,
                 "ee_frame": "panda_hand",
@@ -100,7 +136,7 @@ class EnvConfigGenerator:
                 }
             },
             "ur10": {
-                "usd_path": "omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/UniversalRobots/ur10/ur10.usd",
+                "usd_path": get_isaac_asset_path("ur10", isaac_version),
                 "num_dofs": 6,
                 "gripper_dofs": 0,
                 "ee_frame": "tool0",
@@ -115,7 +151,7 @@ class EnvConfigGenerator:
                 }
             },
             "fetch": {
-                "usd_path": "omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/Fetch/fetch.usd",
+                "usd_path": get_isaac_asset_path("fetch", isaac_version),
                 "num_dofs": 7,
                 "gripper_dofs": 2,
                 "ee_frame": "gripper_link",

@@ -678,6 +678,7 @@ import torch
 from typing import TYPE_CHECKING
 
 from omni.isaac.lab.envs import ManagerBasedEnv
+from . import reward_functions
 
 if TYPE_CHECKING:
     from .env_cfg import {class_name}EnvCfg
@@ -696,9 +697,13 @@ class {class_name}Task:
         self.cfg = cfg
         self.device = env.device
         self.num_envs = env.num_envs
-        self.scene_entity_map = getattr(cfg, "scene_entity_map", {{}}) if hasattr(cfg, "scene_entity_map") else {config.scene_entities}
+        # Get scene entity map from config (set in config's __post_init__)
+        self.scene_entity_map = getattr(cfg, "scene_entity_map", {config.scene_entities})
         self.target_name = "{target_name}"
         self.ee_frame = "{ee_frame}"
+
+        # Initialize reward function state variables (CRITICAL for sim2real transfer rewards)
+        reward_functions.initialize_reward_state(env)
 
         # Task state
         self._setup_task_state()
@@ -792,6 +797,9 @@ class {class_name}Task:
 task_name: "{config.task_name}"
 experiment_name: "{config.task_name}_training"
 
+# Device settings
+device: "cuda:0"  # Use GPU 0 by default, can be overridden
+
 # Environment settings
 env:
   num_envs: {config.num_envs}
@@ -813,11 +821,17 @@ algo:
   value_loss_coef: 1.0
   max_grad_norm: 1.0
 
+  # KL divergence early stopping (prevents policy from changing too quickly)
+  desired_kl: 0.01
+  max_kl: 0.02
+
   # Learning rate
   learning_rate: 3.0e-4
   lr_schedule: "adaptive"
 
   # Batch settings
+  rollout_steps: {config.episode_length}  # Number of steps to collect before training
+  batch_size: {config.num_envs * config.episode_length}  # Total samples per iteration
   num_learning_epochs: 5
   num_mini_batches: 4
 
@@ -1306,14 +1320,17 @@ __all__ = [
         """Generate reward term configurations."""
         terms = []
         for component, weight in config.reward_weights.items():
-            # Built-in task-shaping terms live in env_cfg; others are generated in reward_functions.py
+            # Built-in task-shaping terms live in env_cfg; others are in reward_functions module
             if component in {"reaching", "task_success"}:
+                # These are defined in the env_cfg.py file itself
                 func_name = f"reward_{component}"
             else:
+                # These are imported from reward_functions module
+                # Use direct reference instead of string path
                 func_name = f"reward_functions.reward_{component}"
 
             terms.append(f'''    {component} = RewardTermCfg(
-        func="{func_name}",
+        func={func_name},
         weight={weight},
     )''')
 
