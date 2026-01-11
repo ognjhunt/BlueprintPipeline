@@ -19,6 +19,7 @@ Market Positioning:
 See: Episode Pricing Strategy and Competitive Analysis documentation.
 """
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -52,6 +53,25 @@ class DatasetSplitConfig:
     splits to compare models fairly.
 
     DROID and BridgeData provide explicit splits; we should too.
+
+    Environment Variables:
+        BP_SPLIT_SEED: Override split seed (default: 42)
+        BP_SPLIT_STRATEGY: Override split strategy (default: "random")
+        BP_SPLIT_TRAIN_RATIO: Override train ratio (default: 0.8)
+        BP_SPLIT_VAL_RATIO: Override validation ratio (default: 0.1)
+        BP_SPLIT_TEST_RATIO: Override test ratio (default: 0.1)
+
+    Examples:
+        # Use default split seed (42) for reproducibility
+        config = DatasetSplitConfig()
+
+        # Override split seed via environment variable
+        os.environ["BP_SPLIT_SEED"] = "1337"
+        config = DatasetSplitConfig()
+        # config.split_seed == 1337
+
+        # Override programmatically
+        config = DatasetSplitConfig(split_seed=999)
     """
 
     train_ratio: float = 0.8
@@ -59,6 +79,7 @@ class DatasetSplitConfig:
     test_ratio: float = 0.1
 
     # Seed for reproducible splits
+    # Can be overridden via BP_SPLIT_SEED environment variable
     split_seed: int = 42
 
     # Split strategy
@@ -71,6 +92,23 @@ class DatasetSplitConfig:
     # Maps episode_id to split name ("train", "val", "test")
     explicit_splits: Optional[Dict[str, str]] = None
 
+    def __post_init__(self) -> None:
+        """Apply environment variable overrides after initialization."""
+        # Allow environment variables to override values if they were using defaults
+        if "BP_SPLIT_SEED" in os.environ:
+            self.split_seed = int(os.environ["BP_SPLIT_SEED"])
+        if "BP_SPLIT_STRATEGY" in os.environ:
+            self.split_strategy = os.environ["BP_SPLIT_STRATEGY"]
+        if "BP_SPLIT_TRAIN_RATIO" in os.environ:
+            self.train_ratio = float(os.environ["BP_SPLIT_TRAIN_RATIO"])
+        if "BP_SPLIT_VAL_RATIO" in os.environ:
+            self.val_ratio = float(os.environ["BP_SPLIT_VAL_RATIO"])
+        if "BP_SPLIT_TEST_RATIO" in os.environ:
+            self.test_ratio = float(os.environ["BP_SPLIT_TEST_RATIO"])
+
+        # Run validation
+        self.validate()
+
     def validate(self) -> None:
         """Validate split configuration."""
         total = self.train_ratio + self.val_ratio + self.test_ratio
@@ -78,6 +116,8 @@ class DatasetSplitConfig:
             raise ValueError(f"Split ratios must sum to 1.0, got {total}")
         if self.split_strategy not in ["random", "scene", "task"]:
             raise ValueError(f"Unknown split strategy: {self.split_strategy}")
+        if self.split_seed < 0:
+            raise ValueError(f"Split seed must be non-negative, got {self.split_seed}")
 
 
 @dataclass

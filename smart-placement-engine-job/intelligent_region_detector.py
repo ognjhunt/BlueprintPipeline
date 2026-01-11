@@ -11,6 +11,7 @@ within scenes. It uses Gemini to:
 import base64
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -22,6 +23,17 @@ try:
     HAVE_GENAI = True
 except ImportError:
     HAVE_GENAI = False
+
+# Add repo root to path for config imports
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from tools.config import load_pipeline_config
+    HAVE_CONFIG = True
+except ImportError:
+    HAVE_CONFIG = False
 
 from .compatibility_matrix import (
     ArticulationState,
@@ -80,23 +92,34 @@ class IntelligentRegionDetector:
     to understand the spatial layout and identify optimal placement regions.
     """
 
-    DEFAULT_MODEL = "gemini-3-pro-preview"
+    @staticmethod
+    def _get_default_model() -> str:
+        """Get default model from config or fallback to hardcoded value."""
+        if HAVE_CONFIG:
+            try:
+                config = load_pipeline_config(validate=False)
+                model_config = config.models.get_model("intelligent_region_detector")
+                if model_config:
+                    return model_config.default_model
+            except Exception:
+                pass
+        return "gemini-3-pro-preview"
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = DEFAULT_MODEL,
+        model: Optional[str] = None,
         enable_web_search: bool = False,
     ):
         """Initialize the detector.
 
         Args:
             api_key: Gemini API key (defaults to GEMINI_API_KEY env var)
-            model: Model to use
+            model: Model to use (defaults from config if not provided)
             enable_web_search: Whether to enable web search grounding
         """
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
-        self.model = model
+        self.model = model or self._get_default_model()
         self.enable_web_search = enable_web_search
         self._client: Optional["genai.Client"] = None
 
@@ -725,13 +748,13 @@ Return a JSON array with enhanced region data in the same format.
 
 def create_region_detector(
     api_key: Optional[str] = None,
-    model: str = IntelligentRegionDetector.DEFAULT_MODEL,
+    model: Optional[str] = None,
 ) -> IntelligentRegionDetector:
     """Factory function to create a region detector.
 
     Args:
         api_key: Optional Gemini API key
-        model: Model to use
+        model: Model to use (defaults from config if not provided)
 
     Returns:
         Configured IntelligentRegionDetector instance

@@ -172,5 +172,26 @@
     "enabled": true,
     "strict_mode": false,
     "description": "Reference to quality gate configuration"
+  },
+  "models": {
+    "placement_engine": {
+      "default_model": "gemini-3-pro-preview",
+      "description": "Default LLM model for placement engine",
+      "alternatives": ["gemini-3-pro", "gpt-4", "claude-3-opus"],
+      "timeout_seconds": 30
+    },
+    "physics_validator": {
+      "default_model": "gemini-3-pro-preview",
+      "description": "Default LLM model for physics validation",
+      "alternatives": ["gemini-3-pro", "gpt-4", "claude-3-opus"],
+      "timeout_seconds": 30
+    },
+    "intelligent_region_detector": {
+      "default_model": "gemini-3-pro-preview",
+      "description": "Default LLM model for region detection",
+      "alternatives": ["gemini-3-pro", "gpt-4", "claude-3-opus"],
+      "timeout_seconds": 30
+    },
+    "description": "LLM model configurations for smart placement pipeline"
   }
 }
