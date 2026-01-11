@@ -164,6 +164,7 @@ class QualityMetrics:
     max_joint_violation: float = 0.0
     max_joint_velocity: float = 0.0
     max_joint_acceleration: float = 0.0
+    torque_limit_violations: int = 0  # P1-6 FIX: Count of torque violations
 
     # Stability metrics
     gripper_slip_events: int = 0
@@ -194,6 +195,7 @@ class QualityMetrics:
             "max_joint_violation": self.max_joint_violation,
             "max_joint_velocity": self.max_joint_velocity,
             "max_joint_acceleration": self.max_joint_acceleration,
+            "torque_limit_violations": self.torque_limit_violations,  # P1-6 FIX
             "gripper_slip_events": self.gripper_slip_events,
             "object_dropped": self.object_dropped,
             "object_stable_at_end": self.object_stable_at_end,
@@ -264,6 +266,9 @@ class ValidationResult:
     # Timing
     validation_time_seconds: float = 0.0
 
+    # P1-4 FIX: Physics backend used for validation
+    physics_backend: str = "unknown"  # "isaac_sim", "heuristic", or "unknown"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "episode_id": self.episode_id,
@@ -277,6 +282,7 @@ class ValidationResult:
             "can_retry": self.can_retry,
             "retry_suggestion": self.retry_suggestion,
             "validation_time_seconds": self.validation_time_seconds,
+            "physics_backend": self.physics_backend,  # P1-4 FIX
         }
 
 
@@ -442,11 +448,13 @@ class SimulationValidator:
 
         # Use real physics if available
         if self.is_using_real_physics():
+            result.physics_backend = "isaac_sim"  # P1-4 FIX: Set physics backend
             result = self._validate_with_physics(
                 trajectory, motion_plan, scene_objects, result, task_success_checker
             )
         else:
             # Fall back to heuristic validation
+            result.physics_backend = "heuristic"  # P1-4 FIX: Set physics backend
             result = self._validate_heuristic(
                 trajectory, motion_plan, scene_objects, result, task_success_checker
             )
@@ -519,6 +527,7 @@ class SimulationValidator:
         # Also run kinematic checks
         self._check_joint_limits(trajectory, result)
         self._check_velocities(trajectory, result)
+        self._check_torques(trajectory, result)  # P1-6 FIX: Check torque limits
         self._check_trajectory_smoothness(trajectory, result)
 
         # Task success check
@@ -585,15 +594,72 @@ class SimulationValidator:
         if unexpected_collisions > self.config.max_unexpected_collisions:
             result.failure_reasons.append(FailureReason.COLLISION)
 
-        # Check object stability at end
+        # P1-5 FIX: Track grasp stability metrics
+        gripper_slip_count = 0
+        object_dropped = False
+        object_stable_at_end = True
+
         if physics_results and target_obj_id:
+            # Track gripper-object contact throughout episode
+            grasp_active = False
+            grasp_start_frame = -1
+            object_max_height = 0.0
+
+            for step_result in physics_results:
+                # Check if gripper is in contact with target object
+                gripper_in_contact = False
+                for contact in step_result.contacts:
+                    body_a = contact.get("body_a", "")
+                    body_b = contact.get("body_b", "")
+                    if (("gripper" in body_a.lower() or "finger" in body_a.lower()) and target_obj_id in body_b) or \
+                       (("gripper" in body_b.lower() or "finger" in body_b.lower()) and target_obj_id in body_a):
+                        gripper_in_contact = True
+                        break
+
+                # Detect grasp start
+                if gripper_in_contact and not grasp_active:
+                    grasp_active = True
+                    grasp_start_frame = step_result.step_index
+
+                # Detect slip (loss of contact during grasp)
+                elif not gripper_in_contact and grasp_active:
+                    # Check if object is still elevated (not placed)
+                    if target_obj_id in step_result.object_states:
+                        obj_state = step_result.object_states[target_obj_id]
+                        obj_height = obj_state.get("position", [0, 0, 0])[2]
+
+                        # If object is elevated, this is a slip
+                        if obj_height > 0.1:  # 10cm threshold
+                            gripper_slip_count += 1
+                            grasp_active = False
+
+                # Track object height during episode
+                if target_obj_id in step_result.object_states:
+                    obj_state = step_result.object_states[target_obj_id]
+                    obj_height = obj_state.get("position", [0, 0, 0])[2]
+                    object_max_height = max(object_max_height, obj_height)
+
+            # Check if object was dropped (fell after being lifted)
             final_states = physics_results[-1].object_states
             if target_obj_id in final_states:
                 obj_state = final_states[target_obj_id]
-                velocity = np.linalg.norm(obj_state.get("linear_velocity", [0, 0, 0]))
-                result.metrics.object_stable_at_end = velocity < self.config.stability_threshold
+                final_height = obj_state.get("position", [0, 0, 0])[2]
+                final_velocity = np.linalg.norm(obj_state.get("linear_velocity", [0, 0, 0]))
+
+                # Object dropped if it was lifted but ended up significantly lower
+                if object_max_height > 0.15 and final_height < object_max_height * 0.5:
+                    object_dropped = True
+
+                # Object stable at end if velocity is low
+                object_stable_at_end = final_velocity < self.config.stability_threshold
+
+        # P1-5 FIX: Set grasp stability metrics
+        result.metrics.gripper_slip_events = gripper_slip_count
+        result.metrics.object_dropped = object_dropped
+        result.metrics.object_stable_at_end = object_stable_at_end
 
         self.log(f"  Physics: {total_collisions} contacts, {unexpected_collisions} unexpected")
+        self.log(f"  Grasp stability: {gripper_slip_count} slips, dropped={object_dropped}, stable={object_stable_at_end}")
 
     def _validate_heuristic(
         self,
@@ -614,9 +680,33 @@ class SimulationValidator:
         # Run all heuristic checks
         self._check_joint_limits(trajectory, result)
         self._check_velocities(trajectory, result)
+        self._check_torques(trajectory, result)  # P1-6 FIX: Check torque limits
         self._check_collisions(trajectory, motion_plan, scene_objects, result)
         self._check_trajectory_smoothness(trajectory, result)
         self._check_task_success(trajectory, motion_plan, scene_objects, result, task_success_checker)
+
+        # P1-5 FIX: Heuristic grasp stability estimation
+        # Without physics, we can't detect actual slips, but we can estimate based on gripper motion
+        gripper_positions = trajectory.get_gripper_positions()
+        if len(gripper_positions) > 1:
+            # Check for rapid gripper opening during trajectory (possible slip)
+            slip_count = 0
+            for i in range(1, len(gripper_positions)):
+                delta = abs(gripper_positions[i] - gripper_positions[i - 1])
+                # If gripper opens rapidly (>0.3 in one step), might be a slip recovery
+                if delta > 0.3 and gripper_positions[i] > gripper_positions[i - 1]:
+                    slip_count += 1
+
+            result.metrics.gripper_slip_events = slip_count
+
+            # Heuristic: assume object stable if final gripper is closed
+            result.metrics.object_stable_at_end = gripper_positions[-1] < 0.3
+
+            # Heuristic: object dropped if gripper opens fully near end
+            final_gripper = gripper_positions[-1]
+            result.metrics.object_dropped = final_gripper > 0.9  # Nearly full open
+
+        self.log(f"  Heuristic grasp stability: {result.metrics.gripper_slip_events} estimated slips")
 
         return result
 
@@ -732,6 +822,80 @@ class SimulationValidator:
                 )
 
             prev_vel = velocity
+
+    def _check_torques(
+        self,
+        trajectory: JointTrajectory,
+        result: ValidationResult,
+    ) -> None:
+        """
+        P1-6 FIX: Check for torque limit violations using inverse dynamics.
+
+        Estimates required joint torques using simplified dynamics model:
+        τ = I·α + C·v + G
+        where I = inertia, α = acceleration, C = damping, v = velocity, G = gravity
+        """
+        if len(trajectory.states) < 3:
+            return  # Need at least 3 states for acceleration
+
+        dt = 1.0 / trajectory.fps
+
+        # Simplified robot parameters (conservative estimates for 7-DOF arm)
+        # These are approximate - real values depend on robot model
+        joint_inertia = np.array([2.0, 2.0, 1.5, 1.5, 1.0, 1.0, 0.5])  # kg·m²
+        damping_coeff = np.array([10.0, 10.0, 8.0, 8.0, 5.0, 5.0, 3.0])  # N·m·s/rad
+        gravity_torque = np.array([15.0, 15.0, 10.0, 10.0, 5.0, 5.0, 2.0])  # N·m (config-dependent)
+
+        # Maximum torque limits (conservative for safety)
+        max_torque = np.array([80.0, 80.0, 60.0, 60.0, 40.0, 40.0, 20.0])  # N·m
+
+        # Pad arrays if robot has fewer DOFs
+        num_dof = len(trajectory.states[0].joint_positions)
+        if num_dof < len(joint_inertia):
+            joint_inertia = joint_inertia[:num_dof]
+            damping_coeff = damping_coeff[:num_dof]
+            gravity_torque = gravity_torque[:num_dof]
+            max_torque = max_torque[:num_dof]
+        elif num_dof > len(joint_inertia):
+            # Extend with defaults for additional joints
+            joint_inertia = np.pad(joint_inertia, (0, num_dof - len(joint_inertia)), constant_values=1.0)
+            damping_coeff = np.pad(damping_coeff, (0, num_dof - len(damping_coeff)), constant_values=5.0)
+            gravity_torque = np.pad(gravity_torque, (0, num_dof - len(gravity_torque)), constant_values=5.0)
+            max_torque = np.pad(max_torque, (0, num_dof - len(max_torque)), constant_values=40.0)
+
+        torque_violations = 0
+
+        for i in range(2, len(trajectory.states)):
+            prev_prev_pos = trajectory.states[i - 2].joint_positions
+            prev_pos = trajectory.states[i - 1].joint_positions
+            curr_pos = trajectory.states[i].joint_positions
+
+            # Compute velocity and acceleration
+            vel_prev = (prev_pos - prev_prev_pos) / dt
+            vel_curr = (curr_pos - prev_pos) / dt
+            accel = (vel_curr - vel_prev) / dt
+
+            # Estimate torques: τ = I·α + C·v + G
+            inertial_torque = joint_inertia * accel
+            damping_torque = damping_coeff * vel_curr
+            # Gravity torque depends on configuration - use conservative estimate
+            total_torque = np.abs(inertial_torque) + np.abs(damping_torque) + np.abs(gravity_torque)
+
+            # Check for violations
+            for j, torque in enumerate(total_torque):
+                if torque > max_torque[j]:
+                    torque_violations += 1
+                    if torque_violations == 1:  # Log first violation
+                        self.log(
+                            f"  Torque limit violation at frame {i}, joint {j}: "
+                            f"{torque:.1f} N·m > {max_torque[j]:.1f} N·m limit",
+                            "WARNING"
+                        )
+
+        # P1-6 FIX: Store torque violations in metrics
+        result.metrics.torque_limit_violations = torque_violations
+        if torque_violations > 0:
+            self.log(f"  Total torque limit violations: {torque_violations}", "WARNING")
 
     def _check_collisions(
         self,

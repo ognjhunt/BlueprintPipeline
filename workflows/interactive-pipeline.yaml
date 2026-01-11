@@ -31,16 +31,101 @@ main:
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           # NOTE: Set PARTICULATE_ENDPOINT environment variable for articulation detection.
-          - articulationBackend: "particulate"
-          - particulateEndpoint: ${sys.get_env("PARTICULATE_ENDPOINT")}
+          # Falls back to heuristic detection if not available.
+          - particulateEndpoint: ${default(sys.get_env("PARTICULATE_ENDPOINT"), "")}
+          - articulationBackend: ${if(particulateEndpoint != "", "particulate", "heuristic")}
           - jobName: "interactive-job"
           - simreadyJobName: "simready-job"
-        next: log_skip_interactive_pipeline
+        next: log_articulation_mode
 
-    - log_skip_interactive_pipeline:
+    - log_articulation_mode:
         call: sys.log
         args:
-          text: ${"Skipping interactive-pipeline entirely (using hunyuan for all objects) for scene " + sceneId + "; creating completion marker"}
+          text: ${"Using " + articulationBackend + " backend for articulation detection in scene " + sceneId}
+          severity: "INFO"
+        next: run_interactive_job
+
+    - run_interactive_job:
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+            body:
+              overrides:
+                containerOverrides:
+                  - name: "interactive"
+                    env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: MULTIVIEW_PREFIX
+                        value: ${multiviewPrefix}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: LAYOUT_PREFIX
+                        value: ${layoutPrefix}
+                      - name: ARTICULATION_BACKEND
+                        value: ${articulationBackend}
+                      - name: PARTICULATE_ENDPOINT
+                        value: ${particulateEndpoint}
+                timeout: "1800s"
+          result: interactiveJobExecution
+        except:
+          as: e
+          steps:
+            - log_interactive_error:
+                call: sys.log
+                args:
+                  text: ${"ERROR: Interactive job failed: " + e.message}
+                  severity: "ERROR"
+            - next: done_failed
+        next: set_interactive_execution_name
+
+    - set_interactive_execution_name:
+        assign:
+          - interactiveExecutionName: '${if(interactiveJobExecution.metadata != null and interactiveJobExecution.metadata.name != null, interactiveJobExecution.metadata.name, interactiveJobExecution.name)}'
+        next: wait_for_interactive_job
+
+    - wait_for_interactive_job:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${interactiveExecutionName}
+        result: interactiveStatus
+        next: check_interactive_status
+
+    - check_interactive_status:
+        assign:
+          - interactiveState: '${if(interactiveStatus.state != null, interactiveStatus.state, if(interactiveStatus.status != null, interactiveStatus.status.state, null))}'
+          - interactiveFailedCount: '${if(interactiveStatus.failedCount != null, interactiveStatus.failedCount, if(interactiveStatus.status != null, interactiveStatus.status.failedCount, null))}'
+          - interactiveSucceededCount: '${if(interactiveStatus.succeededCount != null, interactiveStatus.succeededCount, if(interactiveStatus.status != null, interactiveStatus.status.succeededCount, null))}'
+        next: interactive_status_switch
+
+    - interactive_status_switch:
+        switch:
+          - condition: '${interactiveState == "FAILED" or (interactiveFailedCount != null and interactiveFailedCount > 0)}'
+            next: check_interactive_failure
+          - condition: '${interactiveState == "SUCCEEDED" or (interactiveSucceededCount != null and interactiveSucceededCount > 0)}'
+            next: log_interactive_success
+        next: wait_interactive_poll
+
+    - wait_interactive_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_interactive_job
+
+    - check_interactive_failure:
+        call: sys.log
+        args:
+          text: ${"Interactive job failed for scene " + sceneId}
+          severity: "ERROR"
+        next: done_failed
+
+    - log_interactive_success:
+        call: sys.log
+        args:
+          text: ${"Interactive job completed successfully for scene " + sceneId}
           severity: "INFO"
         next: create_completion_marker
 
@@ -51,7 +136,7 @@ main:
             bucket: ${bucket}
             uploadType: "media"
             name: ${assetsPrefix + "/.interactive_complete"}
-            body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"skipped\\", \\"reason\\": \\"Using Hunyuan pipeline for all objects\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
+            body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"completed\\", \\"backend\\": \\"" + articulationBackend + "\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
           result: markerResult
         except:
           as: e
@@ -66,12 +151,12 @@ main:
     - log_marker_created:
         call: sys.log
         args:
-          text: ${"Created .interactive_complete marker for scene " + sceneId + " (using Hunyuan pipeline)"}
+          text: ${"Created .interactive_complete marker for scene " + sceneId + " (backend: " + articulationBackend + ")"}
           severity: "INFO"
         next: done
 
     - done:
-        return: ${"Interactive + simready pipeline completed for " + object}
+        return: ${"Interactive pipeline completed for " + object}
 
     - done_failed:
         return: ${"Interactive + simready pipeline failed for " + object}

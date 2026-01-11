@@ -863,14 +863,47 @@ class EpisodeGenerator:
                     "dimensions": task["target_dimensions"],
                 }
 
+                # P1-7 FIX: Make articulation info configurable from task specification
                 articulation_info = None
                 if task.get("is_articulated"):
-                    articulation_info = {
-                        "handle_position": task["target_position"],
-                        "axis": [-1, 0, 0],
-                        "range": [0, 0.3],
-                        "type": "prismatic",
-                    }
+                    # Try to get articulation info from task, otherwise use defaults
+                    if "articulation_info" in task:
+                        # Use provided articulation info
+                        articulation_info = task["articulation_info"]
+                    else:
+                        # Infer from object category or use conservative defaults
+                        object_category = task.get("target_object_category", "").lower()
+
+                        # Default articulation parameters by category
+                        if "drawer" in object_category:
+                            articulation_info = {
+                                "handle_position": task["target_position"],
+                                "axis": [-1, 0, 0],  # Pull outward
+                                "range": [0, 0.4],   # 40cm max extension
+                                "type": "prismatic",
+                            }
+                        elif "door" in object_category or "cabinet" in object_category:
+                            articulation_info = {
+                                "handle_position": task["target_position"],
+                                "axis": [0, 0, 1],   # Vertical axis (hinge)
+                                "range": [0, 1.57],  # 90 degrees
+                                "type": "revolute",
+                            }
+                        elif "lid" in object_category or "box" in object_category:
+                            articulation_info = {
+                                "handle_position": task["target_position"],
+                                "axis": [0, 1, 0],   # Horizontal axis
+                                "range": [0, 1.57],  # 90 degrees
+                                "type": "revolute",
+                            }
+                        else:
+                            # Generic fallback (conservative prismatic)
+                            articulation_info = {
+                                "handle_position": task["target_position"],
+                                "axis": task.get("articulation_axis", [-1, 0, 0]),
+                                "range": task.get("articulation_range", [0, 0.3]),
+                                "type": task.get("articulation_type", "prismatic"),
+                            }
 
                 motion_plan = self.motion_planner.plan_motion(
                     task_name=task["task_name"],

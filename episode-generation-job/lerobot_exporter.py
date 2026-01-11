@@ -144,6 +144,7 @@ class LeRobotEpisode:
     success: bool = True
     total_reward: float = 0.0  # Computed by RewardComputer
     quality_score: float = 1.0
+    is_mock: bool = False  # P0-5 FIX: Flag for mock sensor data
 
     # Reward breakdown (for interpretability)
     reward_components: Dict[str, float] = field(default_factory=dict)
@@ -450,6 +451,18 @@ class LeRobotExporter:
             total_reward = quality_score * (1.0 if success else 0.3)
             reward_components = {"fallback": True, "success": float(success), "quality": quality_score}
 
+        # P0-5 FIX: Extract is_mock flag from sensor_data
+        is_mock = False
+        if sensor_data is not None:
+            # Check if sensor_data has frames with is_mock flag
+            if hasattr(sensor_data, 'frames') and len(sensor_data.frames) > 0:
+                first_frame = sensor_data.frames[0]
+                if hasattr(first_frame, 'is_mock'):
+                    is_mock = first_frame.is_mock
+                # Also check state dict if available
+                elif hasattr(first_frame, 'state') and isinstance(first_frame.state, dict):
+                    is_mock = first_frame.state.get('is_mock', False)
+
         episode = LeRobotEpisode(
             episode_index=episode_index,
             task_index=task_index,
@@ -460,6 +473,7 @@ class LeRobotExporter:
             success=success,
             total_reward=total_reward,
             quality_score=quality_score,
+            is_mock=is_mock,
             reward_components=reward_components,
             sensor_data=sensor_data,
             motion_plan=motion_plan,
@@ -609,6 +623,9 @@ class LeRobotExporter:
         - observation.state dimensions match robot DOF
         - action dimensions match robot DOF + gripper
         - timestamps are monotonically increasing
+        - P1-2 FIX: Action continuity (no large jumps)
+        - P1-2 FIX: Joint velocity/acceleration limits
+        - P1-2 FIX: Gripper position range (0.0-1.0)
 
         Raises:
             ValueError: If validation fails
@@ -645,6 +662,98 @@ class LeRobotExporter:
                 f"Episode {episode_index}: negative timestamps detected"
             )
 
+        # P1-2 FIX: Validate gripper position range (0.0-1.0)
+        for i, action in enumerate(action_data):
+            gripper_pos = action[-1]  # Last element is gripper
+            if not (0.0 <= gripper_pos <= 1.0):
+                raise ValueError(
+                    f"Episode {episode_index}, frame {i}: gripper position {gripper_pos:.3f} out of range [0.0, 1.0]"
+                )
+
+        # P1-2 FIX: Validate action continuity (detect large jumps between frames)
+        # Max joint displacement per frame (radians or meters depending on joint type)
+        # This is a heuristic - actual limits depend on robot and control frequency
+        max_joint_delta = 0.5  # radians per timestep (conservative for 30Hz control)
+        max_gripper_delta = 0.3  # gripper can move faster (0-1 normalized)
+
+        for i in range(1, len(action_data)):
+            dt = timestamps[i] - timestamps[i - 1]
+            if dt <= 0:
+                continue  # Already validated monotonic timestamps
+
+            prev_action = action_data[i - 1]
+            curr_action = action_data[i]
+
+            # Check joint continuity
+            for j in range(expected_action_dim - 1):  # Exclude gripper
+                delta = abs(curr_action[j] - prev_action[j])
+                # Scale by time delta for variable-rate trajectories
+                velocity = delta / dt if dt > 0 else float('inf')
+
+                if delta > max_joint_delta and velocity > max_joint_delta * 30:  # Assume ~30Hz base rate
+                    raise ValueError(
+                        f"Episode {episode_index}, frame {i}: Large joint discontinuity detected. "
+                        f"Joint {j}: delta={delta:.3f} rad, velocity={velocity:.3f} rad/s. "
+                        f"This may indicate a trajectory solver error or collision."
+                    )
+
+            # Check gripper continuity
+            gripper_delta = abs(curr_action[-1] - prev_action[-1])
+            if gripper_delta > max_gripper_delta:
+                # Gripper jumps are acceptable (open/close), but log warning for extreme values
+                if gripper_delta > 0.8:  # Very large jump (nearly full range)
+                    self.log(
+                        f"Episode {episode_index}, frame {i}: Large gripper jump {gripper_delta:.3f}. "
+                        f"This is acceptable but verify grasp timing.",
+                        "WARNING"
+                    )
+
+        # P1-2 FIX: Validate joint velocity limits (heuristic based on robot type)
+        # Standard industrial robot velocity limits (conservative)
+        max_joint_velocity = 2.0  # rad/s (conservative for 7-DOF arms)
+
+        for i in range(1, len(state_data)):
+            dt = timestamps[i] - timestamps[i - 1]
+            if dt <= 0:
+                continue
+
+            prev_state = state_data[i - 1]
+            curr_state = state_data[i]
+
+            for j in range(expected_state_dim):
+                velocity = abs(curr_state[j] - prev_state[j]) / dt
+                if velocity > max_joint_velocity:
+                    raise ValueError(
+                        f"Episode {episode_index}, frame {i}: Joint velocity limit exceeded. "
+                        f"Joint {j}: velocity={velocity:.3f} rad/s, limit={max_joint_velocity:.3f} rad/s. "
+                        f"This trajectory may not be executable on real hardware."
+                    )
+
+        # P1-2 FIX: Validate joint acceleration limits (heuristic)
+        max_joint_acceleration = 5.0  # rad/s² (conservative)
+
+        for i in range(2, len(state_data)):
+            dt1 = timestamps[i - 1] - timestamps[i - 2]
+            dt2 = timestamps[i] - timestamps[i - 1]
+            if dt1 <= 0 or dt2 <= 0:
+                continue
+
+            prev_state = state_data[i - 2]
+            curr_state = state_data[i - 1]
+            next_state = state_data[i]
+
+            for j in range(expected_state_dim):
+                vel1 = (curr_state[j] - prev_state[j]) / dt1
+                vel2 = (next_state[j] - curr_state[j]) / dt2
+                acceleration = abs(vel2 - vel1) / ((dt1 + dt2) / 2)
+
+                if acceleration > max_joint_acceleration:
+                    raise ValueError(
+                        f"Episode {episode_index}, frame {i}: Joint acceleration limit exceeded. "
+                        f"Joint {j}: acceleration={acceleration:.3f} rad/s², limit={max_joint_acceleration:.3f} rad/s². "
+                        f"This trajectory may not be executable on real hardware."
+                    )
+
     def _trajectory_to_arrow_table(self, episode: LeRobotEpisode) -> Union[Any, Dict]:
         """Convert trajectory to PyArrow table."""
 
@@ -679,6 +788,15 @@ class LeRobotExporter:
             episode_index=episode.episode_index,
         )
 
+        # P1-1 FIX: Validate ee_position is not None (cannot use [0,0,0] as it's a valid position)
+        for i, s in enumerate(states):
+            if s.ee_position is None:
+                raise ValueError(
+                    f"Episode {episode.episode_index}: ee_position is None at frame {i}. "
+                    f"Cannot use [0,0,0] as fallback since it's a valid position. "
+                    f"Ensure trajectory solver computes ee_position for all frames."
+                )
+
         # Index within episode
         index_in_episode = list(range(len(states)))
 
@@ -696,9 +814,9 @@ class LeRobotExporter:
                 "observation.gripper_position": pa.array(
                     [s.gripper_position for s in states], type=pa.float32()
                 ),
-                # EE position (if available)
+                # EE position (now guaranteed to be non-None)
                 "observation.ee_position": pa.array(
-                    [s.ee_position.tolist() if s.ee_position is not None else [0, 0, 0] for s in states],
+                    [s.ee_position.tolist() for s in states],
                     type=pa.list_(pa.float32()),
                 ),
             })
@@ -925,6 +1043,7 @@ class LeRobotExporter:
                     "variation_index": episode.variation_index,
                     "success": episode.success,
                     "quality_score": episode.quality_score,
+                    "is_mock": episode.is_mock,  # P0-5 FIX: Explicit flag for mock data
                 }
                 # Add sensor data info if available
                 if episode.sensor_data is not None:
