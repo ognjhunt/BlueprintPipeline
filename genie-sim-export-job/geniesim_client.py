@@ -36,6 +36,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiohttp
 import requests
 
+# LABS-BLOCKER-003 FIX: Add Pydantic for API response validation
+try:
+    from pydantic import BaseModel, Field, validator, ValidationError
+    HAVE_PYDANTIC = True
+except ImportError:
+    HAVE_PYDANTIC = False
+    logger.warning("Pydantic not available - API response validation will be limited")
+
 # Add repo root to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -174,6 +182,99 @@ class HealthStatus:
     estimated_queue_time_seconds: Optional[float] = None
     error: Optional[str] = None
     checked_at: Optional[str] = None  # ISO 8601 timestamp
+
+
+# =============================================================================
+# LABS-BLOCKER-003 FIX: Pydantic Models for API Response Validation
+# =============================================================================
+
+if HAVE_PYDANTIC:
+    class JobProgressResponse(BaseModel):
+        """
+        Validated API response for job progress.
+
+        LABS-BLOCKER-003 FIX: Adds validation to prevent:
+        - progress_percent > 100% or < 0%
+        - Invalid job status values
+        - Negative episode counts
+        """
+        job_id: str
+        status: str
+        progress_percent: float = Field(..., ge=0.0, le=100.0, description="Progress percentage (0-100)")
+        current_task: str = ""
+        episodes_generated: int = Field(default=0, ge=0, description="Episodes generated (non-negative)")
+        total_episodes_target: int = Field(default=0, ge=0, description="Total episodes target (non-negative)")
+        started_at: Optional[str] = None
+        estimated_completion: Optional[str] = None
+        logs: List[str] = Field(default_factory=list)
+
+        @validator('status')
+        def validate_status(cls, v):
+            """Validate status is a valid JobStatus enum value."""
+            valid_statuses = {s.value for s in JobStatus}
+            if v not in valid_statuses:
+                raise ValueError(
+                    f"Invalid job status: {v}. "
+                    f"Must be one of: {', '.join(valid_statuses)}"
+                )
+            return v
+
+        @validator('episodes_generated', 'total_episodes_target')
+        def validate_non_negative(cls, v, field):
+            """Ensure counts are non-negative."""
+            if v < 0:
+                raise ValueError(f"{field.name} cannot be negative: {v}")
+            return v
+
+        class Config:
+            # Allow arbitrary types for compatibility
+            arbitrary_types_allowed = True
+
+    class HealthStatusResponse(BaseModel):
+        """
+        Validated API response for health check.
+
+        LABS-BLOCKER-003 FIX: Validates health check response format.
+        """
+        status: str
+        version: Optional[str] = None
+        rate_limit_remaining: Optional[int] = Field(default=None, ge=0)
+        estimated_queue_time_seconds: Optional[float] = Field(default=None, ge=0.0)
+
+        @validator('status')
+        def validate_status(cls, v):
+            """Validate status is 'healthy' or 'unhealthy'."""
+            if v not in ["healthy", "unhealthy", "degraded"]:
+                raise ValueError(f"Invalid health status: {v}")
+            return v
+
+        class Config:
+            arbitrary_types_allowed = True
+
+    class JobSubmissionResponse(BaseModel):
+        """
+        Validated API response for job submission.
+
+        LABS-BLOCKER-003 FIX: Validates job submission response.
+        """
+        job_id: str
+        message: str = ""
+        estimated_completion_time: Optional[str] = None
+        estimated_cost_usd: Optional[float] = Field(default=None, ge=0.0)
+
+        @validator('job_id')
+        def validate_job_id(cls, v):
+            """Validate job ID format (alphanumeric + hyphens/underscores)."""
+            if not v or len(v) < 8:
+                raise ValueError(f"Invalid job ID: {v} (too short)")
+            # Basic format validation - alphanumeric + hyphens/underscores
+            import re
+            if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+                raise ValueError(f"Invalid job ID format: {v}")
+            return v
+
+        class Config:
+            arbitrary_types_allowed = True
 
 
 # =============================================================================
@@ -713,6 +814,8 @@ class GenieSimClient:
         """
         Get current status of a job.
 
+        LABS-BLOCKER-003 FIX: Added Pydantic validation for API response.
+
         Args:
             job_id: Job identifier
 
@@ -721,6 +824,7 @@ class GenieSimClient:
 
         Raises:
             GenieSimJobNotFoundError: If job not found
+            GenieSimAPIError: If response validation fails
         """
         try:
             response = self._make_request_with_retry(
@@ -731,20 +835,58 @@ class GenieSimClient:
             if response.status_code == 404:
                 raise GenieSimJobNotFoundError(f"Job {job_id} not found")
 
-            data = response.json()
-            return JobProgress(
-                job_id=job_id,
-                status=JobStatus(data.get("status", "pending")),
-                progress_percent=data.get("progress_percent", 0.0),
-                current_task=data.get("current_task", ""),
-                episodes_generated=data.get("episodes_generated", 0),
-                total_episodes_target=data.get("total_episodes_target", 0),
-                started_at=data.get("started_at"),
-                estimated_completion=data.get("estimated_completion"),
-                logs=data.get("logs", []),
-            )
+            # LABS-BLOCKER-003 FIX: Parse and validate JSON response
+            try:
+                data = response.json()
+            except (json.JSONDecodeError, ValueError) as e:
+                raise GenieSimAPIError(f"Invalid JSON response from API: {e}")
+
+            # LABS-BLOCKER-003 FIX: Validate response with Pydantic if available
+            if HAVE_PYDANTIC:
+                try:
+                    validated = JobProgressResponse(**data)
+                    # Convert validated Pydantic model back to JobProgress dataclass
+                    return JobProgress(
+                        job_id=validated.job_id,
+                        status=JobStatus(validated.status),
+                        progress_percent=validated.progress_percent,
+                        current_task=validated.current_task,
+                        episodes_generated=validated.episodes_generated,
+                        total_episodes_target=validated.total_episodes_target,
+                        started_at=validated.started_at,
+                        estimated_completion=validated.estimated_completion,
+                        logs=validated.logs,
+                    )
+                except ValidationError as e:
+                    raise GenieSimAPIError(
+                        f"API response validation failed: {e}\n"
+                        f"Received data: {data}"
+                    )
+            else:
+                # Fallback: Manual validation without Pydantic
+                progress_pct = data.get("progress_percent", 0.0)
+                if not (0.0 <= progress_pct <= 100.0):
+                    logger.warning(
+                        f"Invalid progress_percent: {progress_pct} (should be 0-100). "
+                        f"Clamping to valid range."
+                    )
+                    progress_pct = max(0.0, min(100.0, progress_pct))
+
+                return JobProgress(
+                    job_id=job_id,
+                    status=JobStatus(data.get("status", "pending")),
+                    progress_percent=progress_pct,
+                    current_task=data.get("current_task", ""),
+                    episodes_generated=max(0, data.get("episodes_generated", 0)),
+                    total_episodes_target=max(0, data.get("total_episodes_target", 0)),
+                    started_at=data.get("started_at"),
+                    estimated_completion=data.get("estimated_completion"),
+                    logs=data.get("logs", []),
+                )
 
         except GenieSimJobNotFoundError:
+            raise
+        except GenieSimAPIError:
             raise
         except Exception as e:
             logger.error(f"Failed to get job status: {e}")

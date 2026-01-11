@@ -1566,69 +1566,70 @@ def main():
             default_require_real = "false"
 
         require_real_physics = os.getenv("REQUIRE_REAL_PHYSICS", default_require_real).lower() == "true"
-        allow_mock_data = os.getenv("ALLOW_MOCK_DATA", "false").lower() == "true"
+
+        # LABS-BLOCKER-001 FIX: Remove ALLOW_MOCK_DATA override in production
+        # In production, we MUST have Isaac Sim - no exceptions
+        # This prevents labs from wasting GPU hours on garbage data
+        if is_production:
+            allow_mock_data = False  # NEVER allow mock data in production
+            if os.getenv("ALLOW_MOCK_DATA", "").lower() == "true":
+                print("\n" + "=" * 80)
+                print("❌ FATAL ERROR: ALLOW_MOCK_DATA not permitted in production")
+                print("=" * 80)
+                print("")
+                print("ALLOW_MOCK_DATA=true is IGNORED in production environments.")
+                print("Production training data MUST use real Isaac Sim physics.")
+                print("")
+                print("This protection prevents:")
+                print("  - Training models on random noise images")
+                print("  - Wasting GPU hours on useless data")
+                print("  - Shipping low-quality data to labs/customers")
+                print("")
+                print("=" * 80 + "\n")
+        else:
+            # Development mode: allow override for testing
+            allow_mock_data = os.getenv("ALLOW_MOCK_DATA", "false").lower() == "true"
 
         # P0-4 FIX: Log configuration BEFORE checking Isaac Sim
         print(f"[EPISODE-GEN-JOB] Production mode: {is_production}")
         print(f"[EPISODE-GEN-JOB] Require real physics: {require_real_physics}")
         print(f"[EPISODE-GEN-JOB] Allow mock data: {allow_mock_data}")
 
-        # P0-4 FIX: Enforce production requirements - fail loudly if Isaac Sim required but not available
+        # LABS-BLOCKER-001 FIX: Fail hard in production if Isaac Sim not available
         if require_real_physics and not isaac_sim_available:
-            if allow_mock_data:
-                print("\n" + "=" * 80)
-                print("⚠️  CRITICAL WARNING: ALLOW_MOCK_DATA OVERRIDE ACTIVE")
-                print("=" * 80)
-                print("")
-                print("You are running in PRODUCTION mode with MOCK DATA.")
-                print("This will generate:")
-                print("  - Random noise RGB images (NOT real sensor data)")
-                print("  - Heuristic-based validation (NOT physics-verified)")
-                print("  - Mock contact/collision data (NOT accurate)")
-                print("")
-                print("This data is NOT suitable for:")
-                print("  - Training production ML models")
-                print("  - Selling as training data")
-                print("  - Real-world robot deployment")
-                print("")
-                print("To disable this override and enforce real physics:")
-                print("  unset ALLOW_MOCK_DATA")
-                print("  OR set ALLOW_MOCK_DATA=false")
-                print("")
-                print("=" * 80 + "\n")
-
-                # Log to a file for audit trail
-                audit_log = Path("/tmp/mock_data_usage.log")
-                try:
-                    with open(audit_log, "a") as f:
-                        from datetime import datetime
-                        f.write(f"{datetime.utcnow().isoformat()}Z - MOCK DATA USED IN PRODUCTION - Scene: {scene_id}\n")
-                except Exception:
-                    pass  # Don't fail the job if we can't write the audit log
-
-            else:
-                print("\n" + "=" * 70)
-                print("FATAL ERROR: Isaac Sim not available in production mode")
-                print("=" * 70)
-                print("")
-                print("Episode generation requires Isaac Sim for:")
-                print("  - Real physics simulation (PhysX)")
-                print("  - Actual sensor data capture (Replicator)")
-                print("  - Physics-validated trajectories")
-                print("")
-                print("Without Isaac Sim, the pipeline would generate:")
-                print("  - Random noise RGB images (not real visual data)")
-                print("  - Heuristic-based validation (not physics-verified)")
-            print("  - Mock contact/collision data")
+            # In production, this is ALWAYS a fatal error (allow_mock_data is always False)
+            print("\n" + "=" * 80)
+            print("❌ FATAL ERROR: Isaac Sim not available in production mode")
+            print("=" * 80)
+            print("")
+            print("Episode generation requires NVIDIA Isaac Sim for:")
+            print("  ✓ Real physics simulation (PhysX)")
+            print("  ✓ Actual sensor data capture (Replicator)")
+            print("  ✓ Physics-validated trajectories")
+            print("  ✓ Collision detection with real geometry")
+            print("")
+            print("Without Isaac Sim, the pipeline would generate:")
+            print("  ✗ Random noise RGB images (NOT real sensor data)")
+            print("  ✗ Heuristic-based validation (NOT physics-verified)")
+            print("  ✗ Mock contact/collision data (NOT accurate)")
+            print("")
+            print("This data is USELESS for:")
+            print("  • Training production ML models")
+            print("  • Real-world robot deployment")
+            print("  • Lab testing and evaluation")
             print("")
             print("To fix this:")
-            print("  1. Run with Isaac Sim: /isaac-sim/python.sh your_script.py")
-            print("  2. Or use the Isaac Sim container (see docs/ISAAC_SIM_SETUP.md)")
+            print("  1. Install Isaac Sim: https://developer.nvidia.com/isaac-sim")
+            print("  2. Run with Isaac Sim Python: /isaac-sim/python.sh generate_episodes.py")
+            print("  3. Or use the Isaac Sim container: see docs/ISAAC_SIM_SETUP.md")
             print("")
-            print("To override (NOT RECOMMENDED for training data):")
-            print("  export ALLOW_MOCK_DATA=true")
-            print("  export REQUIRE_REAL_PHYSICS=false")
-            print("=" * 70 + "\n")
+            if is_production:
+                print("NOTE: ALLOW_MOCK_DATA override is DISABLED in production.")
+                print("      There is no way to bypass this check in production mode.")
+            else:
+                print("To bypass in development (NOT for production data):")
+                print("  export REQUIRE_REAL_PHYSICS=false")
+            print("=" * 80 + "\n")
             sys.exit(1)
 
     # Development mode warning
