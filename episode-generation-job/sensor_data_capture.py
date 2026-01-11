@@ -285,6 +285,16 @@ class SensorDataConfig:
     use_gpu_compression: bool = True
     max_concurrent_captures: int = 4
 
+    # Robot configuration
+    robot_prim_paths: List[str] = field(default_factory=lambda: [
+        "/World/Robot",
+        "/World/Franka",
+        "/World/Panda",
+        "/World/UR5",
+        "/World/UR10",
+        "/World/Kinova",
+    ])
+
     @classmethod
     def from_data_pack(
         cls,
@@ -580,6 +590,15 @@ class IsaacSimSensorCapture:
         """Check if using real Isaac Sim capture (not mock)."""
         return self.initialized and self._rep is not None
 
+    def is_mock(self) -> bool:
+        """
+        Check if this is a mock sensor capture instance.
+
+        Returns:
+            False for real Isaac Sim sensor capture
+        """
+        return False
+
     def _setup_camera(self, camera_config: CameraConfig) -> None:
         """Set up a camera with its annotators."""
         if self._rep is None:
@@ -657,6 +676,7 @@ class IsaacSimSensorCapture:
             return frame_data
 
         # Capture from each camera
+        failed_cameras = []
         for camera_id, annotators in self._annotators.items():
             try:
                 # RGB
@@ -702,7 +722,17 @@ class IsaacSimSensorCapture:
                         frame_data.normals[camera_id] = normals_data["data"]
 
             except Exception as e:
-                self.log(f"Frame capture error for {camera_id}: {e}", "WARNING")
+                import traceback
+                failed_cameras.append(camera_id)
+                self.log(f"Frame capture error for {camera_id}: {e}", "ERROR")
+                if self.verbose:
+                    self.log(traceback.format_exc(), "DEBUG")
+
+        # Check if all cameras failed
+        if failed_cameras and len(failed_cameras) == len(self._annotators):
+            raise RuntimeError(f"All {len(failed_cameras)} cameras failed to capture frame {frame_index}")
+        elif failed_cameras:
+            self.log(f"Frame {frame_index}: {len(failed_cameras)}/{len(self._annotators)} cameras failed", "WARNING")
 
         # Object poses (if enabled)
         if self.config.include_object_poses and scene_objects:
@@ -1033,8 +1063,10 @@ class IsaacSimSensorCapture:
 
                 stage = get_current_stage()
                 if stage is not None:
-                    # Try common robot paths
-                    robot_paths = ["/World/Robot", "/World/Franka", "/World/Panda"]
+                    # Try configured robot paths (or default common paths)
+                    robot_paths = self.config.robot_prim_paths if hasattr(self.config, 'robot_prim_paths') else [
+                        "/World/Robot", "/World/Franka", "/World/Panda"
+                    ]
                     for robot_path in robot_paths:
                         robot_prim = stage.GetPrimAtPath(robot_path)
                         if robot_prim.IsValid():
@@ -1149,6 +1181,15 @@ class MockSensorCapture(IsaacSimSensorCapture):
 
     # Class-level warning tracker to avoid spam
     _warning_shown = False
+
+    def is_mock(self) -> bool:
+        """
+        Check if this is a mock sensor capture instance.
+
+        Returns:
+            True for mock sensor capture (not suitable for production)
+        """
+        return True
 
     def initialize(self, scene_path: Optional[str] = None) -> bool:
         self.initialized = True

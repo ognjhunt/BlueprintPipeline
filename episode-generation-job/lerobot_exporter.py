@@ -595,6 +595,56 @@ class LeRobotExporter:
                 chunk_dir = data_dir / f"chunk-{chunk_idx:03d}"
                 chunk_dir.mkdir(exist_ok=True)
 
+    def _validate_lerobot_schema(
+        self,
+        timestamps: List[float],
+        state_data: List[List[float]],
+        action_data: List[List[float]],
+        episode_index: int,
+    ) -> None:
+        """
+        Validate LeRobot v2.0 schema compliance.
+
+        Validates:
+        - observation.state dimensions match robot DOF
+        - action dimensions match robot DOF + gripper
+        - timestamps are monotonically increasing
+
+        Raises:
+            ValueError: If validation fails
+        """
+        # Validate state dimensions
+        expected_state_dim = self.robot_config.num_dof
+        for i, state in enumerate(state_data):
+            if len(state) != expected_state_dim:
+                raise ValueError(
+                    f"Episode {episode_index}, frame {i}: observation.state dimension mismatch. "
+                    f"Expected {expected_state_dim}, got {len(state)}"
+                )
+
+        # Validate action dimensions (DOF + gripper)
+        expected_action_dim = self.robot_config.num_dof + 1
+        for i, action in enumerate(action_data):
+            if len(action) != expected_action_dim:
+                raise ValueError(
+                    f"Episode {episode_index}, frame {i}: action dimension mismatch. "
+                    f"Expected {expected_action_dim} (DOF + gripper), got {len(action)}"
+                )
+
+        # Validate timestamps are monotonically increasing
+        for i in range(1, len(timestamps)):
+            if timestamps[i] <= timestamps[i - 1]:
+                raise ValueError(
+                    f"Episode {episode_index}, frame {i}: timestamps not monotonically increasing. "
+                    f"Frame {i-1}: {timestamps[i-1]:.6f}, Frame {i}: {timestamps[i]:.6f}"
+                )
+
+        # Validate timestamps are non-negative
+        if any(t < 0 for t in timestamps):
+            raise ValueError(
+                f"Episode {episode_index}: negative timestamps detected"
+            )
+
     def _trajectory_to_arrow_table(self, episode: LeRobotEpisode) -> Union[Any, Dict]:
         """Convert trajectory to PyArrow table."""
 
@@ -620,6 +670,14 @@ class LeRobotExporter:
                 # Last frame: repeat current
                 action = list(s.joint_positions) + [s.gripper_position]
             action_data.append(action)
+
+        # Validate LeRobot v2.0 schema compliance
+        self._validate_lerobot_schema(
+            timestamps=timestamps,
+            state_data=state_data,
+            action_data=action_data,
+            episode_index=episode.episode_index,
+        )
 
         # Index within episode
         index_in_episode = list(range(len(states)))

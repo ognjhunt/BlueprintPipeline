@@ -44,6 +44,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from motion_planner import MotionPlan, Waypoint
 from trajectory_solver import JointTrajectory, JointState, ROBOT_CONFIGS
+from quality_constants import (
+    MIN_QUALITY_SCORE,
+    MAX_RETRIES,
+    STABILITY_THRESHOLD,
+    COLLISION_PENETRATION_THRESHOLD,
+)
 
 # Import Isaac Sim integration
 try:
@@ -298,15 +304,14 @@ class ValidationConfig:
 
     # Stability
     require_object_stable: bool = True
-    stability_threshold: float = 0.001  # Position change threshold
+    stability_threshold: float = STABILITY_THRESHOLD  # Unified constant
 
-    # Quality thresholds - LABS-BLOCKER-002 FIX: Raised from 0.7 to 0.85
-    # 85% quality ensures data is suitable for production training
-    # Prevents labs from receiving episodes with significant issues
-    min_quality_score: float = 0.85
+    # Quality thresholds - LABS-BLOCKER-002 FIX: Uses unified quality constants
+    # Imported from quality_constants.py to ensure consistency across pipeline
+    min_quality_score: float = MIN_QUALITY_SCORE  # 0.85 - unified threshold
 
     # Retry settings
-    max_retries: int = 3
+    max_retries: int = MAX_RETRIES  # Unified constant
     retry_on_collision: bool = True
     retry_on_joint_limit: bool = True
 

@@ -80,6 +80,7 @@ if str(REPO_ROOT) not in sys.path:
 from motion_planner import AIMotionPlanner, MotionPlan
 from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS
 from lerobot_exporter import LeRobotExporter, LeRobotDatasetConfig
+from quality_constants import MIN_QUALITY_SCORE, MAX_RETRIES, PRODUCTION_TRAINING_THRESHOLD
 
 # SOTA imports (new architecture)
 from task_specifier import TaskSpecifier, TaskSpecification, SegmentType
@@ -189,10 +190,10 @@ class EpisodeGenerationConfig:
     use_cpgen: bool = True  # Use CP-Gen style augmentation
     use_validation: bool = True  # Use simulation validation
 
-    # Quality settings - LABS-BLOCKER-002 FIX: Raised from 0.7 to 0.85
-    # 85% minimum ensures labs receive production-quality training data
-    min_quality_score: float = 0.85
-    max_retries: int = 3
+    # Quality settings - LABS-BLOCKER-002 FIX: Uses unified quality constants
+    # Imported from quality_constants.py to ensure consistency across pipeline
+    min_quality_score: float = MIN_QUALITY_SCORE  # 0.85 - unified threshold
+    max_retries: int = MAX_RETRIES  # 3 - unified retry limit
     validate_trajectories: bool = True
     include_failed: bool = False
 
@@ -636,9 +637,8 @@ class EpisodeGenerator:
                     verbose=verbose,
                 )
 
-                # Check if we got mock capture
-                if hasattr(self.sensor_capture, '__class__'):
-                    self._sensor_capture_is_mock = 'Mock' in self.sensor_capture.__class__.__name__
+                # Check if we got mock capture using the dedicated method
+                self._sensor_capture_is_mock = hasattr(self.sensor_capture, 'is_mock') and self.sensor_capture.is_mock()
 
                 self.log(f"Sensor capture initialized: {config.data_pack_tier} pack, {config.num_cameras} cameras")
                 if self._sensor_capture_is_mock:
@@ -779,7 +779,13 @@ class EpisodeGenerator:
             dataset_path = exporter.finalize()
             output.lerobot_dataset_path = dataset_path
         except Exception as e:
-            output.errors.append(f"LeRobot export failed: {e}")
+            import traceback
+            error_msg = f"LeRobot export failed: {e}"
+            output.errors.append(error_msg)
+            self.log(error_msg, "ERROR")
+            if self.verbose:
+                self.log(traceback.format_exc(), "DEBUG")
+            # LeRobot export failure is non-fatal - episodes are still valid
 
         # Clean up memory after export
         del exporter
@@ -844,6 +850,7 @@ class EpisodeGenerator:
     ) -> List[GeneratedEpisode]:
         """Generate seed episodes for each task."""
         seed_episodes = []
+        failed_seeds = []
 
         for task, spec in tasks_with_specs:
             try:
@@ -922,7 +929,27 @@ class EpisodeGenerator:
                 self.log(f"    Created seed: {task['task_name']}{visual_info}")
 
             except Exception as e:
-                self.log(f"    Failed seed {task['task_name']}: {e}", "WARNING")
+                import traceback
+                failed_seeds.append({
+                    "task_name": task.get("task_name", "unknown"),
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                })
+                self.log(f"    Failed seed {task['task_name']}: {e}", "ERROR")
+                # Log full traceback for debugging
+                if self.verbose:
+                    self.log(traceback.format_exc(), "DEBUG")
+
+        # Check if too many seeds failed
+        total_tasks = len(tasks_with_specs)
+        if total_tasks > 0:
+            failure_rate = len(failed_seeds) / total_tasks
+            if failure_rate > 0.8:  # More than 80% failed
+                error_msg = f"Seed generation failed: {len(failed_seeds)}/{total_tasks} tasks failed ({failure_rate*100:.1f}%)"
+                self.log(error_msg, "ERROR")
+                raise RuntimeError(error_msg)
+            elif failed_seeds:
+                self.log(f"Seed generation completed with {len(failed_seeds)}/{total_tasks} failures ({failure_rate*100:.1f}%)", "WARNING")
 
         return seed_episodes
 
@@ -935,6 +962,8 @@ class EpisodeGenerator:
         """Generate augmented episodes using CP-Gen approach."""
         all_episodes = list(seed_episodes)  # Start with seeds
         objects = manifest.get("objects", [])
+        failed_variations = []
+        failed_seeds = []
 
         if not self.config.use_cpgen or not self.cpgen_augmenter:
             # Fallback: simple variation without CP-Gen
@@ -1009,10 +1038,31 @@ class EpisodeGenerator:
                             all_episodes.append(episode)
 
                     except Exception as e:
-                        self.log(f"    Variation {var_idx} failed: {e}", "WARNING")
+                        import traceback
+                        failed_variations.append({
+                            "seed_task": seed.task_name,
+                            "variation_idx": var_idx,
+                            "error": str(e),
+                            "traceback": traceback.format_exc()
+                        })
+                        self.log(f"    Variation {var_idx} failed: {e}", "ERROR")
+                        if self.verbose:
+                            self.log(traceback.format_exc(), "DEBUG")
 
             except Exception as e:
-                self.log(f"  CP-Gen augmentation failed for {seed.task_name}: {e}", "WARNING")
+                import traceback
+                failed_seeds.append({
+                    "task_name": seed.task_name,
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                })
+                self.log(f"  CP-Gen augmentation failed for {seed.task_name}: {e}", "ERROR")
+                if self.verbose:
+                    self.log(traceback.format_exc(), "DEBUG")
+
+        # Log summary of failures
+        if failed_variations or failed_seeds:
+            self.log(f"  Variation generation: {len(failed_seeds)} seed failures, {len(failed_variations)} variation failures", "WARNING")
 
         self.log(f"  Generated {len(all_episodes)} total episodes")
         return all_episodes
@@ -1026,8 +1076,14 @@ class EpisodeGenerator:
         """Simple variation without CP-Gen (fallback)."""
         all_episodes = list(seed_episodes)
         objects = manifest.get("objects", [])
+        failed_variations = []
 
         for seed in seed_episodes:
+            # Skip seeds with uninitialized task spec or motion plan
+            if seed.task_spec is None or seed.motion_plan is None:
+                self.log(f"    Skipping seed {seed.episode_id} - missing task_spec or motion_plan", "WARNING")
+                continue
+
             for var_idx in range(1, num_variations):
                 try:
                     # Apply small random offsets
@@ -1093,7 +1149,20 @@ class EpisodeGenerator:
                     all_episodes.append(episode)
 
                 except Exception as e:
-                    self.log(f"    Simple variation {var_idx} failed: {e}", "WARNING")
+                    import traceback
+                    failed_variations.append({
+                        "seed_task": seed.task_name,
+                        "variation_idx": var_idx,
+                        "error": str(e),
+                        "traceback": traceback.format_exc()
+                    })
+                    self.log(f"    Simple variation {var_idx} failed: {e}", "ERROR")
+                    if self.verbose:
+                        self.log(traceback.format_exc(), "DEBUG")
+
+        # Log summary of failures
+        if failed_variations:
+            self.log(f"  Simple variation generation: {len(failed_variations)} failures", "WARNING")
 
         return all_episodes
 
