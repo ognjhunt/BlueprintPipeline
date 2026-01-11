@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Quality Gate Configuration",
+  "description": "Configurable thresholds and settings for quality gates. Labs can customize these values for their specific use cases.",
+  "version": "1.0.0",
+  "thresholds": {
+    "physics": {
+      "mass_min_kg": 0.01,
+      "mass_max_kg": 500.0,
+      "friction_min": 0.0,
+      "friction_max": 2.0,
+      "inertia_min": 0.0,
+      "description": "Physics property validation thresholds"
+    },
+    "episodes": {
+      "collision_free_rate_min": 0.80,
+      "quality_score_min": 0.85,
+      "quality_pass_rate_min": 0.50,
+      "min_episodes_required": 1,
+      "description": "Episode generation quality thresholds"
+    },
+    "simulation": {
+      "min_stable_steps": 10,
+      "max_penetration_depth_m": 0.01,
+      "physics_stability_timeout_s": 30.0,
+      "description": "Simulation stability thresholds"
+    },
+    "usd": {
+      "max_broken_references": 0,
+      "require_physics_scene": true,
+      "require_header_validation": true,
+      "description": "USD scene validation thresholds"
+    },
+    "isaac_lab": {
+      "require_env_cfg": true,
+      "require_task_files": true,
+      "syntax_check_enabled": true,
+      "description": "Isaac Lab code generation thresholds"
+    }
+  },
+  "human_approval": {
+    "enabled": true,
+    "timeout_hours": 24,
+    "auto_approve_on_timeout": false,
+    "approval_methods": ["dashboard", "email", "api"],
+    "default_approvers": [],
+    "escalation_after_hours": 12,
+    "escalation_contacts": [],
+    "notification_channels": ["email", "console"],
+    "description": "Human-in-the-loop approval workflow settings"
+  },
+  "notifications": {
+    "email_recipients": [],
+    "sms_recipients": [],
+    "slack_webhook_url": null,
+    "notify_on_pass": false,
+    "notify_on_warning": true,
+    "notify_on_error": true,
+    "notify_on_approval_required": true
+  },
+  "gate_overrides": {
+    "allow_manual_override": true,
+    "override_requires_reason": true,
+    "override_log_retention_days": 90,
+    "allowed_overriders": [],
+    "description": "Settings for manual gate override functionality"
+  },
+  "severity_handling": {
+    "error": {
+      "blocks_pipeline": true,
+      "requires_human_approval": true,
+      "auto_retry_count": 0
+    },
+    "warning": {
+      "blocks_pipeline": false,
+      "requires_human_approval": false,
+      "auto_retry_count": 1
+    },
+    "info": {
+      "blocks_pipeline": false,
+      "requires_human_approval": false,
+      "auto_retry_count": 0
+    }
+  }
+}

@@ -39,6 +39,78 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
+# LABS P1 FIX: Import premium feature modules with robust fallbacks
+# These modules are in the same directory as post_processor.py
+try:
+    from language_annotator import LanguageAnnotator
+    HAVE_LANGUAGE_ANNOTATOR = True
+except ImportError:
+    HAVE_LANGUAGE_ANNOTATOR = False
+    LanguageAnnotator = None
+
+try:
+    from vla_finetuning_generator import VLAFinetuningGenerator, VLAModel
+    HAVE_VLA_GENERATOR = True
+except ImportError:
+    HAVE_VLA_GENERATOR = False
+    VLAFinetuningGenerator = None
+    VLAModel = None
+
+try:
+    from sim2real_service import Sim2RealService, ValidationTier
+    HAVE_SIM2REAL = True
+except ImportError:
+    HAVE_SIM2REAL = False
+    Sim2RealService = None
+    ValidationTier = None
+
+try:
+    from contact_rich_tasks import (
+        ContactRichTaskGenerator,
+        ContactRichTaskType,
+        ToleranceClass,
+    )
+    HAVE_CONTACT_RICH = True
+except ImportError:
+    HAVE_CONTACT_RICH = False
+    ContactRichTaskGenerator = None
+    ContactRichTaskType = None
+    ToleranceClass = None
+
+try:
+    from audio_narrator import AudioNarrator
+    HAVE_AUDIO_NARRATOR = True
+except ImportError:
+    HAVE_AUDIO_NARRATOR = False
+    AudioNarrator = None
+
+try:
+    from subtitle_generator import SubtitleGenerator
+    HAVE_SUBTITLE_GENERATOR = True
+except ImportError:
+    HAVE_SUBTITLE_GENERATOR = False
+    SubtitleGenerator = None
+
+try:
+    from tactile_sensor_sim import (
+        TactileSensorSimulator,
+        TactileSensorType,
+        SENSOR_CONFIGS,
+    )
+    HAVE_TACTILE = True
+except ImportError:
+    HAVE_TACTILE = False
+    TactileSensorSimulator = None
+    TactileSensorType = None
+    SENSOR_CONFIGS = None
+
+try:
+    from advanced_capabilities import AdvancedCapabilities
+    HAVE_ADVANCED = True
+except ImportError:
+    HAVE_ADVANCED = False
+    AdvancedCapabilities = None
+
 
 class BundleTier(Enum):
     """Bundle pricing tiers."""
@@ -264,12 +336,18 @@ class UpsellPostProcessor:
         )
 
     def _apply_language_annotations(self) -> None:
-        """Add language annotations to episodes."""
+        """Add language annotations to episodes.
+
+        LABS P1 FIX: Uses pre-imported module with availability check.
+        """
         self.log("Applying language annotations...")
 
-        try:
-            from language_annotator import LanguageAnnotator
+        if not HAVE_LANGUAGE_ANNOTATOR or LanguageAnnotator is None:
+            self.log("  Language annotator module not available, using template fallback", "WARNING")
+            self._create_placeholder_annotations()
+            return
 
+        try:
             output_path = self.upsell_dir / "language_annotations.json"
 
             # Find tasks file
@@ -295,15 +373,14 @@ class UpsellPostProcessor:
                 "total_annotations": sum(len(v) for v in annotations.values()),
                 "tasks_annotated": len(annotations),
                 "variations_per_task": self.features.num_language_variations,
+                "method": "full",
             }
             self.log(f"  Generated {self.metrics['language_annotations']['total_annotations']} annotations")
 
-        except ImportError as e:
-            self.log(f"  Language annotator not available: {e}", "WARNING")
-            self._create_placeholder_annotations()
         except Exception as e:
             self.errors.append(f"Language annotations failed: {e}")
             self.log(f"  Failed: {e}", "ERROR")
+            self._create_placeholder_annotations()
 
     def _create_tasks_from_episodes(self) -> Path:
         """Create tasks.jsonl from episode metadata."""
@@ -374,12 +451,18 @@ class UpsellPostProcessor:
         }
 
     def _generate_vla_packages(self) -> None:
-        """Generate VLA fine-tuning packages."""
+        """Generate VLA fine-tuning packages.
+
+        LABS P1 FIX: Uses pre-imported module with availability check.
+        """
         self.log("Generating VLA fine-tuning packages...")
 
-        try:
-            from vla_finetuning_generator import VLAFinetuningGenerator, VLAModel
+        if not HAVE_VLA_GENERATOR or VLAFinetuningGenerator is None:
+            self.log("  VLA generator module not available, using placeholder", "WARNING")
+            self._create_placeholder_vla()
+            return
 
+        try:
             vla_dir = self.upsell_dir / "vla_finetuning"
             models = [VLAModel(m) for m in self.features.vla_models]
 
@@ -398,15 +481,14 @@ class UpsellPostProcessor:
             self.metrics["vla_finetuning"] = {
                 "models": [m.value for m in models],
                 "packages_generated": len(results),
+                "method": "full",
             }
             self.log(f"  Generated {len(results)} VLA packages")
 
-        except ImportError as e:
-            self.log(f"  VLA generator not available: {e}", "WARNING")
-            self._create_placeholder_vla()
         except Exception as e:
             self.errors.append(f"VLA generation failed: {e}")
             self.log(f"  Failed: {e}", "ERROR")
+            self._create_placeholder_vla()
 
     def _create_placeholder_vla(self) -> None:
         """Create placeholder VLA configs."""
@@ -437,12 +519,18 @@ class UpsellPostProcessor:
         }
 
     def _run_sim2real_validation(self) -> None:
-        """Run sim2real validation."""
+        """Run sim2real validation.
+
+        LABS P1 FIX: Uses pre-imported module with availability check.
+        """
         self.log(f"Running sim2real validation ({self.features.sim2real_tier})...")
 
-        try:
-            from sim2real_service import Sim2RealService, ValidationTier
+        if not HAVE_SIM2REAL or Sim2RealService is None:
+            self.log("  Sim2Real service module not available, using placeholder", "WARNING")
+            self._create_placeholder_sim2real()
+            return
 
+        try:
             sim2real_dir = self.upsell_dir / "sim2real"
             sim2real_dir.mkdir(parents=True, exist_ok=True)
 
@@ -478,15 +566,14 @@ class UpsellPostProcessor:
                 "real_success_rate": report.real_success_rate,
                 "transfer_gap": report.transfer_gap,
                 "production_ready": report.production_ready,
+                "method": "full",
             }
             self.log(f"  Transfer gap: {report.transfer_gap:.1%}")
 
-        except ImportError as e:
-            self.log(f"  Sim2Real service not available: {e}", "WARNING")
-            self._create_placeholder_sim2real()
         except Exception as e:
             self.errors.append(f"Sim2Real validation failed: {e}")
             self.log(f"  Failed: {e}", "ERROR")
+            self._create_placeholder_sim2real()
 
     def _create_placeholder_sim2real(self) -> None:
         """Create placeholder sim2real report."""

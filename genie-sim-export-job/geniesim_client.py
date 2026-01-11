@@ -761,7 +761,9 @@ class GenieSimClient:
                             try:
                                 data = await response.json()
                                 error_msg = data.get("error", f"HTTP {response.status}")
-                            except:
+                            except (json.JSONDecodeError, aiohttp.ContentTypeError, KeyError) as parse_err:
+                                # LABS P1 FIX: Replace bare except with specific exceptions
+                                logger.debug(f"Could not parse error response: {parse_err}")
                                 error_msg = f"HTTP {response.status}"
 
                             if attempt == self.max_retries - 1:
@@ -1137,7 +1139,9 @@ class GenieSimClient:
                 try:
                     error_data = response.json()
                     error_msg = error_data.get("error", f"HTTP {response.status_code}")
-                except:
+                except (json.JSONDecodeError, requests.exceptions.JSONDecodeError, KeyError) as parse_err:
+                    # LABS P1 FIX: Replace bare except with specific exceptions
+                    logger.debug(f"Could not parse error response: {parse_err}")
                     error_msg = f"HTTP {response.status_code}"
                 raise GenieSimAPIError(f"Failed to download episodes: {error_msg}")
 
@@ -1580,7 +1584,9 @@ class GenieSimClient:
                 try:
                     error_data = response.json()
                     error_msg = error_data.get("error", f"HTTP {response.status_code}")
-                except:
+                except (json.JSONDecodeError, requests.exceptions.JSONDecodeError, KeyError) as parse_err:
+                    # LABS P1 FIX: Replace bare except with specific exceptions
+                    logger.debug(f"Could not parse error response: {parse_err}")
                     error_msg = f"HTTP {response.status_code}"
                 raise GenieSimAPIError(f"Batch submission failed: {error_msg}")
 
