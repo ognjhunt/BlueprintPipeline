@@ -15,6 +15,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 
+# GAP-PHYSICS-011 FIX: Import physics profile selector
+try:
+    from blueprint_sim.recipe_compiler.physics_profiles_selector import create_profile_selector
+    HAVE_PROFILE_SELECTOR = True
+except ImportError:
+    HAVE_PROFILE_SELECTOR = False
+    print("[SIMREADY] WARNING: Physics profile selector unavailable", file=sys.stderr)
+
 import numpy as np
 from PIL import Image  # type: ignore
 from tools.asset_catalog import AssetCatalogClient
@@ -928,7 +936,9 @@ def call_gemini_for_object(
         merged["dynamic"] = _get_bool(["dynamic"], bool(merged.get("dynamic", True)))
 
         collision_shape = _get_str(["collision_shape", "collisionShape"], str(merged.get("collision_shape", "box"))).lower()
-        if collision_shape not in {"box", "sphere", "capsule"}:
+        # GAP-PHYSICS-010 FIX: Support convex decomposition for complex shapes
+        valid_shapes = {"box", "sphere", "capsule", "convex_hull", "convex_decomposition"}
+        if collision_shape not in valid_shapes:
             # Keep it safe/stable: fall back to box collider
             collision_shape = "box"
         merged["collision_shape"] = collision_shape
@@ -1352,6 +1362,10 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
     restitution = float(physics.get("restitution", 0.1))
     collision_shape = str(physics.get("collision_shape", "box")).lower()
 
+    # GAP-PHYSICS-010 FIX: Add kinematic flag and GPU collision support
+    kinematic_enabled = bool(physics.get("kinematic_enabled", False))
+    gpu_collision = bool(physics.get("gpu_collision", True))  # Default enabled for performance
+
     # Robotics-focused properties
     semantic_class = str(physics.get("semantic_class", "object"))
     material_name = str(physics.get("material_name", "generic"))
@@ -1395,6 +1409,15 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
         lines.append(f"    point3f physics:centerOfMass = ({center_of_mass[0]:.6f}, {center_of_mass[1]:.6f}, {center_of_mass[2]:.6f})")
         # (Intentionally not authoring physics:density here. Mass has precedence over density in USD Physics.)
 
+        # GAP-PHYSICS-010 FIX: Add physics:approximation for collision type
+        if collision_shape in {"convex_hull", "convex_decomposition"}:
+            approximation_token = "convexDecomposition" if collision_shape == "convex_decomposition" else "convexHull"
+            lines.append(f'    token physics:approximation = "{approximation_token}"')
+
+        # GAP-PHYSICS-010 FIX: Add kinematic enabled flag for Isaac Sim
+        if kinematic_enabled:
+            lines.append("    bool physics:kinematicEnabled = 1")
+
     # Visual reference
     lines.append("")
     lines.append('    def Xform "Visual" (')
@@ -1424,7 +1447,29 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
         lines.append("    {")
         material_path = "</Asset/Looks/PhysicsMaterial>"
 
-        if collision_shape == "sphere":
+        # GAP-PHYSICS-010 FIX: Support convex decomposition and hull-based collision
+        if collision_shape in {"convex_hull", "convex_decomposition"}:
+            # For complex shapes, reference the visual mesh with convex approximation
+            lines.append(f'        def "{collision_shape.upper()}_Collider" (')
+            lines.append('            prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]')
+            lines.append("        )")
+            lines.append("        {")
+            lines.append(f"            rel material:binding:physics = {material_path}")
+            lines.append(f"            prepend references = @{asset_rel}@")
+            lines.append(f"            double3 xformOp:translate = ({center_m[0]:.6f}, {center_m[1]:.6f}, {center_m[2]:.6f})")
+            lines.append('            uniform token[] xformOpOrder = ["xformOp:translate"]')
+            # PhysX contact properties for stable simulation
+            lines.append(f"            float physxCollision:contactOffset = {contact_offset:.6f}")
+            lines.append(f"            float physxCollision:restOffset = {rest_offset:.6f}")
+            # Set the approximation method for the collider
+            approximation_token = "convexDecomposition" if collision_shape == "convex_decomposition" else "convexHull"
+            lines.append(f'            token physxCollision:approximation = "{approximation_token}"')
+            # GAP-PHYSICS-010 FIX: Add GPU collision support
+            if gpu_collision:
+                lines.append(f'            bool physxCollision:gpuCollision = true')
+            lines.append("        }")
+
+        elif collision_shape == "sphere":
             radius = 0.5 * max(size_pad)
             lines.append('        def Sphere "Collider" (')
             lines.append('            prepend apiSchemas = ["PhysicsCollisionAPI", "PhysxCollisionAPI"]')
@@ -1437,6 +1482,9 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
             # PhysX contact properties for stable simulation
             lines.append(f"            float physxCollision:contactOffset = {contact_offset:.6f}")
             lines.append(f"            float physxCollision:restOffset = {rest_offset:.6f}")
+            # GAP-PHYSICS-010 FIX: Add GPU collision support
+            if gpu_collision:
+                lines.append(f'            bool physxCollision:gpuCollision = true')
             lines.append("        }")
 
         elif collision_shape == "capsule":
@@ -1472,6 +1520,9 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
             # PhysX contact properties for stable simulation
             lines.append(f"            float physxCollision:contactOffset = {contact_offset:.6f}")
             lines.append(f"            float physxCollision:restOffset = {rest_offset:.6f}")
+            # GAP-PHYSICS-010 FIX: Add GPU collision support
+            if gpu_collision:
+                lines.append(f'            bool physxCollision:gpuCollision = true')
             lines.append("        }")
 
         else:
@@ -1489,6 +1540,9 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
             # PhysX contact properties for stable simulation
             lines.append(f"            float physxCollision:contactOffset = {contact_offset:.6f}")
             lines.append(f"            float physxCollision:restOffset = {rest_offset:.6f}")
+            # GAP-PHYSICS-010 FIX: Add GPU collision support
+            if gpu_collision:
+                lines.append(f'            bool physxCollision:gpuCollision = true')
             lines.append("        }")
 
         lines.append("    }")
@@ -1578,6 +1632,15 @@ def prepare_simready_assets_job(
 
     catalog_client = AssetCatalogClient()
 
+    # GAP-PHYSICS-011 FIX: Initialize physics profile selector
+    profile_selector = None
+    if HAVE_PROFILE_SELECTOR:
+        try:
+            profile_selector = create_profile_selector()
+            print("[SIMREADY] Physics profile selector initialized")
+        except Exception as e:
+            print(f"[SIMREADY] WARNING: Failed to initialize profile selector: {e}", file=sys.stderr)
+
     client = None
     if have_gemini():
         # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
@@ -1659,6 +1722,15 @@ def prepare_simready_assets_job(
             # Compute sim2real distribution ranges for domain randomization
             physics_distributions = compute_physics_distributions(physics_cfg, bounds)
             physics_cfg.update(physics_distributions)
+
+            # GAP-PHYSICS-011 FIX: Apply physics profile based on scene/task characteristics
+            if profile_selector:
+                try:
+                    # Get task/scene hint from object metadata or use default
+                    task_hint = obj.get("task") or scene_assets.get("task") or obj.get("category", "unknown")
+                    physics_cfg = profile_selector.apply_profile_to_physics(physics_cfg, profile_selector.select_profile(task_hint))
+                except Exception as e:
+                    logger.warning(f"[SIMREADY] Failed to apply physics profile for obj {oid}: {e}")
 
             # Emit the simready USD with physics
             sim_path = emit_usd(visual_path, physics_cfg, bounds)
