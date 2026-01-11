@@ -189,8 +189,9 @@ class EpisodeGenerationConfig:
     use_cpgen: bool = True  # Use CP-Gen style augmentation
     use_validation: bool = True  # Use simulation validation
 
-    # Quality settings
-    min_quality_score: float = 0.7
+    # Quality settings - LABS-BLOCKER-002 FIX: Raised from 0.7 to 0.85
+    # 85% minimum ensures labs receive production-quality training data
+    min_quality_score: float = 0.85
     max_retries: int = 3
     validate_trajectories: bool = True
     include_failed: bool = False
@@ -1348,7 +1349,7 @@ def run_episode_generation_job(
     fps: float = 30.0,
     use_llm: bool = True,
     use_cpgen: bool = True,
-    min_quality_score: float = 0.7,
+    min_quality_score: float = 0.85,  # LABS-BLOCKER-002 FIX: Raised from 0.7
     data_pack_tier: str = "core",
     num_cameras: int = 1,
     image_resolution: Tuple[int, int] = (640, 480),
@@ -1687,7 +1688,8 @@ def main():
     use_cpgen = os.getenv("USE_CPGEN", "true").lower() == "true"
 
     try:
-        min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
+        # LABS-BLOCKER-002 FIX: Default raised from 0.7 to 0.85 for production quality
+        min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
         if not (0.0 <= min_quality_score <= 1.0):
             raise ValueError("MIN_QUALITY_SCORE must be between 0.0 and 1.0")
     except ValueError as e:

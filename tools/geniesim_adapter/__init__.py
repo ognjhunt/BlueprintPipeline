@@ -4,6 +4,27 @@ Genie Sim 3.0 Adapter Module for BlueprintPipeline.
 This module provides the integration layer between BlueprintPipeline's scene
 representation and AGIBOT's Genie Sim 3.0 data generation platform.
 
+**LOCAL FRAMEWORK (Recommended for Default/Free Pipeline)**
+
+Genie Sim 3.0 is an open-source LOCAL simulation framework that runs on Isaac Sim.
+Use the local framework for running data collection without a hosted API:
+
+    from tools.geniesim_adapter import (
+        GenieSimLocalFramework,
+        run_local_data_collection,
+        check_geniesim_availability,
+    )
+
+    # Check if Genie Sim is available locally
+    status = check_geniesim_availability()
+    if status['available']:
+        # Run data collection locally
+        result = run_local_data_collection(
+            scene_manifest_path=Path("scene_manifest.json"),
+            task_config_path=Path("task_config.json"),
+            output_dir=Path("./output"),
+        )
+
 Architecture:
     BlueprintPipeline handles:
         - Scene image generation (Gemini)
@@ -15,7 +36,7 @@ Architecture:
         - VLA fine-tuning packages
         - Rich ground truth annotations
 
-    Genie Sim 3.0 handles:
+    Genie Sim 3.0 handles (via local framework or API):
         - Task generation (LLM)
         - Trajectory planning (cuRobo)
         - Data collection (automated + teleop)
@@ -68,6 +89,14 @@ from .exporter import (
     GenieSimExportConfig,
     GenieSimExportResult,
 )
+from .local_framework import (
+    GenieSimLocalFramework,
+    GenieSimConfig,
+    GenieSimServerStatus,
+    DataCollectionResult,
+    check_geniesim_availability,
+    run_local_data_collection,
+)
 
 __all__ = [
     # Scene Graph
@@ -97,4 +126,11 @@ __all__ = [
     "GenieSimExporter",
     "GenieSimExportConfig",
     "GenieSimExportResult",
+    # Local Framework
+    "GenieSimLocalFramework",
+    "GenieSimConfig",
+    "GenieSimServerStatus",
+    "DataCollectionResult",
+    "check_geniesim_availability",
+    "run_local_data_collection",
 ]
