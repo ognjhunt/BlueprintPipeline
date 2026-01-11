@@ -8,6 +8,12 @@
 #
 # Trigger: Cloud Storage object finalized event for .regen3d_complete
 #
+# NOTE: This pipeline runs in parallel with usd-assembly-pipeline and dwm-preparation-pipeline
+# (all trigger on the same .regen3d_complete marker). This is safe because:
+# - Each pipeline writes to different output prefixes (dream2flow/*, usd/*, dwm/*)
+# - No shared state is modified
+# - Idempotency checks prevent duplicate processing
+#
 # Dream2Flow (arXiv:2512.24766) pipeline:
 #   - Input: RGB-D observation + language instruction
 #   - Video generation: Generate "dreamed" task execution video
@@ -102,36 +108,54 @@ main:
 
     # Run the Dream2Flow preparation job
     - run_dream2flow_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dream2flowJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: USD_PREFIX
-                      value: ${usdPrefix}
-                    - name: DREAM2FLOW_PREFIX
-                      value: ${dream2flowPrefix}
-                    - name: NUM_TASKS
-                      value: "5"
-                    - name: RESOLUTION_WIDTH
-                      value: "720"
-                    - name: RESOLUTION_HEIGHT
-                      value: "480"
-                    - name: NUM_FRAMES
-                      value: "49"
-                    - name: FPS
-                      value: "24"
-                    - name: ROBOT
-                      value: "franka_panda"
-        result: dream2flowExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dream2flowJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: USD_PREFIX
+                        value: ${usdPrefix}
+                      - name: DREAM2FLOW_PREFIX
+                        value: ${dream2flowPrefix}
+                      - name: NUM_TASKS
+                        value: "5"
+                      - name: RESOLUTION_WIDTH
+                        value: "720"
+                      - name: RESOLUTION_HEIGHT
+                        value: "480"
+                      - name: NUM_FRAMES
+                        value: "49"
+                      - name: FPS
+                        value: "24"
+                      - name: ROBOT
+                        value: "franka_panda"
+          result: dream2flowExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_dream2flow_job_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start Dream2Flow job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_dream2flow_job_error:
+                raise: ${e}
         next: set_dream2flow_execution_name
 
     - set_dream2flow_execution_name:
@@ -195,20 +219,38 @@ main:
 
     # Run the Dream2Flow inference job
     - run_dream2flow_inference_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dream2flowInferenceJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: DREAM2FLOW_PREFIX
-                      value: ${dream2flowPrefix}
-        result: dream2flowInferenceExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dream2flowInferenceJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: DREAM2FLOW_PREFIX
+                        value: ${dream2flowPrefix}
+          result: dream2flowInferenceExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_dream2flow_inference_job_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start Dream2Flow inference job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_dream2flow_inference_job_error:
+                raise: ${e}
         next: set_dream2flow_inference_execution_name
 
     - set_dream2flow_inference_execution_name:

@@ -60,26 +60,44 @@ main:
     # =========================================================================
 
     - run_variation_gen_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + variationGenJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: REPLICATOR_PREFIX
-                      value: ${replicatorPrefix}
-                    - name: VARIATION_ASSETS_PREFIX
-                      value: ${variationAssetsPrefix}
-                    # Generate only required and recommended assets by default
-                    # Set to empty string to generate all
-                    - name: PRIORITY_FILTER
-                      value: ""
-        result: variationGenExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + variationGenJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: REPLICATOR_PREFIX
+                        value: ${replicatorPrefix}
+                      - name: VARIATION_ASSETS_PREFIX
+                        value: ${variationAssetsPrefix}
+                      # Generate only required and recommended assets by default
+                      # Set to empty string to generate all
+                      - name: PRIORITY_FILTER
+                        value: ""
+          result: variationGenExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_variation_gen_job_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start variation-gen job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_variation_gen_job_error:
+                raise: ${e}
         next: set_variation_gen_execution_name
 
     - set_variation_gen_execution_name:
@@ -164,20 +182,38 @@ main:
     # =========================================================================
 
     - run_simready_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + simreadyJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: '${sceneId + "_variation"}'
-                    - name: ASSETS_PREFIX
-                      value: ${variationAssetsPrefix}
-        result: simreadyExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + simreadyJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: '${sceneId + "_variation"}'
+                      - name: ASSETS_PREFIX
+                        value: ${variationAssetsPrefix}
+          result: simreadyExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_simready_job_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start simready job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_simready_job_error:
+                raise: ${e}
         next: set_simready_execution_name
 
     - set_simready_execution_name:

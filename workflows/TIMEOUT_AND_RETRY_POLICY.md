@@ -76,6 +76,35 @@ Retries are applied to transient failures:
 - **Retry:** 3 retries with exponential backoff
 - **Reason:** Object detection is typically fast, non-critical
 
+### Scale Pipeline
+- **Job Timeout:** No explicit timeout (uses Cloud Run default)
+- **Retry:** 3 retries with exponential backoff
+- **Reason:** Layout scaling is typically fast, non-critical
+
+### Dream2Flow Preparation Pipeline
+- **Preparation Job Timeout:** No explicit timeout
+- **Inference Job Timeout:** No explicit timeout
+- **Retry:** 3 retries with exponential backoff (both jobs)
+- **Reason:** 3D flow extraction and inference can be I/O intensive
+
+### DWM Preparation Pipeline
+- **Preparation Job Timeout:** No explicit timeout
+- **Inference Job Timeout:** No explicit timeout
+- **Retry:** 3 retries with exponential backoff (both jobs)
+- **Reason:** Hand mesh video rendering and inference is compute-intensive
+
+### Variation Assets Pipeline
+- **Variation-Gen Job Timeout:** No explicit timeout
+- **Simready Job Timeout:** No explicit timeout
+- **Retry:** 3 retries with exponential backoff (both jobs)
+- **Reason:** Domain randomization asset generation is I/O intensive
+
+### Regen3D Pipeline
+- **Job Timeout:** 3600s (1 hour) - explicit
+- **Retry:** No explicit job-level retries (marker polling has exponential backoff)
+- **Marker Verification:** Exponential backoff polling, max 6 attempts, capped at 30s between attempts
+- **Reason:** 3D reconstruction is compute-intensive, marker polling must handle eventual consistency
+
 ## Cloud Run Job Default Timeout
 
 If not explicitly specified in a workflow, Cloud Run uses:
@@ -97,9 +126,15 @@ For GCS read/write operations (markers, configs):
 ## Workflow Status Polling
 
 When waiting for Cloud Run job completion:
-- **Poll Interval:** 10 seconds
+- **Poll Interval:** 10 seconds (most pipelines)
 - **Max Attempts:** Limited by workflow 24-hour hard timeout
-- **Logic:** Exponential backoff NOT used for polling (fixed 10-second intervals)
+- **Logic:** Fixed 10-second intervals for most job polling
+
+**Special Cases with Exponential Backoff:**
+- **Regen3D Marker Polling:** Exponential backoff 1s→2s→4s→8s→16s→30s (max 6 attempts)
+  - Reason: Handles eventual consistency of GCS writes, avoids hammering storage
+- **Simready Completion Polling:** Exponential backoff 5s→10s→20s→40s→60s (max 12 attempts, ~700s total)
+  - Reason: Simready can be slow on large scenes, reduced polling frequency after initial attempts
 
 ## Timeout Calculation Examples
 
@@ -182,16 +217,22 @@ Future updates should consider:
 
 ## Implementation Status
 
-✓ **Implemented:**
-- Exponential backoff retry logic on critical job launches
+✓ **Implemented (2026-01-11):**
+- Exponential backoff retry logic on critical job launches (3 retries: 2s initial, 30s max)
 - Standardized timeout values for each job
-- Retry policy documentation
+- Retry policy documentation with detailed specifications
+- Added retry logic to: dream2flow (both jobs), dwm (both jobs), variation-assets (both jobs), objects, scale, regen3d-import
+- Exponential backoff marker polling: regen3d (1s→30s) and simready (5s→60s)
+- Environment variable standardization (GOOGLE_CLOUD_PROJECT_ID)
+- .assets_ready marker producer (scale-pipeline)
+- Race condition documentation for parallel pipeline execution
+- Non-fatal failure clarification in arena-export-pipeline
 
 ⚠️ **Partial:**
-- Replicator/Isaac Lab jobs may need timeout adjustment for large scenes
-- DWM and Dream2Flow pipelines still need timeout review
+- Replicator/Isaac Lab jobs may need timeout adjustment for large scenes (future monitoring needed)
 
-📋 **TODO:**
+📋 **TODO (Future):**
 - Add monitoring/alerting for timeout events
 - Historical performance tracking
 - Automatic timeout adjustment based on scene complexity
+- Support for different retry policies per customer tier (premium features)
