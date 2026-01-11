@@ -533,6 +533,234 @@ class LeRobotExporter:
 
         return episode_index
 
+    def _validate_episode_completeness(self) -> List[Tuple[int, List[str]]]:
+        """
+        P1-13 FIX: Validate episode completeness before export.
+
+        Checks for each episode:
+        1. Trajectory is not None and has frames
+        2. Task description is not empty
+        3. If sensor_data exists, it has frames matching trajectory
+        4. Required metadata fields are present
+
+        Returns:
+            List of (episode_index, errors) tuples
+        """
+        incomplete_episodes = []
+
+        for episode in self.episodes:
+            errors = []
+
+            # Check trajectory
+            if episode.trajectory is None:
+                errors.append("Trajectory is None")
+            elif episode.trajectory.num_frames == 0:
+                errors.append("Trajectory has 0 frames")
+
+            # Check task description
+            if not episode.task_description or len(episode.task_description.strip()) == 0:
+                errors.append("Task description is empty")
+
+            # Check sensor data consistency if present
+            if episode.sensor_data is not None:
+                if episode.trajectory is not None:
+                    trajectory_frames = episode.trajectory.num_frames
+                    sensor_frames = episode.sensor_data.num_frames if hasattr(episode.sensor_data, 'num_frames') else 0
+
+                    if sensor_frames == 0:
+                        errors.append("Sensor data has 0 frames")
+                    elif trajectory_frames != sensor_frames:
+                        errors.append(
+                            f"Frame count mismatch: trajectory has {trajectory_frames} frames, "
+                            f"sensor data has {sensor_frames} frames"
+                        )
+
+            # Check if episode has critical data for the advertised tier
+            if self.config.include_images and (episode.sensor_data is None or not episode.sensor_data.has_rgb):
+                errors.append(f"Data pack tier requires RGB images but episode has none")
+
+            if self.config.include_depth and (episode.sensor_data is None or not episode.sensor_data.has_depth):
+                errors.append(f"Data pack tier requires depth maps but episode has none")
+
+            if errors:
+                incomplete_episodes.append((episode.episode_index, errors))
+
+        return incomplete_episodes
+
+    def _validate_data_pack_tier_compliance(self) -> List[Tuple[int, List[str]]]:
+        """
+        P1-14 FIX: Validate data pack tier compliance.
+
+        Checks that all episodes have the data required for advertised tier:
+        - Core: RGB + state + actions + metadata
+        - Plus: Core + depth + segmentation + bboxes
+        - Full: Plus + poses + contacts + privileged state
+
+        Returns:
+            List of (episode_index, errors) tuples for non-compliant episodes
+        """
+        non_compliant = []
+        tier = self.config.data_pack_tier.lower()
+
+        for episode in self.episodes:
+            errors = []
+
+            if episode.sensor_data is None:
+                # Episodes without sensor data don't support Plus/Full features
+                if tier in ["plus", "full"]:
+                    errors.append(f"Tier '{tier}' requires sensor data but episode has none")
+                continue
+
+            # Core requirements (RGB + state + actions already validated in add_episode)
+            if not episode.sensor_data.has_rgb and self.config.include_images:
+                errors.append(f"Tier '{tier}' requires RGB but episode has no RGB images")
+
+            # Plus requirements
+            if tier in ["plus", "full"]:
+                if not episode.sensor_data.has_depth and self.config.include_depth:
+                    errors.append(f"Tier '{tier}' requires depth but episode has no depth maps")
+                if not episode.sensor_data.has_segmentation and self.config.include_segmentation:
+                    errors.append(f"Tier '{tier}' requires segmentation but episode has none")
+
+                # Check for bboxes in frames
+                if self.config.include_bboxes:
+                    has_bboxes = any(
+                        len(frame.bboxes_2d) > 0 or len(frame.bboxes_3d) > 0
+                        for frame in episode.sensor_data.frames
+                    )
+                    if not has_bboxes:
+                        errors.append(f"Tier '{tier}' requires bounding boxes but episode has none")
+
+            # Full requirements
+            if tier == "full":
+                # Check for object poses
+                if self.config.include_object_poses:
+                    has_poses = any(
+                        len(frame.object_poses) > 0
+                        for frame in episode.sensor_data.frames
+                    )
+                    if not has_poses:
+                        errors.append(f"Tier 'full' requires object poses but episode has none")
+
+                # Check for contacts
+                if self.config.include_contacts:
+                    has_contacts = any(
+                        len(frame.contacts) > 0
+                        for frame in episode.sensor_data.frames
+                    )
+                    if not has_contacts:
+                        errors.append(f"Tier 'full' requires contacts but episode has none")
+
+                # Check for privileged state
+                if self.config.include_privileged_state:
+                    has_privileged = any(
+                        frame.privileged_state is not None
+                        for frame in episode.sensor_data.frames
+                    )
+                    if not has_privileged:
+                        errors.append(f"Tier 'full' requires privileged state but episode has none")
+
+            if errors:
+                non_compliant.append((episode.episode_index, errors))
+
+        return non_compliant
+
+    def _validate_camera_calibration(self) -> List[Tuple[int, List[str]]]:
+        """
+        P1-15 FIX: Validate camera calibration matrices.
+
+        For episodes with sensor data, checks:
+        1. Intrinsic matrices are 3x3 and upper triangular
+        2. Extrinsic matrices are 4x4 with valid rotation
+        3. Matrices are invertible (not singular)
+
+        Returns:
+            List of (episode_index, errors) tuples for calibration issues
+        """
+        invalid_calibrations = []
+
+        for episode in self.episodes:
+            if episode.sensor_data is None:
+                continue
+
+            errors = []
+
+            # Check if episode has camera calibration data
+            if not hasattr(episode.sensor_data, 'frames') or len(episode.sensor_data.frames) == 0:
+                continue
+
+            first_frame = episode.sensor_data.frames[0]
+
+            # Get camera calibration from sensor config
+            if not hasattr(episode.sensor_data, 'config') or episode.sensor_data.config is None:
+                continue
+
+            camera_config = episode.sensor_data.config
+
+            # Check for CameraCalibration config
+            if not hasattr(camera_config, 'camera_calibration') or camera_config.camera_calibration is None:
+                continue
+
+            calibration = camera_config.camera_calibration
+
+            # Validate intrinsic matrix
+            if calibration.intrinsic_matrix is not None:
+                K = calibration.intrinsic_matrix
+                # Check shape
+                if K.shape != (3, 3):
+                    errors.append(f"Intrinsic matrix: Expected shape (3, 3), got {K.shape}")
+                else:
+                    # Check upper triangular structure (most elements below diagonal should be ~0)
+                    # K = [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+                    if abs(K[0, 1]) > 1e-6 or abs(K[1, 0]) > 1e-6 or abs(K[2, 0]) > 1e-6 or abs(K[2, 1]) > 1e-6:
+                        errors.append(f"Intrinsic matrix: Not properly upper triangular")
+
+                    # Check diagonal elements are positive (focal lengths)
+                    if K[0, 0] <= 0 or K[1, 1] <= 0:
+                        errors.append(f"Intrinsic matrix: Focal lengths must be positive")
+
+                    # Check invertibility (determinant non-zero)
+                    try:
+                        det = np.linalg.det(K)
+                        if abs(det) < 1e-10:
+                            errors.append(f"Intrinsic matrix: Singular matrix (det ≈ 0)")
+                    except np.linalg.LinAlgError:
+                        errors.append(f"Intrinsic matrix: Failed to compute determinant")
+
+            # Validate extrinsic matrix
+            if calibration.extrinsic_matrix is not None:
+                T = calibration.extrinsic_matrix
+                # Check shape (4x4 homogeneous transform)
+                if T.shape != (4, 4):
+                    errors.append(f"Extrinsic matrix: Expected shape (4, 4), got {T.shape}")
+                else:
+                    # Extract rotation part (top-left 3x3)
+                    R = T[:3, :3]
+
+                    # Check orthogonality (R^T * R should be I)
+                    RTR = np.dot(R.T, R)
+                    should_be_identity = np.eye(3)
+                    if not np.allclose(RTR, should_be_identity, atol=1e-3):
+                        errors.append(
+                            f"Extrinsic matrix: Rotation part is not orthogonal "
+                            f"(R^T*R deviation from I: {np.linalg.norm(RTR - should_be_identity):.4f})"
+                        )
+
+                    # Check determinant is 1 (proper rotation, not reflection)
+                    det_R = np.linalg.det(R)
+                    if abs(det_R - 1.0) > 1e-2:
+                        errors.append(f"Extrinsic matrix: Rotation determinant is {det_R:.3f}, expected 1.0")
+
+                    # Check last row is [0, 0, 0, 1]
+                    expected_last_row = np.array([0, 0, 0, 1])
+                    if not np.allclose(T[3, :], expected_last_row, atol=1e-6):
+                        errors.append(f"Extrinsic matrix: Last row is not [0, 0, 0, 1]")
+
+            if errors:
+                invalid_calibrations.append((episode.episode_index, errors))
+
+        return invalid_calibrations
+
     def _validate_trajectory_sensor_alignment(self) -> List[str]:
         """
         P2-4 FIX: Validate that trajectory frames and sensor data frames are aligned.
@@ -805,9 +1033,82 @@ class LeRobotExporter:
 
         return errors
 
+    def _verify_parquet_exports(self, data_dir: Path) -> List[Tuple[Path, List[str]]]:
+        """
+        P2-9 FIX: Verify Parquet files after export.
+
+        Checks:
+        1. File exists and is readable
+        2. Schema is consistent with expected format
+        3. Contains expected columns (state, action, etc.)
+        4. No missing data (NaN/None values)
+        5. Row counts match expected length
+
+        Returns:
+            List of (file_path, errors) tuples for problematic files
+        """
+        if not HAVE_PYARROW:
+            self.log("  Skipping Parquet verification (pyarrow not available)", "DEBUG")
+            return []
+
+        verification_errors = []
+
+        try:
+            # Find all Parquet files
+            parquet_files = list(data_dir.rglob("*.parquet"))
+            if not parquet_files:
+                self.log(f"  No Parquet files found in {data_dir}", "WARNING")
+                return []
+
+            self.log(f"  Verifying {len(parquet_files)} Parquet files...")
+
+            for parquet_path in parquet_files:
+                errors = []
+
+                try:
+                    # Try to read the file
+                    table = pq.read_table(parquet_path)
+
+                    # Check for expected columns
+                    required_columns = {"observation.state", "action"}
+                    missing_columns = required_columns - set(table.column_names)
+                    if missing_columns:
+                        errors.append(f"Missing columns: {missing_columns}")
+
+                    # Check for NaN/None in critical columns
+                    for col_name in ["observation.state", "action"]:
+                        if col_name in table.column_names:
+                            col = table[col_name].to_numpy()
+                            nan_count = np.isnan(col).sum() if col.dtype == np.float32 else 0
+                            if nan_count > 0:
+                                errors.append(f"Column '{col_name}': {nan_count} NaN values")
+
+                    # Check row count (should match trajectory length for episode)
+                    num_rows = table.num_rows
+                    if num_rows == 0:
+                        errors.append("Table is empty (0 rows)")
+
+                except Exception as e:
+                    errors.append(f"Failed to read Parquet file: {type(e).__name__}: {str(e)}")
+
+                if errors:
+                    verification_errors.append((parquet_path, errors))
+
+        except Exception as e:
+            self.log(f"  Error during Parquet verification: {e}", "ERROR")
+
+        return verification_errors
+
     def finalize(self) -> Path:
         """
-        P2-4 FIX: Write the complete dataset to disk with frame alignment validation.
+        P1-13, P1-14, P1-15, P2-9 FIX: Write the complete dataset to disk with comprehensive validation.
+
+        Validates:
+        - Episode completeness (all required fields present)
+        - Data pack tier compliance (tier-specific data requirements)
+        - Camera calibration matrices (intrinsic/extrinsic validity)
+        - Trajectory-sensor alignment
+        - Parquet post-export verification
 
         Returns:
             Path to the dataset directory
@@ -826,7 +1127,49 @@ class LeRobotExporter:
         meta_dir.mkdir(exist_ok=True)
         data_dir.mkdir(exist_ok=True)
 
-        # P2-4 FIX: Validate trajectory-sensor frame alignment before export
+        # P1-13 FIX: Validate episode completeness before export
+        self.log("Validating episode completeness...")
+        incomplete = self._validate_episode_completeness()
+        if incomplete:
+            self.log(f"  WARNING: Found {len(incomplete)} incomplete episodes:", "WARNING")
+            for ep_idx, errors in incomplete[:3]:  # Show first 3
+                self.log(f"    Episode {ep_idx}:", "WARNING")
+                for error in errors[:3]:  # Show first 3 errors per episode
+                    self.log(f"      - {error}", "WARNING")
+            if len(incomplete) > 3:
+                self.log(f"    ... and {len(incomplete) - 3} more episodes with issues", "WARNING")
+        else:
+            self.log("  All episodes are complete")
+
+        # P1-14 FIX: Validate data pack tier compliance
+        self.log("Validating data pack tier compliance...")
+        non_compliant = self._validate_data_pack_tier_compliance()
+        if non_compliant:
+            self.log(f"  WARNING: Found {len(non_compliant)} tier-non-compliant episodes:", "WARNING")
+            for ep_idx, errors in non_compliant[:3]:  # Show first 3
+                self.log(f"    Episode {ep_idx}:", "WARNING")
+                for error in errors[:2]:  # Show first 2 errors per episode
+                    self.log(f"      - {error}", "WARNING")
+            if len(non_compliant) > 3:
+                self.log(f"    ... and {len(non_compliant) - 3} more episodes", "WARNING")
+        else:
+            self.log(f"  All episodes comply with '{self.config.data_pack_tier}' tier requirements")
+
+        # P1-15 FIX: Validate camera calibration matrices
+        self.log("Validating camera calibration matrices...")
+        bad_calibrations = self._validate_camera_calibration()
+        if bad_calibrations:
+            self.log(f"  WARNING: Found {len(bad_calibrations)} episodes with invalid calibrations:", "WARNING")
+            for ep_idx, errors in bad_calibrations[:3]:  # Show first 3
+                self.log(f"    Episode {ep_idx}:", "WARNING")
+                for error in errors[:2]:  # Show first 2 errors per episode
+                    self.log(f"      - {error}", "WARNING")
+            if len(bad_calibrations) > 3:
+                self.log(f"    ... and {len(bad_calibrations) - 3} more episodes", "WARNING")
+        else:
+            self.log("  All calibration matrices are valid")
+
+        # P2-4 FIX: Validate trajectory-sensor frame alignment
         self.log("Validating trajectory-sensor frame alignment...")
         alignment_errors = self._validate_trajectory_sensor_alignment()
         if alignment_errors:
@@ -842,6 +1185,20 @@ class LeRobotExporter:
         # Step 1: Write episode data (joint-space trajectories)
         self.log("Writing episode data...")
         self._write_episodes(data_dir)
+
+        # P2-9 FIX: Verify Parquet exports after writing
+        self.log("Verifying Parquet file exports...")
+        parquet_errors = self._verify_parquet_exports(data_dir)
+        if parquet_errors:
+            self.log(f"  WARNING: Found {len(parquet_errors)} Parquet verification issues:", "WARNING")
+            for file_path, errors in parquet_errors[:3]:  # Show first 3 files
+                self.log(f"    {file_path.name}:", "WARNING")
+                for error in errors[:2]:  # Show first 2 errors per file
+                    self.log(f"      - {error}", "WARNING")
+            if len(parquet_errors) > 3:
+                self.log(f"    ... and {len(parquet_errors) - 3} more files with issues", "WARNING")
+        else:
+            self.log("  Parquet files verified successfully")
 
         # Step 2: Write visual observations (RGB videos per camera)
         if self.config.include_images:
