@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pipeline Configuration",
+  "description": "Configurable parameters for the BlueprintPipeline. Labs can customize these values for their specific requirements.",
+  "version": "1.0.0",
+  "episode_generation": {
+    "episodes_per_scene": {
+      "standard": 500,
+      "pro": 1500,
+      "enterprise": 2500,
+      "foundation": 5000,
+      "description": "Number of episodes to generate per scene by tier"
+    },
+    "episodes_per_task": 10,
+    "num_variations": 5,
+    "max_parallel_episodes": 8,
+    "episode_timeout_seconds": 300,
+    "retry_failed_episodes": true,
+    "max_retries_per_episode": 3
+  },
+  "video": {
+    "resolution": {
+      "width": 640,
+      "height": 480,
+      "description": "Video resolution for episode recordings"
+    },
+    "fps": 30,
+    "codec": "h264",
+    "quality": "high",
+    "capture_depth": true,
+    "capture_segmentation": true,
+    "capture_normals": false,
+    "num_cameras": 3,
+    "camera_positions": ["wrist", "overhead", "side"]
+  },
+  "physics": {
+    "timestep_hz": 120,
+    "solver_iterations": 4,
+    "solver_type": "TGS",
+    "gravity": [0.0, 0.0, -9.81],
+    "enable_gpu_dynamics": true,
+    "enable_self_collision": true,
+    "contact_offset": 0.001,
+    "rest_offset": 0.0001,
+    "bounce_threshold_velocity": 0.2,
+    "friction_combine_mode": "average",
+    "description": "Physics simulation parameters"
+  },
+  "physics_profiles": {
+    "manipulation_contact_rich": {
+      "description": "High-fidelity contact physics for manipulation tasks",
+      "timestep_hz": 240,
+      "solver_iterations": 8,
+      "enable_gpu_dynamics": true,
+      "contact_offset": 0.0005
+    },
+    "standard": {
+      "description": "Balanced physics for general tasks",
+      "timestep_hz": 120,
+      "solver_iterations": 4,
+      "enable_gpu_dynamics": true
+    },
+    "navigation": {
+      "description": "Optimized for mobile robot navigation",
+      "timestep_hz": 60,
+      "solver_iterations": 2,
+      "enable_gpu_dynamics": false
+    },
+    "vision_only": {
+      "description": "Minimal physics for vision-only tasks",
+      "timestep_hz": 30,
+      "solver_iterations": 1,
+      "enable_gpu_dynamics": false
+    },
+    "deformable": {
+      "description": "Extended solver for deformable objects",
+      "timestep_hz": 240,
+      "solver_iterations": 16,
+      "enable_gpu_dynamics": true
+    }
+  },
+  "domain_randomization": {
+    "enabled": true,
+    "intensity": "medium",
+    "intensity_levels": {
+      "low": {
+        "lighting_variation": 0.1,
+        "texture_variation": 0.05,
+        "object_position_noise_m": 0.01,
+        "object_rotation_noise_deg": 5.0,
+        "physics_noise": 0.05
+      },
+      "medium": {
+        "lighting_variation": 0.3,
+        "texture_variation": 0.15,
+        "object_position_noise_m": 0.03,
+        "object_rotation_noise_deg": 15.0,
+        "physics_noise": 0.1
+      },
+      "high": {
+        "lighting_variation": 0.5,
+        "texture_variation": 0.3,
+        "object_position_noise_m": 0.05,
+        "object_rotation_noise_deg": 30.0,
+        "physics_noise": 0.2
+      }
+    },
+    "randomize_lighting": true,
+    "randomize_textures": true,
+    "randomize_camera": true,
+    "randomize_object_poses": true,
+    "randomize_physics_properties": true,
+    "description": "Domain randomization settings for sim2real transfer"
+  },
+  "reward_shaping": {
+    "sparse_reward": false,
+    "reward_scale": 1.0,
+    "success_reward": 10.0,
+    "failure_penalty": -1.0,
+    "time_penalty_per_step": -0.01,
+    "distance_reward_scale": 1.0,
+    "grasp_reward": 2.0,
+    "contact_penalty": -0.1,
+    "collision_penalty": -0.5,
+    "custom_reward_functions": [],
+    "description": "Reward shaping parameters for RL training"
+  },
+  "robot_config": {
+    "default_robot": "franka",
+    "supported_robots": [
+      "franka",
+      "ur10",
+      "ur5",
+      "fetch",
+      "g2",
+      "gr1",
+      "xarm7",
+      "sawyer",
+      "jaco",
+      "panda",
+      "iiwa",
+      "maniple",
+      "h1"
+    ],
+    "control_frequency_hz": 30.0,
+    "action_space": "joint_position",
+    "observation_space": ["joint_positions", "joint_velocities", "ee_pose", "rgb", "depth"],
+    "gripper_type": "parallel_jaw",
+    "enable_force_torque_sensing": true,
+    "description": "Robot configuration parameters"
+  },
+  "resource_allocation": {
+    "gpu_memory_fraction": 0.8,
+    "num_cpu_workers": 4,
+    "num_gpu_workers": 1,
+    "memory_limit_gb": 32,
+    "enable_distributed": false,
+    "distributed_backend": "ray",
+    "description": "Compute resource allocation settings"
+  },
+  "export_formats": {
+    "default_format": "lerobot",
+    "available_formats": ["lerobot", "isaac_lab", "arena", "hdf5", "tfrecord", "rosbag"],
+    "compression": "parquet",
+    "include_metadata": true,
+    "include_videos": true,
+    "include_depth": true,
+    "description": "Data export format options"
+  },
+  "quality_gates": {
+    "config_path": "tools/quality_gates/quality_config.json",
+    "enabled": true,
+    "strict_mode": false,
+    "description": "Reference to quality gate configuration"
+  }
+}
