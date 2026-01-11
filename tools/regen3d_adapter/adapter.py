@@ -335,13 +335,17 @@ class Regen3DAdapter:
         regen3d_output: Regen3DOutput,
         scene_id: Optional[str] = None,
         environment_type: str = "generic",
+        scale_factor: float = 1.0,
     ) -> Dict[str, Any]:
         """Create a canonical scene_manifest.json from 3D-RE-GEN output.
+
+        (P1-23) Now applies scale_factor consistently with create_layout().
 
         Args:
             regen3d_output: Parsed 3D-RE-GEN output
             scene_id: Optional override for scene ID
             environment_type: Type of environment (kitchen, office, etc.)
+            scale_factor: Optional scale factor to apply (default: 1.0)
 
         Returns:
             Manifest dictionary ready for JSON serialization
@@ -352,7 +356,7 @@ class Regen3DAdapter:
 
         # Process foreground objects
         for obj in regen3d_output.objects:
-            manifest_obj = self._object_to_manifest(obj, regen3d_output)
+            manifest_obj = self._object_to_manifest(obj, regen3d_output, scale_factor)
             objects.append(manifest_obj)
 
         # Process background
@@ -360,6 +364,7 @@ class Regen3DAdapter:
             bg_obj = self._object_to_manifest(
                 regen3d_output.background,
                 regen3d_output,
+                scale_factor,
                 is_background=True,
             )
             objects.append(bg_obj)
@@ -369,9 +374,9 @@ class Regen3DAdapter:
             "scene_id": scene_id,
             "scene": {
                 "coordinate_frame": regen3d_output.coordinate_frame,
-                "meters_per_unit": regen3d_output.meters_per_unit,
+                "meters_per_unit": regen3d_output.meters_per_unit * scale_factor,
                 "environment_type": environment_type,
-                "room": self._compute_room_bounds(regen3d_output),
+                "room": self._compute_room_bounds(regen3d_output, scale_factor),
                 "physics_defaults": {
                     "gravity": {"x": 0.0, "y": -9.81, "z": 0.0},
                     "solver": "TGS",
@@ -388,6 +393,7 @@ class Regen3DAdapter:
                 "regen3d_version": regen3d_output.version,
                 "reconstruction_confidence": regen3d_output.overall_confidence,
                 "source_image_path": regen3d_output.source_image_path,
+                "scale_factor": scale_factor,
             },
         }
 
@@ -397,11 +403,20 @@ class Regen3DAdapter:
         self,
         obj: Regen3DObject,
         scene: Regen3DOutput,
+        scale_factor: float = 1.0,
         is_background: bool = False,
     ) -> Dict[str, Any]:
-        """Convert a Regen3DObject to manifest object format."""
+        """Convert a Regen3DObject to manifest object format.
+
+        (P1-23) Now applies scale_factor to translation and scale components.
+        """
         # Extract transform components from matrix
         transform = self._decompose_transform(obj.pose.transform_matrix)
+
+        # Apply scale_factor to translation and scale
+        if scale_factor != 1.0:
+            transform["translation"] = [v * scale_factor for v in transform["translation"]]
+            transform["scale"] = [v * scale_factor for v in transform["scale"]]
 
         # Determine sim_role based on object properties
         sim_role = obj.sim_role
@@ -528,8 +543,11 @@ class Regen3DAdapter:
 
         return [float(w), float(x), float(y), float(z)]
 
-    def _compute_room_bounds(self, regen3d_output: Regen3DOutput) -> Dict[str, Any]:
-        """Compute room bounds from all objects."""
+    def _compute_room_bounds(self, regen3d_output: Regen3DOutput, scale_factor: float = 1.0) -> Dict[str, Any]:
+        """Compute room bounds from all objects.
+
+        (P1-23) Now applies scale_factor to bounds.
+        """
         all_bounds = []
 
         for obj in regen3d_output.objects:
@@ -539,10 +557,14 @@ class Regen3DAdapter:
             all_bounds.append(regen3d_output.background.bounds)
 
         if not all_bounds:
-            return {
+            default_bounds = {
                 "bounds": {"min": [-5, 0, -5], "max": [5, 3, 5]},
                 "origin": [0, 0, 0],
             }
+            if scale_factor != 1.0:
+                default_bounds["bounds"]["min"] = [v * scale_factor for v in default_bounds["bounds"]["min"]]
+                default_bounds["bounds"]["max"] = [v * scale_factor for v in default_bounds["bounds"]["max"]]
+            return default_bounds
 
         # Compute union of all bounds
         mins = np.array([b.get("min", [-5, 0, -5]) for b in all_bounds])
@@ -550,6 +572,11 @@ class Regen3DAdapter:
 
         room_min = mins.min(axis=0).tolist()
         room_max = maxs.max(axis=0).tolist()
+
+        # Apply scale_factor
+        if scale_factor != 1.0:
+            room_min = [v * scale_factor for v in room_min]
+            room_max = [v * scale_factor for v in room_max]
 
         return {
             "bounds": {"min": room_min, "max": room_max},
@@ -625,16 +652,35 @@ class Regen3DAdapter:
         scale_factor: float,
         is_background: bool = False,
     ) -> Dict[str, Any]:
-        """Convert Regen3DObject to layout object format."""
+        """Convert Regen3DObject to layout object format with OBB data.
+
+        (P2-13) OBB (Oriented Bounding Box) format used by downstream jobs:
+        - center: 3D position [x, y, z] in world coordinates
+        - extents: Half-sizes of the bounding box [hx, hy, hz]
+        - R: 3x3 rotation matrix [row0, row1, row2]
+
+        The OBB is used by build_scene_usd.py to reconstruct the world transform:
+            T_world = OBB.R @ diag(OBB.extents) @ T_local
+
+        Where:
+        - OBB.center is the 3D position in world space
+        - OBB.R is the rotation orientation
+        - OBB.extents are half-sizes used to scale the mesh to fit the bounding box
+        - T_local is the local mesh-to-OBB transform
+
+        See: usd-assembly-job/build_scene_usd.py:matrix_from_obb() for conversion details
+        """
         # Extract center from transform or bounds
         m = np.array(obj.pose.transform_matrix, dtype=np.float64)
         center = (m[:3, 3] * scale_factor).tolist()
 
         # Compute scaled extents (half-sizes)
+        # Extents represent HALF the actual size of the bounding box
         size = obj.bounds.get("size", [1, 1, 1])
         extents = [s * scale_factor * 0.5 for s in size]
 
-        # Extract rotation matrix
+        # Extract rotation matrix (3x3) from the 4x4 transform
+        # This preserves the object's orientation in world space
         rot = m[:3, :3].tolist()
 
         layout_obj = {
@@ -642,9 +688,9 @@ class Regen3DAdapter:
             "class_name": obj.category or ("scene_background" if is_background else "object"),
             "center3d": center,
             "obb": {
-                "center": center,
-                "extents": extents,
-                "R": rot,
+                "center": center,  # World position
+                "extents": extents,  # Half-sizes for scaling mesh
+                "R": rot,  # Rotation matrix for orientation
             },
             "bounds": {
                 "min": [center[i] - extents[i] for i in range(3)],

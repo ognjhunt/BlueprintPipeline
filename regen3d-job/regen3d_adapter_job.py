@@ -60,6 +60,7 @@ from tools.regen3d_adapter import (
     layout_from_regen3d,
     Regen3DOutput,
 )
+from tools.scene_manifest.validate_manifest import validate_manifest
 
 # Optional: Gemini for semantic inventory
 try:
@@ -463,7 +464,18 @@ def run_regen3d_adapter_job(
             regen3d_output,
             scene_id=scene_id,
             environment_type=environment_type,
+            scale_factor=scale_factor,  # (P1-23) Apply scale_factor consistently
         )
+
+        # Validate manifest against schema (P1-21)
+        print("[REGEN3D-JOB] Validating manifest against schema...")
+        try:
+            validate_manifest(manifest)
+            print("[REGEN3D-JOB] Manifest validation passed")
+        except Exception as validation_error:
+            print(f"[REGEN3D-JOB] ERROR: Manifest validation failed: {validation_error}")
+            return 1
+
         manifest_path = assets_dir / "scene_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
         print(f"[REGEN3D-JOB] Wrote manifest: {manifest_path}")
@@ -483,6 +495,7 @@ def run_regen3d_adapter_job(
         return 1
 
     # 4. Generate semantic inventory (for replicator/policy targeting)
+    # (P1-22) Make inventory generation failures fatal - required for downstream jobs
     if not skip_inventory:
         print("[REGEN3D-JOB] Generating semantic inventory...")
         try:
@@ -506,11 +519,16 @@ def run_regen3d_adapter_job(
             inventory_path.write_text(json.dumps(inventory, indent=2))
             print(f"[REGEN3D-JOB] Wrote inventory: {inventory_path}")
         except Exception as e:
-            print(f"[REGEN3D-JOB] WARNING: Failed to generate inventory: {e}")
-            # Non-fatal - continue
+            print(f"[REGEN3D-JOB] ERROR: Failed to generate inventory (required for downstream jobs): {e}")
+            import traceback
+            traceback.print_exc()
+            return 1  # Fail the job - inventory is critical for replicator/policy targeting
 
-    # 5. Write completion markers
-    # Write both .regen3d_complete (for workflow trigger) and .regen3d_adapter_complete (legacy)
+    # 5. Write completion marker
+    # (P2-14) Use only .regen3d_complete as the primary marker.
+    # This marker signals that the 3D-RE-GEN adapter job has completed
+    # and all outputs (manifest, layout, inventory) are ready for downstream jobs.
+    # All downstream workflows should trigger on .regen3d_complete.
     marker_content = {
         "status": "complete",
         "scene_id": scene_id,
@@ -521,14 +539,16 @@ def run_regen3d_adapter_job(
         "completed_at": datetime.utcnow().isoformat() + "Z",
     }
 
-    # Primary marker for workflow trigger
+    # Primary marker: .regen3d_complete
+    # This replaces the legacy .regen3d_adapter_complete marker.
+    # Downstream jobs should watch for this marker:
+    #   - simready-pipeline
+    #   - usd-assembly-pipeline (via simready)
+    #   - replicator-pipeline
+    #   - isaac-lab-pipeline
     primary_marker_path = assets_dir / ".regen3d_complete"
     primary_marker_path.write_text(json.dumps(marker_content, indent=2))
     print(f"[REGEN3D-JOB] Wrote completion marker: {primary_marker_path}")
-
-    # Legacy marker for backwards compatibility
-    legacy_marker_path = assets_dir / ".regen3d_adapter_complete"
-    legacy_marker_path.write_text(json.dumps(marker_content, indent=2))
 
     print("[REGEN3D-JOB] 3D-RE-GEN adapter completed successfully")
     print(f"[REGEN3D-JOB]   Objects: {len(regen3d_output.objects)}")
