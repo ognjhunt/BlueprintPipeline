@@ -176,9 +176,11 @@ main:
         next: log_regen3d_complete
 
     # Wait for marker to appear (job may have just written it)
+    # Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s... max 120 seconds total (6 attempts)
     - wait_for_marker:
         assign:
           - markerAttempts: 0
+          - markerWaitSeconds: 1
         next: poll_for_marker
 
     - poll_for_marker:
@@ -193,7 +195,7 @@ main:
           steps:
             - marker_poll_switch:
                 switch:
-                  - condition: ${markerAttempts < 30}
+                  - condition: ${markerAttempts < 6}
                     next: bump_marker_attempt
                 next: marker_timeout
         next: log_regen3d_complete
@@ -201,12 +203,14 @@ main:
     - bump_marker_attempt:
         assign:
           - markerAttempts: ${markerAttempts + 1}
+          # Exponential backoff: multiply by 2 each time, cap at 30s
+          - markerWaitSeconds: ${if(markerWaitSeconds * 2 > 30, 30, markerWaitSeconds * 2)}
         next: sleep_marker_poll
 
     - sleep_marker_poll:
         call: sys.sleep
         args:
-          seconds: 2
+          seconds: ${markerWaitSeconds}
         next: poll_for_marker
 
     - marker_timeout:

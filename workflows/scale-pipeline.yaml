@@ -71,13 +71,20 @@ main:
                       - name: LAYOUT_PREFIX
                         value: ${layoutPrefix}
           result: scaleExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
         except:
           as: e
           steps:
             - log_job_error:
                 call: sys.log
                 args:
-                  text: ${"ERROR: Failed to start scale-job: " + e.message}
+                  text: ${"ERROR: Failed to start scale-job after retries: " + e.message}
                   severity: "ERROR"
             - write_failure_marker:
                 call: googleapis.storage.v1.objects.insert
@@ -96,6 +103,27 @@ main:
           uploadType: "media"
           body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"processing\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
         result: markerResult
+        next: write_assets_ready_marker
+
+    # Write .assets_ready marker to signal that layout processing is complete
+    # This triggers downstream pipelines (regen3d-pipeline, etc)
+    - write_assets_ready_marker:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${"scenes/" + sceneId + "/assets/.assets_ready"}
+            uploadType: "media"
+            body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"ready\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
+          result: assetsReadyMarker
+        except:
+          as: e
+          steps:
+            - log_assets_ready_error:
+                call: sys.log
+                args:
+                  text: ${"WARNING: Failed to write .assets_ready marker: " + e.message}
+                  severity: "WARNING"
         next: done
 
     - done:

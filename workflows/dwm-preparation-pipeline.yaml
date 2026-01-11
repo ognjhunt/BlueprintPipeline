@@ -7,6 +7,12 @@
 #
 # Trigger: Cloud Storage object finalized event for .regen3d_complete
 #
+# NOTE: This pipeline runs in parallel with usd-assembly-pipeline and dream2flow-preparation-pipeline
+# (all trigger on the same .regen3d_complete marker). This is safe because:
+# - Each pipeline writes to different output prefixes (dwm/*, usd/*, dream2flow/*)
+# - No shared state is modified
+# - Idempotency checks prevent duplicate processing
+#
 # DWM (Dexterous World Model) generates egocentric interaction videos from:
 #   - Static scene video (rendered from 3D scene)
 #   - Hand mesh video (rendered MANO hand meshes)
@@ -101,34 +107,52 @@ main:
 
     # Run the DWM preparation job
     - run_dwm_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dwmJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: USD_PREFIX
-                      value: ${usdPrefix}
-                    - name: DWM_PREFIX
-                      value: ${dwmPrefix}
-                    - name: NUM_TRAJECTORIES
-                      value: "5"
-                    - name: RESOLUTION_WIDTH
-                      value: "720"
-                    - name: RESOLUTION_HEIGHT
-                      value: "480"
-                    - name: NUM_FRAMES
-                      value: "49"
-                    - name: FPS
-                      value: "24"
-        result: dwmExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dwmJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: USD_PREFIX
+                        value: ${usdPrefix}
+                      - name: DWM_PREFIX
+                        value: ${dwmPrefix}
+                      - name: NUM_TRAJECTORIES
+                        value: "5"
+                      - name: RESOLUTION_WIDTH
+                        value: "720"
+                      - name: RESOLUTION_HEIGHT
+                        value: "480"
+                      - name: NUM_FRAMES
+                        value: "49"
+                      - name: FPS
+                        value: "24"
+          result: dwmExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_dwm_job_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start DWM job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_dwm_job_error:
+                raise: ${e}
         next: set_dwm_execution_name
 
     - set_dwm_execution_name:
@@ -193,20 +217,38 @@ main:
 
     # Run the DWM inference job
     - run_dwm_inference_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dwmInferenceJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: DWM_PREFIX
-                      value: ${dwmPrefix}
-        result: dwmInferenceExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + dwmInferenceJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: DWM_PREFIX
+                        value: ${dwmPrefix}
+          result: dwmInferenceExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_dwm_inference_job_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start DWM inference job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_dwm_inference_job_error:
+                raise: ${e}
         next: set_dwm_inference_execution_name
 
     - set_dwm_inference_execution_name:
