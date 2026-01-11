@@ -200,6 +200,10 @@ class USDSceneBuilder:
                 if physics.get("rigid_body", False):
                     self.UsdPhysics.RigidBodyAPI.Apply(prim)
 
+                    # GAP-PHYSICS-007 FIX: Add kinematic enabled flag for Isaac Sim
+                    if physics.get("kinematic_enabled", False):
+                        prim.CreateAttribute("physics:kinematicEnabled", self.Sdf.ValueTypeNames.Bool).Set(True)
+
                     if "mass_override" in physics:
                         mass_api = self.UsdPhysics.MassAPI.Apply(prim)
                         mass_api.CreateMassAttr().Set(physics["mass_override"])
@@ -225,10 +229,16 @@ class USDSceneBuilder:
                         float(physics["restitution"])
                     )
 
+                # GAP-PHYSICS-007 FIX: Add physics:approximation attribute for Isaac Sim
                 if physics.get("collision_approximation"):
-                    prim.CreateAttribute("physxCollision:approximation", self.Sdf.ValueTypeNames.Token).Set(
-                        str(physics["collision_approximation"])
-                    )
+                    approximation = str(physics["collision_approximation"])
+                    # Add both physxCollision:approximation and physics:approximation for compatibility
+                    prim.CreateAttribute("physxCollision:approximation", self.Sdf.ValueTypeNames.Token).Set(approximation)
+                    prim.CreateAttribute("physics:approximation", self.Sdf.ValueTypeNames.Token).Set(approximation)
+
+                # GAP-PHYSICS-007 FIX: Add GPU collision support
+                if physics.get("gpu_collision", True):
+                    prim.CreateAttribute("physxCollision:gpuCollision", self.Sdf.ValueTypeNames.Bool).Set(True)
 
                 articulation = obj.get("articulation")
                 if articulation:
