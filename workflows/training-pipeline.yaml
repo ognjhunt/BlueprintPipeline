@@ -1,0 +1,186 @@
+# =============================================================================
+# Training Pipeline
+# =============================================================================
+#
+# Trains robot policies on imported episodes from Genie Sim 3.0.
+#
+# Trigger Methods:
+# 1. Eventarc event from genie-sim-import-pipeline:
+#    Event type: "blueprintpipeline.episodes.imported"
+#
+# 2. Manual trigger:
+#    gcloud eventarc triggers create training-trigger \
+#      --destination-workflow=training-pipeline \
+#      --event-filters="type=blueprintpipeline.episodes.imported"
+#
+# Pipeline Flow:
+#   Episodes Imported → Validate Dataset → Launch Training Job → Monitor Training
+#
+
+main:
+  params: [event]
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT")}
+          - region: "us-central1"
+          - bucket: ${sys.get_env("GCS_BUCKET", "blueprintpipeline-data")}
+
+    - extract_event:
+        switch:
+          # Direct event payload
+          - condition: ${"job_id" in event}
+            assign:
+              - job_id: ${event.job_id}
+              - scene_id: ${default(event.scene_id, "unknown")}
+              - output_path: ${event.output_path}
+              - episode_count: ${default(event.episode_count, 0)}
+
+          # Wrapped Eventarc event
+          - condition: ${"data" in event}
+            assign:
+              - job_id: ${event.data.job_id}
+              - scene_id: ${default(event.data.scene_id, "unknown")}
+              - output_path: ${event.data.output_path}
+              - episode_count: ${default(event.data.episode_count, 0)}
+
+          # Default/fallback
+          - condition: true
+            steps:
+              - log_missing_data:
+                  call: sys.log
+                  args:
+                    text: "Missing required event data. Event must contain job_id and output_path"
+                    severity: ERROR
+              - raise_invalid_event:
+                  raise:
+                    message: "Invalid event payload: missing required fields"
+
+    - validate_inputs:
+        switch:
+          - condition: ${job_id == null or job_id == ""}
+            raise:
+              message: "job_id is required"
+          - condition: ${output_path == null or output_path == ""}
+            raise:
+              message: "output_path is required"
+
+    - log_start:
+        call: sys.log
+        args:
+          text: ${"Starting training pipeline for job " + job_id + " with " + string(episode_count) + " episodes from " + output_path}
+          severity: INFO
+
+    # Validate dataset exists and has minimum episodes
+    - validate_dataset:
+        switch:
+          - condition: ${episode_count < 1}
+            steps:
+              - log_insufficient_episodes:
+                  call: sys.log
+                  args:
+                    text: ${"Insufficient episodes (" + string(episode_count) + ") for training. Minimum 1 required."}
+                    severity: WARNING
+              - return_skipped:
+                  return:
+                    status: "skipped"
+                    job_id: ${job_id}
+                    reason: "Insufficient episodes for training"
+
+    # Launch training job
+    - run_training_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/training-job"}
+          body:
+            overrides:
+              containerOverrides:
+                - name: "training"
+                  env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${scene_id}
+                    - name: OUTPUT_PATH
+                      value: ${output_path}
+                    - name: EPISODE_COUNT
+                      value: ${string(episode_count)}
+                    - name: TRAINING_MODE
+                      value: "lerobot"
+                    - name: MODEL_ARCHITECTURE
+                      value: "act"  # Default to ACT (Action Chunking Transformer)
+                    - name: TRAINING_EPOCHS
+                      value: "100"
+                    - name: BATCH_SIZE
+                      value: "32"
+                    - name: LEARNING_RATE
+                      value: "0.0001"
+                    - name: CHECKPOINT_INTERVAL
+                      value: "10"
+              timeout: "21600s"  # 6 hours max for training
+        result: training_job_execution
+
+    - set_training_execution_name:
+        assign:
+          - trainingExecutionName: '${if(training_job_execution.metadata != null and training_job_execution.metadata.name != null, training_job_execution.metadata.name, training_job_execution.name)}'
+        next: wait_for_training
+
+    - wait_for_training:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${trainingExecutionName}
+        result: training_status
+        next: check_training_status
+
+    - check_training_status:
+        assign:
+          - trainingState: '${if(training_status.state != null, training_status.state, if(training_status.status != null, training_status.status.state, null))}'
+          - trainingFailedCount: '${if(training_status.failedCount != null, training_status.failedCount, if(training_status.status != null, training_status.status.failedCount, null))}'
+          - trainingSucceededCount: '${if(training_status.succeededCount != null, training_status.succeededCount, if(training_status.status != null, training_status.status.succeededCount, null))}'
+        next: training_status_switch
+
+    - training_status_switch:
+        switch:
+          - condition: '${trainingState == "FAILED" or (trainingFailedCount != null and trainingFailedCount > 0)}'
+            next: check_training_failure
+          - condition: '${trainingState == "SUCCEEDED" or (trainingSucceededCount != null and trainingSucceededCount > 0)}'
+            next: log_training_success
+        next: wait_training_poll
+
+    - wait_training_poll:
+        call: sys.sleep
+        args:
+          seconds: 30  # Poll every 30 seconds (training takes longer)
+        next: wait_for_training
+
+    - check_training_failure:
+        call: sys.log
+        args:
+          text: ${"Training job failed for job " + job_id}
+          severity: ERROR
+        next: raise_training_error
+
+    - raise_training_error:
+        raise:
+          message: ${"Training failed for job " + job_id}
+
+    - log_training_success:
+        call: sys.log
+        args:
+          text: ${"Training job completed successfully for " + job_id}
+          severity: INFO
+
+    # Extract training results (model path)
+    - parse_training_output:
+        assign:
+          - model_path: ${text.replace_all(default(training_status.body.status.logUri, ""), "gs://" + bucket + "/", "")}
+
+    # Return success
+    - return_success:
+        return:
+          status: "success"
+          job_id: ${job_id}
+          scene_id: ${scene_id}
+          episode_count: ${episode_count}
+          model_path: ${model_path}
+          training_execution_id: ${training_job_execution.name}
