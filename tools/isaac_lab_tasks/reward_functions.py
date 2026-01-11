@@ -5,7 +5,10 @@ This module generates reward function implementations for different
 policy types and task configurations.
 """
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 
 class RewardFunctionGenerator:
@@ -365,6 +368,40 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from omni.isaac.lab.envs import ManagerBasedEnv
+
+
+def initialize_reward_state(env: ManagerBasedEnv) -> None:
+    """
+    Initialize state variables required by reward functions.
+
+    This function should be called during environment initialization
+    to prevent AttributeError on first timestep.
+
+    Args:
+        env: The environment instance to initialize
+    """
+    # Initialize action history for jerk/rate penalties
+    if hasattr(env, "action_manager") and env.action_manager.action is not None:
+        env._prev_actions = env.action_manager.action.clone()
+        env._prev_actions_rate = env.action_manager.action.clone()
+    else:
+        # Fallback if action_manager not yet initialized
+        action_dim = 7  # Default for most manipulation robots
+        env._prev_actions = torch.zeros(env.num_envs, action_dim, device=env.device)
+        env._prev_actions_rate = torch.zeros(env.num_envs, action_dim, device=env.device)
+
+    # Initialize end-effector velocity history for smoothness penalties
+    robot = env.scene.get("robot")
+    if robot is not None and hasattr(robot, "data"):
+        try:
+            ee_body_idx = robot.find_bodies("panda_hand")[0] if hasattr(robot, "find_bodies") else 0
+            env._prev_ee_vel = robot.data.body_vel_w[:, ee_body_idx, :3].clone()
+        except (IndexError, AttributeError):
+            # Fallback if end-effector not found
+            env._prev_ee_vel = torch.zeros(env.num_envs, 3, device=env.device)
+    else:
+        env._prev_ee_vel = torch.zeros(env.num_envs, 3, device=env.device)
+
 
 '''
         functions = []
