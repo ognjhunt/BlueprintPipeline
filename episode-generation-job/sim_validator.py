@@ -276,7 +276,13 @@ class ValidationResult:
 
 @dataclass
 class ValidationConfig:
-    """Configuration for validation."""
+    """
+    Configuration for validation.
+
+    LABS-BLOCKER-002 FIX: Raised quality thresholds to production levels.
+    Previous thresholds were too lenient (70% quality, 80% collision-free).
+    New thresholds prevent shipping low-quality data to labs.
+    """
 
     # Thresholds
     max_unexpected_collisions: int = 0
@@ -294,8 +300,10 @@ class ValidationConfig:
     require_object_stable: bool = True
     stability_threshold: float = 0.001  # Position change threshold
 
-    # Quality thresholds
-    min_quality_score: float = 0.7
+    # Quality thresholds - LABS-BLOCKER-002 FIX: Raised from 0.7 to 0.85
+    # 85% quality ensures data is suitable for production training
+    # Prevents labs from receiving episodes with significant issues
+    min_quality_score: float = 0.85
 
     # Retry settings
     max_retries: int = 3
