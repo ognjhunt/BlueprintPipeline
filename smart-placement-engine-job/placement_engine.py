@@ -11,8 +11,10 @@ import json
 import math
 import os
 import random
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -21,6 +23,17 @@ try:
     HAVE_GENAI = True
 except ImportError:
     HAVE_GENAI = False
+
+# Add repo root to path for config imports
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from tools.config import load_pipeline_config
+    HAVE_CONFIG = True
+except ImportError:
+    HAVE_CONFIG = False
 
 from .compatibility_matrix import (
     ArticulationState,
@@ -166,13 +179,25 @@ class SmartPlacementEngine:
     - Optimal distribution algorithms
     """
 
-    DEFAULT_MODEL = "gemini-3-pro-preview"
+    @staticmethod
+    def _get_default_model() -> str:
+        """Get default model from config or fallback to hardcoded value."""
+        if HAVE_CONFIG:
+            try:
+                config = load_pipeline_config(validate=False)
+                model_config = config.models.get_model("placement_engine")
+                if model_config:
+                    return model_config.default_model
+            except Exception:
+                pass
+        return "gemini-3-pro-preview"
 
     def __init__(
         self,
         compatibility_matrix: Optional[CompatibilityMatrix] = None,
         region_detector: Optional[IntelligentRegionDetector] = None,
         api_key: Optional[str] = None,
+        model: Optional[str] = None,
         collision_margin_m: float = 0.01,
         enable_stacking: bool = True,
         randomize_placement: bool = True,
@@ -183,6 +208,7 @@ class SmartPlacementEngine:
             compatibility_matrix: Matrix for scene-to-asset rules
             region_detector: AI-powered region detector
             api_key: Gemini API key for AI features
+            model: LLM model to use (defaults from config if not provided)
             collision_margin_m: Margin for collision detection
             enable_stacking: Whether to allow stacking objects
             randomize_placement: Whether to add randomness to placement
@@ -190,6 +216,7 @@ class SmartPlacementEngine:
         self.matrix = compatibility_matrix or get_compatibility_matrix()
         self.region_detector = region_detector
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        self.model = model or self._get_default_model()
         self.collision_margin = collision_margin_m
         self.enable_stacking = enable_stacking
         self.randomize_placement = randomize_placement
@@ -790,7 +817,7 @@ Focus on:
 
             response_text = ""
             for chunk in client.models.generate_content_stream(
-                model=self.DEFAULT_MODEL,
+                model=self.model,
                 contents=contents,
                 config=config,
             ):
