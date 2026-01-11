@@ -168,6 +168,77 @@ ARTICULATION_PATTERNS = {
         "range": [0, 1.05],  # ~60 degrees
         "handle_offset": [0.5, 0.0, 0.95],
     },
+    # GAP-ARTICULATION-006 FIX: Added missing articulation types
+    # Sliding doors and windows
+    "sliding_door": {
+        "joint_type": JointType.PRISMATIC,
+        "axis": [1, 0, 0],  # Slide along X axis
+        "range": [0, 1.0],  # 1m max slide
+        "handle_offset": [0.9, 0.0, 0.5],
+    },
+    "sliding_window": {
+        "joint_type": JointType.PRISMATIC,
+        "axis": [1, 0, 0],  # Slide along X axis
+        "range": [0, 0.5],  # 50cm max slide
+        "handle_offset": [0.9, 0.0, 0.5],
+    },
+    # Wheels and rotational elements
+    "wheel": {
+        "joint_type": JointType.CONTINUOUS,
+        "axis": [0, 1, 0],  # Rotation around vertical axis
+        "range": [-3.14, 3.14],  # Full rotation
+        "handle_offset": [0.5, 0.0, 0.5],
+    },
+    "tire": {
+        "joint_type": JointType.CONTINUOUS,
+        "axis": [1, 0, 0],  # Rotation around axle
+        "range": [-3.14, 3.14],  # Full rotation
+        "handle_offset": [0.5, 0.0, 0.5],
+    },
+    "caster": {
+        "joint_type": JointType.CONTINUOUS,
+        "axis": [0, 1, 0],  # Rotation for steering
+        "range": [-3.14, 3.14],  # Full rotation
+        "handle_offset": [0.5, 0.0, 0.0],
+    },
+    # Articulated mechanisms
+    "arm": {
+        "joint_type": JointType.REVOLUTE,
+        "axis": [0, 1, 0],  # Rotate around horizontal axis
+        "range": [-1.57, 1.57],  # ±90 degrees
+        "handle_offset": [0.5, 0.0, 1.0],
+    },
+    "articulated_arm": {
+        "joint_type": JointType.REVOLUTE,
+        "axis": [0, 1, 0],  # Rotate around horizontal axis
+        "range": [-2.0, 2.0],  # ±115 degrees
+        "handle_offset": [1.0, 0.0, 0.5],
+    },
+    "hinge": {
+        "joint_type": JointType.REVOLUTE,
+        "axis": [0, 0, 1],  # Vertical axis hinge
+        "range": [-3.14, 3.14],  # Full rotation capability
+        "handle_offset": [0.5, 0.0, 0.5],
+    },
+    # Pneumatic/linear actuators
+    "pneumatic": {
+        "joint_type": JointType.PRISMATIC,
+        "axis": [0, 1, 0],  # Vertical motion (common for pneumatics)
+        "range": [0, 0.3],  # 30cm extension
+        "handle_offset": [0.5, 1.0, 0.5],
+    },
+    "actuator": {
+        "joint_type": JointType.PRISMATIC,
+        "axis": [0, 1, 0],  # Vertical motion
+        "range": [0, 0.5],  # 50cm extension
+        "handle_offset": [0.5, 1.0, 0.5],
+    },
+    "linear_actuator": {
+        "joint_type": JointType.PRISMATIC,
+        "axis": [0, 1, 0],  # Vertical motion
+        "range": [0, 1.0],  # 1m extension
+        "handle_offset": [0.5, 1.0, 0.5],
+    },
 }
 
 
