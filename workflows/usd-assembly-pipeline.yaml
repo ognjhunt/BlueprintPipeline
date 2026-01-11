@@ -58,26 +58,44 @@ main:
         next: run_convert_job
 
     - run_convert_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + usdJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: LAYOUT_PREFIX
-                      value: ${layoutPrefix}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: USD_PREFIX
-                      value: ${usdPrefix}
-                    - name: CONVERT_ONLY
-                      value: "true"
-        result: convertExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + usdJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: LAYOUT_PREFIX
+                        value: ${layoutPrefix}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: USD_PREFIX
+                        value: ${usdPrefix}
+                      - name: CONVERT_ONLY
+                        value: "true"
+          result: convertExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 5
+          backoff:
+            initial_delay: 1
+            max_delay: 60
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_convert_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start USD convert job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_convert_error:
+                raise: ${e}
         next: set_convert_execution_name
 
     - set_convert_execution_name:
@@ -137,19 +155,39 @@ main:
         raise: ${errorMsg}
 
     - run_simready_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/simready-job"}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/simready-job"}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+              timeout: "3600s"  # 1 hour max for simready
+        result: simreadyExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_simready_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start simready job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_simready_error:
+                raise: ${e}
         next: init_simready_poll
 
     - init_simready_poll:
@@ -209,24 +247,43 @@ main:
         raise: ${errorMsg}
 
     - run_usd_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + usdJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: LAYOUT_PREFIX
-                      value: ${layoutPrefix}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: USD_PREFIX
-                      value: ${usdPrefix}
-        result: usdExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + usdJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: LAYOUT_PREFIX
+                        value: ${layoutPrefix}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: USD_PREFIX
+                        value: ${usdPrefix}
+              timeout: "3600s"  # 1 hour max for USD assembly
+          result: usdExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_usd_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start USD job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_usd_error:
+                raise: ${e}
         next: set_usd_execution_name
 
     - set_usd_execution_name:
@@ -290,26 +347,45 @@ main:
     # =========================================================================
 
     - run_replicator_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + replicatorJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: SEG_PREFIX
-                      value: ${segPrefix}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: USD_PREFIX
-                      value: ${usdPrefix}
-                    - name: REPLICATOR_PREFIX
-                      value: ${replicatorPrefix}
-        result: replicatorExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + replicatorJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: SEG_PREFIX
+                        value: ${segPrefix}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: USD_PREFIX
+                        value: ${usdPrefix}
+                      - name: REPLICATOR_PREFIX
+                        value: ${replicatorPrefix}
+              timeout: "1800s"  # 30 minutes max for replicator
+          result: replicatorExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_replicator_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start replicator job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_replicator_error:
+                raise: ${e}
         next: set_replicator_execution_name
 
     - set_replicator_execution_name:
@@ -365,26 +441,45 @@ main:
     # =========================================================================
 
     - run_isaac_lab_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/isaac-lab-job"}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: USD_PREFIX
-                      value: ${usdPrefix}
-                    - name: REPLICATOR_PREFIX
-                      value: ${replicatorPrefix}
-                    - name: ISAAC_LAB_PREFIX
-                      value: '${"scenes/" + sceneId + "/isaac_lab"}'
-        result: isaacLabExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/isaac-lab-job"}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: USD_PREFIX
+                        value: ${usdPrefix}
+                      - name: REPLICATOR_PREFIX
+                        value: ${replicatorPrefix}
+                      - name: ISAAC_LAB_PREFIX
+                        value: '${"scenes/" + sceneId + "/isaac_lab"}'
+              timeout: "1800s"  # 30 minutes max for Isaac Lab task generation
+          result: isaacLabExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_isaac_lab_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start Isaac Lab job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_isaac_lab_error:
+                raise: ${e}
         next: set_isaac_lab_execution_name
 
     - set_isaac_lab_execution_name:

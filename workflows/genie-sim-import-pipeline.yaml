@@ -106,26 +106,49 @@ main:
               timeout: "1800s"  # 30 minutes max
         result: import_job_execution
 
+    - set_import_execution_name:
+        assign:
+          - importExecutionName: '${if(import_job_execution.metadata != null and import_job_execution.metadata.name != null, import_job_execution.metadata.name, import_job_execution.name)}'
+        next: wait_for_import
+
     - wait_for_import:
-        call: http.get
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
         args:
-          url: ${"https://" + region + "-run.googleapis.com/apis/run.googleapis.com/v2/" + import_job_execution.metadata.name + "/executions/" + import_job_execution.name}
-          auth:
-            type: OAuth2
+          name: ${importExecutionName}
         result: import_status
+        next: check_import_status
+
+    - check_import_status:
+        assign:
+          - importState: '${if(import_status.state != null, import_status.state, if(import_status.status != null, import_status.status.state, null))}'
+          - importFailedCount: '${if(import_status.failedCount != null, import_status.failedCount, if(import_status.status != null, import_status.status.failedCount, null))}'
+          - importSucceededCount: '${if(import_status.succeededCount != null, import_status.succeededCount, if(import_status.status != null, import_status.status.succeededCount, null))}'
+        next: import_status_switch
+
+    - import_status_switch:
+        switch:
+          - condition: '${importState == "FAILED" or (importFailedCount != null and importFailedCount > 0)}'
+            next: check_import_success
+          - condition: '${importState == "SUCCEEDED" or (importSucceededCount != null and importSucceededCount > 0)}'
+            next: log_import_success
+        next: wait_import_poll
+
+    - wait_import_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_import
 
     - check_import_success:
-        switch:
-          - condition: ${import_status.body.status.conditions[0].state != "CONDITION_SUCCEEDED"}
-            steps:
-              - log_import_failure:
-                  call: sys.log
-                  args:
-                    text: ${"Import job failed: " + import_status.body.status.conditions[0].message}
-                    severity: ERROR
-              - raise_import_error:
-                  raise:
-                    message: ${"Import failed: " + import_status.body.status.conditions[0].message}
+        call: sys.log
+        args:
+          text: ${"Import job failed for job " + job_id}
+          severity: ERROR
+        next: raise_import_error
+
+    - raise_import_error:
+        raise:
+          message: ${"Import failed for job " + job_id}
 
     - log_import_success:
         call: sys.log
