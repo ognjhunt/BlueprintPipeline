@@ -89,6 +89,11 @@ from .exporter import (
     GenieSimExportConfig,
     GenieSimExportResult,
 )
+from .importer import (
+    GenieSimImporter,
+    GenieSimImportConfig,
+    GenieSimImportResult,
+)
 from .local_framework import (
     GenieSimLocalFramework,
     GenieSimConfig,
@@ -126,6 +131,10 @@ __all__ = [
     "GenieSimExporter",
     "GenieSimExportConfig",
     "GenieSimExportResult",
+    # Importer
+    "GenieSimImporter",
+    "GenieSimImportConfig",
+    "GenieSimImportResult",
     # Local Framework
     "GenieSimLocalFramework",
     "GenieSimConfig",
