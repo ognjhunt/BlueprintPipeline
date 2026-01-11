@@ -429,9 +429,10 @@ class LeRobotExporter:
 
         episode_index = len(self.episodes)
 
-        # Compute reward using RewardComputer if available
+        # P2-3 FIX: Compute reward with comprehensive error handling and logging
         total_reward = 0.0
         reward_components = {}
+        reward_computation_status = "not_attempted"
 
         if HAVE_REWARD_COMPUTATION and motion_plan is not None:
             try:
@@ -442,14 +443,50 @@ class LeRobotExporter:
                     validation_result=validation_result,
                 )
                 reward_components = components.to_dict()
+                reward_computation_status = "success"
+                self.log(f"  Reward computed: {total_reward:.3f} (components: {len(reward_components)})", "DEBUG")
             except Exception as e:
-                self.log(f"Reward computation failed: {e}", "WARNING")
-                # Fallback to heuristic
-                total_reward = 0.7 if success else 0.0
+                import traceback
+                error_details = {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
+                self.log(f"Reward computation failed for episode {episode_index}: {type(e).__name__}: {e}", "WARNING")
+                self.log(f"  Using heuristic fallback for reward computation", "WARNING")
+
+                # P2-3 FIX: Fallback based on quality_score and success (more nuanced than hardcoded 0.7)
+                # Success = quality_score (e.g., 0.85 quality → 0.85 reward)
+                # Failure = quality_score * 0.3 (e.g., 0.85 quality → 0.255 reward)
+                total_reward = quality_score if success else (quality_score * 0.3)
+                reward_components = {
+                    "fallback_reason": "reward_computation_error",
+                    "error_details": error_details,
+                    "success": float(success),
+                    "quality": quality_score,
+                    "computed_from": "quality_score_heuristic"
+                }
+                reward_computation_status = "failed_with_fallback"
         else:
-            # Fallback: use success + quality_score
-            total_reward = quality_score * (1.0 if success else 0.3)
-            reward_components = {"fallback": True, "success": float(success), "quality": quality_score}
+            # P2-3 FIX: Improved fallback with logging of reason
+            if not HAVE_REWARD_COMPUTATION:
+                reason = "reward_computer_not_available"
+                self.log(f"  Reward computation module not available for episode {episode_index}", "DEBUG")
+            elif motion_plan is None:
+                reason = "motion_plan_not_provided"
+                self.log(f"  Motion plan not provided for episode {episode_index}, using fallback", "DEBUG")
+            else:
+                reason = "unknown"
+
+            # Use success + quality_score as heuristic
+            total_reward = quality_score if success else (quality_score * 0.3)
+            reward_components = {
+                "fallback_reason": reason,
+                "success": float(success),
+                "quality": quality_score,
+                "computed_from": "quality_score_heuristic"
+            }
+            reward_computation_status = "fallback"
 
         # P0-5 FIX: Extract is_mock flag from sensor_data
         is_mock = False
@@ -496,9 +533,281 @@ class LeRobotExporter:
 
         return episode_index
 
+    def _validate_trajectory_sensor_alignment(self) -> List[str]:
+        """
+        P2-4 FIX: Validate that trajectory frames and sensor data frames are aligned.
+
+        Checks for each episode:
+        1. If sensor_data exists, validate frame counts match
+        2. Validate timestamps are aligned (within tolerance)
+        3. Detect missing or extra sensor frames
+
+        Returns:
+            List of error messages (empty if all aligned)
+        """
+        errors = []
+
+        for episode in self.episodes:
+            episode_id = episode.episode_index
+            trajectory_frames = episode.trajectory.num_frames if episode.trajectory else 0
+
+            # Skip if no sensor data (not an error)
+            if episode.sensor_data is None:
+                continue
+
+            # Get sensor frame count
+            sensor_frames = 0
+            if hasattr(episode.sensor_data, 'num_frames'):
+                sensor_frames = episode.sensor_data.num_frames
+            elif hasattr(episode.sensor_data, 'frames'):
+                sensor_frames = len(episode.sensor_data.frames)
+
+            # Validate frame count alignment
+            if trajectory_frames != sensor_frames:
+                errors.append(
+                    f"Episode {episode_id}: Frame count mismatch. "
+                    f"Trajectory: {trajectory_frames} frames, Sensor: {sensor_frames} frames"
+                )
+                continue
+
+            # Validate timestamp alignment (if both have timestamps)
+            if hasattr(episode.sensor_data, 'frames') and episode.trajectory:
+                trajectory_timestamps = [s.timestamp for s in episode.trajectory.states]
+                sensor_timestamps = [f.timestamp for f in episode.sensor_data.frames if hasattr(f, 'timestamp')]
+
+                if len(sensor_timestamps) == len(trajectory_timestamps):
+                    # Check timestamp alignment (within 1ms tolerance for floating point)
+                    tolerance = 0.001  # 1ms
+                    misaligned_frames = []
+
+                    for i, (traj_ts, sensor_ts) in enumerate(zip(trajectory_timestamps, sensor_timestamps)):
+                        if abs(traj_ts - sensor_ts) > tolerance:
+                            misaligned_frames.append(i)
+
+                    if misaligned_frames:
+                        # Report first few misaligned frames
+                        sample_frames = misaligned_frames[:3]
+                        frame_info = ", ".join([
+                            f"frame {i} (traj: {trajectory_timestamps[i]:.3f}s, sensor: {sensor_timestamps[i]:.3f}s)"
+                            for i in sample_frames
+                        ])
+                        errors.append(
+                            f"Episode {episode_id}: {len(misaligned_frames)} misaligned timestamps. "
+                            f"Examples: {frame_info}"
+                        )
+
+            # Validate camera consistency (all frames should have same cameras)
+            if hasattr(episode.sensor_data, 'frames') and hasattr(episode.sensor_data, 'camera_ids'):
+                expected_cameras = set(episode.sensor_data.camera_ids)
+                for i, frame in enumerate(episode.sensor_data.frames):
+                    if hasattr(frame, 'rgb_images'):
+                        frame_cameras = set(frame.rgb_images.keys())
+                        missing_cameras = expected_cameras - frame_cameras
+                        if missing_cameras:
+                            errors.append(
+                                f"Episode {episode_id}, frame {i}: Missing camera data for {missing_cameras}"
+                            )
+                            break  # Don't spam errors for every frame
+
+        return errors
+
+    def _validate_rgb_frame(
+        self,
+        frame: np.ndarray,
+        episode_idx: int,
+        camera_id: str,
+        frame_idx: int
+    ) -> List[str]:
+        """
+        P2-5 FIX: Validate RGB image frame.
+
+        Checks:
+        - Shape is (H, W, 3)
+        - Dtype is uint8
+        - Values are in range [0, 255]
+        """
+        errors = []
+
+        # Validate shape
+        if frame.ndim != 3:
+            errors.append(f"Frame {frame_idx}: Invalid dimensions {frame.ndim}, expected 3 (H, W, C)")
+            return errors  # Can't continue validation
+
+        if frame.shape[2] != 3:
+            errors.append(f"Frame {frame_idx}: Invalid channels {frame.shape[2]}, expected 3 (RGB)")
+
+        # Validate dtype
+        if frame.dtype != np.uint8:
+            errors.append(f"Frame {frame_idx}: Invalid dtype {frame.dtype}, expected uint8")
+
+        # Validate value range (only if dtype is correct)
+        if frame.dtype == np.uint8:
+            if frame.min() < 0 or frame.max() > 255:
+                errors.append(f"Frame {frame_idx}: Values out of range [{frame.min()}, {frame.max()}], expected [0, 255]")
+
+        # Validate resolution matches config
+        expected_h, expected_w = self.config.image_resolution[1], self.config.image_resolution[0]
+        actual_h, actual_w = frame.shape[0], frame.shape[1]
+        if (actual_h, actual_w) != (expected_h, expected_w):
+            errors.append(
+                f"Frame {frame_idx}: Resolution mismatch ({actual_w}x{actual_h}), "
+                f"expected ({expected_w}x{expected_h})"
+            )
+
+        return errors
+
+    def _validate_depth_frame(
+        self,
+        frame: np.ndarray,
+        episode_idx: int,
+        camera_id: str,
+        frame_idx: int
+    ) -> List[str]:
+        """
+        P2-5 FIX: Validate depth map frame.
+
+        Checks:
+        - Shape is (H, W)
+        - Dtype is float32
+        - Values are in valid range (0.01m - 100m typical)
+        """
+        errors = []
+
+        # Validate shape
+        if frame.ndim != 2:
+            errors.append(f"Frame {frame_idx}: Invalid depth dimensions {frame.ndim}, expected 2 (H, W)")
+            return errors
+
+        # Validate dtype
+        if frame.dtype != np.float32:
+            errors.append(f"Frame {frame_idx}: Invalid depth dtype {frame.dtype}, expected float32")
+
+        # Validate value range (typical depth sensor range: 0.01m to 100m)
+        if np.isnan(frame).any():
+            errors.append(f"Frame {frame_idx}: Depth contains NaN values")
+
+        if np.isinf(frame).any():
+            errors.append(f"Frame {frame_idx}: Depth contains infinite values")
+
+        valid_mask = ~(np.isnan(frame) | np.isinf(frame))
+        if valid_mask.any():
+            depth_min, depth_max = frame[valid_mask].min(), frame[valid_mask].max()
+            if depth_min < 0.0 or depth_max > 200.0:  # Generous upper bound
+                errors.append(
+                    f"Frame {frame_idx}: Depth values out of typical range [{depth_min:.3f}m, {depth_max:.3f}m], "
+                    f"expected [0.0m, 200.0m]"
+                )
+
+        # Validate resolution matches config
+        expected_h, expected_w = self.config.image_resolution[1], self.config.image_resolution[0]
+        actual_h, actual_w = frame.shape[0], frame.shape[1]
+        if (actual_h, actual_w) != (expected_h, expected_w):
+            errors.append(
+                f"Frame {frame_idx}: Depth resolution mismatch ({actual_w}x{actual_h}), "
+                f"expected ({expected_w}x{expected_h})"
+            )
+
+        return errors
+
+    def _validate_segmentation_frame(
+        self,
+        frame: np.ndarray,
+        episode_idx: int,
+        camera_id: str,
+        frame_idx: int
+    ) -> List[str]:
+        """
+        P2-5 FIX: Validate segmentation mask frame.
+
+        Checks:
+        - Shape is (H, W)
+        - Dtype is uint8 or uint16
+        - Values are valid class IDs
+        """
+        errors = []
+
+        # Validate shape
+        if frame.ndim != 2:
+            errors.append(f"Frame {frame_idx}: Invalid segmentation dimensions {frame.ndim}, expected 2 (H, W)")
+            return errors
+
+        # Validate dtype
+        if frame.dtype not in [np.uint8, np.uint16]:
+            errors.append(f"Frame {frame_idx}: Invalid segmentation dtype {frame.dtype}, expected uint8 or uint16")
+
+        # Validate resolution matches config
+        expected_h, expected_w = self.config.image_resolution[1], self.config.image_resolution[0]
+        actual_h, actual_w = frame.shape[0], frame.shape[1]
+        if (actual_h, actual_w) != (expected_h, expected_w):
+            errors.append(
+                f"Frame {frame_idx}: Segmentation resolution mismatch ({actual_w}x{actual_h}), "
+                f"expected ({expected_w}x{expected_h})"
+            )
+
+        return errors
+
+    def _validate_bbox_frame(
+        self,
+        bboxes: Dict[str, Any],
+        episode_idx: int,
+        camera_id: str,
+        frame_idx: int
+    ) -> List[str]:
+        """
+        P2-5 FIX: Validate bounding box annotations (COCO format).
+
+        Checks:
+        - COCO format compliance: [x, y, width, height]
+        - Values are within image bounds
+        - No negative dimensions
+        """
+        errors = []
+
+        if not isinstance(bboxes, dict):
+            errors.append(f"Frame {frame_idx}: Bboxes must be dict, got {type(bboxes)}")
+            return errors
+
+        # Get image dimensions
+        img_w, img_h = self.config.image_resolution
+
+        # Validate 2D bboxes (COCO format)
+        if 'bboxes_2d' in bboxes:
+            for obj_id, bbox in bboxes['bboxes_2d'].items():
+                if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                    errors.append(f"Frame {frame_idx}, object {obj_id}: Invalid 2D bbox format {bbox}, expected [x, y, w, h]")
+                    continue
+
+                x, y, w, h = bbox
+
+                # Validate no negative dimensions
+                if w < 0 or h < 0:
+                    errors.append(f"Frame {frame_idx}, object {obj_id}: Negative bbox dimensions (w={w}, h={h})")
+
+                # Validate within image bounds
+                if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
+                    errors.append(
+                        f"Frame {frame_idx}, object {obj_id}: Bbox [{x}, {y}, {w}, {h}] "
+                        f"exceeds image bounds [0, 0, {img_w}, {img_h}]"
+                    )
+
+        # Validate 3D bboxes (if present)
+        if 'bboxes_3d' in bboxes:
+            for obj_id, bbox_3d in bboxes['bboxes_3d'].items():
+                if not isinstance(bbox_3d, dict):
+                    errors.append(f"Frame {frame_idx}, object {obj_id}: Invalid 3D bbox format, expected dict")
+                    continue
+
+                # Check for required fields
+                required_fields = ['center', 'size']
+                for field in required_fields:
+                    if field not in bbox_3d:
+                        errors.append(f"Frame {frame_idx}, object {obj_id}: Missing 3D bbox field '{field}'")
+
+        return errors
+
     def finalize(self) -> Path:
         """
-        Write the complete dataset to disk.
+        P2-4 FIX: Write the complete dataset to disk with frame alignment validation.
 
         Returns:
             Path to the dataset directory
@@ -516,6 +825,19 @@ class LeRobotExporter:
         data_dir = output_dir / "data"
         meta_dir.mkdir(exist_ok=True)
         data_dir.mkdir(exist_ok=True)
+
+        # P2-4 FIX: Validate trajectory-sensor frame alignment before export
+        self.log("Validating trajectory-sensor frame alignment...")
+        alignment_errors = self._validate_trajectory_sensor_alignment()
+        if alignment_errors:
+            self.log(f"  Found {len(alignment_errors)} alignment issues:", "WARNING")
+            for error in alignment_errors[:5]:  # Show first 5 errors
+                self.log(f"    - {error}", "WARNING")
+            if len(alignment_errors) > 5:
+                self.log(f"    ... and {len(alignment_errors) - 5} more", "WARNING")
+            # Don't fail - just warn (some episodes may not have sensor data)
+        else:
+            self.log("  All episodes have aligned trajectory-sensor frames")
 
         # Step 1: Write episode data (joint-space trajectories)
         self.log("Writing episode data...")
@@ -1074,7 +1396,7 @@ class LeRobotExporter:
                 self._copy_video(episode.camera_video_path, chunk_dir, episode.episode_index)
 
     def _write_episode_videos(self, episode: LeRobotEpisode, chunk_dir: Path) -> None:
-        """Write video files for an episode's visual observations."""
+        """P2-5 FIX: Write video files with per-frame validation."""
         sensor_data = episode.sensor_data
         if sensor_data is None or not hasattr(sensor_data, 'frames'):
             return
@@ -1086,11 +1408,28 @@ class LeRobotExporter:
 
             video_path = video_dir / f"episode_{episode.episode_index:06d}.mp4"
 
-            # Collect RGB frames for this camera
+            # P2-5 FIX: Collect RGB frames with validation
             frames = []
-            for frame in sensor_data.frames:
+            validation_errors = []
+
+            for frame_idx, frame in enumerate(sensor_data.frames):
                 if hasattr(frame, 'rgb_images') and camera_id in frame.rgb_images:
-                    frames.append(frame.rgb_images[camera_id])
+                    rgb_frame = frame.rgb_images[camera_id]
+
+                    # P2-5 FIX: Validate RGB frame
+                    frame_errors = self._validate_rgb_frame(
+                        rgb_frame, episode.episode_index, camera_id, frame_idx
+                    )
+                    if frame_errors:
+                        validation_errors.extend(frame_errors)
+                    else:
+                        frames.append(rgb_frame)
+
+            # Log validation errors (but don't fail - continue with valid frames)
+            if validation_errors:
+                self.log(f"  Episode {episode.episode_index}, camera {camera_id}: {len(validation_errors)} validation errors", "WARNING")
+                for error in validation_errors[:3]:  # Log first 3
+                    self.log(f"    - {error}", "WARNING")
 
             if frames:
                 self._write_video(frames, video_path, self.config.fps)
@@ -1202,15 +1541,32 @@ class LeRobotExporter:
             self._write_privileged_state_data(sensor_data, chunk_dir, episode_idx)
 
     def _write_depth_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
-        """Write depth maps for an episode."""
+        """P2-5 FIX: Write depth maps with validation."""
         for camera_id in sensor_data.camera_ids if hasattr(sensor_data, 'camera_ids') else []:
             depth_dir = chunk_dir / "depth" / camera_id
             depth_dir.mkdir(parents=True, exist_ok=True)
 
             depth_frames = []
-            for frame in sensor_data.frames:
+            validation_errors = []
+
+            for frame_idx, frame in enumerate(sensor_data.frames):
                 if hasattr(frame, 'depth_maps') and camera_id in frame.depth_maps:
-                    depth_frames.append(frame.depth_maps[camera_id])
+                    depth_frame = frame.depth_maps[camera_id]
+
+                    # P2-5 FIX: Validate depth frame
+                    frame_errors = self._validate_depth_frame(
+                        depth_frame, episode_idx, camera_id, frame_idx
+                    )
+                    if frame_errors:
+                        validation_errors.extend(frame_errors)
+                    else:
+                        depth_frames.append(depth_frame)
+
+            # Log validation errors
+            if validation_errors:
+                self.log(f"  Episode {episode_idx}, camera {camera_id}: {len(validation_errors)} depth validation errors", "WARNING")
+                for error in validation_errors[:3]:
+                    self.log(f"    - {error}", "WARNING")
 
             if depth_frames:
                 depth_path = depth_dir / f"episode_{episode_idx:06d}.npz"
@@ -1222,19 +1578,43 @@ class LeRobotExporter:
                 )
 
     def _write_segmentation_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
-        """Write segmentation masks for an episode."""
+        """P2-5 FIX: Write segmentation masks with validation."""
         for camera_id in sensor_data.camera_ids if hasattr(sensor_data, 'camera_ids') else []:
             seg_dir = chunk_dir / "segmentation" / camera_id
             seg_dir.mkdir(parents=True, exist_ok=True)
 
             semantic_frames = []
             instance_frames = []
+            validation_errors = []
 
-            for frame in sensor_data.frames:
+            for frame_idx, frame in enumerate(sensor_data.frames):
+                # Validate semantic masks
                 if hasattr(frame, 'semantic_masks') and camera_id in frame.semantic_masks:
-                    semantic_frames.append(frame.semantic_masks[camera_id])
+                    semantic_frame = frame.semantic_masks[camera_id]
+                    frame_errors = self._validate_segmentation_frame(
+                        semantic_frame, episode_idx, camera_id, frame_idx
+                    )
+                    if frame_errors:
+                        validation_errors.extend([f"semantic: {e}" for e in frame_errors])
+                    else:
+                        semantic_frames.append(semantic_frame)
+
+                # Validate instance masks
                 if hasattr(frame, 'instance_masks') and camera_id in frame.instance_masks:
-                    instance_frames.append(frame.instance_masks[camera_id])
+                    instance_frame = frame.instance_masks[camera_id]
+                    frame_errors = self._validate_segmentation_frame(
+                        instance_frame, episode_idx, camera_id, frame_idx
+                    )
+                    if frame_errors:
+                        validation_errors.extend([f"instance: {e}" for e in frame_errors])
+                    else:
+                        instance_frames.append(instance_frame)
+
+            # Log validation errors
+            if validation_errors:
+                self.log(f"  Episode {episode_idx}, camera {camera_id}: {len(validation_errors)} segmentation validation errors", "WARNING")
+                for error in validation_errors[:3]:
+                    self.log(f"    - {error}", "WARNING")
 
             if semantic_frames or instance_frames:
                 seg_path = seg_dir / f"episode_{episode_idx:06d}.npz"
@@ -1248,13 +1628,14 @@ class LeRobotExporter:
                 np.savez_compressed(seg_path, **data)
 
     def _write_bbox_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
-        """Write bounding box annotations for an episode."""
+        """P2-5 FIX: Write bounding box annotations with validation."""
         bbox_dir = chunk_dir / "bboxes"
         bbox_dir.mkdir(parents=True, exist_ok=True)
 
         bbox_data = {"episode_index": episode_idx, "frames": []}
+        validation_errors = []
 
-        for frame in sensor_data.frames:
+        for frame_idx, frame in enumerate(sensor_data.frames):
             frame_bboxes = {
                 "frame_index": frame.frame_index,
                 "timestamp": frame.timestamp,
@@ -1267,7 +1648,21 @@ class LeRobotExporter:
             if hasattr(frame, 'bboxes_3d'):
                 frame_bboxes["bboxes_3d"] = frame.bboxes_3d
 
+            # P2-5 FIX: Validate bounding boxes
+            if frame_bboxes["bboxes_2d"] or frame_bboxes["bboxes_3d"]:
+                frame_errors = self._validate_bbox_frame(
+                    frame_bboxes, episode_idx, "global", frame_idx
+                )
+                if frame_errors:
+                    validation_errors.extend(frame_errors)
+
             bbox_data["frames"].append(frame_bboxes)
+
+        # Log validation errors
+        if validation_errors:
+            self.log(f"  Episode {episode_idx}: {len(validation_errors)} bbox validation errors", "WARNING")
+            for error in validation_errors[:3]:
+                self.log(f"    - {error}", "WARNING")
 
         bbox_path = bbox_dir / f"episode_{episode_idx:06d}.json"
         with open(bbox_path, "w") as f:
