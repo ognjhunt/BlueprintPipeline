@@ -208,7 +208,9 @@ class PhysicsDefaults:
         material = (metadata.get("material") or "").lower()
         category = (metadata.get("category") or "").lower()
 
+        # GAP-PHYSICS-005 FIX: Expanded material property database
         material_density = {
+            # Original materials
             "wood": 650,
             "oak": 750,
             "metal": 7800,
@@ -220,6 +222,18 @@ class PhysicsDefaults:
             "ceramic": 2400,
             "stone": 2600,
             "rubber": 1200,
+            # New materials (P2-5)
+            "foam": 200,  # Low-density polyurethane foam
+            "cork": 240,  # Natural cork
+            "leather": 900,  # Treated leather
+            "paper": 700,  # Standard paper/cardboard
+            "concrete": 2400,  # Portland cement concrete
+            "composite": 1600,  # Carbon fiber reinforced polymer
+            "fiberglass": 2000,  # Glass fiber reinforced polymer
+            "titanium": 4500,  # Titanium alloy
+            "electronics": 1200,  # Mixed electronics components
+            "decor": 600,  # Generic decorative materials
+            "kitchenware": 1400,  # Mix of stainless steel/ceramic/plastic
         }
 
         category_density = {
@@ -231,6 +245,17 @@ class PhysicsDefaults:
             "cabinet": 720,
             "shelf": 680,
             "appliance": 2200,
+            # New categories (P2-5)
+            "box": 600,
+            "container": 1000,
+            "bag": 300,
+            "bottle": 1100,
+            "cup": 900,
+            "utensil": 1200,
+            "tool": 2000,
+            "decoration": 600,
+            "electronics_device": 1300,
+            "textile": 350,
         }
 
         density = None
@@ -259,9 +284,10 @@ class PhysicsDefaults:
         material = (metadata.get("material") or "").lower()
         category = (metadata.get("category") or "").lower()
 
+        # GAP-PHYSICS-005 FIX: Expanded friction properties for new materials
         if any(token in material for token in ("rubber", "fabric", "upholstery")):
             static, dynamic = 0.9, 0.8
-        elif any(token in material for token in ("metal", "steel", "aluminum")):
+        elif any(token in material for token in ("metal", "steel", "aluminum", "titanium")):
             static, dynamic = 0.35, 0.25
         elif "glass" in material or "ceramic" in material:
             static, dynamic = 0.4, 0.3
@@ -269,7 +295,21 @@ class PhysicsDefaults:
             static, dynamic = 0.6, 0.45
         elif "plastic" in material:
             static, dynamic = 0.55, 0.4
-        elif "appliance" in category:
+        elif "foam" in material or "cork" in material:
+            static, dynamic = 0.45, 0.35  # Soft, compressible materials
+        elif "leather" in material:
+            static, dynamic = 0.65, 0.55  # Treated leather
+        elif "paper" in material or "cardboard" in material:
+            static, dynamic = 0.5, 0.4  # Paper products
+        elif "concrete" in material or "stone" in material:
+            static, dynamic = 0.7, 0.6  # Rough surfaces
+        elif "composite" in material or "fiberglass" in material:
+            static, dynamic = 0.45, 0.35  # Smooth composites
+        elif "electronics" in material:
+            static, dynamic = 0.4, 0.3  # Smooth surfaces
+        elif "kitchenware" in material:
+            static, dynamic = 0.5, 0.4  # Mixed materials
+        elif "appliance" in category or "kitchenware" in category:
             static, dynamic = 0.45, 0.35
         else:
             static, dynamic = 0.5, 0.4
@@ -278,14 +318,30 @@ class PhysicsDefaults:
 
     def _fallback_restitution(self, metadata: Dict[str, Any]) -> Optional[float]:
         material = (metadata.get("material") or "").lower()
+
+        # GAP-PHYSICS-005 FIX: Expanded restitution for new materials
         if any(token in material for token in ("rubber",)):
             return 0.4
         if "plastic" in material:
             return 0.2
-        if "metal" in material or "steel" in material:
+        if "metal" in material or "steel" in material or "titanium" in material:
             return 0.15
         if "glass" in material or "ceramic" in material:
             return 0.05
+        if "foam" in material or "cork" in material:
+            return 0.05  # Low bounciness for soft materials
+        if "leather" in material:
+            return 0.1  # Low restitution
+        if "paper" in material or "cardboard" in material:
+            return 0.05
+        if "concrete" in material or "stone" in material:
+            return 0.2  # Moderate for rough surfaces
+        if "composite" in material or "fiberglass" in material:
+            return 0.1
+        if "electronics" in material:
+            return 0.08  # Low bounciness
+        if "kitchenware" in material or "aluminum" in material:
+            return 0.12
         return 0.1
 
     def _fallback_collision_hint(self, dimensions: Dict[str, float]) -> str:
