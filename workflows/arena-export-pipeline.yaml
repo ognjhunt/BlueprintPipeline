@@ -44,15 +44,15 @@ main:
 
     - filter_completion_markers:
         switch:
-          # Trigger on Isaac Lab completion (preferred - has all assets)
-          - condition: '${text.match_regex(object, "^scenes/.+/isaac_lab/\\.isaac_lab_complete$")}'
-            next: derive_from_isaac_lab
+          # Trigger on USD completion (preferred - has scene baseline)
+          - condition: '${text.match_regex(object, "^scenes/.+/usd/\\.usd_complete$")}'
+            next: derive_from_usd
           # Trigger on Genie Sim completion (Genie Sim path - enables Arena for both paths)
           - condition: '${text.match_regex(object, "^scenes/.+/geniesim/\\.geniesim_complete$")}'
             next: derive_from_geniesim
-          # Also trigger on USD completion (fallback - minimal requirement)
-          - condition: '${text.match_regex(object, "^scenes/.+/usd/\\.usd_complete$")}'
-            next: derive_from_usd
+          # Also trigger on Isaac Lab completion if available (enhanced RL task data)
+          - condition: '${text.match_regex(object, "^scenes/.+/isaac_lab/\\.isaac_lab_complete$")}'
+            next: derive_from_isaac_lab
         next: skip
 
     - derive_from_isaac_lab:
@@ -105,39 +105,58 @@ main:
     # =========================================================================
 
     - run_arena_export_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + arenaJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: USD_PREFIX
-                      value: ${usdPrefix}
-                    - name: ARENA_PREFIX
-                      value: ${arenaPrefix}
-                    # Genie Sim prefix (when triggered from Genie Sim path)
-                    # This allows Arena to reference the generated training data
-                    - name: GENIESIM_PREFIX
-                      value: '${default(geniesimPrefix, "")}'
-                    # Source that triggered this Arena export
-                    - name: TRIGGER_SOURCE
-                      value: ${triggerSource}
-                    # Enable LLM-based affordance detection
-                    - name: USE_LLM_AFFORDANCES
-                      value: "true"
-                    # Enable Hub registration (requires HF_TOKEN secret)
-                    - name: ENABLE_HUB_REGISTRATION
-                      value: '${sys.get_env("ENABLE_HUB_REGISTRATION", "false")}'
-                    - name: HUB_NAMESPACE
-                      value: '${sys.get_env("HUB_NAMESPACE", "blueprint-robotics")}'
-        result: arenaExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + arenaJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: USD_PREFIX
+                        value: ${usdPrefix}
+                      - name: ARENA_PREFIX
+                        value: ${arenaPrefix}
+                      # Genie Sim prefix (when triggered from Genie Sim path)
+                      # This allows Arena to reference the generated training data
+                      - name: GENIESIM_PREFIX
+                        value: '${default(geniesimPrefix, "")}'
+                      # Source that triggered this Arena export
+                      - name: TRIGGER_SOURCE
+                        value: ${triggerSource}
+                      # Enable LLM-based affordance detection
+                      - name: USE_LLM_AFFORDANCES
+                        value: "true"
+                      # Enable Hub registration (requires HF_TOKEN secret)
+                      - name: ENABLE_HUB_REGISTRATION
+                        value: '${sys.get_env("ENABLE_HUB_REGISTRATION", "false")}'
+                      - name: HUB_NAMESPACE
+                        value: '${sys.get_env("HUB_NAMESPACE", "blueprint-robotics")}'
+              timeout: "1800s"  # 30 minutes max for Arena export
+          result: arenaExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_arena_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start Arena export job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_arena_error:
+                raise: ${e}
         next: set_arena_execution_name
 
     - set_arena_execution_name:

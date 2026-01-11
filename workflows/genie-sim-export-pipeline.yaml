@@ -183,40 +183,59 @@ main:
 
     # Run the Genie Sim export job
     # NOTE: This job uses YOUR variation assets (from variation-gen-job), NOT Genie Sim's assets
+    # WITH RETRY: Exponential backoff for transient failures (max 5 retries, ~2min total backoff)
     - run_geniesim_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + geniesimJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: GENIESIM_PREFIX
-                      value: ${geniesimPrefix}
-                    - name: VARIATION_ASSETS_PREFIX
-                      value: ${variationAssetsPrefix}
-                    - name: REPLICATOR_PREFIX
-                      value: ${replicatorPrefix}
-                    - name: ROBOT_TYPE
-                      value: ${robotType}
-                    - name: MAX_TASKS
-                      value: ${maxTasks}
-                    - name: FILTER_COMMERCIAL
-                      value: "true"
-                    - name: COPY_USD
-                      value: "true"
-                    # Enable all enhanced features for commercial data generation
-                    - name: ENABLE_MULTI_ROBOT
-                      value: "true"
-                    - name: ENABLE_VLA_PACKAGES
-                      value: "true"
-        result: geniesimExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + geniesimJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: GENIESIM_PREFIX
+                        value: ${geniesimPrefix}
+                      - name: VARIATION_ASSETS_PREFIX
+                        value: ${variationAssetsPrefix}
+                      - name: REPLICATOR_PREFIX
+                        value: ${replicatorPrefix}
+                      - name: ROBOT_TYPE
+                        value: ${robotType}
+                      - name: MAX_TASKS
+                        value: ${maxTasks}
+                      - name: FILTER_COMMERCIAL
+                        value: "true"
+                      - name: COPY_USD
+                        value: "true"
+                      # Enable all enhanced features for commercial data generation
+                      - name: ENABLE_MULTI_ROBOT
+                        value: "true"
+                      - name: ENABLE_VLA_PACKAGES
+                        value: "true"
+          result: geniesimExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 5
+          backoff:
+            initial_delay: 1
+            max_delay: 60
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_job_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start Genie Sim job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_job_error:
+                raise: ${e}
         next: set_execution_name
 
     - set_execution_name:
