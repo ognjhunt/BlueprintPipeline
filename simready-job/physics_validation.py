@@ -153,7 +153,15 @@ class PhysicsValidator:
         # 5. Collision shape appropriateness
         self._validate_collision_shape(obj, physics, result)
 
-        # 6. Inertia validation (if present)
+        # 6. Inertia computation and validation
+        # LABS-BLOCKER-002 FIX: Compute inertia tensor if not provided
+        if "inertia_tensor" not in physics and bounds:
+            # Compute inertia tensor from mass and bounding box
+            physics["inertia_tensor"] = self._compute_inertia_tensor(physics, bounds)
+            if self.verbose:
+                print(f"  [PHYSICS] Computed inertia tensor for {obj.get('id', 'unknown')}")
+
+        # Validate inertia (now guaranteed to exist if bounds provided)
         if "inertia_tensor" in physics:
             self._validate_inertia(physics, result)
 
@@ -310,6 +318,48 @@ class PhysicsValidator:
                 current_value=collision_shape,
                 suggested_value="convex_decomposition",
             )
+
+    def _compute_inertia_tensor(
+        self,
+        physics: Dict[str, Any],
+        bounds: Tuple[np.ndarray, np.ndarray]
+    ) -> List[float]:
+        """
+        Compute inertia tensor from mass and bounding box.
+
+        Uses box approximation (treats object as uniform density box).
+        Returns diagonal inertia tensor [Ixx, Iyy, Izz].
+
+        For a uniform density box with dimensions (L, W, H) and mass M:
+        Ixx = (1/12) * M * (W^2 + H^2)
+        Iyy = (1/12) * M * (L^2 + H^2)
+        Izz = (1/12) * M * (L^2 + W^2)
+
+        Args:
+            physics: Physics properties dict (must contain mass_kg)
+            bounds: (bbox_min, bbox_max) tuple
+
+        Returns:
+            Diagonal inertia tensor [Ixx, Iyy, Izz]
+        """
+        bbox_min, bbox_max = bounds
+        dimensions = bbox_max - bbox_min  # [length, width, height]
+        mass = physics.get("mass_kg", 1.0)
+
+        # Ensure positive mass
+        if mass <= 0:
+            mass = self.MIN_MASS_KG
+
+        # Compute inertia for box approximation
+        L, W, H = dimensions
+
+        # Box inertia formula (around center of mass)
+        Ixx = (1.0 / 12.0) * mass * (W**2 + H**2)
+        Iyy = (1.0 / 12.0) * mass * (L**2 + H**2)
+        Izz = (1.0 / 12.0) * mass * (L**2 + W**2)
+
+        # Return as diagonal tensor
+        return [float(Ixx), float(Iyy), float(Izz)]
 
     def _validate_inertia(self, physics: Dict[str, Any], result: ValidationResult):
         """Validate inertia tensor is positive definite."""

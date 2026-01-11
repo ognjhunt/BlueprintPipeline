@@ -170,12 +170,10 @@ class CuRoboMotionPlanner:
             device: CUDA device
             interpolation_dt: Time step for interpolation (default 50Hz)
         """
-        if not CUROBO_AVAILABLE:
-            raise RuntimeError("cuRobo not available. Install with: pip install nvidia-curobo")
-
         self.robot_type = robot_type
         self.device = device
         self.interpolation_dt = interpolation_dt
+        self.use_fallback = False
 
         # Get robot config
         if robot_type not in ROBOT_CONFIGS:
@@ -183,8 +181,14 @@ class CuRoboMotionPlanner:
 
         self.robot_config = ROBOT_CONFIGS[robot_type]
 
-        # Initialize cuRobo
-        self._init_curobo()
+        # Initialize cuRobo (or fallback if not available)
+        if not CUROBO_AVAILABLE:
+            print("[CUROBO] WARNING: cuRobo not available - using simple fallback planner")
+            print("[CUROBO] For production quality, install cuRobo: pip install nvidia-curobo")
+            self.use_fallback = True
+            self.motion_gen = None
+        else:
+            self._init_curobo()
 
     def _init_curobo(self):
         """Initialize cuRobo motion generator."""
@@ -253,6 +257,75 @@ class CuRoboMotionPlanner:
 
         print(f"[CUROBO] Updated world: {len(cuboids)} cuboids, {len(meshes)} meshes")
 
+    def _fallback_plan_to_joint_config(
+        self, request: CuRoboPlanRequest, start_time: float
+    ) -> CuRoboPlanResult:
+        """
+        Fallback planner using simple linear interpolation.
+
+        NOTE: This does NOT perform collision checking or optimization.
+        For production use, install cuRobo: pip install nvidia-curobo
+
+        Args:
+            request: Planning request
+            start_time: Planning start time
+
+        Returns:
+            CuRoboPlanResult with simple interpolated trajectory
+        """
+        # Linear interpolation between start and goal
+        num_steps = 50  # Fixed number of waypoints
+        start_pos = np.array(request.start_joint_positions)
+        goal_pos = np.array(request.goal_joint_positions)
+
+        # Generate linear interpolation
+        alphas = np.linspace(0, 1, num_steps)
+        joint_positions = np.array([
+            start_pos + alpha * (goal_pos - start_pos)
+            for alpha in alphas
+        ])
+
+        timesteps = np.arange(num_steps) * self.interpolation_dt
+        planning_time = (time.time() - start_time) * 1000
+
+        return CuRoboPlanResult(
+            success=True,
+            joint_positions=joint_positions,
+            timesteps=timesteps,
+            planning_time_ms=planning_time,
+            num_iterations=1,
+            collision_free=False,  # Unknown - no collision checking
+            path_length=np.sum(np.linalg.norm(np.diff(joint_positions, axis=0), axis=1)),
+            smoothness_cost=0.0,  # Not computed
+            warnings=["Using fallback planner - NO collision checking performed. Install cuRobo for production use."],
+        )
+
+    def _fallback_plan_to_pose(
+        self, request: CuRoboPlanRequest, start_time: float
+    ) -> CuRoboPlanResult:
+        """
+        Fallback planner for pose targets (returns failure).
+
+        NOTE: Pose-based planning requires inverse kinematics, which
+        is not available in fallback mode. Use joint-config planning instead.
+
+        Args:
+            request: Planning request
+            start_time: Planning start time
+
+        Returns:
+            CuRoboPlanResult indicating failure
+        """
+        return CuRoboPlanResult(
+            success=False,
+            planning_time_ms=(time.time() - start_time) * 1000,
+            error_message=(
+                "Pose-based planning requires cuRobo (inverse kinematics not available in fallback mode). "
+                "Install cuRobo: pip install nvidia-curobo"
+            ),
+            warnings=["Fallback planner does not support pose-based planning"],
+        )
+
     def plan_to_pose(self, request: CuRoboPlanRequest) -> CuRoboPlanResult:
         """
         Plan trajectory to target end-effector pose.
@@ -264,6 +337,10 @@ class CuRoboMotionPlanner:
             CuRoboPlanResult with trajectory or error
         """
         start_time = time.time()
+
+        # Fallback mode: use simple linear interpolation
+        if self.use_fallback:
+            return self._fallback_plan_to_pose(request, start_time)
 
         try:
             # Update world with obstacles
@@ -352,6 +429,10 @@ class CuRoboMotionPlanner:
             )
 
         start_time = time.time()
+
+        # Fallback mode: use simple linear interpolation
+        if self.use_fallback:
+            return self._fallback_plan_to_joint_config(request, start_time)
 
         try:
             # Update world

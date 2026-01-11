@@ -35,6 +35,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from quality_constants import (
+    MIN_QUALITY_SCORE,
+    PRODUCTION_TRAINING_THRESHOLD,
+    FINE_TUNING_THRESHOLD,
+    get_training_suitability_level,
+)
 from isaac_sim_enforcement import (
     DataQualityLevel,
     EnvironmentCapabilities,
@@ -287,21 +293,19 @@ class QualityCertificate:
     def assess_training_suitability(self) -> str:
         """Assess training suitability based on quality and source."""
         # Production data with high quality
-        # LABS-BLOCKER-002 FIX: Raised quality thresholds
-        # Production training: requires 90%+ quality (was 80%)
+        # LABS-BLOCKER-002 FIX: Uses unified quality thresholds from quality_constants.py
         if (
             self.sensor_source == SensorSource.ISAAC_SIM_REPLICATOR.value
             and self.physics_backend == PhysicsValidationBackend.PHYSX.value
-            and self.overall_quality_score >= 0.90
+            and self.overall_quality_score >= PRODUCTION_TRAINING_THRESHOLD  # 0.90
         ):
             return "production_training"
 
-        # Fine-tuning: requires 80%+ quality (was 60%)
-        # Still uses real physics but may have minor issues
+        # Fine-tuning: still uses real physics but may have minor issues
         if (
             self.sensor_source == SensorSource.ISAAC_SIM_REPLICATOR.value
             and self.physics_backend == PhysicsValidationBackend.PHYSX.value
-            and self.overall_quality_score >= 0.80
+            and self.overall_quality_score >= FINE_TUNING_THRESHOLD  # 0.80
         ):
             return "fine_tuning"
 
