@@ -9,6 +9,12 @@
 #
 # Trigger: Cloud Storage object finalized event for .regen3d_complete
 #
+# NOTE: This pipeline runs in parallel with dwm-preparation-pipeline and dream2flow-preparation-pipeline
+# (all trigger on the same .regen3d_complete marker). This is safe because:
+# - Each pipeline writes to different output prefixes (usd/*, dwm/*, dream2flow/*)
+# - No shared state is modified
+# - Idempotency checks prevent duplicate processing
+#
 # 3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
 # "image → sim-ready 3D reconstruction" with explicit physical constraints.
 # Reference: https://3dregen.jdihlmann.com/
@@ -193,6 +199,7 @@ main:
     - init_simready_poll:
         assign:
           - simreadyAttempts: 0
+          - simreadyWaitSeconds: 5
           - simreadyCompleteObject: '${assetsPrefix + "/.simready_complete"}'
         next: wait_for_simready_complete
 
@@ -208,7 +215,7 @@ main:
           steps:
             - simready_poll_switch:
                 switch:
-                  - condition: ${simreadyAttempts < 90}
+                  - condition: ${simreadyAttempts < 12}
                     next: bump_simready_attempt
                 next: simready_failed
         next: log_simready_complete
@@ -216,12 +223,14 @@ main:
     - bump_simready_attempt:
         assign:
           - simreadyAttempts: ${simreadyAttempts + 1}
+          # Exponential backoff: 5s, 10s, 20s, 40s... capped at 60s
+          - simreadyWaitSeconds: ${if(simreadyWaitSeconds * 2 > 60, 60, simreadyWaitSeconds * 2)}
         next: sleep_simready_poll
 
     - sleep_simready_poll:
         call: sys.sleep
         args:
-          seconds: 10
+          seconds: ${simreadyWaitSeconds}
         next: wait_for_simready_complete
 
     - log_simready_complete:

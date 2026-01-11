@@ -229,7 +229,8 @@ main:
         return:
           status: "PARTIAL_SUCCESS"
           scene_id: ${sceneId}
-          message: '${"Scene " + sceneId + " available without Arena export"}'
+          message: '${"Arena export FAILED for scene " + sceneId + " - scene is available but without Arena evaluation support"}'
+          failure_details: "Arena export failed - scene is still usable for simulation but lacks Arena-specific affordances and evaluation infrastructure"
           trigger_source: ${triggerSource}
           arena_execution: ${arenaExec.name}
           outputs:
