@@ -111,6 +111,63 @@ class GenerationBackend(str, Enum):
     HYBRID = "hybrid"  # Both Isaac Sim + cuRobo
 
 
+# P2-4 FIX: Define supported robot types for validation
+class SupportedRobotType(str, Enum):
+    """Supported robot types for Genie Sim 3.0."""
+
+    # Arm manipulators
+    FRANKA = "franka"  # Franka Emika Panda
+    UR5 = "ur5"  # Universal Robots UR5
+    UR10 = "ur10"  # Universal Robots UR10
+    UR5E = "ur5e"  # Universal Robots UR5e
+    KINOVA_GEN3 = "kinova_gen3"  # Kinova Gen3
+    KINOVA_JACO = "kinova_jaco"  # Kinova Jaco
+    ABB_YUM = "abb_yumi"  # ABB YuMi (dual-arm)
+
+    # Mobile manipulators
+    FETCH = "fetch"  # Fetch Robotics
+    TGO = "tgo"  # Toyota HSR
+    STRETCH = "stretch"  # Hello Robot Stretch
+
+    # Humanoids
+    GR1 = "gr1"  # Fourier Intelligence GR-1
+    G2 = "g2"  # Unitree G1/G2
+    H1 = "h1"  # Unitree H1
+    DIGIT = "digit"  # Agility Robotics Digit
+    ATLAS = "atlas"  # Boston Dynamics Atlas
+
+    # Quadrupeds (with manipulation)
+    SPOT = "spot"  # Boston Dynamics Spot (with arm)
+    UNITREE_GO2 = "unitree_go2"  # Unitree Go2
+
+    # Bimanual/Dual-Arm
+    BIMANUAL_FRANKA = "bimanual_franka"  # Dual Franka Panda
+    BIMANUAL_UR5 = "bimanual_ur5"  # Dual UR5
+
+    # Custom (for testing/development)
+    CUSTOM = "custom"  # User-provided URDF
+
+
+# P2-4 FIX: Helper function to validate robot type
+def validate_robot_type(robot_type: str) -> None:
+    """
+    Validate that robot_type is a supported value.
+
+    Args:
+        robot_type: Robot type string to validate
+
+    Raises:
+        ValueError: If robot type is not supported
+    """
+    supported_types = {rt.value for rt in SupportedRobotType}
+
+    if robot_type not in supported_types:
+        raise ValueError(
+            f"Invalid robot_type: '{robot_type}'. "
+            f"Supported types: {', '.join(sorted(supported_types))}"
+        )
+
+
 @dataclass
 class GenerationParams:
     """Parameters for episode generation."""
@@ -129,9 +186,13 @@ class GenerationParams:
     enable_validation: bool = True
     filter_failed_episodes: bool = True
 
-    # Robot configuration
+    # Robot configuration - P2-4 FIX: Validated robot type
     robot_type: str = "franka"  # franka, ur10, fetch, etc.
     control_frequency_hz: float = 30.0
+
+    def __post_init__(self):
+        """P2-4 FIX: Validate robot_type after initialization."""
+        validate_robot_type(self.robot_type)
 
     # Visual observations
     num_cameras: int = 3  # wrist, overhead, side
