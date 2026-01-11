@@ -287,22 +287,25 @@ class QualityCertificate:
     def assess_training_suitability(self) -> str:
         """Assess training suitability based on quality and source."""
         # Production data with high quality
+        # LABS-BLOCKER-002 FIX: Raised quality thresholds
+        # Production training: requires 90%+ quality (was 80%)
         if (
             self.sensor_source == SensorSource.ISAAC_SIM_REPLICATOR.value
             and self.physics_backend == PhysicsValidationBackend.PHYSX.value
-            and self.overall_quality_score >= 0.8
+            and self.overall_quality_score >= 0.90
         ):
             return "production_training"
 
-        # Production data with medium quality
+        # Fine-tuning: requires 80%+ quality (was 60%)
+        # Still uses real physics but may have minor issues
         if (
             self.sensor_source == SensorSource.ISAAC_SIM_REPLICATOR.value
             and self.physics_backend == PhysicsValidationBackend.PHYSX.value
-            and self.overall_quality_score >= 0.6
+            and self.overall_quality_score >= 0.80
         ):
             return "fine_tuning"
 
-        # Mock data or low quality
+        # Mock data or low quality - NOT suitable for production use
         return "testing"
 
     def add_warning(self, warning: str):
