@@ -69,16 +69,10 @@ except ImportError:
 
 
 # =============================================================================
-# Data Pack Configuration
+# Data Pack Configuration (imported from data_pack_config)
 # =============================================================================
-
-
-class DataPackTier(Enum):
-    """Data pack tiers for episode datasets."""
-
-    CORE = "core"  # RGB + state + actions + metadata
-    PLUS = "plus"  # Core + depth + segmentation + bboxes
-    FULL = "full"  # Plus + poses + contacts + privileged state
+# P2-11 FIX: Import DataPackTier from primary definition to avoid duplication
+from data_pack_config import DataPackTier
 
 
 class SensorDataCaptureMode(Enum):
@@ -397,39 +391,206 @@ class SensorDataConfig:
 
 
 @dataclass
+class ContactData:
+    """
+    P2-10 FIX: Formal ContactData schema.
+
+    Represents a single contact event from physics simulation.
+    Includes all information needed for contact-aware learning.
+    """
+
+    # Bodies in contact
+    body_a: str                           # First body name (e.g., 'gripper', 'table')
+    body_b: str                           # Second body name
+
+    # Contact geometry
+    position: Tuple[float, float, float]  # Contact point in world coordinates (3D)
+    normal: Tuple[float, float, float]    # Contact normal vector (unit vector)
+
+    # Forces and properties
+    force_magnitude: float                # Magnitude of impulse/force (N)
+    separation: float                     # Separation distance (negative = penetrating)
+
+    # Optional fields for advanced analysis
+    contact_area: Optional[float] = None  # Contact area (if available)
+    relative_velocity: Optional[Tuple[float, float, float]] = None  # Relative velocity at contact
+    friction_coefficient: Optional[float] = None  # Friction coefficient
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "body_a": self.body_a,
+            "body_b": self.body_b,
+            "position": list(self.position),
+            "normal": list(self.normal),
+            "force_magnitude": float(self.force_magnitude),
+            "separation": float(self.separation),
+            "contact_area": float(self.contact_area) if self.contact_area is not None else None,
+            "relative_velocity": list(self.relative_velocity) if self.relative_velocity is not None else None,
+            "friction_coefficient": float(self.friction_coefficient) if self.friction_coefficient is not None else None,
+        }
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'ContactData':
+        """Create from dictionary."""
+        return ContactData(
+            body_a=str(data.get("body_a", "")),
+            body_b=str(data.get("body_b", "")),
+            position=tuple(data.get("position", [0, 0, 0])),
+            normal=tuple(data.get("normal", [0, 0, 1])),
+            force_magnitude=float(data.get("force_magnitude", 0)),
+            separation=float(data.get("separation", 0)),
+            contact_area=float(data["contact_area"]) if data.get("contact_area") is not None else None,
+            relative_velocity=tuple(data["relative_velocity"]) if data.get("relative_velocity") is not None else None,
+            friction_coefficient=float(data["friction_coefficient"]) if data.get("friction_coefficient") is not None else None,
+        )
+
+
+@dataclass
 class FrameSensorData:
-    """Sensor data captured for a single frame."""
+    """
+    P2-10 FIX: Formal FrameSensorData schema with proper type hints.
 
-    frame_index: int
-    timestamp: float
+    Sensor data captured for a single frame during trajectory execution.
+    Includes visual observations, ground-truth annotations, and physics state.
+    """
 
-    # RGB images per camera {camera_id: np.ndarray (H, W, 3)}
+    frame_index: int                                    # Frame number in episode
+    timestamp: float                                    # Timestamp in seconds
+
+    # =========================================================================
+    # Visual Observations (per-camera)
+    # =========================================================================
+
+    # RGB images: {camera_id: ndarray(H, W, 3) uint8 [0-255]}
     rgb_images: Dict[str, np.ndarray] = field(default_factory=dict)
 
-    # Depth maps per camera {camera_id: np.ndarray (H, W)}
+    # Depth maps: {camera_id: ndarray(H, W) float32 [meters]}
     depth_maps: Dict[str, np.ndarray] = field(default_factory=dict)
 
-    # Segmentation masks per camera {camera_id: np.ndarray (H, W)}
+    # =========================================================================
+    # Segmentation (per-camera)
+    # =========================================================================
+
+    # Semantic segmentation: {camera_id: ndarray(H, W) uint8 [class_id]}
     semantic_masks: Dict[str, np.ndarray] = field(default_factory=dict)
+
+    # Instance segmentation: {camera_id: ndarray(H, W) uint16 [instance_id]}
     instance_masks: Dict[str, np.ndarray] = field(default_factory=dict)
 
-    # 2D bounding boxes per camera {camera_id: List[BBox2D]}
+    # =========================================================================
+    # Bounding Boxes (per-camera)
+    # =========================================================================
+
+    # 2D bounding boxes: {camera_id: List[Dict]} (COCO format: [x, y, w, h])
     bboxes_2d: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
-    # 3D bounding boxes (camera-space) {camera_id: List[BBox3D]}
+    # 3D bounding boxes: {camera_id: List[Dict]} (center + size + orientation)
     bboxes_3d: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
-    # Surface normals per camera {camera_id: np.ndarray (H, W, 3)}
+    # =========================================================================
+    # Geometry (per-camera)
+    # =========================================================================
+
+    # Surface normals: {camera_id: ndarray(H, W, 3) float32}
     normals: Dict[str, np.ndarray] = field(default_factory=dict)
 
-    # Ground-truth object poses (world-space) {object_id: pose}
+    # =========================================================================
+    # Ground-Truth Annotations
+    # =========================================================================
+
+    # Object poses (world frame): {object_id: {'position': [x,y,z], 'orientation': [qx,qy,qz,qw], ...}}
     object_poses: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
-    # Contact information
+    # Contact information: List[ContactData] - contact events at this frame
     contacts: List[Dict[str, Any]] = field(default_factory=list)
 
-    # Privileged state (full physics state)
+    # =========================================================================
+    # Privileged State (full physics state, not observable by robot)
+    # =========================================================================
+
+    # Privileged state: {'object_velocities': {...}, 'contact_flags': {...}, ...}
     privileged_state: Optional[Dict[str, Any]] = None
+
+    # =========================================================================
+    # Metadata
+    # =========================================================================
+
+    # Flag indicating this frame is from mock sensor capture (not real simulation)
+    is_mock: bool = False
+
+    def validate_rgb_frames(self) -> List[str]:
+        """
+        Validate RGB frames meet quality standards.
+
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        errors = []
+        for camera_id, rgb in self.rgb_images.items():
+            # Check shape
+            if len(rgb.shape) != 3 or rgb.shape[2] != 3:
+                errors.append(f"{camera_id} RGB: Expected shape (H, W, 3), got {rgb.shape}")
+            # Check dtype
+            if rgb.dtype != np.uint8:
+                errors.append(f"{camera_id} RGB: Expected dtype uint8, got {rgb.dtype}")
+            # Check value range
+            if rgb.min() < 0 or rgb.max() > 255:
+                errors.append(f"{camera_id} RGB: Values outside [0, 255] range")
+        return errors
+
+    def validate_depth_frames(self) -> List[str]:
+        """
+        Validate depth maps meet quality standards.
+
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        errors = []
+        for camera_id, depth in self.depth_maps.items():
+            # Check shape
+            if len(depth.shape) != 2:
+                errors.append(f"{camera_id} depth: Expected shape (H, W), got {depth.shape}")
+            # Check dtype
+            if depth.dtype != np.float32:
+                errors.append(f"{camera_id} depth: Expected dtype float32, got {depth.dtype}")
+            # Check for NaN/Inf
+            if np.any(np.isnan(depth)) or np.any(np.isinf(depth)):
+                errors.append(f"{camera_id} depth: Contains NaN or Inf values")
+            # Check reasonable range (0.01m to 200m)
+            valid_depth = depth[(depth > 0) & np.isfinite(depth)]
+            if len(valid_depth) > 0:
+                if valid_depth.min() < 0.01 or valid_depth.max() > 200.0:
+                    errors.append(
+                        f"{camera_id} depth: Values outside [0.01m, 200m] range "
+                        f"(min={valid_depth.min():.3f}, max={valid_depth.max():.1f})"
+                    )
+        return errors
+
+    def validate_segmentation_frames(self) -> List[str]:
+        """
+        Validate segmentation masks meet quality standards.
+
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        errors = []
+
+        # Check semantic masks
+        for camera_id, sem_mask in self.semantic_masks.items():
+            if len(sem_mask.shape) != 2:
+                errors.append(f"{camera_id} semantic: Expected shape (H, W), got {sem_mask.shape}")
+            if sem_mask.dtype not in (np.uint8, np.uint16):
+                errors.append(f"{camera_id} semantic: Expected dtype uint8/uint16, got {sem_mask.dtype}")
+
+        # Check instance masks
+        for camera_id, inst_mask in self.instance_masks.items():
+            if len(inst_mask.shape) != 2:
+                errors.append(f"{camera_id} instance: Expected shape (H, W), got {inst_mask.shape}")
+            if inst_mask.dtype != np.uint16:
+                errors.append(f"{camera_id} instance: Expected dtype uint16, got {inst_mask.dtype}")
+
+        return errors
 
 
 @dataclass
@@ -472,6 +633,29 @@ class EpisodeSensorData:
         if len(self.frames) == 0:
             return []
         return list(self.frames[0].rgb_images.keys())
+
+    def validate_all_frames(self) -> List[str]:
+        """
+        P2-10 FIX: Validate all frames in episode.
+
+        Calls validation methods on each frame and collects errors.
+
+        Returns:
+            List of validation error messages
+        """
+        all_errors = []
+
+        for frame in self.frames:
+            frame_errors = []
+            frame_errors.extend(frame.validate_rgb_frames())
+            frame_errors.extend(frame.validate_depth_frames())
+            frame_errors.extend(frame.validate_segmentation_frames())
+
+            # Prefix with frame number
+            for error in frame_errors:
+                all_errors.append(f"Frame {frame.frame_index}: {error}")
+
+        return all_errors
 
 
 # =============================================================================
