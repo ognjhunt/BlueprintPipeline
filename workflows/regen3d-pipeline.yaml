@@ -1,0 +1,287 @@
+# regen3d-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that:
+#   1. Triggers on completion marker file from upstream asset preparation (.assets_ready)
+#   2. Runs regen3d-adapter-job to convert 2D images to 3D scene reconstructions
+#   3. Writes .regen3d_complete marker when finished to trigger downstream jobs
+#
+# Trigger: Cloud Storage object finalized event for .assets_ready
+#
+# 3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
+# "image → sim-ready 3D reconstruction" with explicit physical constraints.
+# Reference: https://3dregen.jdihlmann.com/
+#
+# EventArc Setup:
+#   gcloud eventarc triggers create regen3d-trigger \
+#     --location=us-central1 \
+#     --service-account="${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+#     --destination-workflow=regen3d-pipeline \
+#     --destination-workflow-location=us-central1 \
+#     --event-filters="type=google.cloud.storage.object.v1.finalized" \
+#     --event-filters="bucket=${BUCKET}" \
+#     --event-data-content-type="application/json"
+#
+# Or run manually:
+#   gcloud workflows run regen3d-pipeline \
+#     --location=us-central1 \
+#     --data='{"data":{"bucket":"your-bucket","name":"scenes/kitchen_001/assets/.assets_ready"}}'
+
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: "us-central1"
+        next: filter_completion_markers
+
+    # Filter for .assets_ready marker files (from upstream asset preparation)
+    - filter_completion_markers:
+        switch:
+          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.assets_ready$")}'
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
+          - segPrefix: '${"scenes/" + sceneId + "/seg"}'
+          - layoutPrefix: '${"scenes/" + sceneId + "/layout"}'
+          - regen3dJobName: "regen3d-adapter-job"
+          - regen3dCompleteMarker: '${assetsPrefix + "/.regen3d_complete"}'
+          - regen3dFailedMarker: '${assetsPrefix + "/.regen3d_failed"}'
+        next: check_already_processed
+
+    # Check if 3D reconstruction already completed (idempotence)
+    - check_already_processed:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${regen3dCompleteMarker}
+          result: existingMarker
+        except:
+          as: e
+          steps:
+            - check_not_found:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: log_start
+                next: raise_check_error
+        next: skip_already_processed
+
+    - skip_already_processed:
+        call: sys.log
+        args:
+          text: '${"3D reconstruction already completed for scene " + sceneId + " - skipping"}'
+          severity: "INFO"
+        next: skip
+
+    - raise_check_error:
+        raise: '${e}'
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"3D reconstruction (3D-RE-GEN) triggered for scene " + sceneId}'
+          severity: "INFO"
+        next: run_regen3d_job
+
+    # Run 3D-RE-GEN adapter job to convert 2D images to 3D scene
+    - run_regen3d_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + regen3dJobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: BUCKET
+                      value: ${bucket}
+                    - name: SCENE_ID
+                      value: ${sceneId}
+                    - name: ASSETS_PREFIX
+                      value: ${assetsPrefix}
+                    - name: SEG_PREFIX
+                      value: ${segPrefix}
+                    - name: LAYOUT_PREFIX
+                      value: ${layoutPrefix}
+                    - name: USE_MOCK_DATA
+                      value: "false"
+              timeoutSeconds: 3600  # 1 hour timeout
+        result: regen3dExec
+        next: set_regen3d_execution_name
+
+    - set_regen3d_execution_name:
+        # jobs.run returns a long-running operation; prefer the execution name from metadata when present
+        assign:
+          - regen3dExecutionName: '${if(regen3dExec.metadata != null and regen3dExec.metadata.name != null, regen3dExec.metadata.name, regen3dExec.name)}'
+        next: wait_for_regen3d
+
+    - wait_for_regen3d:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${regen3dExecutionName}
+        result: regen3dStatus
+        next: check_regen3d_status
+
+    - check_regen3d_status:
+        assign:
+          - regen3dState: '${if(regen3dStatus.state != null, regen3dStatus.state, if(regen3dStatus.status != null, regen3dStatus.status.state, null))}'
+          - regen3dFailedCount: '${if(regen3dStatus.failedCount != null, regen3dStatus.failedCount, if(regen3dStatus.status != null, regen3dStatus.status.failedCount, null))}'
+          - regen3dSucceededCount: '${if(regen3dStatus.succeededCount != null, regen3dStatus.succeededCount, if(regen3dStatus.status != null, regen3dStatus.status.succeededCount, null))}'
+        next: regen3d_status_switch
+
+    - regen3d_status_switch:
+        switch:
+          - condition: '${regen3dState == "FAILED" or (regen3dFailedCount != null and regen3dFailedCount > 0)}'
+            next: regen3d_failed
+          - condition: '${regen3dState == "SUCCEEDED" or (regen3dSucceededCount != null and regen3dSucceededCount > 0)}'
+            next: verify_completion_marker
+        next: wait_regen3d_poll
+
+    - wait_regen3d_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_regen3d
+
+    # Verify that the job actually wrote the completion marker
+    - verify_completion_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${regen3dCompleteMarker}
+          result: completionMarker
+        except:
+          as: e
+          steps:
+            - marker_not_found:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: wait_for_marker
+                next: raise_marker_error
+        next: log_regen3d_complete
+
+    # Wait for marker to appear (job may have just written it)
+    - wait_for_marker:
+        assign:
+          - markerAttempts: 0
+        next: poll_for_marker
+
+    - poll_for_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${regen3dCompleteMarker}
+          result: completionMarker
+        except:
+          as: e
+          steps:
+            - marker_poll_switch:
+                switch:
+                  - condition: ${markerAttempts < 30}
+                    next: bump_marker_attempt
+                next: marker_timeout
+        next: log_regen3d_complete
+
+    - bump_marker_attempt:
+        assign:
+          - markerAttempts: ${markerAttempts + 1}
+        next: sleep_marker_poll
+
+    - sleep_marker_poll:
+        call: sys.sleep
+        args:
+          seconds: 2
+        next: poll_for_marker
+
+    - marker_timeout:
+        assign:
+          - errorMsg: '${"3D reconstruction job succeeded but .regen3d_complete marker not found for scene " + sceneId}'
+        next: log_marker_error
+
+    - log_marker_error:
+        call: sys.log
+        args:
+          text: ${errorMsg}
+          severity: "ERROR"
+        next: raise_marker_error
+
+    - raise_marker_error:
+        raise: ${errorMsg}
+
+    - log_regen3d_complete:
+        call: sys.log
+        args:
+          text: '${"3D reconstruction (3D-RE-GEN) completed for scene " + sceneId}'
+          severity: "INFO"
+        next: done
+
+    - regen3d_failed:
+        assign:
+          - errorMsg: '${"3D reconstruction (3D-RE-GEN) job FAILED for scene " + sceneId}'
+        next: log_regen3d_error
+
+    - log_regen3d_error:
+        call: sys.log
+        args:
+          text: ${errorMsg}
+          severity: "ERROR"
+        next: write_failure_marker
+
+    # Write failure marker for debugging and monitoring
+    - write_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${regen3dFailedMarker}
+            uploadType: "media"
+            body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\", \"execution\": \"" + regen3dExecutionName + "\"}"}'
+          result: failMarkerResult
+        except:
+          as: e
+          steps:
+            - log_marker_write_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to write failure marker: " + e.message}'
+                  severity: "WARNING"
+        next: raise_regen3d_error
+
+    - raise_regen3d_error:
+        raise: ${errorMsg}
+
+    # =========================================================================
+    # Completion
+    # =========================================================================
+
+    - done:
+        return:
+          status: "SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"3D reconstruction (3D-RE-GEN) completed for scene " + sceneId}'
+          execution: ${regen3dExec.name}
+          outputs:
+            completion_marker: ${regen3dCompleteMarker}
+            assets_prefix: ${assetsPrefix}
+            layout_prefix: ${layoutPrefix}
+
+    - skip:
+        return:
+          status: "SKIPPED"
+          message: '${"Not an assets ready marker file: " + object}'
