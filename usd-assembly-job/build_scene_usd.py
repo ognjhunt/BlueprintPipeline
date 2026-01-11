@@ -84,13 +84,35 @@ def safe_path_join(root: Path, rel: str) -> Path:
 
 
 def matrix_from_obb(obb: Dict) -> Optional[np.ndarray]:
-    """
-    Build a 4x4 transform matrix from an OBB record.
+    """Build a 4x4 transform matrix from an OBB (Oriented Bounding Box) record.
 
-    obb["R"]      -> 3x3 rotation matrix
-    obb["center"] -> 3D center
+    (P2-13) OBB to Transform Conversion
+    ===================================
 
-    Returns a row-major 4x4 matrix.
+    Input OBB format (from regen3d_adapter/adapter.py):
+        obb["R"]      -> 3x3 rotation matrix [row0, row1, row2]
+        obb["center"] -> 3D center position [x, y, z]
+        obb["extents"] -> Half-sizes [hx, hy, hz] (used separately for mesh scaling)
+
+    The OBB represents the world-space placement of an object with:
+    - center: Position in world coordinates
+    - R: Rotation/orientation in world space
+    - extents: Used to scale the local mesh to fit the bounding box
+
+    This function creates a 4x4 transformation matrix:
+        T_world = [R  center]
+                  [0    1   ]
+
+    Where R is the 3x3 rotation matrix and center is the 3D position.
+
+    The full transform pipeline in build_scene_usd.py (lines 750-784):
+        1. Extract OBB data (center, extents, R)
+        2. Create T_world from R and center using this function
+        3. Apply OBB.extents to scale the mesh to match the bounding box
+        4. Combine all transforms to place the mesh in world space
+
+    Returns:
+        4x4 row-major numpy array, or None if OBB is incomplete
     """
     center = obb.get("center")
     R = obb.get("R")
