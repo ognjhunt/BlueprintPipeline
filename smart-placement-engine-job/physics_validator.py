@@ -10,8 +10,10 @@ This module validates that placements are physically plausible:
 import json
 import math
 import os
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -20,6 +22,17 @@ try:
     HAVE_GENAI = True
 except ImportError:
     HAVE_GENAI = False
+
+# Add repo root to path for config imports
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from tools.config import load_pipeline_config
+    HAVE_CONFIG = True
+except ImportError:
+    HAVE_CONFIG = False
 
 from .compatibility_matrix import AssetCategory, RegionType
 from .intelligent_region_detector import DetectedRegion
@@ -213,7 +226,6 @@ class PhysicsValidator:
     - Stacking safety
     """
 
-    DEFAULT_MODEL = "gemini-3-pro-preview"
     GRAVITY = 9.81  # m/s²
 
     def __init__(
@@ -221,6 +233,7 @@ class PhysicsValidator:
         api_key: Optional[str] = None,
         strict_mode: bool = False,
         surface_angle_tolerance_deg: float = 5.0,
+        model: Optional[str] = None,
     ):
         """Initialize the physics validator.
 
@@ -228,11 +241,25 @@ class PhysicsValidator:
             api_key: Gemini API key for AI-powered analysis
             strict_mode: If True, warnings become errors
             surface_angle_tolerance_deg: Max surface angle before slip check
+            model: LLM model to use (defaults from config if not provided)
         """
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
         self.strict_mode = strict_mode
         self.surface_angle_tolerance = surface_angle_tolerance_deg
         self._client: Optional["genai.Client"] = None
+
+        # Load model from config if not provided
+        if model:
+            self.model = model
+        elif HAVE_CONFIG:
+            try:
+                config = load_pipeline_config(validate=False)
+                model_config = config.models.get_model("physics_validator")
+                self.model = model_config.default_model if model_config else "gemini-3-pro-preview"
+            except Exception:
+                self.model = "gemini-3-pro-preview"
+        else:
+            self.model = "gemini-3-pro-preview"
 
     def _get_client(self) -> Optional["genai.Client"]:
         """Get or create the Gemini client."""
@@ -697,7 +724,7 @@ Provide 2-3 sentences with:
 
             response_text = ""
             for chunk in client.models.generate_content_stream(
-                model=self.DEFAULT_MODEL,
+                model=self.model,
                 contents=contents,
                 config=config,
             ):
