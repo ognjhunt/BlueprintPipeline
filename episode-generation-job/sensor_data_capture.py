@@ -684,6 +684,10 @@ class EpisodeSensorData:
     # Object metadata {object_id: {class, dimensions, etc.}}
     object_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+    # Capture diagnostics
+    camera_capture_warnings: List[str] = field(default_factory=list)
+    camera_error_counts: Dict[str, int] = field(default_factory=dict)
+
     @property
     def num_frames(self) -> int:
         return len(self.frames)
@@ -770,6 +774,7 @@ class IsaacSimSensorCapture:
         self._render_products: Dict[str, Any] = {}
         self._annotators: Dict[str, Dict[str, Any]] = {}
         self._writer = None
+        self._camera_error_counts: Dict[str, int] = {}
 
         # Isaac Sim module references
         self._rep = None
@@ -980,7 +985,15 @@ class IsaacSimSensorCapture:
             except Exception as e:
                 import traceback
                 failed_cameras.append(camera_id)
-                self.log(f"Frame capture error for {camera_id}: {e}", "ERROR")
+                self._camera_error_counts[camera_id] = self._camera_error_counts.get(camera_id, 0) + 1
+                error_payload = {
+                    "event": "camera_capture_error",
+                    "camera_id": camera_id,
+                    "frame_index": frame_index,
+                    "error_count": self._camera_error_counts[camera_id],
+                    "error": str(e),
+                }
+                self.log(json.dumps(error_payload), "ERROR")
                 if self.verbose:
                     self.log(traceback.format_exc(), "DEBUG")
 
@@ -1378,6 +1391,36 @@ class IsaacSimSensorCapture:
 
         return state
 
+    def _summarize_camera_capture_warnings(
+        self,
+        episode_data: EpisodeSensorData,
+    ) -> Tuple[List[str], Dict[str, List[int]]]:
+        expected_cameras = [
+            cam.camera_id for cam in self.config.cameras if cam.capture_rgb
+        ]
+        if not expected_cameras or episode_data.num_frames == 0:
+            return [], {}
+
+        missing_frames_by_camera = {camera_id: [] for camera_id in expected_cameras}
+        for frame in episode_data.frames:
+            present_cameras = set(frame.rgb_images.keys())
+            for camera_id in expected_cameras:
+                if camera_id not in present_cameras:
+                    missing_frames_by_camera[camera_id].append(frame.frame_index)
+
+        warnings = []
+        for camera_id, missing_frames in missing_frames_by_camera.items():
+            if not missing_frames:
+                continue
+            preview = missing_frames[:5]
+            warnings.append(
+                "Missing RGB frames for camera "
+                f"'{camera_id}' in {len(missing_frames)}/{episode_data.num_frames} frames "
+                f"(first missing frames: {preview})"
+            )
+
+        return warnings, missing_frames_by_camera
+
     def capture_episode(
         self,
         episode_id: str,
@@ -1399,6 +1442,9 @@ class IsaacSimSensorCapture:
             episode_id=episode_id,
             config=self.config,
         )
+        self._camera_error_counts = {
+            cam.camera_id: 0 for cam in self.config.cameras
+        }
 
         self.log(f"Capturing sensor data for episode {episode_id}")
 
@@ -1408,6 +1454,17 @@ class IsaacSimSensorCapture:
             episode_data.frames.append(frame_data)
 
         self.log(f"Captured {len(episode_data.frames)} frames")
+
+        warnings, missing_frames = self._summarize_camera_capture_warnings(episode_data)
+        if warnings:
+            episode_data.camera_capture_warnings.extend(warnings)
+            for camera_id, frames in missing_frames.items():
+                if frames:
+                    self.log(
+                        f"Episode {episode_id}: camera '{camera_id}' missing {len(frames)} frame(s)",
+                        "WARNING",
+                    )
+        episode_data.camera_error_counts = dict(self._camera_error_counts)
 
         # Collect semantic label mapping
         if self.config.include_semantic_labels and scene_objects:
