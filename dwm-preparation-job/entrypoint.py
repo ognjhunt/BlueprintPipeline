@@ -146,6 +146,7 @@ def main():
     num_frames = int(os.environ.get("NUM_FRAMES", "49"))
     fps = float(os.environ.get("FPS", "24"))
     mano_model_path = os.environ.get("MANO_MODEL_PATH")
+    skip_dwm = os.environ.get("SKIP_DWM", "").strip().lower() in {"1", "true", "yes"}
 
     print(f"[DWM-ENTRYPOINT] Configuration:")
     print(f"  BUCKET: {bucket_name}")
@@ -156,8 +157,13 @@ def main():
     print(f"  NUM_TRAJECTORIES: {num_trajectories}")
     print(f"  RESOLUTION: {resolution_width}x{resolution_height}")
     print(f"  FRAMES: {num_frames} @ {fps}fps")
+    print(f"  SKIP_DWM: {skip_dwm}")
     if mano_model_path:
         print(f"  MANO_MODEL_PATH: {mano_model_path}")
+
+    if skip_dwm:
+        print("[DWM-ENTRYPOINT] SKIP_DWM enabled - exiting without running DWM preparation.")
+        sys.exit(0)
 
     # Create GCS client
     client = storage.Client()
