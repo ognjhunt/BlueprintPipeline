@@ -67,6 +67,31 @@ def log(msg: str, level: str = "INFO", obj_id: str = "") -> None:
     print(f"[INTERACTIVE] [{level}] {prefix}{msg}", file=stream, flush=True)
 
 
+def parse_env_flag(value: str) -> bool:
+    """Parse boolean-like environment variable values."""
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def write_failure_marker(
+    assets_root: Path,
+    scene_id: str,
+    reason: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> Path:
+    """Write a failure marker to prevent downstream jobs from using low-fidelity assets."""
+    marker_path = assets_root / ".interactive_failed"
+    payload = {
+        "scene_id": scene_id,
+        "status": "failed",
+        "reason": reason,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "details": details or {},
+    }
+    save_json(payload, marker_path)
+    log(f"Wrote failure marker: {marker_path}", "ERROR")
+    return marker_path
+
+
 # =============================================================================
 # File/Path Utilities
 # =============================================================================
@@ -1349,6 +1374,7 @@ def main() -> None:
     particulate_endpoint = os.getenv("PARTICULATE_ENDPOINT", "")
 
     mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
+    production_mode = parse_env_flag(os.getenv("PRODUCTION_MODE", "false"))
 
     if not assets_prefix:
         log("ASSETS_PREFIX is required", "ERROR")
@@ -1387,7 +1413,18 @@ def main() -> None:
     log(f"Particulate Endpoint: {particulate_endpoint or '(none - static mode)'}")
     log(f"Mode: {mode}")
     log(f"Interactive objects: {len(interactive_objects)}")
+    log(f"Production mode: {production_mode}")
     log("=" * 60)
+
+    if production_mode and not particulate_endpoint:
+        log("PARTICULATE_ENDPOINT is required in production mode", "ERROR")
+        write_failure_marker(
+            assets_root,
+            scene_id,
+            reason="missing_particulate_endpoint",
+            details={"mode": mode},
+        )
+        sys.exit(1)
 
     # Early exit if no interactive objects
     if not interactive_objects:
@@ -1413,6 +1450,15 @@ def main() -> None:
     if particulate_endpoint:
         log("Checking Particulate service health...")
         if not wait_for_particulate_ready(particulate_endpoint):
+            if production_mode:
+                log("Particulate service not ready in production mode", "ERROR")
+                write_failure_marker(
+                    assets_root,
+                    scene_id,
+                    reason="particulate_unhealthy",
+                    details={"endpoint": particulate_endpoint},
+                )
+                sys.exit(1)
             log("Particulate service not ready, will attempt processing anyway", "WARNING")
 
     # Process each object
@@ -1462,6 +1508,20 @@ def main() -> None:
     ensure_dir(results_path.parent)
     save_json(results_data, results_path)
     log(f"Results written to {results_path}")
+
+    if production_mode and ok_count == 0 and len(interactive_objects) > 0:
+        log("No successful articulations in production mode", "ERROR")
+        write_failure_marker(
+            assets_root,
+            scene_id,
+            reason="articulation_failed",
+            details={
+                "total_objects": len(interactive_objects),
+                "error_count": error_count,
+                "fallback_count": fallback_count,
+            },
+        )
+        sys.exit(1)
 
     # Write completion marker
     marker_path = assets_root / ".interactive_complete"
