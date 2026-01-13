@@ -488,10 +488,12 @@ class SimulationValidator:
         """Block heuristic fallback when production quality is requested."""
         capabilities = get_environment_capabilities()
         data_quality = os.environ.get("DATA_QUALITY_LEVEL", "development").lower()
+        labs_staging = os.environ.get("LABS_STAGING", "").lower() in {"1", "true", "yes"}
         production_requested = (
             capabilities.production_mode
             or data_quality == DataQualityLevel.PRODUCTION.value
             or os.environ.get("ISAAC_SIM_REQUIRED", "false").lower() == "true"
+            or labs_staging
         )
 
         if production_requested and not capabilities.can_generate_production_data:
@@ -1325,9 +1327,13 @@ class ValidationReportGenerator:
     ) -> Path:
         """Generate a validation report."""
 
+        physics_validation = self._compute_physics_validation(results)
+        self._enforce_physx_usage(physics_validation)
+
         report = {
             "scene_id": scene_id,
             "summary": self._compute_summary(results),
+            "physics_validation": physics_validation,
             "quality_distribution": self._compute_quality_distribution(results),
             "failure_analysis": self._analyze_failures(results),
             "episodes": [r.to_dict() for r in results],
@@ -1363,6 +1369,38 @@ class ValidationReportGenerator:
             "max_score": max(scores) if scores else 0,
             "score_std": np.std(scores) if scores else 0,
         }
+
+    def _compute_physics_validation(
+        self,
+        results: List[ValidationResult],
+    ) -> Dict[str, Any]:
+        """Summarize whether PhysX validation ran."""
+        physx_backends = {"isaac_sim", "isaac_lab"}
+        physx_episodes = sum(1 for r in results if r.physics_backend in physx_backends)
+        total = len(results)
+        return {
+            "physx_used": bool(results) and physx_episodes == total,
+            "physx_episode_count": physx_episodes,
+            "non_physx_episode_count": max(0, total - physx_episodes),
+            "physics_backends": sorted({r.physics_backend for r in results}),
+        }
+
+    def _enforce_physx_usage(self, physics_validation: Dict[str, Any]) -> None:
+        """Fail if PhysX validation is required but not used."""
+        data_quality = os.environ.get("DATA_QUALITY_LEVEL", "development").lower()
+        labs_staging = os.environ.get("LABS_STAGING", "").lower() in {"1", "true", "yes"}
+        production_requested = (
+            os.environ.get("PRODUCTION_MODE", "false").lower() == "true"
+            or os.environ.get("ISAAC_SIM_REQUIRED", "false").lower() == "true"
+            or data_quality == DataQualityLevel.PRODUCTION.value
+            or labs_staging
+        )
+
+        if production_requested and not physics_validation.get("physx_used", False):
+            raise ProductionDataQualityError(
+                "PhysX validation is required for labs/production runs but was not used. "
+                "Run inside Isaac Sim with PhysX enabled to validate episodes."
+            )
 
     def _compute_quality_distribution(
         self,
