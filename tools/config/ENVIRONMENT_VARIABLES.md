@@ -158,6 +158,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
 |----------|------|----------|-------------|
 | `GEMINI_API_KEY` | str | No | Google Gemini API key for LLM features |
 | `HF_TOKEN` | str | No | HuggingFace API token for model downloads |
+| `GENIE_SIM_API_KEY` | str | No | Genie Sim API key (only used when API submission is explicitly enabled) |
 | `MESHY_API_KEY` | str | No | Meshy API key for 3D generation |
 
 ---
@@ -179,6 +180,7 @@ Feature flags allow opt-in/opt-out of capabilities.
 | `ENABLE_DWM_CONDITIONING` | bool | "0" | Enable DWM-style conditioning |
 | `ENABLE_AUDIO_NARRATION` | bool | "0" | Enable audio narration |
 | `ENABLE_SUBTITLE_GENERATION` | bool | "0" | Enable subtitle generation |
+| `GENIESIM_SUBMIT_API` | bool | "0" | Opt-in to hosted Genie Sim API submission (default local execution) |
 
 **Example**:
 ```bash
@@ -197,9 +199,11 @@ export ENABLE_CUROBO=0  # Use fallback planner
 
 ## Service Endpoints
 
+Local (free) Genie Sim runs use the gRPC host/port below; the hosted API endpoint is only used when API submission is explicitly enabled.
+
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `GENIE_SIM_API_URL` | url | `https://api.agibot.com/geniesim/v3` | Genie Sim API endpoint |
+| `GENIE_SIM_API_URL` | url | `https://api.agibot.com/geniesim/v3` | Genie Sim API endpoint (used only when `GENIESIM_SUBMIT_API=1`) |
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework) |
