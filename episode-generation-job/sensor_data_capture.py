@@ -73,6 +73,7 @@ except ImportError:
 # =============================================================================
 # P2-11 FIX: Import DataPackTier from primary definition to avoid duplication
 from data_pack_config import DataPackTier
+from usd_scene_scan import resolve_robot_prim_paths
 
 
 class SensorDataCaptureMode(Enum):
@@ -279,15 +280,9 @@ class SensorDataConfig:
     use_gpu_compression: bool = True
     max_concurrent_captures: int = 4
 
-    # Robot configuration
-    robot_prim_paths: List[str] = field(default_factory=lambda: [
-        "/World/Robot",
-        "/World/Franka",
-        "/World/Panda",
-        "/World/UR5",
-        "/World/UR10",
-        "/World/Kinova",
-    ])
+    # Scene + robot configuration
+    scene_usd_path: Optional[str] = None
+    robot_prim_paths: Optional[List[str]] = None
 
     @classmethod
     def from_data_pack(
@@ -1248,35 +1243,50 @@ class IsaacSimSensorCapture:
 
                 stage = get_current_stage()
                 if stage is not None:
-                    # Try configured robot paths (or default common paths)
-                    robot_paths = self.config.robot_prim_paths if hasattr(self.config, 'robot_prim_paths') else [
-                        "/World/Robot", "/World/Franka", "/World/Panda"
-                    ]
+                    robot_paths = resolve_robot_prim_paths(
+                        self.config.robot_prim_paths,
+                        scene_usd_path=self.config.scene_usd_path,
+                        stage=stage,
+                    )
+                    if not robot_paths:
+                        raise RuntimeError(
+                            "No robot prims found for sensor capture. "
+                            "Provide robot_prim_paths in scenes/<scene_id>/config.json "
+                            "or ensure the USD scene has an ArticulationRoot prim."
+                        )
+
                     for robot_path in robot_paths:
                         robot_prim = stage.GetPrimAtPath(robot_path)
-                        if robot_prim.IsValid():
-                            try:
-                                robot = Articulation(robot_path)
-                                if not robot.initialized:
-                                    robot.initialize()
+                        if not robot_prim.IsValid():
+                            continue
+                        try:
+                            robot = Articulation(robot_path)
+                            if not robot.initialized:
+                                robot.initialize()
 
-                                joint_pos = robot.get_joint_positions()
-                                joint_vel = robot.get_joint_velocities()
+                            joint_pos = robot.get_joint_positions()
+                            joint_vel = robot.get_joint_velocities()
 
-                                state["robot_state"] = {
-                                    "prim_path": robot_path,
-                                    "joint_positions": [
-                                        float(x) for x in (joint_pos if joint_pos is not None else [])
-                                    ],
-                                    "joint_velocities": [
-                                        float(x) for x in (joint_vel if joint_vel is not None else [])
-                                    ],
-                                    "num_dof": robot.num_dof if hasattr(robot, "num_dof") else 0,
-                                    "data_source": "simulation",
-                                }
-                                break
-                            except Exception as e:
-                                self.log(f"Failed to get robot state from {robot_path}: {e}", "DEBUG")
+                            state["robot_state"] = {
+                                "prim_path": robot_path,
+                                "joint_positions": [
+                                    float(x) for x in (joint_pos if joint_pos is not None else [])
+                                ],
+                                "joint_velocities": [
+                                    float(x) for x in (joint_vel if joint_vel is not None else [])
+                                ],
+                                "num_dof": robot.num_dof if hasattr(robot, "num_dof") else 0,
+                                "data_source": "simulation",
+                            }
+                            break
+                        except Exception as e:
+                            self.log(f"Failed to get robot state from {robot_path}: {e}", "DEBUG")
+
+                    if not state["robot_state"]:
+                        raise RuntimeError(
+                            "Robot prim paths were configured/discovered but none were valid in the USD stage. "
+                            "Update scenes/<scene_id>/config.json with the correct robot_prim_paths."
+                        )
 
             except Exception as e:
                 self.log(f"Failed to capture robot state: {e}", "WARNING")
@@ -1847,6 +1857,8 @@ def create_sensor_capture(
     num_cameras: int = 1,
     resolution: Tuple[int, int] = (640, 480),
     fps: float = 30.0,
+    robot_prim_paths: Optional[List[str]] = None,
+    scene_usd_path: Optional[str] = None,
     use_mock: bool = False,
     require_real: bool = False,
     capture_mode: Optional[SensorDataCaptureMode] = None,
@@ -1867,6 +1879,8 @@ def create_sensor_capture(
         num_cameras: Number of cameras to configure
         resolution: Image resolution (width, height)
         fps: Frames per second
+        robot_prim_paths: Optional list of robot prim paths to track
+        scene_usd_path: Optional USD scene path for auto-discovery
         use_mock: [DEPRECATED] Force mock capture (use capture_mode=MOCK_DEV instead)
         require_real: [DEPRECATED] Require real (use capture_mode=ISAAC_SIM instead)
         capture_mode: Explicit capture mode (recommended over use_mock/require_real)
@@ -1888,6 +1902,8 @@ def create_sensor_capture(
         resolution=resolution,
         fps=fps,
     )
+    config.robot_prim_paths = robot_prim_paths
+    config.scene_usd_path = scene_usd_path
 
     # Determine capture mode (prioritize new explicit mode)
     if capture_mode is None:

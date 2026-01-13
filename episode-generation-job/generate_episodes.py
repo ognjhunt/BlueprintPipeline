@@ -180,6 +180,8 @@ class EpisodeGenerationConfig:
 
     # Robot configuration
     robot_type: str = "franka"
+    robot_prim_paths: Optional[List[str]] = None
+    scene_usd_path: Optional[str] = None
 
     # Generation parameters
     episodes_per_variation: int = 10
@@ -256,6 +258,37 @@ class GeneratedEpisode:
 
     # Timing
     generation_time_seconds: float = 0.0
+
+
+def _load_scene_config(scene_dir: Path) -> Dict[str, Any]:
+    """Load optional scene configuration from scenes/<id>/config.json."""
+    config_path = scene_dir / "config.json"
+    if not config_path.is_file():
+        return {}
+
+    try:
+        with open(config_path) as file:
+            return json.load(file)
+    except Exception as exc:
+        print(f"[EPISODE-GEN-JOB] WARNING: Failed to read scene config: {exc}")
+        return {}
+
+
+def _resolve_scene_usd_path(scene_dir: Path) -> Optional[str]:
+    """Resolve a USD scene path for auto-discovery."""
+    usd_dir = scene_dir / "usd"
+    for filename in ("scene.usd", "scene.usda", "scene.usdz"):
+        candidate = usd_dir / filename
+        if candidate.is_file():
+            return str(candidate)
+
+    if usd_dir.is_dir():
+        for pattern in ("*.usd", "*.usda", "*.usdz"):
+            matches = sorted(usd_dir.glob(pattern))
+            if matches:
+                return str(matches[0])
+
+    return None
 
 
 @dataclass
@@ -946,6 +979,8 @@ class EpisodeGenerator:
                 min_quality_score=config.min_quality_score,
                 max_retries=config.max_retries,
             ),
+            scene_usd_path=config.scene_usd_path,
+            robot_prim_paths=config.robot_prim_paths,
             verbose=verbose,
         ) if config.use_validation else None
 
@@ -981,6 +1016,8 @@ class EpisodeGenerator:
                     num_cameras=config.num_cameras,
                     resolution=config.image_resolution,
                     fps=config.fps,
+                    robot_prim_paths=config.robot_prim_paths,
+                    scene_usd_path=config.scene_usd_path,
                     capture_mode=capture_mode,
                     allow_mock_capture=config.allow_mock_capture,
                     verbose=verbose,
@@ -2188,11 +2225,25 @@ def run_episode_generation_job(
         print(f"[EPISODE-GEN-JOB] ERROR: Failed to load manifest: {e}")
         return 1
 
+    scene_dir = root / f"scenes/{scene_id}"
+    scene_config = _load_scene_config(scene_dir)
+    scene_usd_path = _resolve_scene_usd_path(scene_dir)
+
+    robot_prim_paths = scene_config.get("robot_prim_paths")
+    if not robot_prim_paths:
+        robot_prim_path = scene_config.get("robot_prim_path")
+        if robot_prim_path:
+            robot_prim_paths = [robot_prim_path]
+    if isinstance(robot_prim_paths, str):
+        robot_prim_paths = [robot_prim_paths]
+
     # Configure and run generator
     config = EpisodeGenerationConfig(
         scene_id=scene_id,
         manifest_path=manifest_path,
         robot_type=robot_type,
+        robot_prim_paths=robot_prim_paths,
+        scene_usd_path=scene_usd_path,
         episodes_per_variation=episodes_per_variation,
         max_variations=max_variations,
         fps=fps,
