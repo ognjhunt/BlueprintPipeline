@@ -341,6 +341,34 @@ class GenieSimGRPCClient:
             self._connected = False
             return False
 
+    def ping(self, timeout: Optional[float] = None) -> bool:
+        """
+        Perform a lightweight gRPC health check against the server.
+
+        Returns:
+            True if the server responds successfully.
+        """
+        effective_timeout = min(self.timeout, timeout) if timeout else self.timeout
+
+        if not self._have_grpc or self._stub is None:
+            return self._check_server_socket()
+
+        try:
+            request = GetObservationRequest(
+                include_images=False,
+                include_depth=False,
+                include_semantic=False,
+            )
+            response = self._stub.GetObservation(request, timeout=effective_timeout)
+            if response.success:
+                logger.info("✅ Genie Sim gRPC ping succeeded")
+                return True
+            logger.warning("Genie Sim gRPC ping returned unsuccessful response")
+            return False
+        except Exception as exc:
+            logger.error(f"Genie Sim gRPC ping failed: {exc}")
+            return False
+
     def _check_server_socket(self) -> bool:
         """Check if server is running via socket connection."""
         import socket
@@ -950,11 +978,25 @@ class GenieSimLocalFramework:
             task_name=task_config.get("name", "unknown"),
         )
 
+        # Ensure server is running (bootstrap if needed)
+        if not self.is_server_running():
+            scene_usd_path = None
+            if scene_config:
+                scene_usd_path = scene_config.get("usd_path") or scene_config.get("scene_usd_path")
+            if scene_usd_path:
+                scene_usd_path = Path(scene_usd_path)
+            if not self.start_server(scene_usd_path=scene_usd_path):
+                result.errors.append("Failed to start Genie Sim server")
+                return result
+
         # Ensure connected
         if not self._client.is_connected():
             if not self.connect():
                 result.errors.append("Failed to connect to Genie Sim server")
                 return result
+        if not self._client.ping(timeout=10.0):
+            result.errors.append("Genie Sim server ping failed")
+            return result
 
         episodes_target = episodes_per_task or self.config.episodes_per_task
         tasks = task_config.get("suggested_tasks", [task_config])

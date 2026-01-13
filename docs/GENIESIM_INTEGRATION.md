@@ -509,10 +509,16 @@ Genie Sim is optimized for the G2 humanoid robot. For other robots:
 
 ## Environment Variables
 
+For local Genie Sim server deployment scripts, see `tools/geniesim_adapter/deployment/` in this repo.
+
 ```bash
 # Genie Sim connection (enabled by default)
 # Set USE_GENIESIM=false to disable and use BlueprintPipeline episode generation
 USE_GENIESIM=true  # (default, can be omitted)
+GENIESIM_HOST=localhost
+GENIESIM_PORT=50051
+GENIESIM_ROOT=/opt/geniesim
+ISAAC_SIM_PATH=/isaac-sim
 GENIESIM_ASSETS_PATH=/path/to/geniesim/assets
 GENIESIM_CHROMADB_PATH=/path/to/chromadb
 GENIESIM_EMBEDDING_MODEL=qwen-text-embedding-v4
