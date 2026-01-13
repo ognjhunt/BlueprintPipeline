@@ -14,8 +14,8 @@ PRODUCTION (Cloud Run / Docker with GPU):
   - docker-compose.isaacsim.yaml configures the production environment
 
 LOCAL DEVELOPMENT (without GPU):
-  - Falls back to PYRENDER, TRIMESH, or MOCK backends
-  - MockRenderer generates placeholder frames for testing
+  - Falls back to PYRENDER (CPU/OpenGL) when Isaac Sim is unavailable
+  - Deterministic batch rendering supported for dataset reproducibility
   - Set environment or use for CI/CD iteration
 
 Supported rendering backends:
@@ -23,7 +23,6 @@ Supported rendering backends:
 - PyRender (CPU/OpenGL, good for development)
 - Trimesh (built-in renderer)
 - Blender (optional, high quality offline)
-- Mock (placeholder for testing)
 
 Based on DWM paper:
 - Static scene video: frames rendered from static 3D scene along camera trajectory
@@ -31,6 +30,8 @@ Based on DWM paper:
 - Frames: 49 (DWM default)
 """
 
+import json
+import random
 import shutil
 import subprocess
 from abc import ABC, abstractmethod
@@ -63,9 +64,6 @@ class RenderBackend(str, Enum):
     # Blender via command line
     BLENDER = "blender"
 
-    # Placeholder for when rendering isn't available
-    MOCK = "mock"
-
 
 @dataclass
 class RenderConfig:
@@ -94,12 +92,82 @@ class RenderConfig:
     video_fps: float = 24.0
     video_quality: int = 23  # CRF for x264 (lower = better)
 
+    # Deterministic rendering controls
+    deterministic: bool = True
+    deterministic_seed: int = 0
+
 
 class BaseRenderer(ABC):
     """Abstract base class for scene renderers."""
 
     def __init__(self, config: RenderConfig):
         self.config = config
+
+    def _apply_determinism(self) -> None:
+        """Apply deterministic settings for reproducible rendering."""
+        if self.config.deterministic:
+            random.seed(self.config.deterministic_seed)
+            np.random.seed(self.config.deterministic_seed)
+
+    def _frame_metadata(
+        self,
+        trajectory: CameraTrajectory,
+        camera_pose: CameraPose,
+        output_path: Path,
+        depth_path: Optional[Path],
+        segmentation_path: Optional[Path],
+    ) -> dict[str, Any]:
+        """Build consistent metadata for a rendered frame."""
+        focal_length = (
+            camera_pose.focal_length
+            if camera_pose.focal_length is not None
+            else trajectory.focal_length
+        )
+
+        return {
+            "frame_idx": camera_pose.frame_idx,
+            "timestamp": camera_pose.timestamp,
+            "focal_length": focal_length,
+            "transform": np.asarray(camera_pose.transform).tolist(),
+            "position": np.asarray(camera_pose.position).tolist(),
+            "rotation": np.asarray(camera_pose.rotation).tolist(),
+            "output_path": str(output_path),
+            "depth_path": str(depth_path) if depth_path else None,
+            "segmentation_path": str(segmentation_path) if segmentation_path else None,
+        }
+
+    def _write_metadata(
+        self,
+        trajectory: CameraTrajectory,
+        output_dir: Path,
+        frames: list[dict[str, Any]],
+    ) -> Path:
+        """Write consistent frame metadata for reproducibility."""
+        metadata = {
+            "trajectory_id": trajectory.trajectory_id,
+            "trajectory_type": trajectory.trajectory_type.value,
+            "fps": trajectory.fps,
+            "resolution": {
+                "width": self.config.width,
+                "height": self.config.height,
+            },
+            "renderer": type(self).__name__,
+            "render_config": {
+                "samples": self.config.samples,
+                "antialiasing": self.config.antialiasing,
+                "near_clip": self.config.near_clip,
+                "far_clip": self.config.far_clip,
+                "background_color": self.config.background_color,
+                "output_format": self.config.output_format,
+                "deterministic": self.config.deterministic,
+                "deterministic_seed": self.config.deterministic_seed,
+            },
+            "frames": frames,
+        }
+
+        metadata_path = output_dir / "frame_metadata.json"
+        metadata_path.write_text(json.dumps(metadata, indent=2))
+        return metadata_path
 
     @abstractmethod
     def load_scene(self, scene_path: Path) -> bool:
@@ -124,7 +192,7 @@ class BaseRenderer(ABC):
         frame_prefix: str = "frame",
         depth_dir: Optional[Path] = None,
         segmentation_dir: Optional[Path] = None,
-    ) -> dict[str, list[Path]]:
+    ) -> dict[str, Any]:
         """
         Render all frames in a trajectory.
 
@@ -147,10 +215,14 @@ class BaseRenderer(ABC):
             segmentation_dir = Path(segmentation_dir)
             segmentation_dir.mkdir(parents=True, exist_ok=True)
 
+        self._apply_determinism()
+
         color_paths = []
         depth_paths = []
         seg_paths = []
-        for pose in trajectory.poses:
+        frame_metadata = []
+
+        for pose in sorted(trajectory.poses, key=lambda item: item.frame_idx):
             frame_name = f"{frame_prefix}_{pose.frame_idx:04d}.{self.config.output_format}"
             frame_path = output_dir / frame_name
 
@@ -173,95 +245,30 @@ class BaseRenderer(ABC):
                     depth_paths.append(depth_path)
                 if seg_path:
                     seg_paths.append(seg_path)
+                frame_metadata.append(
+                    self._frame_metadata(
+                        trajectory,
+                        pose,
+                        frame_path,
+                        depth_path,
+                        seg_path,
+                    )
+                )
             else:
                 print(f"Warning: Failed to render frame {pose.frame_idx}")
+
+        metadata_path = self._write_metadata(
+            trajectory,
+            output_dir,
+            frame_metadata,
+        )
 
         return {
             "color": color_paths,
             "depth": depth_paths,
             "segmentation": seg_paths,
+            "metadata_path": metadata_path,
         }
-
-
-class MockRenderer(BaseRenderer):
-    """
-    Mock renderer for testing/development.
-
-    Generates placeholder images instead of actual renders.
-    """
-
-    def __init__(self, config: RenderConfig):
-        super().__init__(config)
-        self.scene_loaded = False
-
-    def load_scene(self, scene_path: Path) -> bool:
-        """Mock scene loading."""
-        self.scene_loaded = True
-        return True
-
-    def render_frame(
-        self,
-        camera_pose: CameraPose,
-        output_path: Path,
-        depth_path: Optional[Path] = None,
-        segmentation_path: Optional[Path] = None,
-    ) -> bool:
-        """Generate a mock frame (solid color with frame info)."""
-        try:
-            from PIL import Image, ImageDraw
-
-            # Create a gradient image
-            img = Image.new(
-                "RGB",
-                (self.config.width, self.config.height),
-                color=(50, 50, 80),
-            )
-
-            draw = ImageDraw.Draw(img)
-
-            # Add frame info text
-            text = f"Frame {camera_pose.frame_idx}"
-            pos = f"Pos: ({camera_pose.position[0]:.2f}, {camera_pose.position[1]:.2f}, {camera_pose.position[2]:.2f})"
-
-            draw.text((10, 10), text, fill=(255, 255, 255))
-            draw.text((10, 30), pos, fill=(200, 200, 200))
-            draw.text((10, 50), "[MOCK RENDER]", fill=(255, 200, 100))
-
-            # Add a simple grid pattern
-            for i in range(0, self.config.width, 50):
-                draw.line([(i, 0), (i, self.config.height)], fill=(60, 60, 90))
-            for i in range(0, self.config.height, 50):
-                draw.line([(0, i), (self.config.width, i)], fill=(60, 60, 90))
-
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            img.save(output_path)
-
-            # Save mock depth/segmentation if requested
-            if depth_path:
-                depth_path.parent.mkdir(parents=True, exist_ok=True)
-                depth = np.linspace(0, 1, num=self.config.width * self.config.height).reshape(
-                    (self.config.height, self.config.width)
-                )
-                np.save(depth_path, depth)
-
-            if segmentation_path:
-                segmentation_path.parent.mkdir(parents=True, exist_ok=True)
-                seg_map = np.zeros((self.config.height, self.config.width), dtype=np.int32)
-                np.save(segmentation_path, seg_map)
-
-            return True
-
-        except ImportError:
-            # PIL not available, create empty file
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"")
-            if depth_path:
-                depth_path.parent.mkdir(parents=True, exist_ok=True)
-                np.save(depth_path, np.zeros((self.config.height, self.config.width)))
-            if segmentation_path:
-                segmentation_path.parent.mkdir(parents=True, exist_ok=True)
-                np.save(segmentation_path, np.zeros((self.config.height, self.config.width)))
-            return True
 
 
 class PyRenderRenderer(BaseRenderer):
@@ -279,10 +286,20 @@ class PyRenderRenderer(BaseRenderer):
 
     def load_scene(self, scene_path: Path) -> bool:
         """Load scene from GLB/GLTF/USD file."""
-        try:
-            import pyrender
-            import trimesh
+        import importlib.util
 
+        if (
+            importlib.util.find_spec("pyrender") is None
+            or importlib.util.find_spec("trimesh") is None
+        ):
+            raise RuntimeError(
+                "PyRender backend requested but pyrender/trimesh are not installed."
+            )
+
+        import pyrender
+        import trimesh
+
+        try:
             scene_path = Path(scene_path)
             if not scene_path.exists():
                 raise FileNotFoundError(f"Scene file not found: {scene_path}")
@@ -338,10 +355,10 @@ class PyRenderRenderer(BaseRenderer):
         if self.scene is None or self.renderer is None:
             return False
 
-        try:
-            import pyrender
-            from PIL import Image
+        import pyrender
+        from PIL import Image
 
+        try:
             # Create camera
             camera = pyrender.PerspectiveCamera(
                 yfov=np.pi / 3.0,
@@ -405,15 +422,17 @@ class IsaacSimRenderer(BaseRenderer):
     @staticmethod
     def _require_isaac_modules() -> None:
         """Ensure Isaac Sim modules are available."""
-        try:
-            import omni  # noqa: F401
-            from omni.isaac.kit import SimulationApp  # noqa: F401
-            from pxr import UsdGeom  # noqa: F401
-        except ImportError as exc:
+        import importlib.util
+
+        if (
+            importlib.util.find_spec("omni") is None
+            or importlib.util.find_spec("omni.isaac.kit") is None
+            or importlib.util.find_spec("pxr") is None
+        ):
             raise RuntimeError(
                 "Isaac Sim backend requested but required modules are unavailable. "
                 "Run inside the Isaac Sim Python environment."
-            ) from exc
+            )
 
     def load_scene(self, scene_path: Path) -> bool:
         """Store scene path for Isaac Sim."""
@@ -474,13 +493,13 @@ class IsaacSimRenderer(BaseRenderer):
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        try:
-            from omni.isaac.kit import SimulationApp
-            import omni
-            from omni.isaac.core.utils.stage import open_stage
-            import omni.kit.viewport.utility as vp_utils
-            from omni.kit.capture.viewport import CaptureExtension
+        from omni.isaac.kit import SimulationApp
+        import omni
+        from omni.isaac.core.utils.stage import open_stage
+        import omni.kit.viewport.utility as vp_utils
+        from omni.kit.capture.viewport import CaptureExtension
 
+        try:
             # Create headless SimulationApp
             simulation_app = SimulationApp({"headless": True})
 
@@ -505,50 +524,53 @@ class IsaacSimRenderer(BaseRenderer):
 
                 # Capture depth and segmentation if requested
                 if depth_path or segmentation_path:
-                    try:
-                        from omni.syntheticdata import SyntheticDataHelper
+                    import importlib.util
 
-                        sd_helper = SyntheticDataHelper()
-                        render_product = viewport.get_render_product_path()
-
-                        sensor_types = []
-                        if depth_path:
-                            sensor_types.append("depth")
-                        if segmentation_path:
-                            sensor_types.append("instanceSegmentation")
-
-                        gt = sd_helper.get_groundtruth(
-                            render_product,
-                            sensor_types,
-                            wait_for_servers=True,
-                        )
-
-                        if depth_path and "depth" in gt:
-                            depth_path = Path(depth_path)
-                            depth_path.parent.mkdir(parents=True, exist_ok=True)
-                            np.save(depth_path, gt["depth"])
-
-                        if segmentation_path and "instanceSegmentation" in gt:
-                            segmentation_path = Path(segmentation_path)
-                            segmentation_path.parent.mkdir(parents=True, exist_ok=True)
-                            seg_data = gt["instanceSegmentation"]
-                            if isinstance(seg_data, dict):
-                                seg_data = seg_data.get("data", seg_data)
-                            np.save(segmentation_path, seg_data)
-
-                    except ImportError:
+                    if importlib.util.find_spec("omni.syntheticdata") is None:
                         print("[IsaacSimRenderer] Warning: SyntheticDataHelper not available")
-                    except Exception as e:
-                        print(f"[IsaacSimRenderer] Warning: Failed to capture depth/segmentation: {e}")
+                    else:
+                        try:
+                            from omni.syntheticdata import SyntheticDataHelper
+
+                            sd_helper = SyntheticDataHelper()
+                            render_product = viewport.get_render_product_path()
+
+                            sensor_types = []
+                            if depth_path:
+                                sensor_types.append("depth")
+                            if segmentation_path:
+                                sensor_types.append("instanceSegmentation")
+
+                            gt = sd_helper.get_groundtruth(
+                                render_product,
+                                sensor_types,
+                                wait_for_servers=True,
+                            )
+
+                            if depth_path and "depth" in gt:
+                                depth_path = Path(depth_path)
+                                depth_path.parent.mkdir(parents=True, exist_ok=True)
+                                np.save(depth_path, gt["depth"])
+
+                            if segmentation_path and "instanceSegmentation" in gt:
+                                segmentation_path = Path(segmentation_path)
+                                segmentation_path.parent.mkdir(parents=True, exist_ok=True)
+                                seg_data = gt["instanceSegmentation"]
+                                if isinstance(seg_data, dict):
+                                    seg_data = seg_data.get("data", seg_data)
+                                np.save(segmentation_path, seg_data)
+
+                        except Exception as e:
+                            print(
+                                "[IsaacSimRenderer] Warning: "
+                                f"Failed to capture depth/segmentation: {e}"
+                            )
 
                 return True
 
             finally:
                 simulation_app.close()
 
-        except ImportError as e:
-            print(f"[IsaacSimRenderer] Error: Required Isaac Sim modules not available: {e}")
-            return False
         except Exception as e:
             print(f"[IsaacSimRenderer] Error: Rendering failed: {e}")
             return False
@@ -560,7 +582,7 @@ class IsaacSimRenderer(BaseRenderer):
         frame_prefix: str = "frame",
         depth_dir: Optional[Path] = None,
         segmentation_dir: Optional[Path] = None,
-    ) -> dict[str, list[Path]]:
+    ) -> dict[str, Any]:
         """
         Render the full trajectory inside Isaac Sim.
         """
@@ -568,6 +590,7 @@ class IsaacSimRenderer(BaseRenderer):
         if self.scene_path is None:
             raise RuntimeError("Scene not loaded for Isaac Sim renderer")
 
+        self._apply_determinism()
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         depth_dir = Path(depth_dir) if depth_dir else None
@@ -576,15 +599,17 @@ class IsaacSimRenderer(BaseRenderer):
         color_paths: list[Path] = []
         depth_paths: list[Path] = []
         seg_paths: list[Path] = []
+        frame_metadata: list[dict[str, Any]] = []
+
+        import importlib.util
+
+        from omni.isaac.kit import SimulationApp
+        import omni
+        from omni.isaac.core.utils.stage import open_stage
+        import omni.kit.viewport.utility as vp_utils
+        from omni.kit.capture.viewport import CaptureExtension
 
         try:
-            from omni.isaac.kit import SimulationApp
-            import omni
-            from omni.isaac.core.utils.stage import open_stage
-            import omni.kit.viewport.utility as vp_utils
-            from omni.kit.capture.viewport import CaptureExtension
-            from omni.syntheticdata import SyntheticDataHelper
-
             simulation_app = SimulationApp({"headless": True})
             try:
                 open_stage(str(self.scene_path))
@@ -595,9 +620,13 @@ class IsaacSimRenderer(BaseRenderer):
                 viewport.set_active_camera(self.CAMERA_PATH)
 
                 capture_ext = CaptureExtension()
-                sd_helper = SyntheticDataHelper()
+                sd_helper = None
+                if importlib.util.find_spec("omni.syntheticdata") is not None:
+                    from omni.syntheticdata import SyntheticDataHelper
 
-                for pose in trajectory.poses:
+                    sd_helper = SyntheticDataHelper()
+
+                for pose in sorted(trajectory.poses, key=lambda item: item.frame_idx):
                     frame_name = f"{frame_prefix}_{pose.frame_idx:04d}.{self.config.output_format}"
                     output_path = output_dir / frame_name
                     depth_path = None
@@ -617,7 +646,7 @@ class IsaacSimRenderer(BaseRenderer):
                     capture_ext.capture_frame(str(output_path), self.config.width, self.config.height)
                     simulation_app.update()
 
-                    if depth_path or seg_path:
+                    if (depth_path or seg_path) and sd_helper is not None:
                         render_product = viewport.get_render_product_path()
                         gt = sd_helper.get_groundtruth(
                             render_product,
@@ -636,8 +665,22 @@ class IsaacSimRenderer(BaseRenderer):
                             if seg_data is not None:
                                 np.save(seg_path, seg_data)
                                 seg_paths.append(seg_path)
+                    elif depth_path or seg_path:
+                        print(
+                            "[IsaacSimRenderer] Warning: "
+                            "SyntheticDataHelper not available for depth/segmentation."
+                        )
 
                     color_paths.append(output_path)
+                    frame_metadata.append(
+                        self._frame_metadata(
+                            trajectory,
+                            pose,
+                            output_path,
+                            depth_path,
+                            seg_path,
+                        )
+                    )
 
             finally:
                 simulation_app.close()
@@ -645,10 +688,17 @@ class IsaacSimRenderer(BaseRenderer):
         except Exception as exc:
             raise RuntimeError(f"Isaac Sim rendering failed: {exc}") from exc
 
+        metadata_path = self._write_metadata(
+            trajectory,
+            output_dir,
+            frame_metadata,
+        )
+
         return {
             "color": color_paths,
             "depth": depth_paths,
             "segmentation": seg_paths,
+            "metadata_path": metadata_path,
         }
 
 
@@ -682,44 +732,41 @@ class SceneRenderer:
 
     def _detect_backend(self) -> RenderBackend:
         """Auto-detect best available backend."""
-        # Check for Isaac Sim
-        try:
-            import omni
+        import importlib.util
+
+        if importlib.util.find_spec("omni") is not None:
             return RenderBackend.ISAAC_SIM
-        except ImportError:
-            pass
 
-        # Check for PyRender
-        try:
-            import pyrender
+        if importlib.util.find_spec("pyrender") is not None:
             return RenderBackend.PYRENDER
-        except ImportError:
-            pass
 
-        # Fall back to mock
-        return RenderBackend.MOCK
+        raise RuntimeError(
+            "No supported renderer backend available. Install Isaac Sim or pyrender."
+        )
 
     def _ensure_backend_available(self, backend: RenderBackend) -> None:
         """Validate that the selected backend can run."""
         if backend == RenderBackend.ISAAC_SIM:
-            try:
-                import omni  # noqa: F401
-                from omni.isaac.kit import SimulationApp  # noqa: F401
-            except ImportError as exc:
+            import importlib.util
+
+            if (
+                importlib.util.find_spec("omni") is None
+                or importlib.util.find_spec("omni.isaac.kit") is None
+            ):
                 raise RuntimeError(
                     "Isaac Sim backend requested but required modules are missing. "
                     "Run within Isaac Sim or choose a different backend."
-                ) from exc
+                )
         elif backend == RenderBackend.PYRENDER:
-            try:
-                import pyrender  # noqa: F401
-                import trimesh  # noqa: F401
-            except ImportError as exc:
+            import importlib.util
+
+            if (
+                importlib.util.find_spec("pyrender") is None
+                or importlib.util.find_spec("trimesh") is None
+            ):
                 raise RuntimeError(
                     "PyRender backend requested but pyrender/trimesh are not installed."
-                ) from exc
-        elif backend == RenderBackend.MOCK:
-            return
+                )
         else:
             raise ValueError(f"Unsupported render backend: {backend}")
 
@@ -730,15 +777,13 @@ class SceneRenderer:
             return IsaacSimRenderer(self.config)
         elif backend == RenderBackend.PYRENDER:
             return PyRenderRenderer(self.config)
-        elif backend == RenderBackend.MOCK:
-            return MockRenderer(self.config)
         else:
             raise ValueError(f"Backend {backend} is not implemented")
 
     def load_scene(self, scene_path: Path) -> bool:
         """Load a scene for rendering."""
         success = self.renderer.load_scene(scene_path)
-        if not success and self.backend != RenderBackend.MOCK:
+        if not success:
             raise RuntimeError(f"Renderer {self.backend} failed to load scene at {scene_path}")
         return success
 
@@ -775,7 +820,7 @@ class SceneRenderer:
         frame_prefix: str = "static_scene",
         depth_dir: Optional[Path] = None,
         segmentation_dir: Optional[Path] = None,
-    ) -> dict[str, list[Path]]:
+    ) -> dict[str, Any]:
         """
         Render trajectory to individual frames and optionally depth/segmentation.
 
@@ -798,7 +843,7 @@ class SceneRenderer:
         )
         if isinstance(outputs, dict):
             return outputs
-        return {"color": outputs, "depth": [], "segmentation": []}
+        return {"color": outputs, "depth": [], "segmentation": [], "metadata_path": None}
 
     def frames_to_video(
         self,
