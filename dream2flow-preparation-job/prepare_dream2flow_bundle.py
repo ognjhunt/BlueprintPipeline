@@ -27,7 +27,9 @@ Usage:
 """
 
 import argparse
+import importlib.util
 import json
+import os
 import sys
 import time
 import traceback
@@ -267,25 +269,46 @@ class Dream2FlowPreparationJob:
         """
         Render initial RGB-D observation for a task.
 
-        In production, this would render from the USD scene.
-        Currently creates placeholder observation.
+        Render from Isaac Sim/Omniverse when available, using USD scene + camera calibration.
+        Falls back to placeholder data only when explicitly allowed.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # TODO: Integrate with Isaac Sim / Omniverse for real rendering
-        # Placeholder: create simple observation
+        if self._should_enforce_real_render():
+            if not self.config.scene_usd_path:
+                raise RuntimeError("Scene USD path is required for production Dream2Flow rendering.")
 
+        if self.config.scene_usd_path:
+            try:
+                return self._render_with_isaac_sim(output_dir)
+            except Exception as exc:
+                if self._should_enforce_real_render() or not self.config.allow_placeholder:
+                    raise
+                self.log(f"Isaac Sim render failed, falling back to placeholder: {exc}", "WARNING")
+
+        if not self.config.allow_placeholder:
+            raise RuntimeError("Placeholder rendering disabled but Isaac Sim render is unavailable.")
+
+        return self._render_placeholder_observation(output_dir)
+
+    def _should_enforce_real_render(self) -> bool:
+        """Check if production flags require real rendering."""
+        return (
+            os.getenv("PRODUCTION_MODE", "").lower() in {"1", "true", "yes"}
+            or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
+            or os.getenv("DREAM2FLOW_PRODUCTION", "").lower() in {"1", "true", "yes"}
+        )
+
+    def _render_placeholder_observation(self, output_dir: Path) -> RGBDObservation:
+        """Generate a placeholder RGB-D observation for development."""
         width, height = self.config.resolution
 
-        # Placeholder RGB (gray with text)
         rgb = np.full((height, width, 3), 60, dtype=np.uint8)
-
-        # Placeholder depth (gradient)
         depth = np.linspace(0.5, 3.0, height)[:, np.newaxis]
         depth = np.tile(depth, (1, width)).astype(np.float32)
 
-        # Save to files
         from PIL import Image
+
         rgb_path = output_dir / "initial_rgb.png"
         depth_path = output_dir / "initial_depth.png"
 
@@ -293,7 +316,6 @@ class Dream2FlowPreparationJob:
         depth_mm = (depth * 1000).astype(np.uint16)
         Image.fromarray(depth_mm).save(depth_path)
 
-        # Default camera intrinsics
         fx = fy = 500.0
         cx, cy = width / 2, height / 2
         intrinsics = np.array([
@@ -310,8 +332,150 @@ class Dream2FlowPreparationJob:
             depth_path=depth_path,
             camera_intrinsics=intrinsics,
             camera_extrinsics=np.eye(4),
+            timestamp=time.time(),
         )
 
+    def _render_with_isaac_sim(self, output_dir: Path) -> RGBDObservation:
+        """Render RGB-D observation with Isaac Sim/Omniverse."""
+        if not self.config.scene_usd_path:
+            raise RuntimeError("Scene USD path is required for Isaac Sim rendering.")
+
+        if importlib.util.find_spec("omni") is None:
+            raise RuntimeError("Isaac Sim modules are not available in this environment.")
+
+        from omni.isaac.kit import SimulationApp
+        import omni
+        from omni.isaac.core.utils.stage import open_stage
+        import omni.kit.viewport.utility as vp_utils
+        from omni.kit.capture.viewport import CaptureExtension
+        from omni.syntheticdata import SyntheticDataHelper
+        from PIL import Image
+
+        width, height = self.config.resolution
+        rgb_path = output_dir / "initial_rgb.png"
+        depth_path = output_dir / "initial_depth.png"
+
+        simulation_app = SimulationApp({"headless": True})
+        try:
+            open_stage(str(self.config.scene_usd_path))
+            stage = omni.usd.get_context().get_stage()
+
+            intrinsics, extrinsics = self._load_camera_calibration(stage, width, height)
+            camera_path = "/World/Dream2FlowCamera"
+            self._configure_render_camera(stage, camera_path, intrinsics, extrinsics, width, height)
+
+            viewport = vp_utils.get_active_viewport()
+            viewport.set_texture_resolution((width, height))
+            viewport.set_active_camera(camera_path)
+
+            capture_ext = CaptureExtension()
+            capture_ext.capture_frame(str(rgb_path), width, height)
+            simulation_app.update()
+
+            sd_helper = SyntheticDataHelper()
+            render_product = viewport.get_render_product_path()
+            gt = sd_helper.get_groundtruth(render_product, ["depth"], wait_for_servers=True)
+            if "depth" not in gt:
+                raise RuntimeError("Isaac Sim depth capture missing 'depth' output.")
+
+            depth = np.asarray(gt["depth"], dtype=np.float32)
+            depth_mm = np.clip(depth * 1000.0, 0, np.iinfo(np.uint16).max).astype(np.uint16)
+            Image.fromarray(depth_mm).save(depth_path)
+
+            rgb = np.array(Image.open(rgb_path))
+
+            return RGBDObservation(
+                frame_idx=0,
+                rgb=rgb,
+                depth=depth,
+                rgb_path=rgb_path,
+                depth_path=depth_path,
+                camera_intrinsics=intrinsics,
+                camera_extrinsics=extrinsics,
+                timestamp=time.time(),
+            )
+        finally:
+            simulation_app.close()
+
+    def _load_camera_calibration(
+        self,
+        stage,
+        width: int,
+        height: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Load camera intrinsics/extrinsics from the USD stage."""
+        intrinsics = None
+        extrinsics = None
+
+        cameras_scope = stage.GetPrimAtPath("/World/Cameras")
+        camera_prims = []
+        if cameras_scope and cameras_scope.IsValid():
+            camera_prims.extend(cameras_scope.GetChildren())
+        if not camera_prims:
+            camera_prims = [prim for prim in stage.Traverse() if prim.IsValid()]
+
+        for prim in camera_prims:
+            intr_attr = prim.GetAttribute("intrinsics")
+            extr_attr = prim.GetAttribute("cameraExtrinsics")
+            if intr_attr and intr_attr.HasAuthoredValueOpinion():
+                intr_val = intr_attr.Get()
+                intr_vals = list(intr_val)
+                if len(intr_vals) >= 3:
+                    fx, fy, cx = intr_vals[:3]
+                    cy = height / 2
+                    intrinsics = np.array([
+                        [fx, 0, cx],
+                        [0, fy, cy],
+                        [0, 0, 1],
+                    ], dtype=np.float32)
+            if extr_attr and extr_attr.HasAuthoredValueOpinion():
+                extr_val = extr_attr.Get()
+                extrinsics = np.array(extr_val, dtype=np.float32)
+            if intrinsics is not None and extrinsics is not None:
+                break
+
+        if intrinsics is None:
+            raise RuntimeError("No camera intrinsics found in USD scene.")
+        if extrinsics is None:
+            extrinsics = np.eye(4, dtype=np.float32)
+
+        return intrinsics, extrinsics
+
+    def _configure_render_camera(
+        self,
+        stage,
+        camera_path: str,
+        intrinsics: np.ndarray,
+        extrinsics: np.ndarray,
+        width: int,
+        height: int,
+    ) -> None:
+        """Create/update a USD camera prim with the desired calibration."""
+        from pxr import Gf, UsdGeom
+
+        camera = UsdGeom.Camera.Define(stage, camera_path)
+        xform = UsdGeom.Xformable(camera)
+        xform.ClearXformOpOrder()
+        matrix = Gf.Matrix4d(*extrinsics.astype(float).flatten().tolist())
+        xform.AddTransformOp().Set(matrix)
+
+        fx = intrinsics[0, 0]
+        fy = intrinsics[1, 1]
+        cx = intrinsics[0, 2]
+        cy = intrinsics[1, 2]
+
+        horizontal_aperture = 36.0
+        focal_length = fx * horizontal_aperture / width
+        vertical_aperture = height * focal_length / fy
+
+        camera.GetFocalLengthAttr().Set(float(focal_length))
+        camera.GetHorizontalApertureAttr().Set(float(horizontal_aperture))
+        camera.GetVerticalApertureAttr().Set(float(vertical_aperture))
+
+        horiz_offset = (cx - (width / 2.0)) * horizontal_aperture / width
+        vert_offset = (cy - (height / 2.0)) * vertical_aperture / height
+        camera.GetHorizontalApertureOffsetAttr().Set(float(horiz_offset))
+        camera.GetVerticalApertureOffsetAttr().Set(float(vert_offset))
     def process_task(
         self,
         instruction: TaskInstruction,
