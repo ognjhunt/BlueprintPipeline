@@ -116,7 +116,7 @@ try:
 except ImportError:
     CUROBO_INTEGRATION_AVAILABLE = False
     CuRoboMotionPlanner = None
-    logger.warning("cuRobo planner not available - using linear interpolation fallback")
+    logger.warning("cuRobo planner not available - collision-aware planning disabled")
 
 
 # =============================================================================
@@ -214,6 +214,8 @@ class GenieSimConfig:
     episodes_per_task: int = 100
     use_curobo: bool = True
     headless: bool = True
+    environment: str = "development"
+    allow_linear_fallback: bool = False
 
     # Output settings
     recording_dir: Path = Path("/tmp/geniesim_recordings")
@@ -226,6 +228,8 @@ class GenieSimConfig:
     @classmethod
     def from_env(cls) -> "GenieSimConfig":
         """Create configuration from environment variables."""
+        environment = os.getenv("GENIESIM_ENV", os.getenv("BP_ENV", "development")).lower()
+        allow_linear_fallback = os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK", "0") == "1"
         return cls(
             host=os.getenv("GENIESIM_HOST", "localhost"),
             port=int(os.getenv("GENIESIM_PORT", "50051")),
@@ -234,6 +238,8 @@ class GenieSimConfig:
             isaac_sim_path=Path(os.getenv("ISAAC_SIM_PATH", "/isaac-sim")),
             headless=os.getenv("HEADLESS", "1") == "1",
             robot_type=os.getenv("ROBOT_TYPE", "franka"),
+            environment=environment,
+            allow_linear_fallback=allow_linear_fallback,
         )
 
 
@@ -1228,6 +1234,7 @@ class GenieSimLocalFramework:
         Returns:
             List of waypoints or None if planning fails
         """
+        production_mode = self.config.environment == "production"
         # Get target position from task
         target_pos = task.get("target_position", [0.5, 0.0, 0.8])
         place_pos = task.get("place_position", [0.3, 0.2, 0.8])
@@ -1243,6 +1250,12 @@ class GenieSimLocalFramework:
         # =====================================================================
         # P0-4 FIX: Use cuRobo for real motion planning
         # =====================================================================
+        if production_mode and not (CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo):
+            raise RuntimeError(
+                "Collision-aware planner required in production; "
+                "cuRobo integration is unavailable or disabled."
+            )
+
         if CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo:
             trajectory = self._generate_curobo_trajectory(
                 task=task,
@@ -1254,12 +1267,25 @@ class GenieSimLocalFramework:
             if trajectory is not None:
                 self.log(f"  ✅ cuRobo trajectory: {len(trajectory)} waypoints")
                 return trajectory
+            elif production_mode:
+                raise RuntimeError(
+                    "Collision-aware planning failed in production; "
+                    "linear interpolation fallback is disabled."
+                )
             else:
-                self.log("  ⚠️  cuRobo planning failed, falling back to linear interpolation", "WARNING")
+                self.log("  ⚠️  cuRobo planning failed", "WARNING")
 
         # =====================================================================
         # Fallback: Linear interpolation (not collision-free!)
         # =====================================================================
+        if not self.config.allow_linear_fallback:
+            self.log(
+                "  ❌ Linear interpolation fallback disabled. "
+                "Set GENIESIM_ALLOW_LINEAR_FALLBACK=1 for dev-only runs.",
+                "ERROR",
+            )
+            return None
+
         self.log("  ⚠️  Using linear interpolation fallback (not collision-aware)", "WARNING")
 
         num_waypoints = 100

@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib import error as url_error
+from urllib import request as url_request
 
 import numpy as np
 
@@ -294,6 +297,7 @@ class AssetIndexBuilder:
         self,
         generate_embeddings: bool = False,
         embedding_model: Optional[str] = None,
+        embedding_provider: Optional[str] = None,
         verbose: bool = True,
     ):
         """
@@ -302,15 +306,19 @@ class AssetIndexBuilder:
         Args:
             generate_embeddings: Whether to generate embeddings (requires model)
             embedding_model: Embedding model name (e.g., "qwen-text-embedding-v4")
+            embedding_provider: Embedding provider ("openai" or "qwen")
             verbose: Print progress
         """
         self.verbose = verbose
         self.generate_embeddings = generate_embeddings
         self.embedding_model = embedding_model
+        self.embedding_provider = embedding_provider
         self.description_generator = SemanticDescriptionGenerator()
+        self.environment = os.getenv("GENIESIM_ENV", os.getenv("BP_ENV", "development")).lower()
 
         # Embedding client (initialized lazily)
         self._embedding_client = None
+        self._embedding_config: Optional[Dict[str, str]] = None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -357,6 +365,49 @@ class AssetIndexBuilder:
         }
 
         return GenieSimAssetIndex(assets=assets, metadata=metadata)
+
+    def _is_production(self) -> bool:
+        return self.environment == "production"
+
+    def _resolve_embedding_config(self) -> Optional[Dict[str, str]]:
+        if self._embedding_config is not None:
+            return self._embedding_config
+
+        provider = self.embedding_provider
+        if provider is None:
+            if os.getenv("OPENAI_API_KEY"):
+                provider = "openai"
+            elif os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"):
+                provider = "qwen"
+
+        if provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY")
+            base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            model = self.embedding_model or os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+        elif provider == "qwen":
+            api_key = os.getenv("QWEN_API_KEY", os.getenv("DASHSCOPE_API_KEY", ""))
+            base_url = os.getenv(
+                "QWEN_BASE_URL",
+                os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            )
+            model = self.embedding_model or os.getenv("QWEN_EMBEDDING_MODEL", "text-embedding-v4")
+        else:
+            self._embedding_config = None
+            return None
+
+        if not api_key:
+            self._embedding_config = None
+            return None
+
+        self.embedding_provider = provider
+        self.embedding_model = model
+        self._embedding_config = {
+            "provider": provider,
+            "api_key": api_key,
+            "base_url": base_url.rstrip("/"),
+            "model": model,
+        }
+        return self._embedding_config
 
     def _build_asset(
         self,
@@ -468,44 +519,91 @@ class AssetIndexBuilder:
     def _generate_embeddings(self, assets: List[GenieSimAsset]) -> None:
         """Generate embeddings for all assets."""
         self.log(f"Generating embeddings for {len(assets)} assets...")
+        production_mode = self._is_production()
 
         try:
-            # Try to use the configured embedding model
-            # This is a placeholder - actual implementation would use
-            # the QWEN embedding model or similar
             for asset in assets:
-                # For now, generate a placeholder embedding
-                # In production, this would call the embedding API
                 asset.embedding = self._get_embedding(asset.semantic_description)
 
             self.log(f"Generated embeddings for {len(assets)} assets")
 
         except Exception as e:
+            if production_mode:
+                raise RuntimeError(f"Embedding generation failed in production: {e}") from e
             self.log(f"Embedding generation failed: {e}", "WARNING")
 
     def _get_embedding(self, text: str) -> List[float]:
         """
         Get embedding for text.
 
-        In production, this would call:
-        - QWEN text-embedding-v4 (Genie Sim default)
-        - Or another embedding model
-
-        For now, returns a deterministic placeholder based on text hash.
+        Uses a configured embedding provider:
+        - OpenAI embeddings via OPENAI_API_KEY
+        - Qwen embeddings via QWEN_API_KEY / DASHSCOPE_API_KEY
         """
-        # Placeholder: generate a deterministic 2048-dim embedding
-        # based on text hash (for testing/development)
+        config = self._resolve_embedding_config()
+        if not config:
+            if self._is_production():
+                raise RuntimeError(
+                    "Embeddings are required in production but no embedding provider "
+                    "is configured. Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
+                )
+            self.log("Embedding provider unavailable; using placeholder embeddings.", "WARNING")
+            return self._get_placeholder_embedding(text)
+
+        try:
+            return self._request_embedding(text, config)
+        except Exception as e:
+            if self._is_production():
+                raise
+            self.log(f"Embedding request failed; using placeholder embeddings: {e}", "WARNING")
+            return self._get_placeholder_embedding(text)
+
+    def _request_embedding(self, text: str, config: Dict[str, str]) -> List[float]:
+        payload = {
+            "model": config["model"],
+            "input": text,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        endpoint = f"{config['base_url']}/embeddings"
+        request = url_request.Request(
+            endpoint,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {config['api_key']}",
+            },
+            method="POST",
+        )
+
+        try:
+            with url_request.urlopen(request, timeout=30) as response:
+                response_body = response.read()
+        except url_error.HTTPError as e:
+            raise RuntimeError(f"Embedding request failed: {e.code} {e.reason}") from e
+        except url_error.URLError as e:
+            raise RuntimeError(f"Embedding request failed: {e.reason}") from e
+
+        data = json.loads(response_body.decode("utf-8"))
+        if "data" not in data or not data["data"]:
+            raise RuntimeError("Embedding response missing data")
+
+        embedding = data["data"][0].get("embedding")
+        if not isinstance(embedding, list):
+            raise RuntimeError("Embedding response missing embedding vector")
+
+        return embedding
+
+    def _get_placeholder_embedding(self, text: str) -> List[float]:
+        """Generate a deterministic placeholder embedding (dev only)."""
         import hashlib
 
         text_hash = hashlib.sha256(text.encode()).digest()
 
-        # Convert hash to floats
         embedding = []
         for i in range(0, min(len(text_hash), 32), 4):
-            val = int.from_bytes(text_hash[i:i+4], 'big')
-            embedding.append((val / (2**32)) * 2 - 1)  # Normalize to [-1, 1]
+            val = int.from_bytes(text_hash[i:i + 4], "big")
+            embedding.append((val / (2**32)) * 2 - 1)
 
-        # Pad to 2048 dimensions
         while len(embedding) < 2048:
             embedding.extend(embedding[:min(len(embedding), 2048 - len(embedding))])
 
