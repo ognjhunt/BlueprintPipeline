@@ -205,8 +205,19 @@ class SceneValidator:
             self.report.add_result(ValidationResult(
                 name=f"manifest_field:{field_name}",
                 passed=passed,
-                level=ValidationLevel.ERROR if field_name in ["objects"] else ValidationLevel.WARNING,
+                level=ValidationLevel.ERROR,
                 message=f"Field '{field_name}' {'present' if passed else 'missing'}",
+            ))
+
+        # Check required scene fields
+        scene = manifest.get("scene", {})
+        for field_name in ["coordinate_frame", "meters_per_unit"]:
+            passed = field_name in scene
+            self.report.add_result(ValidationResult(
+                name=f"manifest_scene_field:{field_name}",
+                passed=passed,
+                level=ValidationLevel.ERROR,
+                message=f"Scene field '{field_name}' {'present' if passed else 'missing'}",
             ))
 
         # Check objects have required properties
@@ -214,13 +225,22 @@ class SceneValidator:
         for obj in objects:
             obj_id = obj.get("id", "unknown")
 
+            for field_name in ["id", "sim_role", "asset", "transform"]:
+                passed = field_name in obj
+                self.report.add_result(ValidationResult(
+                    name=f"object_field:{obj_id}:{field_name}",
+                    passed=passed,
+                    level=ValidationLevel.ERROR,
+                    message=f"Object '{obj_id}' field '{field_name}' {'present' if passed else 'missing'}",
+                ))
+
             # Check for asset path
             asset = obj.get("asset", {})
             has_asset_path = bool(asset.get("path"))
             self.report.add_result(ValidationResult(
                 name=f"object_asset:{obj_id}",
                 passed=has_asset_path,
-                level=ValidationLevel.WARNING,
+                level=ValidationLevel.ERROR,
                 message=f"Object '{obj_id}' {'has' if has_asset_path else 'missing'} asset path",
             ))
 
@@ -230,17 +250,23 @@ class SceneValidator:
             self.report.add_result(ValidationResult(
                 name=f"object_transform:{obj_id}",
                 passed=has_position,
-                level=ValidationLevel.WARNING,
-                message=f"Object '{obj_id}' {'has' if has_position else 'missing'} transform",
+                level=ValidationLevel.ERROR,
+                message=f"Object '{obj_id}' {'has' if has_position else 'missing'} position",
+            ))
+            has_scale = "scale" in transform
+            self.report.add_result(ValidationResult(
+                name=f"object_transform_scale:{obj_id}",
+                passed=has_scale,
+                level=ValidationLevel.ERROR,
+                message=f"Object '{obj_id}' {'has' if has_scale else 'missing'} scale",
             ))
 
         # Check scale authority
-        scene = manifest.get("scene", {})
         meters_per_unit = scene.get("meters_per_unit")
         self.report.add_result(ValidationResult(
             name="manifest_scale",
             passed=meters_per_unit is not None,
-            level=ValidationLevel.WARNING,
+            level=ValidationLevel.ERROR,
             message=f"meters_per_unit: {meters_per_unit or 'not set'}",
             details={"meters_per_unit": meters_per_unit},
         ))

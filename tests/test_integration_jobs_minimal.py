@@ -46,6 +46,7 @@ geniesim_export_module = _load_module(
 
 def _write_scene_manifest(path: Path, scene_id: str) -> None:
     manifest = {
+        "version": "1.0.0",
         "scene_id": scene_id,
         "scene": {
             "environment_type": "kitchen",
@@ -64,7 +65,7 @@ def _write_scene_manifest(path: Path, scene_id: str) -> None:
                 "transform": {
                     "position": {"x": 0.1, "y": 0.2, "z": 0.8},
                     "rotation_quaternion": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
-                    "scale": [1.0, 1.0, 1.0],
+                    "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
                 "asset": {"path": "mug_0.usd"},
                 "physics": {"mass": 0.2},
