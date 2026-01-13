@@ -101,7 +101,7 @@ main:
                       - name: WAIT_FOR_COMPLETION
                         value: "true"
                       - name: MIN_QUALITY_SCORE
-                        value: "0.7"
+                        value: "0.85"
                       - name: VALIDATE_EPISODES
                         value: "true"
                 timeout: "1800s"  # 30 minutes max
