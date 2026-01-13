@@ -1850,6 +1850,7 @@ def create_sensor_capture(
     use_mock: bool = False,
     require_real: bool = False,
     capture_mode: Optional[SensorDataCaptureMode] = None,
+    allow_mock_capture: bool = False,
     verbose: bool = True,
 ) -> IsaacSimSensorCapture:
     """
@@ -1869,6 +1870,7 @@ def create_sensor_capture(
         use_mock: [DEPRECATED] Force mock capture (use capture_mode=MOCK_DEV instead)
         require_real: [DEPRECATED] Require real (use capture_mode=ISAAC_SIM instead)
         capture_mode: Explicit capture mode (recommended over use_mock/require_real)
+        allow_mock_capture: Allow mock capture when capture_mode=MOCK_DEV
         verbose: Print progress
 
     Returns:
@@ -1900,6 +1902,7 @@ def create_sensor_capture(
 
     # Check if Isaac Sim is available
     isaac_available = is_isaac_sim_available()
+    replicator_available = is_replicator_available()
 
     # Handle each mode
     if capture_mode == SensorDataCaptureMode.ISAAC_SIM:
@@ -1922,6 +1925,18 @@ def create_sensor_capture(
                 "║    export SENSOR_CAPTURE_MODE=mock_dev                                       ║\n"
                 "╚══════════════════════════════════════════════════════════════════════════════╝"
             )
+        if not replicator_available:
+            raise RuntimeError(
+                "╔══════════════════════════════════════════════════════════════════════════════╗\n"
+                "║               ❌  REPLICATOR REQUIRED (Production Mode)                      ║\n"
+                "╠══════════════════════════════════════════════════════════════════════════════╣\n"
+                "║  Capture mode: ISAAC_SIM (production quality)                                ║\n"
+                "║  Status: omni.replicator.core NOT available                                  ║\n"
+                "║                                                                              ║\n"
+                "║  Ensure the Replicator extension is enabled in Isaac Sim.                    ║\n"
+                "║  This is required for real sensor data capture.                              ║\n"
+                "╚══════════════════════════════════════════════════════════════════════════════╝"
+            )
         # Try to initialize real capture
         capture = IsaacSimSensorCapture(config, verbose=verbose)
         if not capture.initialize():
@@ -1930,11 +1945,16 @@ def create_sensor_capture(
                 "Ensure Isaac Sim is running with Replicator extension."
             )
         if verbose:
-            print("[SENSOR-CAPTURE] ✅ Using IsaacSimSensorCapture (production quality)")
+            print("[SENSOR-CAPTURE] ✅ [PRODUCTION] Using IsaacSimSensorCapture (production quality)")
         return capture
 
     elif capture_mode == SensorDataCaptureMode.MOCK_DEV:
         # Development mode - explicitly allow mock
+        if not allow_mock_capture:
+            raise RuntimeError(
+                "Mock sensor capture requested, but allow_mock_capture is False.\n"
+                "Set allow_mock_capture=True (development only) or use ISAAC_SIM for production."
+            )
         if not isaac_available:
             print("\n" + "=" * 80)
             print("⚠️  WARNING: MOCK DATA MODE (Development Only)")
@@ -1956,7 +1976,7 @@ def create_sensor_capture(
         capture = MockSensorCapture(config, verbose=verbose)
         capture.initialize()
         if verbose:
-            print("[SENSOR-CAPTURE] ⚠️  Using MockSensorCapture (development only)")
+            print("[SENSOR-CAPTURE] ⚠️  [TEST] Using MockSensorCapture (development only)")
         return capture
 
     elif capture_mode == SensorDataCaptureMode.FAIL_CLOSED:
@@ -1979,6 +1999,18 @@ def create_sensor_capture(
                 "║    export SENSOR_CAPTURE_MODE=mock_dev                                       ║\n"
                 "╚══════════════════════════════════════════════════════════════════════════════╝"
             )
+        if not replicator_available:
+            raise RuntimeError(
+                "╔══════════════════════════════════════════════════════════════════════════════╗\n"
+                "║               ❌  REPLICATOR REQUIRED (Fail-Closed Mode)                     ║\n"
+                "╠══════════════════════════════════════════════════════════════════════════════╣\n"
+                "║  Capture mode: FAIL_CLOSED (default production safe)                         ║\n"
+                "║  Status: omni.replicator.core NOT available                                  ║\n"
+                "║                                                                              ║\n"
+                "║  Ensure the Replicator extension is enabled in Isaac Sim.                    ║\n"
+                "║  This is required for real sensor data capture.                              ║\n"
+                "╚══════════════════════════════════════════════════════════════════════════════╝"
+            )
         # Isaac Sim available - use it
         capture = IsaacSimSensorCapture(config, verbose=verbose)
         if not capture.initialize():
@@ -1987,7 +2019,7 @@ def create_sensor_capture(
                 "Ensure Isaac Sim is running with Replicator extension."
             )
         if verbose:
-            print("[SENSOR-CAPTURE] ✅ Using IsaacSimSensorCapture (fail-closed mode)")
+            print("[SENSOR-CAPTURE] ✅ [PRODUCTION] Using IsaacSimSensorCapture (fail-closed mode)")
         return capture
 
     else:
@@ -2081,6 +2113,7 @@ if __name__ == "__main__":
             resolution=(640, 480),
             fps=30.0,
             use_mock=True,
+            allow_mock_capture=True,
             verbose=True,
         )
 
