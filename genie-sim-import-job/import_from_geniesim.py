@@ -36,6 +36,19 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from import_manifest_utils import (
+    ENV_SNAPSHOT_KEYS,
+    MANIFEST_SCHEMA_DEFINITION,
+    MANIFEST_SCHEMA_VERSION,
+    build_directory_checksums,
+    build_file_inventory,
+    collect_provenance,
+    compute_manifest_checksum,
+    get_episode_file_paths,
+    get_lerobot_metadata_paths,
+    snapshot_env,
+)
+
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -885,6 +898,49 @@ def run_import_job(
         }
         import_manifest = {
             "schema_version": "1.1",
+        episode_ids = [episode.episode_id for episode in download_result.episodes]
+        episode_paths, missing_episode_ids = get_episode_file_paths(config.output_dir, episode_ids)
+        metadata_paths = get_lerobot_metadata_paths(config.output_dir)
+        lerobot_info_path = config.output_dir / "lerobot" / "meta" / "info.json"
+        missing_metadata_files = []
+        if not lerobot_info_path.exists():
+            missing_metadata_files.append(lerobot_info_path.relative_to(config.output_dir).as_posix())
+        file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
+        directory_checksums = build_directory_checksums(config.output_dir, exclude_paths=[import_manifest_path])
+        episode_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in episode_paths}
+        metadata_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in metadata_paths}
+        checksums = {
+            "episodes": {
+                rel_path: checksum
+                for rel_path, checksum in directory_checksums.items()
+                if rel_path in episode_rel_paths
+            },
+            "metadata": {
+                rel_path: checksum
+                for rel_path, checksum in directory_checksums.items()
+                if rel_path in metadata_rel_paths
+            },
+            "missing_episode_ids": missing_episode_ids,
+            "missing_metadata_files": missing_metadata_files,
+        }
+        config_snapshot = {
+            "env": snapshot_env(ENV_SNAPSHOT_KEYS),
+            "config": {
+                "job_id": config.job_id,
+                "output_dir": output_dir_str,
+                "min_quality_score": config.min_quality_score,
+                "enable_validation": config.enable_validation,
+                "filter_low_quality": config.filter_low_quality,
+                "require_lerobot": config.require_lerobot,
+                "poll_interval": config.poll_interval,
+                "wait_for_completion": config.wait_for_completion,
+                "fail_on_partial_error": config.fail_on_partial_error,
+            },
+        }
+        provenance = collect_provenance(REPO_ROOT, config_snapshot)
+        import_manifest = {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "schema_definition": MANIFEST_SCHEMA_DEFINITION,
             "generated_at": datetime.utcnow().isoformat() + "Z",
             "job_id": config.job_id,
             "output_dir": output_dir_str,
@@ -917,6 +973,13 @@ def run_import_job(
                 "lerobot": lerobot_checksums,
             },
             "provenance": provenance,
+            "file_inventory": file_inventory,
+            "checksums": checksums,
+            "provenance": provenance,
+        }
+
+        import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
+            "sha256": compute_manifest_checksum(import_manifest),
         }
 
         with open(import_manifest_path, "w") as f:
