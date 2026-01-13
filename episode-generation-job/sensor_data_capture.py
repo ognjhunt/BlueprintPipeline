@@ -2004,11 +2004,19 @@ def create_sensor_capture(
             capture_mode = get_capture_mode_from_env()
 
     if _is_production_run():
+        allow_mock_env = (
+            os.getenv("ALLOW_MOCK_DATA", "").lower() == "true"
+            or os.getenv("ALLOW_MOCK_CAPTURE", "").lower() == "true"
+        )
+        if allow_mock_env:
+            raise RuntimeError(
+                "ALLOW_MOCK_DATA/ALLOW_MOCK_CAPTURE is not permitted in production mode. "
+                "Unset DATA_QUALITY_LEVEL=production/ISAAC_SIM_REQUIRED for development runs."
+            )
         if capture_mode == SensorDataCaptureMode.MOCK_DEV or use_mock or allow_mock_capture:
             raise RuntimeError(
-                "Mock sensor capture is blocked in production mode. "
-                "Unset DATA_QUALITY_LEVEL=production/ISAAC_SIM_REQUIRED or "
-                "run with Isaac Sim available."
+                "Mock sensor capture requested while ALLOW_MOCK_DATA=false in production mode. "
+                "Run with Isaac Sim available or switch to a non-production configuration."
             )
 
     # Check if Isaac Sim is available

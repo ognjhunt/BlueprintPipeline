@@ -19,8 +19,21 @@ Production entrypoints (Docker/Kubernetes) explicitly enforce real sensor captur
 
 - `SENSOR_CAPTURE_MODE=isaac_sim`
 - `USE_MOCK_CAPTURE=false`
+- `DATA_QUALITY_LEVEL=production`
+- `ISAAC_SIM_REQUIRED=true`
+- `ALLOW_MOCK_DATA=false`
 
 Mock capture is intended **only** for local development/testing.
+
+## Lab Runs: Required Runtime + Fail-Fast Behavior
+
+Labs should run episode generation inside an Isaac Sim runtime (4.2.0) with
+Replicator enabled. Production flags (`DATA_QUALITY_LEVEL=production` or
+`ISAAC_SIM_REQUIRED=true`) trigger fail-fast behavior: if Isaac Sim/Replicator
+aren't available, the run raises immediately instead of falling back to mock
+capture. `ALLOW_MOCK_DATA`/`ALLOW_MOCK_CAPTURE` are rejected in production mode,
+so local tests must explicitly disable production flags and opt into
+`SENSOR_CAPTURE_MODE=mock_dev` for mock data.
 
 ## Useful References
 
