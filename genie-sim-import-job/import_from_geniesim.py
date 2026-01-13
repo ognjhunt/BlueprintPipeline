@@ -888,16 +888,6 @@ def run_import_job(
             if result.manifest_path and result.manifest_path.exists()
             else None
         )
-        provenance = {
-            "source": "genie_sim",
-            "job_id": config.job_id,
-            "scene_id": scene_id or None,
-            "imported_by": "BlueprintPipeline",
-            "importer": "genie-sim-import-job",
-            "client_mode": "mock" if getattr(client, "mock_mode", False) else "api",
-        }
-        import_manifest = {
-            "schema_version": "1.1",
         episode_ids = [episode.episode_id for episode in download_result.episodes]
         episode_paths, missing_episode_ids = get_episode_file_paths(config.output_dir, episode_ids)
         metadata_paths = get_lerobot_metadata_paths(config.output_dir)
@@ -910,18 +900,26 @@ def run_import_job(
         episode_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in episode_paths}
         metadata_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in metadata_paths}
         checksums = {
-            "episodes": {
-                rel_path: checksum
-                for rel_path, checksum in directory_checksums.items()
-                if rel_path in episode_rel_paths
+            "download": {
+                "manifest": download_manifest_checksum,
+                "episodes": episode_checksums,
+                "filtered_episodes": filtered_checksums,
+                "lerobot": lerobot_checksums,
             },
-            "metadata": {
-                rel_path: checksum
-                for rel_path, checksum in directory_checksums.items()
-                if rel_path in metadata_rel_paths
+            "files": {
+                "episodes": {
+                    rel_path: checksum
+                    for rel_path, checksum in directory_checksums.items()
+                    if rel_path in episode_rel_paths
+                },
+                "metadata": {
+                    rel_path: checksum
+                    for rel_path, checksum in directory_checksums.items()
+                    if rel_path in metadata_rel_paths
+                },
+                "missing_episode_ids": missing_episode_ids,
+                "missing_metadata_files": missing_metadata_files,
             },
-            "missing_episode_ids": missing_episode_ids,
-            "missing_metadata_files": missing_metadata_files,
         }
         config_snapshot = {
             "env": snapshot_env(ENV_SNAPSHOT_KEYS),
@@ -966,19 +964,12 @@ def run_import_job(
                 "required": config.require_lerobot or config.enable_validation,
             },
             "metrics_summary": metrics_summary,
-            "checksums": {
-                "download_manifest": download_manifest_checksum,
-                "episodes": episode_checksums,
-                "filtered_episodes": filtered_checksums,
-                "lerobot": lerobot_checksums,
-            },
-            "provenance": provenance,
-            "file_inventory": file_inventory,
             "checksums": checksums,
+            "file_inventory": file_inventory,
             "provenance": provenance,
         }
 
-        import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
+        import_manifest["checksums"]["files"]["metadata"]["import_manifest.json"] = {
             "sha256": compute_manifest_checksum(import_manifest),
         }
 

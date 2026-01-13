@@ -19,13 +19,13 @@ MANIFEST_SCHEMA_DEFINITION = {
         "lerobot": "LeRobot conversion status and outputs.",
         "metrics_summary": "Pipeline metrics snapshot.",
         "file_inventory": "List of all output files (path + size).",
-        "checksums": "SHA256 checksums for episodes and key metadata files.",
+        "checksums": "Checksums for downloaded artifacts and per-file outputs.",
         "provenance": "Source control, pipeline version, config snapshot, and tool versions.",
     },
     "notes": [
         "file_inventory is scoped to output_dir and excludes import_manifest.json to avoid self-reference.",
-        "checksums.metadata['import_manifest.json'] is computed from a canonical JSON representation of the "
-        "manifest with that checksum entry removed.",
+        "checksums.files.metadata['import_manifest.json'] is computed from a canonical JSON representation of "
+        "the manifest with that checksum entry removed.",
     ],
 }
 
