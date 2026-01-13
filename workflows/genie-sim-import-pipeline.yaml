@@ -222,6 +222,23 @@ main:
         assign:
           - episodes_imported: ${default(import_status.body.status.logUri, "0")}  # TODO: Parse from logs
           - output_path: ${text.replace_all(default(import_status.body.status.logUri, ""), "gs://" + bucket + "/", "")}
+        next: write_import_marker
+
+    - write_import_marker:
+        switch:
+          - condition: ${scene_id == null or scene_id == "" or scene_id == "unknown"}
+            next: check_training_enabled
+        next: create_import_marker
+
+    - create_import_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${"scenes/" + scene_id + "/geniesim/.geniesim_import_complete"}
+          uploadType: "media"
+          body: ${"{\"scene_id\": \"" + scene_id + "\", \"job_id\": \"" + job_id + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}
+        result: import_marker
+        next: check_training_enabled
 
     # Trigger downstream training pipeline (optional)
     - check_training_enabled:
