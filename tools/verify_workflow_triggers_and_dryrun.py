@@ -54,6 +54,39 @@ def verify_usd_assembly() -> List[str]:
     return check_patterns(path, expectations)
 
 
+def verify_geniesim_export_trigger(scene_id: str = "demo") -> List[str]:
+    """Confirm Genie Sim export pipeline watches variation completion markers."""
+    path = REPO_ROOT / "workflows" / "genie-sim-export-pipeline.yaml"
+    if not path.exists():
+        return [f"Genie Sim export pipeline not found: {path}"]
+
+    expectations = [
+        (
+            "Variation pipeline marker filter",
+            r"variation_assets/\\.variation_pipeline_complete",
+        ),
+        (
+            "Genie Sim export job invocation",
+            r"genie-sim-export-job",
+        ),
+    ]
+    errors = check_patterns(path, expectations)
+    if errors:
+        return errors
+
+    mock_marker = f"scenes/{scene_id}/variation_assets/.variation_pipeline_complete"
+    workflow_regex = r"^scenes/.+/variation_assets/\.variation_pipeline_complete$"
+    if not re.match(workflow_regex, mock_marker):
+        return [f"Mock marker did not match Genie Sim export trigger regex: {mock_marker}"]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        marker_path = Path(tmpdir) / mock_marker
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text("done\n")
+
+    return []
+
+
 def dry_run_regen3d_pipeline(scene_id: str = "demo", bucket: str = "demo-bucket") -> List[str]:
     """Simulate the 3D-RE-GEN pipeline flow.
 
@@ -110,6 +143,10 @@ def main() -> int:
     usd_errors = verify_usd_assembly()
     if usd_errors:
         errors.extend(["USD assembly: " + e for e in usd_errors])
+
+    geniesim_errors = verify_geniesim_export_trigger()
+    if geniesim_errors:
+        errors.extend(["Genie Sim export: " + e for e in geniesim_errors])
 
     dry_run_actions = dry_run_regen3d_pipeline()
 
