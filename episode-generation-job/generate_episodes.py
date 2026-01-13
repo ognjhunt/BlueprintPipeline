@@ -64,7 +64,7 @@ import sys
 import time
 import traceback
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -346,6 +346,17 @@ class ManipulationTaskGenerator:
         "object": [("pick_object", "Pick up the object and relocate it")],
     }
 
+    MULTI_OBJECT_TEMPLATES = {
+        "stack_objects": {
+            "description": "Pick up {top_obj} and stack it on {base_obj}",
+            "min_objects": 2,
+        },
+        "stack_three_objects": {
+            "description": "Pick up {obj_a}, place it on {obj_b}, then stack {obj_c} on top",
+            "min_objects": 3,
+        },
+    }
+
     def __init__(self, use_llm: bool = True, verbose: bool = True):
         self.use_llm = use_llm
         self.verbose = verbose
@@ -376,14 +387,30 @@ class ManipulationTaskGenerator:
 
         # Get basic tasks from scene
         basic_tasks = self.generate_tasks(manifest, manifest_path)
+        valid_tasks = []
+        objects = manifest.get("objects", [])
+        object_lookup = self._build_object_lookup(objects)
+
+        for task in basic_tasks:
+            is_valid, ordered_steps, errors = self._validate_task_steps(task, object_lookup)
+            if not is_valid:
+                self.log(
+                    f"  Skipping task {task.get('task_id', 'unknown')} due to errors: {errors}",
+                    "WARNING",
+                )
+                continue
+            if ordered_steps is not None:
+                task["task_steps"] = ordered_steps
+            valid_tasks.append(task)
 
         # Enhance with full specifications
         tasks_with_specs = []
-        objects = manifest.get("objects", [])
 
-        for task in basic_tasks:
+        for task in valid_tasks:
             try:
-                if self.task_specifier:
+                if "task_steps" in task:
+                    spec = self._create_multi_object_spec(task, objects, robot_type)
+                elif self.task_specifier:
                     # Use Gemini to generate full specification
                     spec = self.task_specifier.specify_task(
                         task_name=task["task_name"],
@@ -402,7 +429,7 @@ class ManipulationTaskGenerator:
             except Exception as e:
                 self.log(f"  Failed to specify {task['task_name']}: {e}", "WARNING")
                 # Still add with minimal spec
-                spec = self._create_minimal_spec(task, objects, robot_type)
+                spec = self._create_multi_object_spec(task, objects, robot_type) if "task_steps" in task else self._create_minimal_spec(task, objects, robot_type)
                 tasks_with_specs.append((task, spec))
 
         self.log(f"Generated {len(tasks_with_specs)} task specifications")
@@ -438,6 +465,65 @@ class ManipulationTaskGenerator:
                 ),
             ],
             robot_type=robot_type,
+        )
+
+    def _create_multi_object_spec(
+        self,
+        task: Dict[str, Any],
+        objects: List[Dict[str, Any]],
+        robot_type: str,
+    ) -> TaskSpecification:
+        """Create a minimal multi-object task specification with ordered steps."""
+        from task_specifier import SkillSegment
+
+        steps = task.get("task_steps", [])
+        spec_id = f"spec_{task['task_id']}"
+        segments = []
+        time_cursor = 0.0
+        segment_duration = 1.0
+        step_dependencies = {}
+
+        for step in steps:
+            step_id = step.get("step_id", f"{task['task_id']}_step")
+            step_dependencies[step_id] = list(step.get("depends_on", []))
+            target_obj_id = step.get("target_object_id")
+            description = step.get("description", task["description"])
+
+            segments.append(
+                SkillSegment(
+                    segment_id=f"{spec_id}_{step_id}",
+                    segment_type=SegmentType.SKILL,
+                    skill_name=step.get("action", task["task_name"]),
+                    description=description,
+                    start_time=time_cursor,
+                    end_time=time_cursor + segment_duration,
+                    manipulated_object_id=target_obj_id,
+                    contact_objects=[target_obj_id] if target_obj_id else [],
+                )
+            )
+            time_cursor += segment_duration
+
+        goal_object_id = steps[-1].get("target_object_id") if steps else task.get("target_object_id")
+        goal_position = task.get("place_position")
+        if goal_position is None and steps:
+            goal_position = steps[-1].get("place_position")
+
+        if goal_position is None:
+            goal_position = self._compute_default_goal_position(task, objects, robot_type)
+
+        return TaskSpecification(
+            spec_id=spec_id,
+            task_name=task["task_name"],
+            task_description=task["description"],
+            goal_object_id=goal_object_id,
+            goal_position=np.array(goal_position),
+            segments=segments,
+            success_criteria={
+                "step_dependencies": step_dependencies,
+                "ordered_execution_required": True,
+            },
+            robot_type=robot_type,
+            estimated_duration=time_cursor,
         )
 
     def generate_tasks(
@@ -552,8 +638,196 @@ class ManipulationTaskGenerator:
                 }
                 tasks.append(task)
 
+        tasks.extend(self._generate_multi_object_tasks(manifest))
+
         self.log(f"Generated {len(tasks)} tasks from object categories")
         return tasks
+
+    def _generate_multi_object_tasks(self, manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate multi-object tasks such as stacking based on manifest or templates."""
+        tasks = []
+        objects = manifest.get("objects", [])
+
+        explicit_tasks = manifest.get("multi_object_tasks", [])
+        if explicit_tasks:
+            for task in explicit_tasks:
+                task.setdefault("task_id", f"{task.get('task_name', 'multi')}_{uuid.uuid4().hex[:8]}")
+                task.setdefault("task_name", "multi_object_task")
+                task.setdefault("description", "Multi-object manipulation task")
+                tasks.append(task)
+            return tasks
+
+        stackable = [
+            obj for obj in objects
+            if obj.get("category", "object").lower() not in ["background", "surface"]
+        ]
+
+        if len(stackable) >= 2:
+            base_obj = stackable[0]
+            top_obj = stackable[1]
+            base_id = base_obj.get("id", base_obj.get("name", "base"))
+            top_id = top_obj.get("id", top_obj.get("name", "top"))
+            base_position = base_obj.get("position", [0.5, 0.0, 0.85])
+            base_dims = base_obj.get("dimensions", base_obj.get("bbox", [0.1, 0.1, 0.1]))
+            stack_position = self._calculate_stack_position(base_position, base_dims)
+
+            tasks.append({
+                "task_id": f"stack_{top_id}_on_{base_id}",
+                "task_name": "stack_objects",
+                "description": self.MULTI_OBJECT_TEMPLATES["stack_objects"]["description"].format(
+                    top_obj=top_id,
+                    base_obj=base_id,
+                ),
+                "target_object_id": top_id,
+                "target_position": top_obj.get("position", base_position),
+                "target_dimensions": top_obj.get("dimensions", base_dims),
+                "place_position": stack_position,
+                "task_steps": [
+                    {
+                        "step_id": "pick_place_top",
+                        "action": "pick_place",
+                        "description": f"Pick {top_id} and place on {base_id}",
+                        "target_object_id": top_id,
+                        "target_position": top_obj.get("position", base_position),
+                        "target_dimensions": top_obj.get("dimensions", base_dims),
+                        "place_position": stack_position,
+                        "place_on_object_id": base_id,
+                        "depends_on": [],
+                    },
+                ],
+                "is_articulated": False,
+            })
+
+        if len(stackable) >= 3:
+            obj_a, obj_b, obj_c = stackable[:3]
+            obj_a_id = obj_a.get("id", obj_a.get("name", "obj_a"))
+            obj_b_id = obj_b.get("id", obj_b.get("name", "obj_b"))
+            obj_c_id = obj_c.get("id", obj_c.get("name", "obj_c"))
+            obj_b_position = obj_b.get("position", [0.5, 0.0, 0.85])
+            obj_b_dims = obj_b.get("dimensions", obj_b.get("bbox", [0.1, 0.1, 0.1]))
+            obj_c_position = obj_c.get("position", [0.5, 0.0, 0.85])
+            obj_c_dims = obj_c.get("dimensions", obj_c.get("bbox", [0.1, 0.1, 0.1]))
+
+            place_on_b = self._calculate_stack_position(obj_b_position, obj_b_dims)
+            place_on_c = self._calculate_stack_position(obj_c_position, obj_c_dims)
+
+            tasks.append({
+                "task_id": f"stack_{obj_a_id}_{obj_b_id}_{obj_c_id}",
+                "task_name": "stack_three_objects",
+                "description": self.MULTI_OBJECT_TEMPLATES["stack_three_objects"]["description"].format(
+                    obj_a=obj_a_id,
+                    obj_b=obj_b_id,
+                    obj_c=obj_c_id,
+                ),
+                "target_object_id": obj_a_id,
+                "target_position": obj_a.get("position", obj_b_position),
+                "target_dimensions": obj_a.get("dimensions", obj_b_dims),
+                "place_position": place_on_c,
+                "task_steps": [
+                    {
+                        "step_id": "stack_first",
+                        "action": "pick_place",
+                        "description": f"Pick {obj_a_id} and place on {obj_b_id}",
+                        "target_object_id": obj_a_id,
+                        "target_position": obj_a.get("position", obj_b_position),
+                        "target_dimensions": obj_a.get("dimensions", obj_b_dims),
+                        "place_position": place_on_b,
+                        "place_on_object_id": obj_b_id,
+                        "depends_on": [],
+                    },
+                    {
+                        "step_id": "stack_second",
+                        "action": "pick_place",
+                        "description": f"Pick {obj_c_id} and place on {obj_a_id}",
+                        "target_object_id": obj_c_id,
+                        "target_position": obj_c.get("position", obj_c_position),
+                        "target_dimensions": obj_c.get("dimensions", obj_c_dims),
+                        "place_position": self._calculate_stack_position(place_on_b, obj_a.get("dimensions", obj_b_dims)),
+                        "place_on_object_id": obj_a_id,
+                        "depends_on": ["stack_first"],
+                    },
+                ],
+                "is_articulated": False,
+            })
+
+        return tasks
+
+    def _build_object_lookup(self, objects: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        return {
+            obj.get("id", obj.get("name", f"obj_{idx}")): obj
+            for idx, obj in enumerate(objects)
+        }
+
+    def _validate_task_steps(
+        self,
+        task: Dict[str, Any],
+        object_lookup: Dict[str, Dict[str, Any]],
+    ) -> Tuple[bool, Optional[List[Dict[str, Any]]], List[str]]:
+        """Validate multi-object task step ordering and dependencies."""
+        steps = task.get("task_steps")
+        if not steps:
+            return True, None, []
+
+        errors = []
+        step_ids = [step.get("step_id") for step in steps]
+        if any(step_id is None for step_id in step_ids):
+            errors.append("All task steps must include a step_id")
+        if len(set(step_ids)) != len(step_ids):
+            errors.append("Task step_ids must be unique")
+
+        for step in steps:
+            target_id = step.get("target_object_id")
+            if target_id and target_id not in object_lookup:
+                errors.append(f"Unknown target object in steps: {target_id}")
+            place_on_id = step.get("place_on_object_id")
+            if place_on_id and place_on_id not in object_lookup:
+                errors.append(f"Unknown place_on object in steps: {place_on_id}")
+            for dep in step.get("depends_on", []):
+                if dep not in step_ids:
+                    errors.append(f"Unknown dependency step_id: {dep}")
+
+        ordered_steps = self._order_task_steps(steps)
+        if ordered_steps is None:
+            errors.append("Task steps contain cyclic dependencies")
+
+        return len(errors) == 0, ordered_steps, errors
+
+    def _order_task_steps(self, steps: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+        """Topologically order task steps based on dependencies."""
+        steps_by_id = {step.get("step_id"): step for step in steps}
+        if None in steps_by_id:
+            return None
+
+        dependencies = {
+            step_id: set(steps_by_id[step_id].get("depends_on", []))
+            for step_id in steps_by_id
+        }
+        ordered = []
+        ready = [step_id for step_id, deps in dependencies.items() if not deps]
+
+        while ready:
+            current = ready.pop(0)
+            ordered.append(steps_by_id[current])
+            for step_id, deps in dependencies.items():
+                if current in deps:
+                    deps.remove(current)
+                    if not deps and step_id not in [s.get("step_id") for s in ordered] and step_id not in ready:
+                        ready.append(step_id)
+
+        if len(ordered) != len(steps):
+            return None
+
+        return ordered
+
+    def _calculate_stack_position(
+        self,
+        base_position: List[float],
+        base_dimensions: List[float],
+    ) -> List[float]:
+        """Calculate a stacking position above a base object."""
+        base_pos = np.array(base_position)
+        base_dims = np.array(base_dimensions)
+        return [base_pos[0], base_pos[1], base_pos[2] + (base_dims[2] / 2) + 0.02]
 
     def _compute_default_goal_position(
         self,
@@ -1008,77 +1282,134 @@ class EpisodeGenerator:
             try:
                 start_time = time.time()
 
-                # Generate motion plan using constraint-aware planning
-                target_object = {
-                    "id": task["target_object_id"],
-                    "position": task["target_position"],
-                    "dimensions": task["target_dimensions"],
-                }
+                if "task_steps" in task:
+                    motion_plan, trajectory, sensor_data, object_metadata = self._plan_multi_step_task(
+                        task=task,
+                        spec=spec,
+                        manifest=manifest,
+                        scene_context=scene_context,
+                    )
+                else:
+                    # Generate motion plan using constraint-aware planning
+                    target_object = {
+                        "id": task["target_object_id"],
+                        "position": task["target_position"],
+                        "dimensions": task["target_dimensions"],
+                    }
 
-                # P1-7 FIX: Make articulation info configurable from task specification
-                articulation_info = None
-                if task.get("is_articulated"):
-                    # Try to get articulation info from task, otherwise use defaults
-                    if "articulation_info" in task:
-                        # Use provided articulation info
-                        articulation_info = task["articulation_info"]
-                    else:
-                        # Infer from object category or use conservative defaults
-                        object_category = task.get("target_object_category", "").lower()
-
-                        # Default articulation parameters by category
-                        if "drawer" in object_category:
-                            articulation_info = {
-                                "handle_position": task["target_position"],
-                                "axis": [-1, 0, 0],  # Pull outward
-                                "range": [0, 0.4],   # 40cm max extension
-                                "type": "prismatic",
-                            }
-                        elif "door" in object_category or "cabinet" in object_category:
-                            articulation_info = {
-                                "handle_position": task["target_position"],
-                                "axis": [0, 0, 1],   # Vertical axis (hinge)
-                                "range": [0, 1.57],  # 90 degrees
-                                "type": "revolute",
-                            }
-                        elif "lid" in object_category or "box" in object_category:
-                            articulation_info = {
-                                "handle_position": task["target_position"],
-                                "axis": [0, 1, 0],   # Horizontal axis
-                                "range": [0, 1.57],  # 90 degrees
-                                "type": "revolute",
-                            }
+                    # P1-7 FIX: Make articulation info configurable from task specification
+                    articulation_info = None
+                    if task.get("is_articulated"):
+                        # Try to get articulation info from task, otherwise use defaults
+                        if "articulation_info" in task:
+                            # Use provided articulation info
+                            articulation_info = task["articulation_info"]
                         else:
-                            # Generic fallback (conservative prismatic)
-                            articulation_info = {
-                                "handle_position": task["target_position"],
-                                "axis": task.get("articulation_axis", [-1, 0, 0]),
-                                "range": task.get("articulation_range", [0, 0.3]),
-                                "type": task.get("articulation_type", "prismatic"),
+                            # Infer from object category or use conservative defaults
+                            object_category = task.get("target_object_category", "").lower()
+
+                            # Default articulation parameters by category
+                            if "drawer" in object_category:
+                                articulation_info = {
+                                    "handle_position": task["target_position"],
+                                    "axis": [-1, 0, 0],  # Pull outward
+                                    "range": [0, 0.4],   # 40cm max extension
+                                    "type": "prismatic",
+                                }
+                            elif "door" in object_category or "cabinet" in object_category:
+                                articulation_info = {
+                                    "handle_position": task["target_position"],
+                                    "axis": [0, 0, 1],   # Vertical axis (hinge)
+                                    "range": [0, 1.57],  # 90 degrees
+                                    "type": "revolute",
+                                }
+                            elif "lid" in object_category or "box" in object_category:
+                                articulation_info = {
+                                    "handle_position": task["target_position"],
+                                    "axis": [0, 1, 0],   # Horizontal axis
+                                    "range": [0, 1.57],  # 90 degrees
+                                    "type": "revolute",
+                                }
+                            else:
+                                # Generic fallback (conservative prismatic)
+                                articulation_info = {
+                                    "handle_position": task["target_position"],
+                                    "axis": task.get("articulation_axis", [-1, 0, 0]),
+                                    "range": task.get("articulation_range", [0, 0.3]),
+                                    "type": task.get("articulation_type", "prismatic"),
+                                }
+
+                    motion_plan = self.motion_planner.plan_motion(
+                        task_name=task["task_name"],
+                        task_description=task["description"],
+                        target_object=target_object,
+                        place_position=task.get("place_position"),
+                        articulation_info=articulation_info,
+                        scene_context=scene_context,
+                    )
+
+                    # Solve trajectory with replan on IK failure
+                    motion_plan, trajectory = self._solve_trajectory_with_replan(
+                        motion_plan=motion_plan,
+                        task_name=task["task_name"],
+                        task_description=task["description"],
+                        target_object=target_object,
+                        place_position=task.get("place_position"),
+                        articulation_info=articulation_info,
+                        context_label=f"seed:{task['task_id']}",
+                    )
+                    if not getattr(motion_plan, "planning_success", True):
+                        self.log(
+                            f"    Motion planning failed for {task['task_name']}: {motion_plan.planning_errors}",
+                            "WARNING",
+                        )
+                        episode = GeneratedEpisode(
+                            episode_id=f"seed_{task['task_id']}",
+                            task_name=task["task_name"],
+                            task_description=task["description"],
+                            trajectory=None,
+                            motion_plan=motion_plan,
+                            task_spec=spec,
+                            scene_id=self.config.scene_id,
+                            variation_index=0,
+                            is_seed=True,
+                            augmentation_method="direct",
+                            generation_time_seconds=time.time() - start_time,
+                        )
+                        seed_episodes.append(episode)
+                        continue
+
+                    # Solve trajectory
+                    trajectory = self.trajectory_solver.solve(motion_plan)
+
+                    # Capture sensor data during trajectory execution (if available)
+                    sensor_data = None
+                    object_metadata = {}
+                    if self.sensor_capture:
+                        try:
+                            # Get scene objects for metadata
+                            scene_objects = manifest.get("objects", [])
+                            object_metadata = {
+                                obj.get("id", obj.get("name", "")): {
+                                    "category": obj.get("category", "object"),
+                                    "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
+                                    "position": obj.get("position", [0, 0, 0]),
+                                }
+                                for obj in scene_objects
                             }
 
-                motion_plan = self.motion_planner.plan_motion(
-                    task_name=task["task_name"],
-                    task_description=task["description"],
-                    target_object=target_object,
-                    place_position=task.get("place_position"),
-                    articulation_info=articulation_info,
-                    scene_context=scene_context,
-                )
+                            sensor_data = self.sensor_capture.capture_episode(
+                                episode_id=f"seed_{task['task_id']}",
+                                trajectory_states=trajectory.states,
+                                scene_objects=scene_objects,
+                            )
+                            self.log(f"    Captured sensor data: {sensor_data.num_frames} frames")
+                        except Exception as e:
+                            self.log(f"    Sensor capture failed: {e}", "WARNING")
 
-                # Solve trajectory with replan on IK failure
-                motion_plan, trajectory = self._solve_trajectory_with_replan(
-                    motion_plan=motion_plan,
-                    task_name=task["task_name"],
-                    task_description=task["description"],
-                    target_object=target_object,
-                    place_position=task.get("place_position"),
-                    articulation_info=articulation_info,
-                    context_label=f"seed:{task['task_id']}",
-                )
-                if not getattr(motion_plan, "planning_success", True):
+                if trajectory is None or not getattr(motion_plan, "planning_success", True):
                     self.log(
-                        f"    Motion planning failed for {task['task_name']}: {motion_plan.planning_errors}",
+                        f"    Motion planning failed for {task['task_name']}: {getattr(motion_plan, 'planning_errors', [])}",
                         "WARNING",
                     )
                     episode = GeneratedEpisode(
@@ -1096,34 +1427,6 @@ class EpisodeGenerator:
                     )
                     seed_episodes.append(episode)
                     continue
-
-                # Solve trajectory
-                trajectory = self.trajectory_solver.solve(motion_plan)
-
-                # Capture sensor data during trajectory execution (if available)
-                sensor_data = None
-                object_metadata = {}
-                if self.sensor_capture:
-                    try:
-                        # Get scene objects for metadata
-                        scene_objects = manifest.get("objects", [])
-                        object_metadata = {
-                            obj.get("id", obj.get("name", "")): {
-                                "category": obj.get("category", "object"),
-                                "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
-                                "position": obj.get("position", [0, 0, 0]),
-                            }
-                            for obj in scene_objects
-                        }
-
-                        sensor_data = self.sensor_capture.capture_episode(
-                            episode_id=f"seed_{task['task_id']}",
-                            trajectory_states=trajectory.states,
-                            scene_objects=scene_objects,
-                        )
-                        self.log(f"    Captured sensor data: {sensor_data.num_frames} frames")
-                    except Exception as e:
-                        self.log(f"    Sensor capture failed: {e}", "WARNING")
 
                 episode = GeneratedEpisode(
                     episode_id=f"seed_{task['task_id']}",
@@ -1169,6 +1472,141 @@ class EpisodeGenerator:
                 self.log(f"Seed generation completed with {len(failed_seeds)}/{total_tasks} failures ({failure_rate*100:.1f}%)", "WARNING")
 
         return seed_episodes
+
+    def _plan_multi_step_task(
+        self,
+        task: Dict[str, Any],
+        spec: TaskSpecification,
+        manifest: Dict[str, Any],
+        scene_context: SceneContext,
+    ) -> Tuple[MotionPlan, Optional[JointTrajectory], Optional[Any], Dict[str, Any]]:
+        """Plan and solve a multi-step manipulation task."""
+        steps = task.get("task_steps", [])
+        step_plans = []
+        step_trajectories = []
+        object_metadata = {}
+
+        for step_index, step in enumerate(steps):
+            target_object = {
+                "id": step.get("target_object_id"),
+                "position": step.get("target_position", task.get("target_position")),
+                "dimensions": step.get("target_dimensions", task.get("target_dimensions")),
+            }
+            motion_plan = self.motion_planner.plan_motion(
+                task_name=step.get("action", task["task_name"]),
+                task_description=step.get("description", task["description"]),
+                target_object=target_object,
+                place_position=step.get("place_position", task.get("place_position")),
+                articulation_info=step.get("articulation_info"),
+                scene_context=scene_context,
+            )
+
+            motion_plan, trajectory = self._solve_trajectory_with_replan(
+                motion_plan=motion_plan,
+                task_name=step.get("action", task["task_name"]),
+                task_description=step.get("description", task["description"]),
+                target_object=target_object,
+                place_position=step.get("place_position", task.get("place_position")),
+                articulation_info=step.get("articulation_info"),
+                context_label=f"seed:{task['task_id']}:step{step_index}",
+            )
+
+            if not getattr(motion_plan, "planning_success", True):
+                motion_plan.planning_errors.append(f"Multi-step planning failed at step index {step_index}")
+                return motion_plan, None, None, {}
+
+            step_plans.append(motion_plan)
+            step_trajectories.append(trajectory)
+
+        combined_plan = self._combine_motion_plans(step_plans, task)
+        combined_trajectory = self._combine_trajectories(step_trajectories, task)
+
+        sensor_data = None
+        if self.sensor_capture and combined_trajectory is not None:
+            try:
+                scene_objects = manifest.get("objects", [])
+                object_metadata = {
+                    obj.get("id", obj.get("name", "")): {
+                        "category": obj.get("category", "object"),
+                        "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
+                        "position": obj.get("position", [0, 0, 0]),
+                    }
+                    for obj in scene_objects
+                }
+                sensor_data = self.sensor_capture.capture_episode(
+                    episode_id=f"seed_{task['task_id']}",
+                    trajectory_states=combined_trajectory.states,
+                    scene_objects=scene_objects,
+                )
+                self.log(f"    Captured sensor data: {sensor_data.num_frames} frames")
+            except Exception as e:
+                self.log(f"    Sensor capture failed: {e}", "WARNING")
+
+        return combined_plan, combined_trajectory, sensor_data, object_metadata
+
+    def _combine_motion_plans(
+        self,
+        plans: List[MotionPlan],
+        task: Dict[str, Any],
+    ) -> MotionPlan:
+        """Combine motion plans from multiple steps into a single plan."""
+        all_waypoints = []
+        for plan in plans:
+            all_waypoints.extend(plan.waypoints)
+
+        last_plan = plans[-1] if plans else None
+        return MotionPlan(
+            plan_id=f"plan_{task['task_id']}",
+            task_name=task["task_name"],
+            task_description=task["description"],
+            waypoints=all_waypoints,
+            target_object_id=last_plan.target_object_id if last_plan else None,
+            target_object_position=last_plan.target_object_position if last_plan else None,
+            target_object_dimensions=last_plan.target_object_dimensions if last_plan else None,
+            place_position=last_plan.place_position if last_plan else None,
+            articulation_axis=last_plan.articulation_axis if last_plan else None,
+            articulation_range=last_plan.articulation_range if last_plan else None,
+            handle_position=last_plan.handle_position if last_plan else None,
+            robot_type=self.config.robot_type,
+            planning_backend="multi_step",
+            planning_success=True,
+        )
+
+    def _combine_trajectories(
+        self,
+        trajectories: List[JointTrajectory],
+        task: Dict[str, Any],
+    ) -> Optional[JointTrajectory]:
+        """Combine step trajectories into a single trajectory."""
+        if not trajectories:
+            return None
+
+        combined_states = []
+        time_offset = 0.0
+        frame_offset = 0
+
+        for trajectory in trajectories:
+            for state in trajectory.states:
+                combined_states.append(
+                    replace(
+                        state,
+                        frame_idx=state.frame_idx + frame_offset,
+                        timestamp=state.timestamp + time_offset,
+                    )
+                )
+            time_offset += trajectory.total_duration
+            frame_offset += trajectory.num_frames
+
+        combined = JointTrajectory(
+            trajectory_id=f"traj_{task['task_id']}",
+            robot_type=trajectories[0].robot_type,
+            robot_config=trajectories[0].robot_config,
+            states=combined_states,
+            source_plan_id=f"plan_{task['task_id']}",
+            fps=trajectories[0].fps,
+            total_duration=time_offset,
+        )
+        return combined
 
     def _generate_augmented_episodes(
         self,
@@ -1620,6 +2058,10 @@ class EpisodeGenerator:
                     "description": t["description"],
                     "has_full_spec": spec is not None,
                     "num_segments": len(spec.segments) if spec else 0,
+                    "num_steps": len(t.get("task_steps", [])) if t else 0,
+                    "step_dependencies": spec.success_criteria.get("step_dependencies")
+                    if spec and isinstance(spec.success_criteria, dict)
+                    else None,
                     "episodes_generated": output.tasks_generated.get(t["task_name"], 0),
                 }
                 for t, spec in tasks_with_specs
