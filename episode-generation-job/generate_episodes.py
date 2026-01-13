@@ -723,6 +723,24 @@ class EpisodeGenerator:
         if self.verbose:
             print(f"[EPISODE-GENERATOR] [{level}] {msg}")
 
+    def _is_production_quality_level(self) -> bool:
+        env_level = os.getenv("DATA_QUALITY_LEVEL")
+        if env_level:
+            return env_level.lower() == "production"
+        if HAVE_QUALITY_SYSTEM:
+            try:
+                return get_data_quality_level().value == "production"
+            except Exception:
+                return False
+        return False
+
+    def _allow_lerobot_export_failure(self) -> bool:
+        if self._is_production_quality_level():
+            return False
+        override = os.getenv("ALLOW_LEROBOT_EXPORT_FAILURE")
+        if override is None:
+            return True
+        return override.lower() == "true"
     def _solve_trajectory_with_replan(
         self,
         motion_plan: MotionPlan,
@@ -887,11 +905,27 @@ class EpisodeGenerator:
         except Exception as e:
             import traceback
             error_msg = f"LeRobot export failed: {e}"
-            output.errors.append(error_msg)
-            self.log(error_msg, "ERROR")
-            if self.verbose:
-                self.log(traceback.format_exc(), "DEBUG")
-            # LeRobot export failure is non-fatal - episodes are still valid
+            is_production = self._is_production_quality_level()
+            allow_failure = self._allow_lerobot_export_failure()
+            if is_production and os.getenv("ALLOW_LEROBOT_EXPORT_FAILURE"):
+                self.log(
+                    "ALLOW_LEROBOT_EXPORT_FAILURE is ignored in production runs.",
+                    "ERROR",
+                )
+            if allow_failure:
+                output.warnings.append(error_msg)
+                self.log(
+                    f"{error_msg} (continuing because ALLOW_LEROBOT_EXPORT_FAILURE is enabled for dev runs)",
+                    "WARNING",
+                )
+                if self.verbose:
+                    self.log(traceback.format_exc(), "DEBUG")
+            else:
+                output.errors.append(error_msg)
+                self.log(error_msg, "ERROR")
+                if self.verbose:
+                    self.log(traceback.format_exc(), "DEBUG")
+                raise
 
         # Clean up memory after export
         del exporter
