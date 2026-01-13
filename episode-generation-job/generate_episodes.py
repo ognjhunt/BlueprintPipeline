@@ -55,6 +55,7 @@ Environment Variables:
     USE_LLM: Enable LLM for task specification - default: true
     USE_CPGEN: Enable CP-Gen augmentation - default: true
     MIN_QUALITY_SCORE: Minimum quality score for export - default: 0.7
+    MIN_SUCCESS_RATE: Minimum success rate for episode generation - default: 0.5
 """
 
 import gc
@@ -91,6 +92,11 @@ from motion_planner import AIMotionPlanner, MotionPlan, SceneContext
 from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS
 from lerobot_exporter import LeRobotExporter, LeRobotDatasetConfig
 from quality_constants import MIN_QUALITY_SCORE, MAX_RETRIES, PRODUCTION_TRAINING_THRESHOLD
+from tools.error_handling.partial_failure import (
+    PartialFailureError,
+    PartialFailureHandler,
+    PartialFailureResult,
+)
 
 # SOTA imports (new architecture)
 from task_specifier import TaskSpecifier, TaskSpecification, SegmentType
@@ -208,6 +214,7 @@ class EpisodeGenerationConfig:
     # Quality settings - LABS-BLOCKER-002 FIX: Uses unified quality constants
     # Imported from quality_constants.py to ensure consistency across pipeline
     min_quality_score: float = MIN_QUALITY_SCORE  # 0.85 - unified threshold
+    min_success_rate: float = 0.5
     max_retries: int = MAX_RETRIES  # 3 - unified retry limit
     validate_trajectories: bool = True
     include_failed: bool = False
@@ -1009,6 +1016,13 @@ class EpisodeGenerator:
             use_llm=config.use_llm,
             verbose=verbose,
         )
+        self._partial_failure_errors: List[str] = []
+        self._partial_failure_handler = PartialFailureHandler(
+            min_success_rate=config.min_success_rate,
+            save_successful=True,
+            output_dir=config.output_dir / "meta" / "partial_failures",
+            failure_report_path=config.output_dir / "meta" / "partial_failure_report.json",
+        )
 
         # SOTA components
         self.cpgen_augmenter = ConstraintPreservingAugmenter(
@@ -1084,6 +1098,43 @@ class EpisodeGenerator:
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
             print(f"[EPISODE-GENERATOR] [{level}] {msg}")
+
+    def _process_with_partial_failures(
+        self,
+        items: List[Any],
+        process_fn,
+        item_id_fn,
+        batch_name: str,
+    ) -> PartialFailureResult[Any]:
+        try:
+            result = self._partial_failure_handler.process_batch(
+                items,
+                process_fn=process_fn,
+                item_id_fn=item_id_fn,
+                batch_name=batch_name,
+            )
+        except PartialFailureError as exc:
+            result = exc.result
+            error_msg = (
+                f"{batch_name} success rate {result.success_rate:.1%} below minimum "
+                f"{self.config.min_success_rate:.1%} "
+                f"({result.success_count}/{result.total_attempted} succeeded)"
+            )
+            self._partial_failure_errors.append(error_msg)
+            self.log(error_msg, "ERROR")
+
+        if result.failed:
+            self.log(
+                f"{batch_name} failures: {result.failure_count}/{result.total_attempted}",
+                "WARNING",
+            )
+            for failure in result.failed:
+                self.log(
+                    f"  [{batch_name}] index={failure.get('item_index')} "
+                    f"id={failure.get('item_id')} error={failure.get('error')}",
+                    "WARNING",
+                )
+        return result
 
     def _is_production_quality_level(self) -> bool:
         env_level = os.getenv("DATA_QUALITY_LEVEL")
@@ -1193,6 +1244,7 @@ class EpisodeGenerator:
         self.log(f"CP-Gen Augmentation: {self.config.use_cpgen}")
         self.log(f"Simulation Validation: {self.config.use_validation}")
         self.log(f"Min Quality Score: {self.config.min_quality_score}")
+        self.log(f"Min Success Rate: {self.config.min_success_rate:.1%}")
         self.log(f"Data Pack: {self.config.data_pack_tier}")
         self.log(f"Cameras: {self.config.num_cameras}")
         self.log(f"Sensor Capture: {'enabled' if self.sensor_capture else 'disabled'}")
@@ -1356,6 +1408,9 @@ class EpisodeGenerator:
             if seed_episodes else 0
         )
 
+        if self._partial_failure_errors:
+            output.errors.extend(self._partial_failure_errors)
+
         # Summary
         self.log("\n" + "=" * 70)
         self.log("GENERATION COMPLETE (SOTA Pipeline)")
@@ -1375,14 +1430,183 @@ class EpisodeGenerator:
 
         return output
 
+    def _generate_seed_episode(
+        self,
+        task: Dict[str, Any],
+        spec: TaskSpecification,
+        manifest: Dict[str, Any],
+        scene_context: SceneContext,
+    ) -> GeneratedEpisode:
+        start_time = time.time()
+
+        if "task_steps" in task:
+            motion_plan, trajectory, sensor_data, object_metadata = self._plan_multi_step_task(
+                task=task,
+                spec=spec,
+                manifest=manifest,
+                scene_context=scene_context,
+            )
+        else:
+            # Generate motion plan using constraint-aware planning
+            target_object = {
+                "id": task["target_object_id"],
+                "position": task["target_position"],
+                "dimensions": task["target_dimensions"],
+            }
+
+            # P1-7 FIX: Make articulation info configurable from task specification
+            articulation_info = None
+            if task.get("is_articulated"):
+                # Try to get articulation info from task, otherwise use defaults
+                if "articulation_info" in task:
+                    # Use provided articulation info
+                    articulation_info = task["articulation_info"]
+                else:
+                    # Infer from object category or use conservative defaults
+                    object_category = task.get("target_object_category", "").lower()
+
+                    # Default articulation parameters by category
+                    if "drawer" in object_category:
+                        articulation_info = {
+                            "handle_position": task["target_position"],
+                            "axis": [-1, 0, 0],  # Pull outward
+                            "range": [0, 0.4],   # 40cm max extension
+                            "type": "prismatic",
+                        }
+                    elif "door" in object_category or "cabinet" in object_category:
+                        articulation_info = {
+                            "handle_position": task["target_position"],
+                            "axis": [0, 0, 1],   # Vertical axis (hinge)
+                            "range": [0, 1.57],  # 90 degrees
+                            "type": "revolute",
+                        }
+                    elif "lid" in object_category or "box" in object_category:
+                        articulation_info = {
+                            "handle_position": task["target_position"],
+                            "axis": [0, 1, 0],   # Horizontal axis
+                            "range": [0, 1.57],  # 90 degrees
+                            "type": "revolute",
+                        }
+                    else:
+                        # Generic fallback (conservative prismatic)
+                        articulation_info = {
+                            "handle_position": task["target_position"],
+                            "axis": task.get("articulation_axis", [-1, 0, 0]),
+                            "range": task.get("articulation_range", [0, 0.3]),
+                            "type": task.get("articulation_type", "prismatic"),
+                        }
+
+            motion_plan = self.motion_planner.plan_motion(
+                task_name=task["task_name"],
+                task_description=task["description"],
+                target_object=target_object,
+                place_position=task.get("place_position"),
+                articulation_info=articulation_info,
+                scene_context=scene_context,
+            )
+
+            # Solve trajectory with replan on IK failure
+            motion_plan, trajectory = self._solve_trajectory_with_replan(
+                motion_plan=motion_plan,
+                task_name=task["task_name"],
+                task_description=task["description"],
+                target_object=target_object,
+                place_position=task.get("place_position"),
+                articulation_info=articulation_info,
+                context_label=f"seed:{task['task_id']}",
+            )
+            if not getattr(motion_plan, "planning_success", True):
+                self.log(
+                    f"    Motion planning failed for {task['task_name']}: {motion_plan.planning_errors}",
+                    "WARNING",
+                )
+                return GeneratedEpisode(
+                    episode_id=f"seed_{task['task_id']}",
+                    task_name=task["task_name"],
+                    task_description=task["description"],
+                    trajectory=None,
+                    motion_plan=motion_plan,
+                    task_spec=spec,
+                    scene_id=self.config.scene_id,
+                    variation_index=0,
+                    is_seed=True,
+                    augmentation_method="direct",
+                    generation_time_seconds=time.time() - start_time,
+                )
+
+            # Solve trajectory
+            trajectory = self.trajectory_solver.solve(motion_plan)
+
+            # Capture sensor data during trajectory execution (if available)
+            sensor_data = None
+            object_metadata = {}
+            if self.sensor_capture:
+                try:
+                    # Get scene objects for metadata
+                    scene_objects = manifest.get("objects", [])
+                    object_metadata = {
+                        obj.get("id", obj.get("name", "")): {
+                            "category": obj.get("category", "object"),
+                            "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
+                            "position": obj.get("position", [0, 0, 0]),
+                        }
+                        for obj in scene_objects
+                    }
+
+                    sensor_data = self.sensor_capture.capture_episode(
+                        episode_id=f"seed_{task['task_id']}",
+                        trajectory_states=trajectory.states,
+                        scene_objects=scene_objects,
+                    )
+                    self.log(f"    Captured sensor data: {sensor_data.num_frames} frames")
+                except Exception as e:
+                    self.log(f"    Sensor capture failed: {e}", "WARNING")
+
+        if trajectory is None or not getattr(motion_plan, "planning_success", True):
+            self.log(
+                f"    Motion planning failed for {task['task_name']}: {getattr(motion_plan, 'planning_errors', [])}",
+                "WARNING",
+            )
+            return GeneratedEpisode(
+                episode_id=f"seed_{task['task_id']}",
+                task_name=task["task_name"],
+                task_description=task["description"],
+                trajectory=None,
+                motion_plan=motion_plan,
+                task_spec=spec,
+                scene_id=self.config.scene_id,
+                variation_index=0,
+                is_seed=True,
+                augmentation_method="direct",
+                generation_time_seconds=time.time() - start_time,
+            )
+
+        episode = GeneratedEpisode(
+            episode_id=f"seed_{task['task_id']}",
+            task_name=task["task_name"],
+            task_description=task["description"],
+            trajectory=trajectory,
+            motion_plan=motion_plan,
+            task_spec=spec,
+            scene_id=self.config.scene_id,
+            variation_index=0,
+            is_seed=True,
+            augmentation_method="direct",
+            sensor_data=sensor_data,
+            object_metadata=object_metadata,
+            generation_time_seconds=time.time() - start_time,
+        )
+
+        visual_info = f" (visual: {sensor_data.num_frames}f)" if sensor_data else ""
+        self.log(f"    Created seed: {task['task_name']}{visual_info}")
+        return episode
+
     def _generate_seed_episodes(
         self,
         tasks_with_specs: List[Tuple[Dict[str, Any], TaskSpecification]],
         manifest: Dict[str, Any],
     ) -> List[GeneratedEpisode]:
         """Generate seed episodes for each task."""
-        seed_episodes = []
-        failed_seeds = []
         scene_context = SceneContext(
             scene_id=self.config.scene_id,
             environment_type=manifest.get("environment_type", "unknown"),
@@ -1391,200 +1615,17 @@ class EpisodeGenerator:
             robot_urdf_path=self.config.robot_urdf_path,
         )
 
-        for task, spec in tasks_with_specs:
-            try:
-                start_time = time.time()
+        def process_item(item: Tuple[Dict[str, Any], TaskSpecification]) -> GeneratedEpisode:
+            task, spec = item
+            return self._generate_seed_episode(task, spec, manifest, scene_context)
 
-                if "task_steps" in task:
-                    motion_plan, trajectory, sensor_data, object_metadata = self._plan_multi_step_task(
-                        task=task,
-                        spec=spec,
-                        manifest=manifest,
-                        scene_context=scene_context,
-                    )
-                else:
-                    # Generate motion plan using constraint-aware planning
-                    target_object = {
-                        "id": task["target_object_id"],
-                        "position": task["target_position"],
-                        "dimensions": task["target_dimensions"],
-                    }
-
-                    # P1-7 FIX: Make articulation info configurable from task specification
-                    articulation_info = None
-                    if task.get("is_articulated"):
-                        # Try to get articulation info from task, otherwise use defaults
-                        if "articulation_info" in task:
-                            # Use provided articulation info
-                            articulation_info = task["articulation_info"]
-                        else:
-                            # Infer from object category or use conservative defaults
-                            object_category = task.get("target_object_category", "").lower()
-
-                            # Default articulation parameters by category
-                            if "drawer" in object_category:
-                                articulation_info = {
-                                    "handle_position": task["target_position"],
-                                    "axis": [-1, 0, 0],  # Pull outward
-                                    "range": [0, 0.4],   # 40cm max extension
-                                    "type": "prismatic",
-                                }
-                            elif "door" in object_category or "cabinet" in object_category:
-                                articulation_info = {
-                                    "handle_position": task["target_position"],
-                                    "axis": [0, 0, 1],   # Vertical axis (hinge)
-                                    "range": [0, 1.57],  # 90 degrees
-                                    "type": "revolute",
-                                }
-                            elif "lid" in object_category or "box" in object_category:
-                                articulation_info = {
-                                    "handle_position": task["target_position"],
-                                    "axis": [0, 1, 0],   # Horizontal axis
-                                    "range": [0, 1.57],  # 90 degrees
-                                    "type": "revolute",
-                                }
-                            else:
-                                # Generic fallback (conservative prismatic)
-                                articulation_info = {
-                                    "handle_position": task["target_position"],
-                                    "axis": task.get("articulation_axis", [-1, 0, 0]),
-                                    "range": task.get("articulation_range", [0, 0.3]),
-                                    "type": task.get("articulation_type", "prismatic"),
-                                }
-
-                    motion_plan = self.motion_planner.plan_motion(
-                        task_name=task["task_name"],
-                        task_description=task["description"],
-                        target_object=target_object,
-                        place_position=task.get("place_position"),
-                        articulation_info=articulation_info,
-                        scene_context=scene_context,
-                    )
-
-                    # Solve trajectory with replan on IK failure
-                    motion_plan, trajectory = self._solve_trajectory_with_replan(
-                        motion_plan=motion_plan,
-                        task_name=task["task_name"],
-                        task_description=task["description"],
-                        target_object=target_object,
-                        place_position=task.get("place_position"),
-                        articulation_info=articulation_info,
-                        context_label=f"seed:{task['task_id']}",
-                    )
-                    if not getattr(motion_plan, "planning_success", True):
-                        self.log(
-                            f"    Motion planning failed for {task['task_name']}: {motion_plan.planning_errors}",
-                            "WARNING",
-                        )
-                        episode = GeneratedEpisode(
-                            episode_id=f"seed_{task['task_id']}",
-                            task_name=task["task_name"],
-                            task_description=task["description"],
-                            trajectory=None,
-                            motion_plan=motion_plan,
-                            task_spec=spec,
-                            scene_id=self.config.scene_id,
-                            variation_index=0,
-                            is_seed=True,
-                            augmentation_method="direct",
-                            generation_time_seconds=time.time() - start_time,
-                        )
-                        seed_episodes.append(episode)
-                        continue
-
-                    # Solve trajectory
-                    trajectory = self.trajectory_solver.solve(motion_plan)
-
-                    # Capture sensor data during trajectory execution (if available)
-                    sensor_data = None
-                    object_metadata = {}
-                    if self.sensor_capture:
-                        try:
-                            # Get scene objects for metadata
-                            scene_objects = manifest.get("objects", [])
-                            object_metadata = {
-                                obj.get("id", obj.get("name", "")): {
-                                    "category": obj.get("category", "object"),
-                                    "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
-                                    "position": obj.get("position", [0, 0, 0]),
-                                }
-                                for obj in scene_objects
-                            }
-
-                            sensor_data = self.sensor_capture.capture_episode(
-                                episode_id=f"seed_{task['task_id']}",
-                                trajectory_states=trajectory.states,
-                                scene_objects=scene_objects,
-                            )
-                            self.log(f"    Captured sensor data: {sensor_data.num_frames} frames")
-                        except Exception as e:
-                            self.log(f"    Sensor capture failed: {e}", "WARNING")
-
-                if trajectory is None or not getattr(motion_plan, "planning_success", True):
-                    self.log(
-                        f"    Motion planning failed for {task['task_name']}: {getattr(motion_plan, 'planning_errors', [])}",
-                        "WARNING",
-                    )
-                    episode = GeneratedEpisode(
-                        episode_id=f"seed_{task['task_id']}",
-                        task_name=task["task_name"],
-                        task_description=task["description"],
-                        trajectory=None,
-                        motion_plan=motion_plan,
-                        task_spec=spec,
-                        scene_id=self.config.scene_id,
-                        variation_index=0,
-                        is_seed=True,
-                        augmentation_method="direct",
-                        generation_time_seconds=time.time() - start_time,
-                    )
-                    seed_episodes.append(episode)
-                    continue
-
-                episode = GeneratedEpisode(
-                    episode_id=f"seed_{task['task_id']}",
-                    task_name=task["task_name"],
-                    task_description=task["description"],
-                    trajectory=trajectory,
-                    motion_plan=motion_plan,
-                    task_spec=spec,
-                    scene_id=self.config.scene_id,
-                    variation_index=0,
-                    is_seed=True,
-                    augmentation_method="direct",
-                    sensor_data=sensor_data,
-                    object_metadata=object_metadata,
-                    generation_time_seconds=time.time() - start_time,
-                )
-
-                seed_episodes.append(episode)
-                visual_info = f" (visual: {sensor_data.num_frames}f)" if sensor_data else ""
-                self.log(f"    Created seed: {task['task_name']}{visual_info}")
-
-            except Exception as e:
-                import traceback
-                failed_seeds.append({
-                    "task_name": task.get("task_name", "unknown"),
-                    "error": str(e),
-                    "traceback": traceback.format_exc()
-                })
-                self.log(f"    Failed seed {task['task_name']}: {e}", "ERROR")
-                # Log full traceback for debugging
-                if self.verbose:
-                    self.log(traceback.format_exc(), "DEBUG")
-
-        # Check if too many seeds failed
-        total_tasks = len(tasks_with_specs)
-        if total_tasks > 0:
-            failure_rate = len(failed_seeds) / total_tasks
-            if failure_rate > 0.8:  # More than 80% failed
-                error_msg = f"Seed generation failed: {len(failed_seeds)}/{total_tasks} tasks failed ({failure_rate*100:.1f}%)"
-                self.log(error_msg, "ERROR")
-                raise RuntimeError(error_msg)
-            elif failed_seeds:
-                self.log(f"Seed generation completed with {len(failed_seeds)}/{total_tasks} failures ({failure_rate*100:.1f}%)", "WARNING")
-
-        return seed_episodes
+        result = self._process_with_partial_failures(
+            tasks_with_specs,
+            process_fn=process_item,
+            item_id_fn=lambda item: item[0].get("task_id", item[0].get("task_name", "unknown")),
+            batch_name="seed_generation",
+        )
+        return result.successful
 
     def _plan_multi_step_task(
         self,
@@ -1730,110 +1771,109 @@ class EpisodeGenerator:
         """Generate augmented episodes using CP-Gen approach."""
         all_episodes = list(seed_episodes)  # Start with seeds
         objects = manifest.get("objects", [])
-        failed_variations = []
-        failed_seeds = []
 
         if not self.config.use_cpgen or not self.cpgen_augmenter:
             # Fallback: simple variation without CP-Gen
             self.log("  Using simple variation (CP-Gen disabled)")
             return self._generate_simple_variations(seed_episodes, manifest, num_variations)
 
+        eligible_seeds = []
         for seed in seed_episodes:
             if seed.task_spec is None or seed.motion_plan is None:
                 continue
             if not getattr(seed.motion_plan, "planning_success", True):
                 self.log(f"  Skipping seed {seed.episode_id} due to planning failure", "WARNING")
                 continue
+            eligible_seeds.append(seed)
 
-            try:
-                # Create CP-Gen seed episode
-                cpgen_seed = self.cpgen_augmenter.create_seed_episode(
-                    task_spec=seed.task_spec,
-                    motion_plan=seed.motion_plan,
-                    scene_objects=objects,
+        if not eligible_seeds:
+            self.log("  No eligible seeds available for CP-Gen augmentation", "WARNING")
+            return all_episodes
+
+        def create_cpgen_seed(seed: GeneratedEpisode) -> Tuple[GeneratedEpisode, SeedEpisode]:
+            cpgen_seed = self.cpgen_augmenter.create_seed_episode(
+                task_spec=seed.task_spec,
+                motion_plan=seed.motion_plan,
+                scene_objects=objects,
+            )
+            return seed, cpgen_seed
+
+        seed_result = self._process_with_partial_failures(
+            eligible_seeds,
+            process_fn=create_cpgen_seed,
+            item_id_fn=lambda seed: seed.episode_id,
+            batch_name="cpgen_seed",
+        )
+
+        variation_tasks: List[Tuple[GeneratedEpisode, SeedEpisode, int]] = []
+        for seed, cpgen_seed in seed_result.successful:
+            for var_idx in range(1, num_variations):
+                variation_tasks.append((seed, cpgen_seed, var_idx))
+
+        def process_variation(task: Tuple[GeneratedEpisode, SeedEpisode, int]) -> GeneratedEpisode:
+            seed, cpgen_seed, var_idx = task
+            object_transforms = self._generate_variation_transforms(
+                objects, var_idx
+            )
+            updated_obstacles = self._apply_transforms_to_objects(
+                objects, object_transforms
+            )
+
+            augmented = self.cpgen_augmenter.augment(
+                seed=cpgen_seed,
+                object_transforms=object_transforms,
+                obstacles=updated_obstacles,
+                variation_index=var_idx,
+            )
+
+            if not augmented.planning_success:
+                planning_errors = []
+                if augmented.motion_plan is not None:
+                    planning_errors = getattr(augmented.motion_plan, "planning_errors", [])
+                raise RuntimeError(
+                    f"CP-Gen planning failed for {seed.task_name} variation {var_idx}: {planning_errors}"
                 )
 
-                # Generate variations (skip first as it's the seed)
-                for var_idx in range(1, num_variations):
-                    try:
-                        # Generate random object transforms
-                        object_transforms = self._generate_variation_transforms(
-                            objects, var_idx
-                        )
-                        updated_obstacles = self._apply_transforms_to_objects(
-                            objects, object_transforms
-                        )
+            trajectory = self.trajectory_solver.solve(augmented.motion_plan)
 
-                        # Augment episode
-                        augmented = self.cpgen_augmenter.augment(
-                            seed=cpgen_seed,
-                            object_transforms=object_transforms,
-                            obstacles=updated_obstacles,
-                            variation_index=var_idx,
-                        )
+            sensor_data = None
+            if self.sensor_capture:
+                try:
+                    sensor_data = self.sensor_capture.capture_episode(
+                        episode_id=augmented.episode_id,
+                        trajectory_states=trajectory.states,
+                        scene_objects=updated_obstacles,
+                    )
+                except Exception as e:
+                    self.log(f"    Sensor capture failed for variation {var_idx}: {e}", "WARNING")
 
-                        if augmented.planning_success:
-                            # Solve trajectory for augmented plan
-                            trajectory = self.trajectory_solver.solve(augmented.motion_plan)
+            return GeneratedEpisode(
+                episode_id=augmented.episode_id,
+                task_name=seed.task_name,
+                task_description=seed.task_description,
+                trajectory=trajectory,
+                motion_plan=augmented.motion_plan,
+                task_spec=seed.task_spec,
+                scene_id=self.config.scene_id,
+                variation_index=var_idx,
+                is_seed=False,
+                augmentation_method="cpgen",
+                seed_episode_id=seed.episode_id,
+                sensor_data=sensor_data,
+                object_metadata=seed.object_metadata,
+                quality_score=augmented.constraint_satisfaction,
+                is_valid=augmented.collision_free,
+                generation_time_seconds=augmented.generation_time_seconds,
+            )
 
-                            # Capture sensor data for augmented episode
-                            sensor_data = None
-                            if self.sensor_capture:
-                                try:
-                                    sensor_data = self.sensor_capture.capture_episode(
-                                        episode_id=augmented.episode_id,
-                                        trajectory_states=trajectory.states,
-                                        scene_objects=updated_obstacles,
-                                    )
-                                except Exception as e:
-                                    self.log(f"    Sensor capture failed for variation {var_idx}: {e}", "WARNING")
-
-                            episode = GeneratedEpisode(
-                                episode_id=augmented.episode_id,
-                                task_name=seed.task_name,
-                                task_description=seed.task_description,
-                                trajectory=trajectory,
-                                motion_plan=augmented.motion_plan,
-                                task_spec=seed.task_spec,
-                                scene_id=self.config.scene_id,
-                                variation_index=var_idx,
-                                is_seed=False,
-                                augmentation_method="cpgen",
-                                seed_episode_id=seed.episode_id,
-                                sensor_data=sensor_data,
-                                object_metadata=seed.object_metadata,
-                                quality_score=augmented.constraint_satisfaction,
-                                is_valid=augmented.collision_free,
-                                generation_time_seconds=augmented.generation_time_seconds,
-                            )
-                            all_episodes.append(episode)
-
-                    except Exception as e:
-                        import traceback
-                        failed_variations.append({
-                            "seed_task": seed.task_name,
-                            "variation_idx": var_idx,
-                            "error": str(e),
-                            "traceback": traceback.format_exc()
-                        })
-                        self.log(f"    Variation {var_idx} failed: {e}", "ERROR")
-                        if self.verbose:
-                            self.log(traceback.format_exc(), "DEBUG")
-
-            except Exception as e:
-                import traceback
-                failed_seeds.append({
-                    "task_name": seed.task_name,
-                    "error": str(e),
-                    "traceback": traceback.format_exc()
-                })
-                self.log(f"  CP-Gen augmentation failed for {seed.task_name}: {e}", "ERROR")
-                if self.verbose:
-                    self.log(traceback.format_exc(), "DEBUG")
-
-        # Log summary of failures
-        if failed_variations or failed_seeds:
-            self.log(f"  Variation generation: {len(failed_seeds)} seed failures, {len(failed_variations)} variation failures", "WARNING")
+        if variation_tasks:
+            variation_result = self._process_with_partial_failures(
+                variation_tasks,
+                process_fn=process_variation,
+                item_id_fn=lambda task: f"{task[0].episode_id}_var{task[2]}",
+                batch_name="cpgen_variations",
+            )
+            all_episodes.extend(variation_result.successful)
 
         self.log(f"  Generated {len(all_episodes)} total episodes")
         return all_episodes
@@ -1846,13 +1886,12 @@ class EpisodeGenerator:
     ) -> List[GeneratedEpisode]:
         """P2-1 FIX: Simple variation without CP-Gen (fallback)."""
         all_episodes = list(seed_episodes)
-        objects = manifest.get("objects", [])
-        failed_variations = []
 
         # P2-1 FIX: Get workspace defaults from manifest or robot config
         robot_config = manifest.get("robot_config", {})
         workspace_center = robot_config.get("workspace_center", [0.5, 0.0, 0.85])
 
+        eligible_seeds = []
         for seed in seed_episodes:
             # Skip seeds with uninitialized task spec or motion plan
             if seed.task_spec is None or seed.motion_plan is None:
@@ -1861,111 +1900,107 @@ class EpisodeGenerator:
             if not getattr(seed.motion_plan, "planning_success", True):
                 self.log(f"    Skipping seed {seed.episode_id} due to planning failure", "WARNING")
                 continue
+            eligible_seeds.append(seed)
 
+        variation_tasks: List[Tuple[GeneratedEpisode, int]] = []
+        for seed in eligible_seeds:
             for var_idx in range(1, num_variations):
+                variation_tasks.append((seed, var_idx))
+
+        def process_variation(task: Tuple[GeneratedEpisode, int]) -> GeneratedEpisode:
+            seed, var_idx = task
+            np.random.seed(var_idx)
+            varied_manifest = json.loads(json.dumps(manifest))
+
+            for obj in varied_manifest.get("objects", []):
+                if "position" in obj:
+                    pos = obj["position"]
+                    if isinstance(pos, list):
+                        offset = np.random.uniform(-0.05, 0.05, 3)
+                        offset[2] = 0
+                        obj["position"] = [p + o for p, o in zip(pos, offset)]
+
+            # P2-1 FIX: Regenerate episode for this variation
+            target_object = {
+                "id": seed.motion_plan.target_object_id if seed.motion_plan else "target",
+                "position": seed.motion_plan.target_object_position.tolist() if seed.motion_plan and seed.motion_plan.target_object_position is not None else workspace_center,
+                "dimensions": seed.motion_plan.target_object_dimensions.tolist() if seed.motion_plan and seed.motion_plan.target_object_dimensions is not None else [0.08, 0.08, 0.1],
+            }
+
+            # Add variation offset
+            offset = np.random.uniform(-0.05, 0.05, 3)
+            offset[2] = 0
+            target_object["position"] = [
+                p + o for p, o in zip(target_object["position"], offset)
+            ]
+
+            variation_scene_context = SceneContext(
+                scene_id=self.config.scene_id,
+                environment_type=varied_manifest.get("environment_type", "unknown"),
+                objects=varied_manifest.get("objects", []),
+                scene_usd_path=self.config.scene_usd_path,
+                robot_urdf_path=self.config.robot_urdf_path,
+            )
+
+            motion_plan = self.motion_planner.plan_motion(
+                task_name=seed.task_name,
+                task_description=seed.task_description,
+                target_object=target_object,
+                place_position=seed.motion_plan.place_position.tolist() if seed.motion_plan and seed.motion_plan.place_position is not None else None,
+                scene_context=variation_scene_context,
+            )
+
+            motion_plan, trajectory = self._solve_trajectory_with_replan(
+                motion_plan=motion_plan,
+                task_name=seed.task_name,
+                task_description=seed.task_description,
+                target_object=target_object,
+                place_position=seed.motion_plan.place_position.tolist() if seed.motion_plan and seed.motion_plan.place_position is not None else None,
+                articulation_info=None,
+                context_label=f"simple_var:{seed.task_name}:{var_idx}",
+            )
+            if not getattr(motion_plan, "planning_success", True):
+                raise RuntimeError(
+                    f"Simple variation planning failed for {seed.task_name} variation {var_idx}: "
+                    f"{motion_plan.planning_errors}"
+                )
+
+            trajectory = self.trajectory_solver.solve(motion_plan)
+
+            # Capture sensor data for simple variation
+            sensor_data = None
+            if self.sensor_capture:
                 try:
-                    # Apply small random offsets
-                    np.random.seed(var_idx)
-                    varied_manifest = json.loads(json.dumps(manifest))
-
-                    for obj in varied_manifest.get("objects", []):
-                        if "position" in obj:
-                            pos = obj["position"]
-                            if isinstance(pos, list):
-                                offset = np.random.uniform(-0.05, 0.05, 3)
-                                offset[2] = 0
-                                obj["position"] = [p + o for p, o in zip(pos, offset)]
-
-                    # P2-1 FIX: Regenerate episode for this variation
-                    target_object = {
-                        "id": seed.motion_plan.target_object_id if seed.motion_plan else "target",
-                        "position": seed.motion_plan.target_object_position.tolist() if seed.motion_plan and seed.motion_plan.target_object_position is not None else workspace_center,
-                        "dimensions": seed.motion_plan.target_object_dimensions.tolist() if seed.motion_plan and seed.motion_plan.target_object_dimensions is not None else [0.08, 0.08, 0.1],
-                    }
-
-                    # Add variation offset
-                    offset = np.random.uniform(-0.05, 0.05, 3)
-                    offset[2] = 0
-                    target_object["position"] = [
-                        p + o for p, o in zip(target_object["position"], offset)
-                    ]
-
-                    variation_scene_context = SceneContext(
-                        scene_id=self.config.scene_id,
-                        environment_type=varied_manifest.get("environment_type", "unknown"),
-                        objects=varied_manifest.get("objects", []),
-                        scene_usd_path=self.config.scene_usd_path,
-                        robot_urdf_path=self.config.robot_urdf_path,
+                    sensor_data = self.sensor_capture.capture_episode(
+                        episode_id=f"{seed.task_name}_var{var_idx}",
+                        trajectory_states=trajectory.states,
+                        scene_objects=varied_manifest.get("objects", []),
                     )
-
-                    motion_plan = self.motion_planner.plan_motion(
-                        task_name=seed.task_name,
-                        task_description=seed.task_description,
-                        target_object=target_object,
-                        place_position=seed.motion_plan.place_position.tolist() if seed.motion_plan and seed.motion_plan.place_position is not None else None,
-                        scene_context=variation_scene_context,
-                    )
-
-                    motion_plan, trajectory = self._solve_trajectory_with_replan(
-                        motion_plan=motion_plan,
-                        task_name=seed.task_name,
-                        task_description=seed.task_description,
-                        target_object=target_object,
-                        place_position=seed.motion_plan.place_position.tolist() if seed.motion_plan and seed.motion_plan.place_position is not None else None,
-                        articulation_info=None,
-                        context_label=f"simple_var:{seed.task_name}:{var_idx}",
-                    )
-                    if not getattr(motion_plan, "planning_success", True):
-                        self.log(
-                            f"    Motion planning failed for variation {var_idx}: {motion_plan.planning_errors}",
-                            "WARNING",
-                        )
-                        continue
-
-                    trajectory = self.trajectory_solver.solve(motion_plan)
-
-                    # Capture sensor data for simple variation
-                    sensor_data = None
-                    if self.sensor_capture:
-                        try:
-                            sensor_data = self.sensor_capture.capture_episode(
-                                episode_id=f"{seed.task_name}_var{var_idx}",
-                                trajectory_states=trajectory.states,
-                                scene_objects=varied_manifest.get("objects", []),
-                            )
-                        except Exception as e:
-                            self.log(f"    Sensor capture failed for simple var {var_idx}: {e}", "WARNING")
-
-                    episode = GeneratedEpisode(
-                        episode_id=f"{seed.task_name}_var{var_idx}_{uuid.uuid4().hex[:8]}",
-                        task_name=seed.task_name,
-                        task_description=seed.task_description,
-                        trajectory=trajectory,
-                        motion_plan=motion_plan,
-                        scene_id=self.config.scene_id,
-                        variation_index=var_idx,
-                        augmentation_method="simple",
-                        seed_episode_id=seed.episode_id,
-                        sensor_data=sensor_data,
-                        object_metadata=seed.object_metadata,
-                    )
-                    all_episodes.append(episode)
-
                 except Exception as e:
-                    import traceback
-                    failed_variations.append({
-                        "seed_task": seed.task_name,
-                        "variation_idx": var_idx,
-                        "error": str(e),
-                        "traceback": traceback.format_exc()
-                    })
-                    self.log(f"    Simple variation {var_idx} failed: {e}", "ERROR")
-                    if self.verbose:
-                        self.log(traceback.format_exc(), "DEBUG")
+                    self.log(f"    Sensor capture failed for simple var {var_idx}: {e}", "WARNING")
 
-        # Log summary of failures
-        if failed_variations:
-            self.log(f"  Simple variation generation: {len(failed_variations)} failures", "WARNING")
+            return GeneratedEpisode(
+                episode_id=f"{seed.task_name}_var{var_idx}_{uuid.uuid4().hex[:8]}",
+                task_name=seed.task_name,
+                task_description=seed.task_description,
+                trajectory=trajectory,
+                motion_plan=motion_plan,
+                scene_id=self.config.scene_id,
+                variation_index=var_idx,
+                augmentation_method="simple",
+                seed_episode_id=seed.episode_id,
+                sensor_data=sensor_data,
+                object_metadata=seed.object_metadata,
+            )
+
+        if variation_tasks:
+            variation_result = self._process_with_partial_failures(
+                variation_tasks,
+                process_fn=process_variation,
+                item_id_fn=lambda task: f"{task[0].episode_id}_var{task[1]}",
+                batch_name="simple_variations",
+            )
+            all_episodes.extend(variation_result.successful)
 
         return all_episodes
 
@@ -2037,7 +2072,7 @@ class EpisodeGenerator:
 
         objects = manifest.get("objects", [])
 
-        for episode in episodes:
+        def validate_episode(episode: GeneratedEpisode) -> GeneratedEpisode:
             if episode.trajectory is None or episode.motion_plan is None:
                 if episode.motion_plan is not None and not getattr(episode.motion_plan, "planning_success", True):
                     result = ValidationResult(
@@ -2050,12 +2085,12 @@ class EpisodeGenerator:
                     episode.is_valid = False
                     episode.quality_score = 0.0
                     episode.validation_errors = [r.value for r in result.failure_reasons]
-                    continue
+                    return episode
 
                 episode.is_valid = False
                 episode.quality_score = 0.0
                 episode.validation_errors.append("Missing trajectory or motion plan")
-                continue
+                return episode
 
             try:
                 result = self.validator.validate(
@@ -2074,7 +2109,15 @@ class EpisodeGenerator:
                 episode.quality_score = 0.0
                 episode.validation_errors.append(str(e))
 
-        return episodes
+            return episode
+
+        result = self._process_with_partial_failures(
+            episodes,
+            process_fn=validate_episode,
+            item_id_fn=lambda ep: ep.episode_id,
+            batch_name="validation",
+        )
+        return result.successful
 
     def _get_data_pack_includes(self) -> List[str]:
         """Get list of data streams included in the configured data pack."""
@@ -2125,6 +2168,7 @@ class EpisodeGenerator:
                 "use_cpgen": self.config.use_cpgen,
                 "use_validation": self.config.use_validation,
                 "min_quality_score": self.config.min_quality_score,
+                "min_success_rate": self.config.min_success_rate,
             },
             "data_pack": {
                 "tier": self.config.data_pack_tier,
@@ -2239,6 +2283,7 @@ def run_episode_generation_job(
     use_llm: bool = True,
     use_cpgen: bool = True,
     min_quality_score: float = 0.85,  # LABS-BLOCKER-002 FIX: Raised from 0.7
+    min_success_rate: float = 0.5,
     data_pack_tier: str = "core",
     num_cameras: int = 1,
     image_resolution: Tuple[int, int] = (640, 480),
@@ -2262,6 +2307,7 @@ def run_episode_generation_job(
         use_llm: Enable Gemini for task specification
         use_cpgen: Enable CP-Gen augmentation
         min_quality_score: Minimum quality score for export
+        min_success_rate: Minimum success rate for episode generation
         data_pack_tier: Data pack tier ("core", "plus", "full")
         num_cameras: Number of cameras to capture
         image_resolution: Image resolution (width, height)
@@ -2281,6 +2327,7 @@ def run_episode_generation_job(
     print(f"[EPISODE-GEN-JOB] Episodes per variation: {episodes_per_variation}")
     print(f"[EPISODE-GEN-JOB] CP-Gen augmentation: {use_cpgen}")
     print(f"[EPISODE-GEN-JOB] Min quality score: {min_quality_score}")
+    print(f"[EPISODE-GEN-JOB] Min success rate: {min_success_rate:.1%}")
     print(f"[EPISODE-GEN-JOB] Data pack: {data_pack_tier}")
     print(f"[EPISODE-GEN-JOB] Cameras: {num_cameras}")
     print(f"[EPISODE-GEN-JOB] Resolution: {image_resolution}")
@@ -2332,6 +2379,7 @@ def run_episode_generation_job(
         use_llm=use_llm,
         use_cpgen=use_cpgen,
         min_quality_score=min_quality_score,
+        min_success_rate=min_success_rate,
         data_pack_tier=data_pack_tier,
         num_cameras=num_cameras,
         image_resolution=image_resolution,
@@ -2719,6 +2767,14 @@ def main():
         print(f"[EPISODE-GEN-JOB] ERROR: Invalid MIN_QUALITY_SCORE: {e}")
         sys.exit(1)
 
+    try:
+        min_success_rate = float(os.getenv("MIN_SUCCESS_RATE", "0.5"))
+        if not (0.0 <= min_success_rate <= 1.0):
+            raise ValueError("MIN_SUCCESS_RATE must be between 0.0 and 1.0")
+    except ValueError as e:
+        print(f"[EPISODE-GEN-JOB] ERROR: Invalid MIN_SUCCESS_RATE: {e}")
+        sys.exit(1)
+
     # Data pack configuration (Core/Plus/Full)
     data_pack_tier = os.getenv("DATA_PACK_TIER", "core")
 
@@ -2756,6 +2812,7 @@ def main():
     print(f"[EPISODE-GEN-JOB]   Bundle Tier: {bundle_tier}")
     print(f"[EPISODE-GEN-JOB]   Cameras: {num_cameras}")
     print(f"[EPISODE-GEN-JOB]   Resolution: {image_resolution}")
+    print(f"[EPISODE-GEN-JOB]   Min success rate: {min_success_rate:.1%}")
     print(f"[EPISODE-GEN-JOB]   Allow mock capture: {allow_mock_capture}")
 
     GCS_ROOT = Path("/mnt/gcs")
@@ -2772,6 +2829,7 @@ def main():
         use_llm=use_llm,
         use_cpgen=use_cpgen,
         min_quality_score=min_quality_score,
+        min_success_rate=min_success_rate,
         data_pack_tier=data_pack_tier,
         num_cameras=num_cameras,
         image_resolution=image_resolution,
