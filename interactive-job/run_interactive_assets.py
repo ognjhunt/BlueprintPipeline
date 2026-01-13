@@ -22,7 +22,9 @@ Environment Variables:
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
 """
 import base64
+import importlib.util
 import json
+import math
 import os
 import sys
 import time
@@ -459,6 +461,130 @@ class URDFValidationResult:
 
     def add_repair(self, msg: str):
         self.repairs_made.append(msg)
+
+
+class SimulationValidationResult:
+    """Result of simulation-backed URDF validation."""
+
+    def __init__(self):
+        self.is_valid = True
+        self.errors: List[str] = []
+        self.warnings: List[str] = []
+        self.skipped = False
+        self.backend: Optional[str] = None
+
+    def add_error(self, msg: str):
+        self.errors.append(msg)
+        self.is_valid = False
+
+    def add_warning(self, msg: str):
+        self.warnings.append(msg)
+
+    def mark_skipped(self, reason: str):
+        self.skipped = True
+        self.add_warning(reason)
+
+
+def validate_urdf_in_pybullet(
+    urdf_path: Path,
+    mesh_dir: Optional[Path] = None,
+    obj_id: str = "",
+) -> SimulationValidationResult:
+    """
+    Validate a URDF by loading it in PyBullet and checking controllability.
+
+    Checks:
+    - URDF loads successfully in PyBullet
+    - Joint limits are valid for revolute/prismatic joints
+    - Joint axis is non-zero and normalized
+    - Controllable joints accept position control commands
+    """
+    result = SimulationValidationResult()
+    result.backend = "pybullet"
+
+    if not urdf_path.is_file():
+        result.add_error(f"URDF file does not exist: {urdf_path}")
+        return result
+
+    if importlib.util.find_spec("pybullet") is None:
+        result.mark_skipped("PyBullet not available; skipping simulation validation")
+        return result
+
+    import pybullet as p
+
+    client_id = p.connect(p.DIRECT)
+    try:
+        if mesh_dir:
+            p.setAdditionalSearchPath(str(mesh_dir), physicsClientId=client_id)
+
+        try:
+            body_id = p.loadURDF(
+                str(urdf_path),
+                basePosition=[0, 0, 0],
+                useFixedBase=True,
+                flags=p.URDF_USE_INERTIA_FROM_FILE,
+                physicsClientId=client_id,
+            )
+        except Exception as exc:
+            result.add_error(f"Failed to load URDF in PyBullet: {exc}")
+            return result
+
+        if body_id < 0:
+            result.add_error("PyBullet returned invalid body id")
+            return result
+
+        joint_count = p.getNumJoints(body_id, physicsClientId=client_id)
+        for joint_index in range(joint_count):
+            joint_info = p.getJointInfo(body_id, joint_index, physicsClientId=client_id)
+            joint_name = joint_info[1].decode("utf-8", errors="ignore") if joint_info[1] else f"joint_{joint_index}"
+            joint_type = joint_info[2]
+            lower_limit = joint_info[8]
+            upper_limit = joint_info[9]
+            axis = joint_info[13]
+
+            axis_norm = math.sqrt(sum(v * v for v in axis))
+            if axis_norm <= 1e-6 and joint_type != p.JOINT_FIXED:
+                result.add_error(f"Joint '{joint_name}': axis is zero vector in PyBullet")
+            elif axis_norm > 1e-6 and abs(axis_norm - 1.0) > 0.05:
+                result.add_warning(f"Joint '{joint_name}': axis not normalized (norm={axis_norm:.3f})")
+
+            if joint_type in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
+                if lower_limit >= upper_limit:
+                    result.add_error(
+                        f"Joint '{joint_name}': lower limit ({lower_limit}) >= upper limit ({upper_limit})"
+                    )
+
+                mid = (lower_limit + upper_limit) * 0.5
+                try:
+                    p.resetJointState(body_id, joint_index, mid, physicsClientId=client_id)
+                    p.setJointMotorControl2(
+                        bodyIndex=body_id,
+                        jointIndex=joint_index,
+                        controlMode=p.POSITION_CONTROL,
+                        targetPosition=mid,
+                        force=100,
+                        physicsClientId=client_id,
+                    )
+                except Exception as exc:
+                    result.add_error(f"Joint '{joint_name}': not controllable in PyBullet ({exc})")
+
+    finally:
+        p.disconnect(physicsClientId=client_id)
+
+    return result
+
+
+def validate_urdf_in_simulator(
+    urdf_path: Path,
+    mesh_dir: Optional[Path] = None,
+    obj_id: str = "",
+) -> SimulationValidationResult:
+    """
+    Validate URDF in a simulator backend (PyBullet preferred).
+
+    Returns a SimulationValidationResult with validation status and warnings.
+    """
+    return validate_urdf_in_pybullet(urdf_path, mesh_dir, obj_id)
 
 
 def validate_urdf(urdf_path: Path, mesh_dir: Optional[Path] = None) -> URDFValidationResult:
@@ -1123,6 +1249,32 @@ def process_object(
         obj_id=obj_name
     )
 
+    # Simulation-backed validation (PyBullet/Isaac Sim)
+    sim_validation = validate_urdf_in_simulator(
+        urdf_path,
+        mesh_dir=output_dir,
+        obj_id=obj_name,
+    )
+    if sim_validation.errors:
+        log(f"Simulation validation errors: {sim_validation.errors}", "ERROR", obj_id=obj_name)
+    if sim_validation.warnings:
+        log(f"Simulation validation warnings: {sim_validation.warnings}", "WARNING", obj_id=obj_name)
+
+    downgraded_to_static = False
+    if not sim_validation.skipped and not sim_validation.is_valid:
+        log(
+            "Invalid URDF in simulator; downgrading to static asset.",
+            "WARNING",
+            obj_id=obj_name,
+        )
+        urdf_path.write_text(
+            generate_static_urdf(obj_name, mesh_path.name),
+            encoding="utf-8",
+        )
+        result["status"] = "static"
+        downgraded_to_static = True
+        urdf_validation = validate_urdf(urdf_path, mesh_dir=output_dir)
+
     # Parse URDF for joint information
     joint_summary = parse_urdf_summary(urdf_path)
     joint_count = len(joint_summary.get("joints", []))
@@ -1145,6 +1297,14 @@ def process_object(
             "warnings": urdf_validation.warnings,
             "repairs_made": urdf_validation.repairs_made,
         },
+        "simulation_validation": {
+            "backend": sim_validation.backend,
+            "is_valid": sim_validation.is_valid,
+            "errors": sim_validation.errors,
+            "warnings": sim_validation.warnings,
+            "skipped": sim_validation.skipped,
+        },
+        "downgraded_to_static": downgraded_to_static,
     }
 
     if glb_path:
@@ -1155,7 +1315,8 @@ def process_object(
     save_json(manifest, manifest_path)
 
     # Update result
-    result["status"] = "ok"
+    if result["status"] == "pending":
+        result["status"] = "ok"
     result["mesh_path"] = str(mesh_path)
     result["urdf_path"] = str(urdf_path)
     result["manifest_path"] = str(manifest_path)
@@ -1163,6 +1324,7 @@ def process_object(
     result["is_articulated"] = joint_count > 0
     result["urdf_valid"] = urdf_validation.is_valid
     result["urdf_repairs"] = len(urdf_validation.repairs_made)
+    result["downgraded_to_static"] = downgraded_to_static
 
     log(f"Completed: {joint_count} joints detected, articulated={joint_count > 0}, urdf_valid={urdf_validation.is_valid}", obj_id=obj_name)
 
