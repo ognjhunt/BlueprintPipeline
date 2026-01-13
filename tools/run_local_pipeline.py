@@ -181,6 +181,8 @@ class LocalPipelineRunner:
         if run_validation and PipelineStep.VALIDATE not in steps:
             steps.append(PipelineStep.VALIDATE)
 
+        self._apply_labs_flags(run_validation=run_validation)
+
         self.log("=" * 60)
         self.log("BlueprintPipeline Local Runner")
         self.log("=" * 60)
@@ -216,6 +218,21 @@ class LocalPipelineRunner:
         self._print_summary()
 
         return all_success
+
+    def _apply_labs_flags(self, run_validation: bool) -> None:
+        """Apply production/labs flags for staging or lab validation runs."""
+        staging_e2e = os.environ.get("RUN_STAGING_E2E") == "1"
+        labs_staging = os.environ.get("LABS_STAGING", "").lower() in {"1", "true", "yes"}
+        labs_validation = os.environ.get("LABS_VALIDATION", "").lower() in {"1", "true", "yes"}
+
+        if not (staging_e2e or labs_staging or (labs_validation and run_validation)):
+            return
+
+        os.environ.setdefault("LABS_STAGING", "1")
+        os.environ.setdefault("DATA_QUALITY_LEVEL", "production")
+        os.environ.setdefault("ISAAC_SIM_REQUIRED", "true")
+        os.environ.setdefault("PRODUCTION_MODE", "true")
+        self.log("Applied labs/production flags for staging or lab validation runs")
 
     def _run_step(self, step: PipelineStep) -> StepResult:
         """Run a single pipeline step."""
