@@ -63,6 +63,9 @@ main:
           - episodesPrefix: '${"scenes/" + sceneId + "/episodes"}'
           - upsellOutputPrefix: '${"scenes/" + sceneId + "/episodes/upsell_outputs"}'
           - upsellCompleteMarker: '${"scenes/" + sceneId + "/episodes/upsell_outputs/.upsell_complete"}'
+          - upsellFailedMarker: '${"scenes/" + sceneId + "/episodes/upsell_outputs/.failed"}'
+          - upsellLegacyFailedMarker: '${"scenes/" + sceneId + "/episodes/upsell_outputs/.upsell_failed"}'
+          - upsellJobName: "upsell-features-job"
         next: check_bundle_tier
 
     # Skip if standard tier (no upsell features)
@@ -146,6 +149,11 @@ main:
                     - name: SCENE_PATH
                       value: ${scenePath}
         result: jobResult
+        next: set_upsell_execution_name
+
+    - set_upsell_execution_name:
+        assign:
+          - upsellExecutionName: '${if(jobResult.metadata != null and jobResult.metadata.name != null, jobResult.metadata.name, jobResult.name)}'
         next: wait_for_job
 
     - wait_for_job:
@@ -204,16 +212,82 @@ main:
         args:
           text: '${"ERROR: Upsell features processing failed for scene " + sceneId}'
           severity: "ERROR"
+        next: read_failure_marker
+
+    - read_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${upsellFailedMarker}
+            alt: "media"
+          result: upsellFailurePayload
+        except:
+          as: e
+          steps:
+            - handle_missing_upsell_failure_marker:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: write_failure_marker
+                next: log_upsell_failure_marker_read_error
+        next: log_upsell_failure_marker_payload
+
+    - log_upsell_failure_marker_read_error:
+        call: sys.log
+        args:
+          text: '${"Failed to read .failed marker for upsell in scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
         next: write_failure_marker
+
+    - log_upsell_failure_marker_payload:
+        call: sys.log
+        args:
+          text: '${"Upsell failure marker payload for scene " + sceneId + ": " + upsellFailurePayload}'
+          severity: "ERROR"
+        next: write_legacy_failure_marker
 
     - write_failure_marker:
         call: googleapis.storage.v1.objects.insert
         args:
           bucket: ${bucket}
-          name: '${"scenes/" + sceneId + "/episodes/upsell_outputs/.upsell_failed"}'
+          name: ${upsellFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": upsellJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "upsell_features_failed",
+              "message": "Upsell features processing failed",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": upsellExecutionName,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "upsell_output_prefix": upsellOutputPrefix,
+                "bundle_tier": bundleTier
+              }
+            },
+            "input_params": {
+              "scene_id": sceneId,
+              "bucket": bucket
+            }
+          })}
+        result: failMarkerResult
+        next: write_legacy_failure_marker
+
+    - write_legacy_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${upsellLegacyFailedMarker}
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"bundle_tier\": \"" + bundleTier + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
-        result: failMarkerResult
+        result: legacyFailMarkerResult
         next: done_with_failure
 
     # =========================================================================

@@ -60,7 +60,8 @@ main:
           - layoutPrefix: '${"scenes/" + sceneId + "/layout"}'
           - regen3dJobName: "regen3d-adapter-job"
           - regen3dCompleteMarker: '${assetsPrefix + "/.regen3d_complete"}'
-          - regen3dFailedMarker: '${assetsPrefix + "/.regen3d_failed"}'
+          - regen3dFailedMarker: '${assetsPrefix + "/.failed"}'
+          - regen3dLegacyFailedMarker: '${assetsPrefix + "/.regen3d_failed"}'
         next: check_already_processed
 
     # Check if 3D reconstruction already completed (idempotence)
@@ -245,7 +246,39 @@ main:
         args:
           text: ${errorMsg}
           severity: "ERROR"
+        next: read_failure_marker
+
+    - read_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${regen3dFailedMarker}
+            alt: "media"
+          result: failureMarkerPayload
+        except:
+          as: e
+          steps:
+            - handle_missing_marker:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: write_failure_marker
+                next: log_failure_marker_read_error
+        next: log_failure_marker_payload
+
+    - log_failure_marker_read_error:
+        call: sys.log
+        args:
+          text: '${"Failed to read .failed marker for scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
         next: write_failure_marker
+
+    - log_failure_marker_payload:
+        call: sys.log
+        args:
+          text: '${"Failure marker payload for scene " + sceneId + ": " + failureMarkerPayload}'
+          severity: "ERROR"
+        next: write_legacy_failure_marker
 
     # Write failure marker for debugging and monitoring
     - write_failure_marker:
@@ -255,7 +288,32 @@ main:
             bucket: ${bucket}
             name: ${regen3dFailedMarker}
             uploadType: "media"
-            body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\", \"execution\": \"" + regen3dExecutionName + "\"}"}'
+            body: ${json.encode({
+              "scene_id": sceneId,
+              "job_name": regen3dJobName,
+              "status": "failed",
+              "timestamp": time.format(sys.now()),
+              "error": {
+                "code": "regen3d_failed",
+                "message": "3D reconstruction job failed",
+                "type": "workflow_failure",
+                "stack_trace": null
+              },
+              "context": {
+                "execution_id": regen3dExecutionName,
+                "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                "attempt_number": 1,
+                "config_context": {
+                  "assets_prefix": assetsPrefix,
+                  "layout_prefix": layoutPrefix,
+                  "seg_prefix": segPrefix
+                }
+              },
+              "input_params": {
+                "scene_id": sceneId,
+                "bucket": bucket
+              }
+            })}
           result: failMarkerResult
         except:
           as: e
@@ -264,6 +322,32 @@ main:
                 call: sys.log
                 args:
                   text: '${"Failed to write failure marker: " + e.message}'
+                  severity: "WARNING"
+        next: log_written_failure_marker
+
+    - log_written_failure_marker:
+        call: sys.log
+        args:
+          text: '${"Wrote .failed marker for scene " + sceneId}'
+          severity: "ERROR"
+        next: write_legacy_failure_marker
+
+    - write_legacy_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${regen3dLegacyFailedMarker}
+            uploadType: "media"
+            body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\", \"execution\": \"" + regen3dExecutionName + "\"}"}'
+          result: legacyFailMarkerResult
+        except:
+          as: e
+          steps:
+            - log_legacy_marker_write_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to write legacy failure marker: " + e.message}'
                   severity: "WARNING"
         next: raise_regen3d_error
 
