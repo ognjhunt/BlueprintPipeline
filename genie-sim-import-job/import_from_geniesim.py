@@ -19,6 +19,7 @@ Environment Variables:
     OUTPUT_PREFIX: Output path for imported episodes (default: scenes/{scene_id}/episodes)
     MIN_QUALITY_SCORE: Minimum quality score for import (default: 0.7)
     ENABLE_VALIDATION: Enable quality validation (default: true)
+    REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: false)
 """
 
 import json
@@ -84,6 +85,7 @@ class ImportConfig:
     min_quality_score: float = 0.85
     enable_validation: bool = True
     filter_low_quality: bool = True
+    require_lerobot: bool = False
 
     # Polling (if waiting for completion)
     poll_interval: int = 30
@@ -113,6 +115,7 @@ class ImportResult:
     output_dir: Optional[Path] = None
     manifest_path: Optional[Path] = None
     import_manifest_path: Optional[Path] = None
+    lerobot_conversion_success: bool = True
 
     # Errors
     errors: List[str] = field(default_factory=list)
@@ -694,6 +697,8 @@ def run_import_job(
         # Step 5: Convert episodes to LeRobot format
         print(f"[IMPORT] Converting episodes to LeRobot format...")
         lerobot_dir = config.output_dir / "lerobot"
+        lerobot_error = None
+        convert_result: Dict[str, Any] = {}
         try:
             convert_result = convert_to_lerobot(
                 episodes_dir=config.output_dir,
@@ -701,11 +706,21 @@ def run_import_job(
                 episode_metadata_list=download_result.episodes,
                 min_quality_score=config.min_quality_score,
             )
+            result.lerobot_conversion_success = True
             print(f"[IMPORT] ✅ Converted {convert_result['converted_count']} episodes to LeRobot format")
             print(f"[IMPORT]    Output: {convert_result['output_dir']}\n")
         except Exception as e:
-            result.warnings.append(f"LeRobot conversion failed: {e}")
-            print(f"[IMPORT] ⚠️  LeRobot conversion failed: {e}\n")
+            lerobot_error = str(e)
+            result.lerobot_conversion_success = False
+            result.warnings.append(f"LeRobot conversion failed: {lerobot_error}")
+            print(f"[IMPORT] ⚠️  LeRobot conversion failed: {lerobot_error}\n")
+
+            if config.enable_validation or config.require_lerobot:
+                result.errors.append(
+                    "LeRobot conversion failed and is required "
+                    f"(enable_validation={config.enable_validation}, require_lerobot={config.require_lerobot}): "
+                    f"{lerobot_error}"
+                )
 
         # Step 6: Update manifest with import metadata
         if result.manifest_path and result.manifest_path.exists():
@@ -719,7 +734,9 @@ def run_import_job(
                 "passed_validation": result.episodes_passed_validation,
                 "filtered": result.episodes_filtered,
                 "average_quality_score": result.average_quality_score,
-                "lerobot_converted": convert_result.get('converted_count', 0) if 'convert_result' in locals() else 0,
+                "lerobot_converted": convert_result.get('converted_count', 0),
+                "lerobot_conversion_success": result.lerobot_conversion_success,
+                "lerobot_conversion_error": lerobot_error,
             }
 
             with open(result.manifest_path, "w") as f:
@@ -756,6 +773,13 @@ def run_import_job(
                 "threshold": config.min_quality_score,
                 "validation_enabled": config.enable_validation,
             },
+            "lerobot": {
+                "conversion_success": result.lerobot_conversion_success,
+                "converted_count": convert_result.get("converted_count", 0),
+                "output_dir": str(lerobot_dir),
+                "error": lerobot_error,
+                "required": config.require_lerobot or config.enable_validation,
+            },
             "metrics_summary": metrics_summary,
         }
 
@@ -765,12 +789,12 @@ def run_import_job(
         result.import_manifest_path = import_manifest_path
 
         # Success
-        result.success = True
+        result.success = len(result.errors) == 0
 
         print("=" * 80)
         print("IMPORT COMPLETE")
         print("=" * 80)
-        print(f"✅ Successfully imported {result.episodes_passed_validation} episodes")
+        print(f"{'✅' if result.success else '❌'} Successfully imported {result.episodes_passed_validation} episodes")
         print(f"Output directory: {result.output_dir}")
         print(f"Manifest: {result.manifest_path}")
         print("=" * 80 + "\n")
@@ -826,6 +850,7 @@ def main():
     min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
     enable_validation = os.getenv("ENABLE_VALIDATION", "true").lower() == "true"
     filter_low_quality = os.getenv("FILTER_LOW_QUALITY", "true").lower() == "true"
+    require_lerobot = os.getenv("REQUIRE_LEROBOT", "false").lower() == "true"
 
     # Polling configuration
     poll_interval = int(os.getenv("GENIE_SIM_POLL_INTERVAL", "30"))
@@ -839,6 +864,7 @@ def main():
     print(f"[GENIE-SIM-IMPORT]   Output Prefix: {output_prefix}")
     print(f"[GENIE-SIM-IMPORT]   Min Quality: {min_quality_score}")
     print(f"[GENIE-SIM-IMPORT]   Enable Validation: {enable_validation}")
+    print(f"[GENIE-SIM-IMPORT]   Require LeRobot: {require_lerobot}")
     print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}")
     print(f"[GENIE-SIM-IMPORT]   Fail on Partial Error: {fail_on_partial_error}\n")
 
@@ -854,6 +880,7 @@ def main():
         min_quality_score=min_quality_score,
         enable_validation=enable_validation,
         filter_low_quality=filter_low_quality,
+        require_lerobot=require_lerobot,
         poll_interval=poll_interval,
         wait_for_completion=wait_for_completion,
         fail_on_partial_error=fail_on_partial_error,  # P0-8 FIX
