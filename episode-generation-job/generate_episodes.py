@@ -181,6 +181,7 @@ class EpisodeGenerationConfig:
     # Robot configuration
     robot_type: str = "franka"
     robot_prim_paths: Optional[List[str]] = None
+    camera_specs: Optional[List[Dict[str, str]]] = None
     scene_usd_path: Optional[str] = None
 
     # Generation parameters
@@ -289,6 +290,39 @@ def _resolve_scene_usd_path(scene_dir: Path) -> Optional[str]:
                 return str(matches[0])
 
     return None
+
+
+def _load_camera_specs(scene_config: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
+    """Load optional camera specs from scene config."""
+    raw_specs = scene_config.get("cameras")
+    if not raw_specs:
+        return None
+    if not isinstance(raw_specs, list):
+        print("[EPISODE-GEN-JOB] WARNING: scene config cameras entry is not a list.")
+        return None
+
+    normalized: List[Dict[str, str]] = []
+    for entry in raw_specs:
+        if not isinstance(entry, dict):
+            continue
+        prim_path = entry.get("prim_path") or entry.get("path")
+        if not prim_path:
+            continue
+        camera_type = entry.get("type") or entry.get("camera_type") or "rgb"
+        camera_id = entry.get("camera_id") or entry.get("id") or camera_type
+        normalized.append(
+            {
+                "prim_path": prim_path,
+                "camera_type": camera_type,
+                "camera_id": camera_id,
+            }
+        )
+
+    if not normalized:
+        print("[EPISODE-GEN-JOB] WARNING: scene config cameras list is empty.")
+        return None
+
+    return normalized
 
 
 @dataclass
@@ -1016,6 +1050,7 @@ class EpisodeGenerator:
                     num_cameras=config.num_cameras,
                     resolution=config.image_resolution,
                     fps=config.fps,
+                    camera_specs=config.camera_specs,
                     robot_prim_paths=config.robot_prim_paths,
                     scene_usd_path=config.scene_usd_path,
                     capture_mode=capture_mode,
@@ -2228,6 +2263,7 @@ def run_episode_generation_job(
     scene_dir = root / f"scenes/{scene_id}"
     scene_config = _load_scene_config(scene_dir)
     scene_usd_path = _resolve_scene_usd_path(scene_dir)
+    camera_specs = _load_camera_specs(scene_config)
 
     robot_prim_paths = scene_config.get("robot_prim_paths")
     if not robot_prim_paths:
@@ -2243,6 +2279,7 @@ def run_episode_generation_job(
         manifest_path=manifest_path,
         robot_type=robot_type,
         robot_prim_paths=robot_prim_paths,
+        camera_specs=camera_specs,
         scene_usd_path=scene_usd_path,
         episodes_per_variation=episodes_per_variation,
         max_variations=max_variations,
