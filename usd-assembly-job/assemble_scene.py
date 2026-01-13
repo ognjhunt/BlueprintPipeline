@@ -20,7 +20,9 @@ Environment variables:
   BYPASS_QUALITY_GATES - Skip quality gate evaluation (dev-only)
 """
 
+import json
 import os
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -48,6 +50,7 @@ def _gate_report_path(scene_id: str) -> Path:
     report_path = GCS_ROOT / f"scenes/{scene_id}/{JOB_NAME}/quality_gate_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     return report_path
+from tools.metrics.pipeline_metrics import get_metrics
 
 
 def main() -> None:
@@ -102,6 +105,29 @@ def main() -> None:
             ],
         )
         sys.exit(1)
+    scene_id = os.getenv("SCENE_ID", "")
+    metrics = get_metrics()
+    with metrics.track_job("usd-assembly-job", scene_id):
+        exit_code = assemble_from_env()
+
+    usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
+    completion_manifest_path = Path("/mnt/gcs") / usd_prefix / "usd_assembly_manifest.json"
+    metrics_summary = {
+        "backend": metrics.backend.value,
+        "stats": metrics.get_stats(),
+    }
+    completion_manifest = {
+        "scene_id": scene_id,
+        "assets_prefix": assets_prefix,
+        "layout_prefix": os.getenv("LAYOUT_PREFIX", ""),
+        "usd_prefix": usd_prefix,
+        "convert_only": os.getenv("CONVERT_ONLY", "false").lower() in {"1", "true", "yes"},
+        "status": "completed" if exit_code == 0 else "failed",
+        "completed_at": datetime.utcnow().isoformat() + "Z",
+        "metrics_summary": metrics_summary,
+    }
+    completion_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    completion_manifest_path.write_text(json.dumps(completion_manifest, indent=2))
 
     sys.exit(exit_code)
 

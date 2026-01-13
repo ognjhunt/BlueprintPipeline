@@ -76,6 +76,9 @@ class VideoGeneratorConfig:
     # Debug
     verbose: bool = True
     save_debug_info: bool = False
+    # Feature flags
+    enabled: bool = True
+    allow_placeholder: bool = True
 
 
 class VideoGenerator:
@@ -90,6 +93,7 @@ class VideoGenerator:
         self.config = config
         self.model = None
         self._initialized = False
+        self._disabled_reason: Optional[str] = None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.config.verbose:
@@ -104,6 +108,11 @@ class VideoGenerator:
         """
         if self._initialized:
             return True
+        if not self.config.enabled:
+            self._disabled_reason = "Video generation disabled by configuration."
+            self.log(self._disabled_reason, level="WARNING")
+            self._initialized = True
+            return False
 
         # PLACEHOLDER: Awaiting Dream2Flow model release (arXiv:2512.24766)
         # When available, implement:
@@ -113,15 +122,39 @@ class VideoGenerator:
         # 4. Validate model compatibility with task instruction format
         # 5. Pre-allocate GPU memory for efficient generation
         # 6. Initialize dream2flow client/library
+        if not self.config.api_endpoint and not self.config.checkpoint_path and not self.config.allow_placeholder:
+            self._disabled_reason = (
+                "Video generation disabled: no API endpoint or checkpoint configured "
+                "and placeholders are not allowed."
+            )
+            self.log(self._disabled_reason, level="ERROR")
+            self._initialized = True
+            return False
+
         try:
-            # from dream2flow import VideoGenerator  # Not yet available
+            if self.config.checkpoint_path:
+                if not self.config.checkpoint_path.exists():
+                    raise FileNotFoundError(f"Checkpoint not found: {self.config.checkpoint_path}")
+                # from dream2flow import VideoGenerator  # Not yet available
+                # self.model = VideoGenerator.from_checkpoint(self.config.checkpoint_path)
+                # self.model.eval()
+                self.log(
+                    "Local Dream2Flow checkpoint specified but integration not available; "
+                    "falling back to placeholder mode.",
+                    level="WARNING",
+                )
             self.log("Video generator initialized (placeholder mode - awaiting Dream2Flow release)")
             self._initialized = True
             return True
-        except ImportError as e:
-            self.log(f"Dream2Flow not available: {e}", level="WARNING")
-            self._initialized = True  # Still proceed in placeholder mode
-            return True
+        except (ImportError, FileNotFoundError) as e:
+            if self.config.allow_placeholder:
+                self.log(f"Dream2Flow not available: {e}", level="WARNING")
+                self._initialized = True  # Still proceed in placeholder mode
+                return True
+            self._disabled_reason = f"Video generation disabled: {e}"
+            self.log(self._disabled_reason, level="ERROR")
+            self._initialized = True
+            return False
 
     def generate(
         self,
@@ -144,6 +177,19 @@ class VideoGenerator:
         """
         if not self._initialized:
             self.initialize()
+        if self._disabled_reason:
+            self.log(self._disabled_reason, level="ERROR")
+            return GeneratedVideo(
+                video_id=video_id or f"video_{uuid.uuid4().hex[:8]}",
+                instruction=instruction,
+                initial_observation=observation,
+                resolution=self.config.resolution,
+                num_frames=0,
+                fps=self.config.fps,
+                model_name=self.config.model_name,
+                quality_score=0.0,
+                metadata={"error": self._disabled_reason, "disabled": True},
+            )
 
         video_id = video_id or f"video_{uuid.uuid4().hex[:8]}"
         output_dir = Path(output_dir)
@@ -303,10 +349,15 @@ class VideoGenerator:
         video_id: str,
     ) -> GeneratedVideo:
         """Generate video using local model checkpoint."""
-        # TODO: Implement when Dream2Flow model is released
-        raise NotImplementedError(
-            "Local model generation not yet implemented. "
-            "Waiting for Dream2Flow model release."
+        if self.model is None:
+            raise RuntimeError(
+                "Local video generation is disabled: no Dream2Flow model available. "
+                "Provide a valid checkpoint and integration or set allow_placeholder=True."
+            )
+        # Placeholder for actual model invocation when available.
+        raise RuntimeError(
+            "Local Dream2Flow generation is unavailable in this build. "
+            "Use the API endpoint or enable placeholders."
         )
 
     def _generate_placeholder(

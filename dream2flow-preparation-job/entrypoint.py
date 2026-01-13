@@ -21,6 +21,15 @@ Environment Variables:
         FPS: Frames per second (default: 24)
         ROBOT: Robot embodiment (default: franka_panda)
         VIDEO_API_ENDPOINT: API endpoint for video generation (optional)
+        DREAM2FLOW_VIDEO_CHECKPOINT: Local checkpoint path for video generation (optional)
+        SEGMENTATION_API: API endpoint for segmentation (optional)
+        DEPTH_API: API endpoint for depth estimation (optional)
+        TRACKING_API: API endpoint for point tracking (optional)
+        ROBOT_TRACKING_API: API endpoint for robot tracking (optional)
+        DREAM2FLOW_ENABLE_VIDEO: Enable video generation stage (default: true)
+        DREAM2FLOW_ENABLE_FLOW: Enable flow extraction stage (default: true)
+        DREAM2FLOW_ENABLE_ROBOT: Enable robot tracking stage (default: true)
+        DREAM2FLOW_ALLOW_PLACEHOLDER: Allow placeholder fallbacks (default: true)
 """
 
 import json
@@ -144,6 +153,12 @@ def main():
     bucket_name = os.environ.get("BUCKET")
     scene_id = os.environ.get("SCENE_ID")
 
+    def env_flag(name: str, default: bool = True) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
     # Get optional environment variables
     assets_prefix = os.environ.get("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
     usd_prefix = os.environ.get("USD_PREFIX", f"scenes/{scene_id}/usd")
@@ -155,6 +170,15 @@ def main():
     fps = float(os.environ.get("FPS", "24"))
     robot_name = os.environ.get("ROBOT", "franka_panda")
     video_api_endpoint = os.environ.get("VIDEO_API_ENDPOINT")
+    video_checkpoint_path = os.environ.get("DREAM2FLOW_VIDEO_CHECKPOINT")
+    segmentation_api = os.environ.get("SEGMENTATION_API")
+    depth_api = os.environ.get("DEPTH_API")
+    tracking_api = os.environ.get("TRACKING_API")
+    robot_tracking_api = os.environ.get("ROBOT_TRACKING_API")
+    enable_video = env_flag("DREAM2FLOW_ENABLE_VIDEO", True)
+    enable_flow = env_flag("DREAM2FLOW_ENABLE_FLOW", True)
+    enable_robot = env_flag("DREAM2FLOW_ENABLE_ROBOT", True)
+    allow_placeholder = env_flag("DREAM2FLOW_ALLOW_PLACEHOLDER", True)
 
     # Map robot name to enum
     robot_map = {
@@ -177,6 +201,22 @@ def main():
     print(f"  ROBOT: {robot_name}")
     if video_api_endpoint:
         print(f"  VIDEO_API_ENDPOINT: {video_api_endpoint}")
+    if video_checkpoint_path:
+        print(f"  VIDEO_CHECKPOINT: {video_checkpoint_path}")
+    if segmentation_api or depth_api or tracking_api:
+        print("  Flow APIs:")
+        if segmentation_api:
+            print(f"    SEGMENTATION_API: {segmentation_api}")
+        if depth_api:
+            print(f"    DEPTH_API: {depth_api}")
+        if tracking_api:
+            print(f"    TRACKING_API: {tracking_api}")
+    if robot_tracking_api:
+        print(f"  ROBOT_TRACKING_API: {robot_tracking_api}")
+    print(f"  ENABLE_VIDEO: {enable_video}")
+    print(f"  ENABLE_FLOW: {enable_flow}")
+    print(f"  ENABLE_ROBOT: {enable_robot}")
+    print(f"  ALLOW_PLACEHOLDER: {allow_placeholder}")
 
     # Create GCS client
     client = storage.Client()
@@ -214,6 +254,15 @@ def main():
                 fps=fps,
                 robot_embodiment=robot,
                 video_api_endpoint=video_api_endpoint,
+                video_checkpoint_path=Path(video_checkpoint_path) if video_checkpoint_path else None,
+                segmentation_api=segmentation_api,
+                depth_api=depth_api,
+                tracking_api=tracking_api,
+                robot_tracking_api=robot_tracking_api,
+                enable_video_generation=enable_video,
+                enable_flow_extraction=enable_flow,
+                enable_robot_tracking=enable_robot,
+                allow_placeholder=allow_placeholder,
                 verbose=True,
             )
 

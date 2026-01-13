@@ -18,6 +18,8 @@ Environment Variables:
     SCENE_ID: Scene identifier
     ASSETS_PREFIX: Path to assets (contains scene_assets.json)
     PARTICULATE_ENDPOINT: Particulate Cloud Run service URL
+    PARTICULATE_MODE: "remote" (default), "local", or "skip" for inference control
+    PARTICULATE_LOCAL_ENDPOINT: Optional local Particulate URL for PARTICULATE_MODE=local
     REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
 """
@@ -40,6 +42,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 from tools.workflow import FailureMarkerWriter
+from tools.metrics.pipeline_metrics import get_metrics
 
 
 # =============================================================================
@@ -56,6 +59,10 @@ MAX_RETRIES = 3
 MODE_GLB = "glb"      # 3D-RE-GEN GLB mesh input (default)
 MODE_IMAGE = "image"  # Legacy crop image input
 
+PARTICULATE_MODE_REMOTE = "remote"
+PARTICULATE_MODE_LOCAL = "local"
+PARTICULATE_MODE_SKIP = "skip"
+
 
 # =============================================================================
 # Logging
@@ -71,6 +78,37 @@ def log(msg: str, level: str = "INFO", obj_id: str = "") -> None:
 def parse_env_flag(value: str) -> bool:
     """Parse boolean-like environment variable values."""
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def normalize_particulate_mode(value: str) -> str:
+    """Normalize particulate mode env var to a supported value."""
+    mode = value.strip().lower()
+    if mode not in {PARTICULATE_MODE_REMOTE, PARTICULATE_MODE_LOCAL, PARTICULATE_MODE_SKIP}:
+        log(
+            f"Unknown PARTICULATE_MODE '{value}', defaulting to '{PARTICULATE_MODE_REMOTE}'",
+            "WARNING",
+        )
+        return PARTICULATE_MODE_REMOTE
+    return mode
+
+
+def resolve_particulate_endpoint(
+    particulate_mode: str,
+    remote_endpoint: str,
+    local_endpoint: str,
+) -> Tuple[str, Optional[str]]:
+    """Resolve the particulate endpoint based on mode."""
+    if particulate_mode == PARTICULATE_MODE_LOCAL:
+        endpoint = local_endpoint or "http://localhost:8080"
+        if not local_endpoint:
+            log(
+                f"PARTICULATE_LOCAL_ENDPOINT not set; using default {endpoint}",
+                "WARNING",
+            )
+        return endpoint, "local"
+    if particulate_mode == PARTICULATE_MODE_REMOTE:
+        return remote_endpoint, "remote"
+    return "", None
 
 
 def write_failure_marker(
@@ -484,13 +522,16 @@ def call_particulate_service(
                 headers={"Content-Type": "application/json"},
             )
 
+            metrics = get_metrics()
+            scene_id = os.getenv("SCENE_ID", "")
             start = time.time()
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                elapsed = int(time.time() - start)
-                log(f"Response: {resp.status} ({elapsed}s)", obj_id=obj_id)
+            with metrics.track_api_call("particulate", "articulation", scene_id):
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    elapsed = int(time.time() - start)
+                    log(f"Response: {resp.status} ({elapsed}s)", obj_id=obj_id)
 
-                text = resp.read().decode("utf-8", errors="replace")
-                data = json.loads(text)
+                    text = resp.read().decode("utf-8", errors="replace")
+                    data = json.loads(text)
 
                 is_placeholder = data.get("placeholder", True)
                 articulation = data.get("articulation", {})
@@ -1199,6 +1240,7 @@ def process_object(
     regen3d_root: Path,
     multiview_root: Path,
     particulate_endpoint: Optional[str],
+    particulate_mode: str,
     mode: str,
     index: int,
     total: int,
@@ -1233,6 +1275,7 @@ def process_object(
         "status": "pending",
         "mode": mode,
         "backend": "particulate",
+        "particulate_mode": particulate_mode,
         "output_dir": str(output_dir),
         "mesh_path": None,
         "urdf_path": None,
@@ -1380,6 +1423,7 @@ def process_object(
         "class_name": obj_class,
         "generator": meta.get("generator", "particulate"),
         "endpoint": particulate_endpoint,
+        "particulate_mode": particulate_mode,
         "mesh_path": mesh_path.name,
         "urdf_path": urdf_path.name,
         "is_articulated": joint_count > 0,
@@ -1441,6 +1485,13 @@ def main() -> None:
 
     # Particulate endpoint
     particulate_endpoint = os.getenv("PARTICULATE_ENDPOINT", "")
+    particulate_mode = normalize_particulate_mode(os.getenv("PARTICULATE_MODE", PARTICULATE_MODE_REMOTE))
+    particulate_local_endpoint = os.getenv("PARTICULATE_LOCAL_ENDPOINT", "")
+    particulate_endpoint, endpoint_source = resolve_particulate_endpoint(
+        particulate_mode,
+        particulate_endpoint,
+        particulate_local_endpoint,
+    )
 
     mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
     production_mode = parse_env_flag(os.getenv("PRODUCTION_MODE", "false"))
@@ -1485,6 +1536,7 @@ def main() -> None:
     log(f"Assets: {assets_root}")
     log(f"3D-RE-GEN: {regen3d_root}")
     log(f"Multiview: {multiview_root}")
+    log(f"Particulate Mode: {particulate_mode}")
     log(f"Particulate Endpoint: {particulate_endpoint or '(none - static mode)'}")
     log(f"Mode: {mode}")
     log(f"Interactive objects: {len(interactive_objects)}")
@@ -1496,11 +1548,13 @@ def main() -> None:
         "multiview_prefix": multiview_prefix or None,
         "regen3d_prefix": regen3d_prefix or None,
         "mode": mode,
+        "particulate_mode": particulate_mode,
         "production_mode": production_mode,
         "particulate_endpoint": particulate_endpoint or None,
+        "particulate_endpoint_source": endpoint_source,
     }
 
-    if production_mode and not particulate_endpoint:
+    if production_mode and particulate_mode == PARTICULATE_MODE_REMOTE and not particulate_endpoint:
         log("PARTICULATE_ENDPOINT is required in production mode", "ERROR")
         write_failure_marker(
             assets_root,
@@ -1511,6 +1565,64 @@ def main() -> None:
             config_context=config_context,
         )
         sys.exit(1)
+
+    if particulate_mode == PARTICULATE_MODE_SKIP:
+        log("PARTICULATE_MODE=skip set; skipping articulation", "WARNING")
+        warnings = [{
+            "code": "particulate_skipped",
+            "message": "Particulate inference skipped by configuration (PARTICULATE_MODE=skip).",
+            "details": {
+                "particulate_mode": particulate_mode,
+            },
+        }]
+        results = [{
+            "id": str(obj.get("id")),
+            "name": f"obj_{obj.get('id')}",
+            "class_name": obj.get("class_name", "unknown"),
+            "status": "skipped",
+            "mode": mode,
+            "backend": "particulate",
+            "particulate_mode": particulate_mode,
+            "error": "particulate_skipped",
+        } for obj in interactive_objects]
+
+        results_path = assets_root / "interactive" / "interactive_results.json"
+        ensure_dir(results_path.parent)
+        save_json({
+            "scene_id": scene_id,
+            "total_objects": len(interactive_objects),
+            "ok_count": 0,
+            "articulated_count": 0,
+            "error_count": 0,
+            "fallback_count": 0,
+            "skipped_count": len(interactive_objects),
+            "mode": mode,
+            "backend": "particulate",
+            "particulate_mode": particulate_mode,
+            "particulate_endpoint": particulate_endpoint or None,
+            "objects": results,
+        }, results_path)
+
+        summary = {
+            "total_objects": len(interactive_objects),
+            "ok_count": 0,
+            "articulated_count": 0,
+            "error_count": 0,
+            "fallback_count": 0,
+            "skipped_count": len(interactive_objects),
+            "mode": mode,
+            "backend": "particulate",
+            "particulate_mode": particulate_mode,
+            "particulate_endpoint": particulate_endpoint or None,
+        }
+        write_status_marker(
+            assets_root,
+            scene_id,
+            status="success",
+            summary=summary,
+            warnings=warnings,
+        )
+        return
 
     # Early exit if no interactive objects
     if not interactive_objects:
@@ -1531,8 +1643,10 @@ def main() -> None:
             "articulated_count": 0,
             "error_count": 0,
             "fallback_count": 0,
+            "skipped_count": 0,
             "mode": mode,
             "backend": "particulate",
+            "particulate_mode": particulate_mode,
             "particulate_endpoint": particulate_endpoint or None,
         }
         write_status_marker(
@@ -1572,6 +1686,7 @@ def main() -> None:
                 regen3d_root=regen3d_root,
                 multiview_root=multiview_root,
                 particulate_endpoint=particulate_endpoint,
+                particulate_mode=particulate_mode,
                 mode=mode,
                 index=i,
                 total=len(interactive_objects),
@@ -1590,6 +1705,7 @@ def main() -> None:
     articulated_count = sum(1 for r in results if r.get("is_articulated"))
     error_count = sum(1 for r in results if r.get("status") == "error")
     fallback_count = sum(1 for r in results if r.get("status") in ("fallback", "static"))
+    skipped_count = sum(1 for r in results if r.get("status") == "skipped")
     error_payloads, warning_payloads = collect_result_payloads(results)
 
     # Write results
@@ -1600,8 +1716,10 @@ def main() -> None:
         "articulated_count": articulated_count,
         "error_count": error_count,
         "fallback_count": fallback_count,
+        "skipped_count": skipped_count,
         "mode": mode,
         "backend": "particulate",
+        "particulate_mode": particulate_mode,
         "particulate_endpoint": particulate_endpoint or None,
         "objects": results,
     }
@@ -1635,8 +1753,10 @@ def main() -> None:
         "articulated_count": articulated_count,
         "error_count": error_count,
         "fallback_count": fallback_count,
+        "skipped_count": skipped_count,
         "mode": mode,
         "backend": "particulate",
+        "particulate_mode": particulate_mode,
         "particulate_endpoint": particulate_endpoint or None,
     }
 

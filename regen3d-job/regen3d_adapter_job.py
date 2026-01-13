@@ -67,6 +67,7 @@ from tools.quality_gates.quality_gate import QualityGateCheckpoint, QualityGateR
 from tools.scale_authority.authority import REFERENCE_DIMENSIONS
 from tools.scene_manifest.validate_manifest import validate_manifest
 from tools.workflow.failure_markers import FailureMarkerWriter
+from tools.metrics.pipeline_metrics import get_metrics
 
 # Optional: Gemini for semantic inventory
 try:
@@ -290,12 +291,15 @@ def enrich_inventory_with_gemini(
         prompt = _build_gemini_enrichment_prompt(objects_for_prompt, environment_type)
 
         # Call Gemini with the image
-        response = client.generate(
-            prompt=prompt,
-            image=source_image_path,
-            json_output=True,
-            temperature=0.3,  # Lower temperature for more consistent categorization
-        )
+        metrics = get_metrics()
+        scene_id = inventory.get("scene_id", "")
+        with metrics.track_api_call("gemini", "enrich_inventory", scene_id):
+            response = client.generate(
+                prompt=prompt,
+                image=source_image_path,
+                json_output=True,
+                temperature=0.3,  # Lower temperature for more consistent categorization
+            )
 
         # Parse response
         enrichment_data = response.parse_json()
@@ -678,6 +682,11 @@ def run_regen3d_adapter_job(
     # This marker signals that the 3D-RE-GEN adapter job has completed
     # and all outputs (manifest, layout, inventory) are ready for downstream jobs.
     # All downstream workflows should trigger on .regen3d_complete.
+    metrics = get_metrics()
+    metrics_summary = {
+        "backend": metrics.backend.value,
+        "stats": metrics.get_stats(),
+    }
     marker_content = {
         "status": "complete",
         "scene_id": scene_id,
@@ -686,6 +695,7 @@ def run_regen3d_adapter_job(
         "scale_factor": scale_factor,
         "environment_type": environment_type,
         "completed_at": datetime.utcnow().isoformat() + "Z",
+        "metrics_summary": metrics_summary,
     }
 
     # Primary marker: .regen3d_complete
@@ -708,7 +718,7 @@ def run_regen3d_adapter_job(
     return 0
 
 
-def main():
+def main() -> int:
     """Main entry point."""
     # Get configuration from environment
     bucket = os.getenv("BUCKET", "")
@@ -716,7 +726,7 @@ def main():
 
     if not scene_id:
         print("[REGEN3D-JOB] ERROR: SCENE_ID is required")
-        sys.exit(1)
+        return 1
 
     # Prefixes with defaults
     regen3d_prefix = os.getenv("REGEN3D_PREFIX", f"scenes/{scene_id}/regen3d")
@@ -743,9 +753,40 @@ def main():
         scale_factor=scale_factor,
         skip_inventory=skip_inventory,
     )
+    metrics = get_metrics()
+    with metrics.track_job("regen3d-job", scene_id):
+        exit_code = run_regen3d_adapter_job(
+            root=GCS_ROOT,
+            scene_id=scene_id,
+            regen3d_prefix=regen3d_prefix,
+            assets_prefix=assets_prefix,
+            layout_prefix=layout_prefix,
+            environment_type=environment_type,
+            scale_factor=scale_factor,
+            skip_inventory=skip_inventory,
+        )
 
-    sys.exit(exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+
+    input_params = {
+        "bucket": os.getenv("BUCKET", ""),
+        "scene_id": os.getenv("SCENE_ID", ""),
+        "regen3d_prefix": os.getenv("REGEN3D_PREFIX"),
+        "assets_prefix": os.getenv("ASSETS_PREFIX"),
+        "layout_prefix": os.getenv("LAYOUT_PREFIX"),
+        "environment_type": os.getenv("ENVIRONMENT_TYPE", "generic"),
+        "scale_factor": os.getenv("SCALE_FACTOR", "1.0"),
+        "skip_inventory": os.getenv("SKIP_INVENTORY", ""),
+    }
+    exit_code = run_job_with_dead_letter_queue(
+        main,
+        scene_id=os.getenv("SCENE_ID", ""),
+        job_type="regen3d_adapter",
+        step="regen3d_adapter",
+        input_params=input_params,
+    )
+    sys.exit(exit_code)
