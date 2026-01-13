@@ -33,13 +33,12 @@ ENHANCED FEATURES (v2.0):
 - Better skill segment detection from motion phases
 """
 
-import json
-import math
 import sys
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -116,6 +115,16 @@ class ObjectTransform:
 
         # Apply translation
         return rotated + self.position_offset
+
+    def apply_to_offset(self, offset: np.ndarray) -> np.ndarray:
+        """Apply rotation/scale to an offset without translation."""
+        rot = Rotation.from_quat([
+            self.rotation_offset[1],  # x
+            self.rotation_offset[2],  # y
+            self.rotation_offset[3],  # z
+            self.rotation_offset[0],  # w
+        ])
+        return rot.apply(offset * self.scale_factor)
 
     def apply_to_orientation(self, quat: np.ndarray) -> np.ndarray:
         """Apply rotation to orientation."""
@@ -334,67 +343,69 @@ class ConstraintSolver:
 
         # Apply each constraint
         for constraint in sorted(constraints, key=lambda c: -c.priority):
+            transform = None
             if constraint.reference_object_id:
                 transform = object_transforms.get(constraint.reference_object_id)
                 if transform is None:
                     continue
 
-                if constraint.constraint_type == ConstraintType.RELATIVE_POSITION:
-                    # Keypoint should be at offset from object
-                    if constraint.reference_offset is not None:
-                        # Get original object position
-                        orig_pos, orig_ori = original_object_poses.get(
-                            constraint.reference_object_id,
-                            (np.zeros(3), np.array([1, 0, 0, 0]))
-                        )
+            if constraint.constraint_type == ConstraintType.RELATIVE_POSITION:
+                # Keypoint should be at offset from object
+                if constraint.reference_offset is not None and constraint.reference_object_id:
+                    # Get original object position
+                    orig_pos, orig_ori = original_object_poses.get(
+                        constraint.reference_object_id,
+                        (np.zeros(3), np.array([1, 0, 0, 0]))
+                    )
 
-                        # Transform the offset to new configuration
-                        new_offset = transform.apply_to_position(constraint.reference_offset)
-                        new_obj_pos = transform.apply_to_position(orig_pos)
+                    # Transform the offset to new configuration
+                    new_offset = transform.apply_to_offset(constraint.reference_offset)
+                    new_obj_pos = transform.apply_to_position(orig_pos)
 
-                        # Find keypoint and compute EE position
-                        keypoint = self._find_keypoint(constraint.keypoint_id, keypoints)
-                        if keypoint:
-                            # EE position = target keypoint position - keypoint offset
-                            target_keypoint_pos = new_obj_pos + new_offset
-                            new_position = target_keypoint_pos - keypoint.local_position
+                    # Find keypoint and compute EE position
+                    keypoint = self._find_keypoint(constraint.keypoint_id, keypoints)
+                    if keypoint:
+                        # EE position = target keypoint position - keypoint offset
+                        target_keypoint_pos = new_obj_pos + new_offset
+                        new_position = target_keypoint_pos - keypoint.local_position
 
-                elif constraint.constraint_type == ConstraintType.TRAJECTORY:
-                    # Keypoint should follow trajectory relative to object
-                    if constraint.trajectory_waypoints:
-                        # Get time-appropriate waypoint in trajectory
-                        t = original_waypoint.timestamp
-                        t_norm = (t - constraint.start_time) / max(
-                            0.001, constraint.end_time - constraint.start_time
-                        )
-                        t_norm = np.clip(t_norm, 0, 1)
+            elif constraint.constraint_type == ConstraintType.TRAJECTORY:
+                # Keypoint should follow trajectory relative to object
+                if constraint.trajectory_waypoints and constraint.reference_object_id:
+                    # Get time-appropriate waypoint in trajectory
+                    t = original_waypoint.timestamp
+                    t_norm = (t - constraint.start_time) / max(
+                        0.001, constraint.end_time - constraint.start_time
+                    )
+                    t_norm = np.clip(t_norm, 0, 1)
 
-                        # Interpolate trajectory
-                        traj_offset = self._interpolate_trajectory(
-                            constraint.trajectory_waypoints, t_norm
-                        )
+                    # Interpolate trajectory
+                    traj_offset = self._interpolate_trajectory(
+                        constraint.trajectory_waypoints, t_norm
+                    )
 
-                        # Transform trajectory point
-                        orig_pos, _ = original_object_poses.get(
-                            constraint.reference_object_id,
-                            (np.zeros(3), np.array([1, 0, 0, 0]))
-                        )
-                        new_traj_offset = transform.apply_to_position(traj_offset)
-                        new_obj_pos = transform.apply_to_position(orig_pos)
+                    # Transform trajectory point
+                    orig_pos, _ = original_object_poses.get(
+                        constraint.reference_object_id,
+                        (np.zeros(3), np.array([1, 0, 0, 0]))
+                    )
+                    new_traj_offset = transform.apply_to_offset(traj_offset)
+                    new_obj_pos = transform.apply_to_position(orig_pos)
 
-                        keypoint = self._find_keypoint(constraint.keypoint_id, keypoints)
-                        if keypoint:
-                            target_keypoint_pos = new_obj_pos + new_traj_offset
-                            new_position = target_keypoint_pos - keypoint.local_position
+                    keypoint = self._find_keypoint(constraint.keypoint_id, keypoints)
+                    if keypoint:
+                        target_keypoint_pos = new_obj_pos + new_traj_offset
+                        new_position = target_keypoint_pos - keypoint.local_position
 
-                elif constraint.constraint_type == ConstraintType.POSITION:
-                    # Absolute position (already transformed in constraint)
-                    if constraint.reference_offset is not None:
-                        keypoint = self._find_keypoint(constraint.keypoint_id, keypoints)
-                        if keypoint:
-                            new_position = transform.apply_to_position(
-                                constraint.reference_offset
-                            ) - keypoint.local_position
+            elif constraint.constraint_type == ConstraintType.POSITION:
+                # Absolute position (already transformed in constraint)
+                if constraint.reference_offset is not None:
+                    keypoint = self._find_keypoint(constraint.keypoint_id, keypoints)
+                    if keypoint:
+                        target_position = constraint.reference_offset
+                        if transform is not None:
+                            target_position = transform.apply_to_position(target_position)
+                        new_position = target_position - keypoint.local_position
 
         # Create new waypoint
         return Waypoint(
@@ -449,6 +460,304 @@ class ConstraintSolver:
         local_t = np.clip(local_t, 0, 1)
 
         # Linear interpolation
+        p1 = waypoints[segment_idx]
+        p2 = waypoints[segment_idx + 1]
+
+        return (1 - local_t) * p1 + local_t * p2
+
+
+# =============================================================================
+# Constraint Modules
+# =============================================================================
+
+
+class ConstraintModule(ABC):
+    """Pluggable interface for constraint preservation and validation."""
+
+    @abstractmethod
+    def solve_waypoint(
+        self,
+        original_waypoint: Waypoint,
+        constraints: List[KeypointConstraint],
+        keypoints: List[Keypoint],
+        object_transforms: Dict[str, ObjectTransform],
+        original_object_poses: Dict[str, Tuple[np.ndarray, np.ndarray]],
+    ) -> Waypoint:
+        """Generate a waypoint that respects active constraints."""
+
+    @abstractmethod
+    def validate_trajectory(
+        self,
+        waypoints: List[Waypoint],
+        task_spec: TaskSpecification,
+        object_transforms: Dict[str, ObjectTransform],
+        original_object_poses: Dict[str, Tuple[np.ndarray, np.ndarray]],
+    ) -> AugmentationMetrics:
+        """Validate constraint satisfaction for a trajectory."""
+
+
+class KeypointConstraintModule(ConstraintModule):
+    """Default constraint module based on keypoint constraints."""
+
+    def __init__(
+        self,
+        solver: ConstraintSolver,
+        position_tolerance: float = 0.02,
+        contact_tolerance: float = 0.02,
+        orientation_tolerance: float = 0.2,
+    ) -> None:
+        self._solver = solver
+        self._position_tolerance = position_tolerance
+        self._contact_tolerance = contact_tolerance
+        self._orientation_tolerance = orientation_tolerance
+
+    def solve_waypoint(
+        self,
+        original_waypoint: Waypoint,
+        constraints: List[KeypointConstraint],
+        keypoints: List[Keypoint],
+        object_transforms: Dict[str, ObjectTransform],
+        original_object_poses: Dict[str, Tuple[np.ndarray, np.ndarray]],
+    ) -> Waypoint:
+        return self._solver.solve_waypoint(
+            original_waypoint=original_waypoint,
+            constraints=constraints,
+            keypoints=keypoints,
+            object_transforms=object_transforms,
+            original_object_poses=original_object_poses,
+        )
+
+    def validate_trajectory(
+        self,
+        waypoints: List[Waypoint],
+        task_spec: TaskSpecification,
+        object_transforms: Dict[str, ObjectTransform],
+        original_object_poses: Dict[str, Tuple[np.ndarray, np.ndarray]],
+    ) -> AugmentationMetrics:
+        metrics = AugmentationMetrics()
+        position_errors: List[float] = []
+        orientation_errors: List[float] = []
+
+        for waypoint_index, waypoint in enumerate(waypoints):
+            segment = self._find_segment(task_spec.segments, waypoint.timestamp)
+            if segment is None:
+                continue
+            if segment.segment_type != SegmentType.SKILL:
+                continue
+
+            active_constraints = self._collect_constraints(task_spec, segment, waypoint.timestamp)
+            if not active_constraints:
+                continue
+
+            keypoints = task_spec.keypoints + segment.keypoints
+            for constraint in active_constraints:
+                evaluation = self._evaluate_constraint(
+                    constraint=constraint,
+                    waypoint=waypoint,
+                    keypoints=keypoints,
+                    object_transforms=object_transforms,
+                    original_object_poses=original_object_poses,
+                )
+                if evaluation is None:
+                    continue
+
+                satisfied, expected, actual, error, orientation_error = evaluation
+                metrics.num_constraints_checked += 1
+                if satisfied:
+                    metrics.num_constraints_satisfied += 1
+                else:
+                    metrics.violations.append(
+                        ConstraintViolation(
+                            constraint_id=constraint.constraint_id,
+                            constraint_type=constraint.constraint_type.value,
+                            expected_value=expected,
+                            actual_value=actual,
+                            error_magnitude=error,
+                            waypoint_index=waypoint_index,
+                            timestamp=waypoint.timestamp,
+                        )
+                    )
+                position_errors.append(error)
+                if orientation_error is not None:
+                    orientation_errors.append(orientation_error)
+
+        if metrics.num_constraints_checked > 0:
+            metrics.constraint_satisfaction_ratio = (
+                metrics.num_constraints_satisfied / metrics.num_constraints_checked
+            )
+        else:
+            metrics.constraint_satisfaction_ratio = 1.0
+
+        if position_errors:
+            metrics.max_position_error = float(np.max(position_errors))
+            metrics.mean_position_error = float(np.mean(position_errors))
+
+        if orientation_errors:
+            metrics.max_orientation_error = float(np.max(orientation_errors))
+            metrics.mean_orientation_error = float(np.mean(orientation_errors))
+
+        return metrics
+
+    def _find_segment(
+        self,
+        segments: List[SkillSegment],
+        timestamp: float,
+    ) -> Optional[SkillSegment]:
+        for segment in segments:
+            if segment.start_time <= timestamp <= segment.end_time:
+                return segment
+        return None
+
+    def _collect_constraints(
+        self,
+        task_spec: TaskSpecification,
+        segment: SkillSegment,
+        timestamp: float,
+    ) -> List[KeypointConstraint]:
+        constraints = []
+        for constraint in task_spec.constraints + segment.constraints:
+            if constraint.start_time <= timestamp <= constraint.end_time:
+                constraints.append(constraint)
+        return constraints
+
+    def _evaluate_constraint(
+        self,
+        constraint: KeypointConstraint,
+        waypoint: Waypoint,
+        keypoints: List[Keypoint],
+        object_transforms: Dict[str, ObjectTransform],
+        original_object_poses: Dict[str, Tuple[np.ndarray, np.ndarray]],
+    ) -> Optional[Tuple[bool, Any, Any, float, Optional[float]]]:
+        keypoint = self._find_keypoint(constraint.keypoint_id, keypoints)
+        if keypoint is None:
+            return None
+
+        keypoint_world = waypoint.position + keypoint.local_position
+
+        if constraint.constraint_type == ConstraintType.RELATIVE_POSITION:
+            if constraint.reference_object_id is None or constraint.reference_offset is None:
+                return None
+            expected = self._transform_reference_offset(
+                constraint.reference_object_id,
+                constraint.reference_offset,
+                object_transforms,
+                original_object_poses,
+            )
+            error = float(np.linalg.norm(keypoint_world - expected))
+            return error <= self._position_tolerance, expected.tolist(), keypoint_world.tolist(), error, None
+
+        if constraint.constraint_type == ConstraintType.TRAJECTORY:
+            if constraint.reference_object_id is None or not constraint.trajectory_waypoints:
+                return None
+            t_norm = (waypoint.timestamp - constraint.start_time) / max(
+                1e-3, constraint.end_time - constraint.start_time
+            )
+            t_norm = np.clip(t_norm, 0, 1)
+            traj_offset = self._interpolate_trajectory(constraint.trajectory_waypoints, t_norm)
+            expected = self._transform_reference_offset(
+                constraint.reference_object_id,
+                traj_offset,
+                object_transforms,
+                original_object_poses,
+            )
+            error = float(np.linalg.norm(keypoint_world - expected))
+            return error <= self._position_tolerance, expected.tolist(), keypoint_world.tolist(), error, None
+
+        if constraint.constraint_type == ConstraintType.POSITION:
+            if constraint.reference_offset is None:
+                return None
+            expected = constraint.reference_offset
+            if constraint.reference_object_id:
+                transform = object_transforms.get(constraint.reference_object_id)
+                if transform:
+                    expected = transform.apply_to_position(expected)
+            error = float(np.linalg.norm(keypoint_world - expected))
+            return error <= self._position_tolerance, expected.tolist(), keypoint_world.tolist(), error, None
+
+        if constraint.constraint_type == ConstraintType.CONTACT:
+            if constraint.reference_object_id is None:
+                return None
+            object_position = self._get_object_position(
+                constraint.reference_object_id,
+                object_transforms,
+                original_object_poses,
+            )
+            error = float(np.linalg.norm(keypoint_world - object_position))
+            return error <= self._contact_tolerance, object_position.tolist(), keypoint_world.tolist(), error, None
+
+        if constraint.constraint_type == ConstraintType.CLEARANCE:
+            if constraint.reference_object_id is None:
+                return None
+            object_position = self._get_object_position(
+                constraint.reference_object_id,
+                object_transforms,
+                original_object_poses,
+            )
+            distance = float(np.linalg.norm(keypoint_world - object_position))
+            error = max(0.0, constraint.clearance_distance - distance)
+            satisfied = distance >= constraint.clearance_distance
+            return satisfied, object_position.tolist(), keypoint_world.tolist(), error, None
+
+        if constraint.constraint_type == ConstraintType.ORIENTATION:
+            orientation_error = 0.0
+            return True, waypoint.orientation.tolist(), waypoint.orientation.tolist(), 0.0, orientation_error
+
+        return None
+
+    def _transform_reference_offset(
+        self,
+        object_id: str,
+        offset: np.ndarray,
+        object_transforms: Dict[str, ObjectTransform],
+        original_object_poses: Dict[str, Tuple[np.ndarray, np.ndarray]],
+    ) -> np.ndarray:
+        original_position, _ = original_object_poses.get(
+            object_id, (np.zeros(3), np.array([1, 0, 0, 0]))
+        )
+        transform = object_transforms.get(object_id)
+        if transform is None:
+            return original_position + offset
+        new_obj_pos = transform.apply_to_position(original_position)
+        new_offset = transform.apply_to_offset(offset)
+        return new_obj_pos + new_offset
+
+    def _get_object_position(
+        self,
+        object_id: str,
+        object_transforms: Dict[str, ObjectTransform],
+        original_object_poses: Dict[str, Tuple[np.ndarray, np.ndarray]],
+    ) -> np.ndarray:
+        original_position, _ = original_object_poses.get(
+            object_id, (np.zeros(3), np.array([1, 0, 0, 0]))
+        )
+        transform = object_transforms.get(object_id)
+        if transform is None:
+            return original_position
+        return transform.apply_to_position(original_position)
+
+    def _find_keypoint(self, keypoint_id: str, keypoints: List[Keypoint]) -> Optional[Keypoint]:
+        for keypoint in keypoints:
+            if keypoint.keypoint_id == keypoint_id:
+                return keypoint
+        return None
+
+    def _interpolate_trajectory(
+        self,
+        waypoints: List[np.ndarray],
+        t: float,
+    ) -> np.ndarray:
+        if not waypoints:
+            return np.zeros(3)
+        if len(waypoints) == 1:
+            return waypoints[0].copy()
+
+        num_segments = len(waypoints) - 1
+        segment_idx = int(t * num_segments)
+        segment_idx = min(segment_idx, num_segments - 1)
+
+        local_t = (t * num_segments) - segment_idx
+        local_t = np.clip(local_t, 0, 1)
+
         p1 = waypoints[segment_idx]
         p2 = waypoints[segment_idx + 1]
 
@@ -725,6 +1034,7 @@ class ConstraintPreservingAugmenter:
         scene_usd_path: Optional[str] = None,
         use_collision_planner: bool = True,
         use_physics_validation: bool = True,
+        constraint_module: Optional[ConstraintModule] = None,
         verbose: bool = True,
     ):
         """
@@ -735,6 +1045,7 @@ class ConstraintPreservingAugmenter:
             scene_usd_path: Optional USD scene path for collision geometry
             use_collision_planner: Use enhanced collision-aware planning
             use_physics_validation: Validate with physics simulation
+            constraint_module: Optional constraint module (learned or rule-based)
             verbose: Print debug info
         """
         self.robot_type = robot_type
@@ -743,6 +1054,7 @@ class ConstraintPreservingAugmenter:
 
         # Constraint solver
         self.constraint_solver = ConstraintSolver(verbose=verbose)
+        self.constraint_module = constraint_module or KeypointConstraintModule(self.constraint_solver)
 
         # Motion planning - try enhanced planner first
         self._use_collision_planner = use_collision_planner and _HAVE_COLLISION_PLANNER
@@ -868,8 +1180,7 @@ class ConstraintPreservingAugmenter:
         self.log(f"Augmenting for variation {variation_index}")
 
         new_waypoints = []
-        constraint_violations = 0
-        total_constraints = 0
+        constraint_waypoints = []
 
         # Process each segment
         prev_waypoint = None
@@ -893,7 +1204,7 @@ class ConstraintPreservingAugmenter:
                 # Transform each waypoint
                 transformed = []
                 for wp in seg_waypoints:
-                    new_wp = self.constraint_solver.solve_waypoint(
+                    new_wp = self.constraint_module.solve_waypoint(
                         original_waypoint=wp,
                         constraints=segment_constraints,
                         keypoints=seed.task_spec.keypoints + segment.keypoints,
@@ -901,9 +1212,7 @@ class ConstraintPreservingAugmenter:
                         original_object_poses=seed.reference_object_poses,
                     )
                     transformed.append(new_wp)
-
-                    # Track constraint satisfaction
-                    total_constraints += len(segment_constraints)
+                constraint_waypoints.extend(transformed)
 
                 # Add motion plan connection if needed
                 if prev_waypoint is not None and transformed:
@@ -965,11 +1274,15 @@ class ConstraintPreservingAugmenter:
             if new_waypoints:
                 prev_waypoint = new_waypoints[-1]
 
-        # Calculate constraint satisfaction
-        constraint_satisfaction = 1.0 - (constraint_violations / max(1, total_constraints))
-
         # Check for collisions
         collision_free = self._check_collision_free(new_waypoints, obstacles)
+        metrics = self.constraint_module.validate_trajectory(
+            waypoints=constraint_waypoints,
+            task_spec=seed.task_spec,
+            object_transforms=object_transforms,
+            original_object_poses=seed.reference_object_poses,
+        )
+        metrics.collision_detected = not collision_free
 
         # Create new motion plan
         new_plan = MotionPlan(
@@ -999,10 +1312,17 @@ class ConstraintPreservingAugmenter:
             variation_index=variation_index,
             motion_plan=new_plan,
             object_transforms=object_transforms,
-            constraint_satisfaction=constraint_satisfaction,
+            constraint_satisfaction=metrics.constraint_satisfaction_ratio,
             collision_free=collision_free,
-            planning_success=len(new_waypoints) > 0,
+            planning_success=(
+                len(new_waypoints) > 0
+                and (
+                    metrics.num_constraints_checked == 0
+                    or metrics.constraint_satisfaction_ratio == 1.0
+                )
+            ),
             generation_time_seconds=time.time() - start_time,
+            metrics=metrics,
         )
 
     def generate_variations(
