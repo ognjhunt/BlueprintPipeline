@@ -9,6 +9,19 @@ This guide covers setting up NVIDIA Isaac Sim for use with BlueprintPipeline's e
 - 32GB+ RAM recommended (16GB minimum)
 - Ubuntu 20.04/22.04 or Windows 10/11 with WSL2
 
+## Episode Generation Runtime Requirements (Production)
+
+Episode generation **must** run inside an Isaac Sim runtime with Replicator enabled.
+We standardize on the NVIDIA NGC container image below for production runs:
+
+- **Container image**: `nvcr.io/nvidia/isaac-sim:2024.1.0` (Isaac Sim 2024.1.0+)
+- **Required extensions**: `omni.isaac.core`, `omni.physx`, `omni.replicator.core`
+- **GPU**: NVIDIA RTX/Tesla-class GPU (T4/L4/A10/A100) with **16GB+ VRAM**
+- **Driver/tooling**: NVIDIA driver + NVIDIA Container Toolkit installed
+
+If Replicator is disabled or Isaac Sim is unavailable, production runs will fail
+fast to prevent generating mock (non-trainable) data.
+
 ## Option 1: NVIDIA NGC Container (Recommended)
 
 The fastest way to get started is using NVIDIA's pre-built Isaac Sim container from NGC.
