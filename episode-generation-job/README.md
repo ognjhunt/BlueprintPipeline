@@ -35,6 +35,15 @@ capture. `ALLOW_MOCK_DATA`/`ALLOW_MOCK_CAPTURE` are rejected in production mode,
 so local tests must explicitly disable production flags and opt into
 `SENSOR_CAPTURE_MODE=mock_dev` for mock data.
 
+For labs staging/production-quality runs, cuRobo collision planning is required:
+
+- **cuRobo** (NVIDIA cuRobo Python package)
+- **CUDA** runtime + NVIDIA drivers
+- **PyTorch with CUDA support**
+
+Missing these dependencies causes a hard failure in labs/production runs to
+avoid generating collision-unsafe trajectories.
+
 ## Useful References
 
 - `episode-generation-job/Dockerfile.isaacsim`
