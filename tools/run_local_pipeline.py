@@ -43,6 +43,7 @@ References:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import traceback
 from dataclasses import dataclass
@@ -287,6 +288,7 @@ class LocalPipelineRunner:
         )
         manifest_path = self.assets_dir / "scene_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
+        manifest = self._annotate_articulation_requirements(manifest, manifest_path)
         self.log(f"Wrote manifest: {manifest_path}")
 
         # Generate layout
@@ -331,6 +333,104 @@ class LocalPipelineRunner:
             },
         )
 
+    def _annotate_articulation_requirements(
+        self,
+        manifest: Dict[str, Any],
+        manifest_path: Path,
+    ) -> Dict[str, Any]:
+        """Detect articulated objects and annotate the manifest."""
+        from tools.articulation import detect_scene_articulations
+
+        results = detect_scene_articulations(
+            manifest,
+            use_llm=False,
+            verbose=self.verbose,
+        )
+
+        required_ids = []
+        for obj in manifest.get("objects", []):
+            obj_id = obj.get("id")
+            if not obj_id or obj.get("sim_role") in {"background", "scene_shell"}:
+                continue
+
+            result = results.get(obj_id)
+            if not result or not result.has_articulation:
+                continue
+
+            required_ids.append(obj_id)
+            articulation = obj.get("articulation") or {}
+            detection_payload = {
+                "type": result.articulation_type.value,
+                "confidence": result.confidence,
+                "method": result.detection_method,
+            }
+            if result.joint_axis is not None:
+                detection_payload["axis"] = [float(v) for v in result.joint_axis.tolist()]
+            if result.joint_range is not None:
+                detection_payload["range"] = [float(result.joint_range[0]), float(result.joint_range[1])]
+
+            articulation.update({
+                "required": True,
+                "detection": detection_payload,
+            })
+            obj["articulation"] = articulation
+
+            if obj.get("sim_role") in {"unknown", "static", None, ""}:
+                obj["sim_role"] = self._infer_articulation_role(obj)
+
+        metadata = manifest.get("metadata") or {}
+        metadata["articulation_detection"] = {
+            "required_count": len(required_ids),
+            "required_objects": required_ids,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "source": "heuristic",
+        }
+        manifest["metadata"] = metadata
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        if required_ids:
+            self.log(f"Detected {len(required_ids)} articulated objects requiring interactive processing")
+
+        return manifest
+
+    def _infer_articulation_role(self, obj: Dict[str, Any]) -> str:
+        """Infer an articulated sim_role based on object category."""
+        category = (obj.get("category")
+                    or (obj.get("semantics") or {}).get("category")
+                    or obj.get("id", ""))
+        category = category.lower()
+
+        appliance_keywords = {
+            "refrigerator",
+            "fridge",
+            "oven",
+            "microwave",
+            "dishwasher",
+            "washing_machine",
+            "washer",
+            "dryer",
+            "stove",
+            "range",
+        }
+        if any(keyword in category for keyword in appliance_keywords):
+            return "articulated_appliance"
+        return "articulated_furniture"
+
+    def _required_articulation_ids(self, manifest: Dict[str, Any]) -> List[str]:
+        """Return object IDs that require articulation."""
+        required = []
+        for obj in manifest.get("objects", []):
+            obj_id = obj.get("id")
+            if not obj_id:
+                continue
+            if obj.get("sim_role") in {"articulated_furniture", "articulated_appliance"}:
+                required.append(obj_id)
+                continue
+            articulation = obj.get("articulation") or {}
+            if articulation.get("required"):
+                required.append(obj_id)
+        return required
+
     def _generate_inventory(self, regen3d_output) -> Dict[str, Any]:
         """Generate semantic inventory from 3D-RE-GEN output."""
         objects = []
@@ -370,7 +470,24 @@ class LocalPipelineRunner:
 
     def _run_interactive(self) -> StepResult:
         """Run interactive asset processing."""
+        manifest_path = self.assets_dir / "scene_manifest.json"
+        required_ids: List[str] = []
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text())
+            required_ids = self._required_articulation_ids(manifest)
+
         if self.skip_interactive:
+            if required_ids:
+                return StepResult(
+                    step=PipelineStep.INTERACTIVE,
+                    success=False,
+                    duration_seconds=0,
+                    message=(
+                        "Articulation required but interactive job is disabled. "
+                        "Run with --with-interactive and set PARTICULATE_ENDPOINT."
+                    ),
+                    outputs={"required_articulations": required_ids},
+                )
             self.log("Interactive job skipped (requires PARTICULATE_ENDPOINT)")
             return StepResult(
                 step=PipelineStep.INTERACTIVE,
@@ -382,6 +499,14 @@ class LocalPipelineRunner:
         # Would need PARTICULATE_ENDPOINT to run
         endpoint = os.getenv("PARTICULATE_ENDPOINT")
         if not endpoint:
+            if required_ids:
+                return StepResult(
+                    step=PipelineStep.INTERACTIVE,
+                    success=False,
+                    duration_seconds=0,
+                    message="Articulation required but PARTICULATE_ENDPOINT not set",
+                    outputs={"required_articulations": required_ids},
+                )
             return StepResult(
                 step=PipelineStep.INTERACTIVE,
                 success=True,
@@ -389,14 +514,78 @@ class LocalPipelineRunner:
                 message="Skipped (PARTICULATE_ENDPOINT not set)",
             )
 
-        # Interactive job requires external PARTICULATE service for articulation detection
-        # This is a placeholder that correctly reports the step as not implemented
+        interactive_script = REPO_ROOT / "interactive-job" / "run_interactive_assets.py"
+        env = os.environ.copy()
+        env.update({
+            "ASSETS_PREFIX": str(self.assets_dir),
+            "REGEN3D_PREFIX": str(self.regen3d_dir),
+            "SCENE_ID": self.scene_id,
+            "PARTICULATE_ENDPOINT": endpoint,
+            "PRODUCTION_MODE": "false",
+        })
+
+        self.log("Running interactive-job entrypoint locally")
+        proc = subprocess.run(
+            [sys.executable, str(interactive_script)],
+            cwd=str(REPO_ROOT),
+            env=env,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return StepResult(
+                step=PipelineStep.INTERACTIVE,
+                success=False,
+                duration_seconds=0,
+                message=f"interactive-job failed with exit code {proc.returncode}",
+            )
+
+        failure_marker = self.assets_dir / ".interactive_failed"
+        if failure_marker.is_file():
+            failure_payload = json.loads(failure_marker.read_text())
+            return StepResult(
+                step=PipelineStep.INTERACTIVE,
+                success=False,
+                duration_seconds=0,
+                message=f"interactive-job reported failure: {failure_payload.get('reason')}",
+                outputs={"failure_payload": failure_payload},
+            )
+
+        results_path = self.assets_dir / "interactive" / "interactive_results.json"
+        if not results_path.is_file():
+            return StepResult(
+                step=PipelineStep.INTERACTIVE,
+                success=False,
+                duration_seconds=0,
+                message="interactive-job results not found",
+            )
+
+        results_data = json.loads(results_path.read_text())
+        if required_ids:
+            result_by_id = {
+                str(r.get("id")): r for r in results_data.get("objects", [])
+            }
+            missing = [
+                obj_id for obj_id in required_ids
+                if not result_by_id.get(str(obj_id), {}).get("is_articulated")
+            ]
+            if missing:
+                return StepResult(
+                    step=PipelineStep.INTERACTIVE,
+                    success=False,
+                    duration_seconds=0,
+                    message="Articulation required but not available for all objects",
+                    outputs={"missing_articulations": missing},
+                )
+
         return StepResult(
             step=PipelineStep.INTERACTIVE,
-            success=False,
+            success=True,
             duration_seconds=0,
-            message="Interactive job not implemented in local mode - requires PARTICULATE service",
-            error="Interactive job requires Cloud Run job execution against PARTICULATE service endpoint",
+            message="Interactive job completed",
+            outputs={
+                "interactive_results": str(results_path),
+                "articulated_count": results_data.get("articulated_count", 0),
+            },
         )
 
     def _run_simready(self) -> StepResult:
