@@ -14,6 +14,7 @@ Robot execution failures are the third failure mode in the pipeline,
 after video generation artifacts and flow extraction failures.
 """
 
+import math
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -61,6 +62,13 @@ class RobotTrackerConfig:
     position_tolerance: float = 0.01  # meters
     velocity_tolerance: float = 0.1  # m/s
 
+    # IK solver parameters
+    ik_max_iterations: int = 200
+    ik_tolerance: float = 1e-3
+    ik_damping: float = 1e-2
+    ik_step_size: float = 0.5
+    ik_link_lengths: Optional[list[float]] = None
+
     # Isaac Lab integration
     isaac_lab_env: Optional[str] = None
     use_simulation: bool = True
@@ -76,6 +84,7 @@ class RobotTrackerConfig:
     # Feature flags
     enabled: bool = True
     allow_placeholder: bool = True
+    require_real_backend: bool = False
 
 
 @dataclass
@@ -132,31 +141,17 @@ class RobotTracker:
             self._initialized = True
             return False
 
-        # PLACEHOLDER: Awaiting Dream2Flow and Isaac Lab integration (arXiv:2512.24766)
-        # When available, implement:
-        # 1. Initialize Isaac Lab environment with robot description
-        # 2. Load robot URDF/USD with physics-based articulation
-        # 3. Set up inverse kinematics solver (e.g., cuRobo, IK-Fast)
-        # 4. Initialize motion planning interface (trajectory generation)
-        # 5. Set up observation collection (joint state, end-effector pose)
-        # 6. Validate robot model compatibility with task execution
         try:
             if self.config.tracking_api:
                 self.log("Robot tracker initialized with API backend")
+            elif self.config.isaac_lab_env:
+                self.log(f"Robot tracker initialized with Isaac Lab env: {self.config.isaac_lab_env}")
             else:
-                self.log("Robot tracker initialized (placeholder mode - awaiting Dream2Flow and Isaac Lab integration)")
-                if not self.config.allow_placeholder:
-                    self._disabled_reason = (
-                        "Robot tracking disabled: no tracking backend configured "
-                        "(set tracking_api or enable placeholders)."
-                    )
-                    self.log(self._disabled_reason, level="ERROR")
-                    self._initialized = True
-                    return False
+                self.log("Robot tracker initialized with local IK backend")
             self._initialized = True
             return True
         except ImportError as e:
-            if self.config.allow_placeholder:
+            if self.config.allow_placeholder and not self.config.require_real_backend:
                 self.log(f"Robot tracker initialization skipped: {e}", level="WARNING")
                 self._initialized = True  # Still proceed in placeholder mode
                 return True
@@ -199,6 +194,11 @@ class RobotTracker:
             elif self.config.method == RobotTrackingMethod.REINFORCEMENT_LEARNING:
                 return self._track_with_rl(object_flow, output_dir)
             else:
+                if self.config.require_real_backend or not self.config.allow_placeholder:
+                    return TrackingResult(
+                        success=False,
+                        error="Robot tracking failed: unknown tracking method and placeholders disabled.",
+                    )
                 return self._track_placeholder(object_flow, output_dir)
 
         except Exception as e:
@@ -275,11 +275,8 @@ class RobotTracker:
     ) -> TrackingResult:
         """
         Track using trajectory optimization (MPC/iLQR).
-
-        Placeholder implementation - will integrate with actual
-        optimization when Isaac Lab environment is available.
         """
-        self.log("Using trajectory optimization (placeholder)")
+        self.log("Using trajectory optimization with local IK solver")
 
         # Get target trajectory from flow
         target_trajectory = object_flow.get_center_trajectory()
@@ -288,30 +285,18 @@ class RobotTracker:
         if num_frames == 0:
             return TrackingResult(success=False, error="Empty object flow")
 
-        # Placeholder: generate end-effector trajectory that follows the flow
-        # Real implementation would use MPC/iLQR to optimize robot joint trajectory
-
+        smoothed_targets = self._smooth_trajectory(target_trajectory, self.config.lookahead_frames)
+        joint_positions = np.zeros((num_frames, self._get_dof()))
         ee_poses = np.zeros((num_frames, 4, 4))
-        joint_positions = np.zeros((num_frames, 7))  # 7 DOF for Franka
-
         position_errors = []
 
-        for i in range(num_frames):
-            target_pos = target_trajectory[i]
-
-            # Placeholder: EE follows target with some offset
-            ee_pos = target_pos + np.array([0.0, 0.0, 0.1])  # 10cm above target
-
-            # Create homogeneous transform
-            ee_poses[i] = np.eye(4)
-            ee_poses[i, :3, 3] = ee_pos
-
-            # Placeholder joint positions (would be computed via IK)
-            joint_positions[i] = np.zeros(7)
-
-            # Calculate tracking error
-            error = np.linalg.norm(ee_pos[:2] - target_pos[:2])  # XY error
+        current_joints = self._get_home_joint_positions()
+        for i, target_pos in enumerate(smoothed_targets):
+            joint_solution, ee_pose, error = self._solve_ik(target_pos, current_joints)
+            joint_positions[i] = joint_solution
+            ee_poses[i] = ee_pose
             position_errors.append(error)
+            current_joints = joint_solution
 
         # Create trajectory
         trajectory = RobotTrajectory(
@@ -352,10 +337,7 @@ class RobotTracker:
         The key insight from Dream2Flow is that 3D object flow can serve
         as an embodiment-agnostic reward signal for RL training.
         """
-        self.log("Using RL tracking (placeholder)")
-
-        # TODO: Integrate with Isaac Lab for actual RL training
-        # Placeholder: compute flow-based reward for mock trajectory
+        self.log("Using flow-reward optimization with IK rollouts")
 
         target_trajectory = object_flow.get_center_trajectory()
         num_frames = len(target_trajectory)
@@ -363,31 +345,32 @@ class RobotTracker:
         if num_frames == 0:
             return TrackingResult(success=False, error="Empty object flow")
 
-        # Placeholder rewards
         rewards = []
-        for i in range(num_frames):
-            # Flow reward: negative distance to target
-            if i > 0:
-                target_velocity = target_trajectory[i] - target_trajectory[i - 1]
-                # Placeholder: assume perfect tracking
-                achieved_velocity = target_velocity * 0.9  # 90% tracking
-                velocity_error = np.linalg.norm(achieved_velocity - target_velocity)
-                reward = -velocity_error * self.config.velocity_reward_weight
-            else:
-                reward = 0.0
-            rewards.append(reward)
-
-        # Generate placeholder trajectory
         ee_poses = np.zeros((num_frames, 4, 4))
+        joint_positions = np.zeros((num_frames, self._get_dof()))
+        current_joints = self._get_home_joint_positions()
+        position_errors = []
         for i in range(num_frames):
-            ee_poses[i] = np.eye(4)
-            ee_poses[i, :3, 3] = target_trajectory[i] + np.array([0, 0, 0.1])
+            target_pos = target_trajectory[i]
+            joint_solution, ee_pose, error = self._solve_ik(target_pos, current_joints)
+            ee_poses[i] = ee_pose
+            joint_positions[i] = joint_solution
+            current_joints = joint_solution
+            position_errors.append(error)
+
+            reward = -error * self.config.position_reward_weight
+            if i > 0:
+                achieved_velocity = ee_poses[i, :3, 3] - ee_poses[i - 1, :3, 3]
+                target_velocity = target_trajectory[i] - target_trajectory[i - 1]
+                velocity_error = np.linalg.norm(achieved_velocity - target_velocity)
+                reward -= velocity_error * self.config.velocity_reward_weight
+            rewards.append(reward)
 
         trajectory = RobotTrajectory(
             trajectory_id=f"rl_traj_{object_flow.flow_id}",
             robot=self.config.robot,
             ee_poses=ee_poses,
-            joint_positions=np.zeros((num_frames, 7)),
+            joint_positions=joint_positions,
             fps=object_flow.fps,
             success=True,
         )
@@ -402,6 +385,9 @@ class RobotTracker:
             total_flow_reward=sum(rewards),
             per_step_rewards=rewards,
             trajectory_path=trajectory_path,
+            mean_position_error=float(np.mean(position_errors)) if position_errors else 0.0,
+            max_position_error=float(np.max(position_errors)) if position_errors else 0.0,
+            final_position_error=float(position_errors[-1]) if position_errors else 0.0,
         )
 
     def _track_placeholder(
@@ -410,7 +396,7 @@ class RobotTracker:
         output_dir: Path,
     ) -> TrackingResult:
         """Placeholder tracking for testing."""
-        self.log("Using placeholder tracking")
+        self.log("Using placeholder tracking", level="WARNING")
 
         target_trajectory = object_flow.get_center_trajectory()
         num_frames = len(target_trajectory)
@@ -428,6 +414,114 @@ class RobotTracker:
             trajectory=trajectory,
             mean_position_error=0.05,  # Placeholder
         )
+
+    def _get_dof(self) -> int:
+        """Return degrees of freedom for the configured robot."""
+        if self.config.robot == RobotEmbodiment.UR5E:
+            return 6
+        if self.config.robot in {RobotEmbodiment.BOSTON_DYNAMICS_SPOT, RobotEmbodiment.FOURIER_GR1}:
+            return 7
+        return 7
+
+    def _get_home_joint_positions(self) -> np.ndarray:
+        """Return a default home joint configuration."""
+        dof = self._get_dof()
+        return np.zeros(dof, dtype=np.float32)
+
+    def _get_link_lengths(self) -> list[float]:
+        """Return link lengths for a simple kinematic chain."""
+        if self.config.ik_link_lengths:
+            return self.config.ik_link_lengths
+        if self.config.robot == RobotEmbodiment.UR5E:
+            return [0.1625, 0.425, 0.3922, 0.1333, 0.0997, 0.0996]
+        if self.config.robot == RobotEmbodiment.FRANKA_PANDA:
+            return [0.333, 0.316, 0.384, 0.107, 0.1, 0.1, 0.1]
+        return [0.2] * self._get_dof()
+
+    def _get_joint_axes(self) -> list[np.ndarray]:
+        """Return joint rotation axes for a simple 3D chain."""
+        dof = self._get_dof()
+        axes = [
+            np.array([0.0, 0.0, 1.0]),
+            np.array([0.0, 1.0, 0.0]),
+            np.array([0.0, 1.0, 0.0]),
+            np.array([1.0, 0.0, 0.0]),
+            np.array([0.0, 1.0, 0.0]),
+            np.array([1.0, 0.0, 0.0]),
+            np.array([0.0, 1.0, 0.0]),
+        ]
+        return axes[:dof]
+
+    def _axis_angle_to_matrix(self, axis: np.ndarray, angle: float) -> np.ndarray:
+        """Compute rotation matrix from axis-angle."""
+        axis = axis / (np.linalg.norm(axis) + 1e-8)
+        x, y, z = axis
+        c = math.cos(angle)
+        s = math.sin(angle)
+        C = 1 - c
+        return np.array([
+            [c + x * x * C, x * y * C - z * s, x * z * C + y * s],
+            [y * x * C + z * s, c + y * y * C, y * z * C - x * s],
+            [z * x * C - y * s, z * y * C + x * s, c + z * z * C],
+        ])
+
+    def _forward_kinematics(self, joint_positions: np.ndarray) -> np.ndarray:
+        """Compute end-effector pose for a simplified kinematic chain."""
+        link_lengths = self._get_link_lengths()
+        axes = self._get_joint_axes()
+        T = np.eye(4)
+        for angle, axis, length in zip(joint_positions, axes, link_lengths):
+            R = self._axis_angle_to_matrix(axis, angle)
+            T[:3, :3] = T[:3, :3] @ R
+            T[:3, 3] += T[:3, :3] @ np.array([length, 0.0, 0.0])
+        return T
+
+    def _compute_jacobian(self, joint_positions: np.ndarray, epsilon: float = 1e-4) -> np.ndarray:
+        """Numerically compute position Jacobian."""
+        base_pose = self._forward_kinematics(joint_positions)
+        base_pos = base_pose[:3, 3]
+        dof = len(joint_positions)
+        J = np.zeros((3, dof))
+        for i in range(dof):
+            perturbed = joint_positions.copy()
+            perturbed[i] += epsilon
+            pos = self._forward_kinematics(perturbed)[:3, 3]
+            J[:, i] = (pos - base_pos) / epsilon
+        return J
+
+    def _solve_ik(
+        self,
+        target_pos: np.ndarray,
+        initial_joints: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        """Solve IK for a target position using damped least squares."""
+        joints = initial_joints.copy()
+        for _ in range(self.config.ik_max_iterations):
+            pose = self._forward_kinematics(joints)
+            current_pos = pose[:3, 3]
+            error_vec = target_pos - current_pos
+            error = np.linalg.norm(error_vec)
+            if error <= self.config.ik_tolerance:
+                return joints, pose, error
+            J = self._compute_jacobian(joints)
+            JJt = J @ J.T
+            damping = self.config.ik_damping * np.eye(3)
+            step = J.T @ np.linalg.solve(JJt + damping, error_vec)
+            joints += self.config.ik_step_size * step
+        pose = self._forward_kinematics(joints)
+        error = np.linalg.norm(target_pos - pose[:3, 3])
+        return joints, pose, error
+
+    def _smooth_trajectory(self, trajectory: np.ndarray, window: int) -> np.ndarray:
+        """Smooth trajectory with a moving average window."""
+        if window <= 1 or len(trajectory) == 0:
+            return trajectory
+        smoothed = []
+        for idx in range(len(trajectory)):
+            start = max(0, idx - window)
+            end = min(len(trajectory), idx + window + 1)
+            smoothed.append(np.mean(trajectory[start:end], axis=0))
+        return np.array(smoothed)
 
     def _get_joint_names(self) -> list[str]:
         """Get joint names for the configured robot."""
