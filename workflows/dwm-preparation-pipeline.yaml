@@ -69,6 +69,10 @@ main:
           - dwmCompleteMarker: '${"scenes/" + sceneId + "/dwm/.dwm_complete"}'
           - dwmInferenceJobName: "dwm-inference-job"
           - dwmInferenceCompleteMarker: '${"scenes/" + sceneId + "/dwm/.dwm_inference_complete"}'
+          - dwmFailedMarker: '${"scenes/" + sceneId + "/dwm/.failed"}'
+          - dwmLegacyFailedMarker: '${"scenes/" + sceneId + "/dwm/.dwm_failed"}'
+          - dwmInferenceFailedMarker: '${"scenes/" + sceneId + "/dwm/.failed"}'
+          - dwmInferenceLegacyFailedMarker: '${"scenes/" + sceneId + "/dwm/.dwm_inference_failed"}'
         next: check_dwm_enabled
 
     - check_dwm_enabled:
@@ -319,13 +323,77 @@ main:
         args:
           text: '${"WARNING: DWM inference failed for scene " + sceneId}'
           severity: "WARNING"
+        next: read_inference_failure_marker
+
+    - read_inference_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${dwmInferenceFailedMarker}
+            alt: "media"
+          result: dwmInferenceFailurePayload
+        except:
+          as: e
+          steps:
+            - handle_missing_dwm_inference_marker:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: write_inference_failure_marker
+                next: log_dwm_inference_marker_read_error
+        next: log_dwm_inference_marker_payload
+
+    - log_dwm_inference_marker_read_error:
+        call: sys.log
+        args:
+          text: '${"Failed to read .failed inference marker for DWM in scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
         next: write_inference_failure_marker
+
+    - log_dwm_inference_marker_payload:
+        call: sys.log
+        args:
+          text: '${"DWM inference failure marker payload for scene " + sceneId + ": " + dwmInferenceFailurePayload}'
+          severity: "ERROR"
+        next: write_inference_legacy_failure_marker
 
     - write_inference_failure_marker:
         call: googleapis.storage.v1.objects.insert
         args:
           bucket: ${bucket}
-          name: '${"scenes/" + sceneId + "/dwm/.dwm_inference_failed"}'
+          name: ${dwmInferenceFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": dwmInferenceJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "dwm_inference_failed",
+              "message": "DWM inference failed",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": dwmInferenceExecutionName,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "dwm_prefix": dwmPrefix
+              }
+            },
+            "input_params": {
+              "scene_id": sceneId,
+              "bucket": bucket
+            }
+          })}
+        next: write_inference_legacy_failure_marker
+
+    - write_inference_legacy_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${dwmInferenceLegacyFailedMarker}
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
         next: done_with_failure
@@ -336,16 +404,81 @@ main:
         args:
           text: '${"WARNING: DWM preparation failed for scene " + sceneId + " - scene still usable for simulation"}'
           severity: "WARNING"
+        next: read_failure_marker
+
+    - read_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${dwmFailedMarker}
+            alt: "media"
+          result: dwmFailurePayload
+        except:
+          as: e
+          steps:
+            - handle_missing_dwm_failure_marker:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: write_failure_marker
+                next: log_dwm_failure_marker_read_error
+        next: log_dwm_failure_marker_payload
+
+    - log_dwm_failure_marker_read_error:
+        call: sys.log
+        args:
+          text: '${"Failed to read .failed marker for DWM in scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
         next: write_failure_marker
+
+    - log_dwm_failure_marker_payload:
+        call: sys.log
+        args:
+          text: '${"DWM failure marker payload for scene " + sceneId + ": " + dwmFailurePayload}'
+          severity: "ERROR"
+        next: write_legacy_failure_marker
 
     - write_failure_marker:
         call: googleapis.storage.v1.objects.insert
         args:
           bucket: ${bucket}
-          name: '${"scenes/" + sceneId + "/dwm/.dwm_failed"}'
+          name: ${dwmFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": dwmJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "dwm_failed",
+              "message": "DWM preparation failed",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": dwmExecutionName,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "dwm_prefix": dwmPrefix
+              }
+            },
+            "input_params": {
+              "scene_id": sceneId,
+              "bucket": bucket
+            }
+          })}
+        result: failMarkerResult
+        next: write_legacy_failure_marker
+
+    - write_legacy_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${dwmLegacyFailedMarker}
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
-        result: failMarkerResult
+        result: legacyFailMarkerResult
         next: done_with_failure
 
     # =========================================================================

@@ -40,6 +40,7 @@ class FailureContext:
     execution_id: Optional[str] = None
     workflow_execution_id: Optional[str] = None
     attempt_number: int = 1
+    config_context: Dict[str, Any] = field(default_factory=dict)
 
     # Input parameters
     input_params: Dict[str, Any] = field(default_factory=dict)
@@ -75,6 +76,7 @@ class FailureContext:
                 "execution_id": self.execution_id,
                 "workflow_execution_id": self.workflow_execution_id,
                 "attempt_number": self.attempt_number,
+                "config_context": self.config_context,
             },
             "input_params": self.input_params,
             "partial_results": self.partial_results,
@@ -124,7 +126,7 @@ class FailureMarkerWriter:
         self.bucket = bucket
         self.scene_id = scene_id
         self.job_name = job_name
-        self.base_path = base_path or f"scenes/{scene_id}/geniesim"
+        self.base_path = base_path or f"scenes/{scene_id}/{job_name}"
 
     def write_failure(
         self,
@@ -133,6 +135,9 @@ class FailureMarkerWriter:
         input_params: Optional[Dict[str, Any]] = None,
         partial_results: Optional[Dict[str, Any]] = None,
         recommendations: Optional[List[str]] = None,
+        error_code: Optional[str] = None,
+        config_context: Optional[Dict[str, Any]] = None,
+        include_stack_trace: Optional[bool] = None,
     ) -> Path:
         """
         Write enhanced failure marker.
@@ -169,6 +174,9 @@ class FailureMarkerWriter:
             input_params=input_params or {},
             partial_results=partial_results or {},
             recommendations=recommendations or [],
+            error_code=error_code,
+            config_context=config_context or {},
+            include_stack_trace=include_stack_trace,
         )
 
         # Write to GCS
@@ -188,16 +196,27 @@ class FailureMarkerWriter:
         input_params: Dict[str, Any],
         partial_results: Dict[str, Any],
         recommendations: List[str],
+        error_code: Optional[str],
+        config_context: Dict[str, Any],
+        include_stack_trace: Optional[bool],
     ) -> FailureContext:
         """Build failure context from exception and parameters."""
         # Extract error details
         error_message = str(exception)
         error_type = type(exception).__name__
-        stack_trace = ''.join(traceback.format_exception(
-            type(exception),
-            exception,
-            exception.__traceback__,
-        ))
+        include_stack = include_stack_trace
+        if include_stack is None:
+            include_stack = os.getenv(
+                "FAILURE_MARKER_INCLUDE_STACK_TRACE",
+                "true",
+            ).strip().lower() in {"1", "true", "yes", "y", "on"}
+        stack_trace = None
+        if include_stack:
+            stack_trace = ''.join(traceback.format_exception(
+                type(exception),
+                exception,
+                exception.__traceback__,
+            ))
 
         # Get environment info
         environment = {
@@ -235,6 +254,7 @@ class FailureMarkerWriter:
         return FailureContext(
             scene_id=self.scene_id,
             job_name=self.job_name,
+            error_code=error_code or error_type,
             error_message=error_message,
             error_type=error_type,
             stack_trace=stack_trace,
@@ -242,6 +262,7 @@ class FailureMarkerWriter:
             execution_id=os.getenv("CLOUD_RUN_EXECUTION", "unknown"),
             workflow_execution_id=os.getenv("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
             attempt_number=int(os.getenv("CLOUD_RUN_TASK_ATTEMPT", "1")),
+            config_context=config_context,
             input_params=input_params,
             partial_results=partial_results,
             environment=environment,
@@ -313,12 +334,15 @@ class FailureMarkerWriter:
             # Fallback to local file if GCS not available
             return self._write_to_local(context)
 
+        if not self.bucket:
+            return self._write_to_local(context)
+
         try:
             client = storage.Client()
             bucket = client.bucket(self.bucket)
 
             # Write detailed failure marker
-            blob_path = f"{self.base_path}/.geniesim_failed"
+            blob_path = f"{self.base_path}/.failed"
             blob = bucket.blob(blob_path)
             blob.upload_from_string(
                 context.to_json(),
@@ -326,7 +350,7 @@ class FailureMarkerWriter:
             )
 
             # Also write a simple marker for backward compatibility
-            simple_marker_path = f"{self.base_path}/.failed"
+            simple_marker_path = f"{self.base_path}/.failed.summary"
             simple_blob = bucket.blob(simple_marker_path)
             simple_blob.upload_from_string(
                 json.dumps({
@@ -347,7 +371,7 @@ class FailureMarkerWriter:
 
     def _write_to_local(self, context: FailureContext) -> Path:
         """Fallback: write failure context to local file."""
-        local_path = Path("/tmp") / f"{self.scene_id}_failure.json"
+        local_path = Path("/tmp") / f"{self.scene_id}.failed"
 
         try:
             with open(local_path, 'w') as f:

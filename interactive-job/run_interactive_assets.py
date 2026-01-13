@@ -39,6 +39,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
+from tools.workflow import FailureMarkerWriter
 
 
 # =============================================================================
@@ -74,11 +75,13 @@ def parse_env_flag(value: str) -> bool:
 
 def write_failure_marker(
     assets_root: Path,
+    failure_writer: Optional[FailureMarkerWriter],
     scene_id: str,
     reason: str,
     details: Optional[Dict[str, Any]] = None,
     errors: Optional[List[Dict[str, Any]]] = None,
     warnings: Optional[List[Dict[str, Any]]] = None,
+    config_context: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Write a failure marker to prevent downstream jobs from using low-fidelity assets."""
     marker_path = assets_root / ".interactive_failed"
@@ -99,6 +102,19 @@ def write_failure_marker(
         "error": error_payload,
     }
     save_json(payload, marker_path)
+    if failure_writer is not None:
+        failure_writer.write_failure(
+            exception=RuntimeError(reason),
+            failed_step="interactive-assets",
+            input_params=config_context or {},
+            partial_results={
+                "details": details or {},
+                "errors": errors or [],
+                "warnings": warnings or [],
+            },
+            error_code=reason,
+            config_context=config_context or {},
+        )
     log(f"Wrote failure marker: {marker_path}", "ERROR")
     return marker_path
 
@@ -1428,6 +1444,12 @@ def main() -> None:
 
     mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
     production_mode = parse_env_flag(os.getenv("PRODUCTION_MODE", "false"))
+    failure_writer = FailureMarkerWriter(
+        bucket=bucket,
+        scene_id=scene_id or "unknown",
+        job_name="interactive-job",
+        base_path=assets_prefix or None,
+    )
 
     if not assets_prefix:
         log("ASSETS_PREFIX is required", "ERROR")
@@ -1469,13 +1491,24 @@ def main() -> None:
     log(f"Production mode: {production_mode}")
     log("=" * 60)
 
+    config_context = {
+        "assets_prefix": assets_prefix,
+        "multiview_prefix": multiview_prefix or None,
+        "regen3d_prefix": regen3d_prefix or None,
+        "mode": mode,
+        "production_mode": production_mode,
+        "particulate_endpoint": particulate_endpoint or None,
+    }
+
     if production_mode and not particulate_endpoint:
         log("PARTICULATE_ENDPOINT is required in production mode", "ERROR")
         write_failure_marker(
             assets_root,
+            failure_writer,
             scene_id,
             reason="missing_particulate_endpoint",
             details={"mode": mode},
+            config_context=config_context,
         )
         sys.exit(1)
 
@@ -1520,9 +1553,11 @@ def main() -> None:
                 log("Particulate service not ready in production mode", "ERROR")
                 write_failure_marker(
                     assets_root,
+                    failure_writer,
                     scene_id,
                     reason="particulate_unhealthy",
                     details={"endpoint": particulate_endpoint},
+                    config_context=config_context,
                 )
                 sys.exit(1)
             log("Particulate service not ready, will attempt processing anyway", "WARNING")
@@ -1580,6 +1615,7 @@ def main() -> None:
         log("No successful articulations in production mode", "ERROR")
         write_failure_marker(
             assets_root,
+            failure_writer,
             scene_id,
             reason="articulation_failed",
             details={
@@ -1589,6 +1625,7 @@ def main() -> None:
             },
             errors=error_payloads,
             warnings=warning_payloads,
+            config_context=config_context,
         )
         sys.exit(1)
 
@@ -1623,11 +1660,13 @@ def main() -> None:
     if status == "failure":
         write_failure_marker(
             assets_root,
+            failure_writer,
             scene_id,
             reason="articulation_failed",
             details=summary,
             errors=error_payloads,
             warnings=warning_payloads,
+            config_context=config_context,
         )
 
     # Final summary

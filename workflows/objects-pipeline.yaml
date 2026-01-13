@@ -31,6 +31,8 @@ main:
           - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "objects-job"
+          - objectsFailedMarker: ${"scenes/" + sceneId + "/objects/.failed"}
+          - objectsLegacyFailedMarker: ${"scenes/" + sceneId + "/objects/.objects_failed"}
         next: check_if_done
 
     # Check if the output already exists to avoid duplicate processing
@@ -100,7 +102,39 @@ main:
                 call: googleapis.storage.v1.objects.insert
                 args:
                   bucket: ${bucket}
-                  name: ${"scenes/" + sceneId + "/objects/.objects_failed"}
+                  name: ${objectsFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": jobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "objects_job_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "execution_id": "unknown",
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "da3_prefix": da3Prefix,
+                        "seg_dataset_prefix": segDatasetPrefix,
+                        "layout_prefix": layoutPrefix
+                      }
+                    },
+                    "input_params": {
+                      "scene_id": sceneId,
+                      "bucket": bucket
+                    }
+                  })}
+            - write_legacy_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${objectsLegacyFailedMarker}
                   uploadType: "media"
                   body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"failed\\", \\"error\\": \\"" + e.message + "\\"}" }
         next: set_objects_execution_name
@@ -143,6 +177,101 @@ main:
         args:
           text: ${"WARNING: Objects job failed for scene " + sceneId + " but continuing pipeline"}
           severity: "WARNING"
+        next: read_objects_failure_marker
+
+    - read_objects_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${objectsFailedMarker}
+            alt: "media"
+          result: objectsFailurePayload
+        except:
+          as: e
+          steps:
+            - handle_missing_objects_failure_marker:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: write_objects_failure_marker
+                next: log_objects_failure_marker_read_error
+        next: log_objects_failure_marker_payload
+
+    - log_objects_failure_marker_read_error:
+        call: sys.log
+        args:
+          text: '${"Failed to read .failed marker for objects job in scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
+        next: write_objects_failure_marker
+
+    - log_objects_failure_marker_payload:
+        call: sys.log
+        args:
+          text: '${"Objects failure marker payload for scene " + sceneId + ": " + objectsFailurePayload}'
+          severity: "ERROR"
+        next: mark_objects_complete
+
+    - write_objects_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${objectsFailedMarker}
+            uploadType: "media"
+            body: ${json.encode({
+              "scene_id": sceneId,
+              "job_name": jobName,
+              "status": "failed",
+              "timestamp": time.format(sys.now()),
+              "error": {
+                "code": "objects_failed",
+                "message": "Objects job failed",
+                "type": "workflow_failure",
+                "stack_trace": null
+              },
+              "context": {
+                "execution_id": objectsExecutionName,
+                "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                "attempt_number": 1,
+                "config_context": {
+                  "da3_prefix": da3Prefix,
+                  "seg_dataset_prefix": segDatasetPrefix,
+                  "layout_prefix": layoutPrefix
+                }
+              },
+              "input_params": {
+                "scene_id": sceneId,
+                "bucket": bucket
+              }
+            })}
+          result: objectsFailureMarkerResult
+        except:
+          as: e
+          steps:
+            - log_objects_marker_write_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to write .failed marker for objects job: " + e.message}'
+                  severity: "WARNING"
+        next: write_objects_legacy_failure_marker
+
+    - write_objects_legacy_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${objectsLegacyFailedMarker}
+            uploadType: "media"
+            body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"failed\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
+          result: objectsLegacyFailureMarkerResult
+        except:
+          as: e
+          steps:
+            - log_objects_legacy_marker_write_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to write legacy objects failure marker: " + e.message}'
+                  severity: "WARNING"
         next: mark_objects_complete
 
     - mark_objects_complete:
