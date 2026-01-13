@@ -193,6 +193,42 @@ generation instead, set `USE_GENIESIM=false`.
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+## Local gRPC Server Runner (Fallback)
+
+When `GENIESIM_ROOT` is not available, BlueprintPipeline can launch a lightweight local
+gRPC server for integration tests and lab connectivity checks. Use the server runner in
+`tools/geniesim_adapter/geniesim_server.py`:
+
+```bash
+# Start local gRPC server (binds to 0.0.0.0:50051 by default)
+python -m tools.geniesim_adapter.geniesim_server --port 50051 --log-level INFO
+
+# Health check (uses gRPC health service when available)
+python -m tools.geniesim_adapter.geniesim_server --host localhost --port 50051 --health-check
+```
+
+> Note: This local server is a stubbed implementation. Production data collection still
+> requires the Isaac Sim-hosted Genie Sim server.
+
+## Required Ports, Version, and Startup Order
+
+**Ports**
+- `50051/tcp`: Genie Sim gRPC service + health checks (default).
+
+**Isaac Sim Version**
+- Isaac Sim **2024.1.0+** is required for production data collection with Replicator.
+
+**Startup Order (Production)**
+1. Start Isaac Sim with the Genie Sim data collection server inside the Isaac Sim runtime.
+2. Confirm the gRPC endpoint is reachable (`host:port`).
+3. Launch BlueprintPipeline clients (e.g., `GenieSimLocalFramework`) to request observations,
+   joint commands, trajectories, and recording sessions.
+
+**Startup Order (Local Fallback)**
+1. Start the local gRPC server runner (see above).
+2. Point BlueprintPipeline to the local server via `GENIESIM_HOST` / `GENIESIM_PORT`.
+3. Run data collection jobs that only require stubbed observations.
+
 ## Schema Mapping
 
 ### BlueprintPipeline → Genie Sim Scene Graph
