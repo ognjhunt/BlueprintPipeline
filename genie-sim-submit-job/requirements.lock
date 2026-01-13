@@ -1,0 +1,6 @@
+# Locked dependencies for deterministic builds.
+requests==2.32.3
+aiohttp==3.9.5
+google-cloud-storage==2.18.2
+pydantic==2.8.2
+numpy==1.26.4
