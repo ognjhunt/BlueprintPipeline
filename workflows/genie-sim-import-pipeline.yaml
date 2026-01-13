@@ -217,11 +217,62 @@ main:
           text: ${"Import job completed successfully for " + job_id}
           severity: INFO
 
+    # Load and validate import manifest
+    - set_manifest_location:
+        assign:
+          - manifest_object: ${"scenes/" + scene_id + "/episodes/geniesim_" + job_id + "/import_manifest.json"}
+        next: read_import_manifest
+
+    - read_import_manifest:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${manifest_object}
+            alt: "media"
+          result: manifest_raw
+        except:
+          as: e
+          steps:
+            - log_manifest_missing:
+                call: sys.log
+                args:
+                  text: ${"Import manifest missing at " + manifest_object + ": " + e.message}
+                  severity: "ERROR"
+            - raise_manifest_missing:
+                raise:
+                  message: ${"Import manifest missing at " + manifest_object}
+
+    - parse_import_manifest:
+        try:
+          assign:
+            - import_manifest: ${json.decode(manifest_raw)}
+        except:
+          as: e
+          steps:
+            - log_manifest_malformed:
+                call: sys.log
+                args:
+                  text: ${"Import manifest malformed for job " + job_id + ": " + e.message}
+                  severity: "ERROR"
+            - raise_manifest_malformed:
+                raise:
+                  message: ${"Import manifest malformed for job " + job_id}
+
+    - validate_import_manifest:
+        switch:
+          - condition: ${!("episodes" in import_manifest) or !("quality" in import_manifest)}
+            raise:
+              message: ${"Import manifest missing required sections for job " + job_id}
+          - condition: ${!("downloaded" in import_manifest.episodes) or !("passed_validation" in import_manifest.episodes) or !("average_score" in import_manifest.quality)}
+            raise:
+              message: ${"Import manifest missing required fields for job " + job_id}
+
     # Extract import results
     - parse_import_output:
         assign:
-          - episodes_imported: ${default(import_status.body.status.logUri, "0")}  # TODO: Parse from logs
-          - output_path: ${text.replace_all(default(import_status.body.status.logUri, ""), "gs://" + bucket + "/", "")}
+          - episodes_imported: ${default(import_manifest.episodes.passed_validation, 0)}
+          - output_path: ${default(import_manifest.gcs_output_path, import_manifest.output_dir)}
         next: write_import_marker
 
     - write_import_marker:
