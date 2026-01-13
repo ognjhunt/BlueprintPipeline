@@ -11,15 +11,9 @@ if TYPE_CHECKING:
     import torch
 
 
-class RewardFunctionGenerator:
-    """
-    Generates reward function code for Isaac Lab tasks.
+class RewardTemplateRegistry:
+    """Registry for concrete reward templates."""
 
-    Reward functions are designed to be compatible with Isaac Lab's
-    RewardTermCfg and can be used with the manager-based architecture.
-    """
-
-    # Reward function templates
     REWARD_TEMPLATES = {
         "grasp_success": '''
 def reward_grasp_success(
@@ -672,6 +666,34 @@ def reward_rotation_accuracy(
 ''',
     }
 
+    @classmethod
+    def get_missing_components(cls, components: list[str]) -> list[str]:
+        """Return reward components that would fall back to the default stub."""
+        missing = set(components) - set(cls.REWARD_TEMPLATES)
+        return sorted(missing)
+
+    @classmethod
+    def validate_components(cls, components: list[str]) -> None:
+        """Ensure reward components map to concrete implementations."""
+        missing = cls.get_missing_components(components)
+        if missing:
+            missing_str = ", ".join(missing)
+            raise ValueError(
+                "Reward components resolve to default stubs: "
+                f"{missing_str}"
+            )
+
+
+class RewardFunctionGenerator:
+    """
+    Generates reward function code for Isaac Lab tasks.
+
+    Reward functions are designed to be compatible with Isaac Lab's
+    RewardTermCfg and can be used with the manager-based architecture.
+    """
+
+    REWARD_TEMPLATES = RewardTemplateRegistry.REWARD_TEMPLATES
+
     def __init__(self):
         pass
 
@@ -681,18 +703,11 @@ def reward_rotation_accuracy(
 
     def validate_components(self, components: list[str]) -> None:
         """Ensure reward components map to concrete implementations."""
-        missing = self.get_missing_components(components)
-        if missing:
-            missing_str = ", ".join(missing)
-            raise ValueError(
-                "Reward components resolve to default stubs: "
-                f"{missing_str}"
-            )
+        RewardTemplateRegistry.validate_components(components)
 
     def get_missing_components(self, components: list[str]) -> list[str]:
         """Return reward components that would fall back to the default stub."""
-        missing = set(components) - set(self.REWARD_TEMPLATES)
-        return sorted(missing)
+        return RewardTemplateRegistry.get_missing_components(components)
 
     def _generate_default_reward(self, component: str) -> str:
         """Generate a default reward function stub."""
