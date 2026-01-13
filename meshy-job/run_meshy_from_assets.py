@@ -1,4 +1,8 @@
-import os, sys, json, base64, time
+import base64
+import json
+import os
+import sys
+import time
 from pathlib import Path
 
 import requests
@@ -8,6 +12,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
+from tools.validation.entrypoint_checks import (
+    validate_required_env_vars,
+    validate_scene_manifest,
+)
 
 MESHY_BASE = "https://api.meshy.ai"
 
@@ -74,17 +82,24 @@ def download_file(url: str, out_path: Path):
     urllib.request.urlretrieve(url, out_path)
 
 def main():
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+            "MESHY_API_KEY": "Meshy API key for 3D generation",
+        },
+        label="[MESHY]",
+    )
+
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
     assets_prefix = os.getenv("ASSETS_PREFIX")  # e.g. scenes/<sceneId>/assets
     meshy_api_key = os.getenv("MESHY_API_KEY")
 
-    if not assets_prefix or not meshy_api_key:
-        print("[MESHY] ASSETS_PREFIX and MESHY_API_KEY required", file=sys.stderr)
-        sys.exit(1)
-
     root = Path("/mnt/gcs")
     assets_root = root / assets_prefix
+    validate_scene_manifest(assets_root / "scene_manifest.json", label="[MESHY]")
     plan = load_assets_plan(assets_root)
     objs = plan.get("objects", [])
     print(f"[MESHY] Loaded plan with {len(objs)} objects")

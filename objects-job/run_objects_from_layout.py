@@ -1,12 +1,17 @@
+import json
 import os
 import sys
-import json
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 import yaml
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from tools.validation.entrypoint_checks import validate_required_env_vars
 
 def load_da3_geom(geom_path: Path):
     data = np.load(str(geom_path), allow_pickle=True)
@@ -140,18 +145,22 @@ def load_class_names(data_yaml_path: Path) -> Optional[List[str]]:
 
 
 def main() -> None:
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "DA3_PREFIX": "Path prefix for DA3 inputs (scenes/<sceneId>/da3)",
+            "SEG_DATASET_PREFIX": "Path prefix for segmentation dataset (scenes/<sceneId>/seg/dataset)",
+            "LAYOUT_PREFIX": "Path prefix for layout files (scenes/<sceneId>/layout)",
+        },
+        label="[OBJECTS]",
+    )
+
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
     da3_prefix = os.getenv("DA3_PREFIX")          # e.g. scenes/<sceneId>/da3
     seg_dataset_prefix = os.getenv("SEG_DATASET_PREFIX")  # e.g. scenes/<sceneId>/seg/dataset
     layout_prefix = os.getenv("LAYOUT_PREFIX")    # e.g. scenes/<sceneId>/layout
-
-    if not da3_prefix or not seg_dataset_prefix or not layout_prefix:
-        print(
-            "[OBJECTS] DA3_PREFIX, SEG_DATASET_PREFIX, and LAYOUT_PREFIX env vars are required",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
     root = Path("/mnt/gcs")
     da3_dir = root / da3_prefix

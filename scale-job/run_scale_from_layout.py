@@ -1,11 +1,16 @@
+import json
 import os
 import sys
-import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from tools.validation.entrypoint_checks import validate_required_env_vars
 
 # Class priors (approximate object heights in meters)
 CLASS_PRIORS: Dict[str, float] = {
@@ -119,13 +124,18 @@ def gather_reference_scales(metadata: dict, objects: List[dict]) -> Tuple[List[f
 
 
 def main() -> None:
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "LAYOUT_PREFIX": "Path prefix for layout files (scenes/<sceneId>/layout)",
+        },
+        label="[SCALE]",
+    )
+
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
     layout_prefix = os.getenv("LAYOUT_PREFIX")  # e.g. scenes/<sceneId>/layout
-
-    if not layout_prefix:
-        print("[SCALE] LAYOUT_PREFIX env var is required", file=sys.stderr)
-        sys.exit(1)
 
     root = Path("/mnt/gcs")
     layout_dir = root / layout_prefix

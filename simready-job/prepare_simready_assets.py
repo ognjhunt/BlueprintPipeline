@@ -14,6 +14,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
+from tools.validation.entrypoint_checks import (
+    validate_required_env_vars,
+    validate_scene_manifest,
+)
 
 # GAP-PHYSICS-011 FIX: Import physics profile selector
 try:
@@ -1875,6 +1879,18 @@ def main() -> None:
         sys.path.append(str(REPO_ROOT))
 
     from blueprint_sim.simready import run_from_env
+
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+        },
+        label="[SIMREADY]",
+    )
+    assets_prefix = os.getenv("ASSETS_PREFIX", "")
+    assets_root = GCS_ROOT / assets_prefix
+    validate_scene_manifest(assets_root / "scene_manifest.json", label="[SIMREADY]")
 
     sys.exit(run_from_env(root=GCS_ROOT))
 
