@@ -7,7 +7,8 @@ WORKDIR /app
 
 # Install Python dependencies
 COPY genie-sim-submit-job/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY genie-sim-submit-job/requirements.lock /app/requirements.lock
+RUN pip install --no-cache-dir -r requirements.txt -c requirements.lock
 
 # Copy job code and shared tools
 COPY genie-sim-submit-job/ /app/genie-sim-submit-job/
