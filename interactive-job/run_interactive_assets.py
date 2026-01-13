@@ -22,6 +22,7 @@ Environment Variables:
     PARTICULATE_LOCAL_ENDPOINT: Optional local Particulate URL for PARTICULATE_MODE=local
     REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
+    DISALLOW_PLACEHOLDER_URDF: "true" to fail if placeholder URDFs are generated
 """
 import base64
 import importlib.util
@@ -78,6 +79,15 @@ def log(msg: str, level: str = "INFO", obj_id: str = "") -> None:
 def parse_env_flag(value: str) -> bool:
     """Parse boolean-like environment variable values."""
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def raise_placeholder_error(obj_id: str, reason: str) -> None:
+    """Raise a clear error when placeholder outputs are generated."""
+    raise RuntimeError(
+        "Placeholder URDF generation blocked "
+        f"for {obj_id} ({reason}). "
+        "Set DISALLOW_PLACEHOLDER_URDF=false and disable production mode to allow placeholders."
+    )
 
 
 def normalize_particulate_mode(value: str) -> str:
@@ -1155,8 +1165,14 @@ def generate_static_urdf(obj_id: str, mesh_filename: str = "mesh.glb") -> str:
 """
 
 
-def generate_placeholder_urdf(obj_id: str, reason: str = "service_unavailable") -> str:
+def generate_placeholder_urdf(
+    obj_id: str,
+    reason: str = "service_unavailable",
+    disallow_placeholder: bool = False,
+) -> str:
     """Generate placeholder URDF when processing fails."""
+    if disallow_placeholder:
+        raise_placeholder_error(obj_id, reason)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!-- Placeholder URDF: {reason} -->
 <robot name="{obj_id}_placeholder">
@@ -1179,6 +1195,7 @@ def materialize_articulation_response(
     response: dict,
     output_dir: Path,
     obj_id: str,
+    disallow_placeholder: bool = False,
 ) -> Tuple[Optional[Path], Optional[Path], Dict[str, Any]]:
     """
     Materialize Particulate articulation response to disk.
@@ -1198,6 +1215,8 @@ def materialize_articulation_response(
 
     # Handle placeholder response
     if response.get("placeholder"):
+        if disallow_placeholder:
+            raise_placeholder_error(obj_id, "particulate_placeholder_response")
         return None, None, meta
 
     # Decode mesh
@@ -1242,6 +1261,7 @@ def process_object(
     particulate_endpoint: Optional[str],
     particulate_mode: str,
     mode: str,
+    disallow_placeholder_urdf: bool,
     index: int,
     total: int,
 ) -> dict:
@@ -1318,7 +1338,14 @@ def process_object(
         result["error"] = "no_glb_found"
 
         urdf_path = output_dir / f"{obj_name}.urdf"
-        urdf_path.write_text(generate_placeholder_urdf(obj_name, "no_glb"), encoding="utf-8")
+        urdf_path.write_text(
+            generate_placeholder_urdf(
+                obj_name,
+                "no_glb",
+                disallow_placeholder=disallow_placeholder_urdf,
+            ),
+            encoding="utf-8",
+        )
         result["urdf_path"] = str(urdf_path)
         return result
 
@@ -1359,7 +1386,12 @@ def process_object(
         return result
 
     # Materialize response
-    mesh_path, urdf_path, meta = materialize_articulation_response(response, output_dir, obj_name)
+    mesh_path, urdf_path, meta = materialize_articulation_response(
+        response,
+        output_dir,
+        obj_name,
+        disallow_placeholder=disallow_placeholder_urdf,
+    )
 
     if not mesh_path or not urdf_path:
         log("Materialization failed, using fallback", "WARNING", obj_name)
@@ -1495,6 +1527,8 @@ def main() -> None:
 
     mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
     production_mode = parse_env_flag(os.getenv("PRODUCTION_MODE", "false"))
+    disallow_placeholder_env = parse_env_flag(os.getenv("DISALLOW_PLACEHOLDER_URDF", "false"))
+    disallow_placeholder_urdf = production_mode or disallow_placeholder_env
     failure_writer = FailureMarkerWriter(
         bucket=bucket,
         scene_id=scene_id or "unknown",
@@ -1541,6 +1575,7 @@ def main() -> None:
     log(f"Mode: {mode}")
     log(f"Interactive objects: {len(interactive_objects)}")
     log(f"Production mode: {production_mode}")
+    log(f"Disallow placeholder URDFs: {disallow_placeholder_urdf}")
     log("=" * 60)
 
     config_context = {
@@ -1550,6 +1585,7 @@ def main() -> None:
         "mode": mode,
         "particulate_mode": particulate_mode,
         "production_mode": production_mode,
+        "disallow_placeholder_urdf": disallow_placeholder_urdf,
         "particulate_endpoint": particulate_endpoint or None,
         "particulate_endpoint_source": endpoint_source,
     }
@@ -1688,6 +1724,7 @@ def main() -> None:
                 particulate_endpoint=particulate_endpoint,
                 particulate_mode=particulate_mode,
                 mode=mode,
+                disallow_placeholder_urdf=disallow_placeholder_urdf,
                 index=i,
                 total=len(interactive_objects),
             )
