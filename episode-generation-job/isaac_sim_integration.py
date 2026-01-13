@@ -250,6 +250,7 @@ class PhysicsStepResult:
     # Robot state
     robot_joint_positions: Optional[np.ndarray] = None
     robot_joint_velocities: Optional[np.ndarray] = None
+    robot_joint_efforts: Optional[np.ndarray] = None
     robot_ee_pose: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
     # Success/error
@@ -534,6 +535,7 @@ class PhysicsSimulator:
                 robot_state = self._get_robot_state()
                 result.robot_joint_positions = robot_state.get("joint_positions")
                 result.robot_joint_velocities = robot_state.get("joint_velocities")
+                result.robot_joint_efforts = robot_state.get("joint_efforts")
                 result.robot_ee_pose = robot_state.get("ee_pose")
 
             result.success = True
@@ -671,6 +673,14 @@ class PhysicsSimulator:
             # Get joint positions and velocities
             joint_positions = robot.get_joint_positions()
             joint_velocities = robot.get_joint_velocities()
+            joint_efforts = None
+
+            if hasattr(robot, "get_joint_efforts"):
+                joint_efforts = robot.get_joint_efforts()
+            elif hasattr(robot, "get_measured_joint_efforts"):
+                joint_efforts = robot.get_measured_joint_efforts()
+            elif hasattr(robot, "get_applied_joint_efforts"):
+                joint_efforts = robot.get_applied_joint_efforts()
 
             # Handle None cases
             if joint_positions is None:
@@ -680,6 +690,10 @@ class PhysicsSimulator:
 
             state["joint_positions"] = np.array(joint_positions, dtype=np.float64)
             state["joint_velocities"] = np.array(joint_velocities, dtype=np.float64)
+            if joint_efforts is None:
+                state["joint_efforts"] = np.zeros_like(state["joint_positions"])
+            else:
+                state["joint_efforts"] = np.array(joint_efforts, dtype=np.float64)
 
             # Get end-effector pose
             # Try common EE link names
