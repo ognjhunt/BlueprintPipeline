@@ -40,6 +40,9 @@ from geniesim_adapter.local_framework import (
 )
 from tools.metrics.pipeline_metrics import get_metrics
 
+EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
+EXPECTED_GENIESIM_API_VERSION = "3.0.0"
+
 
 def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,6 +59,69 @@ def _read_json_blob(client: storage.Client, bucket: str, blob_name: str) -> Dict
 def _write_json_blob(client: storage.Client, bucket: str, blob_name: str, payload: Dict[str, Any]) -> None:
     blob = client.bucket(bucket).blob(blob_name)
     blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
+
+
+def _parse_version(version: str) -> tuple:
+    parts = version.split(".")
+    padded = (parts + ["0", "0", "0"])[:3]
+    parsed = []
+    for part in padded:
+        if part.lower() in {"x", "*"}:
+            parsed.append(None)
+        else:
+            parsed.append(int(part))
+    return tuple(parsed)
+
+
+def _version_tuple(version: str) -> tuple:
+    major, minor, patch = _parse_version(version)
+    return (major or 0, minor or 0, patch or 0)
+
+
+def _is_version_compatible(expected_version: str, min_version: str, max_version: str) -> bool:
+    expected = _version_tuple(expected_version)
+    min_required = _version_tuple(min_version)
+    max_parsed = _parse_version(max_version)
+    if expected < min_required:
+        return False
+    if max_parsed[1] is None or max_parsed[2] is None:
+        return expected[0] == (max_parsed[0] or expected[0])
+    max_required = _version_tuple(max_version)
+    return expected <= max_required
+
+
+def _validate_export_marker(marker: Dict[str, Any]) -> None:
+    export_schema = marker.get("export_schema_version")
+    geniesim_schema = marker.get("geniesim_schema_version")
+    compatibility = marker.get("schema_compatibility", {})
+
+    if not export_schema:
+        raise RuntimeError("Missing export_schema_version in _GENIESIM_EXPORT_COMPLETE.")
+    if export_schema != EXPECTED_EXPORT_SCHEMA_VERSION:
+        raise RuntimeError(
+            "Export schema mismatch: expected "
+            f"{EXPECTED_EXPORT_SCHEMA_VERSION}, found {export_schema}."
+        )
+
+    if not geniesim_schema:
+        raise RuntimeError("Missing geniesim_schema_version in _GENIESIM_EXPORT_COMPLETE.")
+    if _parse_version(geniesim_schema)[0] != _parse_version(EXPECTED_GENIESIM_API_VERSION)[0]:
+        raise RuntimeError(
+            "Genie Sim API version incompatibility: "
+            f"expected major {EXPECTED_GENIESIM_API_VERSION}, found {geniesim_schema}."
+        )
+
+    min_version = compatibility.get("min_geniesim_version")
+    max_version = compatibility.get("max_geniesim_version")
+    if not min_version or not max_version:
+        raise RuntimeError(
+            "Missing schema_compatibility ranges in _GENIESIM_EXPORT_COMPLETE."
+        )
+    if not _is_version_compatible(EXPECTED_GENIESIM_API_VERSION, min_version, max_version):
+        raise RuntimeError(
+            "Genie Sim API version incompatibility: expected "
+            f"{EXPECTED_GENIESIM_API_VERSION} to be within [{min_version}, {max_version}]."
+        )
 
 
 def main() -> int:
@@ -77,6 +143,12 @@ def main() -> int:
     scene_graph = _read_json_blob(storage_client, bucket, f"{geniesim_prefix}/scene_graph.json")
     asset_index = _read_json_blob(storage_client, bucket, f"{geniesim_prefix}/asset_index.json")
     task_config = _read_json_blob(storage_client, bucket, f"{geniesim_prefix}/task_config.json")
+    export_marker = _read_json_blob(
+        storage_client,
+        bucket,
+        f"{geniesim_prefix}/_GENIESIM_EXPORT_COMPLETE",
+    )
+    _validate_export_marker(export_marker)
 
     generation_params = GenerationParams(
         episodes_per_task=episodes_per_task,
@@ -209,6 +281,13 @@ def main() -> int:
             "episodes_per_task": episodes_per_task,
             "num_variations": num_variations,
             "min_quality_score": min_quality_score,
+        },
+        "export_schema": {
+            "export_schema_version": export_marker.get("export_schema_version"),
+            "geniesim_schema_version": export_marker.get("geniesim_schema_version"),
+            "blueprintpipeline_version": export_marker.get("blueprintpipeline_version"),
+            "export_timestamp": export_marker.get("export_timestamp"),
+            "schema_compatibility": export_marker.get("schema_compatibility", {}),
         },
         "metrics_summary": metrics_summary,
     }
