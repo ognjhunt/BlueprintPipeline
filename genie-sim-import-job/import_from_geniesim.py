@@ -898,6 +898,7 @@ def run_import_job(
         }
         import_manifest = {
             "schema_version": "1.1",
+        }
         episode_ids = [episode.episode_id for episode in download_result.episodes]
         episode_paths, missing_episode_ids = get_episode_file_paths(config.output_dir, episode_ids)
         metadata_paths = get_lerobot_metadata_paths(config.output_dir)
