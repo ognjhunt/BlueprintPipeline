@@ -1,0 +1,19 @@
+# Adaptive timeout configuration for workflow job invocations.
+#
+# Values are in seconds. Workflows can override these defaults via
+# event payload fields like `timeout_override_seconds`.
+#
+# Bundle tier overrides allow higher tiers to use longer timeouts.
+
+bundle_tier:
+  standard: 900
+  pro: 1800
+  enterprise: 2700
+
+scene_complexity:
+  low: 1800
+  medium: 2700
+  high: 3600
+
+# Default fallback when no tier/complexity is provided.
+default_timeout_seconds: 1800
