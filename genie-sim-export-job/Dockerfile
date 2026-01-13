@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements first for caching
 COPY genie-sim-export-job/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY genie-sim-export-job/requirements.lock ./requirements.lock
+RUN pip install --no-cache-dir -r requirements.txt -c requirements.lock
 
 # Copy tools directory (geniesim_adapter module)
 COPY tools/ ./tools/
