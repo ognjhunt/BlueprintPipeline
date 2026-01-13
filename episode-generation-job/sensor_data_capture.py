@@ -73,7 +73,7 @@ except ImportError:
 # =============================================================================
 # P2-11 FIX: Import DataPackTier from primary definition to avoid duplication
 from data_pack_config import DataPackTier
-from usd_scene_scan import resolve_robot_prim_paths
+from usd_scene_scan import discover_camera_prim_specs, get_usd_stage, resolve_robot_prim_paths
 
 
 class SensorDataCaptureMode(Enum):
@@ -291,6 +291,8 @@ class SensorDataConfig:
         num_cameras: int = 1,
         resolution: Tuple[int, int] = (640, 480),
         fps: float = 30.0,
+        camera_specs: Optional[List[Dict[str, str]]] = None,
+        scene_usd_path: Optional[str] = None,
     ) -> "SensorDataConfig":
         """Create configuration from data pack tier."""
         config = cls(
@@ -303,7 +305,11 @@ class SensorDataConfig:
         if tier == DataPackTier.CORE:
             # Core: RGB only
             config.cameras = cls._create_default_cameras(
-                num_cameras, resolution, capture_depth=False
+                num_cameras,
+                resolution,
+                camera_specs=camera_specs,
+                scene_usd_path=scene_usd_path,
+                capture_depth=False,
             )
 
         elif tier == DataPackTier.PLUS:
@@ -311,6 +317,8 @@ class SensorDataConfig:
             config.cameras = cls._create_default_cameras(
                 num_cameras,
                 resolution,
+                camera_specs=camera_specs,
+                scene_usd_path=scene_usd_path,
                 capture_depth=True,
                 capture_segmentation=True,
                 capture_bbox_2d=True,
@@ -324,6 +332,8 @@ class SensorDataConfig:
             config.cameras = cls._create_default_cameras(
                 num_cameras,
                 resolution,
+                camera_specs=camera_specs,
+                scene_usd_path=scene_usd_path,
                 capture_depth=True,
                 capture_segmentation=True,
                 capture_bbox_2d=True,
@@ -342,6 +352,8 @@ class SensorDataConfig:
     def _create_default_cameras(
         num_cameras: int,
         resolution: Tuple[int, int],
+        camera_specs: Optional[List[Dict[str, str]]] = None,
+        scene_usd_path: Optional[str] = None,
         capture_depth: bool = False,
         capture_segmentation: bool = False,
         capture_bbox_2d: bool = False,
@@ -349,18 +361,71 @@ class SensorDataConfig:
         capture_normals: bool = False,
     ) -> List[CameraConfig]:
         """Create default camera configurations."""
-        cameras = []
+        cameras: List[CameraConfig] = []
 
-        # Standard camera configurations
-        camera_specs = [
-            ("wrist", "/World/Robot/wrist_camera", "wrist"),
-            ("overhead", "/World/Cameras/overhead_camera", "overhead"),
-            ("side", "/World/Cameras/side_camera", "side"),
-            ("front", "/World/Cameras/front_camera", "front"),
-        ]
+        normalized_specs = []
+        for spec in camera_specs or []:
+            if not isinstance(spec, dict):
+                continue
+            prim_path = spec.get("prim_path") or spec.get("path")
+            if not prim_path:
+                continue
+            camera_type = spec.get("camera_type") or spec.get("type") or "rgb"
+            camera_id = spec.get("camera_id") or spec.get("id") or camera_type
+            normalized_specs.append(
+                {
+                    "prim_path": prim_path,
+                    "camera_type": camera_type,
+                    "camera_id": camera_id,
+                }
+            )
 
-        for i in range(min(num_cameras, len(camera_specs))):
-            camera_id, prim_path, camera_type = camera_specs[i]
+        if not normalized_specs:
+            normalized_specs = discover_camera_prim_specs(scene_usd_path=scene_usd_path)
+
+        if not normalized_specs:
+            raise RuntimeError(
+                "No camera configuration provided and no cameras discovered in the USD. "
+                "Add cameras to the scene config or ensure the USD contains camera prims."
+            )
+
+        stage = get_usd_stage(scene_usd_path) if scene_usd_path else None
+        missing_prims: List[str] = []
+        validated_specs = []
+
+        for spec in normalized_specs:
+            prim_path = spec["prim_path"]
+            if stage is not None:
+                prim = stage.GetPrimAtPath(prim_path)
+                if not prim.IsValid():
+                    missing_prims.append(prim_path)
+                    continue
+                try:
+                    from pxr import UsdGeom
+                    is_camera = prim.IsA(UsdGeom.Camera)
+                except Exception:
+                    is_camera = False
+                if not is_camera:
+                    missing_prims.append(prim_path)
+                    continue
+            validated_specs.append(spec)
+
+        if missing_prims:
+            missing_list = ", ".join(sorted(set(missing_prims)))
+            raise RuntimeError(
+                f"Required camera prims are missing or invalid in the USD: {missing_list}"
+            )
+
+        if len(validated_specs) < num_cameras:
+            raise RuntimeError(
+                f"Requested {num_cameras} cameras but only {len(validated_specs)} available."
+            )
+
+        for i in range(num_cameras):
+            spec = validated_specs[i]
+            camera_id = spec.get("camera_id") or f"camera_{i + 1}"
+            prim_path = spec["prim_path"]
+            camera_type = spec.get("camera_type") or "rgb"
             cameras.append(
                 CameraConfig(
                     camera_id=camera_id,
@@ -1857,6 +1922,7 @@ def create_sensor_capture(
     num_cameras: int = 1,
     resolution: Tuple[int, int] = (640, 480),
     fps: float = 30.0,
+    camera_specs: Optional[List[Dict[str, str]]] = None,
     robot_prim_paths: Optional[List[str]] = None,
     scene_usd_path: Optional[str] = None,
     use_mock: bool = False,
@@ -1879,6 +1945,7 @@ def create_sensor_capture(
         num_cameras: Number of cameras to configure
         resolution: Image resolution (width, height)
         fps: Frames per second
+        camera_specs: Optional camera specifications from scene config
         robot_prim_paths: Optional list of robot prim paths to track
         scene_usd_path: Optional USD scene path for auto-discovery
         use_mock: [DEPRECATED] Force mock capture (use capture_mode=MOCK_DEV instead)
@@ -1901,6 +1968,8 @@ def create_sensor_capture(
         num_cameras=num_cameras,
         resolution=resolution,
         fps=fps,
+        camera_specs=camera_specs,
+        scene_usd_path=scene_usd_path,
     )
     config.robot_prim_paths = robot_prim_paths
     config.scene_usd_path = scene_usd_path
