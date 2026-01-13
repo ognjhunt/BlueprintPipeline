@@ -186,6 +186,9 @@ try:
         get_environment_capabilities,
         get_data_quality_level,
         print_environment_report,
+        DataQualityLevel,
+        SensorSource,
+        PhysicsValidationBackend,
         IsaacSimRequirementError,
         ProductionDataQualityError,
     )
@@ -1332,6 +1335,16 @@ class EpisodeGenerator:
         validated_episodes = self._validate_episodes(all_episodes, manifest)
         self._enforce_physics_backed_qc(validated_episodes)
 
+        if HAVE_QUALITY_SYSTEM:
+            self.log("\nStep 4b: Generating quality certificates...")
+            cert_generator = QualityCertificateGenerator(get_environment_capabilities())
+            for episode in validated_episodes:
+                episode.quality_certificate = self._build_quality_certificate(
+                    episode,
+                    cert_generator,
+                )
+            self._write_quality_artifacts(validated_episodes)
+
         # Step 6: Filter to high-quality episodes
         valid_episodes = [
             ep for ep in validated_episodes
@@ -2152,6 +2165,199 @@ class EpisodeGenerator:
             batch_name="validation",
         )
         return result.successful
+
+    def _resolve_sensor_source(self, episode: GeneratedEpisode) -> str:
+        if episode.sensor_data is None or self.sensor_capture is None:
+            return "disabled"
+        if self._sensor_capture_is_mock:
+            return SensorSource.MOCK.value
+        return SensorSource.ISAAC_SIM_REPLICATOR.value
+
+    def _resolve_physics_backend(self, episode: GeneratedEpisode) -> str:
+        backend = None
+        if episode.validation_result:
+            backend = episode.validation_result.physics_backend
+        if backend in {"isaac_sim", "isaac_lab"}:
+            return PhysicsValidationBackend.PHYSX.value
+        if backend == "heuristic":
+            return PhysicsValidationBackend.HEURISTIC.value
+        if self.validator and self.validator.is_using_real_physics():
+            return PhysicsValidationBackend.PHYSX.value
+        return PhysicsValidationBackend.HEURISTIC.value
+
+    def _build_quality_certificate(
+        self,
+        episode: GeneratedEpisode,
+        generator: "QualityCertificateGenerator",
+    ) -> Optional["QualityCertificate"]:
+        if not HAVE_QUALITY_SYSTEM:
+            return None
+
+        validation_metrics = (
+            episode.validation_result.metrics
+            if episode.validation_result and episode.validation_result.metrics
+            else None
+        )
+        sensor_source = self._resolve_sensor_source(episode)
+        physics_backend = self._resolve_physics_backend(episode)
+
+        collision_count = validation_metrics.total_collisions if validation_metrics else 0
+        joint_limit_violations = validation_metrics.joint_limit_violations if validation_metrics else 0
+        torque_limit_violations = validation_metrics.torque_limit_violations if validation_metrics else 0
+        path_length = validation_metrics.path_length if validation_metrics else 0.0
+        jerk_integral = validation_metrics.jerk_integral if validation_metrics else 0.0
+        smoothness_score = validation_metrics.velocity_smoothness if validation_metrics else 0.0
+
+        trajectory_metrics = TrajectoryQualityMetrics(
+            smoothness_score=smoothness_score,
+            mean_jerk=jerk_integral,
+            path_efficiency=1.0,
+            time_efficiency=1.0,
+            trajectory_length_meters=path_length,
+            dynamics_feasibility=1.0 if joint_limit_violations == 0 else 0.7,
+            joint_limit_violations=joint_limit_violations,
+            torque_limit_violations=torque_limit_violations,
+            collision_count=collision_count,
+        )
+
+        skill_segments_correct = 0
+        if validation_metrics:
+            skill_segments_correct = int(validation_metrics.grasp_success) + int(
+                validation_metrics.placement_success
+            )
+        skill_segment_count = 2 if validation_metrics else 0
+        skill_correctness_ratio = (
+            skill_segments_correct / skill_segment_count
+            if skill_segment_count
+            else 0.0
+        )
+
+        constraint_violations = joint_limit_violations + torque_limit_violations
+        constraint_satisfaction = 1.0 if constraint_violations == 0 else 0.5
+        task_metrics = TaskQualityMetrics(
+            goal_achievement_score=1.0 if validation_metrics and validation_metrics.task_success else 0.0,
+            skill_segment_count=skill_segment_count,
+            skill_segments_correct=skill_segments_correct,
+            skill_correctness_ratio=skill_correctness_ratio,
+            constraint_violations=constraint_violations,
+            constraint_satisfaction_score=constraint_satisfaction,
+        )
+
+        frame_count = episode.sensor_data.num_frames if episode.sensor_data else 0
+        camera_count = len(episode.sensor_data.camera_ids) if episode.sensor_data else 0
+        visual_metrics = VisualQualityMetrics(
+            target_visibility_ratio=1.0 if episode.sensor_data and episode.sensor_data.has_rgb else 0.0,
+            viewpoint_diversity=min(1.0, camera_count / 3.0) if camera_count else 0.0,
+        )
+
+        sim2real_metrics = Sim2RealMetrics(
+            physics_plausibility_score=1.0 if physics_backend == PhysicsValidationBackend.PHYSX.value else 0.5,
+            episode_duration_seconds=validation_metrics.total_duration if validation_metrics else 0.0,
+            timing_realism_score=1.0,
+        )
+
+        episode_hash = compute_episode_data_hash(
+            {
+                "episode_id": episode.episode_id,
+                "task_name": episode.task_name,
+                "quality_score": episode.quality_score,
+                "validation_errors": episode.validation_errors,
+                "sensor_frames": frame_count,
+                "sensor_source": sensor_source,
+                "physics_backend": physics_backend,
+            }
+        )
+
+        cert = generator.generate_certificate(
+            episode_id=episode.episode_id,
+            scene_id=episode.scene_id,
+            task_id=episode.task_name,
+            trajectory_metrics=trajectory_metrics,
+            visual_metrics=visual_metrics,
+            task_metrics=task_metrics,
+            sim2real_metrics=sim2real_metrics,
+            validation_passed=episode.is_valid,
+            frame_count=frame_count,
+            camera_count=camera_count,
+            episode_data_hash=episode_hash,
+        )
+
+        cert.sensor_source = sensor_source
+        cert.physics_backend = physics_backend
+        cert.overall_quality_score = episode.quality_score
+        cert.validation_errors = list(episode.validation_errors)
+        cert.recommended_use = cert.assess_training_suitability()
+        cert.confidence_score = generator._compute_confidence_score(cert)
+
+        if sensor_source != SensorSource.ISAAC_SIM_REPLICATOR.value or (
+            physics_backend != PhysicsValidationBackend.PHYSX.value
+        ):
+            cert.data_quality_level = DataQualityLevel.DEVELOPMENT.value
+
+        if sensor_source == SensorSource.MOCK.value or self._sensor_capture_is_mock:
+            cert.add_warning(
+                "MockSensorCapture in use - sensor data is placeholder noise and non-production"
+            )
+
+        if sensor_source == "disabled":
+            cert.add_warning("Sensor capture disabled - no visual observations recorded")
+
+        if physics_backend == PhysicsValidationBackend.HEURISTIC.value:
+            cert.add_warning(
+                "Heuristic physics validation in use - not suitable for production filtering"
+            )
+
+        return cert
+
+    def _map_quality_suitability(self, cert: "QualityCertificate") -> str:
+        if cert.recommended_use == "production_training":
+            return "production"
+        if cert.recommended_use == "fine_tuning":
+            return "fine_tuning"
+        return "dev_only"
+
+    def _write_quality_artifacts(self, episodes: List[GeneratedEpisode]) -> None:
+        if not HAVE_QUALITY_SYSTEM:
+            return
+
+        quality_dir = self.config.output_dir / "quality" / "episodes"
+        quality_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest_entries = []
+        for episode in episodes:
+            cert = episode.quality_certificate
+            if cert is None:
+                continue
+            episode_dir = quality_dir / episode.episode_id
+            episode_dir.mkdir(parents=True, exist_ok=True)
+            cert.save(episode_dir / "quality_certificate.json")
+            manifest_entries.append(
+                {
+                    "episode_id": episode.episode_id,
+                    "task_name": episode.task_name,
+                    "quality_score": cert.overall_quality_score,
+                    "suitability": self._map_quality_suitability(cert),
+                    "sensor_backend": cert.sensor_source,
+                    "physics_backend": cert.physics_backend,
+                    "warnings": list(cert.validation_warnings),
+                }
+            )
+
+        manifest = {
+            "scene_id": self.config.scene_id,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "episodes": manifest_entries,
+            "summary": {
+                "total_episodes": len(manifest_entries),
+                "production": sum(1 for entry in manifest_entries if entry["suitability"] == "production"),
+                "fine_tuning": sum(1 for entry in manifest_entries if entry["suitability"] == "fine_tuning"),
+                "dev_only": sum(1 for entry in manifest_entries if entry["suitability"] == "dev_only"),
+            },
+        }
+
+        manifest_path = self.config.output_dir / "dataset_quality_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
 
     def _get_data_pack_includes(self) -> List[str]:
         """Get list of data streams included in the configured data pack."""
