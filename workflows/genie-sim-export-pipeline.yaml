@@ -319,6 +319,14 @@ main:
                         value: '${"scenes/" + sceneId + "/episodes"}'
                       - name: GENIESIM_FORCE_LOCAL
                         value: "true"
+                      - name: GENIESIM_HOST
+                        value: '${default(sys.get_env("GENIESIM_HOST"), "localhost")}'
+                      - name: GENIESIM_PORT
+                        value: '${default(sys.get_env("GENIESIM_PORT"), "50051")}'
+                      - name: GENIESIM_ROOT
+                        value: '${default(sys.get_env("GENIESIM_ROOT"), "/opt/geniesim")}'
+                      - name: ISAAC_SIM_PATH
+                        value: '${default(sys.get_env("ISAAC_SIM_PATH"), "/isaac-sim")}'
         result: geniesimSubmitExec
         retry:
           predicate: ${http.default_retry_predicate}
