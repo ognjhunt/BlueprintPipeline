@@ -23,6 +23,7 @@ Reference:
 """
 
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -44,6 +45,31 @@ except ImportError:
     HAVE_LLM_CLIENT = False
     create_llm_client = None
 
+try:
+    from tools.secrets import get_secret_or_env, SecretIds
+    HAVE_SECRET_MANAGER = True
+except ImportError:
+    HAVE_SECRET_MANAGER = False
+    get_secret_or_env = None
+    SecretIds = None
+
+SECRET_ID_GEMINI = SecretIds.GEMINI_API_KEY if SecretIds else "gemini-api-key"
+SECRET_ID_OPENAI = SecretIds.OPENAI_API_KEY if SecretIds else "openai-api-key"
+SECRET_ID_ANTHROPIC = SecretIds.ANTHROPIC_API_KEY if SecretIds else "anthropic-api-key"
+
+
+def _load_secret_value(secret_id: str, env_var: str) -> Optional[str]:
+    if HAVE_SECRET_MANAGER and get_secret_or_env is not None:
+        try:
+            return get_secret_or_env(secret_id, env_var=env_var)
+        except Exception as exc:
+            print(
+                f"[TASK-SPECIFIER] [WARN] Failed to fetch secret '{secret_id}', "
+                f"falling back to env var '{env_var}': {exc}",
+                file=sys.stderr,
+            )
+            return os.environ.get(env_var)
+    return os.environ.get(env_var)
 
 # =============================================================================
 # Data Models for Task Specification
@@ -301,11 +327,34 @@ class TaskSpecifier:
         if self.verbose:
             print(f"[TASK-SPECIFIER] [{level}] {msg}")
 
+    def _ensure_llm_credentials(self) -> None:
+        providers = [
+            ("gemini", SECRET_ID_GEMINI, "GEMINI_API_KEY"),
+            ("openai", SECRET_ID_OPENAI, "OPENAI_API_KEY"),
+            ("anthropic", SECRET_ID_ANTHROPIC, "ANTHROPIC_API_KEY"),
+        ]
+        available = []
+        for provider, secret_id, env_var in providers:
+            if _load_secret_value(secret_id, env_var):
+                available.append(provider)
+
+        if not available:
+            message = (
+                "No LLM API keys configured. "
+                "Set Secret Manager IDs "
+                f"'{SECRET_ID_GEMINI}', '{SECRET_ID_OPENAI}', "
+                f"or '{SECRET_ID_ANTHROPIC}', "
+                "or provide GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY env vars."
+            )
+            self.log(message, level="ERROR")
+            raise ValueError(message)
+
     def _get_client(self):
         """Get or create LLM client."""
         if self._client is None:
             if not HAVE_LLM_CLIENT:
                 raise ImportError("LLM client not available")
+            self._ensure_llm_credentials()
             self._client = create_llm_client()
         return self._client
 
