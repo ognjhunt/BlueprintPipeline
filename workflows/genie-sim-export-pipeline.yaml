@@ -72,8 +72,8 @@ main:
           - robotType: '${default(map.get(event, "robot_type"), "franka")}'
           # Max tasks to generate hints for
           - maxTasks: '${default(map.get(event, "max_tasks"), "50")}'
-          # Submission mode: api or local
-          - geniesimSubmissionMode: '${default(map.get(event, "geniesim_submission_mode"), "api")}'
+          # Submission mode: api or local (API requires explicit opt-in)
+          - geniesimSubmissionMode: '${default(map.get(event, "geniesim_submission_mode"), "local")}'
         next: filter_completion_markers
 
     # Filter for .variation_pipeline_complete marker files
