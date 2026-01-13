@@ -2539,14 +2539,17 @@ def main():
     print("[EPISODE-GEN-JOB] Episode Generation Job (SOTA)")
     print("[EPISODE-GEN-JOB] ================================\n")
 
-    def _is_production_preflight() -> bool:
-        env_flags = (
+    def _production_env_flags() -> bool:
+        return (
             os.getenv("REQUIRE_REAL_PHYSICS", "").lower() == "true"
             or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
             or os.getenv("PRODUCTION_MODE", "").lower() == "true"
             or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
             or os.getenv("PRODUCTION", "").lower() == "true"
         )
+
+    def _is_production_preflight() -> bool:
+        env_flags = _production_env_flags()
         if HAVE_QUALITY_SYSTEM:
             try:
                 return get_data_quality_level().value == "production" or env_flags
@@ -2671,7 +2674,7 @@ def main():
             print("[EPISODE-GEN-JOB] ✅ Environment check passed\n")
 
             allow_mock_capture_env = os.getenv("ALLOW_MOCK_CAPTURE", os.getenv("ALLOW_MOCK_DATA", "false")).lower() == "true"
-            if required_quality.value == "production":
+            if required_quality.value == "production" or _production_env_flags():
                 allow_mock_capture = False
                 if allow_mock_capture_env:
                     print("[EPISODE-GEN-JOB] ⚠️  ALLOW_MOCK_CAPTURE ignored in production quality mode")
@@ -2693,9 +2696,11 @@ def main():
         print("[EPISODE-GEN-JOB] Using legacy Isaac Sim check (quality system unavailable)\n")
 
         # P0-4 FIX: Add explicit check for sensor capture environment
+        replicator_available = False
         if check_sensor_capture_environment is not None:
             status = check_sensor_capture_environment()
             isaac_sim_available = status.get("isaac_sim_available", False)
+            replicator_available = status.get("replicator_available", False)
             print(f"[EPISODE-GEN-JOB] Isaac Sim available: {isaac_sim_available}\n")
         else:
             isaac_sim_available = False
@@ -2703,11 +2708,13 @@ def main():
 
         # Detect if running in production environment
         # Production indicators: running in container, K8s, or Cloud Run
+        production_env_flags = _production_env_flags()
         is_production = (
             os.getenv("KUBERNETES_SERVICE_HOST") is not None or  # K8s
             os.getenv("K_SERVICE") is not None or  # Cloud Run
             os.path.exists("/.dockerenv") or  # Docker
             os.getenv("PRODUCTION", "false").lower() == "true"
+            or production_env_flags
         )
 
         # In production, require real physics by default unless explicitly disabled
@@ -2718,6 +2725,8 @@ def main():
             default_require_real = "false"
 
         require_real_physics = os.getenv("REQUIRE_REAL_PHYSICS", default_require_real).lower() == "true"
+        if production_env_flags:
+            require_real_physics = True
 
         # LABS-BLOCKER-001 FIX: Remove ALLOW_MOCK_DATA override in production
         # In production, we MUST have Isaac Sim - no exceptions
@@ -2748,11 +2757,14 @@ def main():
         print(f"[EPISODE-GEN-JOB] Allow mock data: {allow_mock_data}")
         allow_mock_capture = allow_mock_data
 
-        # LABS-BLOCKER-001 FIX: Fail hard in production if Isaac Sim not available
-        if require_real_physics and not isaac_sim_available:
+        # LABS-BLOCKER-001 FIX: Fail hard in production if Isaac Sim/Replicator not available
+        if require_real_physics and (not isaac_sim_available or not replicator_available):
             # In production, this is ALWAYS a fatal error (allow_mock_data is always False)
             print("\n" + "=" * 80)
-            print("❌ FATAL ERROR: Isaac Sim not available in production mode")
+            if not isaac_sim_available:
+                print("❌ FATAL ERROR: Isaac Sim not available in production mode")
+            else:
+                print("❌ FATAL ERROR: Replicator extension not available in production mode")
             print("=" * 80)
             print("")
             print("Episode generation requires NVIDIA Isaac Sim for:")

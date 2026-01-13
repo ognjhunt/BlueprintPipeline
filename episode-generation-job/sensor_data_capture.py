@@ -2003,6 +2003,14 @@ def create_sensor_capture(
             # Default: fail-closed (production safe)
             capture_mode = get_capture_mode_from_env()
 
+    if _is_production_run():
+        if capture_mode == SensorDataCaptureMode.MOCK_DEV or use_mock or allow_mock_capture:
+            raise RuntimeError(
+                "Mock sensor capture is blocked in production mode. "
+                "Unset DATA_QUALITY_LEVEL=production/ISAAC_SIM_REQUIRED or "
+                "run with Isaac Sim available."
+            )
+
     # Check if Isaac Sim is available
     if capture_mode in (SensorDataCaptureMode.ISAAC_SIM, SensorDataCaptureMode.FAIL_CLOSED):
         if not _HAVE_INTEGRATION_MODULE:
