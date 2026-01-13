@@ -150,6 +150,7 @@ class MotionPlan:
 
     # Planning metadata
     planning_backend: str = "heuristic"
+    trajectory_backend: str = "heuristic"
     planning_success: bool = True
     planning_errors: List[str] = field(default_factory=list)
 
@@ -164,6 +165,10 @@ class MotionPlan:
 
     def __post_init__(self):
         """Calculate total duration."""
+        self.recalculate_timing()
+
+    def recalculate_timing(self) -> None:
+        """Recalculate timestamps and total duration after waypoint changes."""
         if self.waypoints:
             self.total_duration = sum(w.duration_to_next for w in self.waypoints[:-1])
             # Assign timestamps
@@ -194,6 +199,7 @@ class MotionPlan:
             "confidence": self.confidence,
             "robot_type": self.robot_type,
             "planning_backend": self.planning_backend,
+            "trajectory_backend": self.trajectory_backend,
             "planning_success": self.planning_success,
             "planning_errors": list(self.planning_errors),
             "collision_checked": self.collision_checked,
@@ -319,8 +325,14 @@ class AIMotionPlanner:
         self.verbose = verbose
         self._client = None
         self._curobo_planner = None
+        self._collision_planner = None
         self._curobo_device = curobo_device or os.getenv("CUROBO_DEVICE", "cuda:0")
         self._use_curobo = use_curobo and os.getenv("USE_CUROBO", "true").lower() in {"1", "true", "yes"}
+        self._require_collision_planner = os.getenv("REQUIRE_COLLISION_PLANNER", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         self._timing = load_motion_planner_timing()
 
     def log(self, msg: str, level: str = "INFO") -> None:
@@ -380,6 +392,53 @@ class AIMotionPlanner:
             ))
 
         return obstacles
+
+    def _get_collision_planner(self, scene_context: Optional[SceneContext]):
+        """Get or create fallback collision-aware planner (RRT-based)."""
+        if self._collision_planner is None:
+            try:
+                from collision_aware_planner import CollisionAwarePlanner
+            except ImportError:
+                return None
+
+            scene_objects = scene_context.objects if scene_context else None
+            self._collision_planner = CollisionAwarePlanner(
+                robot_type=self.robot_type,
+                scene_objects=scene_objects,
+                use_curobo=False,
+                verbose=self.verbose,
+            )
+            if scene_context is not None:
+                self._collision_planner.rrt_planner.set_workspace_bounds(
+                    scene_context.workspace_min, scene_context.workspace_max
+                )
+        return self._collision_planner
+
+    def _plan_collision_aware_waypoints(
+        self,
+        waypoints: List[Waypoint],
+        scene_context: Optional[SceneContext],
+        robot_radius: float = 0.08,
+    ) -> Tuple[Optional[List[Waypoint]], Optional[bool], List[str]]:
+        """Plan a collision-aware waypoint trajectory using RRT fallback."""
+        planner = self._get_collision_planner(scene_context)
+        if planner is None:
+            return None, None, ["Fallback collision planner unavailable"]
+
+        new_waypoints = planner.plan_waypoint_trajectory(waypoints, robot_radius=robot_radius)
+        if new_waypoints is None:
+            return None, None, ["Fallback collision planner failed to produce a trajectory"]
+
+        path_positions = [wp.position for wp in new_waypoints]
+        collision_detected, segment_idx = planner.collision_checker.check_collision_path(
+            path_positions, radius=robot_radius
+        )
+        collision_free = not collision_detected
+        errors: List[str] = []
+        if collision_detected:
+            errors.append(f"Collision detected in fallback trajectory at segment {segment_idx}")
+
+        return new_waypoints, collision_free, errors
 
     def _plan_joint_trajectory(
         self,
@@ -642,16 +701,19 @@ class AIMotionPlanner:
             robot_type=self.robot_type,
         )
 
+        collision_planner_used = False
         joint_trajectory, joint_timestamps, collision_checked, collision_free, errors = (
             self._plan_joint_trajectory(waypoints=waypoints, scene_context=scene_context)
         )
         if collision_checked:
             plan.planning_backend = "curobo"
+            plan.trajectory_backend = "curobo"
             plan.collision_checked = True
             plan.collision_free = collision_free
             plan.joint_limits_enforced = True
             plan.joint_trajectory = joint_trajectory
             plan.joint_trajectory_timestamps = joint_timestamps
+            collision_planner_used = True
             if errors:
                 plan.planning_errors.extend(errors)
                 plan.planning_success = False
@@ -660,18 +722,42 @@ class AIMotionPlanner:
                 plan.planning_success = False
 
         if not collision_checked:
-            joint_trajectory, joint_timestamps, ik_errors = self._solve_waypoint_ik(waypoints)
+            fallback_waypoints, fallback_collision_free, fallback_errors = self._plan_collision_aware_waypoints(
+                waypoints=plan.waypoints,
+                scene_context=scene_context,
+            )
+            if fallback_waypoints is not None:
+                plan.waypoints = fallback_waypoints
+                plan.recalculate_timing()
+                plan.planning_backend = "rrt"
+                plan.trajectory_backend = "rrt"
+                plan.collision_checked = True
+                plan.collision_free = fallback_collision_free
+                collision_planner_used = True
+                if fallback_errors:
+                    plan.planning_errors.extend(fallback_errors)
+                    plan.planning_success = False
+                if fallback_collision_free is False:
+                    plan.planning_success = False
+            elif fallback_errors and self._require_collision_planner:
+                plan.planning_errors.extend(fallback_errors)
+                plan.planning_success = False
+
+            joint_trajectory, joint_timestamps, ik_errors = self._solve_waypoint_ik(plan.waypoints)
             if ik_errors:
                 plan.planning_errors.extend(ik_errors)
                 plan.planning_success = False
             else:
-                plan.planning_backend = "ik"
+                if plan.planning_backend == "heuristic":
+                    plan.planning_backend = "ik"
+                if plan.trajectory_backend == "heuristic":
+                    plan.trajectory_backend = "ik"
                 plan.joint_trajectory = joint_trajectory
                 plan.joint_trajectory_timestamps = joint_timestamps
                 plan.joint_limits_enforced = True
 
         if not plan.collision_checked:
-            collision_free, collision_errors = self._check_scene_collisions(waypoints, scene_context)
+            collision_free, collision_errors = self._check_scene_collisions(plan.waypoints, scene_context)
             if collision_free is not None:
                 plan.collision_checked = True
                 plan.collision_free = collision_free
@@ -681,6 +767,10 @@ class AIMotionPlanner:
             elif collision_errors:
                 plan.planning_errors.extend(collision_errors)
                 plan.planning_success = False
+
+        if self._require_collision_planner and not collision_planner_used:
+            plan.planning_errors.append("Collision planner required but unavailable")
+            plan.planning_success = False
 
         if plan.planning_errors:
             self.log(f"  Planning errors: {plan.planning_errors}", "WARNING")
