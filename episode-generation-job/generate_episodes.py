@@ -1094,6 +1094,35 @@ class EpisodeGenerator:
         if override is None:
             return True
         return override.lower() == "true"
+
+    def _enforce_physics_backed_qc(self, validated_episodes: List[GeneratedEpisode]) -> None:
+        """Ensure production exports only use physics-backed QC results."""
+        if not self._is_production_quality_level():
+            return
+
+        if not HAVE_QUALITY_SYSTEM:
+            raise RuntimeError(
+                "Production QC gating requires the quality system to be available."
+            )
+
+        if not self.validator or not self.validator.is_using_real_physics():
+            raise ProductionDataQualityError(
+                "Production exports require physics-backed QC results. "
+                "Run with Isaac Sim or Isaac Lab + PhysX enabled."
+            )
+
+        non_physics = [
+            ep for ep in validated_episodes
+            if ep.validation_result is None
+            or ep.validation_result.dev_only_fallback
+            or ep.validation_result.physics_backend not in {"isaac_sim", "isaac_lab"}
+        ]
+        if non_physics:
+            raise ProductionDataQualityError(
+                "Production exports require physics-backed QC results for every episode. "
+                f"Found {len(non_physics)} episodes without physics-backed validation."
+            )
+
     def _solve_trajectory_with_replan(
         self,
         motion_plan: MotionPlan,
@@ -1206,6 +1235,7 @@ class EpisodeGenerator:
         # Step 5: Validate episodes
         self.log("\nStep 4: Validating episodes in simulation...")
         validated_episodes = self._validate_episodes(all_episodes, manifest)
+        self._enforce_physics_backed_qc(validated_episodes)
 
         # Step 6: Filter to high-quality episodes
         valid_episodes = [

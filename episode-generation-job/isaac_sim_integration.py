@@ -197,6 +197,11 @@ def is_curobo_available() -> bool:
     return _CUROBO_AVAILABLE
 
 
+def is_isaac_lab_available() -> bool:
+    """Check if Isaac Lab is available."""
+    return _ISAAC_LAB_AVAILABLE
+
+
 def get_availability_status() -> Dict[str, bool]:
     """Get detailed availability status."""
     return _AVAILABILITY_STATUS.copy()
@@ -321,7 +326,7 @@ class PhysicsSimulator:
         self._contacts_this_step: List[ContactInfo] = []
 
         # Check availability
-        self._use_real_physics = _PHYSX_AVAILABLE and _ISAAC_SIM_AVAILABLE
+        self._use_real_physics = _PHYSX_AVAILABLE and (_ISAAC_SIM_AVAILABLE or _ISAAC_LAB_AVAILABLE)
 
         if not self._use_real_physics:
             self.log("PhysX not available - using mock physics simulation", "WARNING")
@@ -883,6 +888,7 @@ class PhysicsSimulator:
         joint_trajectory: np.ndarray,
         dt: float = 1.0 / 30.0,
         gripper_trajectory: Optional[np.ndarray] = None,
+        post_rollout_steps: int = 0,
     ) -> List[PhysicsStepResult]:
         """
         Run a complete trajectory through physics simulation.
@@ -891,6 +897,7 @@ class PhysicsSimulator:
             joint_trajectory: Array of shape (num_frames, num_joints)
             dt: Time between trajectory frames
             gripper_trajectory: Optional gripper positions for each frame
+            post_rollout_steps: Additional physics steps after last frame
 
         Returns:
             List of PhysicsStepResult for each frame
@@ -915,6 +922,10 @@ class PhysicsSimulator:
             for _ in range(steps_per_frame):
                 result = self.step()
 
+            results.append(result)
+
+        for _ in range(max(0, post_rollout_steps)):
+            result = self.step()
             results.append(result)
 
         self.stop()
