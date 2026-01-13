@@ -17,6 +17,7 @@ Environment variables:
   LAYOUT_PREFIX  - Path prefix for layout files
   ASSETS_PREFIX  - Path prefix for asset files
   USD_PREFIX     - Path prefix for USD output (defaults to ASSETS_PREFIX)
+  BYPASS_QUALITY_GATES - Skip quality gate evaluation (dev-only)
 """
 
 import os
@@ -28,10 +29,25 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from blueprint_sim.assembly import assemble_from_env
+from tools.quality_gates.quality_gate import QualityGateCheckpoint, QualityGateRegistry
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
 )
+from tools.workflow.failure_markers import FailureMarkerWriter
+
+JOB_NAME = "usd-assembly-job"
+GCS_ROOT = Path("/mnt/gcs")
+
+
+def _should_bypass_quality_gates() -> bool:
+    return os.getenv("BYPASS_QUALITY_GATES", "").lower() in {"1", "true", "yes", "y"}
+
+
+def _gate_report_path(scene_id: str) -> Path:
+    report_path = GCS_ROOT / f"scenes/{scene_id}/{JOB_NAME}/quality_gate_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    return report_path
 
 
 def main() -> None:
@@ -45,9 +61,49 @@ def main() -> None:
         label="[USD-ASSEMBLY]",
     )
     assets_prefix = os.getenv("ASSETS_PREFIX", "")
-    assets_root = Path("/mnt/gcs") / assets_prefix
+    assets_root = GCS_ROOT / assets_prefix
     validate_scene_manifest(assets_root / "scene_manifest.json", label="[USD-ASSEMBLY]")
-    sys.exit(assemble_from_env())
+    exit_code = assemble_from_env()
+
+    if exit_code != 0:
+        sys.exit(exit_code)
+
+    if _should_bypass_quality_gates():
+        print("[USD-ASSEMBLY] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates")
+        sys.exit(exit_code)
+
+    usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
+    scene_id = os.getenv("SCENE_ID", "")
+    bucket = os.getenv("BUCKET", "")
+    usd_path = GCS_ROOT / usd_prefix / "scene.usda"
+
+    quality_gates = QualityGateRegistry(verbose=True)
+    quality_gates.run_checkpoint(
+        QualityGateCheckpoint.USD_ASSEMBLED,
+        context={"usd_path": str(usd_path), "scene_id": scene_id},
+    )
+    report_path = _gate_report_path(scene_id)
+    quality_gates.save_report(scene_id, report_path)
+
+    if not quality_gates.can_proceed():
+        print("[USD-ASSEMBLY] ❌ Quality gates blocked downstream pipeline")
+        FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+            exception=RuntimeError("Quality gates blocked: USD validation failed"),
+            failed_step="quality_gates",
+            input_params={
+                "scene_id": scene_id,
+                "usd_prefix": usd_prefix,
+                "usd_path": str(usd_path),
+            },
+            partial_results={"quality_gate_report": str(report_path)},
+            recommendations=[
+                "Fix USD validation errors before proceeding.",
+                f"Review quality gate report: {report_path}",
+            ],
+        )
+        sys.exit(1)
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
