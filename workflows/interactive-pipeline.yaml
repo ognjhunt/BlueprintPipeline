@@ -33,6 +33,7 @@ main:
           # NOTE: Set PARTICULATE_ENDPOINT environment variable for articulation detection.
           # Falls back to heuristic detection if not available.
           - particulateEndpoint: ${default(sys.get_env("PARTICULATE_ENDPOINT"), "")}
+          - disallowPlaceholderUrdf: ${default(sys.get_env("DISALLOW_PLACEHOLDER_URDF"), "false")}
           - articulationBackend: ${if(particulateEndpoint != "", "particulate", "heuristic")}
           - jobName: "interactive-job"
           - simreadyJobName: "simready-job"
@@ -70,6 +71,8 @@ main:
                         value: ${articulationBackend}
                       - name: PARTICULATE_ENDPOINT
                         value: ${particulateEndpoint}
+                      - name: DISALLOW_PLACEHOLDER_URDF
+                        value: ${disallowPlaceholderUrdf}
                 timeout: "1800s"
           result: interactiveJobExecution
         except:
