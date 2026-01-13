@@ -74,6 +74,8 @@ main:
           - episodesPrefix: '${"scenes/" + sceneId + "/episodes"}'
           - episodeJobName: "episode-generation-job"
           - episodesCompleteMarker: '${"scenes/" + sceneId + "/episodes/.episodes_complete"}'
+          - episodesFailedMarker: '${"scenes/" + sceneId + "/episodes/.failed"}'
+          - episodesLegacyFailedMarker: '${"scenes/" + sceneId + "/episodes/.episodes_failed"}'
           - sceneConfigPath: '${"scenes/" + sceneId + "/config.json"}'
         next: lookup_scene_config
 
@@ -384,16 +386,82 @@ main:
         args:
           text: '${"ERROR: Episode generation failed for scene " + sceneId}'
           severity: "ERROR"
+        next: read_failure_marker
+
+    - read_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${episodesFailedMarker}
+            alt: "media"
+          result: episodeFailurePayload
+        except:
+          as: e
+          steps:
+            - handle_missing_episode_failure_marker:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: write_failure_marker
+                next: log_episode_failure_marker_read_error
+        next: log_episode_failure_marker_payload
+
+    - log_episode_failure_marker_read_error:
+        call: sys.log
+        args:
+          text: '${"Failed to read .failed marker for episodes in scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
         next: write_failure_marker
+
+    - log_episode_failure_marker_payload:
+        call: sys.log
+        args:
+          text: '${"Episode failure marker payload for scene " + sceneId + ": " + episodeFailurePayload}'
+          severity: "ERROR"
+        next: write_legacy_failure_marker
 
     - write_failure_marker:
         call: googleapis.storage.v1.objects.insert
         args:
           bucket: ${bucket}
-          name: '${"scenes/" + sceneId + "/episodes/.episodes_failed"}'
+          name: ${episodesFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": episodeJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "episode_generation_failed",
+              "message": "Episode generation failed",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": "unknown",
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "episodes_prefix": episodesPrefix,
+                "episodes_per_variation": episodesPerVariation
+              }
+            },
+            "input_params": {
+              "scene_id": sceneId,
+              "bucket": bucket
+            }
+          })}
+        result: failMarkerResult
+        next: write_legacy_failure_marker
+
+    - write_legacy_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${episodesLegacyFailedMarker}
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
-        result: failMarkerResult
+        result: legacyFailMarkerResult
         next: done_with_failure
 
     # =========================================================================

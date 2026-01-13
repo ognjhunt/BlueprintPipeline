@@ -98,6 +98,8 @@ main:
           - geniesimLocalJobName: "genie-sim-local-job"
           - geniesimCompleteMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_complete"}'
           - geniesimJobMetadataPath: '${"scenes/" + sceneId + "/geniesim/job.json"}'
+          - geniesimFailedMarker: '${"scenes/" + sceneId + "/geniesim/.failed"}'
+          - geniesimLegacyFailedMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_failed"}'
         next: check_geniesim_enabled
 
     # Check if Genie Sim mode is enabled (can be overridden per-scene)
@@ -514,16 +516,84 @@ main:
         args:
           text: '${"ERROR: Genie Sim export failed for scene " + sceneId}'
           severity: "ERROR"
+        next: read_failure_marker
+
+    - read_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${geniesimFailedMarker}
+            alt: "media"
+          result: geniesimFailurePayload
+        except:
+          as: e
+          steps:
+            - handle_missing_geniesim_failure_marker:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: write_failure_marker
+                next: log_geniesim_failure_marker_read_error
+        next: log_geniesim_failure_marker_payload
+
+    - log_geniesim_failure_marker_read_error:
+        call: sys.log
+        args:
+          text: '${"Failed to read .failed marker for Genie Sim export in scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
         next: write_failure_marker
+
+    - log_geniesim_failure_marker_payload:
+        call: sys.log
+        args:
+          text: '${"Genie Sim failure marker payload for scene " + sceneId + ": " + geniesimFailurePayload}'
+          severity: "ERROR"
+        next: write_legacy_failure_marker
 
     - write_failure_marker:
         call: googleapis.storage.v1.objects.insert
         args:
           bucket: ${bucket}
-          name: '${"scenes/" + sceneId + "/geniesim/.geniesim_failed"}'
+          name: ${geniesimFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": geniesimJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "geniesim_export_failed",
+              "message": "Genie Sim export failed",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": geniesimExecutionName,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "robot_type": robotType,
+                "filter_commercial": filterCommercial,
+                "max_tasks": maxTasks,
+                "geniesim_submission_mode": geniesimSubmissionMode
+              }
+            },
+            "input_params": {
+              "scene_id": sceneId,
+              "bucket": bucket
+            }
+          })}
+        result: failMarkerResult
+        next: write_legacy_failure_marker
+
+    - write_legacy_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${geniesimLegacyFailedMarker}
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
-        result: failMarkerResult
+        result: legacyFailMarkerResult
         next: done_with_failure
 
     # =========================================================================

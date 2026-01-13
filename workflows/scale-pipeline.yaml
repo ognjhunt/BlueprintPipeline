@@ -30,6 +30,8 @@ main:
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "scale-job"
           - doneMarkerPath: ${"scenes/" + sceneId + "/layout/scene_layout_scaled.done"}
+          - scaleFailedMarker: ${"scenes/" + sceneId + "/layout/.failed"}
+          - scaleLegacyFailedMarker: ${"scenes/" + sceneId + "/layout/.scale_failed"}
         next: check_if_done
 
     # Check if the output already exists to avoid duplicate processing
@@ -90,7 +92,37 @@ main:
                 call: googleapis.storage.v1.objects.insert
                 args:
                   bucket: ${bucket}
-                  name: ${"scenes/" + sceneId + "/layout/.scale_failed"}
+                  name: ${scaleFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": jobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "scale_job_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "execution_id": "unknown",
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "layout_prefix": layoutPrefix
+                      }
+                    },
+                    "input_params": {
+                      "scene_id": sceneId,
+                      "bucket": bucket
+                    }
+                  })}
+            - write_legacy_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${scaleLegacyFailedMarker}
                   uploadType: "media"
                   body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"failed\\", \\"error\\": \\"" + e.message + "\\"}" }
         next: mark_scale_complete

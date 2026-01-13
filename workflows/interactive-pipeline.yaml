@@ -36,6 +36,7 @@ main:
           - articulationBackend: ${if(particulateEndpoint != "", "particulate", "heuristic")}
           - jobName: "interactive-job"
           - simreadyJobName: "simready-job"
+          - interactiveFailedMarker: ${"scenes/" + sceneId + "/assets/.failed"}
         next: log_articulation_mode
 
     - log_articulation_mode:
@@ -119,6 +120,31 @@ main:
         call: sys.log
         args:
           text: ${"Interactive job failed for scene " + sceneId}
+          severity: "ERROR"
+        next: read_interactive_failure_marker
+
+    - read_interactive_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${interactiveFailedMarker}
+            alt: "media"
+          result: interactiveFailurePayload
+        except:
+          as: e
+          steps:
+            - log_interactive_failure_marker_read_error:
+                call: sys.log
+                args:
+                  text: ${"Failed to read .failed marker for interactive job in scene " + sceneId + ": " + e.message}
+                  severity: "WARNING"
+        next: log_interactive_failure_marker_payload
+
+    - log_interactive_failure_marker_payload:
+        call: sys.log
+        args:
+          text: ${"Interactive failure marker payload for scene " + sceneId + ": " + interactiveFailurePayload}
           severity: "ERROR"
         next: done_failed
 
