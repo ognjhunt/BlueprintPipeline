@@ -129,6 +129,7 @@ class JobRegistry:
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX"],
             optional_env_vars=[
                 "PARTICULATE_ENDPOINT",    # Particulate service URL
+                "DISALLOW_PLACEHOLDER_URDF",
                 "TIMEOUT_SECONDS",
             ],
             depends_on=["regen3d-job"],

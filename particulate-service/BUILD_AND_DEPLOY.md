@@ -151,11 +151,13 @@ Run deployment, capture the service URL and wire it into the pipeline:
 # Example: set the endpoint on the Cloud Run job used by workflows
 gcloud run jobs update interactive-job \
   --region us-central1 \
-  --set-env-vars "PARTICULATE_ENDPOINT=https://particulate-service-xxx.run.app"
+  --set-env-vars "PARTICULATE_ENDPOINT=https://particulate-service-xxx.run.app,DISALLOW_PLACEHOLDER_URDF=true"
 ```
 
 Alternatively, export `PARTICULATE_ENDPOINT` in the workflow environment or CI
 runtime so `workflows/interactive-pipeline.yaml` can pass it through to the job.
+In production, set `DISALLOW_PLACEHOLDER_URDF=true` to fail fast if Particulate
+returns placeholder responses.
 
 ## Particulate Features
 

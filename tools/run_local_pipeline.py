@@ -522,6 +522,7 @@ class LocalPipelineRunner:
             "SCENE_ID": self.scene_id,
             "PARTICULATE_ENDPOINT": endpoint,
             "PRODUCTION_MODE": "false",
+            "DISALLOW_PLACEHOLDER_URDF": os.getenv("DISALLOW_PLACEHOLDER_URDF", "false"),
         })
 
         self.log("Running interactive-job entrypoint locally")
