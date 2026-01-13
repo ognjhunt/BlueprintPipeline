@@ -1234,6 +1234,20 @@ class IKSolver:
 # =============================================================================
 
 
+class TrajectoryIKError(RuntimeError):
+    """Raised when IK fails for a waypoint during trajectory solving."""
+
+    def __init__(
+        self,
+        message: str,
+        waypoint_index: Optional[int] = None,
+        phase: Optional[MotionPhase] = None,
+    ):
+        super().__init__(message)
+        self.waypoint_index = waypoint_index
+        self.phase = phase
+
+
 class TrajectorySolver:
     """
     Converts motion plans to dense joint trajectories.
@@ -1283,7 +1297,14 @@ class TrajectorySolver:
         self.log(f"  Duration: {motion_plan.total_duration:.2f}s")
 
         # Step 1: Solve IK for each waypoint
-        waypoint_joints = self._solve_waypoint_ik(motion_plan.waypoints)
+        try:
+            waypoint_joints = self._solve_waypoint_ik(motion_plan.waypoints)
+        except TrajectoryIKError as exc:
+            raise TrajectoryIKError(
+                f"IK failed for motion plan {motion_plan.plan_id}: {exc}",
+                waypoint_index=exc.waypoint_index,
+                phase=exc.phase,
+            ) from exc
 
         # Step 2: Build interpolation splines
         splines = self._build_splines(motion_plan.waypoints, waypoint_joints)
@@ -1322,8 +1343,13 @@ class TrajectorySolver:
             )
 
             if joints is None:
-                self.log(f"  IK failed for waypoint {i}, using previous", "WARNING")
-                joints = prev_joints.copy()
+                phase_label = wp.phase.value if hasattr(wp.phase, "value") else str(wp.phase)
+                message = (
+                    f"IK failed for waypoint {i} (phase={phase_label}) "
+                    f"pos={wp.position.tolist()} ori={wp.orientation.tolist()}"
+                )
+                self.log(f"  {message}", "ERROR")
+                raise TrajectoryIKError(message, waypoint_index=i, phase=wp.phase)
 
             results.append(joints)
             prev_joints = joints

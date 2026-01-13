@@ -94,6 +94,7 @@ class FailureReason(str, Enum):
     EXCESSIVE_VELOCITY = "excessive_velocity"
     GRASP_FAILURE = "grasp_failure"
     PLACEMENT_FAILURE = "placement_failure"
+    PLANNING_FAILURE = "planning_failure"
 
 
 @dataclass
@@ -445,6 +446,14 @@ class SimulationValidator:
             episode_id=episode_id,
             status=ValidationStatus.PENDING,
         )
+
+        if not getattr(motion_plan, "planning_success", True):
+            result.failure_reasons.append(FailureReason.PLANNING_FAILURE)
+            result.failure_details = "; ".join(getattr(motion_plan, "planning_errors", []))
+            result.status = self._determine_status(result)
+            result.validation_time_seconds = time.time() - start_time
+            self._determine_retry_info(result)
+            return result
 
         # Use real physics if available
         if self.is_using_real_physics():
@@ -1051,6 +1060,7 @@ class SimulationValidator:
             FailureReason.COLLISION,
             FailureReason.JOINT_LIMIT,
             FailureReason.IK_FAILURE,
+            FailureReason.PLANNING_FAILURE,
         }
 
         if all(r in retryable_failures for r in result.failure_reasons):
@@ -1084,6 +1094,9 @@ class SimulationValidator:
 
         if FailureReason.GRASP_FAILURE in result.failure_reasons:
             suggestions.append("Adjust grasp position/timing")
+
+        if FailureReason.PLANNING_FAILURE in result.failure_reasons:
+            suggestions.append("Retry collision-checked motion planning")
 
         result.retry_suggestion = "; ".join(suggestions)
 
