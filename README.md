@@ -148,6 +148,22 @@ report = run_qa_validation(scene_dir=Path("scenes/scene_123"))
 | `PARTICULATE_ENDPOINT` | Particulate articulation service URL | - |
 | `LLM_PROVIDER` | LLM provider (`gemini`/`openai`/`auto`) | `auto` |
 
+## Secrets
+
+BlueprintPipeline uses Google Secret Manager with environment variable fallbacks. Configure the
+following secret IDs (or equivalent env vars) for jobs that rely on external APIs:
+
+| Secret ID | Env var fallback | Used by | Description |
+|-----------|------------------|---------|-------------|
+| `gemini-api-key` | `GEMINI_API_KEY` | `simready-job`, `episode-generation-job` | Gemini API access for physics estimation and task specification |
+| `openai-api-key` | `OPENAI_API_KEY` | `episode-generation-job` | OpenAI API access for task specification |
+| `anthropic-api-key` | `ANTHROPIC_API_KEY` | `episode-generation-job` | Anthropic API access for task specification |
+| `genie-sim-api-key` | `GENIE_SIM_API_KEY` | `genie-sim-*` jobs | Genie-Sim API access |
+| `particulate-api-key` | `PARTICULATE_API_KEY` | `interactive-job` | Particulate articulation service access |
+
+In production, `simready-job` requires a Gemini key; without it, the job falls back to heuristic-only
+physics and will fail in production mode.
+
 ## Documentation
 
 - [Troubleshooting](docs/troubleshooting.md)

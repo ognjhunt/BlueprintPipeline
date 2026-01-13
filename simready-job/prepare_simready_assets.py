@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -37,7 +38,12 @@ try:
     HAVE_SECRET_MANAGER = True
 except ImportError:  # pragma: no cover
     HAVE_SECRET_MANAGER = False
+    get_secret_or_env = None
+    SecretIds = None
     print("[SIMREADY] WARNING: Secret Manager not available - using env vars only", file=sys.stderr)
+
+SECRET_ID_GEMINI = SecretIds.GEMINI_API_KEY if SecretIds else "gemini-api-key"
+SECRET_ID_OPENAI = SecretIds.OPENAI_API_KEY if SecretIds else "openai-api-key"
 
 try:
     # Google GenAI SDK for Gemini 3.x
@@ -84,6 +90,49 @@ def ensure_dir(path: Path) -> None:
 def safe_path_join(root: Path, rel: str) -> Path:
     rel_path = rel.lstrip("/")
     return root / rel_path
+
+
+def _get_env_value(name: str, default: Optional[str] = None) -> Optional[str]:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value
+
+
+@lru_cache(maxsize=8)
+def _load_secret_value(secret_id: str, env_var: str) -> Optional[str]:
+    if HAVE_SECRET_MANAGER and get_secret_or_env is not None:
+        try:
+            return get_secret_or_env(secret_id, env_var=env_var)
+        except Exception as exc:
+            logger.warning(
+                "[SIMREADY] Failed to fetch secret '%s'; falling back to env var '%s': %s",
+                secret_id,
+                env_var,
+                exc,
+            )
+    return os.environ.get(env_var)
+
+
+def _get_secret_value(
+    secret_id: str,
+    env_var: str,
+    *,
+    purpose: str,
+    required: bool = False,
+    log_missing: bool = True,
+) -> Optional[str]:
+    value = _load_secret_value(secret_id, env_var)
+    if not value and log_missing:
+        message = (
+            f"[SIMREADY] Missing {purpose} credentials. "
+            f"Set Secret Manager ID '{secret_id}' or env var '{env_var}'."
+        )
+        if required:
+            logger.error(message)
+        else:
+            logger.warning(message)
+    return value
 
 
 def choose_reference_image_path(root: Path, obj: Dict[str, Any]) -> Optional[Path]:
@@ -289,9 +338,9 @@ def padded_size(size_m: List[float]) -> List[float]:
       SIMREADY_COLLIDER_PAD_MIN_M (default 0.001 == 1mm)
       SIMREADY_COLLIDER_PAD_MAX_M (default 0.02 == 2cm)
     """
-    ratio = float(os.getenv("SIMREADY_COLLIDER_PAD_RATIO", "0.01"))
-    pad_min = float(os.getenv("SIMREADY_COLLIDER_PAD_MIN_M", "0.001"))
-    pad_max = float(os.getenv("SIMREADY_COLLIDER_PAD_MAX_M", "0.02"))
+    ratio = float(_get_env_value("SIMREADY_COLLIDER_PAD_RATIO", "0.01"))
+    pad_min = float(_get_env_value("SIMREADY_COLLIDER_PAD_MIN_M", "0.001"))
+    pad_max = float(_get_env_value("SIMREADY_COLLIDER_PAD_MAX_M", "0.02"))
 
     mx = max(size_m)
     pad = _clamp(mx * ratio, pad_min, pad_max)
@@ -620,12 +669,14 @@ Object info (cropped to relevant fields):
 
 
 def have_gemini() -> bool:
-    return genai is not None and types is not None and bool(os.getenv("GEMINI_API_KEY"))
+    if genai is None or types is None:
+        return False
+    return bool(_load_secret_value(SECRET_ID_GEMINI, "GEMINI_API_KEY"))
 
 
 def have_openai() -> bool:
     """Check if OpenAI is available."""
-    return bool(os.getenv("OPENAI_API_KEY"))
+    return bool(_load_secret_value(SECRET_ID_OPENAI, "OPENAI_API_KEY"))
 
 
 def have_any_llm() -> bool:
@@ -635,7 +686,7 @@ def have_any_llm() -> bool:
 
 def get_llm_provider() -> Optional[str]:
     """Get the preferred LLM provider based on environment."""
-    provider = os.getenv("LLM_PROVIDER", "auto").lower()
+    provider = (_get_env_value("LLM_PROVIDER", "auto") or "auto").lower()
     if provider == "openai" and have_openai():
         return "openai"
     elif provider == "gemini" and have_gemini():
@@ -775,7 +826,7 @@ def call_gemini_for_dimensions(
     prompt = make_dimension_estimation_prompt(obj, has_multiple_views=len(images) > 1)
 
     try:
-        model_name = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-pro-preview")
         if model_name.startswith("gemini-1") or model_name.startswith("gemini-2"):
             print(
                 f"[SIMREADY] Overriding legacy Gemini model '{model_name}' with gemini-3-pro-preview",
@@ -788,7 +839,9 @@ def call_gemini_for_dimensions(
         }
 
         # Enable grounding for Gemini 3.x models
-        grounding_enabled = os.getenv("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
+        grounding_enabled = (
+            _get_env_value("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
+        )
         if model_name.startswith("gemini-3") and grounding_enabled:
             if hasattr(types, "GroundingConfig") and hasattr(types, "GoogleSearch"):
                 cfg_kwargs["grounding"] = types.GroundingConfig(
@@ -867,14 +920,16 @@ def call_gemini_for_object(
     prompt = make_gemini_prompt(oid, obj, bounds, base_cfg, has_image=reference_image is not None)
 
     try:
-        model_name = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-pro-preview")
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
         }
 
         # Enable grounding for Gemini 3.x models (default: enabled)
-        grounding_enabled = os.getenv("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
+        grounding_enabled = (
+            _get_env_value("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
+        )
         if model_name.startswith("gemini-3") and grounding_enabled:
             if hasattr(types, "GroundingConfig") and hasattr(types, "GoogleSearch"):
                 cfg_kwargs["grounding"] = types.GroundingConfig(
@@ -1365,7 +1420,7 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
         - Bind it to the collider using rel material:binding:physics
         - Add robotics-focused metadata (semantic class, graspability, grasp regions, etc.)
     """
-    add_proxy = os.getenv("SIMREADY_ADD_PROXY_COLLIDER", "true").lower() in {"1", "true", "yes"}
+    add_proxy = _get_env_value("SIMREADY_ADD_PROXY_COLLIDER", "true").lower() in {"1", "true", "yes"}
 
     # Core physics properties
     dynamic = bool(physics.get("dynamic", True))
@@ -1615,14 +1670,14 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
+    value = _get_env_value(name)
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _resolve_production_mode() -> bool:
-    pipeline_env = os.getenv("PIPELINE_ENV", "").strip().lower()
+    pipeline_env = _get_env_value("PIPELINE_ENV", "").strip().lower()
     return _env_flag("SIMREADY_PRODUCTION_MODE") or pipeline_env in {"prod", "production"}
 
 
@@ -1682,26 +1737,33 @@ def prepare_simready_assets_job(
 
     client = None
     if have_gemini():
-        # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
-        if HAVE_SECRET_MANAGER:
-            try:
-                gemini_api_key = get_secret_or_env(
-                    SecretIds.GEMINI_API_KEY,
-                    env_var="GEMINI_API_KEY"
-                )
-            except Exception as e:
-                print(f"[SIMREADY] WARNING: Secret Manager unavailable, falling back to env var: {e}", file=sys.stderr)
-                gemini_api_key = os.environ.get("GEMINI_API_KEY")
+        gemini_api_key = _get_secret_value(
+            SECRET_ID_GEMINI,
+            "GEMINI_API_KEY",
+            purpose="Gemini API",
+            required=production_mode,
+        )
+        if gemini_api_key:
+            client = genai.Client(api_key=gemini_api_key)
+            print("[SIMREADY] Gemini client initialized")
+        elif production_mode:
+            logger.error(
+                "[SIMREADY] Gemini API key is required in production mode. "
+                "Set Secret Manager ID '%s' or env var 'GEMINI_API_KEY'.",
+                SECRET_ID_GEMINI,
+            )
+            return 2
         else:
-            gemini_api_key = os.environ.get("GEMINI_API_KEY")
-
-        client = genai.Client(api_key=gemini_api_key)
-        print("[SIMREADY] Gemini client initialized")
+            logger.warning(
+                "[SIMREADY] Gemini API key missing; continuing with heuristic fallback."
+            )
     else:
         if production_mode:
             logger.error(
                 "[SIMREADY] Production mode requires Gemini-backed physics estimation. "
-                "Heuristic-only physics is not allowed. Set GEMINI_API_KEY or disable production mode."
+                "Heuristic-only physics is not allowed. "
+                "Set Secret Manager ID '%s' or env var 'GEMINI_API_KEY', or disable production mode.",
+                SECRET_ID_GEMINI,
             )
             return 2
         if allow_heuristic_fallback:
@@ -1888,7 +1950,7 @@ def main() -> None:
         },
         label="[SIMREADY]",
     )
-    assets_prefix = os.getenv("ASSETS_PREFIX", "")
+    assets_prefix = _get_env_value("ASSETS_PREFIX", "")
     assets_root = GCS_ROOT / assets_prefix
     validate_scene_manifest(assets_root / "scene_manifest.json", label="[SIMREADY]")
 
