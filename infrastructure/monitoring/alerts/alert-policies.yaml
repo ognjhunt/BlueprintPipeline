@@ -45,6 +45,108 @@ spec:
   combiner: OR
   notificationChannels:
     - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Workflow Job Timeout Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-workflow-job-timeout
+spec:
+  displayName: "[Blueprint] Workflow Job Timeout Detected"
+  documentation:
+    content: |
+      A workflow job invocation hit or exceeded its configured timeout.
+
+      Actions:
+      1. Review workflow execution logs for duration and timeout details
+      2. Confirm scene complexity or bundle tier inputs
+      3. Adjust adaptive timeout overrides if needed
+    mimeType: text/markdown
+  conditions:
+    - displayName: Job Timeout Events > 0
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="logging.googleapis.com/user/blueprint_job_timeout_events"
+        comparison: COMPARISON_GT
+        thresholdValue: 0
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_SUM
+            crossSeriesReducer: REDUCE_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Workflow Job Retry Exhausted Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-workflow-job-retry-spike
+spec:
+  displayName: "[Blueprint] Workflow Job Retry Spike"
+  documentation:
+    content: |
+      Workflow job invocations are exhausting retries at a high rate.
+
+      Actions:
+      1. Review upstream API health or Cloud Run errors
+      2. Check recent deploys that could cause transient failures
+      3. Consider adjusting retry/backoff or rate limiting
+    mimeType: text/markdown
+  conditions:
+    - displayName: Retry Exhausted > 3 in 10 minutes
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="logging.googleapis.com/user/blueprint_job_retry_exhausted_total"
+        comparison: COMPARISON_GT
+        thresholdValue: 3
+        duration: 600s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_SUM
+            crossSeriesReducer: REDUCE_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Workflow Job Timeout Usage Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-workflow-job-timeout-usage
+spec:
+  displayName: "[Blueprint] Workflow Job Timeout Usage > 80%"
+  documentation:
+    content: |
+      Workflow job invocation duration exceeded 80% of the configured timeout.
+
+      Actions:
+      1. Review duration and timeout usage ratio logs
+      2. Adjust adaptive timeout tiering if needed
+      3. Investigate performance regressions in jobs
+    mimeType: text/markdown
+  conditions:
+    - displayName: Timeout Usage Ratio > 0.8
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="logging.googleapis.com/user/blueprint_job_timeout_usage_ratio"
+        comparison: COMPARISON_GT
+        thresholdValue: 0.8
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_MAX
+            crossSeriesReducer: REDUCE_MAX
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
   alertStrategy:
     autoClose: 1800s  # 30 minutes
 

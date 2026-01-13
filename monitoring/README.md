@@ -120,6 +120,15 @@ This directory contains monitoring and alerting configuration for the BlueprintP
 
 ### Google Cloud Monitoring
 
+#### Log-based Metrics (Workflow Timeouts/Retry Spikes)
+
+```bash
+# Create log-based metrics for timeout usage and retry exhaustion
+gcloud logging metrics create --config-from-file=../infrastructure/monitoring/metrics/job-timeout-events.yaml
+gcloud logging metrics create --config-from-file=../infrastructure/monitoring/metrics/job-retry-exhausted.yaml
+gcloud logging metrics create --config-from-file=../infrastructure/monitoring/metrics/job-timeout-usage.yaml
+```
+
 ```bash
 # Create alert policy
 gcloud alpha monitoring policies create \

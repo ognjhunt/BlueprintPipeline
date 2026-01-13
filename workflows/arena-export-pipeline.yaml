@@ -98,11 +98,32 @@ main:
         args:
           text: '${"Arena export triggered for scene " + sceneId + " (source: " + triggerSource + ") - detecting affordances and generating Arena format"}'
           severity: "INFO"
-        next: run_arena_export_job
+        next: init_arena_metrics
 
     # =========================================================================
     # Arena Export Job - Generate Isaac Lab-Arena compatible format
     # =========================================================================
+
+    - init_arena_metrics:
+        assign:
+          - arenaStartTime: '${time.format(sys.now())}'
+          - arenaTimeoutSeconds: 1800
+        next: emit_arena_metrics_start
+
+    - emit_arena_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "arena-export-pipeline"
+            job: ${arenaJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${arenaTimeoutSeconds}
+            retry_max: 3
+            start_time: ${arenaStartTime}
+          severity: "INFO"
+        next: run_arena_export_job
 
     - run_arena_export_job:
         try:
@@ -150,6 +171,17 @@ main:
         except:
           as: e
           steps:
+            - log_arena_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "arena-export-pipeline"
+                    job: ${arenaJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_arena_error:
                 call: sys.log
                 args:
@@ -193,6 +225,34 @@ main:
         next: wait_for_arena
 
     - log_arena_complete:
+        assign:
+          - arenaEndTime: '${time.format(sys.now())}'
+          - arenaDurationSeconds: '${time.parse(arenaEndTime) - time.parse(arenaStartTime)}'
+          - arenaTimeoutUsageRatio: '${arenaDurationSeconds / arenaTimeoutSeconds}'
+          - arenaTimedOut: '${arenaDurationSeconds >= arenaTimeoutSeconds}'
+        next: emit_arena_metrics_complete
+
+    - emit_arena_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "arena-export-pipeline"
+            job: ${arenaJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${arenaTimeoutSeconds}
+            duration_seconds: ${arenaDurationSeconds}
+            timeout_usage_ratio: ${arenaTimeoutUsageRatio}
+            timed_out: ${arenaTimedOut}
+            status: "SUCCEEDED"
+            execution_name: ${arenaExecutionName}
+            start_time: ${arenaStartTime}
+            end_time: ${arenaEndTime}
+          severity: "INFO"
+        next: log_arena_complete_message
+
+    - log_arena_complete_message:
         call: sys.log
         args:
           text: '${"Arena export completed for scene " + sceneId + " - affordances detected and Arena format generated"}'
@@ -201,6 +261,34 @@ main:
 
     - arena_failed:
         # Arena export failure is non-fatal - scene is still usable without Arena format
+        assign:
+          - arenaEndTime: '${time.format(sys.now())}'
+          - arenaDurationSeconds: '${time.parse(arenaEndTime) - time.parse(arenaStartTime)}'
+          - arenaTimeoutUsageRatio: '${arenaDurationSeconds / arenaTimeoutSeconds}'
+          - arenaTimedOut: '${arenaDurationSeconds >= arenaTimeoutSeconds}'
+        next: emit_arena_metrics_failed
+
+    - emit_arena_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "arena-export-pipeline"
+            job: ${arenaJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${arenaTimeoutSeconds}
+            duration_seconds: ${arenaDurationSeconds}
+            timeout_usage_ratio: ${arenaTimeoutUsageRatio}
+            timed_out: ${arenaTimedOut}
+            status: "FAILED"
+            execution_name: ${arenaExecutionName}
+            start_time: ${arenaStartTime}
+            end_time: ${arenaEndTime}
+          severity: "WARNING"
+        next: log_arena_failed_message
+
+    - log_arena_failed_message:
         call: sys.log
         args:
           text: '${"WARNING: Arena export failed for scene " + sceneId + " - scene is still usable but without Arena evaluation support"}'
