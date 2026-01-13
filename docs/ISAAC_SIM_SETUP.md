@@ -144,6 +144,10 @@ Labs should run the staging harness against **real** 3D-RE-GEN reconstructions
 inside Isaac Sim before a production rollout. This exercises the real pipeline
 handoff and confirms USD scenes load in Isaac Sim with the live backend.
 
+Staging checklist (labs pre-production):
+- Confirm Particulate availability via `PARTICULATE_ENDPOINT`, or run a local Particulate
+  instance (`PARTICULATE_MODE=local`) with an approved `PARTICULATE_LOCAL_MODEL`.
+
 ```bash
 RUN_STAGING_E2E=1 \
 STAGING_SCENE_DIR=/mnt/gcs/scenes/<scene_id> \
