@@ -38,6 +38,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.metrics.pipeline_metrics import get_metrics
+
 try:
     from tools.llm_client import create_llm_client, LLMResponse
     HAVE_LLM_CLIENT = True
@@ -1033,13 +1035,16 @@ class TaskSpecifier:
 
                 # Call LLM with timeout
                 start_time = time.time()
-                response = client.generate(
-                    prompt=prompt,
-                    json_output=True,
-                    temperature=0.3,
-                    max_tokens=4000,
-                    timeout=timeout_seconds,  # Add timeout parameter
-                )
+                metrics = get_metrics()
+                scene_id = os.getenv("SCENE_ID", "")
+                with metrics.track_api_call("gemini", "task_specification", scene_id):
+                    response = client.generate(
+                        prompt=prompt,
+                        json_output=True,
+                        temperature=0.3,
+                        max_tokens=4000,
+                        timeout=timeout_seconds,  # Add timeout parameter
+                    )
                 elapsed = time.time() - start_time
 
                 # Check for timeout

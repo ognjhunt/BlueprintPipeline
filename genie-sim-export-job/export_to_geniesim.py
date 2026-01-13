@@ -67,6 +67,7 @@ from tools.geniesim_adapter import (
     GenieSimExportConfig,
     GenieSimExportResult,
 )
+from tools.metrics.pipeline_metrics import get_metrics
 
 # P0-5 FIX: Import quality gates for validation before export
 try:
@@ -724,6 +725,11 @@ def run_geniesim_export_job(
             # P1-9 FIX: Write completion marker with schema version tracking
             import datetime
             marker_path = output_dir / "_GENIESIM_EXPORT_COMPLETE"
+            metrics = get_metrics()
+            metrics_summary = {
+                "backend": metrics.backend.value,
+                "stats": metrics.get_stats(),
+            }
             marker_data = {
                 "scene_id": scene_id,
                 "robot_type": robot_type,
@@ -749,6 +755,7 @@ def run_geniesim_export_job(
                     "original_objects": original_object_count,
                     "variation_assets": len(variation_objects),
                 },
+                "metrics_summary": metrics_summary,
                 # P1-9 FIX: Track which premium features were exported
                 "premium_features_exported": {
                     "sim2real_fidelity": SIM2REAL_AVAILABLE,
@@ -843,28 +850,30 @@ def main():
 
     GCS_ROOT = Path("/mnt/gcs")
 
-    exit_code = run_geniesim_export_job(
-        root=GCS_ROOT,
-        scene_id=scene_id,
-        assets_prefix=assets_prefix,
-        geniesim_prefix=geniesim_prefix,
-        robot_type=robot_type,
-        urdf_path=urdf_path,
-        max_tasks=max_tasks,
-        generate_embeddings=generate_embeddings,
-        filter_commercial=filter_commercial,
-        copy_usd=copy_usd,
-        # Enhanced features (DEFAULT: ENABLED)
-        enable_multi_robot=enable_multi_robot,
-        enable_bimanual=enable_bimanual,
-        enable_vla_packages=enable_vla_packages,
-        enable_rich_annotations=enable_rich_annotations,
-        # YOUR commercial assets for domain randomization
-        variation_assets_prefix=variation_assets_prefix,
-        replicator_prefix=replicator_prefix,
-        # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
-        enable_premium_analytics=enable_premium_analytics,
-    )
+    metrics = get_metrics()
+    with metrics.track_job("genie-sim-export-job", scene_id):
+        exit_code = run_geniesim_export_job(
+            root=GCS_ROOT,
+            scene_id=scene_id,
+            assets_prefix=assets_prefix,
+            geniesim_prefix=geniesim_prefix,
+            robot_type=robot_type,
+            urdf_path=urdf_path,
+            max_tasks=max_tasks,
+            generate_embeddings=generate_embeddings,
+            filter_commercial=filter_commercial,
+            copy_usd=copy_usd,
+            # Enhanced features (DEFAULT: ENABLED)
+            enable_multi_robot=enable_multi_robot,
+            enable_bimanual=enable_bimanual,
+            enable_vla_packages=enable_vla_packages,
+            enable_rich_annotations=enable_rich_annotations,
+            # YOUR commercial assets for domain randomization
+            variation_assets_prefix=variation_assets_prefix,
+            replicator_prefix=replicator_prefix,
+            # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
+            enable_premium_analytics=enable_premium_analytics,
+        )
 
     sys.exit(exit_code)
 

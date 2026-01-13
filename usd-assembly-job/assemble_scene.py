@@ -19,7 +19,9 @@ Environment variables:
   USD_PREFIX     - Path prefix for USD output (defaults to ASSETS_PREFIX)
 """
 
+import json
 import os
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -32,6 +34,7 @@ from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
 )
+from tools.metrics.pipeline_metrics import get_metrics
 
 
 def main() -> None:
@@ -47,7 +50,31 @@ def main() -> None:
     assets_prefix = os.getenv("ASSETS_PREFIX", "")
     assets_root = Path("/mnt/gcs") / assets_prefix
     validate_scene_manifest(assets_root / "scene_manifest.json", label="[USD-ASSEMBLY]")
-    sys.exit(assemble_from_env())
+    scene_id = os.getenv("SCENE_ID", "")
+    metrics = get_metrics()
+    with metrics.track_job("usd-assembly-job", scene_id):
+        exit_code = assemble_from_env()
+
+    usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
+    completion_manifest_path = Path("/mnt/gcs") / usd_prefix / "usd_assembly_manifest.json"
+    metrics_summary = {
+        "backend": metrics.backend.value,
+        "stats": metrics.get_stats(),
+    }
+    completion_manifest = {
+        "scene_id": scene_id,
+        "assets_prefix": assets_prefix,
+        "layout_prefix": os.getenv("LAYOUT_PREFIX", ""),
+        "usd_prefix": usd_prefix,
+        "convert_only": os.getenv("CONVERT_ONLY", "false").lower() in {"1", "true", "yes"},
+        "status": "completed" if exit_code == 0 else "failed",
+        "completed_at": datetime.utcnow().isoformat() + "Z",
+        "metrics_summary": metrics_summary,
+    }
+    completion_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    completion_manifest_path.write_text(json.dumps(completion_manifest, indent=2))
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
