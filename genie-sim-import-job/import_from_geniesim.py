@@ -837,9 +837,20 @@ def run_import_job(
         # Step 7: Write machine-readable import manifest for workflows
         import_manifest_path = config.output_dir / "import_manifest.json"
         gcs_output_path = None
+        bundle_root = config.output_dir.resolve()
         output_dir_str = str(config.output_dir)
         if output_dir_str.startswith("/mnt/gcs/"):
             gcs_output_path = "gs://" + output_dir_str[len("/mnt/gcs/"):]
+
+        def _relative_to_bundle(path: Path) -> str:
+            try:
+                rel_path = path.resolve().relative_to(bundle_root)
+            except ValueError:
+                return path.as_posix()
+            rel_str = rel_path.as_posix()
+            return rel_str if rel_str else "."
+
+        output_dir_str = _relative_to_bundle(config.output_dir)
 
         metrics = get_metrics()
         metrics_summary = {
@@ -962,7 +973,7 @@ def run_import_job(
             "lerobot": {
                 "conversion_success": result.lerobot_conversion_success,
                 "converted_count": convert_result.get("converted_count", 0),
-                "output_dir": str(lerobot_dir),
+                "output_dir": _relative_to_bundle(lerobot_dir),
                 "error": lerobot_error,
                 "required": config.require_lerobot or config.enable_validation,
             },
