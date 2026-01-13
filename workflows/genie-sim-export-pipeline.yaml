@@ -432,6 +432,62 @@ main:
         args:
           text: '${"Genie Sim submission recorded for scene " + sceneId + " at " + geniesimJobMetadataPath}'
           severity: "INFO"
+        next: read_submission_metadata
+
+    - read_submission_metadata:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${geniesimJobMetadataPath}
+            alt: "media"
+          result: submissionMetadataRaw
+        except:
+          as: e
+          steps:
+            - log_submission_metadata_missing:
+                call: sys.log
+                args:
+                  text: '${"Unable to read Genie Sim job metadata for scene " + sceneId + ": " + e.message}'
+                  severity: "WARNING"
+            - skip_import_trigger_missing:
+                next: write_completion_marker
+        next: parse_submission_metadata
+
+    - parse_submission_metadata:
+        assign:
+          - submissionMetadata: ${json.decode(submissionMetadataRaw)}
+          - submittedJobId: ${submissionMetadata.job_id}
+          - submittedJobStatus: ${default(submissionMetadata.status, "submitted")}
+        next: maybe_trigger_import
+
+    - maybe_trigger_import:
+        switch:
+          - condition: '${submittedJobStatus == "completed"}'
+            next: trigger_import_workflow
+        next: skip_import_trigger
+
+    - trigger_import_workflow:
+        call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.create
+        args:
+          parent: '${"projects/" + projectId + "/locations/" + region + "/workflows/genie-sim-import-pipeline"}'
+          body:
+            argument: '${json.encode({"job_id": submittedJobId, "scene_id": sceneId, "status": submittedJobStatus})}'
+        result: importExecution
+        next: log_import_trigger
+
+    - log_import_trigger:
+        call: sys.log
+        args:
+          text: '${"Triggered import workflow for completed Genie Sim job " + submittedJobId}'
+          severity: "INFO"
+        next: write_completion_marker
+
+    - skip_import_trigger:
+        call: sys.log
+        args:
+          text: '${"Genie Sim job not yet complete for scene " + sceneId + " (status: " + submittedJobStatus + ")"}'
+          severity: "INFO"
         next: write_completion_marker
 
     # Write completion marker
