@@ -1,7 +1,7 @@
 # genie-sim-export-pipeline.yaml
 #
 # Google Cloud Workflows pipeline that:
-#   1. Triggers on completion marker file from variation-assets-pipeline (.variation_pipeline_complete)
+#   1. Triggers on completion marker file from variation-gen-job (.variation_pipeline_complete)
 #   2. Runs genie-sim-export-job to convert scene to Genie Sim 3.0 format
 #   3. Writes .geniesim_complete marker when finished
 #   4. Triggers arena-export-pipeline for policy evaluation infrastructure
@@ -24,14 +24,14 @@
 # to ensure commercial rights to generated data.
 #
 # COMMERCIAL USE REQUIREMENT:
-#   This pipeline triggers AFTER variation-assets-pipeline completes, ensuring
+#   This pipeline triggers AFTER variation-gen-job completes, ensuring
 #   that YOUR OWN generated assets are ready before export. Genie Sim's built-in
 #   assets are CC BY-NC-SA 4.0 (non-commercial) and cannot be used for selling data.
 #
 # Pipeline Order:
-#   replicator-job → variation-assets-pipeline → [THIS PIPELINE] → Genie Sim
-#                                                       ↓
-#                                              arena-export-pipeline (automatic)
+#   replicator-job → variation-gen-job → [THIS PIPELINE] → Genie Sim
+#                                                 ↓
+#                                        arena-export-pipeline (automatic)
 #
 # Trigger: Cloud Storage object finalized event for .variation_pipeline_complete
 #

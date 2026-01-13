@@ -624,7 +624,7 @@ def process_variation_assets(
         # Still write completion marker
         output_dir = root / variation_assets_prefix
         output_dir.mkdir(parents=True, exist_ok=True)
-        marker_path = output_dir / ".variation_gen_complete"
+        marker_path = output_dir / ".variation_pipeline_complete"
         marker_path.write_text(f"No assets to generate at {datetime.datetime.utcnow().isoformat()}Z\n")
         return True
 
@@ -692,7 +692,7 @@ def process_variation_assets(
         json.dump(report, f, indent=2)
 
     # Write completion marker
-    marker_path = output_dir / ".variation_gen_complete"
+    marker_path = output_dir / ".variation_pipeline_complete"
     marker_path.write_text(
         f"completed at {datetime.datetime.utcnow().isoformat()}Z\n"
         f"successful: {summary['successful']}\n"
