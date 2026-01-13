@@ -19,6 +19,7 @@ Environment variables:
   USD_PREFIX     - Path prefix for USD output (defaults to ASSETS_PREFIX)
 """
 
+import os
 from pathlib import Path
 import sys
 
@@ -27,9 +28,25 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from blueprint_sim.assembly import assemble_from_env
+from tools.validation.entrypoint_checks import (
+    validate_required_env_vars,
+    validate_scene_manifest,
+)
 
 
 def main() -> None:
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "LAYOUT_PREFIX": "Path prefix for layout files (scenes/<sceneId>/layout)",
+            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+        },
+        label="[USD-ASSEMBLY]",
+    )
+    assets_prefix = os.getenv("ASSETS_PREFIX", "")
+    assets_root = Path("/mnt/gcs") / assets_prefix
+    validate_scene_manifest(assets_root / "scene_manifest.json", label="[USD-ASSEMBLY]")
     sys.exit(assemble_from_env())
 
 

@@ -32,11 +32,19 @@ from pathlib import Path
 
 from google.cloud import storage
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
 # Add current directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from prepare_dream2flow_bundle import Dream2FlowJobConfig, Dream2FlowPreparationJob
 from models import TaskType, RobotEmbodiment
+from tools.validation.entrypoint_checks import (
+    validate_required_env_vars,
+    validate_scene_manifest,
+)
 
 
 def download_scene_data(
@@ -124,16 +132,17 @@ def main():
     """Main entrypoint."""
     print("[D2F-ENTRYPOINT] Starting Dream2Flow Preparation Job")
 
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+        },
+        label="[D2F-ENTRYPOINT]",
+    )
+
     # Get required environment variables
     bucket_name = os.environ.get("BUCKET")
     scene_id = os.environ.get("SCENE_ID")
-
-    if not bucket_name:
-        print("[D2F-ENTRYPOINT] ERROR: BUCKET environment variable required")
-        sys.exit(1)
-    if not scene_id:
-        print("[D2F-ENTRYPOINT] ERROR: SCENE_ID environment variable required")
-        sys.exit(1)
 
     # Get optional environment variables
     assets_prefix = os.environ.get("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
@@ -191,6 +200,7 @@ def main():
                 usd_prefix=usd_prefix,
                 local_dir=local_scene_dir,
             )
+            validate_scene_manifest(manifest_path, label="[D2F-ENTRYPOINT]")
 
             # Step 2: Configure and run Dream2Flow preparation
             print("[D2F-ENTRYPOINT] Running Dream2Flow preparation...")

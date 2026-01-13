@@ -35,6 +35,12 @@ from enum import Enum
 
 from PIL import Image
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from tools.validation.entrypoint_checks import validate_required_env_vars
+
 try:
     from google import genai
     from google.genai import types
@@ -703,6 +709,15 @@ def process_variation_assets(
 
 def main():
     """Main entry point for the variation-gen job."""
+
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "GEMINI_API_KEY": "Gemini API key for image generation",
+        },
+        label="[VARIATION-GEN]",
+    )
 
     # Get configuration from environment
     bucket = os.getenv("BUCKET", "")
