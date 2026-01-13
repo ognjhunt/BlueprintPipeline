@@ -619,4 +619,5 @@ if __name__ == "__main__":
     print(f"\nTask Breakdown:")
     for task_name, task in baselines.tasks.items():
         best = task.get_best_baseline()
-        print(f"  {task_name}: best={best.baseline_name if best else 'N/A'} ({best.success_rate:.1%} if best else 0})")
+        success_rate = best.success_rate if best else 0
+        print(f"  {task_name}: best={best.baseline_name if best else 'N/A'} ({success_rate:.1%})")

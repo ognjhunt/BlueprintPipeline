@@ -177,7 +177,8 @@ class HumanApprovalManager:
     """
 
     # Storage directory for pending approvals
-    APPROVALS_DIR = Path("/tmp/blueprintpipeline/approvals")
+    # Can be overridden via BP_APPROVALS_DIR environment variable
+    APPROVALS_DIR = Path(os.getenv("BP_APPROVALS_DIR", "/tmp/blueprintpipeline/approvals"))
 
     def __init__(
         self,
