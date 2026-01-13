@@ -148,6 +148,11 @@ report = run_qa_validation(scene_dir=Path("scenes/scene_123"))
 | `PARTICULATE_ENDPOINT` | Particulate articulation service URL | - |
 | `LLM_PROVIDER` | LLM provider (`gemini`/`openai`/`auto`) | `auto` |
 
+## Documentation
+
+- [Troubleshooting](docs/troubleshooting.md)
+- [Performance Tuning](docs/performance_tuning.md)
+
 ## Testing
 
 ```bash
