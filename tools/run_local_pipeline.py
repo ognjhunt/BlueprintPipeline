@@ -28,6 +28,8 @@ Pipeline Steps:
     9. dwm-inference - Run DWM model to generate interaction videos for each bundle
     10. validate  - QA validation
 
+Note: DWM steps are optional and only included by default when --enable-dwm is set.
+
 References:
 - 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
   Paper: https://arxiv.org/abs/2512.17459
@@ -95,10 +97,13 @@ class LocalPipelineRunner:
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
         PipelineStep.ISAAC_LAB,
-        PipelineStep.DWM,  # DWM conditioning data generation
-        PipelineStep.DWM_INFERENCE,  # Run DWM model on bundles
         PipelineStep.DREAM2FLOW,  # Dream2Flow conditioning data (arXiv:2512.24766)
         PipelineStep.DREAM2FLOW_INFERENCE,  # Run Dream2Flow inference
+    ]
+
+    DWM_STEPS = [
+        PipelineStep.DWM,  # DWM conditioning data generation
+        PipelineStep.DWM_INFERENCE,  # Run DWM model on bundles
     ]
 
     def __init__(
@@ -107,6 +112,7 @@ class LocalPipelineRunner:
         verbose: bool = True,
         skip_interactive: bool = True,
         environment_type: str = "kitchen",
+        enable_dwm: bool = False,
     ):
         """Initialize the local pipeline runner.
 
@@ -120,6 +126,7 @@ class LocalPipelineRunner:
         self.verbose = verbose
         self.skip_interactive = skip_interactive
         self.environment_type = environment_type
+        self.enable_dwm = enable_dwm
 
         # Derive scene ID from directory name
         self.scene_id = self.scene_dir.name
@@ -166,6 +173,9 @@ class LocalPipelineRunner:
         """
         if steps is None:
             steps = self.DEFAULT_STEPS.copy()
+            if self.enable_dwm:
+                insert_at = self.DEFAULT_STEPS.index(PipelineStep.DREAM2FLOW)
+                steps[insert_at:insert_at] = self.DWM_STEPS
 
         if run_validation and PipelineStep.VALIDATE not in steps:
             steps.append(PipelineStep.VALIDATE)
@@ -1113,6 +1123,11 @@ def main():
         help="Run interactive job (requires PARTICULATE_ENDPOINT)",
     )
     parser.add_argument(
+        "--enable-dwm",
+        action="store_true",
+        help="Include optional DWM preparation/inference steps in the default pipeline",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Reduce output verbosity",
@@ -1139,6 +1154,7 @@ def main():
         verbose=not args.quiet,
         skip_interactive=not args.with_interactive,
         environment_type=args.environment,
+        enable_dwm=args.enable_dwm,
     )
 
     success = runner.run(steps=steps, run_validation=args.validate)

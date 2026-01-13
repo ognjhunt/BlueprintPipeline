@@ -47,6 +47,7 @@ main:
           - object: ${event.data.name}
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: "us-central1"
+          - enableDwm: '${sys.get_env("ENABLE_DWM") != null and text.lower(sys.get_env("ENABLE_DWM")) == "true"}'
         next: filter_completion_markers
 
     # Filter for .regen3d_complete marker files
@@ -68,7 +69,20 @@ main:
           - dwmCompleteMarker: '${"scenes/" + sceneId + "/dwm/.dwm_complete"}'
           - dwmInferenceJobName: "dwm-inference-job"
           - dwmInferenceCompleteMarker: '${"scenes/" + sceneId + "/dwm/.dwm_inference_complete"}'
-        next: check_already_processed
+        next: check_dwm_enabled
+
+    - check_dwm_enabled:
+        switch:
+          - condition: ${enableDwm}
+            next: check_already_processed
+        next: log_dwm_disabled
+
+    - log_dwm_disabled:
+        call: sys.log
+        args:
+          text: '${"DWM preparation is disabled for scene " + sceneId + " (ENABLE_DWM not set)"}'
+          severity: "INFO"
+        next: skip
 
     # Check if DWM bundles already generated (idempotence)
     - check_already_processed:

@@ -105,6 +105,7 @@ class DWMJobConfig:
     robot_config_name: str = "ur5e_parallel_gripper"
     robot_demo_roots: Optional[list[Path]] = None
     use_physics_ground_truth: bool = False
+    skip_dwm: bool = False
 
     def __post_init__(self):
         if self.trajectory_types is None:
@@ -745,6 +746,16 @@ class DWMPreparationJob:
         start_time = time.time()
         errors = []
 
+        if self.config.skip_dwm:
+            self.log("Skipping DWM preparation (skip flag enabled).", "WARN")
+            self.config.output_dir.mkdir(parents=True, exist_ok=True)
+            return DWMPipelineOutput(
+                scene_id="unknown",
+                output_dir=self.config.output_dir,
+                skipped=True,
+                generation_time_seconds=time.time() - start_time,
+            )
+
         self.log("=" * 60)
         self.log("DWM Preparation Job")
         self.log("=" * 60)
@@ -875,6 +886,7 @@ def prepare_dwm_bundles(
     fps: float = 24.0,
     verbose: bool = True,
     use_physics_ground_truth: bool = False,
+    skip_dwm: bool = False,
 ) -> DWMPipelineOutput:
     """
     Convenience function to prepare DWM bundles.
@@ -891,6 +903,7 @@ def prepare_dwm_bundles(
         fps: Frames per second
         verbose: Print progress
         use_physics_ground_truth: Run Isaac Sim/Lab rollouts for aligned physics logs
+        skip_dwm: Skip DWM preparation and return a successful no-op result
 
     Returns:
         DWMPipelineOutput with results
@@ -907,6 +920,7 @@ def prepare_dwm_bundles(
         fps=fps,
         verbose=verbose,
         use_physics_ground_truth=use_physics_ground_truth,
+        skip_dwm=skip_dwm,
     )
 
     job = DWMPreparationJob(config)
@@ -919,6 +933,7 @@ def run_dwm_preparation(
     num_trajectories: int = 5,
     verbose: bool = True,
     use_physics_ground_truth: bool = False,
+    skip_dwm: bool = False,
 ) -> DWMPipelineOutput:
     """
     Run DWM preparation on a scene directory.
@@ -935,6 +950,7 @@ def run_dwm_preparation(
         output_dir: Output directory (default: scene_dir/dwm)
         num_trajectories: Number of trajectories
         verbose: Print progress
+        skip_dwm: Skip DWM preparation and return a successful no-op result
 
     Returns:
         DWMPipelineOutput with results
@@ -954,6 +970,7 @@ def run_dwm_preparation(
         num_trajectories=num_trajectories,
         verbose=verbose,
         use_physics_ground_truth=use_physics_ground_truth,
+        skip_dwm=skip_dwm,
     )
 
 
@@ -1148,6 +1165,11 @@ Examples:
         default=Path("./dwm_output"),
         help="Output directory for bundles",
     )
+    parser.add_argument(
+        "--skip-dwm",
+        action="store_true",
+        help="Skip DWM preparation and exit successfully",
+    )
 
     # Episode-based mode (enhanced)
     parser.add_argument(
@@ -1275,6 +1297,11 @@ Examples:
         output_dir = args.output_dir
     else:
         parser.error("Either --manifest-path or --scene-dir is required")
+
+    if args.skip_dwm:
+        print("[DWM] Skipping DWM preparation (skip flag enabled).")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        sys.exit(0)
 
     # Use episode-based mode if requested
     if args.episodes:
