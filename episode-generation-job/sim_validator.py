@@ -51,6 +51,7 @@ from quality_constants import (
     STABILITY_THRESHOLD,
     COLLISION_PENETRATION_THRESHOLD,
 )
+from usd_scene_scan import resolve_robot_prim_paths
 from isaac_sim_enforcement import (
     DataQualityLevel,
     ProductionDataQualityError,
@@ -390,6 +391,7 @@ class SimulationValidator:
         robot_type: str = "franka",
         config: Optional[ValidationConfig] = None,
         scene_usd_path: Optional[str] = None,
+        robot_prim_paths: Optional[List[str]] = None,
         verbose: bool = True,
     ):
         """
@@ -399,6 +401,7 @@ class SimulationValidator:
             robot_type: Robot type (franka, ur10, fetch)
             config: Validation configuration
             scene_usd_path: Path to USD scene for physics simulation
+            robot_prim_paths: Optional list of robot prim paths to track
             verbose: Print debug info
         """
         self.robot_type = robot_type
@@ -406,6 +409,7 @@ class SimulationValidator:
         self.config = config or ValidationConfig.from_policy_config()
         self.verbose = verbose
         self._scene_usd_path = scene_usd_path
+        self._robot_prim_paths = robot_prim_paths
         self._scene_loaded = False
 
         # Check physics availability
@@ -483,6 +487,13 @@ class SimulationValidator:
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
             print(f"[SIM-VALIDATOR] [{level}] {msg}")
+
+    def _resolve_robot_prim_paths(self) -> List[str]:
+        """Resolve robot prim paths from config or USD auto-discovery."""
+        return resolve_robot_prim_paths(
+            self._robot_prim_paths,
+            scene_usd_path=self._scene_usd_path,
+        )
 
     def validate(
         self,
@@ -581,7 +592,14 @@ class SimulationValidator:
             self._physics_sim.add_tracked_object(obj_id, prim_path)
 
         # Set robot tracking
-        robot_prim = f"/World/Robots/{self.robot_type}"
+        robot_paths = self._resolve_robot_prim_paths()
+        if not robot_paths:
+            raise RuntimeError(
+                "No robot prims found for physics validation. "
+                "Provide robot_prim_paths in scenes/<scene_id>/config.json "
+                "or ensure the USD scene has an ArticulationRoot prim."
+            )
+        robot_prim = robot_paths[0]
         self._physics_sim.set_robot(robot_prim)
 
         # Get joint trajectory as array
