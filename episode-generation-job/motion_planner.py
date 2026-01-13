@@ -14,6 +14,7 @@ Key Features:
 
 import json
 import math
+import os
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
@@ -145,6 +146,20 @@ class MotionPlan:
     # Robot config used
     robot_type: str = "franka"
 
+    # Planning metadata
+    planning_backend: str = "heuristic"
+    planning_success: bool = True
+    planning_errors: List[str] = field(default_factory=list)
+
+    # Collision checking + joint limits
+    collision_checked: bool = False
+    collision_free: Optional[bool] = None
+    joint_limits_enforced: bool = False
+
+    # Joint-space trajectory (optional, collision-checked)
+    joint_trajectory: Optional[np.ndarray] = None  # [T, DOF]
+    joint_trajectory_timestamps: Optional[np.ndarray] = None  # [T]
+
     def __post_init__(self):
         """Calculate total duration."""
         if self.waypoints:
@@ -176,6 +191,15 @@ class MotionPlan:
             "total_duration": self.total_duration,
             "confidence": self.confidence,
             "robot_type": self.robot_type,
+            "planning_backend": self.planning_backend,
+            "planning_success": self.planning_success,
+            "planning_errors": list(self.planning_errors),
+            "collision_checked": self.collision_checked,
+            "collision_free": self.collision_free,
+            "joint_limits_enforced": self.joint_limits_enforced,
+            "joint_trajectory": self.joint_trajectory.tolist() if self.joint_trajectory is not None else None,
+            "joint_trajectory_timestamps": self.joint_trajectory_timestamps.tolist()
+            if self.joint_trajectory_timestamps is not None else None,
         }
 
 
@@ -238,6 +262,10 @@ class AIMotionPlanner:
             "ee_to_gripper": 0.107,  # distance from EE frame to gripper tips
             "home_position": np.array([0.3, 0, 0.5]),
             "home_orientation": np.array([0, 1, 0, 0]),  # pointing down
+            "dof": 7,
+            "default_joint_positions": np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]),
+            "joint_limits_lower": np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973]),
+            "joint_limits_upper": np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973]),
         },
         "ur10": {
             "reach": 1.3,
@@ -246,6 +274,10 @@ class AIMotionPlanner:
             "ee_to_gripper": 0.15,
             "home_position": np.array([0.4, 0, 0.6]),
             "home_orientation": np.array([0, 1, 0, 0]),
+            "dof": 6,
+            "default_joint_positions": np.array([0.0, -1.571, 1.571, -1.571, -1.571, 0.0]),
+            "joint_limits_lower": np.array([-2*np.pi, -2*np.pi, -np.pi, -2*np.pi, -2*np.pi, -2*np.pi]),
+            "joint_limits_upper": np.array([2*np.pi, 2*np.pi, np.pi, 2*np.pi, 2*np.pi, 2*np.pi]),
         },
         "fetch": {
             "reach": 1.1,
@@ -254,6 +286,10 @@ class AIMotionPlanner:
             "ee_to_gripper": 0.12,
             "home_position": np.array([0.5, 0, 0.8]),
             "home_orientation": np.array([0, 1, 0, 0]),
+            "dof": 7,
+            "default_joint_positions": np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            "joint_limits_lower": np.array([-1.605, -1.221, -np.inf, -2.251, -np.inf, -2.16, -np.inf]),
+            "joint_limits_upper": np.array([1.605, 1.518, np.inf, 2.251, np.inf, 2.16, np.inf]),
         },
     }
 
@@ -261,6 +297,8 @@ class AIMotionPlanner:
         self,
         robot_type: str = "franka",
         use_llm: bool = True,
+        use_curobo: bool = True,
+        curobo_device: Optional[str] = None,
         verbose: bool = True,
     ):
         """
@@ -269,6 +307,8 @@ class AIMotionPlanner:
         Args:
             robot_type: Type of robot (franka, ur10, fetch)
             use_llm: Whether to use LLM for enhanced planning
+            use_curobo: Whether to use cuRobo for collision-checked planning
+            curobo_device: CUDA device for cuRobo (e.g., "cuda:0")
             verbose: Print debug info
         """
         self.robot_type = robot_type
@@ -276,6 +316,9 @@ class AIMotionPlanner:
         self.use_llm = use_llm and HAVE_LLM_CLIENT
         self.verbose = verbose
         self._client = None
+        self._curobo_planner = None
+        self._curobo_device = curobo_device or os.getenv("CUROBO_DEVICE", "cuda:0")
+        self._use_curobo = use_curobo and os.getenv("USE_CUROBO", "true").lower() in {"1", "true", "yes"}
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -289,6 +332,130 @@ class AIMotionPlanner:
                 raise ImportError("LLM client not available")
             self._client = create_llm_client()
         return self._client
+
+    def _get_curobo_planner(self):
+        """Get or create cuRobo planner."""
+        if self._curobo_planner is None:
+            try:
+                from curobo_planner import create_curobo_planner, is_curobo_available
+            except ImportError:
+                return None
+
+            if not is_curobo_available():
+                return None
+
+            self._curobo_planner = create_curobo_planner(
+                robot_type=self.robot_type,
+                device=self._curobo_device,
+            )
+        return self._curobo_planner
+
+    def _build_collision_objects(self, scene_context: Optional[SceneContext]) -> List[Any]:
+        """Convert scene objects to cuRobo collision objects."""
+        if scene_context is None or not scene_context.objects:
+            return []
+
+        try:
+            from curobo_planner import CollisionObject, CollisionGeometryType
+        except ImportError:
+            return []
+
+        obstacles = []
+        for obj in scene_context.objects:
+            obj_id = obj.get("id", obj.get("name", "obstacle"))
+            position = np.array(obj.get("position", [0, 0, 0]))
+            orientation = np.array(obj.get("orientation", [1, 0, 0, 0]))
+            dimensions = np.array(obj.get("dimensions", [0.1, 0.1, 0.1]))
+
+            obstacles.append(CollisionObject(
+                object_id=obj_id,
+                geometry_type=CollisionGeometryType.CUBOID,
+                position=position,
+                orientation=orientation,
+                dimensions=dimensions,
+                is_static=obj.get("is_static", True),
+            ))
+
+        return obstacles
+
+    def _plan_joint_trajectory(
+        self,
+        waypoints: List[Waypoint],
+        scene_context: Optional[SceneContext],
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], bool, Optional[bool], List[str]]:
+        """Plan collision-checked joint trajectory using cuRobo."""
+        if not self._use_curobo:
+            return None, None, False, None, []
+
+        planner = self._get_curobo_planner()
+        if planner is None:
+            return None, None, False, None, ["cuRobo planner unavailable"]
+
+        try:
+            from curobo_planner import CuRoboPlanRequest
+        except ImportError:
+            return None, None, False, None, ["cuRobo planner import failed"]
+
+        obstacles = self._build_collision_objects(scene_context)
+        current_joints = self.robot_config.get("default_joint_positions")
+        if current_joints is None:
+            current_joints = np.zeros(self.robot_config.get("dof", 7))
+        current_joints = current_joints.copy()
+
+        joint_segments: List[np.ndarray] = []
+        time_segments: List[np.ndarray] = []
+        time_offset = 0.0
+        collision_free = True
+        errors: List[str] = []
+
+        for idx, wp in enumerate(waypoints):
+            goal_pose = np.concatenate([wp.position, wp.orientation])
+            request = CuRoboPlanRequest(
+                start_joint_positions=current_joints,
+                goal_pose=goal_pose,
+                obstacles=obstacles,
+            )
+            result = planner.plan_to_pose(request)
+
+            if not result.success or result.joint_trajectory is None:
+                errors.append(f"cuRobo failed at waypoint {idx}: {result.error_message}")
+                return None, None, True, None, errors
+
+            if not result.is_collision_free:
+                collision_free = False
+
+            segment_traj = result.joint_trajectory
+            segment_times = result.timesteps if result.timesteps is not None else np.arange(len(segment_traj))
+
+            if joint_segments:
+                segment_traj = segment_traj[1:]
+                segment_times = segment_times[1:]
+
+            if len(segment_traj) > 0:
+                joint_segments.append(segment_traj)
+                time_segments.append(segment_times + time_offset)
+                time_offset = time_segments[-1][-1]
+                current_joints = segment_traj[-1].copy()
+
+            wp.joint_positions = current_joints.copy()
+
+        if not joint_segments:
+            return None, None, True, None, ["cuRobo produced empty trajectory"]
+
+        joint_trajectory = np.vstack(joint_segments)
+        joint_timestamps = np.concatenate(time_segments)
+
+        limits_lower = self.robot_config.get("joint_limits_lower")
+        limits_upper = self.robot_config.get("joint_limits_upper")
+        if limits_lower is not None and limits_upper is not None:
+            out_of_bounds = np.logical_or(
+                joint_trajectory < limits_lower - 1e-5,
+                joint_trajectory > limits_upper + 1e-5,
+            )
+            if np.any(out_of_bounds):
+                errors.append("cuRobo trajectory violates joint limits")
+
+        return joint_trajectory, joint_timestamps, True, collision_free, errors
 
     def plan_motion(
         self,
@@ -370,6 +537,26 @@ class AIMotionPlanner:
             place_position=np.array(place_position) if place_position else None,
             robot_type=self.robot_type,
         )
+
+        joint_trajectory, joint_timestamps, collision_checked, collision_free, errors = (
+            self._plan_joint_trajectory(waypoints=waypoints, scene_context=scene_context)
+        )
+        if collision_checked:
+            plan.planning_backend = "curobo"
+            plan.collision_checked = True
+            plan.collision_free = collision_free
+            plan.joint_limits_enforced = True
+            plan.joint_trajectory = joint_trajectory
+            plan.joint_trajectory_timestamps = joint_timestamps
+            if errors:
+                plan.planning_errors.extend(errors)
+                plan.planning_success = False
+            if collision_free is False:
+                plan.planning_errors.append("cuRobo reported collision in planned trajectory")
+                plan.planning_success = False
+
+        if plan.planning_errors:
+            self.log(f"  Planning errors: {plan.planning_errors}", "WARNING")
 
         self.log(f"  Generated {plan.num_waypoints} waypoints, duration: {plan.total_duration:.2f}s")
 
