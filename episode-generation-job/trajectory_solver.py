@@ -14,6 +14,7 @@ Key Features:
 
 import json
 import math
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1314,6 +1315,13 @@ class TrajectorySolver:
         if self.verbose:
             print(f"[TRAJECTORY-SOLVER] [{level}] {msg}")
 
+    def _is_production_mode(self) -> bool:
+        """Detect production mode for fail-closed behavior."""
+        return (
+            os.getenv("PRODUCTION_MODE", "false").lower() == "true"
+            or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
+        )
+
     def _within_joint_limits(self, joints: np.ndarray, tolerance: float = 1e-4) -> bool:
         """Check whether joints are within configured limits."""
         lower = self.robot_config.joint_limits_lower
@@ -1338,6 +1346,20 @@ class TrajectorySolver:
         self.log(f"Solving trajectory for {motion_plan.task_name}")
         self.log(f"  Waypoints: {motion_plan.num_waypoints}")
         self.log(f"  Duration: {motion_plan.total_duration:.2f}s")
+
+        if self._is_production_mode():
+            if not motion_plan.planning_success:
+                raise TrajectoryIKError(
+                    f"Motion plan {motion_plan.plan_id} planning failed in production mode."
+                )
+            if motion_plan.joint_trajectory is None:
+                raise TrajectoryIKError(
+                    f"Motion plan {motion_plan.plan_id} missing joint trajectory in production mode."
+                )
+            if not motion_plan.waypoints:
+                raise TrajectoryIKError(
+                    f"Motion plan {motion_plan.plan_id} has no waypoints in production mode."
+                )
 
         # Step 1: Solve IK for each waypoint
         try:

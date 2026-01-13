@@ -33,6 +33,7 @@ Reference:
 - OMPL: Open Motion Planning Library
 """
 
+import importlib
 import math
 import sys
 import time
@@ -136,10 +137,12 @@ class SceneCollisionChecker:
         self,
         scene_usd_path: Optional[str] = None,
         robot_type: str = "franka",
+        robot_urdf_path: Optional[str] = None,
         verbose: bool = True,
     ):
         self.scene_usd_path = scene_usd_path
         self.robot_type = robot_type
+        self.robot_urdf_path = robot_urdf_path
         self.verbose = verbose
 
         # Collision geometry
@@ -153,10 +156,126 @@ class SceneCollisionChecker:
         # Load scene if provided
         if scene_usd_path:
             self.load_scene(scene_usd_path)
+        if robot_urdf_path:
+            self.load_robot_urdf(robot_urdf_path)
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
             print(f"[COLLISION-CHECKER] [{level}] {msg}")
+
+    def load_robot_urdf(self, urdf_path: str) -> bool:
+        """Load robot collision geometry from URDF."""
+        spec = importlib.util.find_spec("urdfpy")
+        if spec is None:
+            self.log("urdfpy not available - skipping robot URDF load", "WARNING")
+            return False
+
+        urdfpy = importlib.import_module("urdfpy")
+        try:
+            robot = urdfpy.URDF.load(urdf_path)
+        except Exception as exc:
+            self.log(f"Failed to load robot URDF {urdf_path}: {exc}", "ERROR")
+            return False
+
+        loaded = 0
+        for link in robot.links:
+            for collision in link.collisions:
+                prim = self._collision_primitive_from_urdf(link.name, collision)
+                if prim is None:
+                    continue
+                prim.is_robot = True
+                self.robot_link_primitives[f"{link.name}:{loaded}"] = prim
+                loaded += 1
+
+        self.log(f"Loaded {loaded} robot collision primitives from {urdf_path}")
+        return loaded > 0
+
+    def _collision_primitive_from_urdf(self, link_name: str, collision) -> Optional[CollisionPrimitive]:
+        """Convert a URDF collision element into a collision primitive."""
+        geometry = collision.geometry
+        if geometry is None:
+            return None
+
+        origin = collision.origin
+        if origin is not None:
+            position = np.array(origin[:3, 3])
+            orientation = self._quat_from_matrix(origin[:3, :3])
+        else:
+            position = np.zeros(3)
+            orientation = np.array([1.0, 0.0, 0.0, 0.0])
+
+        if geometry.box is not None:
+            return CollisionPrimitive(
+                prim_type="box",
+                position=position,
+                orientation=orientation,
+                dimensions=np.array(geometry.box.size),
+                prim_path=f"{link_name}/collision",
+                is_robot=True,
+            )
+        if geometry.sphere is not None:
+            return CollisionPrimitive(
+                prim_type="sphere",
+                position=position,
+                orientation=orientation,
+                radius=float(geometry.sphere.radius),
+                prim_path=f"{link_name}/collision",
+                is_robot=True,
+            )
+        if geometry.cylinder is not None:
+            return CollisionPrimitive(
+                prim_type="capsule",
+                position=position,
+                orientation=orientation,
+                radius=float(geometry.cylinder.radius),
+                height=float(geometry.cylinder.length),
+                prim_path=f"{link_name}/collision",
+                is_robot=True,
+            )
+        if geometry.mesh is not None:
+            return CollisionPrimitive(
+                prim_type="mesh",
+                position=position,
+                orientation=orientation,
+                prim_path=f"{link_name}/collision",
+                is_robot=True,
+            )
+        return None
+
+    def _quat_from_matrix(self, mat: np.ndarray) -> np.ndarray:
+        """Convert rotation matrix to quaternion (w, x, y, z)."""
+        trace = np.trace(mat)
+        if trace > 0.0:
+            s = math.sqrt(trace + 1.0) * 2
+            return np.array([
+                0.25 * s,
+                (mat[2, 1] - mat[1, 2]) / s,
+                (mat[0, 2] - mat[2, 0]) / s,
+                (mat[1, 0] - mat[0, 1]) / s,
+            ])
+        if mat[0, 0] > mat[1, 1] and mat[0, 0] > mat[2, 2]:
+            s = math.sqrt(1.0 + mat[0, 0] - mat[1, 1] - mat[2, 2]) * 2
+            return np.array([
+                (mat[2, 1] - mat[1, 2]) / s,
+                0.25 * s,
+                (mat[0, 1] + mat[1, 0]) / s,
+                (mat[0, 2] + mat[2, 0]) / s,
+            ])
+        if mat[1, 1] > mat[2, 2]:
+            s = math.sqrt(1.0 + mat[1, 1] - mat[0, 0] - mat[2, 2]) * 2
+            return np.array([
+                (mat[0, 2] - mat[2, 0]) / s,
+                (mat[0, 1] + mat[1, 0]) / s,
+                0.25 * s,
+                (mat[1, 2] + mat[2, 1]) / s,
+            ])
+        s = math.sqrt(1.0 + mat[2, 2] - mat[0, 0] - mat[1, 1]) * 2
+        return np.array([
+            (mat[1, 0] - mat[0, 1]) / s,
+            (mat[0, 2] + mat[2, 0]) / s,
+            (mat[1, 2] + mat[2, 1]) / s,
+            0.25 * s,
+        ])
 
     def load_scene(self, scene_path: str) -> bool:
         """Load collision geometry from USD scene."""
@@ -594,6 +713,7 @@ class CollisionAwarePlanner:
         robot_type: str = "franka",
         scene_usd_path: Optional[str] = None,
         scene_objects: Optional[List[Dict[str, Any]]] = None,
+        robot_urdf_path: Optional[str] = None,
         use_curobo: bool = True,
         verbose: bool = True,
     ):
@@ -604,6 +724,7 @@ class CollisionAwarePlanner:
             robot_type: Robot type (franka, ur10, fetch)
             scene_usd_path: Path to USD scene for collision geometry
             scene_objects: Alternatively, list of object dicts with position/dimensions
+            robot_urdf_path: Optional robot URDF for collision geometry
             use_curobo: Use cuRobo if available
             verbose: Print debug info
         """
@@ -615,6 +736,7 @@ class CollisionAwarePlanner:
         self.collision_checker = SceneCollisionChecker(
             scene_usd_path=scene_usd_path,
             robot_type=robot_type,
+            robot_urdf_path=robot_urdf_path,
             verbose=verbose,
         )
 

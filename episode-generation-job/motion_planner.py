@@ -12,6 +12,7 @@ Key Features:
 - Multi-phase motion sequences (approach, grasp, transport, place)
 """
 
+import importlib
 import json
 import math
 import os
@@ -232,6 +233,137 @@ class SceneContext:
     # Table/surface height (for placing)
     surface_height: float = 0.8
 
+    # Optional: USD scene and robot URDF for collision-aware planning
+    scene_usd_path: Optional[str] = None
+    robot_urdf_path: Optional[str] = None
+
+
+@dataclass
+class PlanningContext:
+    """Collision-aware planning context built from scene inputs."""
+
+    robot_type: str
+    robot_config: Dict[str, Any]
+    scene_objects: List[Dict[str, Any]]
+    workspace_min: np.ndarray
+    workspace_max: np.ndarray
+    scene_usd_path: Optional[str] = None
+    robot_urdf_path: Optional[str] = None
+
+
+@dataclass
+class PlannerResult:
+    """Result from a planner backend."""
+
+    backend: str
+    success: bool
+    joint_trajectory: Optional[np.ndarray]
+    joint_timestamps: Optional[np.ndarray]
+    collision_checked: bool
+    collision_free: Optional[bool]
+    errors: List[str]
+    planned_waypoints: Optional[List[Waypoint]] = None
+
+
+class PlannerBackend:
+    """Planner backend interface."""
+
+    name = "base"
+
+    def plan(
+        self,
+        waypoints: List[Waypoint],
+        context: PlanningContext,
+    ) -> PlannerResult:
+        raise NotImplementedError
+
+
+class CuRoboPlannerBackend(PlannerBackend):
+    """cuRobo planner backend."""
+
+    name = "curobo"
+
+    def __init__(self, planner: "AIMotionPlanner"):
+        self._planner = planner
+
+    def plan(self, waypoints: List[Waypoint], context: PlanningContext) -> PlannerResult:
+        joint_trajectory, joint_timestamps, collision_checked, collision_free, errors = (
+            self._planner._plan_joint_trajectory(waypoints=waypoints, context=context)
+        )
+        success = joint_trajectory is not None and not errors and collision_free is not False
+        return PlannerResult(
+            backend=self.name,
+            success=success,
+            joint_trajectory=joint_trajectory,
+            joint_timestamps=joint_timestamps,
+            collision_checked=collision_checked,
+            collision_free=collision_free,
+            errors=errors,
+        )
+
+
+class OmplPlannerBackend(PlannerBackend):
+    """OMPL-style planner backend using collision-aware waypoints + IK."""
+
+    name = "ompl"
+
+    def __init__(self, planner: "AIMotionPlanner"):
+        self._planner = planner
+
+    def plan(self, waypoints: List[Waypoint], context: PlanningContext) -> PlannerResult:
+        new_waypoints, collision_free, errors = self._planner._plan_collision_aware_waypoints(
+            waypoints=waypoints,
+            context=context,
+        )
+        planned_waypoints = new_waypoints if new_waypoints is not None else waypoints
+        joint_trajectory = None
+        joint_timestamps = None
+        if new_waypoints is not None and not errors:
+            joint_trajectory, joint_timestamps, ik_errors = self._planner._solve_waypoint_ik(planned_waypoints)
+            if ik_errors:
+                errors.extend(ik_errors)
+        else:
+            errors.append("OMPL backend could not produce collision-aware waypoints")
+        success = joint_trajectory is not None and not errors and collision_free is not False
+        return PlannerResult(
+            backend=self.name,
+            success=success,
+            joint_trajectory=joint_trajectory,
+            joint_timestamps=joint_timestamps,
+            collision_checked=new_waypoints is not None,
+            collision_free=collision_free,
+            errors=errors,
+            planned_waypoints=planned_waypoints if new_waypoints is not None else None,
+        )
+
+
+class IKPlannerBackend(PlannerBackend):
+    """IK-only planner backend (non-collision-checked)."""
+
+    name = "ik"
+
+    def __init__(self, planner: "AIMotionPlanner"):
+        self._planner = planner
+
+    def plan(self, waypoints: List[Waypoint], context: PlanningContext) -> PlannerResult:
+        joint_trajectory, joint_timestamps, errors = self._planner._solve_waypoint_ik(waypoints)
+        collision_free, collision_errors = self._planner._check_scene_collisions(
+            waypoints=waypoints,
+            context=context,
+        )
+        if collision_errors:
+            errors.extend(collision_errors)
+        success = joint_trajectory is not None and not errors and collision_free is not False
+        return PlannerResult(
+            backend=self.name,
+            success=success,
+            joint_trajectory=joint_trajectory,
+            joint_timestamps=joint_timestamps,
+            collision_checked=collision_free is not None,
+            collision_free=collision_free,
+            errors=errors,
+        )
+
 
 # =============================================================================
 # Motion Planner
@@ -334,6 +466,11 @@ class AIMotionPlanner:
             "yes",
         }
         self._timing = load_motion_planner_timing()
+        self._planner_backend_order = [
+            name.strip().lower()
+            for name in os.getenv("MOTION_PLANNER_BACKENDS", "curobo,ompl,ik").split(",")
+            if name.strip()
+        ]
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -365,9 +502,9 @@ class AIMotionPlanner:
             )
         return self._curobo_planner
 
-    def _build_collision_objects(self, scene_context: Optional[SceneContext]) -> List[Any]:
-        """Convert scene objects to cuRobo collision objects."""
-        if scene_context is None or not scene_context.objects:
+    def _build_collision_objects(self, context: PlanningContext) -> List[Any]:
+        """Convert scene objects/geometry to cuRobo collision objects."""
+        if not context.scene_objects and not context.scene_usd_path:
             return []
 
         try:
@@ -376,7 +513,7 @@ class AIMotionPlanner:
             return []
 
         obstacles = []
-        for obj in scene_context.objects:
+        for obj in context.scene_objects:
             obj_id = obj.get("id", obj.get("name", "obstacle"))
             position = np.array(obj.get("position", [0, 0, 0]))
             orientation = np.array(obj.get("orientation", [1, 0, 0, 0]))
@@ -391,9 +528,32 @@ class AIMotionPlanner:
                 is_static=obj.get("is_static", True),
             ))
 
+        if context.scene_usd_path:
+            spec = importlib.util.find_spec("collision_aware_planner")
+            if spec is not None:
+                collision_module = importlib.import_module("collision_aware_planner")
+                checker = collision_module.SceneCollisionChecker(
+                    scene_usd_path=context.scene_usd_path,
+                    robot_type=context.robot_type,
+                    robot_urdf_path=context.robot_urdf_path,
+                    verbose=False,
+                )
+                for idx, prim in enumerate(checker.collision_primitives):
+                    aabb_min, aabb_max = prim.get_aabb()
+                    dimensions = aabb_max - aabb_min
+                    position = (aabb_max + aabb_min) / 2.0
+                    obstacles.append(CollisionObject(
+                        object_id=f"usd_{idx}",
+                        geometry_type=CollisionGeometryType.CUBOID,
+                        position=position,
+                        orientation=np.array([1, 0, 0, 0]),
+                        dimensions=dimensions,
+                        is_static=True,
+                    ))
+
         return obstacles
 
-    def _get_collision_planner(self, scene_context: Optional[SceneContext]):
+    def _get_collision_planner(self, context: PlanningContext):
         """Get or create fallback collision-aware planner (RRT-based)."""
         if self._collision_planner is None:
             try:
@@ -401,27 +561,28 @@ class AIMotionPlanner:
             except ImportError:
                 return None
 
-            scene_objects = scene_context.objects if scene_context else None
+            scene_objects = context.scene_objects if context else None
             self._collision_planner = CollisionAwarePlanner(
                 robot_type=self.robot_type,
                 scene_objects=scene_objects,
+                scene_usd_path=context.scene_usd_path,
+                robot_urdf_path=context.robot_urdf_path,
                 use_curobo=False,
                 verbose=self.verbose,
             )
-            if scene_context is not None:
-                self._collision_planner.rrt_planner.set_workspace_bounds(
-                    scene_context.workspace_min, scene_context.workspace_max
-                )
+            self._collision_planner.rrt_planner.set_workspace_bounds(
+                context.workspace_min, context.workspace_max
+            )
         return self._collision_planner
 
     def _plan_collision_aware_waypoints(
         self,
         waypoints: List[Waypoint],
-        scene_context: Optional[SceneContext],
+        context: PlanningContext,
         robot_radius: float = 0.08,
     ) -> Tuple[Optional[List[Waypoint]], Optional[bool], List[str]]:
         """Plan a collision-aware waypoint trajectory using RRT fallback."""
-        planner = self._get_collision_planner(scene_context)
+        planner = self._get_collision_planner(context)
         if planner is None:
             return None, None, ["Fallback collision planner unavailable"]
 
@@ -443,7 +604,7 @@ class AIMotionPlanner:
     def _plan_joint_trajectory(
         self,
         waypoints: List[Waypoint],
-        scene_context: Optional[SceneContext],
+        context: PlanningContext,
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], bool, Optional[bool], List[str]]:
         """Plan collision-checked joint trajectory using cuRobo."""
         if not self._use_curobo:
@@ -458,7 +619,7 @@ class AIMotionPlanner:
         except ImportError:
             return None, None, False, None, ["cuRobo planner import failed"]
 
-        obstacles = self._build_collision_objects(scene_context)
+        obstacles = self._build_collision_objects(context)
         current_joints = self.robot_config.get("default_joint_positions")
         if current_joints is None:
             current_joints = np.zeros(self.robot_config.get("dof", 7))
@@ -535,6 +696,43 @@ class AIMotionPlanner:
         above = joints[finite_mask] > (upper[finite_mask] + tolerance)
         return not (np.any(below) or np.any(above))
 
+    def _build_planning_context(self, scene_context: Optional[SceneContext]) -> PlanningContext:
+        """Build planner context from scene inputs."""
+        if scene_context is None:
+            return PlanningContext(
+                robot_type=self.robot_type,
+                robot_config=self.robot_config,
+                scene_objects=[],
+                workspace_min=np.array([-1, -1, 0]),
+                workspace_max=np.array([1, 1, 1.5]),
+            )
+
+        return PlanningContext(
+            robot_type=self.robot_type,
+            robot_config=self.robot_config,
+            scene_objects=list(scene_context.objects),
+            workspace_min=scene_context.workspace_min,
+            workspace_max=scene_context.workspace_max,
+            scene_usd_path=scene_context.scene_usd_path,
+            robot_urdf_path=scene_context.robot_urdf_path,
+        )
+
+    def _get_planner_backends(self) -> List[PlannerBackend]:
+        """Return planner backends in configured order."""
+        backend_map = {
+            "curobo": CuRoboPlannerBackend(self),
+            "ompl": OmplPlannerBackend(self),
+            "ik": IKPlannerBackend(self),
+        }
+        backends = []
+        for name in self._planner_backend_order:
+            backend = backend_map.get(name)
+            if backend is not None:
+                backends.append(backend)
+            else:
+                self.log(f"Unknown planner backend '{name}'", "WARNING")
+        return backends
+
     def _solve_waypoint_ik(
         self,
         waypoints: List[Waypoint],
@@ -587,11 +785,11 @@ class AIMotionPlanner:
     def _check_scene_collisions(
         self,
         waypoints: List[Waypoint],
-        scene_context: Optional[SceneContext],
+        context: PlanningContext,
         robot_radius: float = 0.08,
     ) -> Tuple[Optional[bool], List[str]]:
         """Check for collisions against scene obstacles."""
-        if scene_context is None or not scene_context.objects:
+        if not context.scene_objects and not context.scene_usd_path:
             return None, []
 
         try:
@@ -600,12 +798,13 @@ class AIMotionPlanner:
             return None, [f"Scene collision checker unavailable: {exc}"]
 
         checker = SceneCollisionChecker(
-            scene_usd_path=None,
+            scene_usd_path=context.scene_usd_path,
             robot_type=self.robot_type,
+            robot_urdf_path=context.robot_urdf_path,
             verbose=self.verbose,
         )
 
-        for obj in scene_context.objects:
+        for obj in context.scene_objects:
             position = np.array(obj.get("position", [0, 0, 0]))
             dimensions = np.array(obj.get("dimensions", [0.1, 0.1, 0.1]))
             checker.add_obstacle(position, dimensions)
@@ -701,63 +900,33 @@ class AIMotionPlanner:
             robot_type=self.robot_type,
         )
 
+        planning_context = self._build_planning_context(scene_context)
         collision_planner_used = False
-        joint_trajectory, joint_timestamps, collision_checked, collision_free, errors = (
-            self._plan_joint_trajectory(waypoints=waypoints, scene_context=scene_context)
-        )
-        if collision_checked:
-            plan.planning_backend = "curobo"
-            plan.trajectory_backend = "curobo"
-            plan.collision_checked = True
-            plan.collision_free = collision_free
-            plan.joint_limits_enforced = True
-            plan.joint_trajectory = joint_trajectory
-            plan.joint_trajectory_timestamps = joint_timestamps
-            collision_planner_used = True
-            if errors:
-                plan.planning_errors.extend(errors)
-                plan.planning_success = False
-            if collision_free is False:
-                plan.planning_errors.append("cuRobo reported collision in planned trajectory")
-                plan.planning_success = False
+        plan.planning_success = False
+        collected_errors: List[str] = []
 
-        if not collision_checked:
-            fallback_waypoints, fallback_collision_free, fallback_errors = self._plan_collision_aware_waypoints(
-                waypoints=plan.waypoints,
-                scene_context=scene_context,
-            )
-            if fallback_waypoints is not None:
-                plan.waypoints = fallback_waypoints
-                plan.recalculate_timing()
-                plan.planning_backend = "rrt"
-                plan.trajectory_backend = "rrt"
-                plan.collision_checked = True
-                plan.collision_free = fallback_collision_free
+        for backend in self._get_planner_backends():
+            result = backend.plan(plan.waypoints, planning_context)
+            if result.collision_checked:
                 collision_planner_used = True
-                if fallback_errors:
-                    plan.planning_errors.extend(fallback_errors)
-                    plan.planning_success = False
-                if fallback_collision_free is False:
-                    plan.planning_success = False
-            elif fallback_errors and self._require_collision_planner:
-                plan.planning_errors.extend(fallback_errors)
-                plan.planning_success = False
-
-            joint_trajectory, joint_timestamps, ik_errors = self._solve_waypoint_ik(plan.waypoints)
-            if ik_errors:
-                plan.planning_errors.extend(ik_errors)
-                plan.planning_success = False
-            else:
-                if plan.planning_backend == "heuristic":
-                    plan.planning_backend = "ik"
-                if plan.trajectory_backend == "heuristic":
-                    plan.trajectory_backend = "ik"
-                plan.joint_trajectory = joint_trajectory
-                plan.joint_trajectory_timestamps = joint_timestamps
+            if result.errors:
+                collected_errors.extend(result.errors)
+            if result.success:
+                if result.planned_waypoints is not None:
+                    plan.waypoints = result.planned_waypoints
+                    plan.recalculate_timing()
+                plan.joint_trajectory = result.joint_trajectory
+                plan.joint_trajectory_timestamps = result.joint_timestamps
+                plan.planning_backend = result.backend
+                plan.trajectory_backend = result.backend
+                plan.collision_checked = result.collision_checked
+                plan.collision_free = result.collision_free
                 plan.joint_limits_enforced = True
+                plan.planning_success = True
+                break
 
         if not plan.collision_checked:
-            collision_free, collision_errors = self._check_scene_collisions(plan.waypoints, scene_context)
+            collision_free, collision_errors = self._check_scene_collisions(plan.waypoints, planning_context)
             if collision_free is not None:
                 plan.collision_checked = True
                 plan.collision_free = collision_free
@@ -771,6 +940,13 @@ class AIMotionPlanner:
         if self._require_collision_planner and not collision_planner_used:
             plan.planning_errors.append("Collision planner required but unavailable")
             plan.planning_success = False
+
+        if plan.joint_trajectory is None:
+            plan.planning_errors.append("No joint trajectory produced by planner backends")
+            plan.planning_success = False
+
+        if not plan.planning_success and collected_errors:
+            plan.planning_errors.extend(collected_errors)
 
         if plan.planning_errors:
             self.log(f"  Planning errors: {plan.planning_errors}", "WARNING")
