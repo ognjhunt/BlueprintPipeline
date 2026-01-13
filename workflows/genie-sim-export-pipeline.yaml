@@ -222,6 +222,8 @@ main:
                         value: "true"
                       - name: COPY_USD
                         value: "true"
+                      - name: REQUIRE_QUALITY_GATES
+                        value: "true"
                       # Enable all enhanced features for commercial data generation
                       - name: ENABLE_MULTI_ROBOT
                         value: "true"
