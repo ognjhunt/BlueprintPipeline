@@ -64,6 +64,7 @@ from tools.regen3d_adapter import (
 )
 from tools.scale_authority.authority import REFERENCE_DIMENSIONS
 from tools.scene_manifest.validate_manifest import validate_manifest
+from tools.metrics.pipeline_metrics import get_metrics
 
 # Optional: Gemini for semantic inventory
 try:
@@ -276,12 +277,15 @@ def enrich_inventory_with_gemini(
         prompt = _build_gemini_enrichment_prompt(objects_for_prompt, environment_type)
 
         # Call Gemini with the image
-        response = client.generate(
-            prompt=prompt,
-            image=source_image_path,
-            json_output=True,
-            temperature=0.3,  # Lower temperature for more consistent categorization
-        )
+        metrics = get_metrics()
+        scene_id = inventory.get("scene_id", "")
+        with metrics.track_api_call("gemini", "enrich_inventory", scene_id):
+            response = client.generate(
+                prompt=prompt,
+                image=source_image_path,
+                json_output=True,
+                temperature=0.3,  # Lower temperature for more consistent categorization
+            )
 
         # Parse response
         enrichment_data = response.parse_json()
@@ -633,6 +637,11 @@ def run_regen3d_adapter_job(
     # This marker signals that the 3D-RE-GEN adapter job has completed
     # and all outputs (manifest, layout, inventory) are ready for downstream jobs.
     # All downstream workflows should trigger on .regen3d_complete.
+    metrics = get_metrics()
+    metrics_summary = {
+        "backend": metrics.backend.value,
+        "stats": metrics.get_stats(),
+    }
     marker_content = {
         "status": "complete",
         "scene_id": scene_id,
@@ -641,6 +650,7 @@ def run_regen3d_adapter_job(
         "scale_factor": scale_factor,
         "environment_type": environment_type,
         "completed_at": datetime.utcnow().isoformat() + "Z",
+        "metrics_summary": metrics_summary,
     }
 
     # Primary marker: .regen3d_complete
@@ -687,16 +697,18 @@ def main():
     print(f"[REGEN3D-JOB]   Bucket: {bucket}")
     print(f"[REGEN3D-JOB]   Scene ID: {scene_id}")
 
-    exit_code = run_regen3d_adapter_job(
-        root=GCS_ROOT,
-        scene_id=scene_id,
-        regen3d_prefix=regen3d_prefix,
-        assets_prefix=assets_prefix,
-        layout_prefix=layout_prefix,
-        environment_type=environment_type,
-        scale_factor=scale_factor,
-        skip_inventory=skip_inventory,
-    )
+    metrics = get_metrics()
+    with metrics.track_job("regen3d-job", scene_id):
+        exit_code = run_regen3d_adapter_job(
+            root=GCS_ROOT,
+            scene_id=scene_id,
+            regen3d_prefix=regen3d_prefix,
+            assets_prefix=assets_prefix,
+            layout_prefix=layout_prefix,
+            environment_type=environment_type,
+            scale_factor=scale_factor,
+            skip_inventory=skip_inventory,
+        )
 
     sys.exit(exit_code)
 

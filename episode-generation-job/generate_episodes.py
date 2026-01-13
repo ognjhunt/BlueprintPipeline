@@ -77,6 +77,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.metrics.pipeline_metrics import get_metrics
+
 REQUIRED_ISAAC_SIM_VERSION = "2024.1.0+"
 REQUIRED_ISAAC_SIM_CONTAINER = "nvcr.io/nvidia/isaac-sim:2024.1.0"
 REQUIRED_EXTENSIONS = (
@@ -2158,6 +2160,11 @@ class EpisodeGenerator:
         episodes_with_sensor_data = sum(1 for e in episodes if e.sensor_data is not None)
 
         # Generation manifest
+        metrics = get_metrics()
+        metrics_summary = {
+            "backend": metrics.backend.value,
+            "stats": metrics.get_stats(),
+        }
         manifest = {
             "scene_id": self.config.scene_id,
             "robot_type": self.config.robot_type,
@@ -2241,6 +2248,7 @@ class EpisodeGenerator:
                 }
                 for e in episodes
             ],
+            "metrics_summary": metrics_summary,
             "generated_at": datetime.utcnow().isoformat() + "Z",
             "generator_version": "2.0.0",
         }
@@ -2817,27 +2825,29 @@ def main():
 
     GCS_ROOT = Path("/mnt/gcs")
 
-    exit_code = run_episode_generation_job(
-        root=GCS_ROOT,
-        scene_id=scene_id,
-        assets_prefix=assets_prefix,
-        episodes_prefix=episodes_prefix,
-        robot_type=robot_type,
-        episodes_per_variation=episodes_per_variation,
-        max_variations=max_variations,
-        fps=fps,
-        use_llm=use_llm,
-        use_cpgen=use_cpgen,
-        min_quality_score=min_quality_score,
-        min_success_rate=min_success_rate,
-        data_pack_tier=data_pack_tier,
-        num_cameras=num_cameras,
-        image_resolution=image_resolution,
-        capture_sensor_data=capture_sensor_data,
-        use_mock_capture=use_mock_capture,
-        allow_mock_capture=allow_mock_capture,
-        bundle_tier=bundle_tier,
-    )
+    metrics = get_metrics()
+    with metrics.track_job("episode-generation-job", scene_id):
+        exit_code = run_episode_generation_job(
+            root=GCS_ROOT,
+            scene_id=scene_id,
+            assets_prefix=assets_prefix,
+            episodes_prefix=episodes_prefix,
+            robot_type=robot_type,
+            episodes_per_variation=episodes_per_variation,
+            max_variations=max_variations,
+            fps=fps,
+            use_llm=use_llm,
+            use_cpgen=use_cpgen,
+            min_quality_score=min_quality_score,
+            min_success_rate=min_success_rate,
+            data_pack_tier=data_pack_tier,
+            num_cameras=num_cameras,
+            image_resolution=image_resolution,
+            capture_sensor_data=capture_sensor_data,
+            use_mock_capture=use_mock_capture,
+            allow_mock_capture=allow_mock_capture,
+            bundle_tier=bundle_tier,
+        )
 
     sys.exit(exit_code)
 

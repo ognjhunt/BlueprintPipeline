@@ -40,6 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 from tools.workflow import FailureMarkerWriter
+from tools.metrics.pipeline_metrics import get_metrics
 
 
 # =============================================================================
@@ -484,13 +485,16 @@ def call_particulate_service(
                 headers={"Content-Type": "application/json"},
             )
 
+            metrics = get_metrics()
+            scene_id = os.getenv("SCENE_ID", "")
             start = time.time()
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                elapsed = int(time.time() - start)
-                log(f"Response: {resp.status} ({elapsed}s)", obj_id=obj_id)
+            with metrics.track_api_call("particulate", "articulation", scene_id):
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    elapsed = int(time.time() - start)
+                    log(f"Response: {resp.status} ({elapsed}s)", obj_id=obj_id)
 
-                text = resp.read().decode("utf-8", errors="replace")
-                data = json.loads(text)
+                    text = resp.read().decode("utf-8", errors="replace")
+                    data = json.loads(text)
 
                 is_placeholder = data.get("placeholder", True)
                 articulation = data.get("articulation", {})
