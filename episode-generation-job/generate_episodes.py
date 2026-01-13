@@ -78,7 +78,7 @@ if str(REPO_ROOT) not in sys.path:
 
 # Core imports
 from motion_planner import AIMotionPlanner, MotionPlan
-from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS
+from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS, TrajectoryIKError
 from lerobot_exporter import LeRobotExporter, LeRobotDatasetConfig
 from quality_constants import MIN_QUALITY_SCORE, MAX_RETRIES, PRODUCTION_TRAINING_THRESHOLD
 
@@ -720,6 +720,44 @@ class EpisodeGenerator:
         if self.verbose:
             print(f"[EPISODE-GENERATOR] [{level}] {msg}")
 
+    def _solve_trajectory_with_replan(
+        self,
+        motion_plan: MotionPlan,
+        task_name: str,
+        task_description: str,
+        target_object: Dict[str, Any],
+        place_position: Optional[List[float]],
+        articulation_info: Optional[Dict[str, Any]],
+        context_label: str,
+    ) -> Tuple[MotionPlan, JointTrajectory]:
+        """Solve trajectory, replanning if IK fails."""
+        current_plan = motion_plan
+        last_error: Optional[Exception] = None
+
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                trajectory = self.trajectory_solver.solve(current_plan)
+                return current_plan, trajectory
+            except TrajectoryIKError as exc:
+                last_error = exc
+                if attempt >= self.config.max_retries:
+                    break
+                self.log(
+                    f"    IK failed ({context_label}) attempt {attempt + 1}/{self.config.max_retries + 1}: {exc}. Replanning...",
+                    "WARNING",
+                )
+                current_plan = self.motion_planner.plan_motion(
+                    task_name=task_name,
+                    task_description=task_description,
+                    target_object=target_object,
+                    place_position=place_position,
+                    articulation_info=articulation_info,
+                )
+
+        raise TrajectoryIKError(
+            f"IK failed after {self.config.max_retries + 1} attempts ({context_label}): {last_error}"
+        )
+
     def generate(self, manifest: Dict[str, Any]) -> EpisodeGenerationOutput:
         """
         Generate episodes for all variations in the scene.
@@ -978,8 +1016,16 @@ class EpisodeGenerator:
                     articulation_info=articulation_info,
                 )
 
-                # Solve trajectory
-                trajectory = self.trajectory_solver.solve(motion_plan)
+                # Solve trajectory with replan on IK failure
+                motion_plan, trajectory = self._solve_trajectory_with_replan(
+                    motion_plan=motion_plan,
+                    task_name=task["task_name"],
+                    task_description=task["description"],
+                    target_object=target_object,
+                    place_position=task.get("place_position"),
+                    articulation_info=articulation_info,
+                    context_label=f"seed:{task['task_id']}",
+                )
 
                 # Capture sensor data during trajectory execution (if available)
                 sensor_data = None
@@ -1221,7 +1267,15 @@ class EpisodeGenerator:
                         place_position=seed.motion_plan.place_position.tolist() if seed.motion_plan and seed.motion_plan.place_position is not None else None,
                     )
 
-                    trajectory = self.trajectory_solver.solve(motion_plan)
+                    motion_plan, trajectory = self._solve_trajectory_with_replan(
+                        motion_plan=motion_plan,
+                        task_name=seed.task_name,
+                        task_description=seed.task_description,
+                        target_object=target_object,
+                        place_position=seed.motion_plan.place_position.tolist() if seed.motion_plan and seed.motion_plan.place_position is not None else None,
+                        articulation_info=None,
+                        context_label=f"simple_var:{seed.task_name}:{var_idx}",
+                    )
 
                     # Capture sensor data for simple variation
                     sensor_data = None
