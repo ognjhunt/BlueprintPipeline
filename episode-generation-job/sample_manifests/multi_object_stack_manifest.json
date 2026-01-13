@@ -1,0 +1,58 @@
+{
+  "scene_id": "sample_stack_scene",
+  "environment_type": "tabletop",
+  "robot_config": {
+    "workspace_center": [0.5, 0.0, 0.85]
+  },
+  "objects": [
+    {
+      "id": "red_block",
+      "category": "box",
+      "position": [0.45, -0.05, 0.8],
+      "dimensions": [0.05, 0.05, 0.05]
+    },
+    {
+      "id": "blue_block",
+      "category": "box",
+      "position": [0.55, 0.05, 0.8],
+      "dimensions": [0.05, 0.05, 0.05]
+    },
+    {
+      "id": "green_block",
+      "category": "box",
+      "position": [0.6, -0.1, 0.8],
+      "dimensions": [0.05, 0.05, 0.05]
+    }
+  ],
+  "multi_object_tasks": [
+    {
+      "task_id": "stack_blocks",
+      "task_name": "stack_blocks",
+      "description": "Pick up the red block, place it on the blue block, then stack the green block on top.",
+      "task_steps": [
+        {
+          "step_id": "stack_red_on_blue",
+          "action": "pick_place",
+          "description": "Pick red_block and place on blue_block",
+          "target_object_id": "red_block",
+          "target_position": [0.45, -0.05, 0.8],
+          "target_dimensions": [0.05, 0.05, 0.05],
+          "place_position": [0.55, 0.05, 0.87],
+          "place_on_object_id": "blue_block",
+          "depends_on": []
+        },
+        {
+          "step_id": "stack_green_on_red",
+          "action": "pick_place",
+          "description": "Pick green_block and place on red_block",
+          "target_object_id": "green_block",
+          "target_position": [0.6, -0.1, 0.8],
+          "target_dimensions": [0.05, 0.05, 0.05],
+          "place_position": [0.55, 0.05, 0.94],
+          "place_on_object_id": "red_block",
+          "depends_on": ["stack_red_on_blue"]
+        }
+      ]
+    }
+  ]
+}
