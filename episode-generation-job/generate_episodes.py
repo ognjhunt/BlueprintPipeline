@@ -1220,6 +1220,21 @@ class EpisodeGenerator:
                 f"Found {len(non_physics)} episodes without physics-backed validation."
             )
 
+    def _apply_camera_capture_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
+        """Filter episodes with missing required camera frames."""
+        for episode in episodes:
+            warnings = []
+            if episode.sensor_data is not None:
+                warnings = getattr(episode.sensor_data, "camera_capture_warnings", [])
+            if warnings:
+                episode.validation_errors.append("Missing required camera frames")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                self.log(
+                    f"Episode {episode.episode_id} filtered due to missing camera frames",
+                    "WARNING",
+                )
+
     def _solve_trajectory_with_replan(
         self,
         motion_plan: MotionPlan,
@@ -1334,6 +1349,7 @@ class EpisodeGenerator:
         self.log("\nStep 4: Validating episodes in simulation...")
         validated_episodes = self._validate_episodes(all_episodes, manifest)
         self._enforce_physics_backed_qc(validated_episodes)
+        self._apply_camera_capture_quality_gates(validated_episodes)
 
         if HAVE_QUALITY_SYSTEM:
             self.log("\nStep 4b: Generating quality certificates...")

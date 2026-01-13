@@ -156,6 +156,10 @@ class LeRobotEpisode:
     # Ground-truth metadata
     object_metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Capture diagnostics
+    camera_capture_warnings: List[str] = field(default_factory=list)
+    camera_error_counts: Dict[str, int] = field(default_factory=dict)
+
 
 @dataclass
 class LeRobotDatasetConfig:
@@ -500,6 +504,16 @@ class LeRobotExporter:
                 elif hasattr(first_frame, 'state') and isinstance(first_frame.state, dict):
                     is_mock = first_frame.state.get('is_mock', False)
 
+        camera_capture_warnings = []
+        camera_error_counts = {}
+        if sensor_data is not None:
+            camera_capture_warnings = list(
+                getattr(sensor_data, "camera_capture_warnings", [])
+            )
+            camera_error_counts = dict(
+                getattr(sensor_data, "camera_error_counts", {})
+            )
+
         episode = LeRobotEpisode(
             episode_index=episode_index,
             task_index=task_index,
@@ -516,6 +530,8 @@ class LeRobotExporter:
             motion_plan=motion_plan,
             validation_result=validation_result,
             object_metadata=object_metadata or {},
+            camera_capture_warnings=camera_capture_warnings,
+            camera_error_counts=camera_error_counts,
         )
 
         self.episodes.append(episode)
@@ -1728,6 +1744,10 @@ class LeRobotExporter:
                 if episode.sensor_data is not None:
                     meta["has_visual_obs"] = True
                     meta["cameras"] = list(episode.sensor_data.camera_ids) if hasattr(episode.sensor_data, 'camera_ids') else []
+                if episode.camera_capture_warnings:
+                    meta["camera_capture_warnings"] = episode.camera_capture_warnings
+                if episode.camera_error_counts:
+                    meta["camera_error_counts"] = episode.camera_error_counts
                 f.write(json.dumps(meta) + "\n")
 
     def _write_visual_observations(self, output_dir: Path) -> None:
