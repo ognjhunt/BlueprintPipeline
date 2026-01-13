@@ -24,6 +24,7 @@ from .reward_functions import RewardFunctionGenerator
 
 # Physics profile path relative to repo root
 PHYSICS_PROFILES_PATH = Path(__file__).resolve().parents[2] / "policy_configs" / "physics_profiles.json"
+ROBOT_EMBODIMENTS_PATH = Path(__file__).resolve().parents[2] / "policy_configs" / "robot_embodiments.json"
 
 
 def load_physics_profiles() -> dict[str, Any]:
@@ -31,6 +32,30 @@ def load_physics_profiles() -> dict[str, Any]:
     if PHYSICS_PROFILES_PATH.is_file():
         return json.loads(PHYSICS_PROFILES_PATH.read_text())
     return {"profiles": {}}
+
+
+def _normalize_robot_key(robot_type: str) -> str:
+    """Normalize robot IDs for consistent lookups."""
+    return robot_type.lower().replace("-", "_").replace(" ", "_")
+
+
+def load_robot_embodiments() -> dict[str, dict[str, Any]]:
+    """Load robot embodiment configurations from policy_configs."""
+    if not ROBOT_EMBODIMENTS_PATH.is_file():
+        return {}
+
+    raw_config = json.loads(ROBOT_EMBODIMENTS_PATH.read_text())
+    robots = raw_config.get("robots", {})
+    expanded: dict[str, dict[str, Any]] = {}
+
+    for robot_id, config in robots.items():
+        normalized_id = _normalize_robot_key(robot_id)
+        expanded[normalized_id] = config
+
+        for alias in config.get("aliases", []):
+            expanded[_normalize_robot_key(alias)] = config
+
+    return expanded
 
 
 def select_physics_profile(policy_id: str, profiles_config: dict[str, Any]) -> dict[str, Any]:
@@ -107,7 +132,7 @@ class IsaacLabTaskGenerator:
         generator.save(task, "isaac_lab/")
     """
 
-    ROBOT_CONFIGS = {
+    DEFAULT_ROBOT_CONFIGS = {
         "franka": {
             "num_dofs": 7,
             "gripper_dofs": 2,
@@ -134,6 +159,8 @@ class IsaacLabTaskGenerator:
         self.environments = policy_config.get("environments", {})
         self.env_generator = EnvConfigGenerator()
         self.reward_generator = RewardFunctionGenerator()
+        self.robot_configs = dict(self.DEFAULT_ROBOT_CONFIGS)
+        self.robot_configs.update(load_robot_embodiments())
 
     def generate(
         self,
@@ -206,7 +233,10 @@ class IsaacLabTaskGenerator:
         scene_path: str
     ) -> TaskConfig:
         """Build task configuration from recipe and policy."""
-        robot_config = self.ROBOT_CONFIGS.get(robot_type, self.ROBOT_CONFIGS["franka"])
+        robot_key = _normalize_robot_key(robot_type)
+        if robot_key not in self.robot_configs:
+            robot_key = "franka"
+        robot_config = self.robot_configs[robot_key]
 
         # Build observation space based on policy
         obs_space = self._build_observation_space(policy, robot_config, recipe)
@@ -247,7 +277,7 @@ class IsaacLabTaskGenerator:
             task_name=f"{recipe['metadata']['environment_type']}_{policy_id}",
             policy_id=policy_id,
             scene_path=scene_path,
-            robot_type=robot_type,
+            robot_type=robot_key,
             num_envs=num_envs,
             episode_length=500,
             primary_target=primary_target,
@@ -355,7 +385,7 @@ class IsaacLabTaskGenerator:
         """Generate environment configuration file."""
         primary_target = config.primary_target or "target_object"
         target_scene_entity = f'SceneEntityCfg("{primary_target}", prim_path=SCENE_ENTITY_MAP.get("{primary_target}"))'
-        ee_frame = self.ROBOT_CONFIGS[config.robot_type]["ee_frame"]
+        ee_frame = self.robot_configs[config.robot_type]["ee_frame"]
         action_cfg = self._format_action_cfg(config.action_space)
 
         return f'''"""
@@ -634,21 +664,21 @@ class {self._to_class_name(config.task_name)}EnvCfg(ManagerBasedEnvCfg):
         # Selected based on task type for optimal sim2real transfer
 
         # Simulation settings from physics profile
-        self.sim.dt = {config.physics_profile.get("simulation", {{}}).get("dt", 0.008)}
-        self.sim.substeps = {config.physics_profile.get("simulation", {{}}).get("substeps", 2)}
+        self.sim.dt = {config.physics_profile.get("simulation", {}).get("dt", 0.008)}
+        self.sim.substeps = {config.physics_profile.get("simulation", {}).get("substeps", 2)}
         self.sim.render_interval = 1
 
         # PhysX solver settings
-        self.sim.physx.solver_type = {1 if config.physics_profile.get("simulation", {{}}).get("solver_type", "TGS") == "TGS" else 0}  # 0=PGS, 1=TGS
-        self.sim.physx.num_position_iterations = {config.physics_profile.get("simulation", {{}}).get("solver_iterations", 16)}
-        self.sim.physx.num_velocity_iterations = {max(1, config.physics_profile.get("simulation", {{}}).get("solver_iterations", 16) // 4)}
-        self.sim.physx.enable_stabilization = {str(config.physics_profile.get("simulation", {{}}).get("enable_stabilization", True))}
-        self.sim.physx.enable_gyroscopic_forces = {str(config.physics_profile.get("simulation", {{}}).get("enable_gyroscopic_forces", True))}
+        self.sim.physx.solver_type = {1 if config.physics_profile.get("simulation", {}).get("solver_type", "TGS") == "TGS" else 0}  # 0=PGS, 1=TGS
+        self.sim.physx.num_position_iterations = {config.physics_profile.get("simulation", {}).get("solver_iterations", 16)}
+        self.sim.physx.num_velocity_iterations = {max(1, config.physics_profile.get("simulation", {}).get("solver_iterations", 16) // 4)}
+        self.sim.physx.enable_stabilization = {str(config.physics_profile.get("simulation", {}).get("enable_stabilization", True))}
+        self.sim.physx.enable_gyroscopic_forces = {str(config.physics_profile.get("simulation", {}).get("enable_gyroscopic_forces", True))}
 
         # Contact settings for accurate manipulation
-        self.sim.physx.bounce_threshold_velocity = {config.physics_profile.get("contact", {{}}).get("bounce_threshold_velocity", 0.5)}
-        self.sim.physx.friction_offset_threshold = {config.physics_profile.get("contact", {{}}).get("friction_offset_threshold", 0.04)}
-        self.sim.physx.friction_correlation_distance = {config.physics_profile.get("contact", {{}}).get("friction_correlation_distance", 0.025)}
+        self.sim.physx.bounce_threshold_velocity = {config.physics_profile.get("contact", {}).get("bounce_threshold_velocity", 0.5)}
+        self.sim.physx.friction_offset_threshold = {config.physics_profile.get("contact", {}).get("friction_offset_threshold", 0.04)}
+        self.sim.physx.friction_correlation_distance = {config.physics_profile.get("contact", {}).get("friction_correlation_distance", 0.025)}
 
         # Update scene settings
         self.scene.num_envs = {config.num_envs}
@@ -664,7 +694,7 @@ class {self._to_class_name(config.task_name)}EnvCfg(ManagerBasedEnvCfg):
         """Generate task implementation file."""
         class_name = self._to_class_name(config.task_name)
         target_name = config.primary_target or "target_object"
-        ee_frame = self.ROBOT_CONFIGS[config.robot_type]["ee_frame"]
+        ee_frame = self.robot_configs[config.robot_type]["ee_frame"]
         return f'''"""
 Task Implementation - {config.task_name}
 Generated by BlueprintRecipe
@@ -1308,7 +1338,8 @@ __all__ = [
 
     def _format_joint_pos(self, robot_type: str) -> str:
         """Format default joint positions dict."""
-        config = self.ROBOT_CONFIGS.get(robot_type, self.ROBOT_CONFIGS["franka"])
+        robot_key = _normalize_robot_key(robot_type)
+        config = self.robot_configs.get(robot_key, self.robot_configs["franka"])
         positions = config["default_joint_pos"]
         return "{" + ", ".join(f'"joint_{i}": {p}' for i, p in enumerate(positions)) + "}"
 

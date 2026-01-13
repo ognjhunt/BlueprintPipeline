@@ -1,0 +1,124 @@
+{
+  "robots": {
+    "franka": {
+      "num_dofs": 7,
+      "gripper_dofs": 2,
+      "ee_frame": "panda_hand",
+      "default_joint_pos": [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
+      "aliases": ["franka_panda", "panda"],
+      "assets": {
+        "urdf": "robots/franka/panda.urdf",
+        "usd": "robots/franka/panda.usd"
+      },
+      "kinematics": {
+        "reach_radius_m": 0.855,
+        "base_height_m": 0.0
+      }
+    },
+    "ur10": {
+      "num_dofs": 6,
+      "gripper_dofs": 0,
+      "ee_frame": "tool0",
+      "default_joint_pos": [0.0, -1.571, 1.571, -1.571, -1.571, 0.0],
+      "aliases": ["ur10e"],
+      "assets": {
+        "urdf": "robots/ur10/ur10.urdf",
+        "usd": "robots/ur10/ur10.usd"
+      },
+      "kinematics": {
+        "reach_radius_m": 1.3,
+        "base_height_m": 0.0
+      }
+    },
+    "fetch": {
+      "num_dofs": 7,
+      "gripper_dofs": 2,
+      "ee_frame": "gripper_link",
+      "default_joint_pos": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      "aliases": ["fetch_mobile"],
+      "assets": {
+        "urdf": "robots/fetch/fetch.urdf",
+        "usd": "robots/fetch/fetch.usd"
+      },
+      "kinematics": {
+        "reach_radius_m": 1.1,
+        "base_height_m": 0.38
+      }
+    },
+    "ur5e": {
+      "num_dofs": 6,
+      "gripper_dofs": 2,
+      "ee_frame": "tool0",
+      "default_joint_pos": [0.0, -1.571, 1.571, -1.571, -1.571, 0.0],
+      "aliases": ["ur5_e", "ur-5e"],
+      "assets": {
+        "urdf": "robots/ur5e/ur5e.urdf",
+        "usd": "robots/ur5e/ur5e.usd"
+      },
+      "kinematics": {
+        "reach_radius_m": 0.85,
+        "base_height_m": 0.0
+      }
+    },
+    "ur10e": {
+      "num_dofs": 6,
+      "gripper_dofs": 2,
+      "ee_frame": "tool0",
+      "default_joint_pos": [0.0, -1.571, 1.571, -1.571, -1.571, 0.0],
+      "aliases": ["ur10_e", "ur-10e"],
+      "assets": {
+        "urdf": "robots/ur10e/ur10e.urdf",
+        "usd": "robots/ur10e/ur10e.usd"
+      },
+      "kinematics": {
+        "reach_radius_m": 1.3,
+        "base_height_m": 0.0
+      }
+    },
+    "kuka_iiwa": {
+      "num_dofs": 7,
+      "gripper_dofs": 2,
+      "ee_frame": "iiwa_link_ee",
+      "default_joint_pos": [0.0, 0.6, 0.0, -1.7, 0.0, 1.0, 0.0],
+      "aliases": ["kuka-iiwa", "iiwa"],
+      "assets": {
+        "urdf": "robots/kuka_iiwa/iiwa14.urdf",
+        "usd": "robots/kuka_iiwa/iiwa14.usd"
+      },
+      "kinematics": {
+        "reach_radius_m": 0.8,
+        "base_height_m": 0.0
+      }
+    },
+    "kinova_gen3": {
+      "num_dofs": 7,
+      "gripper_dofs": 2,
+      "ee_frame": "tool_frame",
+      "default_joint_pos": [0.0, 0.5, 0.0, 1.5, 0.0, 1.2, 0.0],
+      "aliases": ["gen3", "kinova-gen3"],
+      "assets": {
+        "urdf": "robots/kinova_gen3/gen3.urdf",
+        "usd": "robots/kinova_gen3/gen3.usd"
+      },
+      "kinematics": {
+        "reach_radius_m": 0.9,
+        "base_height_m": 0.0
+      }
+    },
+    "tiago": {
+      "num_dofs": 7,
+      "gripper_dofs": 2,
+      "ee_frame": "gripper_link",
+      "default_joint_pos": [0.2, -1.34, -0.2, 1.94, -1.57, 1.37, 0.0],
+      "aliases": ["tiago_mobile"],
+      "assets": {
+        "urdf": "robots/tiago/tiago.urdf",
+        "usd": "robots/tiago/tiago.usd"
+      },
+      "kinematics": {
+        "reach_radius_m": 0.9,
+        "base_height_m": 0.35
+      }
+    }
+  }
+}
