@@ -145,18 +145,20 @@ From the Dream2Flow paper examples:
 
 ## Status
 
-**Note**: The Dream2Flow model is not yet publicly released. This module provides:
+**Production readiness** is achieved only when real Dream2Flow backends are configured:
+
+- **Video generation**: Set `VIDEO_API_ENDPOINT` or provide a local Dream2Flow checkpoint
+  plus the Dream2Flow Python package.
+- **Robot tracking**: Use `ROBOT_TRACKING_API`, `isaac_lab_env`, or the built-in IK backend.
+- **Placeholders**: Set `DREAM2FLOW_REQUIRE_REAL_BACKENDS=1` to hard-fail if placeholders
+  would otherwise be used.
+
+Default scaffolding still provides:
 
 - ✅ Complete pipeline scaffolding
 - ✅ Data models and bundle structure
 - ✅ Placeholder video/flow generation for testing
 - ✅ Cloud Run job and workflow integration
-- ⏳ Full model integration (pending release)
-
-When the Dream2Flow model is released, update:
-1. `video_generator/video_generator.py` - Add model loading
-2. `flow_extractor/flow_extractor.py` - Integrate vision foundation models
-3. `robot_tracker/robot_tracker.py` - Add Isaac Lab integration
 
 ## Environment Variables
 
@@ -174,6 +176,7 @@ When the Dream2Flow model is released, update:
 | FPS | No | 24 | Frames per second |
 | ROBOT | No | franka_panda | Robot embodiment |
 | VIDEO_API_ENDPOINT | No | - | Remote video generation API |
+| DREAM2FLOW_REQUIRE_REAL_BACKENDS | No | false | Fail if placeholders would be used |
 
 ## References
 

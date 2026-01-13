@@ -17,6 +17,8 @@ Note: This module provides scaffolding for when the Dream2Flow model
 is publicly released. Currently uses placeholder/mock generation.
 """
 
+import importlib
+import inspect
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -79,6 +81,7 @@ class VideoGeneratorConfig:
     # Feature flags
     enabled: bool = True
     allow_placeholder: bool = True
+    require_real_backend: bool = False
 
 
 class VideoGenerator:
@@ -104,7 +107,6 @@ class VideoGenerator:
         Initialize the video generation model.
 
         Returns True if initialization successful.
-        Currently returns True as placeholder.
         """
         if self._initialized:
             return True
@@ -114,41 +116,34 @@ class VideoGenerator:
             self._initialized = True
             return False
 
-        # PLACEHOLDER: Awaiting Dream2Flow model release (arXiv:2512.24766)
-        # When available, implement:
-        # 1. Load pre-trained Dream2Flow video generation model
-        # 2. Set model to inference mode
-        # 3. Initialize tokenizers and processors for RGBD input
-        # 4. Validate model compatibility with task instruction format
-        # 5. Pre-allocate GPU memory for efficient generation
-        # 6. Initialize dream2flow client/library
-        if not self.config.api_endpoint and not self.config.checkpoint_path and not self.config.allow_placeholder:
-            self._disabled_reason = (
-                "Video generation disabled: no API endpoint or checkpoint configured "
-                "and placeholders are not allowed."
-            )
-            self.log(self._disabled_reason, level="ERROR")
+        if not self.config.api_endpoint and not self.config.checkpoint_path:
+            if self.config.require_real_backend or not self.config.allow_placeholder:
+                self._disabled_reason = (
+                    "Video generation disabled: no API endpoint or checkpoint configured "
+                    "and placeholders are not allowed."
+                )
+                self.log(self._disabled_reason, level="ERROR")
+                self._initialized = True
+                return False
+            self.log("Video generator initialized in placeholder mode (no backend configured)", level="WARNING")
             self._initialized = True
-            return False
+            return True
 
         try:
             if self.config.checkpoint_path:
                 if not self.config.checkpoint_path.exists():
                     raise FileNotFoundError(f"Checkpoint not found: {self.config.checkpoint_path}")
-                # from dream2flow import VideoGenerator  # Not yet available
-                # self.model = VideoGenerator.from_checkpoint(self.config.checkpoint_path)
-                # self.model.eval()
-                self.log(
-                    "Local Dream2Flow checkpoint specified but integration not available; "
-                    "falling back to placeholder mode.",
-                    level="WARNING",
-                )
-            self.log("Video generator initialized (placeholder mode - awaiting Dream2Flow release)")
+                self.model = self._load_local_model(self.config.checkpoint_path)
+                if self.model is None:
+                    raise RuntimeError("Unable to load Dream2Flow model from checkpoint.")
+                self.log("Video generator initialized with local Dream2Flow checkpoint")
+            else:
+                self.log("Video generator initialized with API backend")
             self._initialized = True
             return True
-        except (ImportError, FileNotFoundError) as e:
-            if self.config.allow_placeholder:
-                self.log(f"Dream2Flow not available: {e}", level="WARNING")
+        except (ImportError, FileNotFoundError, RuntimeError) as e:
+            if self.config.allow_placeholder and not self.config.require_real_backend:
+                self.log(f"Dream2Flow backend not available: {e}", level="WARNING")
                 self._initialized = True  # Still proceed in placeholder mode
                 return True
             self._disabled_reason = f"Video generation disabled: {e}"
@@ -354,10 +349,27 @@ class VideoGenerator:
                 "Local video generation is disabled: no Dream2Flow model available. "
                 "Provide a valid checkpoint and integration or set allow_placeholder=True."
             )
-        # Placeholder for actual model invocation when available.
-        raise RuntimeError(
-            "Local Dream2Flow generation is unavailable in this build. "
-            "Use the API endpoint or enable placeholders."
+        self.log("Generating via local Dream2Flow checkpoint...")
+        rgb, depth = self._load_observation_arrays(observation)
+        generation_inputs = {
+            "rgb": rgb,
+            "depth": depth,
+            "instruction": instruction.text,
+            "num_frames": self.config.num_frames,
+            "fps": self.config.fps,
+            "guidance_scale": self.config.guidance_scale,
+            "num_inference_steps": self.config.num_inference_steps,
+            "seed": self.config.seed,
+            "resolution": self.config.resolution,
+        }
+
+        result = self._invoke_local_model(generation_inputs)
+        return self._save_model_output(
+            result=result,
+            observation=observation,
+            instruction=instruction,
+            output_dir=output_dir,
+            video_id=video_id,
         )
 
     def _generate_placeholder(
@@ -518,6 +530,189 @@ class VideoGenerator:
             reader.close()
 
         return frames
+
+    def _load_local_model(self, checkpoint_path: Path) -> Any:
+        """Load a local Dream2Flow model checkpoint using a compatible backend."""
+        model_module = self.config.model_name
+        module_candidates = []
+        if model_module and model_module not in {"placeholder", "none"}:
+            module_candidates.append(model_module)
+        module_candidates.extend(["dream2flow", "dream2flow.video", "dream2flow.video_generator"])
+
+        last_error = None
+        for module_name in module_candidates:
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError as exc:
+                last_error = exc
+                continue
+
+            model_cls = None
+            for attr in (
+                "Dream2FlowVideoGenerator",
+                "Dream2FlowVideoPipeline",
+                "VideoGenerator",
+                "Dream2Flow",
+            ):
+                if hasattr(module, attr):
+                    model_cls = getattr(module, attr)
+                    break
+
+            if model_cls is None:
+                continue
+
+            if hasattr(model_cls, "from_pretrained"):
+                model = model_cls.from_pretrained(str(checkpoint_path))
+            elif hasattr(model_cls, "from_checkpoint"):
+                model = model_cls.from_checkpoint(str(checkpoint_path))
+            elif hasattr(model_cls, "load_from_checkpoint"):
+                model = model_cls.load_from_checkpoint(str(checkpoint_path))
+            else:
+                model = model_cls(str(checkpoint_path))
+
+            if hasattr(model, "eval"):
+                model.eval()
+            return model
+
+        if last_error:
+            raise ImportError(f"Unable to import Dream2Flow backend: {last_error}") from last_error
+        raise ImportError("No compatible Dream2Flow backend found.")
+
+    def _invoke_local_model(self, inputs: dict[str, Any]) -> Any:
+        """Invoke the local Dream2Flow model with flexible signatures."""
+        if hasattr(self.model, "generate"):
+            method = self.model.generate
+        elif callable(self.model):
+            method = self.model
+        else:
+            raise RuntimeError("Dream2Flow model does not expose a callable interface.")
+
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is None:
+            return method(**inputs)
+
+        supported = {}
+        for name in signature.parameters:
+            if name in inputs:
+                supported[name] = inputs[name]
+        if "instruction" in signature.parameters and "instruction" not in supported:
+            supported["instruction"] = inputs["instruction"]
+        if "text" in signature.parameters and "instruction" in inputs:
+            supported["text"] = inputs["instruction"]
+        if "rgbd" in signature.parameters and inputs.get("rgb") is not None and inputs.get("depth") is not None:
+            supported["rgbd"] = np.concatenate(
+                [inputs["rgb"], inputs["depth"][..., None].astype(inputs["rgb"].dtype)],
+                axis=-1,
+            )
+
+        return method(**supported)
+
+    def _save_model_output(
+        self,
+        result: Any,
+        observation: RGBDObservation,
+        instruction: TaskInstruction,
+        output_dir: Path,
+        video_id: str,
+    ) -> GeneratedVideo:
+        """Persist model output into video/frames and build GeneratedVideo."""
+        frames = None
+        video_bytes = None
+        video_path = None
+
+        if isinstance(result, dict):
+            frames = result.get("frames") or result.get("video")
+            video_path = result.get("video_path")
+            video_bytes = result.get("video_bytes")
+        elif isinstance(result, (list, tuple, np.ndarray)):
+            frames = result
+        elif isinstance(result, (bytes, bytearray)):
+            video_bytes = result
+
+        if video_path:
+            video_path = Path(video_path)
+        else:
+            video_path = output_dir / f"{video_id}.mp4"
+
+        frames_dir = output_dir / f"{video_id}_frames"
+        frames_dir.mkdir(exist_ok=True)
+
+        if frames is not None:
+            frame_list = self._normalize_frames(frames)
+            for idx, frame in enumerate(frame_list):
+                frame_path = frames_dir / f"frame_{idx:04d}.png"
+                frame.save(frame_path)
+            if imageio is not None:
+                writer = imageio.get_writer(video_path, fps=self.config.fps)
+                for frame in frame_list:
+                    writer.append_data(np.array(frame))
+                writer.close()
+        elif video_bytes is not None:
+            video_path.write_bytes(video_bytes)
+            self._extract_frames(video_path, frames_dir)
+        elif video_path.exists():
+            self._extract_frames(video_path, frames_dir)
+        else:
+            raise RuntimeError("Dream2Flow model did not return frames or video output.")
+
+        num_frames = len(list(frames_dir.glob("frame_*.png")))
+        return GeneratedVideo(
+            video_id=video_id,
+            video_path=video_path,
+            frames_dir=frames_dir,
+            resolution=self.config.resolution,
+            num_frames=num_frames,
+            fps=self.config.fps,
+            instruction=instruction,
+            initial_observation=observation,
+            model_name=self.config.model_name,
+            quality_score=0.8,
+            metadata={
+                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "backend": "local",
+            },
+        )
+
+    def _normalize_frames(self, frames: Any) -> list[Image.Image]:
+        """Normalize model frames into PIL Images."""
+        if isinstance(frames, np.ndarray):
+            if frames.ndim == 4:
+                frames = list(frames)
+            else:
+                frames = [frames]
+
+        normalized = []
+        for frame in frames:
+            if isinstance(frame, Image.Image):
+                normalized.append(frame.resize(self.config.resolution, Image.Resampling.LANCZOS))
+            else:
+                frame_array = np.asarray(frame)
+                if frame_array.dtype != np.uint8:
+                    frame_array = np.clip(frame_array * 255, 0, 255).astype(np.uint8)
+                normalized.append(Image.fromarray(frame_array).resize(
+                    self.config.resolution, Image.Resampling.LANCZOS
+                ))
+        return normalized
+
+    def _load_observation_arrays(self, observation: RGBDObservation) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Load RGB and depth arrays from observation."""
+        rgb = None
+        depth = None
+        if observation.rgb is not None:
+            rgb = observation.rgb
+        elif observation.rgb_path and observation.rgb_path.exists():
+            rgb = np.array(Image.open(observation.rgb_path))
+
+        if observation.depth is not None:
+            depth = observation.depth
+        elif observation.depth_path and observation.depth_path.exists():
+            depth_image = Image.open(observation.depth_path)
+            depth = np.array(depth_image).astype(np.float32)
+        return rgb, depth
 
 
 class MockVideoGenerator(VideoGenerator):
