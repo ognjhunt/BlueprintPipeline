@@ -35,6 +35,11 @@ data:
   FPS: "30"
   NUM_CAMERAS: "1"
   IMAGE_RESOLUTION: "640,480"
+  # Production enforcement
+  DATA_QUALITY_LEVEL: "production"
+  ISAAC_SIM_REQUIRED: "true"
+  ALLOW_MOCK_DATA: "false"
+  ALLOW_MOCK_CAPTURE: "false"
   # LABS-BLOCKER-002 FIX: Raised from 0.7 to 0.85 for production quality
   MIN_QUALITY_SCORE: "0.85"
 
