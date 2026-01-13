@@ -888,6 +888,17 @@ def run_import_job(
             if result.manifest_path and result.manifest_path.exists()
             else None
         )
+        provenance = {
+            "source": "genie_sim",
+            "job_id": config.job_id,
+            "scene_id": scene_id or None,
+            "imported_by": "BlueprintPipeline",
+            "importer": "genie-sim-import-job",
+            "client_mode": "mock" if getattr(client, "mock_mode", False) else "api",
+        }
+        import_manifest = {
+            "schema_version": "1.1",
+        }
         episode_ids = [episode.episode_id for episode in download_result.episodes]
         episode_paths, missing_episode_ids = get_episode_file_paths(config.output_dir, episode_ids)
         metadata_paths = get_lerobot_metadata_paths(config.output_dir)

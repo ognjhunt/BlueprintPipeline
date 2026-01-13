@@ -53,6 +53,18 @@ try:
     CUROBO_AVAILABLE = True
 except ImportError:
     CUROBO_AVAILABLE = False
+    CollisionCheckerType = Any
+    WorldConfig = Any
+    Cuboid = Any
+    Mesh = Any
+    TensorDeviceType = Any
+    CuRoboPose = Any
+    CuRoboJointState = Any
+    CuRoboState = Any
+    MotionGen = Any
+    MotionGenConfig = Any
+    MotionGenPlanConfig = Any
+    CudaRobotModel = Any
     print("[CUROBO] WARNING: cuRobo not available - falling back to CPU planning")
 
 # Import local modules

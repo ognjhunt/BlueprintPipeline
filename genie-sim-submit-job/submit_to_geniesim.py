@@ -61,6 +61,10 @@ def _write_json_blob(client: storage.Client, bucket: str, blob_name: str, payloa
     blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
 
 
+def _env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y"}
+
+
 def _parse_version(version: str) -> tuple:
     parts = version.split(".")
     padded = (parts + ["0", "0", "0"])[:3]
@@ -158,8 +162,9 @@ def main() -> int:
     )
 
     api_key = os.getenv("GENIE_SIM_API_KEY")
-    force_local = os.getenv("GENIESIM_FORCE_LOCAL", "false").lower() == "true"
-    submission_mode = "api" if api_key and not force_local else "local"
+    force_local = _env_flag("GENIESIM_FORCE_LOCAL")
+    enable_api_submission = _env_flag("GENIESIM_SUBMIT_API")
+    submission_mode = "api" if api_key and enable_api_submission and not force_local else "local"
     job_id = None
     submission_message = None
     local_run_result = None
