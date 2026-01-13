@@ -64,6 +64,7 @@ try:
     from isaac_sim_integration import (
         is_isaac_sim_available,
         is_physx_available,
+        is_isaac_lab_available,
         PhysicsSimulator,
         PhysicsStepResult,
         get_isaac_sim_session,
@@ -74,6 +75,8 @@ except ImportError:
     def is_isaac_sim_available() -> bool:
         return False
     def is_physx_available() -> bool:
+        return False
+    def is_isaac_lab_available() -> bool:
         return False
 
 
@@ -392,6 +395,8 @@ class SimulationValidator:
         config: Optional[ValidationConfig] = None,
         scene_usd_path: Optional[str] = None,
         robot_prim_paths: Optional[List[str]] = None,
+        load_scene_in_sim: Optional[bool] = None,
+        post_rollout_seconds: Optional[float] = None,
         verbose: bool = True,
     ):
         """
@@ -402,6 +407,8 @@ class SimulationValidator:
             config: Validation configuration
             scene_usd_path: Path to USD scene for physics simulation
             robot_prim_paths: Optional list of robot prim paths to track
+            load_scene_in_sim: Whether to load the USD scene into Isaac Sim/Lab
+            post_rollout_seconds: Extra physics rollout duration after trajectory
             verbose: Print debug info
         """
         self.robot_type = robot_type
@@ -411,13 +418,22 @@ class SimulationValidator:
         self._scene_usd_path = scene_usd_path
         self._robot_prim_paths = robot_prim_paths
         self._scene_loaded = False
+        self._load_scene_in_sim = (
+            load_scene_in_sim
+            if load_scene_in_sim is not None
+            else os.getenv("SIM_VALIDATOR_LOAD_SCENE", "true").lower() == "true"
+        )
+        if post_rollout_seconds is None:
+            post_rollout_seconds = float(os.getenv("SIM_VALIDATOR_POST_ROLLOUT_SECONDS", "0.5"))
+        self._post_rollout_seconds = max(0.0, post_rollout_seconds)
 
         # Check physics availability
         self._physics_available = _HAVE_PHYSICS_INTEGRATION and is_physx_available()
         self._physics_sim: Optional["PhysicsSimulator"] = None
 
         if self._physics_available:
-            self.log("PhysX available - using real physics validation")
+            backend = "Isaac Lab" if is_isaac_lab_available() and not is_isaac_sim_available() else "Isaac Sim"
+            self.log(f"PhysX available - using real physics validation ({backend})")
             self._init_physics_simulator()
         else:
             self._guard_dev_only_fallback()
@@ -432,7 +448,7 @@ class SimulationValidator:
         try:
             session = get_isaac_sim_session()
             self._physics_sim = session.get_physics_simulator()
-            if self._scene_usd_path:
+            if self._scene_usd_path and self._load_scene_in_sim:
                 self._scene_loaded = session.load_scene(self._scene_usd_path)
                 if self._scene_loaded:
                     self.log(f"Loaded scene for physics: {self._scene_usd_path}")
@@ -447,6 +463,10 @@ class SimulationValidator:
     def _ensure_scene_loaded(self) -> None:
         """Ensure the USD scene is loaded into Isaac Sim/Isaac Lab."""
         if not self._physics_available:
+            return
+
+        if not self._load_scene_in_sim:
+            self.log("Scene loading disabled; assuming USD stage is already loaded", "INFO")
             return
 
         if not self._scene_usd_path:
@@ -538,7 +558,11 @@ class SimulationValidator:
 
         # Use real physics if available
         if self.is_using_real_physics():
-            result.physics_backend = "isaac_sim"  # P1-4 FIX: Set physics backend
+            result.physics_backend = (
+                "isaac_lab"
+                if is_isaac_lab_available() and not is_isaac_sim_available()
+                else "isaac_sim"
+            )
             self._ensure_scene_loaded()
             result = self._validate_with_physics(
                 trajectory, motion_plan, scene_objects, result, task_success_checker
@@ -608,11 +632,15 @@ class SimulationValidator:
 
         # Run simulation
         try:
+            rollout_steps = self._get_post_rollout_steps()
             physics_results = self._physics_sim.run_trajectory(
                 joint_trajectory=joint_positions,
                 dt=1.0 / trajectory.fps,
                 gripper_trajectory=gripper_positions,
+                post_rollout_steps=rollout_steps,
             )
+            if rollout_steps > 0:
+                self.log(f"  Post-rollout steps: {rollout_steps}")
 
             # Analyze physics results
             self._analyze_physics_results(
@@ -653,6 +681,13 @@ class SimulationValidator:
             result.failure_reasons.append(FailureReason.PLACEMENT_FAILURE)
 
         return result
+
+    def _get_post_rollout_steps(self) -> int:
+        """Compute post-trajectory rollout steps for physics verification."""
+        if self._post_rollout_seconds <= 0.0 or self._physics_sim is None:
+            return 0
+        dt = getattr(self._physics_sim, "dt", 1.0 / 60.0)
+        return max(1, int(self._post_rollout_seconds / dt))
 
     def _analyze_physics_results(
         self,
