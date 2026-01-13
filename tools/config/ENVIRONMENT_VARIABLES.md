@@ -201,7 +201,11 @@ export ENABLE_CUROBO=0  # Use fallback planner
 |----------|------|---------|-------------|
 | `GENIE_SIM_API_URL` | url | `https://api.agibot.com/geniesim/v3` | Genie Sim API endpoint |
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
+| `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
+| `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework) |
+| `GENIESIM_ROOT` | path | `/opt/geniesim` | Genie Sim repository root (local framework) |
 | `ISAAC_SIM_ENDPOINT` | url | `http://localhost:8011` | Isaac Sim endpoint |
+| `ISAAC_SIM_PATH` | path | `/isaac-sim` | Isaac Sim installation path (local framework) |
 | `PARTICULATE_SERVICE_PORT` | int | 5000 | Particulate service port |
 
 ---
