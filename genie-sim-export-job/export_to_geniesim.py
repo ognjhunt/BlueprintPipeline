@@ -145,6 +145,12 @@ except ImportError:
     AUDIO_NARRATION_AVAILABLE = False
 
 
+def parse_bool(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def run_geniesim_export_job(
     root: Path,
     scene_id: str,
@@ -163,6 +169,7 @@ def run_geniesim_export_job(
     variation_assets_prefix: Optional[str] = None,  # Path to variation assets
     replicator_prefix: Optional[str] = None,  # Path to replicator bundle
     enable_premium_analytics: bool = True,  # DEFAULT: ENABLED (no longer upsell!)
+    require_quality_gates: bool = True,
 ) -> int:
     """
     Run the Genie Sim export job.
@@ -185,6 +192,7 @@ def run_geniesim_export_job(
         variation_assets_prefix: Path to variation assets (YOUR commercial assets)
         replicator_prefix: Path to replicator bundle
         enable_premium_analytics: Enable premium analytics capture (DEFAULT: True - NO LONGER UPSELL!)
+        require_quality_gates: Fail when quality gates are unavailable or error (DEFAULT: True)
 
     Returns:
         0 on success, 1 on failure
@@ -204,6 +212,7 @@ def run_geniesim_export_job(
     print(f"[GENIESIM-EXPORT-JOB] VLA packages enabled: {enable_vla_packages}")
     print(f"[GENIESIM-EXPORT-JOB] Rich annotations enabled: {enable_rich_annotations}")
     print(f"[GENIESIM-EXPORT-JOB] Premium analytics enabled: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
+    print(f"[GENIESIM-EXPORT-JOB] Require quality gates: {require_quality_gates}")
 
     assets_dir = root / assets_prefix
     output_dir = root / geniesim_prefix
@@ -369,6 +378,12 @@ def run_geniesim_export_job(
     print(f"[GENIESIM-EXPORT-JOB] Wrote merged manifest to: {merged_manifest_path}")
 
     # P0-5 FIX: Run quality gates before export
+    gate_names = [
+        "manifest_completeness",
+        "asset_existence",
+        "physics_properties",
+        "scale_sanity",
+    ]
     if HAVE_QUALITY_GATES:
         print("\n[GENIESIM-EXPORT-JOB] Running quality gates before export...")
         try:
@@ -482,10 +497,21 @@ def run_geniesim_export_job(
 
             print("[GENIESIM-EXPORT-JOB] ✅ Quality gates passed\n")
         except Exception as e:
-            print(f"[GENIESIM-EXPORT-JOB] ⚠️  Quality gate evaluation failed: {e}")
-            print("[GENIESIM-EXPORT-JOB] ⚠️  Skipping quality gate validation\n")
+            print(
+                "[GENIESIM-EXPORT-JOB] ❌ Quality gate evaluation failed; "
+                f"gates impacted: {gate_names}. Error: {e}"
+            )
+            if require_quality_gates:
+                return 1
+            print("[GENIESIM-EXPORT-JOB] ⚠️  Continuing without quality gate validation\n")
     else:
-        print("[GENIESIM-EXPORT-JOB] ⚠️  Quality gates not available - skipping validation\n")
+        print(
+            "[GENIESIM-EXPORT-JOB] ❌ Quality gates not available; "
+            f"expected gates: {gate_names}."
+        )
+        if require_quality_gates:
+            return 1
+        print("[GENIESIM-EXPORT-JOB] ⚠️  Continuing without quality gate validation\n")
 
     # Configure exporter with enhanced features
     config = GenieSimExportConfig(
@@ -842,6 +868,7 @@ def main():
 
     # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
     enable_premium_analytics = os.getenv("ENABLE_PREMIUM_ANALYTICS", "true").lower() == "true"
+    require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
 
     print("[GENIESIM-EXPORT-JOB] Configuration:")
     print(f"[GENIESIM-EXPORT-JOB]   Bucket: {bucket}")
@@ -856,6 +883,7 @@ def main():
     print(f"[GENIESIM-EXPORT-JOB]   Rich Annotations: {enable_rich_annotations}")
     print(f"[GENIESIM-EXPORT-JOB]   Commercial Filter: {filter_commercial}")
     print(f"[GENIESIM-EXPORT-JOB]   Premium Analytics: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
+    print(f"[GENIESIM-EXPORT-JOB]   Require Quality Gates: {require_quality_gates}")
 
     GCS_ROOT = Path("/mnt/gcs")
 
@@ -882,6 +910,7 @@ def main():
             replicator_prefix=replicator_prefix,
             # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
             enable_premium_analytics=enable_premium_analytics,
+            require_quality_gates=require_quality_gates,
         )
 
     sys.exit(exit_code)
