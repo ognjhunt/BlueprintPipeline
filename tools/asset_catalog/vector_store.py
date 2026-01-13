@@ -9,6 +9,8 @@ while providing the same API shape that cloud backends use.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import sqlite3
 from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
@@ -25,6 +27,22 @@ class VectorStoreConfig:
     connection_uri: Optional[str] = None
     namespace: Optional[str] = None
     dimension: Optional[int] = None
+
+    @classmethod
+    def from_env(cls, **overrides: Any) -> "VectorStoreConfig":
+        """Create a config using VECTOR_STORE_* environment variables."""
+        env_config = cls(
+            provider=os.getenv("VECTOR_STORE_PROVIDER", cls.provider),
+            collection=os.getenv("VECTOR_STORE_COLLECTION", cls.collection),
+            project_id=os.getenv("VECTOR_STORE_PROJECT_ID"),
+            location=os.getenv("VECTOR_STORE_LOCATION"),
+            connection_uri=os.getenv("VECTOR_STORE_CONNECTION_URI"),
+            namespace=os.getenv("VECTOR_STORE_NAMESPACE"),
+            dimension=_optional_int(os.getenv("VECTOR_STORE_DIMENSION")),
+        )
+        for key, value in overrides.items():
+            setattr(env_config, key, value)
+        return env_config
 
 
 @dataclass
@@ -346,6 +364,155 @@ class PgVectorStore(BaseVectorStore):
         return results
 
 
+class SqliteVectorStore(BaseVectorStore):
+    """SQLite-backed vector store with on-disk persistence."""
+
+    def __init__(self, connection_uri: str, collection: str = "embeddings", dimension: int = 1536):
+        self.connection_uri = connection_uri
+        self.collection = collection
+        self.dimension = dimension
+        self._conn: Optional[sqlite3.Connection] = None
+
+    def _get_connection(self) -> sqlite3.Connection:
+        if self._conn is not None:
+            return self._conn
+        self._conn = sqlite3.connect(self.connection_uri)
+        self._conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {self.collection} (
+                id TEXT PRIMARY KEY,
+                embedding TEXT NOT NULL,
+                metadata TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.commit()
+        return self._conn
+
+    def upsert(self, records: Iterable[VectorRecord], namespace: Optional[str] = None) -> None:
+        import json as json_module
+
+        conn = self._get_connection()
+        records_list = list(records)
+        if not records_list:
+            return
+
+        payload = [
+            (
+                record.id,
+                json_module.dumps(record.embedding.tolist()),
+                json_module.dumps(record.metadata),
+            )
+            for record in records_list
+        ]
+        conn.executemany(
+            f"""
+            INSERT INTO {self.collection} (id, embedding, metadata)
+            VALUES (?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                embedding = excluded.embedding,
+                metadata = excluded.metadata
+            """,
+            payload,
+        )
+        conn.commit()
+
+    def query(
+        self,
+        embedding: np.ndarray,
+        top_k: int = 10,
+        namespace: Optional[str] = None,
+        filter_metadata: Optional[dict[str, Any]] = None,
+    ) -> List[VectorRecord]:
+        import json as json_module
+
+        conn = self._get_connection()
+        cursor = conn.execute(f"SELECT id, embedding, metadata FROM {self.collection}")
+        rows = cursor.fetchall()
+
+        records: list[VectorRecord] = []
+        for record_id, emb_data, metadata in rows:
+            emb_values = json_module.loads(emb_data)
+            meta_obj = json_module.loads(metadata)
+            records.append(
+                VectorRecord(
+                    id=record_id,
+                    embedding=np.array(emb_values),
+                    metadata=meta_obj,
+                )
+            )
+
+        def _matches_filter(record: VectorRecord) -> bool:
+            if not filter_metadata:
+                return True
+            return all(record.metadata.get(k) == v for k, v in filter_metadata.items())
+
+        filtered = [rec for rec in records if _matches_filter(rec)]
+        if not filtered:
+            return []
+
+        emb_norm = np.linalg.norm(embedding) + 1e-8
+        scored: list[VectorRecord] = []
+        for rec in filtered:
+            denom = (np.linalg.norm(rec.embedding) * emb_norm) + 1e-8
+            score = float(np.dot(rec.embedding, embedding) / denom)
+            scored.append(
+                VectorRecord(id=rec.id, embedding=rec.embedding, metadata=rec.metadata, score=score)
+            )
+
+        scored.sort(key=lambda r: r.score or 0.0, reverse=True)
+        return scored[:top_k]
+
+    def fetch(self, ids: Iterable[str], namespace: Optional[str] = None) -> List[VectorRecord]:
+        import json as json_module
+
+        conn = self._get_connection()
+        ids_list = list(ids)
+        if not ids_list:
+            return []
+
+        placeholders = ",".join(["?"] * len(ids_list))
+        cursor = conn.execute(
+            f"SELECT id, embedding, metadata FROM {self.collection} WHERE id IN ({placeholders})",
+            ids_list,
+        )
+        rows = cursor.fetchall()
+
+        results = []
+        for record_id, emb_data, metadata in rows:
+            results.append(
+                VectorRecord(
+                    id=record_id,
+                    embedding=np.array(json_module.loads(emb_data)),
+                    metadata=json_module.loads(metadata),
+                )
+            )
+        return results
+
+    def list(
+        self, namespace: Optional[str] = None, filter_metadata: Optional[dict[str, Any]] = None
+    ) -> List[VectorRecord]:
+        import json as json_module
+
+        conn = self._get_connection()
+        cursor = conn.execute(f"SELECT id, embedding, metadata FROM {self.collection}")
+        rows = cursor.fetchall()
+
+        results = []
+        for record_id, emb_data, metadata in rows:
+            meta_obj = json_module.loads(metadata)
+            if filter_metadata and not all(meta_obj.get(k) == v for k, v in filter_metadata.items()):
+                continue
+            results.append(
+                VectorRecord(
+                    id=record_id,
+                    embedding=np.array(json_module.loads(emb_data)),
+                    metadata=meta_obj,
+                )
+            )
+        return results
+
+
 class VertexAIVectorStore(BaseVectorStore):
     """
     Google Cloud Vertex AI Vector Search based vector store.
@@ -520,6 +687,15 @@ class VectorStoreClient:
         if provider == "in-memory":
             return InMemoryVectorStore()
 
+        if provider == "sqlite":
+            if not config.connection_uri:
+                raise ValueError("sqlite provider requires connection_uri in config")
+            return SqliteVectorStore(
+                connection_uri=config.connection_uri,
+                collection=config.collection,
+                dimension=config.dimension or 1536,
+            )
+
         if provider == "pgvector":
             if not config.connection_uri:
                 raise ValueError("pgvector provider requires connection_uri in config")
@@ -579,3 +755,9 @@ class VectorStoreClient:
         self, namespace: Optional[str] = None, filter_metadata: Optional[dict[str, Any]] = None
     ) -> List[VectorRecord]:
         return self.store.list(namespace=namespace or self.config.collection, filter_metadata=filter_metadata)
+
+
+def _optional_int(value: Optional[str]) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    return int(value)
