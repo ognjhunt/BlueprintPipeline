@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .env_config import EnvConfigGenerator
-from .reward_functions import RewardFunctionGenerator
+from .reward_functions import RewardFunctionGenerator, RewardTemplateRegistry
 
 
 # Physics profile path relative to repo root
@@ -269,6 +269,16 @@ class IsaacLabTaskGenerator:
         for component, weight in sim2real_defaults.items():
             if component not in reward_weights:
                 reward_weights[component] = weight
+
+        missing_components = RewardTemplateRegistry.get_missing_components(
+            list(reward_weights.keys())
+        )
+        if missing_components:
+            missing_str = ", ".join(missing_components)
+            raise ValueError(
+                "Reward components resolve to default stubs for policy "
+                f"{policy_id}: {missing_str}"
+            )
 
         # Get randomization config
         randomization_config = self._build_randomization_config(policy, recipe)
