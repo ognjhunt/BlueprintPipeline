@@ -123,71 +123,24 @@ echo ""
 # =============================================================================
 echo -e "${BLUE}Step 4: Creating Cloud Run webhook service...${NC}"
 
-# Create a minimal Cloud Run service that triggers the workflow
-# This service will receive webhooks from Genie Sim
 echo -e "${YELLOW}Deploying Cloud Run webhook receiver...${NC}"
 
-# For now, we'll provide instructions for manual setup
-# since the webhook service needs to be implemented as a Cloud Function or custom service
-echo ""
-echo -e "${YELLOW}Manual Webhook Setup Required:${NC}"
-echo ""
-echo "You need to deploy a webhook receiver service. Here are the options:"
-echo ""
-echo "OPTION 1: Use Google Cloud Functions (Recommended)"
-echo "  1. Create a Cloud Function in Python:"
-echo ""
-cat << 'EOF'
-    def geniesim_webhook(request):
-        import json
-        import functions_framework
-        from google.cloud import workflows_v1beta
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-        request_json = request.get_json()
-        project_id = "YOUR_PROJECT_ID"
-        region = "us-central1"
+gcloud run deploy ${WEBHOOK_SERVICE} \
+    --source "${REPO_ROOT}/genie-sim-import-webhook" \
+    --region=${REGION} \
+    --allow-unauthenticated \
+    --service-account=${SA_EMAIL} \
+    --set-env-vars="WORKFLOW_NAME=${WORKFLOW_NAME},WORKFLOW_REGION=${REGION}" \
+    --project=${PROJECT_ID}
 
-        # Invoke workflow
-        client = workflows_v1beta.ExecutionsClient()
-        parent = f"projects/{project_id}/locations/{region}/workflows/genie-sim-import-pipeline"
+WEBHOOK_URL=$(gcloud run services describe ${WEBHOOK_SERVICE} \
+    --region=${REGION} \
+    --project=${PROJECT_ID} \
+    --format='value(status.url)')
 
-        execution = {
-            "argument": json.dumps(request_json)
-        }
-
-        response = client.create_execution(request={"parent": parent, "execution": execution})
-        return {"status": "triggered", "execution": response.name}
-EOF
-echo ""
-echo "  2. Deploy with:"
-echo "    gcloud functions deploy geniesim-webhook \\"
-echo "      --runtime python39 \\"
-echo "      --trigger-http \\"
-echo "      --allow-unauthenticated \\"
-echo "      --region=${REGION} \\"
-echo "      --project=${PROJECT_ID}"
-echo ""
-echo "OPTION 2: Create a Cloud Run service"
-echo "  1. Build a Docker image that handles webhooks"
-echo "  2. Deploy to Cloud Run with:"
-echo "    gcloud run deploy geniesim-webhook \\"
-echo "      --image gcr.io/${PROJECT_ID}/geniesim-webhook \\"
-echo "      --region=${REGION} \\"
-echo "      --allow-unauthenticated \\"
-echo "      --project=${PROJECT_ID}"
-echo ""
-echo "OPTION 3: Use Pub/Sub for decoupled triggering"
-echo "  1. Create a Pub/Sub topic:"
-echo "    gcloud pubsub topics create geniesim-job-events --project=${PROJECT_ID}"
-echo ""
-echo "  2. Create a Cloud Scheduler job to trigger the workflow:"
-echo "    gcloud scheduler jobs create pubsub geniesim-import-poller \\"
-echo "      --schedule='*/5 * * * *' \\"
-echo "      --topic=geniesim-job-events \\"
-echo "      --message-body='{}' \\"
-echo "      --location=${REGION} \\"
-echo "      --project=${PROJECT_ID}"
-echo ""
+echo -e "${GREEN}Webhook service deployed:${NC} ${WEBHOOK_URL}/webhooks/geniesim/job-complete"
 
 echo ""
 echo -e "${GREEN}=== Setup Complete ===${NC}"
@@ -198,8 +151,8 @@ echo "  Region: ${REGION}"
 echo "  Service Account: ${SA_EMAIL}"
 echo ""
 echo "Next Steps:"
-echo "  1. Choose a webhook delivery mechanism (Cloud Function, Cloud Run, or Pub/Sub)"
-echo "  2. Configure Genie Sim to send completion webhooks"
+echo "  1. Configure Genie Sim to send completion webhooks"
+echo "  2. (Optional) Deploy the fallback poller with ./setup-genie-sim-import-poller.sh"
 echo "  3. Webhook payload should include:"
 echo "     - job_id (required)"
 echo "     - scene_id (optional)"
@@ -207,6 +160,9 @@ echo "     - status (required, should be 'completed')"
 echo ""
 echo "Example webhook payload:"
 echo '  {"job_id": "job-12345", "scene_id": "kitchen_001", "status": "completed"}'
+echo ""
+echo "Webhook URL:"
+echo "  ${WEBHOOK_URL}/webhooks/geniesim/job-complete"
 echo ""
 echo "To invoke workflow manually:"
 echo "  gcloud workflows run ${WORKFLOW_NAME} --location=${REGION} \\"
