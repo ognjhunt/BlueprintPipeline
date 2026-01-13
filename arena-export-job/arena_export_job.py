@@ -499,8 +499,8 @@ def run_from_env(root: Path = GCS_ROOT) -> int:
         return 1
 
 
-def main():
-    """Main entry point with CLI argument parsing."""
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
         description="Export Blueprint scene to Isaac Lab-Arena format"
     )
@@ -541,16 +541,19 @@ def main():
         help="Run in environment variable mode (Cloud Run Job)",
     )
 
-    args = parser.parse_args()
+    return parser.parse_args(argv)
 
+
+def run_cli(args: argparse.Namespace) -> int:
+    """Run the Arena export job with parsed arguments."""
     if args.env_mode or args.scene_dir is None:
         # Environment variable mode
-        sys.exit(run_from_env())
+        return run_from_env()
 
     # CLI mode
     if not args.scene_dir.exists():
         print(f"ERROR: Scene directory not found: {args.scene_dir}", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
     result = run_arena_export(
         scene_dir=args.scene_dir,
@@ -584,8 +587,31 @@ def main():
 
     print("=" * 60)
 
-    sys.exit(0 if result["success"] else 1)
+    return 0 if result["success"] else 1
 
 
 if __name__ == "__main__":
-    main()
+    from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+
+    cli_args = parse_args()
+    scene_id = os.getenv("SCENE_ID") or (
+        cli_args.scene_dir.name if cli_args.scene_dir else ""
+    )
+    input_params = {
+        "scene_id": scene_id,
+        "scene_dir": str(cli_args.scene_dir) if cli_args.scene_dir else None,
+        "output_dir": str(cli_args.output_dir) if cli_args.output_dir else None,
+        "use_llm": not cli_args.no_llm,
+        "enable_hub_registration": cli_args.enable_hub,
+        "hub_namespace": cli_args.hub_namespace,
+        "enable_premium_analytics": not cli_args.disable_premium_analytics,
+        "env_mode": cli_args.env_mode,
+    }
+    exit_code = run_job_with_dead_letter_queue(
+        lambda: run_cli(cli_args),
+        scene_id=scene_id,
+        job_type="arena_export",
+        step="arena_export",
+        input_params=input_params,
+    )
+    sys.exit(exit_code)
