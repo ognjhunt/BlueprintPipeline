@@ -125,6 +125,28 @@ main:
                     reason: ${"Job status is " + status}
 
     # Run import job
+    - init_import_metrics:
+        assign:
+          - importStartTime: '${time.format(sys.now())}'
+          - importTimeoutSeconds: 1800
+        next: emit_import_metrics_start
+
+    - emit_import_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "genie-sim-import-pipeline"
+            job: "genie-sim-import-job"
+            scene_id: ${scene_id}
+            job_id: ${job_id}
+            timeout_seconds: ${importTimeoutSeconds}
+            retry_max: 3
+            start_time: ${importStartTime}
+          severity: "INFO"
+        next: run_import_job
+
     - run_import_job:
         try:
           call: googleapis.run.v2.projects.locations.jobs.run
@@ -159,6 +181,18 @@ main:
         except:
           as: e
           steps:
+            - log_import_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "genie-sim-import-pipeline"
+                    job: "genie-sim-import-job"
+                    scene_id: ${scene_id}
+                    job_id: ${job_id}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_import_job_error:
                 call: sys.log
                 args:
@@ -201,6 +235,35 @@ main:
         next: wait_for_import
 
     - check_import_success:
+        assign:
+          - importEndTime: '${time.format(sys.now())}'
+          - importDurationSeconds: '${time.parse(importEndTime) - time.parse(importStartTime)}'
+          - importTimeoutUsageRatio: '${importDurationSeconds / importTimeoutSeconds}'
+          - importTimedOut: '${importDurationSeconds >= importTimeoutSeconds}'
+        next: emit_import_metrics_failed
+
+    - emit_import_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "genie-sim-import-pipeline"
+            job: "genie-sim-import-job"
+            scene_id: ${scene_id}
+            job_id: ${job_id}
+            timeout_seconds: ${importTimeoutSeconds}
+            duration_seconds: ${importDurationSeconds}
+            timeout_usage_ratio: ${importTimeoutUsageRatio}
+            timed_out: ${importTimedOut}
+            status: "FAILED"
+            execution_name: ${importExecutionName}
+            start_time: ${importStartTime}
+            end_time: ${importEndTime}
+          severity: "ERROR"
+        next: log_import_failed_message
+
+    - log_import_failed_message:
         call: sys.log
         args:
           text: ${"Import job failed for job " + job_id}
@@ -212,6 +275,35 @@ main:
           message: ${"Import failed for job " + job_id}
 
     - log_import_success:
+        assign:
+          - importEndTime: '${time.format(sys.now())}'
+          - importDurationSeconds: '${time.parse(importEndTime) - time.parse(importStartTime)}'
+          - importTimeoutUsageRatio: '${importDurationSeconds / importTimeoutSeconds}'
+          - importTimedOut: '${importDurationSeconds >= importTimeoutSeconds}'
+        next: emit_import_metrics_complete
+
+    - emit_import_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "genie-sim-import-pipeline"
+            job: "genie-sim-import-job"
+            scene_id: ${scene_id}
+            job_id: ${job_id}
+            timeout_seconds: ${importTimeoutSeconds}
+            duration_seconds: ${importDurationSeconds}
+            timeout_usage_ratio: ${importTimeoutUsageRatio}
+            timed_out: ${importTimedOut}
+            status: "SUCCEEDED"
+            execution_name: ${importExecutionName}
+            start_time: ${importStartTime}
+            end_time: ${importEndTime}
+          severity: "INFO"
+        next: log_import_success_message
+
+    - log_import_success_message:
         call: sys.log
         args:
           text: ${"Import job completed successfully for " + job_id}

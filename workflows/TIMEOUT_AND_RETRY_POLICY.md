@@ -199,11 +199,29 @@ Total Retry Overhead: ~31 seconds (best case)
 2. **Retry Success Rate:** Monitor how many retries are successful vs failures
 3. **Timeout Occurrences:** Alert if any job hits timeout
 4. **Error Categories:** Track retryable vs non-retryable failures
+5. **Timeout Usage Ratio:** Duration / configured timeout per job invocation
+6. **Retry Exhaustion:** Count of retry-exhausted job starts
 
 ### Alert Thresholds
 - Execution time > 80% of timeout: WARNING
 - Execution time > 95% of timeout: CRITICAL
 - 3+ consecutive retries: WARNING
+
+### Alert Configuration (Cloud Monitoring)
+Alert policies and log-based metrics are defined in:
+- `infrastructure/monitoring/alerts/alert-policies.yaml`
+- `infrastructure/monitoring/metrics/*.yaml`
+
+Log-based metrics are emitted from workflows with structured logging fields:
+- `bp_metric: "job_invocation"` with `timeout_seconds`, `duration_seconds`, `timeout_usage_ratio`
+- `bp_metric: "job_retry_exhausted"` for retry spikes
+
+### Adaptive Timeout Overrides
+Adaptive timeout defaults live in `policy_configs/adaptive_timeouts.yaml`.
+Workflows can override defaults by passing `timeout_override_seconds` in the
+workflow event payload. Current usage:
+- `upsell-features-pipeline.yaml` scales timeout by `bundle_tier` and accepts
+  `timeout_override_seconds` for manual overrides.
 
 ## Policy Updates
 
@@ -227,12 +245,14 @@ Future updates should consider:
 - .assets_ready marker producer (scale-pipeline)
 - Race condition documentation for parallel pipeline execution
 - Non-fatal failure clarification in arena-export-pipeline
+- Structured workflow job invocation metrics (timeout usage + retry exhaustion)
+- Log-based Cloud Monitoring metrics + alert policy definitions
+- Adaptive timeout defaults with bundle-tier override support
 
 ⚠️ **Partial:**
 - Replicator/Isaac Lab jobs may need timeout adjustment for large scenes (future monitoring needed)
 
 📋 **TODO (Future):**
-- Add monitoring/alerting for timeout events
 - Historical performance tracking
 - Automatic timeout adjustment based on scene complexity
 - Support for different retry policies per customer tier (premium features)
