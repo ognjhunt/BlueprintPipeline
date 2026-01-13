@@ -22,6 +22,7 @@ Environment Variables:
     REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: false)
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -82,6 +83,14 @@ except ImportError:
 # =============================================================================
 # Data Models
 # =============================================================================
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(8192), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 @dataclass
@@ -361,6 +370,76 @@ def convert_to_lerobot(
     Returns:
         Dict with conversion statistics
     """
+    mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
+    if mock_mode:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        converted_count = 0
+        skipped_count = 0
+        total_frames = 0
+        dataset_info = {
+            "dataset_type": "lerobot",
+            "format_version": "1.0",
+            "episodes": [],
+            "total_frames": 0,
+            "average_quality_score": 0.0,
+            "source": "genie_sim_mock",
+            "converted_at": "2025-01-01T00:00:00Z",
+        }
+        quality_scores = []
+
+        for ep_metadata in episode_metadata_list:
+            if ep_metadata.quality_score < min_quality_score:
+                skipped_count += 1
+                continue
+
+            episode_file = episodes_dir / f"{ep_metadata.episode_id}.parquet"
+            if not episode_file.exists():
+                skipped_count += 1
+                continue
+
+            episode_output = output_dir / f"episode_{converted_count:06d}.parquet"
+            shutil.copyfile(episode_file, episode_output)
+
+            dataset_info["episodes"].append({
+                "episode_id": ep_metadata.episode_id,
+                "episode_index": converted_count,
+                "num_frames": ep_metadata.frame_count,
+                "duration_seconds": ep_metadata.duration_seconds,
+                "quality_score": ep_metadata.quality_score,
+                "validation_passed": ep_metadata.validation_passed,
+                "file": str(episode_output.name),
+            })
+
+            converted_count += 1
+            total_frames += ep_metadata.frame_count
+            quality_scores.append(ep_metadata.quality_score)
+
+        dataset_info["total_episodes"] = converted_count
+        dataset_info["total_frames"] = total_frames
+        dataset_info["skipped_episodes"] = skipped_count
+        if quality_scores:
+            dataset_info["average_quality_score"] = float(np.mean(quality_scores))
+            dataset_info["min_quality_score"] = float(np.min(quality_scores))
+            dataset_info["max_quality_score"] = float(np.max(quality_scores))
+
+        metadata_file = output_dir / "dataset_info.json"
+        with open(metadata_file, "w") as f:
+            json.dump(dataset_info, f, indent=2)
+
+        episodes_file = output_dir / "episodes.jsonl"
+        with open(episodes_file, "w") as f:
+            for ep_info in dataset_info["episodes"]:
+                f.write(json.dumps(ep_info) + "\n")
+
+        return {
+            "success": True,
+            "converted_count": converted_count,
+            "skipped_count": skipped_count,
+            "total_frames": total_frames,
+            "output_dir": output_dir,
+            "metadata_file": metadata_file,
+        }
+
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -767,6 +846,58 @@ def run_import_job(
             "backend": metrics.backend.value,
             "stats": metrics.get_stats(),
         }
+        episode_checksums = []
+        filtered_checksums = []
+        for episode in download_result.episodes:
+            episode_file = config.output_dir / f"{episode.episode_id}.parquet"
+            if episode_file.exists():
+                episode_checksums.append({
+                    "episode_id": episode.episode_id,
+                    "file_name": episode_file.name,
+                    "sha256": _sha256_file(episode_file),
+                })
+        filtered_dir = config.output_dir / "filtered"
+        if filtered_dir.exists():
+            for filtered_file in sorted(filtered_dir.glob("*.parquet")):
+                filtered_checksums.append({
+                    "episode_id": filtered_file.stem,
+                    "file_name": filtered_file.name,
+                    "sha256": _sha256_file(filtered_file),
+                })
+
+        lerobot_checksums = {
+            "dataset_info": None,
+            "episodes_index": None,
+            "episodes": [],
+        }
+        dataset_info_path = lerobot_dir / "dataset_info.json"
+        episodes_index_path = lerobot_dir / "episodes.jsonl"
+        if dataset_info_path.exists():
+            lerobot_checksums["dataset_info"] = _sha256_file(dataset_info_path)
+        if episodes_index_path.exists():
+            lerobot_checksums["episodes_index"] = _sha256_file(episodes_index_path)
+        if lerobot_dir.exists():
+            for lerobot_file in sorted(lerobot_dir.glob("episode_*.parquet")):
+                lerobot_checksums["episodes"].append({
+                    "file_name": lerobot_file.name,
+                    "sha256": _sha256_file(lerobot_file),
+                })
+
+        download_manifest_checksum = (
+            _sha256_file(result.manifest_path)
+            if result.manifest_path and result.manifest_path.exists()
+            else None
+        )
+        provenance = {
+            "source": "genie_sim",
+            "job_id": config.job_id,
+            "scene_id": scene_id or None,
+            "imported_by": "BlueprintPipeline",
+            "importer": "genie-sim-import-job",
+            "client_mode": "mock" if getattr(client, "mock_mode", False) else "api",
+        }
+        import_manifest = {
+            "schema_version": "1.1",
         episode_ids = [episode.episode_id for episode in download_result.episodes]
         episode_paths, missing_episode_ids = get_episode_file_paths(config.output_dir, episode_ids)
         metadata_paths = get_lerobot_metadata_paths(config.output_dir)
@@ -835,6 +966,13 @@ def run_import_job(
                 "required": config.require_lerobot or config.enable_validation,
             },
             "metrics_summary": metrics_summary,
+            "checksums": {
+                "download_manifest": download_manifest_checksum,
+                "episodes": episode_checksums,
+                "filtered_episodes": filtered_checksums,
+                "lerobot": lerobot_checksums,
+            },
+            "provenance": provenance,
             "file_inventory": file_inventory,
             "checksums": checksums,
             "provenance": provenance,
@@ -949,7 +1087,10 @@ def main():
 
     # Create client
     try:
-        client = GenieSimClient()
+        client = GenieSimClient(
+            mock_mode=os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true",
+            validate_on_init=False,
+        )
     except Exception as e:
         print(f"[GENIE-SIM-IMPORT] ERROR: Failed to create Genie Sim client: {e}")
         print("[GENIE-SIM-IMPORT] Make sure GENIE_SIM_API_KEY is set")

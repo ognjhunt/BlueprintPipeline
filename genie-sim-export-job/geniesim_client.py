@@ -62,11 +62,21 @@ import requests
 
 # LABS-BLOCKER-003 FIX: Add Pydantic for API response validation
 try:
-    from pydantic import BaseModel, Field, validator, ValidationError
-    HAVE_PYDANTIC = True
+    import pydantic
+    from pydantic import BaseModel, Field, ValidationError, validator
+    _pydantic_major_version = int(pydantic.__version__.split(".", 1)[0])
+    if _pydantic_major_version >= 2:
+        HAVE_PYDANTIC = False
+        logging.getLogger(__name__).warning(
+            "Pydantic v2 detected - disabling response validation for compatibility"
+        )
+    else:
+        HAVE_PYDANTIC = True
 except ImportError:
     HAVE_PYDANTIC = False
-    logger.warning("Pydantic not available - API response validation will be limited")
+    logging.getLogger(__name__).warning(
+        "Pydantic not available - API response validation will be limited"
+    )
 
 # Add repo root to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -442,6 +452,54 @@ class GenieSimClient:
     - Episode download
     - Quality validation
     """
+    _mock_jobs: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _mock_job_id(
+        scene_graph: Dict[str, Any],
+        task_config: Dict[str, Any],
+        job_name: Optional[str],
+    ) -> str:
+        payload = {
+            "scene_id": scene_graph.get("scene_id"),
+            "job_name": job_name,
+            "task_ids": [
+                task.get("task_id")
+                for task in task_config.get("tasks", [])
+                if isinstance(task, dict)
+            ],
+        }
+        fingerprint = json.dumps(payload, sort_keys=True).encode("utf-8")
+        digest = hashlib.sha256(fingerprint).hexdigest()[:12]
+        return f"mock-{digest}"
+
+    @staticmethod
+    def _mock_total_episodes(
+        generation_params: GenerationParams,
+        task_config: Dict[str, Any],
+    ) -> int:
+        task_count = len(task_config.get("tasks", [])) or 1
+        return max(1, generation_params.episodes_per_task * task_count)
+
+    @staticmethod
+    def _mock_episode_quality(index: int) -> float:
+        return 0.9 if index % 2 == 0 else 0.8
+
+    @classmethod
+    def _mock_store_job(
+        cls,
+        job_id: str,
+        generation_params: GenerationParams,
+        task_config: Dict[str, Any],
+        created_at: str,
+    ) -> None:
+        cls._mock_jobs[job_id] = {
+            "created_at": created_at,
+            "generation_params": generation_params,
+            "task_config": task_config,
+            "status": JobStatus.COMPLETED,
+            "total_episodes": cls._mock_total_episodes(generation_params, task_config),
+        }
 
     def __init__(
         self,
@@ -450,6 +508,7 @@ class GenieSimClient:
         timeout: int = 300,
         max_retries: int = 3,
         validate_on_init: bool = True,
+        mock_mode: Optional[bool] = None,
     ):
         """
         Initialize Genie Sim client.
@@ -461,27 +520,37 @@ class GenieSimClient:
             max_retries: Maximum retries for failed requests
             validate_on_init: Validate endpoint is reachable on initialization (P0-1 FIX)
         """
-        # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
-        if HAVE_RESILIENCE_TOOLS:
-            try:
-                self.api_key = api_key or get_secret_or_env(
-                    SecretIds.GENIE_SIM_API_KEY,
-                    env_var="GENIE_SIM_API_KEY"
-                )
-            except Exception as e:
-                logger.warning(f"Secret Manager unavailable, falling back to env var: {e}")
-                self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
-        else:
-            self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
-
-        if not self.api_key:
-            raise GenieSimAuthenticationError(
-                "API key required. Set GENIE_SIM_API_KEY environment variable or pass api_key parameter."
-            )
-
-        self.endpoint = endpoint or os.getenv(
-            "GENIE_SIM_API_URL", "https://api.agibot.com/geniesim/v3"
+        self.mock_mode = (
+            mock_mode
+            if mock_mode is not None
+            else os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
         )
+
+        if self.mock_mode:
+            self.api_key = api_key or "mock-api-key"
+            self.endpoint = endpoint or "mock://geniesim"
+        else:
+            # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
+            if HAVE_RESILIENCE_TOOLS:
+                try:
+                    self.api_key = api_key or get_secret_or_env(
+                        SecretIds.GENIE_SIM_API_KEY,
+                        env_var="GENIE_SIM_API_KEY"
+                    )
+                except Exception as e:
+                    logger.warning(f"Secret Manager unavailable, falling back to env var: {e}")
+                    self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
+            else:
+                self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
+
+            if not self.api_key:
+                raise GenieSimAuthenticationError(
+                    "API key required. Set GENIE_SIM_API_KEY environment variable or pass api_key parameter."
+                )
+
+            self.endpoint = endpoint or os.getenv(
+                "GENIE_SIM_API_URL", "https://api.agibot.com/geniesim/v3"
+            )
         self.timeout = timeout
         self.max_retries = max_retries
 
@@ -489,7 +558,7 @@ class GenieSimClient:
         self._async_session: Optional[aiohttp.ClientSession] = None
 
         # GAP-EH-002 FIX: Add circuit breaker to prevent cascading failures
-        if HAVE_RESILIENCE_TOOLS:
+        if HAVE_RESILIENCE_TOOLS and not self.mock_mode:
             self._circuit_breaker = CircuitBreaker(
                 failure_threshold=5,
                 recovery_timeout=60.0,
@@ -502,7 +571,7 @@ class GenieSimClient:
             self._rate_limiter = None
 
         # P0-1 FIX: Validate endpoint is reachable on initialization
-        if validate_on_init:
+        if validate_on_init and not self.mock_mode:
             self._validate_endpoint()
 
     @property
@@ -607,6 +676,14 @@ class GenieSimClient:
         - Service is operational
         - Rate limits and queue status
         """
+        if self.mock_mode:
+            return HealthStatus(
+                available=True,
+                api_version="mock",
+                rate_limit_remaining=1000,
+                estimated_queue_time_seconds=0.0,
+                checked_at="2025-01-01T00:00:00Z",
+            )
         try:
             response = self._make_request_with_retry(
                 "GET",
@@ -656,6 +733,14 @@ class GenieSimClient:
         Returns:
             HealthStatus with availability and metadata
         """
+        if self.mock_mode:
+            return HealthStatus(
+                available=True,
+                api_version="mock",
+                rate_limit_remaining=1000,
+                estimated_queue_time_seconds=0.0,
+                checked_at="2025-01-01T00:00:00Z",
+            )
         try:
             session = await self._get_async_session()
             async with session.get(f"{self.endpoint}/health") as response:
@@ -723,6 +808,17 @@ class GenieSimClient:
         Raises:
             GenieSimAPIError: If submission fails
         """
+        if self.mock_mode:
+            created_at = "2025-01-01T00:00:00Z"
+            job_id = self._mock_job_id(scene_graph, task_config, job_name)
+            self._mock_store_job(job_id, generation_params, task_config, created_at)
+            return JobSubmissionResult(
+                success=True,
+                job_id=job_id,
+                message="Mock job submitted",
+                estimated_completion_time=created_at,
+                estimated_cost_usd=0.0,
+            )
         payload = {
             "job_name": job_name or f"blueprintpipeline_{int(time.time())}",
             "scene_graph": scene_graph,
@@ -771,6 +867,17 @@ class GenieSimClient:
         job_name: Optional[str] = None,
     ) -> JobSubmissionResult:
         """Async version of submit_generation_job with circuit breaker and retry logic."""
+        if self.mock_mode:
+            created_at = "2025-01-01T00:00:00Z"
+            job_id = self._mock_job_id(scene_graph, task_config, job_name)
+            self._mock_store_job(job_id, generation_params, task_config, created_at)
+            return JobSubmissionResult(
+                success=True,
+                job_id=job_id,
+                message="Mock job submitted",
+                estimated_completion_time=created_at,
+                estimated_cost_usd=0.0,
+            )
         payload = {
             "job_name": job_name or f"blueprintpipeline_{int(time.time())}",
             "scene_graph": scene_graph,
@@ -913,6 +1020,22 @@ class GenieSimClient:
             GenieSimJobNotFoundError: If job not found
             GenieSimAPIError: If response validation fails
         """
+        if self.mock_mode:
+            job_data = self._mock_jobs.get(job_id)
+            if not job_data:
+                raise GenieSimJobNotFoundError(f"Mock job {job_id} not found")
+            total_episodes = job_data["total_episodes"]
+            return JobProgress(
+                job_id=job_id,
+                status=job_data["status"],
+                progress_percent=100.0,
+                current_task="mock_complete",
+                episodes_generated=total_episodes,
+                total_episodes_target=total_episodes,
+                started_at=job_data["created_at"],
+                estimated_completion=job_data["created_at"],
+                logs=["Mock job completed"],
+            )
         try:
             response = self._make_request_with_retry(
                 "GET",
@@ -981,6 +1104,8 @@ class GenieSimClient:
 
     async def get_job_status_async(self, job_id: str) -> JobProgress:
         """Async version of get_job_status with retry logic and validation."""
+        if self.mock_mode:
+            return self.get_job_status(job_id)
         # Apply rate limiting
         if self._rate_limiter:
             self._rate_limiter.acquire()
@@ -1097,6 +1222,11 @@ class GenieSimClient:
         Raises:
             GenieSimAPIError: If job fails, is cancelled, or times out
         """
+        if self.mock_mode:
+            progress = self.get_job_status(job_id)
+            if callback:
+                callback(progress)
+            return progress
         # P0-2 FIX: Set default timeout to 4 hours
         if max_wait_time is None:
             max_wait_time = 14400.0  # 4 hours for large jobs
@@ -1178,6 +1308,69 @@ class GenieSimClient:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
+            if self.mock_mode:
+                job_data = self._mock_jobs.get(job_id)
+                if not job_data:
+                    raise GenieSimJobNotFoundError(f"Mock job {job_id} not found")
+
+                tasks = [
+                    task.get("task_name")
+                    or task.get("task_id")
+                    or "mock_task"
+                    for task in job_data["task_config"].get("tasks", [])
+                    if isinstance(task, dict)
+                ] or ["mock_task"]
+
+                episodes: List[GeneratedEpisodeMetadata] = []
+                total_size = 0
+                min_quality = job_data["generation_params"].min_quality_score
+                for index in range(job_data["total_episodes"]):
+                    episode_id = f"episode_{index:06d}"
+                    task_name = tasks[index % len(tasks)]
+                    frame_count = 12
+                    duration_seconds = frame_count / 10.0
+                    quality_score = self._mock_episode_quality(index)
+                    validation_passed = quality_score >= min_quality
+                    episode_file = output_dir / f"{episode_id}.parquet"
+                    content = f"mock-episode-{job_id}-{episode_id}".encode("utf-8")
+                    episode_file.write_bytes(content)
+                    file_size = episode_file.stat().st_size
+                    total_size += file_size
+                    episodes.append(
+                        GeneratedEpisodeMetadata(
+                            episode_id=episode_id,
+                            task_name=task_name,
+                            quality_score=quality_score,
+                            frame_count=frame_count,
+                            duration_seconds=duration_seconds,
+                            validation_passed=validation_passed,
+                            file_size_bytes=file_size,
+                        )
+                    )
+
+                manifest_path = output_dir / "manifest.json"
+                manifest = {
+                    "job_id": job_id,
+                    "schema_version": "mock-1.0",
+                    "generated_at": "2025-01-01T00:00:00Z",
+                    "episodes": [asdict(ep) for ep in episodes],
+                }
+                manifest_path.write_text(json.dumps(manifest, indent=2))
+
+                errors = []
+                if validate:
+                    errors = self._validate_downloaded_episodes(output_dir, episodes)
+
+                return DownloadResult(
+                    success=len(errors) == 0,
+                    output_dir=output_dir,
+                    episode_count=len(episodes),
+                    total_size_bytes=total_size,
+                    manifest_path=manifest_path,
+                    episodes=episodes,
+                    errors=errors,
+                )
+
             # Check job status
             progress = self.get_job_status(job_id)
             if progress.status != JobStatus.COMPLETED:
@@ -1362,6 +1555,12 @@ class GenieSimClient:
         Returns:
             True if successfully cancelled
         """
+        if self.mock_mode:
+            job_data = self._mock_jobs.get(job_id)
+            if not job_data:
+                return False
+            job_data["status"] = JobStatus.CANCELLED
+            return True
         try:
             response = self._make_request_with_retry(
                 "POST",
@@ -1520,6 +1719,8 @@ class GenieSimClient:
         Raises:
             GenieSimJobNotFoundError: If job not found
         """
+        if self.mock_mode:
+            return self._mock_jobs.pop(job_id, None) is not None
         params = {"force": "true" if force else "false"}
 
         try:
