@@ -196,6 +196,26 @@ main:
                       --zone=${gkeZone} \
                       --project=${projectId}
 
+                    # Preflight guard: ensure GPU nodes are present before scheduling
+                    GPU_NODE_COUNT=$(kubectl get nodes \
+                      -l cloud.google.com/gke-accelerator=nvidia-tesla-t4 \
+                      -o name | wc -l | tr -d ' ')
+                    if [ "${GPU_NODE_COUNT}" -eq 0 ]; then
+                      echo "ERROR: No GPU nodes found with accelerator label nvidia-tesla-t4."
+                      echo "Episode generation requires Isaac Sim runtime on GPU nodes."
+                      exit 1
+                    fi
+
+                    GPU_CAPACITY=$(kubectl get nodes \
+                      -l cloud.google.com/gke-accelerator=nvidia-tesla-t4 \
+                      -o jsonpath='{range .items[*]}{.status.capacity.nvidia\.com/gpu}{"\n"}{end}' \
+                      | awk 'BEGIN{sum=0} {if ($1 ~ /^[0-9]+$/) sum+=$1} END{print sum}')
+                    if [ "${GPU_CAPACITY:-0}" -le 0 ]; then
+                      echo "ERROR: GPU capacity is not reported on GPU nodes."
+                      echo "Verify NVIDIA drivers and device plugin are installed."
+                      exit 1
+                    fi
+
                     # Create unique job name
                     JOB_NAME="episode-gen-${sceneId}-$(date +%s)"
 

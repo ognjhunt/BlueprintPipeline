@@ -76,6 +76,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+REQUIRED_ISAAC_SIM_VERSION = "2024.1.0+"
+REQUIRED_ISAAC_SIM_CONTAINER = "nvcr.io/nvidia/isaac-sim:2024.1.0"
+REQUIRED_EXTENSIONS = (
+    "omni.isaac.core",
+    "omni.physx",
+    "omni.replicator.core",
+)
+
 # Core imports
 from motion_planner import AIMotionPlanner, MotionPlan
 from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS, TrajectoryIKError
@@ -2401,6 +2409,109 @@ def main():
     print("\n[EPISODE-GEN-JOB] ================================")
     print("[EPISODE-GEN-JOB] Episode Generation Job (SOTA)")
     print("[EPISODE-GEN-JOB] ================================\n")
+
+    def _is_production_preflight() -> bool:
+        env_flags = (
+            os.getenv("REQUIRE_REAL_PHYSICS", "").lower() == "true"
+            or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
+            or os.getenv("PRODUCTION_MODE", "").lower() == "true"
+            or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
+            or os.getenv("PRODUCTION", "").lower() == "true"
+        )
+        if HAVE_QUALITY_SYSTEM:
+            try:
+                return get_data_quality_level().value == "production" or env_flags
+            except Exception:
+                return env_flags
+        return env_flags
+
+    def _collect_preflight_capabilities() -> Dict[str, Any]:
+        capabilities: Dict[str, Any] = {
+            "isaac_sim_available": False,
+            "replicator_available": False,
+            "physx_available": False,
+            "gpu_available": os.path.exists("/dev/nvidia0") or os.path.exists("/proc/driver/nvidia"),
+        }
+        if HAVE_QUALITY_SYSTEM:
+            try:
+                detected = get_environment_capabilities()
+                capabilities.update(
+                    {
+                        "isaac_sim_available": detected.isaac_sim_available,
+                        "replicator_available": detected.replicator_available,
+                        "physx_available": detected.physx_available,
+                        "gpu_available": detected.gpu_available,
+                        "production_mode": detected.production_mode,
+                        "allow_mock_capture": detected.allow_mock_capture,
+                    }
+                )
+                return capabilities
+            except Exception:
+                pass
+        if check_sensor_capture_environment is not None:
+            try:
+                status = check_sensor_capture_environment()
+                capabilities.update(
+                    {
+                        "isaac_sim_available": bool(status.get("isaac_sim_available")),
+                        "replicator_available": bool(status.get("replicator_available")),
+                    }
+                )
+            except Exception:
+                pass
+        return capabilities
+
+    def _emit_preflight_failure(capabilities: Dict[str, Any]) -> None:
+        required_extensions = []
+        for extension in REQUIRED_EXTENSIONS:
+            if extension == "omni.replicator.core":
+                available = capabilities.get("replicator_available", False)
+            elif extension == "omni.physx":
+                available = capabilities.get("physx_available", False)
+            else:
+                available = capabilities.get("isaac_sim_available", False)
+            required_extensions.append(
+                {
+                    "name": extension,
+                    "required": True,
+                    "minimum_version": f"bundled with Isaac Sim {REQUIRED_ISAAC_SIM_VERSION}",
+                    "available": bool(available),
+                }
+            )
+
+        payload = {
+            "error": "isaac_sim_preflight_failed",
+            "mode": "production",
+            "required": {
+                "isaac_sim_version": REQUIRED_ISAAC_SIM_VERSION,
+                "runtime": "Isaac Sim Python (/isaac-sim/python.sh)",
+                "container_image": REQUIRED_ISAAC_SIM_CONTAINER,
+                "extensions": required_extensions,
+                "gpu": "NVIDIA RTX/Tesla-class GPU with drivers + nvidia-container-toolkit",
+            },
+            "detected": {
+                "isaac_sim_available": capabilities.get("isaac_sim_available"),
+                "replicator_available": capabilities.get("replicator_available"),
+                "physx_available": capabilities.get("physx_available"),
+                "gpu_available": capabilities.get("gpu_available"),
+            },
+            "remediation": [
+                "Run inside the Isaac Sim container or lab runtime.",
+                "Ensure the Replicator extension (omni.replicator.core) is enabled.",
+                "Verify GPU drivers and NVIDIA Container Toolkit are installed.",
+                "See docs/ISAAC_SIM_SETUP.md for setup steps.",
+            ],
+        }
+        print(json.dumps(payload))
+        sys.exit(1)
+
+    if _is_production_preflight():
+        preflight_capabilities = _collect_preflight_capabilities()
+        if (
+            not preflight_capabilities.get("isaac_sim_available")
+            or not preflight_capabilities.get("replicator_available")
+        ):
+            _emit_preflight_failure(preflight_capabilities)
 
     # =========================================================================
     # PHASE 1: Isaac Sim Enforcement + Environment Check
