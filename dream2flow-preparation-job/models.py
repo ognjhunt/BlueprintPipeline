@@ -545,18 +545,29 @@ class Dream2FlowJobConfig:
     # Video generation
     video_model: str = "placeholder"  # Will be updated when model is released
     video_api_endpoint: Optional[str] = None
+    video_checkpoint_path: Optional[Path] = None
 
     # Flow extraction
     flow_method: FlowExtractionMethod = FlowExtractionMethod.POINT_TRACKING_WITH_DEPTH
     num_tracking_points: int = 100
+    segmentation_api: Optional[str] = None
+    depth_api: Optional[str] = None
+    tracking_api: Optional[str] = None
 
     # Robot tracking
     tracking_method: RobotTrackingMethod = RobotTrackingMethod.TRAJECTORY_OPTIMIZATION
     robot_embodiment: RobotEmbodiment = RobotEmbodiment.FRANKA_PANDA
+    robot_tracking_api: Optional[str] = None
 
     # Output options
     save_intermediate: bool = True
     save_videos: bool = True
+
+    # Feature flags
+    enable_video_generation: bool = True
+    enable_flow_extraction: bool = True
+    enable_robot_tracking: bool = True
+    allow_placeholder: bool = True
 
     # Processing
     verbose: bool = True
