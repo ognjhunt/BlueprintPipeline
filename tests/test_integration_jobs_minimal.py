@@ -162,6 +162,7 @@ def test_episode_generation_job_minimal_end_to_end(tmp_path: Path, monkeypatch: 
 
     exit_code = episode_module.run_episode_generation_job(
         root=tmp_path,
+        bucket="",
         scene_id=scene_id,
         assets_prefix=f"scenes/{scene_id}/assets",
         episodes_prefix=f"scenes/{scene_id}/episodes",
