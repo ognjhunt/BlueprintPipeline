@@ -69,6 +69,10 @@ main:
           - dream2flowCompleteMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_complete"}'
           - dream2flowInferenceJobName: "dream2flow-inference-job"
           - dream2flowInferenceCompleteMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_inference_complete"}'
+          - dream2flowFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.failed"}'
+          - dream2flowLegacyFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_failed"}'
+          - dream2flowInferenceFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.failed"}'
+          - dream2flowInferenceLegacyFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_inference_failed"}'
         next: check_already_processed
 
     # Check if Dream2Flow bundles already generated (idempotence)
@@ -307,13 +311,77 @@ main:
         args:
           text: '${"WARNING: Dream2Flow inference failed for scene " + sceneId}'
           severity: "WARNING"
+        next: read_inference_failure_marker
+
+    - read_inference_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${dream2flowInferenceFailedMarker}
+            alt: "media"
+          result: dream2flowInferenceFailurePayload
+        except:
+          as: e
+          steps:
+            - handle_missing_dream2flow_inference_marker:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: write_inference_failure_marker
+                next: log_dream2flow_inference_marker_read_error
+        next: log_dream2flow_inference_marker_payload
+
+    - log_dream2flow_inference_marker_read_error:
+        call: sys.log
+        args:
+          text: '${"Failed to read .failed inference marker for Dream2Flow in scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
         next: write_inference_failure_marker
+
+    - log_dream2flow_inference_marker_payload:
+        call: sys.log
+        args:
+          text: '${"Dream2Flow inference failure marker payload for scene " + sceneId + ": " + dream2flowInferenceFailurePayload}'
+          severity: "ERROR"
+        next: write_inference_legacy_failure_marker
 
     - write_inference_failure_marker:
         call: googleapis.storage.v1.objects.insert
         args:
           bucket: ${bucket}
-          name: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_inference_failed"}'
+          name: ${dream2flowInferenceFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": dream2flowInferenceJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "dream2flow_inference_failed",
+              "message": "Dream2Flow inference failed",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": dream2flowInferenceExecutionName,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "dream2flow_prefix": dream2flowPrefix
+              }
+            },
+            "input_params": {
+              "scene_id": sceneId,
+              "bucket": bucket
+            }
+          })}
+        next: write_inference_legacy_failure_marker
+
+    - write_inference_legacy_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${dream2flowInferenceLegacyFailedMarker}
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
         next: done_with_failure
@@ -324,16 +392,81 @@ main:
         args:
           text: '${"WARNING: Dream2Flow preparation failed for scene " + sceneId + " - scene still usable for simulation"}'
           severity: "WARNING"
+        next: read_failure_marker
+
+    - read_failure_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${dream2flowFailedMarker}
+            alt: "media"
+          result: dream2flowFailurePayload
+        except:
+          as: e
+          steps:
+            - handle_missing_dream2flow_failure_marker:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: write_failure_marker
+                next: log_dream2flow_failure_marker_read_error
+        next: log_dream2flow_failure_marker_payload
+
+    - log_dream2flow_failure_marker_read_error:
+        call: sys.log
+        args:
+          text: '${"Failed to read .failed marker for Dream2Flow in scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
         next: write_failure_marker
+
+    - log_dream2flow_failure_marker_payload:
+        call: sys.log
+        args:
+          text: '${"Dream2Flow failure marker payload for scene " + sceneId + ": " + dream2flowFailurePayload}'
+          severity: "ERROR"
+        next: write_legacy_failure_marker
 
     - write_failure_marker:
         call: googleapis.storage.v1.objects.insert
         args:
           bucket: ${bucket}
-          name: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_failed"}'
+          name: ${dream2flowFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": dream2flowJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "dream2flow_failed",
+              "message": "Dream2Flow preparation failed",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": dream2flowExecutionName,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "dream2flow_prefix": dream2flowPrefix
+              }
+            },
+            "input_params": {
+              "scene_id": sceneId,
+              "bucket": bucket
+            }
+          })}
+        result: failMarkerResult
+        next: write_legacy_failure_marker
+
+    - write_legacy_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${dream2flowLegacyFailedMarker}
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
-        result: failMarkerResult
+        result: legacyFailMarkerResult
         next: done_with_failure
 
     # =========================================================================
