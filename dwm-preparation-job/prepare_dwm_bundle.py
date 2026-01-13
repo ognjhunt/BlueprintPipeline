@@ -448,16 +448,10 @@ class DWMPreparationJob:
         elif self.config.scene_usd_path and self.config.scene_usd_path.exists():
             scene_path = self.config.scene_usd_path
         else:
-            if self.scene_renderer.backend == RenderBackend.MOCK:
-                self.log(
-                    "No renderable scene file found - mock renderer active (intended for CI smoke tests only)",
-                    "WARN",
-                )
-            else:
-                raise FileNotFoundError(
-                    "No renderable scene file found. Provide a USD/GLB scene path for production rendering "
-                    "or disable rendering explicitly for CI runs."
-                )
+            raise FileNotFoundError(
+                "No renderable scene file found. Provide a USD/GLB scene path for production rendering "
+                "or disable rendering explicitly for CI runs."
+            )
 
         # Load scene
         if scene_path:
@@ -516,6 +510,7 @@ class DWMPreparationJob:
                 "num_frames": len(frame_paths),
                 "depth_dir": depth_dir if render_outputs.get("depth") else None,
                 "seg_dir": seg_dir if render_outputs.get("segmentation") else None,
+                "metadata_path": render_outputs.get("metadata_path"),
                 "scene_state_path": scene_state_path,
             }
 
