@@ -191,6 +191,10 @@ Before production rollouts, labs should run the staging E2E harness against a
 real 3D-RE-GEN reconstruction and Isaac Sim. This validates the full handoff
 from reconstruction → USD → Isaac Sim loading without relying on mocks.
 
+Staging checklist (labs pre-production):
+- Verify Particulate is reachable (`PARTICULATE_ENDPOINT`) **or** run a locally hosted Particulate
+  instance with `PARTICULATE_MODE=local` and an approved `PARTICULATE_LOCAL_MODEL` configured.
+
 ```bash
 # Run inside an Isaac Sim environment with real reconstruction outputs
 RUN_STAGING_E2E=1 \

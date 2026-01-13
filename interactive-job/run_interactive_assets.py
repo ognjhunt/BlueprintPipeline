@@ -20,9 +20,12 @@ Environment Variables:
     PARTICULATE_ENDPOINT: Particulate Cloud Run service URL
     PARTICULATE_MODE: "remote" (default), "local", or "skip" for inference control
     PARTICULATE_LOCAL_ENDPOINT: Optional local Particulate URL for PARTICULATE_MODE=local
+    PARTICULATE_LOCAL_MODEL: Identifier for the locally hosted Particulate model (required in labs/prod)
+    APPROVED_PARTICULATE_MODELS: Comma-separated allowlist for local Particulate models (default: pat_b)
     REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
     DISALLOW_PLACEHOLDER_URDF: "true" to fail if placeholder URDFs are generated
+    LABS_MODE: "true" to enforce labs guardrails (Particulate required, no heuristics)
 """
 import base64
 import importlib.util
@@ -100,6 +103,11 @@ def normalize_particulate_mode(value: str) -> str:
         )
         return PARTICULATE_MODE_REMOTE
     return mode
+
+
+def parse_csv_env(value: str) -> List[str]:
+    """Parse a comma-separated environment value into a normalized list."""
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def resolve_particulate_endpoint(
@@ -1527,8 +1535,12 @@ def main() -> None:
 
     mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
     production_mode = parse_env_flag(os.getenv("PRODUCTION_MODE", "false"))
+    labs_mode = parse_env_flag(os.getenv("LABS_MODE", "false"))
     disallow_placeholder_env = parse_env_flag(os.getenv("DISALLOW_PLACEHOLDER_URDF", "false"))
     disallow_placeholder_urdf = production_mode or disallow_placeholder_env
+    articulation_backend = os.getenv("ARTICULATION_BACKEND", "particulate").strip().lower() or "particulate"
+    local_model_id = os.getenv("PARTICULATE_LOCAL_MODEL", "").strip()
+    approved_models = parse_csv_env(os.getenv("APPROVED_PARTICULATE_MODELS", "pat_b"))
     failure_writer = FailureMarkerWriter(
         bucket=bucket,
         scene_id=scene_id or "unknown",
@@ -1575,7 +1587,9 @@ def main() -> None:
     log(f"Mode: {mode}")
     log(f"Interactive objects: {len(interactive_objects)}")
     log(f"Production mode: {production_mode}")
+    log(f"Labs mode: {labs_mode}")
     log(f"Disallow placeholder URDFs: {disallow_placeholder_urdf}")
+    log(f"Articulation backend: {articulation_backend}")
     log("=" * 60)
 
     config_context = {
@@ -1585,19 +1599,69 @@ def main() -> None:
         "mode": mode,
         "particulate_mode": particulate_mode,
         "production_mode": production_mode,
+        "labs_mode": labs_mode,
         "disallow_placeholder_urdf": disallow_placeholder_urdf,
         "particulate_endpoint": particulate_endpoint or None,
         "particulate_endpoint_source": endpoint_source,
+        "articulation_backend": articulation_backend,
+        "particulate_local_model": local_model_id or None,
     }
 
-    if production_mode and particulate_mode == PARTICULATE_MODE_REMOTE and not particulate_endpoint:
-        log("PARTICULATE_ENDPOINT is required in production mode", "ERROR")
+    guardrails_enabled = production_mode or labs_mode
+
+    if guardrails_enabled and articulation_backend == "heuristic":
+        log("Heuristic articulation outputs are not allowed in labs/production mode", "ERROR")
+        write_failure_marker(
+            assets_root,
+            failure_writer,
+            scene_id,
+            reason="heuristic_articulation_blocked",
+            details={"articulation_backend": articulation_backend},
+            config_context=config_context,
+        )
+        sys.exit(1)
+
+    if guardrails_enabled and particulate_mode == PARTICULATE_MODE_LOCAL:
+        if not local_model_id:
+            log("PARTICULATE_LOCAL_MODEL is required for local Particulate in labs/production mode", "ERROR")
+            write_failure_marker(
+                assets_root,
+                failure_writer,
+                scene_id,
+                reason="missing_particulate_local_model",
+                details={"particulate_mode": particulate_mode},
+                config_context=config_context,
+            )
+            sys.exit(1)
+        if local_model_id not in approved_models:
+            log(
+                f"Local Particulate model '{local_model_id}' is not in the approved list",
+                "ERROR",
+            )
+            write_failure_marker(
+                assets_root,
+                failure_writer,
+                scene_id,
+                reason="unapproved_particulate_model",
+                details={
+                    "particulate_local_model": local_model_id,
+                    "approved_models": approved_models,
+                },
+                config_context=config_context,
+            )
+            sys.exit(1)
+
+    if guardrails_enabled and particulate_mode != PARTICULATE_MODE_LOCAL and not particulate_endpoint:
+        log("PARTICULATE_ENDPOINT is required in labs/production mode", "ERROR")
         write_failure_marker(
             assets_root,
             failure_writer,
             scene_id,
             reason="missing_particulate_endpoint",
-            details={"mode": mode},
+            details={
+                "mode": mode,
+                "particulate_mode": particulate_mode,
+            },
             config_context=config_context,
         )
         sys.exit(1)
