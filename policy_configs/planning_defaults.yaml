@@ -1,0 +1,50 @@
+motion_planner:
+  timing:
+    home: 0.8
+    approach: 0.6
+    pre_grasp: 0.4
+    grasp: 0.3
+    close_gripper: 0.4
+    lift: 0.6
+    transport: 0.8
+    pre_place: 0.4
+    place: 0.3
+    release: 0.4
+    retract: 0.5
+    return_home: 0.0
+    articulation_approach: 0.6
+    articulation_pre_grasp: 0.4
+    articulation_grasp: 0.3
+    articulation_close: 0.4
+    articulation_motion: 1.0
+    articulation_release: 0.3
+    articulation_retract: 0.5
+    push_home: 0.8
+    push_approach: 0.5
+    push_lower: 0.4
+    push_motion: 1.0
+    push_lift: 0.5
+    push_return_home: 0.0
+    simple_home: 0.8
+    simple_approach: 0.6
+    simple_reach: 0.5
+    simple_return_home: 0.0
+
+validation:
+  thresholds:
+    max_unexpected_collisions: 0
+    max_joint_violations: 0
+    max_collision_force: 100.0
+    max_joint_velocity: 5.0
+    max_joint_acceleration: 20.0
+    stability_threshold: 0.001
+    min_quality_score: 0.85
+    max_retries: 3
+  requirements:
+    require_task_success: true
+    require_grasp_success: true
+    require_placement_success: true
+    require_object_stable: true
+  retries:
+    retry_on_collision: true
+    retry_on_joint_limit: true
