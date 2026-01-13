@@ -233,6 +233,7 @@ class PipelineSelector:
             # NOTE: isaac-lab-job removed - Genie Sim handles task generation
             # NOTE: episode-generation-job removed - Genie Sim handles data collection
             "genie-sim-export-job",  # Export to Genie Sim format (uses YOUR assets)
+            "genie-sim-submit-job",  # Submit/run Genie Sim generation (API or local)
             # After this, Genie Sim takes over for:
             # - LLM task generation
             # - cuRobo trajectory planning
@@ -297,3 +298,8 @@ def is_geniesim_enabled() -> bool:
     Returns True by default. Set USE_GENIESIM=false to disable.
     """
     return os.getenv("USE_GENIESIM", "true").lower() == "true"
+
+
+def should_skip_deprecated_job(job_name: str) -> bool:
+    """Return True if a job is deprecated and should be skipped."""
+    return False

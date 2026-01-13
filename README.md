@@ -44,6 +44,35 @@ python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen
 python tests/test_pipeline_e2e.py
 ```
 
+### Local Genie Sim Fixtures
+
+Run the local pipeline with Genie Sim enabled to generate an export bundle and submit
+local data collection (or API submission if configured).
+
+```bash
+USE_GENIESIM=true \
+python tools/run_local_pipeline.py \
+    --scene-dir ./test_scenes/scenes/test_kitchen \
+    --use-geniesim
+```
+
+Expected outputs for fixtures:
+
+```
+scenes/{scene_id}/geniesim/
+├── scene_graph.json
+├── asset_index.json
+├── task_config.json
+├── job.json
+└── merged_scene_manifest.json
+
+scenes/{scene_id}/episodes/geniesim_{job_id}/
+├── config/
+│   ├── scene_manifest.json
+│   └── task_config.json
+└── import_manifest.json            # Produced by genie-sim-import-job
+```
+
 ### Cloud Deployment
 
 The pipeline runs on Google Cloud using:

@@ -24,9 +24,11 @@ Pipeline Steps:
     5. usd       - Assemble scene.usda
     6. replicator - Generate Replicator bundle
     7. isaac-lab - Generate Isaac Lab task package
-    8. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
-    9. dwm-inference - Run DWM model to generate interaction videos for each bundle
-    10. validate  - QA validation
+    8. genie-sim-export - Export scene bundle for Genie Sim
+    9. genie-sim-submit - Submit/run Genie Sim generation (API or local)
+    10. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
+    11. dwm-inference - Run DWM model to generate interaction videos for each bundle
+    12. validate  - QA validation
 
 Note: DWM steps are optional and only included by default when --enable-dwm is set.
 
@@ -67,6 +69,8 @@ class PipelineStep(str, Enum):
     USD = "usd"
     REPLICATOR = "replicator"
     ISAAC_LAB = "isaac-lab"
+    GENIESIM_EXPORT = "genie-sim-export"
+    GENIESIM_SUBMIT = "genie-sim-submit"
     DWM = "dwm"  # Dexterous World Model preparation
     DWM_INFERENCE = "dwm-inference"  # Run DWM model on prepared bundles
     DREAM2FLOW = "dream2flow"  # Dream2Flow preparation (arXiv:2512.24766)
@@ -140,6 +144,8 @@ class LocalPipelineRunner:
         self.usd_dir = self.scene_dir / "usd"
         self.replicator_dir = self.scene_dir / "replicator"
         self.isaac_lab_dir = self.scene_dir / "isaac_lab"
+        self.geniesim_dir = self.scene_dir / "geniesim"
+        self.episodes_dir = self.scene_dir / "episodes"
         self.dwm_dir = self.scene_dir / "dwm"  # DWM conditioning data
         self.dream2flow_dir = self.scene_dir / "dream2flow"  # Dream2Flow conditioning data
 
@@ -173,10 +179,7 @@ class LocalPipelineRunner:
             True if all steps succeeded
         """
         if steps is None:
-            steps = self.DEFAULT_STEPS.copy()
-            if self.enable_dwm:
-                insert_at = self.DEFAULT_STEPS.index(PipelineStep.DREAM2FLOW)
-                steps[insert_at:insert_at] = self.DWM_STEPS
+            steps = self._resolve_default_steps()
 
         if run_validation and PipelineStep.VALIDATE not in steps:
             steps.append(PipelineStep.VALIDATE)
@@ -200,6 +203,7 @@ class LocalPipelineRunner:
         # Create output directories
         for d in [self.assets_dir, self.layout_dir, self.seg_dir,
                   self.usd_dir, self.replicator_dir, self.isaac_lab_dir,
+                  self.geniesim_dir, self.episodes_dir,
                   self.dwm_dir, self.dream2flow_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -234,6 +238,53 @@ class LocalPipelineRunner:
         os.environ.setdefault("PRODUCTION_MODE", "true")
         self.log("Applied labs/production flags for staging or lab validation runs")
 
+    def _resolve_default_steps(self) -> List[PipelineStep]:
+        """Resolve default steps, using pipeline selector for Genie Sim mode."""
+        try:
+            from tools.pipeline_selector.selector import PipelineSelector, DataGenerationBackend
+        except ImportError:
+            self.log("Pipeline selector not available; falling back to default steps", "WARNING")
+            steps = self.DEFAULT_STEPS.copy()
+            if self.enable_dwm:
+                insert_at = self.DEFAULT_STEPS.index(PipelineStep.DREAM2FLOW)
+                steps[insert_at:insert_at] = self.DWM_STEPS
+            return steps
+
+        selector = PipelineSelector(scene_root=self.scene_dir)
+        decision = selector.select(self.scene_dir)
+        if decision.data_backend == DataGenerationBackend.GENIESIM:
+            steps = self._map_jobs_to_steps(decision.job_sequence)
+        else:
+            steps = self.DEFAULT_STEPS.copy()
+
+        if self.enable_dwm:
+            insert_at = steps.index(PipelineStep.DREAM2FLOW) if PipelineStep.DREAM2FLOW in steps else len(steps)
+            steps[insert_at:insert_at] = self.DWM_STEPS
+
+        return steps
+
+    def _map_jobs_to_steps(self, job_sequence: List[str]) -> List[PipelineStep]:
+        """Map pipeline selector job names to local runner steps."""
+        mapping = {
+            "regen3d-job": PipelineStep.REGEN3D,
+            "scale-job": PipelineStep.SCALE,
+            "interactive-job": PipelineStep.INTERACTIVE,
+            "simready-job": PipelineStep.SIMREADY,
+            "usd-assembly-job": PipelineStep.USD,
+            "replicator-job": PipelineStep.REPLICATOR,
+            "isaac-lab-job": PipelineStep.ISAAC_LAB,
+            "genie-sim-export-job": PipelineStep.GENIESIM_EXPORT,
+            "genie-sim-submit-job": PipelineStep.GENIESIM_SUBMIT,
+        }
+        steps: List[PipelineStep] = []
+        for job_name in job_sequence:
+            step = mapping.get(job_name)
+            if step is None:
+                self.log(f"Skipping unsupported local job: {job_name}", "WARNING")
+                continue
+            steps.append(step)
+        return steps
+
     def _run_step(self, step: PipelineStep) -> StepResult:
         """Run a single pipeline step."""
         import time
@@ -256,6 +307,10 @@ class LocalPipelineRunner:
                 result = self._run_replicator()
             elif step == PipelineStep.ISAAC_LAB:
                 result = self._run_isaac_lab()
+            elif step == PipelineStep.GENIESIM_EXPORT:
+                result = self._run_geniesim_export()
+            elif step == PipelineStep.GENIESIM_SUBMIT:
+                result = self._run_geniesim_submit()
             elif step == PipelineStep.DWM:
                 result = self._run_dwm()
             elif step == PipelineStep.DWM_INFERENCE:
@@ -713,6 +768,7 @@ class LocalPipelineRunner:
         usda_content = self._generate_usda(manifest, layout)
         usda_path = self.usd_dir / "scene.usda"
         usda_path.write_text(usda_content)
+        self._write_marker(self.assets_dir / ".usd_assembly_complete", status="completed")
 
         self.log(f"Generated USD: {usda_path}")
 
@@ -811,6 +867,7 @@ class LocalPipelineRunner:
         (variation_dir / "manifest.json").write_text(
             json.dumps(variation_manifest, indent=2)
         )
+        self._write_marker(self.replicator_dir / ".replicator_complete", status="completed")
 
         self.log("Generated replicator bundle")
 
@@ -960,6 +1017,260 @@ class LocalPipelineRunner:
                 duration_seconds=0,
                 message=f"Error: {e}\n{traceback.format_exc()}",
             )
+
+    def _run_geniesim_export(self) -> StepResult:
+        """Run Genie Sim export job locally."""
+        try:
+            sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
+            from export_to_geniesim import run_geniesim_export_job
+        except ImportError as e:
+            return StepResult(
+                step=PipelineStep.GENIESIM_EXPORT,
+                success=False,
+                duration_seconds=0,
+                message=f"Import error (Genie Sim export job not found): {e}",
+            )
+
+        root = self.scene_dir.parent
+        assets_prefix = f"{self.scene_id}/assets"
+        geniesim_prefix = f"{self.scene_id}/geniesim"
+        variation_assets_prefix = f"{self.scene_id}/variation_assets"
+        replicator_prefix = f"{self.scene_id}/replicator"
+        robot_type = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
+
+        exit_code = run_geniesim_export_job(
+            root=root,
+            scene_id=self.scene_id,
+            assets_prefix=assets_prefix,
+            geniesim_prefix=geniesim_prefix,
+            robot_type=robot_type,
+            variation_assets_prefix=variation_assets_prefix,
+            replicator_prefix=replicator_prefix,
+            copy_usd=True,
+        )
+        if exit_code != 0:
+            return StepResult(
+                step=PipelineStep.GENIESIM_EXPORT,
+                success=False,
+                duration_seconds=0,
+                message=f"Genie Sim export failed with exit code {exit_code}",
+            )
+
+        return StepResult(
+            step=PipelineStep.GENIESIM_EXPORT,
+            success=True,
+            duration_seconds=0,
+            message="Genie Sim export completed",
+            outputs={
+                "geniesim_dir": str(self.geniesim_dir),
+                "scene_graph": str(self.geniesim_dir / "scene_graph.json"),
+                "task_config": str(self.geniesim_dir / "task_config.json"),
+            },
+        )
+
+    def _run_geniesim_submit(self) -> StepResult:
+        """Submit Genie Sim generation (API or local framework)."""
+        try:
+            from tools.geniesim_adapter.local_framework import (
+                check_geniesim_availability,
+                run_local_data_collection,
+            )
+        except ImportError as e:
+            return StepResult(
+                step=PipelineStep.GENIESIM_SUBMIT,
+                success=False,
+                duration_seconds=0,
+                message=f"Import error (Genie Sim submit dependencies not found): {e}",
+            )
+
+        scene_graph_path = self.geniesim_dir / "scene_graph.json"
+        asset_index_path = self.geniesim_dir / "asset_index.json"
+        task_config_path = self.geniesim_dir / "task_config.json"
+        if not scene_graph_path.is_file() or not asset_index_path.is_file() or not task_config_path.is_file():
+            return StepResult(
+                step=PipelineStep.GENIESIM_SUBMIT,
+                success=False,
+                duration_seconds=0,
+                message="Genie Sim export outputs missing - run genie-sim-export first",
+            )
+
+        scene_graph = json.loads(scene_graph_path.read_text())
+        asset_index = json.loads(asset_index_path.read_text())
+        task_config = json.loads(task_config_path.read_text())
+
+        robot_type = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
+        episodes_per_task = int(os.getenv("EPISODES_PER_TASK", "10"))
+        num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
+        min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
+
+        api_key = os.getenv("GENIE_SIM_API_KEY")
+        force_local = os.getenv("GENIESIM_FORCE_LOCAL", "false").lower() == "true"
+        submission_mode = "api" if api_key and not force_local else "local"
+        job_id = None
+        submission_message = None
+        local_run_result = None
+        preflight_status = None
+        missing_components: List[str] = []
+        remediation_guidance = None
+
+        if submission_mode == "api":
+            try:
+                sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
+                from geniesim_client import GenieSimClient, GenerationParams
+            except ImportError as e:
+                return StepResult(
+                    step=PipelineStep.GENIESIM_SUBMIT,
+                    success=False,
+                    duration_seconds=0,
+                    message=f"Import error (Genie Sim API client not found): {e}",
+                )
+
+            generation_params = GenerationParams(
+                episodes_per_task=episodes_per_task,
+                num_variations=num_variations,
+                robot_type=robot_type,
+                min_quality_score=min_quality_score,
+            )
+            client = GenieSimClient()
+            try:
+                result = client.submit_generation_job(
+                    scene_graph=scene_graph,
+                    asset_index=asset_index,
+                    task_config=task_config,
+                    generation_params=generation_params,
+                    job_name=f"{self.scene_id}-geniesim",
+                )
+                if not result.success or not result.job_id:
+                    raise RuntimeError(result.message or "Genie Sim submission failed")
+                job_id = result.job_id
+                submission_message = result.message
+            finally:
+                client.close()
+        else:
+            import uuid
+
+            job_id = f"local-{uuid.uuid4()}"
+            submission_message = "Local Genie Sim execution started."
+            preflight_status = check_geniesim_availability()
+            if not preflight_status.get("isaac_sim_available", False):
+                missing_components.append("Isaac Sim path")
+            if not preflight_status.get("grpc_available", False):
+                missing_components.append("gRPC stubs")
+            if not preflight_status.get("server_running", False):
+                missing_components.append("server running")
+            remediation_guidance = (
+                "Set ISAAC_SIM_PATH to your Isaac Sim install, ensure gRPC stubs are installed, "
+                "and start or expose the Genie Sim server at the configured host/port."
+            )
+
+            output_dir = self.episodes_dir / f"geniesim_{job_id}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            config_dir = output_dir / "config"
+            config_dir.mkdir(parents=True, exist_ok=True)
+
+            merged_manifest_path = self.geniesim_dir / "merged_scene_manifest.json"
+            if merged_manifest_path.is_file():
+                scene_manifest = json.loads(merged_manifest_path.read_text())
+            else:
+                scene_manifest = {"scene_graph": scene_graph}
+
+            scene_manifest_path = config_dir / "scene_manifest.json"
+            task_config_local_path = config_dir / "task_config.json"
+            scene_manifest_path.write_text(json.dumps(scene_manifest, indent=2))
+            task_config_local_path.write_text(json.dumps(task_config, indent=2))
+
+            if not preflight_status.get("available", False):
+                submission_message = (
+                    "Local Genie Sim preflight failed; missing: "
+                    f"{', '.join(missing_components) or 'unknown components'}."
+                )
+            else:
+                local_run_result = run_local_data_collection(
+                    scene_manifest_path=scene_manifest_path,
+                    task_config_path=task_config_local_path,
+                    output_dir=output_dir,
+                    robot_type=robot_type,
+                    episodes_per_task=episodes_per_task,
+                    verbose=True,
+                )
+                submission_message = (
+                    "Local Genie Sim execution completed."
+                    if local_run_result and local_run_result.success
+                    else "Local Genie Sim execution failed."
+                )
+
+        job_status = (
+            "completed"
+            if local_run_result and local_run_result.success
+            else ("failed" if submission_mode == "local" else "submitted")
+        )
+        if submission_mode == "local" and preflight_status and not preflight_status.get("available", False):
+            job_status = "failed"
+
+        job_payload = {
+            "job_id": job_id,
+            "scene_id": self.scene_id,
+            "status": job_status,
+            "submission_mode": submission_mode,
+            "submitted_at": datetime.utcnow().isoformat() + "Z",
+            "message": submission_message,
+            "bundle": {
+                "scene_graph": str(scene_graph_path),
+                "asset_index": str(asset_index_path),
+                "task_config": str(task_config_path),
+            },
+            "generation_params": {
+                "robot_type": robot_type,
+                "episodes_per_task": episodes_per_task,
+                "num_variations": num_variations,
+                "min_quality_score": min_quality_score,
+            },
+        }
+
+        if submission_mode == "local":
+            episodes_path = str(self.episodes_dir / f"geniesim_{job_id}")
+            job_payload["artifacts"] = {
+                "episodes_path": episodes_path,
+                "lerobot_path": str(Path(episodes_path) / "lerobot"),
+            }
+            job_payload["local_execution"] = {
+                "success": bool(local_run_result and local_run_result.success),
+                "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
+                "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
+                "preflight": {
+                    "available": preflight_status.get("available", False) if preflight_status else False,
+                    "isaac_sim_available": (
+                        preflight_status.get("isaac_sim_available", False) if preflight_status else False
+                    ),
+                    "grpc_available": (
+                        preflight_status.get("grpc_available", False) if preflight_status else False
+                    ),
+                    "server_running": (
+                        preflight_status.get("server_running", False) if preflight_status else False
+                    ),
+                    "missing_components": missing_components,
+                    "details": preflight_status.get("details", {}) if preflight_status else {},
+                },
+                "remediation": (
+                    remediation_guidance
+                    if preflight_status and not preflight_status.get("available", False)
+                    else None
+                ),
+            }
+
+        job_path = self.geniesim_dir / "job.json"
+        job_path.write_text(json.dumps(job_payload, indent=2))
+
+        return StepResult(
+            step=PipelineStep.GENIESIM_SUBMIT,
+            success=job_status != "failed",
+            duration_seconds=0,
+            message=submission_message or "Genie Sim submission completed",
+            outputs={
+                "job_id": job_id,
+                "job_payload": str(job_path),
+            },
+        )
 
     def _run_dwm(self) -> StepResult:
         """
@@ -1335,12 +1646,20 @@ def main():
         help="Include optional DWM preparation/inference steps in the default pipeline",
     )
     parser.add_argument(
+        "--use-geniesim",
+        action="store_true",
+        help="Use Genie Sim execution mode (overrides USE_GENIESIM for this run)",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Reduce output verbosity",
     )
 
     args = parser.parse_args()
+
+    if args.use_geniesim:
+        os.environ["USE_GENIESIM"] = "true"
 
     # Parse steps
     steps = None
