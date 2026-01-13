@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from policy_config_loader import load_motion_planner_timing
+
 # Add parent to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -319,6 +321,7 @@ class AIMotionPlanner:
         self._curobo_planner = None
         self._curobo_device = curobo_device or os.getenv("CUROBO_DEVICE", "cuda:0")
         self._use_curobo = use_curobo and os.getenv("USE_CUROBO", "true").lower() in {"1", "true", "yes"}
+        self._timing = load_motion_planner_timing()
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -602,7 +605,7 @@ class AIMotionPlanner:
             orientation=self.robot_config["home_orientation"].copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.HOME,
-            duration_to_next=0.8,
+            duration_to_next=self._timing["home"],
         ))
 
         # 2. Approach above object
@@ -611,7 +614,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.APPROACH,
-            duration_to_next=0.6,
+            duration_to_next=self._timing["approach"],
         ))
 
         # 3. Pre-grasp (just above object)
@@ -620,7 +623,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.PRE_GRASP,
-            duration_to_next=0.4,
+            duration_to_next=self._timing["pre_grasp"],
         ))
 
         # 4. Grasp position
@@ -629,7 +632,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.GRASP,
-            duration_to_next=0.3,
+            duration_to_next=self._timing["grasp"],
         ))
 
         # 5. Close gripper
@@ -638,7 +641,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=0.0,  # Closed
             phase=MotionPhase.GRASP,
-            duration_to_next=0.4,
+            duration_to_next=self._timing["close_gripper"],
         ))
 
         # 6. Lift
@@ -647,7 +650,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=0.0,
             phase=MotionPhase.LIFT,
-            duration_to_next=0.6,
+            duration_to_next=self._timing["lift"],
         ))
 
         if place_pos is not None:
@@ -659,7 +662,7 @@ class AIMotionPlanner:
                 orientation=down_orientation.copy(),
                 gripper_aperture=0.0,
                 phase=MotionPhase.TRANSPORT,
-                duration_to_next=0.8,
+                duration_to_next=self._timing["transport"],
             ))
 
             # 8. Pre-place
@@ -668,7 +671,7 @@ class AIMotionPlanner:
                 orientation=down_orientation.copy(),
                 gripper_aperture=0.0,
                 phase=MotionPhase.PRE_PLACE,
-                duration_to_next=0.4,
+                duration_to_next=self._timing["pre_place"],
             ))
 
             # 9. Place
@@ -677,7 +680,7 @@ class AIMotionPlanner:
                 orientation=down_orientation.copy(),
                 gripper_aperture=0.0,
                 phase=MotionPhase.PLACE,
-                duration_to_next=0.3,
+                duration_to_next=self._timing["place"],
             ))
 
             # 10. Release
@@ -686,7 +689,7 @@ class AIMotionPlanner:
                 orientation=down_orientation.copy(),
                 gripper_aperture=1.0,  # Open
                 phase=MotionPhase.RELEASE,
-                duration_to_next=0.4,
+                duration_to_next=self._timing["release"],
             ))
 
             # 11. Retract
@@ -695,7 +698,7 @@ class AIMotionPlanner:
                 orientation=down_orientation.copy(),
                 gripper_aperture=1.0,
                 phase=MotionPhase.RETRACT,
-                duration_to_next=0.5,
+                duration_to_next=self._timing["retract"],
             ))
 
         # 12. Return home
@@ -704,7 +707,7 @@ class AIMotionPlanner:
             orientation=self.robot_config["home_orientation"].copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.HOME,
-            duration_to_next=0.0,
+            duration_to_next=self._timing["return_home"],
         ))
 
         return waypoints
@@ -745,7 +748,7 @@ class AIMotionPlanner:
             orientation=self.robot_config["home_orientation"].copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.HOME,
-            duration_to_next=0.8,
+            duration_to_next=self._timing["home"],
         ))
 
         # 2. Approach above handle
@@ -754,7 +757,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.ARTICULATE_APPROACH,
-            duration_to_next=0.6,
+            duration_to_next=self._timing["articulation_approach"],
         ))
 
         # 3. Pre-grasp handle
@@ -763,7 +766,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.ARTICULATE_APPROACH,
-            duration_to_next=0.4,
+            duration_to_next=self._timing["articulation_pre_grasp"],
         ))
 
         # 4. Grasp handle
@@ -772,7 +775,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.ARTICULATE_GRASP,
-            duration_to_next=0.3,
+            duration_to_next=self._timing["articulation_grasp"],
         ))
 
         # 5. Close gripper
@@ -781,7 +784,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=0.0,
             phase=MotionPhase.ARTICULATE_GRASP,
-            duration_to_next=0.4,
+            duration_to_next=self._timing["articulation_close"],
         ))
 
         # 6. Articulate motion (pull/push)
@@ -791,7 +794,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=0.0,
             phase=MotionPhase.ARTICULATE_MOTION,
-            duration_to_next=1.0,  # Slow motion for articulation
+            duration_to_next=self._timing["articulation_motion"],  # Slow motion for articulation
         ))
 
         # 7. Release
@@ -800,7 +803,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.RELEASE,
-            duration_to_next=0.3,
+            duration_to_next=self._timing["articulation_release"],
         ))
 
         # 8. Retract
@@ -809,7 +812,7 @@ class AIMotionPlanner:
             orientation=down_orientation.copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.RETRACT,
-            duration_to_next=0.5,
+            duration_to_next=self._timing["articulation_retract"],
         ))
 
         # 9. Home
@@ -818,7 +821,7 @@ class AIMotionPlanner:
             orientation=self.robot_config["home_orientation"].copy(),
             gripper_aperture=1.0,
             phase=MotionPhase.HOME,
-            duration_to_next=0.0,
+            duration_to_next=self._timing["return_home"],
         ))
 
         return waypoints
@@ -850,7 +853,7 @@ class AIMotionPlanner:
                 orientation=self.robot_config["home_orientation"].copy(),
                 gripper_aperture=0.0,  # Closed for pushing
                 phase=MotionPhase.HOME,
-                duration_to_next=0.8,
+                duration_to_next=self._timing["push_home"],
             ),
             # Approach
             Waypoint(
@@ -858,7 +861,7 @@ class AIMotionPlanner:
                 orientation=down_orientation.copy(),
                 gripper_aperture=0.0,
                 phase=MotionPhase.APPROACH,
-                duration_to_next=0.5,
+                duration_to_next=self._timing["push_approach"],
             ),
             # Lower to contact
             Waypoint(
@@ -866,7 +869,7 @@ class AIMotionPlanner:
                 orientation=down_orientation.copy(),
                 gripper_aperture=0.0,
                 phase=MotionPhase.PRE_GRASP,
-                duration_to_next=0.4,
+                duration_to_next=self._timing["push_lower"],
             ),
             # Push
             Waypoint(
@@ -874,7 +877,7 @@ class AIMotionPlanner:
                 orientation=down_orientation.copy(),
                 gripper_aperture=0.0,
                 phase=MotionPhase.TRANSPORT,
-                duration_to_next=1.0,
+                duration_to_next=self._timing["push_motion"],
             ),
             # Lift
             Waypoint(
@@ -882,7 +885,7 @@ class AIMotionPlanner:
                 orientation=down_orientation.copy(),
                 gripper_aperture=0.0,
                 phase=MotionPhase.RETRACT,
-                duration_to_next=0.5,
+                duration_to_next=self._timing["push_lift"],
             ),
             # Home
             Waypoint(
@@ -890,7 +893,7 @@ class AIMotionPlanner:
                 orientation=self.robot_config["home_orientation"].copy(),
                 gripper_aperture=1.0,
                 phase=MotionPhase.HOME,
-                duration_to_next=0.0,
+                duration_to_next=self._timing["push_return_home"],
             ),
         ]
 
@@ -910,28 +913,28 @@ class AIMotionPlanner:
                 orientation=self.robot_config["home_orientation"].copy(),
                 gripper_aperture=1.0,
                 phase=MotionPhase.HOME,
-                duration_to_next=0.8,
+                duration_to_next=self._timing["simple_home"],
             ),
             Waypoint(
                 position=np.array([target_pos[0], target_pos[1], approach_height]),
                 orientation=down_orientation.copy(),
                 gripper_aperture=1.0,
                 phase=MotionPhase.APPROACH,
-                duration_to_next=0.6,
+                duration_to_next=self._timing["simple_approach"],
             ),
             Waypoint(
                 position=target_pos.copy(),
                 orientation=down_orientation.copy(),
                 gripper_aperture=1.0,
                 phase=MotionPhase.PRE_GRASP,
-                duration_to_next=0.5,
+                duration_to_next=self._timing["simple_reach"],
             ),
             Waypoint(
                 position=self.robot_config["home_position"].copy(),
                 orientation=self.robot_config["home_orientation"].copy(),
                 gripper_aperture=1.0,
                 phase=MotionPhase.HOME,
-                duration_to_next=0.0,
+                duration_to_next=self._timing["simple_return_home"],
             ),
         ]
 

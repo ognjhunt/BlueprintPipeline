@@ -50,6 +50,7 @@ from quality_constants import (
     STABILITY_THRESHOLD,
     COLLISION_PENETRATION_THRESHOLD,
 )
+from policy_config_loader import load_validation_thresholds
 
 # Import Isaac Sim integration
 try:
@@ -322,6 +323,27 @@ class ValidationConfig:
     retry_on_collision: bool = True
     retry_on_joint_limit: bool = True
 
+    @classmethod
+    def from_policy_config(cls) -> "ValidationConfig":
+        """Load validation configuration from policy defaults."""
+        thresholds = load_validation_thresholds()
+        return cls(
+            max_unexpected_collisions=int(thresholds["max_unexpected_collisions"]),
+            max_joint_violations=int(thresholds["max_joint_violations"]),
+            max_collision_force=thresholds["max_collision_force"],
+            max_joint_velocity=thresholds["max_joint_velocity"],
+            max_joint_acceleration=thresholds["max_joint_acceleration"],
+            require_task_success=thresholds["require_task_success"],
+            require_grasp_success=thresholds["require_grasp_success"],
+            require_placement_success=thresholds["require_placement_success"],
+            require_object_stable=thresholds["require_object_stable"],
+            stability_threshold=thresholds["stability_threshold"],
+            min_quality_score=thresholds["min_quality_score"],
+            max_retries=int(thresholds["max_retries"]),
+            retry_on_collision=thresholds["retry_on_collision"],
+            retry_on_joint_limit=thresholds["retry_on_joint_limit"],
+        )
+
 
 # =============================================================================
 # Simulation Validator
@@ -371,7 +393,7 @@ class SimulationValidator:
         """
         self.robot_type = robot_type
         self.robot_config = ROBOT_CONFIGS.get(robot_type, ROBOT_CONFIGS["franka"])
-        self.config = config or ValidationConfig()
+        self.config = config or ValidationConfig.from_policy_config()
         self.verbose = verbose
         self._scene_usd_path = scene_usd_path
 
