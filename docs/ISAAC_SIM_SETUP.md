@@ -144,6 +144,12 @@ Labs should run the staging harness against **real** 3D-RE-GEN reconstructions
 inside Isaac Sim before a production rollout. This exercises the real pipeline
 handoff and confirms USD scenes load in Isaac Sim with the live backend.
 
+Staging runs also require collision-aware planning dependencies:
+
+- **cuRobo** installed in the Isaac Sim Python environment
+- **CUDA** runtime + compatible NVIDIA drivers
+- **PyTorch with CUDA support**
+
 ```bash
 RUN_STAGING_E2E=1 \
 STAGING_SCENE_DIR=/mnt/gcs/scenes/<scene_id> \
