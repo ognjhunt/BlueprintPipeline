@@ -125,6 +125,27 @@ print(f'Replicator available: {integration.has_replicator()}')
 "
 ```
 
+## Staging E2E Validation (Labs pre-production)
+
+Labs should run the staging harness against **real** 3D-RE-GEN reconstructions
+inside Isaac Sim before a production rollout. This exercises the real pipeline
+handoff and confirms USD scenes load in Isaac Sim with the live backend.
+
+```bash
+RUN_STAGING_E2E=1 \
+STAGING_SCENE_DIR=/mnt/gcs/scenes/<scene_id> \
+/isaac-sim/python.sh -m pytest tests/test_pipeline_e2e_staging.py -v
+```
+
+You can also provide a data root + scene id instead of a full scene path:
+
+```bash
+RUN_STAGING_E2E=1 \
+STAGING_DATA_ROOT=/mnt/gcs \
+STAGING_SCENE_ID=<scene_id> \
+/isaac-sim/python.sh -m pytest tests/test_pipeline_e2e_staging.py -v
+```
+
 ## Production Mode
 
 For production episode generation with full physics validation:

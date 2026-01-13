@@ -169,6 +169,28 @@ python tools/run_local_pipeline.py \
     --validate
 ```
 
+### Staging Isaac Sim E2E (Labs pre-production)
+
+Before production rollouts, labs should run the staging E2E harness against a
+real 3D-RE-GEN reconstruction and Isaac Sim. This validates the full handoff
+from reconstruction → USD → Isaac Sim loading without relying on mocks.
+
+```bash
+# Run inside an Isaac Sim environment with real reconstruction outputs
+RUN_STAGING_E2E=1 \
+STAGING_SCENE_DIR=/mnt/gcs/scenes/<scene_id> \
+/isaac-sim/python.sh -m pytest tests/test_pipeline_e2e_staging.py -v
+```
+
+If you store scenes under a data root, you can also specify:
+
+```bash
+RUN_STAGING_E2E=1 \
+STAGING_DATA_ROOT=/mnt/gcs \
+STAGING_SCENE_ID=<scene_id> \
+/isaac-sim/python.sh -m pytest tests/test_pipeline_e2e_staging.py -v
+```
+
 ## For Robotics Labs
 
 The pipeline produces outputs ready for integration with existing workflows:
