@@ -677,6 +677,11 @@ class IKSolver:
         self.config = robot_config
         self.verbose = verbose
 
+    def log(self, msg: str, level: str = "INFO") -> None:
+        """Log helper for IK solver."""
+        if self.verbose:
+            print(f"[IK-SOLVER] [{level}] {msg}")
+
     def solve(
         self,
         target_position: np.ndarray,
@@ -706,6 +711,25 @@ class IKSolver:
             return self._solve_fetch_ik(target_position, target_orientation, seed_joints)
         else:
             return self._solve_numerical_ik(target_position, target_orientation, seed_joints)
+
+    def _within_joint_limits(self, joints: np.ndarray, tolerance: float = 1e-4) -> bool:
+        """Check whether joints are within configured limits."""
+        lower = self.config.joint_limits_lower
+        upper = self.config.joint_limits_upper
+        finite_mask = np.isfinite(lower) & np.isfinite(upper)
+        if not np.any(finite_mask):
+            return True
+        below = joints[finite_mask] < (lower[finite_mask] - tolerance)
+        above = joints[finite_mask] > (upper[finite_mask] + tolerance)
+        return not (np.any(below) or np.any(above))
+
+    def _reject_if_out_of_bounds(self, joints: np.ndarray) -> Optional[np.ndarray]:
+        """Return joints if within limits, otherwise log and return None."""
+        if not self._within_joint_limits(joints):
+            if self.verbose:
+                self.log("IK solution violates joint limits", "WARNING")
+            return None
+        return joints
 
     def _solve_franka_ik(
         self,
@@ -758,10 +782,7 @@ class IKSolver:
 
         joints = np.array([q1, q2, q3, q4, q5, q6, q7])
 
-        # Clamp to limits
-        joints = np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
-
-        return joints
+        return self._reject_if_out_of_bounds(joints)
 
     def _solve_ur_ik(
         self,
@@ -815,7 +836,7 @@ class IKSolver:
             # Out of reach - use seed with base rotation
             joints = seed_joints.copy()
             joints[0] = q1
-            return np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
+            return self._reject_if_out_of_bounds(joints)
 
         # Joint 3: Elbow angle (using law of cosines)
         cos_q3 = (r**2 - a2**2 - a3**2) / (2 * abs(a2) * abs(a3))
@@ -837,8 +858,7 @@ class IKSolver:
 
         joints = np.array([q1, q2, q3, q4, q5, q6])
 
-        # Clamp to limits
-        return np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
+        return self._reject_if_out_of_bounds(joints)
 
     def _solve_fetch_ik(
         self,
@@ -931,8 +951,7 @@ class IKSolver:
 
         joints = np.array([q0, q1, q2, q3, q4, q5, q6])
 
-        # Clamp to limits
-        return np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
+        return self._reject_if_out_of_bounds(joints)
 
     def _solve_numerical_ik(
         self,
@@ -961,6 +980,7 @@ class IKSolver:
             Joint configuration or None if failed to converge
         """
         joints = seed_joints.copy().astype(np.float64)
+        clipped_during_solve = False
         num_joints = len(joints)
 
         # Damping factor for singularity robustness
@@ -981,9 +1001,9 @@ class IKSolver:
 
             # Check convergence
             if pos_error_norm < position_tolerance and orient_error_norm < orientation_tolerance:
-                # Clamp to joint limits
-                joints = np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
-                return joints
+                if clipped_during_solve:
+                    return None
+                return self._reject_if_out_of_bounds(joints)
 
             # Combine errors into 6D task-space error
             error = np.concatenate([pos_error, orient_error])
@@ -1007,8 +1027,18 @@ class IKSolver:
             # Update joints with step size
             joints = joints + step_size * joint_delta
 
-            # Clamp to joint limits
-            joints = np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
+            # Clamp to joint limits for stability, track violations
+            lower = self.config.joint_limits_lower
+            upper = self.config.joint_limits_upper
+            finite_mask = np.isfinite(lower) & np.isfinite(upper)
+            if np.any(finite_mask):
+                out_of_bounds = np.logical_or(
+                    joints[finite_mask] < lower[finite_mask],
+                    joints[finite_mask] > upper[finite_mask],
+                )
+                if np.any(out_of_bounds):
+                    clipped_during_solve = True
+                joints[finite_mask] = np.clip(joints[finite_mask], lower[finite_mask], upper[finite_mask])
 
             # Adaptive damping: increase if error grows
             if iteration > 0:
@@ -1022,7 +1052,9 @@ class IKSolver:
 
         # Return best effort if close
         if pos_error_norm < position_tolerance * 10:
-            return np.clip(joints, self.config.joint_limits_lower, self.config.joint_limits_upper)
+            if clipped_during_solve:
+                return None
+            return self._reject_if_out_of_bounds(joints)
 
         return None
 
@@ -1282,6 +1314,17 @@ class TrajectorySolver:
         if self.verbose:
             print(f"[TRAJECTORY-SOLVER] [{level}] {msg}")
 
+    def _within_joint_limits(self, joints: np.ndarray, tolerance: float = 1e-4) -> bool:
+        """Check whether joints are within configured limits."""
+        lower = self.robot_config.joint_limits_lower
+        upper = self.robot_config.joint_limits_upper
+        finite_mask = np.isfinite(lower) & np.isfinite(upper)
+        if not np.any(finite_mask):
+            return True
+        below = joints[finite_mask] < (lower[finite_mask] - tolerance)
+        above = joints[finite_mask] > (upper[finite_mask] + tolerance)
+        return not (np.any(below) or np.any(above))
+
     def solve(self, motion_plan: MotionPlan) -> JointTrajectory:
         """
         Convert motion plan to joint trajectory.
@@ -1336,10 +1379,11 @@ class TrajectorySolver:
         prev_joints = self.robot_config.default_joint_positions.copy()
 
         for i, wp in enumerate(waypoints):
+            seed = wp.joint_positions if wp.joint_positions is not None else prev_joints
             joints = self.ik_solver.solve(
                 target_position=wp.position,
                 target_orientation=wp.orientation,
-                seed_joints=prev_joints,
+                seed_joints=seed,
             )
 
             if joints is None:
@@ -1347,6 +1391,15 @@ class TrajectorySolver:
                 message = (
                     f"IK failed for waypoint {i} (phase={phase_label}) "
                     f"pos={wp.position.tolist()} ori={wp.orientation.tolist()}"
+                )
+                self.log(f"  {message}", "ERROR")
+                raise TrajectoryIKError(message, waypoint_index=i, phase=wp.phase)
+
+            if not self._within_joint_limits(joints):
+                phase_label = wp.phase.value if hasattr(wp.phase, "value") else str(wp.phase)
+                message = (
+                    f"IK joint limits violated for waypoint {i} (phase={phase_label}) "
+                    f"joints={joints.tolist()}"
                 )
                 self.log(f"  {message}", "ERROR")
                 raise TrajectoryIKError(message, waypoint_index=i, phase=wp.phase)
