@@ -77,7 +77,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # Core imports
-from motion_planner import AIMotionPlanner, MotionPlan
+from motion_planner import AIMotionPlanner, MotionPlan, SceneContext
 from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS
 from lerobot_exporter import LeRobotExporter, LeRobotDatasetConfig
 from quality_constants import MIN_QUALITY_SCORE, MAX_RETRIES, PRODUCTION_TRAINING_THRESHOLD
@@ -92,6 +92,7 @@ from cpgen_augmenter import (
 )
 from sim_validator import (
     SimulationValidator,
+    FailureReason,
     ValidationResult,
     ValidationStatus,
     ValidationConfig,
@@ -916,6 +917,11 @@ class EpisodeGenerator:
         """Generate seed episodes for each task."""
         seed_episodes = []
         failed_seeds = []
+        scene_context = SceneContext(
+            scene_id=self.config.scene_id,
+            environment_type=manifest.get("environment_type", "unknown"),
+            objects=manifest.get("objects", []),
+        )
 
         for task, spec in tasks_with_specs:
             try:
@@ -976,7 +982,29 @@ class EpisodeGenerator:
                     target_object=target_object,
                     place_position=task.get("place_position"),
                     articulation_info=articulation_info,
+                    scene_context=scene_context,
                 )
+
+                if not getattr(motion_plan, "planning_success", True):
+                    self.log(
+                        f"    Motion planning failed for {task['task_name']}: {motion_plan.planning_errors}",
+                        "WARNING",
+                    )
+                    episode = GeneratedEpisode(
+                        episode_id=f"seed_{task['task_id']}",
+                        task_name=task["task_name"],
+                        task_description=task["description"],
+                        trajectory=None,
+                        motion_plan=motion_plan,
+                        task_spec=spec,
+                        scene_id=self.config.scene_id,
+                        variation_index=0,
+                        is_seed=True,
+                        augmentation_method="direct",
+                        generation_time_seconds=time.time() - start_time,
+                    )
+                    seed_episodes.append(episode)
+                    continue
 
                 # Solve trajectory
                 trajectory = self.trajectory_solver.solve(motion_plan)
@@ -1070,6 +1098,9 @@ class EpisodeGenerator:
 
         for seed in seed_episodes:
             if seed.task_spec is None or seed.motion_plan is None:
+                continue
+            if not getattr(seed.motion_plan, "planning_success", True):
+                self.log(f"  Skipping seed {seed.episode_id} due to planning failure", "WARNING")
                 continue
 
             try:
@@ -1185,6 +1216,9 @@ class EpisodeGenerator:
             if seed.task_spec is None or seed.motion_plan is None:
                 self.log(f"    Skipping seed {seed.episode_id} - missing task_spec or motion_plan", "WARNING")
                 continue
+            if not getattr(seed.motion_plan, "planning_success", True):
+                self.log(f"    Skipping seed {seed.episode_id} due to planning failure", "WARNING")
+                continue
 
             for var_idx in range(1, num_variations):
                 try:
@@ -1214,12 +1248,26 @@ class EpisodeGenerator:
                         p + o for p, o in zip(target_object["position"], offset)
                     ]
 
+                    variation_scene_context = SceneContext(
+                        scene_id=self.config.scene_id,
+                        environment_type=varied_manifest.get("environment_type", "unknown"),
+                        objects=varied_manifest.get("objects", []),
+                    )
+
                     motion_plan = self.motion_planner.plan_motion(
                         task_name=seed.task_name,
                         task_description=seed.task_description,
                         target_object=target_object,
                         place_position=seed.motion_plan.place_position.tolist() if seed.motion_plan and seed.motion_plan.place_position is not None else None,
+                        scene_context=variation_scene_context,
                     )
+
+                    if not getattr(motion_plan, "planning_success", True):
+                        self.log(
+                            f"    Motion planning failed for variation {var_idx}: {motion_plan.planning_errors}",
+                            "WARNING",
+                        )
+                        continue
 
                     trajectory = self.trajectory_solver.solve(motion_plan)
 
@@ -1338,6 +1386,19 @@ class EpisodeGenerator:
 
         for episode in episodes:
             if episode.trajectory is None or episode.motion_plan is None:
+                if episode.motion_plan is not None and not getattr(episode.motion_plan, "planning_success", True):
+                    result = ValidationResult(
+                        episode_id=episode.episode_id,
+                        status=ValidationStatus.NEEDS_RETRY,
+                    )
+                    result.failure_reasons.append(FailureReason.PLANNING_FAILURE)
+                    result.failure_details = "; ".join(episode.motion_plan.planning_errors)
+                    episode.validation_result = result
+                    episode.is_valid = False
+                    episode.quality_score = 0.0
+                    episode.validation_errors = [r.value for r in result.failure_reasons]
+                    continue
+
                 episode.is_valid = False
                 episode.quality_score = 0.0
                 episode.validation_errors.append("Missing trajectory or motion plan")
