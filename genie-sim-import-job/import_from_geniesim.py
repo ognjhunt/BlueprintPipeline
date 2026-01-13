@@ -111,6 +111,7 @@ class ImportResult:
     # Output
     output_dir: Optional[Path] = None
     manifest_path: Optional[Path] = None
+    import_manifest_path: Optional[Path] = None
 
     # Errors
     errors: List[str] = field(default_factory=list)
@@ -504,6 +505,8 @@ def run_import_job(
         success=False,
         job_id=config.job_id,
     )
+    quality_min_score = 0.0
+    quality_max_score = 0.0
 
     try:
         # Step 1: Check/wait for job completion
@@ -638,6 +641,8 @@ def run_import_job(
             result.episodes_passed_validation = validation_result['passed_count']
             result.episodes_filtered = validation_result['failed_count']
             result.average_quality_score = validation_result['average_quality_score']
+            quality_min_score = validation_result["min_quality_score"]
+            quality_max_score = validation_result["max_quality_score"]
 
             # Step 4: Filter low-quality episodes
             if config.filter_low_quality:
@@ -673,9 +678,10 @@ def run_import_job(
 
         else:
             result.episodes_passed_validation = result.total_episodes_downloaded
-            result.average_quality_score = np.mean([
-                ep.quality_score for ep in download_result.episodes
-            ]) if download_result.episodes else 0.0
+            quality_scores = [ep.quality_score for ep in download_result.episodes]
+            result.average_quality_score = np.mean(quality_scores) if quality_scores else 0.0
+            quality_min_score = float(np.min(quality_scores)) if quality_scores else 0.0
+            quality_max_score = float(np.max(quality_scores)) if quality_scores else 0.0
 
         # Step 5: Convert episodes to LeRobot format
         print(f"[IMPORT] Converting episodes to LeRobot format...")
@@ -710,6 +716,39 @@ def run_import_job(
 
             with open(result.manifest_path, "w") as f:
                 json.dump(manifest, f, indent=2)
+
+        # Step 7: Write machine-readable import manifest for workflows
+        import_manifest_path = config.output_dir / "import_manifest.json"
+        gcs_output_path = None
+        output_dir_str = str(config.output_dir)
+        if output_dir_str.startswith("/mnt/gcs/"):
+            gcs_output_path = "gs://" + output_dir_str[len("/mnt/gcs/"):]
+
+        import_manifest = {
+            "schema_version": "1.0",
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "job_id": config.job_id,
+            "output_dir": output_dir_str,
+            "gcs_output_path": gcs_output_path,
+            "episodes": {
+                "downloaded": result.total_episodes_downloaded,
+                "passed_validation": result.episodes_passed_validation,
+                "filtered": result.episodes_filtered,
+                "download_errors": len(download_result.errors),
+            },
+            "quality": {
+                "average_score": result.average_quality_score,
+                "min_score": quality_min_score,
+                "max_score": quality_max_score,
+                "threshold": config.min_quality_score,
+                "validation_enabled": config.enable_validation,
+            },
+        }
+
+        with open(import_manifest_path, "w") as f:
+            json.dump(import_manifest, f, indent=2)
+
+        result.import_manifest_path = import_manifest_path
 
         # Success
         result.success = True
