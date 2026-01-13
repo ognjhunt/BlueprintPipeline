@@ -157,6 +157,8 @@ main:
                 containerOverrides:
                   - name: "genie-sim-import"
                     env:
+                      # Supported overrides via workflow payload:
+                      #   min_quality_score, enable_validation, filter_low_quality, wait_for_completion
                       - name: BUCKET
                         value: ${bucket}
                       - name: GENIE_SIM_JOB_ID
@@ -164,11 +166,13 @@ main:
                       - name: SCENE_ID
                         value: ${scene_id}
                       - name: WAIT_FOR_COMPLETION
-                        value: "true"
+                        value: ${default(event.wait_for_completion, "true")}
                       - name: MIN_QUALITY_SCORE
-                        value: "0.85"
-                      - name: VALIDATE_EPISODES
-                        value: "true"
+                        value: ${default(event.min_quality_score, "0.85")}
+                      - name: ENABLE_VALIDATION
+                        value: ${default(event.enable_validation, "true")}
+                      - name: FILTER_LOW_QUALITY
+                        value: ${default(event.filter_low_quality, "true")}
                 timeout: "1800s"  # 30 minutes max
           result: import_job_execution
         retry:
