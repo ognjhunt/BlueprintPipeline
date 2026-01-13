@@ -426,7 +426,7 @@ class TaskConfigGenerator:
                         break
 
             # Also consider countertops, tables, shelves
-            category = obj.get("category", "").lower()
+            category = (obj.get("category") or "").lower()
             if category in ["countertop", "table", "shelf", "desk", "surface"]:
                 obj_id = str(obj.get("id", ""))
                 if obj_id not in regions:
