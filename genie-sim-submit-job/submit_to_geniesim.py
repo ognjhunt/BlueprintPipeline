@@ -35,6 +35,7 @@ from geniesim_client import GenieSimClient, GenerationParams
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 from geniesim_adapter.local_framework import run_local_data_collection
+from tools.metrics.pipeline_metrics import get_metrics
 
 
 def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -92,13 +93,15 @@ def main() -> int:
     if submission_mode == "api":
         client = GenieSimClient()
         try:
-            result = client.submit_generation_job(
-                scene_graph=scene_graph,
-                asset_index=asset_index,
-                task_config=task_config,
-                generation_params=generation_params,
-                job_name=f"{scene_id}-geniesim",
-            )
+            metrics = get_metrics()
+            with metrics.track_api_call("genie-sim", "submit_generation_job", scene_id):
+                result = client.submit_generation_job(
+                    scene_graph=scene_graph,
+                    asset_index=asset_index,
+                    task_config=task_config,
+                    generation_params=generation_params,
+                    job_name=f"{scene_id}-geniesim",
+                )
             if not result.success or not result.job_id:
                 raise RuntimeError(result.message or "Genie Sim submission failed")
             job_id = result.job_id
@@ -151,6 +154,11 @@ def main() -> int:
                     blob = storage_client.bucket(bucket).blob(str(relative_path))
                     blob.upload_from_filename(str(file_path))
 
+    metrics = get_metrics()
+    metrics_summary = {
+        "backend": metrics.backend.value,
+        "stats": metrics.get_stats(),
+    }
     job_payload = {
         "job_id": job_id,
         "scene_id": scene_id,
@@ -173,6 +181,7 @@ def main() -> int:
             "num_variations": num_variations,
             "min_quality_score": min_quality_score,
         },
+        "metrics_summary": metrics_summary,
     }
     if submission_mode == "local":
         job_payload["artifacts"] = {
@@ -193,4 +202,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    metrics = get_metrics()
+    scene_id = os.getenv("SCENE_ID", "")
+    with metrics.track_job("genie-sim-submit-job", scene_id):
+        raise SystemExit(main())
