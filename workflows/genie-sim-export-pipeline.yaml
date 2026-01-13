@@ -72,6 +72,8 @@ main:
           - robotType: '${default(map.get(event, "robot_type"), "franka")}'
           # Max tasks to generate hints for
           - maxTasks: '${default(map.get(event, "max_tasks"), "50")}'
+          # Submission mode: api or local
+          - geniesimSubmissionMode: '${default(map.get(event, "geniesim_submission_mode"), "api")}'
         next: filter_completion_markers
 
     # Filter for .variation_pipeline_complete marker files
@@ -93,6 +95,7 @@ main:
           - geniesimPrefix: '${"scenes/" + sceneId + "/geniesim"}'
           - geniesimJobName: "genie-sim-export-job"
           - geniesimSubmitJobName: "genie-sim-submit-job"
+          - geniesimLocalJobName: "genie-sim-local-job"
           - geniesimCompleteMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_complete"}'
           - geniesimJobMetadataPath: '${"scenes/" + sceneId + "/geniesim/job.json"}'
         next: check_geniesim_enabled
@@ -125,6 +128,8 @@ main:
             - useGeniesim: '${default(map.get(sceneConfig, "use_geniesim"), true)}'
             # Get robot type from config if specified
             - robotType: '${default(map.get(sceneConfig, "robot_type"), robotType)}'
+            # Allow per-scene override for local execution
+            - geniesimSubmissionMode: '${default(map.get(sceneConfig, "geniesim_submission_mode"), geniesimSubmissionMode)}'
         except:
           as: e
           steps:
@@ -278,7 +283,61 @@ main:
         args:
           text: '${"Genie Sim export completed for scene " + sceneId}'
           severity: "INFO"
+        next: select_geniesim_submission_job
+
+    - select_geniesim_submission_job:
+        switch:
+          - condition: '${geniesimSubmissionMode == "local"}'
+            next: run_geniesim_local_job
         next: run_geniesim_submission_job
+
+    # Run local Genie Sim execution (no hosted API)
+    - run_geniesim_local_job:
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + geniesimLocalJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: GENIESIM_PREFIX
+                        value: ${geniesimPrefix}
+                      - name: JOB_OUTPUT_PATH
+                        value: ${geniesimJobMetadataPath}
+                      - name: ROBOT_TYPE
+                        value: ${robotType}
+                      - name: EPISODES_PER_TASK
+                        value: "10"
+                      - name: NUM_VARIATIONS
+                        value: "5"
+                      - name: OUTPUT_PREFIX
+                        value: '${"scenes/" + sceneId + "/episodes"}'
+                      - name: GENIESIM_FORCE_LOCAL
+                        value: "true"
+        result: geniesimSubmitExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_submission_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to execute local Genie Sim job: " + e.message}'
+                  severity: "ERROR"
+            - raise_submission_error:
+                raise: ${e}
+        next: set_submission_execution_name
 
     # Submit the Genie Sim generation job (local or API-backed)
     - run_geniesim_submission_job:
