@@ -52,6 +52,49 @@ main:
               - job_id: ${event.job_id}
               - status: ${default(event.status, "completed")}
               - scene_id: ${default(event.scene_id, "unknown")}
+        next: resolve_job_id
+
+    - resolve_job_id:
+        switch:
+          - condition: ${job_id == null or job_id == ""}
+            next: fetch_job_metadata
+        next: validate_inputs
+
+    - fetch_job_metadata:
+        switch:
+          - condition: ${scene_id == null or scene_id == "" or scene_id == "unknown"}
+            next: missing_job_id
+        next: read_job_metadata
+
+    - read_job_metadata:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${"scenes/" + scene_id + "/geniesim/job.json"}'
+            alt: "media"
+          result: jobMetadataRaw
+        except:
+          as: e
+          steps:
+            - log_missing_job_metadata:
+                call: sys.log
+                args:
+                  text: ${"Failed to load stored job metadata for scene " + scene_id + ": " + e.message}
+                  severity: "ERROR"
+            - raise_missing_job_metadata:
+                raise: ${e}
+        next: parse_job_metadata
+
+    - parse_job_metadata:
+        assign:
+          - jobMetadata: ${json.decode(jobMetadataRaw)}
+          - job_id: ${jobMetadata.job_id}
+        next: validate_inputs
+
+    - missing_job_id:
+        raise:
+          message: "job_id is required and could not be resolved from scene metadata"
 
     - validate_inputs:
         switch:
