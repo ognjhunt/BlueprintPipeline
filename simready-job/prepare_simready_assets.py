@@ -1188,8 +1188,17 @@ def build_physics_config(
             return physics_cfg
         except Exception as e:
             print(f"[SIMREADY] WARNING: Gemini physics estimation failed: {e}", file=sys.stderr)
+            logger.warning(
+                "[SIMREADY] Falling back to heuristic physics estimates for obj %s due to Gemini failure.",
+                obj.get("id"),
+            )
 
     # Fallback to heuristic defaults
+    if gemini_client is None or not have_gemini():
+        logger.warning(
+            "[SIMREADY] Using heuristic physics estimates for obj %s (no Gemini client available).",
+            obj.get("id"),
+        )
     physics_cfg = estimate_default_physics(obj, bounds)
 
     # Store mesh bounds info for catalog
@@ -1601,11 +1610,25 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
 # ---------- Main pipeline ----------
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _resolve_production_mode() -> bool:
+    pipeline_env = os.getenv("PIPELINE_ENV", "").strip().lower()
+    return _env_flag("SIMREADY_PRODUCTION_MODE") or pipeline_env in {"prod", "production"}
+
+
 def prepare_simready_assets_job(
     bucket: str,
     scene_id: str,
     assets_prefix: str,
     root: Path = GCS_ROOT,
+    allow_heuristic_fallback: Optional[bool] = None,
+    production_mode: Optional[bool] = None,
 ) -> int:
     if not assets_prefix:
         print("[SIMREADY] ASSETS_PREFIX is required", file=sys.stderr)
@@ -1614,10 +1637,17 @@ def prepare_simready_assets_job(
     assets_root = root / assets_prefix
     manifest_path = assets_root / "scene_manifest.json"
 
+    if production_mode is None:
+        production_mode = _resolve_production_mode()
+    if allow_heuristic_fallback is None:
+        allow_heuristic_fallback = _env_flag("SIMREADY_ALLOW_HEURISTIC_FALLBACK")
+
     print(f"[SIMREADY] Bucket={bucket}")
     print(f"[SIMREADY] Scene={scene_id}")
     print(f"[SIMREADY] Assets root={assets_root}")
     print(f"[SIMREADY] Loading {manifest_path} (or legacy scene_assets.json)")
+    print(f"[SIMREADY] Production mode={'true' if production_mode else 'false'}")
+    print(f"[SIMREADY] Heuristic fallback allowed={'true' if allow_heuristic_fallback else 'false'}")
 
     scene_assets = load_manifest_or_scene_assets(assets_root)
     if scene_assets is None:
@@ -1641,6 +1671,11 @@ def prepare_simready_assets_job(
         except Exception as e:
             print(f"[SIMREADY] WARNING: Failed to initialize profile selector: {e}", file=sys.stderr)
 
+    if production_mode and allow_heuristic_fallback:
+        logger.warning(
+            "[SIMREADY] SIMREADY_ALLOW_HEURISTIC_FALLBACK is ignored in production mode."
+        )
+
     client = None
     if have_gemini():
         # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
@@ -1659,10 +1694,21 @@ def prepare_simready_assets_job(
         client = genai.Client(api_key=gemini_api_key)
         print("[SIMREADY] Gemini client initialized")
     else:
-        print(
-            "[SIMREADY] GEMINI_API_KEY not set or google-genai unavailable; using heuristic defaults only",
-            file=sys.stderr,
-        )
+        if production_mode:
+            logger.error(
+                "[SIMREADY] Production mode requires Gemini-backed physics estimation. "
+                "Heuristic-only physics is not allowed. Set GEMINI_API_KEY or disable production mode."
+            )
+            return 2
+        if allow_heuristic_fallback:
+            logger.warning(
+                "[SIMREADY] Gemini unavailable; using heuristic-only physics estimation (CI/testing fallback enabled)."
+            )
+        else:
+            logger.warning(
+                "[SIMREADY] Gemini unavailable; using heuristic-only physics estimation. "
+                "Set SIMREADY_ALLOW_HEURISTIC_FALLBACK=1 to acknowledge this fallback for CI/testing."
+            )
 
     simready_paths: Dict[Any, str] = {}
 
