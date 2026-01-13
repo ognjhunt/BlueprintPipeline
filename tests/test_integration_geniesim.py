@@ -8,13 +8,14 @@ They require a valid API key and will make real API calls when run with the
 
 Usage:
     # Run integration tests (requires API key)
-    pytest -v -m integration tests/test_integration_geniesim.py
+    RUN_GENIESIM_INTEGRATION=1 pytest -v -m integration tests/test_integration_geniesim.py
 
     # Skip integration tests
     pytest -v -m "not integration" tests/
 
 Environment Variables:
     GENIE_SIM_API_KEY: Required for integration tests
+    RUN_GENIESIM_INTEGRATION: Set to "1" to opt-in to integration tests
     GENIE_SIM_API_URL: Optional (defaults to production endpoint)
 """
 
@@ -25,12 +26,15 @@ from pathlib import Path
 
 import pytest
 
-# Add repo root to path
+# Add repo root and module path to sys.path
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+EXPORT_JOB_ROOT = REPO_ROOT / "genie-sim-export-job"
+for path in (REPO_ROOT, EXPORT_JOB_ROOT):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
 
-from genie_sim_export_job.geniesim_client import (
+from geniesim_client import (
     GenieSimClient,
     GenerationParams,
     JobStatus,
@@ -39,12 +43,20 @@ from genie_sim_export_job.geniesim_client import (
     GenieSimJobNotFoundError,
 )
 
-# Skip all tests if no API key
+# Skip all tests unless explicitly opted-in and API key is set
 GENIE_SIM_API_KEY = os.getenv("GENIE_SIM_API_KEY")
-pytestmark = pytest.mark.skipif(
-    not GENIE_SIM_API_KEY,
-    reason="GENIE_SIM_API_KEY not set - skipping Genie Sim integration tests"
-)
+RUN_GENIESIM_INTEGRATION = os.getenv("RUN_GENIESIM_INTEGRATION") == "1"
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not RUN_GENIESIM_INTEGRATION,
+        reason="Set RUN_GENIESIM_INTEGRATION=1 to opt-in to Genie Sim integration tests",
+    ),
+    pytest.mark.skipif(
+        not GENIE_SIM_API_KEY,
+        reason="GENIE_SIM_API_KEY not set - skipping Genie Sim integration tests",
+    ),
+]
 
 
 class TestGenieSimHealthCheck:
