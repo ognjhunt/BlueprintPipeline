@@ -435,7 +435,7 @@ class AssetIndexBuilder:
             semantic_description = self.description_generator.generate(obj)
 
             # Get categories
-            category = obj.get("category", "object").lower()
+            category = (obj.get("category") or "object").lower()
             categories = CATEGORY_MAPPING.get(category, CATEGORY_MAPPING["object"])
 
             # Get physics properties
