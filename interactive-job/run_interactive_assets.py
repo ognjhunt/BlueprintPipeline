@@ -77,19 +77,72 @@ def write_failure_marker(
     scene_id: str,
     reason: str,
     details: Optional[Dict[str, Any]] = None,
+    errors: Optional[List[Dict[str, Any]]] = None,
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> Path:
     """Write a failure marker to prevent downstream jobs from using low-fidelity assets."""
     marker_path = assets_root / ".interactive_failed"
+    error_payload = {
+        "code": reason,
+        "message": reason.replace("_", " ").strip(),
+        "details": details or {},
+        "objects": errors or [],
+        "warnings": warnings or [],
+    }
     payload = {
         "scene_id": scene_id,
         "status": "failed",
+        "success": False,
         "reason": reason,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "details": details or {},
+        "error": error_payload,
     }
     save_json(payload, marker_path)
     log(f"Wrote failure marker: {marker_path}", "ERROR")
     return marker_path
+
+
+def write_status_marker(
+    assets_root: Path,
+    scene_id: str,
+    status: str,
+    summary: Dict[str, Any],
+    errors: Optional[List[Dict[str, Any]]] = None,
+    warnings: Optional[List[Dict[str, Any]]] = None,
+) -> Path:
+    """Write a status marker for workflows with summary + structured payloads."""
+    marker_path = assets_root / ".interactive_complete"
+    payload = {
+        "scene_id": scene_id,
+        "status": status,
+        "success": status == "success",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "summary": summary,
+        "errors": errors or [],
+        "warnings": warnings or [],
+    }
+    save_json(payload, marker_path)
+    log(f"Wrote status marker: {marker_path} ({status})")
+    return marker_path
+
+
+def collect_result_payloads(results: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Collect structured error/warning payloads for workflows."""
+    errors = []
+    warnings = []
+    for result in results:
+        status = result.get("status")
+        payload = {
+            "id": result.get("id"),
+            "status": status,
+            "error": result.get("error"),
+        }
+        if status == "error":
+            errors.append(payload)
+        elif status in {"fallback", "static"}:
+            warnings.append(payload)
+    return errors, warnings
 
 
 # =============================================================================
@@ -1439,9 +1492,22 @@ def main() -> None:
             "objects": [],
         }, results_path)
 
-        # Write completion marker
-        marker_path = assets_root / ".interactive_complete"
-        marker_path.write_text("completed (no interactive objects)\n")
+        summary = {
+            "total_objects": 0,
+            "ok_count": 0,
+            "articulated_count": 0,
+            "error_count": 0,
+            "fallback_count": 0,
+            "mode": mode,
+            "backend": "particulate",
+            "particulate_endpoint": particulate_endpoint or None,
+        }
+        write_status_marker(
+            assets_root,
+            scene_id,
+            status="success",
+            summary=summary,
+        )
 
         log("Done (no objects)")
         return
@@ -1489,6 +1555,7 @@ def main() -> None:
     articulated_count = sum(1 for r in results if r.get("is_articulated"))
     error_count = sum(1 for r in results if r.get("status") == "error")
     fallback_count = sum(1 for r in results if r.get("status") in ("fallback", "static"))
+    error_payloads, warning_payloads = collect_result_payloads(results)
 
     # Write results
     results_data = {
@@ -1520,12 +1587,48 @@ def main() -> None:
                 "error_count": error_count,
                 "fallback_count": fallback_count,
             },
+            errors=error_payloads,
+            warnings=warning_payloads,
         )
         sys.exit(1)
 
-    # Write completion marker
-    marker_path = assets_root / ".interactive_complete"
-    marker_path.write_text(f"completed: {ok_count} ok, {articulated_count} articulated, {error_count} errors\n")
+    summary = {
+        "total_objects": len(interactive_objects),
+        "ok_count": ok_count,
+        "articulated_count": articulated_count,
+        "error_count": error_count,
+        "fallback_count": fallback_count,
+        "mode": mode,
+        "backend": "particulate",
+        "particulate_endpoint": particulate_endpoint or None,
+    }
+
+    if len(interactive_objects) == 0:
+        status = "success"
+    elif ok_count == 0:
+        status = "failure"
+    elif error_count > 0:
+        status = "partial"
+    else:
+        status = "success"
+
+    write_status_marker(
+        assets_root,
+        scene_id,
+        status=status,
+        summary=summary,
+        errors=error_payloads,
+        warnings=warning_payloads,
+    )
+    if status == "failure":
+        write_failure_marker(
+            assets_root,
+            scene_id,
+            reason="articulation_failed",
+            details=summary,
+            errors=error_payloads,
+            warnings=warning_payloads,
+        )
 
     # Final summary
     log("=" * 60)
