@@ -13,6 +13,7 @@ Currently generates placeholder outputs for testing the pipeline.
 Reference: https://arxiv.org/abs/2512.24766
 """
 
+import argparse
 import json
 import os
 import traceback
@@ -390,3 +391,68 @@ def run_dream2flow_inference(
     )
     job = Dream2FlowInferenceJob(config)
     return job.run()
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """CLI entrypoint for Dream2Flow inference."""
+    parser = argparse.ArgumentParser(description="Run Dream2Flow inference job")
+    parser.add_argument("--bundles-dir", type=Path, required=True, help="Bundles directory")
+    parser.add_argument("--api-endpoint", type=str, default=None, help="Dream2Flow API endpoint")
+    parser.add_argument("--checkpoint-path", type=Path, default=None, help="Local checkpoint path")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing inference outputs",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Disable verbose logging",
+    )
+    parser.add_argument(
+        "--scene-id",
+        type=str,
+        default=os.getenv("SCENE_ID", ""),
+        help="Scene identifier (optional)",
+    )
+    args = parser.parse_args(argv)
+
+    output = run_dream2flow_inference(
+        bundles_dir=args.bundles_dir,
+        api_endpoint=args.api_endpoint,
+        checkpoint_path=args.checkpoint_path,
+        overwrite=args.overwrite,
+        verbose=not args.quiet,
+    )
+    return 0 if output.success else 1
+
+
+if __name__ == "__main__":
+    from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+
+    cli_args = argparse.ArgumentParser(add_help=False)
+    cli_args.add_argument("--bundles-dir", type=Path)
+    cli_args.add_argument("--api-endpoint", type=str, default=None)
+    cli_args.add_argument("--checkpoint-path", type=Path, default=None)
+    cli_args.add_argument("--overwrite", action="store_true")
+    cli_args.add_argument("--quiet", action="store_true")
+    cli_args.add_argument("--scene-id", type=str, default=os.getenv("SCENE_ID", ""))
+    parsed_args, _ = cli_args.parse_known_args()
+
+    input_params = {
+        "bundles_dir": str(parsed_args.bundles_dir) if parsed_args.bundles_dir else None,
+        "api_endpoint": parsed_args.api_endpoint,
+        "checkpoint_path": str(parsed_args.checkpoint_path) if parsed_args.checkpoint_path else None,
+        "overwrite": parsed_args.overwrite,
+        "verbose": not parsed_args.quiet,
+        "scene_id": parsed_args.scene_id,
+    }
+
+    exit_code = run_job_with_dead_letter_queue(
+        lambda: main(),
+        scene_id=parsed_args.scene_id,
+        job_type="dream2flow_inference",
+        step="dream2flow_inference",
+        input_params=input_params,
+    )
+    sys.exit(exit_code)

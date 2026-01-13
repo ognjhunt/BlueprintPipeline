@@ -663,7 +663,7 @@ def run_regen3d_adapter_job(
     return 0
 
 
-def main():
+def main() -> int:
     """Main entry point."""
     # Get configuration from environment
     bucket = os.getenv("BUCKET", "")
@@ -671,7 +671,7 @@ def main():
 
     if not scene_id:
         print("[REGEN3D-JOB] ERROR: SCENE_ID is required")
-        sys.exit(1)
+        return 1
 
     # Prefixes with defaults
     regen3d_prefix = os.getenv("REGEN3D_PREFIX", f"scenes/{scene_id}/regen3d")
@@ -698,8 +698,27 @@ def main():
         skip_inventory=skip_inventory,
     )
 
-    sys.exit(exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+
+    input_params = {
+        "bucket": os.getenv("BUCKET", ""),
+        "scene_id": os.getenv("SCENE_ID", ""),
+        "regen3d_prefix": os.getenv("REGEN3D_PREFIX"),
+        "assets_prefix": os.getenv("ASSETS_PREFIX"),
+        "layout_prefix": os.getenv("LAYOUT_PREFIX"),
+        "environment_type": os.getenv("ENVIRONMENT_TYPE", "generic"),
+        "scale_factor": os.getenv("SCALE_FACTOR", "1.0"),
+        "skip_inventory": os.getenv("SKIP_INVENTORY", ""),
+    }
+    exit_code = run_job_with_dead_letter_queue(
+        main,
+        scene_id=os.getenv("SCENE_ID", ""),
+        job_type="regen3d_adapter",
+        step="regen3d_adapter",
+        input_params=input_params,
+    )
+    sys.exit(exit_code)
