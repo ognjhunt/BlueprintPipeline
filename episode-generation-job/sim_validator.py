@@ -28,6 +28,7 @@ Reference:
 """
 
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -49,6 +50,11 @@ from quality_constants import (
     MAX_RETRIES,
     STABILITY_THRESHOLD,
     COLLISION_PENETRATION_THRESHOLD,
+)
+from isaac_sim_enforcement import (
+    DataQualityLevel,
+    ProductionDataQualityError,
+    get_environment_capabilities,
 )
 from policy_config_loader import load_validation_thresholds
 
@@ -107,6 +113,7 @@ class CollisionEvent:
     body_b: str
     contact_point: np.ndarray
     contact_force: float
+    penetration_depth: float = 0.0
     is_expected: bool = False  # True if collision is part of the task (grasping)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -117,6 +124,7 @@ class CollisionEvent:
             "body_b": self.body_b,
             "contact_point": self.contact_point.tolist(),
             "contact_force": self.contact_force,
+            "penetration_depth": self.penetration_depth,
             "is_expected": self.is_expected,
         }
 
@@ -270,6 +278,7 @@ class ValidationResult:
 
     # P1-4 FIX: Physics backend used for validation
     physics_backend: str = "unknown"  # "isaac_sim", "heuristic", or "unknown"
+    dev_only_fallback: bool = False  # Explicitly mark dev-only heuristic fallback
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -285,6 +294,7 @@ class ValidationResult:
             "retry_suggestion": self.retry_suggestion,
             "validation_time_seconds": self.validation_time_seconds,
             "physics_backend": self.physics_backend,  # P1-4 FIX
+            "dev_only_fallback": self.dev_only_fallback,
         }
 
 
@@ -396,6 +406,7 @@ class SimulationValidator:
         self.config = config or ValidationConfig.from_policy_config()
         self.verbose = verbose
         self._scene_usd_path = scene_usd_path
+        self._scene_loaded = False
 
         # Check physics availability
         self._physics_available = _HAVE_PHYSICS_INTEGRATION and is_physx_available()
@@ -405,6 +416,7 @@ class SimulationValidator:
             self.log("PhysX available - using real physics validation")
             self._init_physics_simulator()
         else:
+            self._guard_dev_only_fallback()
             self.log("PhysX not available - using heuristic validation", "WARNING")
             self.log("For production data, run with: /isaac-sim/python.sh", "WARNING")
 
@@ -414,19 +426,55 @@ class SimulationValidator:
             return
 
         try:
-            self._physics_sim = PhysicsSimulator(
-                dt=1.0 / 240.0,  # 240 Hz physics
-                substeps=4,
-                verbose=self.verbose,
-            )
-
+            session = get_isaac_sim_session()
+            self._physics_sim = session.get_physics_simulator()
             if self._scene_usd_path:
-                self._physics_sim.load_scene(self._scene_usd_path)
-                self.log(f"Loaded scene for physics: {self._scene_usd_path}")
+                self._scene_loaded = session.load_scene(self._scene_usd_path)
+                if self._scene_loaded:
+                    self.log(f"Loaded scene for physics: {self._scene_usd_path}")
+                else:
+                    raise RuntimeError(f"Failed to load scene: {self._scene_usd_path}")
 
         except Exception as e:
             self.log(f"Failed to initialize physics simulator: {e}", "ERROR")
             self._physics_available = False
+            self._guard_dev_only_fallback()
+
+    def _ensure_scene_loaded(self) -> None:
+        """Ensure the USD scene is loaded into Isaac Sim/Isaac Lab."""
+        if not self._physics_available:
+            return
+
+        if not self._scene_usd_path:
+            self.log("No USD scene path provided; using existing stage if loaded", "WARNING")
+            return
+
+        if self._scene_loaded and self._physics_sim is not None:
+            return
+
+        session = get_isaac_sim_session()
+        self._scene_loaded = session.load_scene(self._scene_usd_path)
+        if not self._scene_loaded:
+            raise RuntimeError(f"Failed to load USD scene: {self._scene_usd_path}")
+
+        self._physics_sim = session.get_physics_simulator()
+        self.log(f"USD scene loaded into Isaac Sim/Isaac Lab: {self._scene_usd_path}")
+
+    def _guard_dev_only_fallback(self) -> None:
+        """Block heuristic fallback when production quality is requested."""
+        capabilities = get_environment_capabilities()
+        data_quality = os.environ.get("DATA_QUALITY_LEVEL", "development").lower()
+        production_requested = (
+            capabilities.production_mode
+            or data_quality == DataQualityLevel.PRODUCTION.value
+            or os.environ.get("ISAAC_SIM_REQUIRED", "false").lower() == "true"
+        )
+
+        if production_requested and not capabilities.can_generate_production_data:
+            raise ProductionDataQualityError(
+                "DEV-ONLY heuristic fallback blocked in production. "
+                "Run inside Isaac Sim with PhysX enabled to validate episodes."
+            )
 
     def is_using_real_physics(self) -> bool:
         """Check if using real PhysX simulation."""
@@ -480,6 +528,7 @@ class SimulationValidator:
         # Use real physics if available
         if self.is_using_real_physics():
             result.physics_backend = "isaac_sim"  # P1-4 FIX: Set physics backend
+            self._ensure_scene_loaded()
             result = self._validate_with_physics(
                 trajectory, motion_plan, scene_objects, result, task_success_checker
             )
@@ -522,6 +571,8 @@ class SimulationValidator:
         through real physics and captures actual collisions, forces, etc.
         """
         self.log("  Running PhysX simulation...")
+        if self._physics_sim is None:
+            raise RuntimeError("Physics simulator not initialized for PhysX validation.")
 
         # Set up tracking for objects
         for obj in scene_objects:
@@ -571,6 +622,18 @@ class SimulationValidator:
                 result.metrics.unexpected_collisions == 0
             )
 
+        # Set timing
+        result.metrics.total_duration = trajectory.total_duration
+        result.metrics.execution_time = trajectory.total_duration
+
+        # Enforce task requirements for physics validation
+        if self.config.require_task_success and not result.metrics.task_success:
+            result.failure_reasons.append(FailureReason.TASK_FAILURE)
+        if self.config.require_grasp_success and not result.metrics.grasp_success:
+            result.failure_reasons.append(FailureReason.GRASP_FAILURE)
+        if self.config.require_placement_success and motion_plan.place_position and not result.metrics.placement_success:
+            result.failure_reasons.append(FailureReason.PLACEMENT_FAILURE)
+
         return result
 
     def _analyze_physics_results(
@@ -583,16 +646,25 @@ class SimulationValidator:
     ) -> None:
         """Analyze results from physics simulation."""
 
-        target_obj_id = motion_plan.target_object_id
+        target_obj_id = motion_plan.target_object_id or ""
         total_collisions = 0
         unexpected_collisions = 0
         max_collision_force = 0.0
+        max_penetration_depth = 0.0
+        gripper_contact_streak = 0
+        max_gripper_contact_streak = 0
+        object_max_height = 0.0
+        torque_violations = 0
+        torque_limits = self._get_torque_limits()
 
         for step_result in physics_results:
+            gripper_in_contact = False
             for contact in step_result.contacts:
                 body_a = contact.get("body_a", "")
                 body_b = contact.get("body_b", "")
                 impulse = contact.get("impulse", 0)
+                separation = float(contact.get("separation", 0.0))
+                penetration_depth = max(0.0, -separation)
 
                 # Check if collision is expected (gripper-target during grasp)
                 is_expected = (
@@ -601,22 +673,49 @@ class SimulationValidator:
                 )
 
                 total_collisions += 1
-                if not is_expected:
+                if not is_expected and (
+                    penetration_depth >= COLLISION_PENETRATION_THRESHOLD or separation == 0.0
+                ):
                     unexpected_collisions += 1
 
-                    # Record collision event
-                    event = CollisionEvent(
-                        frame_idx=step_result.step_index,
-                        timestamp=step_result.simulation_time,
-                        body_a=body_a,
-                        body_b=body_b,
-                        contact_point=np.array(contact.get("position", [0, 0, 0])),
-                        contact_force=impulse,
-                        is_expected=is_expected,
-                    )
-                    result.collision_events.append(event)
+                event = CollisionEvent(
+                    frame_idx=step_result.step_index,
+                    timestamp=step_result.simulation_time,
+                    body_a=body_a,
+                    body_b=body_b,
+                    contact_point=np.array(contact.get("position", [0, 0, 0])),
+                    contact_force=impulse,
+                    penetration_depth=penetration_depth,
+                    is_expected=is_expected,
+                )
+                result.collision_events.append(event)
+
+                if is_expected:
+                    gripper_in_contact = True
 
                 max_collision_force = max(max_collision_force, impulse)
+                max_penetration_depth = max(max_penetration_depth, penetration_depth)
+
+            if gripper_in_contact:
+                gripper_contact_streak += 1
+                max_gripper_contact_streak = max(max_gripper_contact_streak, gripper_contact_streak)
+            else:
+                gripper_contact_streak = 0
+
+            if target_obj_id and target_obj_id in step_result.object_states:
+                obj_state = step_result.object_states[target_obj_id]
+                obj_height = obj_state.get("position", [0, 0, 0])[2]
+                object_max_height = max(object_max_height, obj_height)
+
+            if step_result.robot_joint_efforts is not None:
+                efforts = np.abs(step_result.robot_joint_efforts)
+                if efforts.size and efforts.shape[0] != torque_limits.shape[0]:
+                    efforts = efforts[: torque_limits.shape[0]]
+                torque_violations += int(np.sum(efforts > torque_limits))
+
+            if step_result.robot_joint_velocities is not None:
+                max_velocity = np.max(np.abs(step_result.robot_joint_velocities))
+                result.metrics.max_joint_velocity = max(result.metrics.max_joint_velocity, max_velocity)
 
         result.metrics.total_collisions = total_collisions
         result.metrics.unexpected_collisions = unexpected_collisions
@@ -634,7 +733,7 @@ class SimulationValidator:
             # Track gripper-object contact throughout episode
             grasp_active = False
             grasp_start_frame = -1
-            object_max_height = 0.0
+            object_max_height = max(object_max_height, 0.0)
 
             for step_result in physics_results:
                 # Check if gripper is in contact with target object
@@ -688,9 +787,30 @@ class SimulationValidator:
         result.metrics.gripper_slip_events = gripper_slip_count
         result.metrics.object_dropped = object_dropped
         result.metrics.object_stable_at_end = object_stable_at_end
+        result.metrics.grasp_success = (
+            max_gripper_contact_streak >= 3 and object_max_height > 0.05 and not object_dropped
+        )
+
+        if motion_plan.place_position is not None and physics_results:
+            final_state = physics_results[-1].object_states.get(target_obj_id, {})
+            final_position = np.array(final_state.get("position", [0.0, 0.0, 0.0]))
+            place_position = np.array(motion_plan.place_position)
+            placement_error = np.linalg.norm(final_position - place_position)
+            result.metrics.placement_success = (
+                placement_error < 0.05 and object_stable_at_end and not gripper_in_contact
+            )
+
+        if torque_violations > 0:
+            result.metrics.torque_limit_violations = max(
+                result.metrics.torque_limit_violations, torque_violations
+            )
 
         self.log(f"  Physics: {total_collisions} contacts, {unexpected_collisions} unexpected")
         self.log(f"  Grasp stability: {gripper_slip_count} slips, dropped={object_dropped}, stable={object_stable_at_end}")
+        if max_penetration_depth > 0:
+            self.log(f"  Max penetration depth: {max_penetration_depth:.4f} m")
+        if torque_violations > 0:
+            self.log(f"  PhysX torque violations: {torque_violations}", "WARNING")
 
     def _validate_heuristic(
         self,
@@ -709,6 +829,9 @@ class SimulationValidator:
         self.log("  Running heuristic validation...")
 
         # Run all heuristic checks
+        result.dev_only_fallback = True
+        result.failure_details = "DEV-ONLY heuristic fallback used; not valid for production."
+        self.log("  DEV-ONLY fallback enabled (heuristic validation)", "WARNING")
         self._check_joint_limits(trajectory, result)
         self._check_velocities(trajectory, result)
         self._check_torques(trajectory, result)  # P1-6 FIX: Check torque limits
@@ -740,6 +863,14 @@ class SimulationValidator:
         self.log(f"  Heuristic grasp stability: {result.metrics.gripper_slip_events} estimated slips")
 
         return result
+
+    def _get_torque_limits(self) -> np.ndarray:
+        """Get conservative torque limits for PhysX-based constraint checks."""
+        base_limits = np.array([80.0, 80.0, 60.0, 60.0, 40.0, 40.0, 20.0])
+        num_dof = self.robot_config.num_joints
+        if num_dof <= len(base_limits):
+            return base_limits[:num_dof]
+        return np.pad(base_limits, (0, num_dof - len(base_limits)), constant_values=40.0)
 
     def validate_batch(
         self,
