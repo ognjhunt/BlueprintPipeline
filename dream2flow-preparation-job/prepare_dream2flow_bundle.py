@@ -135,6 +135,7 @@ class Dream2FlowPreparationJob:
         self.config = config
         self.manifest = None
         self.scene_objects = {}
+        allow_placeholder = config.allow_placeholder and not config.require_real_backends
 
         # Initialize pipeline components
         video_config = VideoGeneratorConfig(
@@ -145,7 +146,8 @@ class Dream2FlowPreparationJob:
             api_endpoint=config.video_api_endpoint,
             checkpoint_path=config.video_checkpoint_path,
             enabled=config.enable_video_generation,
-            allow_placeholder=config.allow_placeholder,
+            allow_placeholder=allow_placeholder,
+            require_real_backend=config.require_real_backends,
         )
         self.video_generator = VideoGenerator(video_config)
 
@@ -156,7 +158,7 @@ class Dream2FlowPreparationJob:
             depth_api=config.depth_api,
             tracking_api=config.tracking_api,
             enabled=config.enable_flow_extraction,
-            allow_placeholder=config.allow_placeholder,
+            allow_placeholder=allow_placeholder,
         )
         self.flow_extractor = FlowExtractor(flow_config)
 
@@ -165,7 +167,8 @@ class Dream2FlowPreparationJob:
             robot=config.robot_embodiment,
             tracking_api=config.robot_tracking_api,
             enabled=config.enable_robot_tracking,
-            allow_placeholder=config.allow_placeholder,
+            allow_placeholder=allow_placeholder,
+            require_real_backend=config.require_real_backends,
         )
         self.robot_tracker = RobotTracker(tracker_config)
 

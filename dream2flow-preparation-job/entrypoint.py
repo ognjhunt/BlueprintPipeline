@@ -179,6 +179,7 @@ def main():
     enable_flow = env_flag("DREAM2FLOW_ENABLE_FLOW", True)
     enable_robot = env_flag("DREAM2FLOW_ENABLE_ROBOT", True)
     allow_placeholder = env_flag("DREAM2FLOW_ALLOW_PLACEHOLDER", True)
+    require_real_backends = env_flag("DREAM2FLOW_REQUIRE_REAL_BACKENDS", False)
 
     # Map robot name to enum
     robot_map = {
@@ -217,6 +218,7 @@ def main():
     print(f"  ENABLE_FLOW: {enable_flow}")
     print(f"  ENABLE_ROBOT: {enable_robot}")
     print(f"  ALLOW_PLACEHOLDER: {allow_placeholder}")
+    print(f"  REQUIRE_REAL_BACKENDS: {require_real_backends}")
 
     # Create GCS client
     client = storage.Client()
@@ -263,6 +265,7 @@ def main():
                 enable_flow_extraction=enable_flow,
                 enable_robot_tracking=enable_robot,
                 allow_placeholder=allow_placeholder,
+                require_real_backends=require_real_backends,
                 verbose=True,
             )
 

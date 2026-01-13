@@ -568,6 +568,7 @@ class Dream2FlowJobConfig:
     enable_flow_extraction: bool = True
     enable_robot_tracking: bool = True
     allow_placeholder: bool = True
+    require_real_backends: bool = False
 
     # Processing
     verbose: bool = True
