@@ -787,40 +787,54 @@ class GenieSimLocalFramework:
         self.log("Starting Genie Sim server...")
         self._status = GenieSimServerStatus.STARTING
 
-        # Find the data collection server script
-        server_script = self.config.geniesim_root / "source/data_collection/scripts/data_collector_server.py"
+        use_local_server = not self.config.geniesim_root.exists()
+        env = os.environ.copy()
 
-        if not server_script.exists():
-            # Try alternative location
-            server_script = Path(__file__).parent / "data_collection_server.py"
+        if use_local_server:
+            self.log("GENIESIM_ROOT not found; using local gRPC server module", "INFO")
+            cmd = [
+                sys.executable,
+                "-m",
+                "tools.geniesim_adapter.geniesim_server",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                str(self.config.port),
+            ]
+        else:
+            # Find the data collection server script
+            server_script = self.config.geniesim_root / "source/data_collection/scripts/data_collector_server.py"
+
             if not server_script.exists():
-                self.log(f"Server script not found: {server_script}", "ERROR")
+                # Try alternative location
+                server_script = Path(__file__).parent / "data_collection_server.py"
+                if not server_script.exists():
+                    self.log(f"Server script not found: {server_script}", "ERROR")
+                    self._status = GenieSimServerStatus.ERROR
+                    return False
+
+            # Build command
+            isaac_python = self.config.isaac_sim_path / "python.sh"
+
+            if not isaac_python.exists():
+                self.log(f"Isaac Sim python.sh not found: {isaac_python}", "ERROR")
                 self._status = GenieSimServerStatus.ERROR
                 return False
 
-        # Build command
-        isaac_python = self.config.isaac_sim_path / "python.sh"
+            cmd = [str(isaac_python), str(server_script)]
 
-        if not isaac_python.exists():
-            self.log(f"Isaac Sim python.sh not found: {isaac_python}", "ERROR")
-            self._status = GenieSimServerStatus.ERROR
-            return False
+            # Add arguments
+            if scene_usd_path:
+                cmd.extend(["--scene", str(scene_usd_path)])
+            if task_config_path:
+                cmd.extend(["--task-config", str(task_config_path)])
+            if self.config.headless:
+                cmd.append("--headless")
 
-        cmd = [str(isaac_python), str(server_script)]
+            cmd.extend(["--port", str(self.config.port)])
 
-        # Add arguments
-        if scene_usd_path:
-            cmd.extend(["--scene", str(scene_usd_path)])
-        if task_config_path:
-            cmd.extend(["--task-config", str(task_config_path)])
-        if self.config.headless:
-            cmd.append("--headless")
-
-        cmd.extend(["--port", str(self.config.port)])
-
-        # Set environment
-        env = os.environ.copy()
-        env["OMNI_KIT_ALLOW_ROOT"] = "1"  # Allow running as root (for containers)
+            # Set environment
+            env["OMNI_KIT_ALLOW_ROOT"] = "1"  # Allow running as root (for containers)
 
         # Start process
         log_file = self.config.log_dir / f"server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
