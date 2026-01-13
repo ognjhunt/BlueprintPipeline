@@ -1,4 +1,4 @@
-# Genie Sim Submission Job Dependencies
+# Genie Sim Local Execution Job Dependencies
 
 # HTTP client for GenieSimClient
 requests>=2.31.0

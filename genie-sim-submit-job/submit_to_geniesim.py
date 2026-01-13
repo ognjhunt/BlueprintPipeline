@@ -33,6 +33,14 @@ if str(REPO_ROOT) not in sys.path:
 sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
 from geniesim_client import GenieSimClient, GenerationParams
 
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+from geniesim_adapter.local_framework import run_local_data_collection
+
+
+def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2))
+
 
 def _read_json_blob(client: storage.Client, bucket: str, blob_name: str) -> Dict[str, Any]:
     blob = client.bucket(bucket).blob(blob_name)
@@ -74,11 +82,14 @@ def main() -> int:
     )
 
     api_key = os.getenv("GENIE_SIM_API_KEY")
-    submission_mode = "api" if api_key else "local"
+    force_local = os.getenv("GENIESIM_FORCE_LOCAL", "false").lower() == "true"
+    submission_mode = "api" if api_key and not force_local else "local"
     job_id = None
     submission_message = None
+    local_run_result = None
+    episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
 
-    if api_key:
+    if submission_mode == "api":
         client = GenieSimClient()
         try:
             result = client.submit_generation_job(
@@ -96,12 +107,58 @@ def main() -> int:
             client.close()
     else:
         job_id = f"local-{uuid.uuid4()}"
-        submission_message = "Local Genie Sim submission recorded (no API key provided)."
+        submission_message = "Local Genie Sim execution started (no API key provided)."
+
+        try:
+            scene_manifest = _read_json_blob(
+                storage_client,
+                bucket,
+                f"{geniesim_prefix}/merged_scene_manifest.json",
+            )
+        except FileNotFoundError:
+            scene_manifest = {"scene_graph": scene_graph}
+        task_config_local = task_config
+
+        gcs_root = Path("/mnt/gcs") / bucket
+        use_gcs_fuse = gcs_root.exists()
+        local_root = gcs_root if use_gcs_fuse else Path("/tmp") / "geniesim-local"
+        output_dir = local_root / episodes_output_prefix / f"geniesim_{job_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        config_dir = output_dir / "config"
+        scene_manifest_path = config_dir / "scene_manifest.json"
+        task_config_path = config_dir / "task_config.json"
+        _write_local_json(scene_manifest_path, scene_manifest)
+        _write_local_json(task_config_path, task_config_local)
+
+        local_run_result = run_local_data_collection(
+            scene_manifest_path=scene_manifest_path,
+            task_config_path=task_config_path,
+            output_dir=output_dir,
+            robot_type=robot_type,
+            episodes_per_task=episodes_per_task,
+            verbose=True,
+        )
+        if local_run_result and local_run_result.success:
+            submission_message = "Local Genie Sim execution completed."
+        else:
+            submission_message = "Local Genie Sim execution failed."
+
+        if not use_gcs_fuse:
+            for file_path in output_dir.rglob("*"):
+                if file_path.is_file():
+                    relative_path = file_path.relative_to(local_root)
+                    blob = storage_client.bucket(bucket).blob(str(relative_path))
+                    blob.upload_from_filename(str(file_path))
 
     job_payload = {
         "job_id": job_id,
         "scene_id": scene_id,
-        "status": "submitted",
+        "status": (
+            "completed"
+            if local_run_result and local_run_result.success
+            else ("failed" if local_run_result else "submitted")
+        ),
         "submission_mode": submission_mode,
         "submitted_at": datetime.utcnow().isoformat() + "Z",
         "message": submission_message,
@@ -117,6 +174,18 @@ def main() -> int:
             "min_quality_score": min_quality_score,
         },
     }
+    if submission_mode == "local":
+        job_payload["artifacts"] = {
+            "episodes_prefix": f"gs://{bucket}/{episodes_output_prefix}/geniesim_{job_id}",
+            "lerobot_prefix": (
+                f"gs://{bucket}/{episodes_output_prefix}/geniesim_{job_id}/lerobot"
+            ),
+        }
+        job_payload["local_execution"] = {
+            "success": bool(local_run_result and local_run_result.success),
+            "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
+            "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
+        }
 
     _write_json_blob(storage_client, bucket, job_output_path, job_payload)
     print(f"[GENIESIM-SUBMIT] Stored job metadata at gs://{bucket}/{job_output_path}")
