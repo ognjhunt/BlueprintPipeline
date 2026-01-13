@@ -92,7 +92,9 @@ main:
           - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
           - geniesimPrefix: '${"scenes/" + sceneId + "/geniesim"}'
           - geniesimJobName: "genie-sim-export-job"
+          - geniesimSubmitJobName: "genie-sim-submit-job"
           - geniesimCompleteMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_complete"}'
+          - geniesimJobMetadataPath: '${"scenes/" + sceneId + "/geniesim/job.json"}'
         next: check_geniesim_enabled
 
     # Check if Genie Sim mode is enabled (can be overridden per-scene)
@@ -275,6 +277,101 @@ main:
         call: sys.log
         args:
           text: '${"Genie Sim export completed for scene " + sceneId}'
+          severity: "INFO"
+        next: run_geniesim_submission_job
+
+    # Submit the Genie Sim generation job (local or API-backed)
+    - run_geniesim_submission_job:
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + geniesimSubmitJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: GENIESIM_PREFIX
+                        value: ${geniesimPrefix}
+                      - name: JOB_OUTPUT_PATH
+                        value: ${geniesimJobMetadataPath}
+                      - name: ROBOT_TYPE
+                        value: ${robotType}
+                      - name: EPISODES_PER_TASK
+                        value: "10"
+                      - name: NUM_VARIATIONS
+                        value: "5"
+        result: geniesimSubmitExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_submission_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to submit Genie Sim job: " + e.message}'
+                  severity: "ERROR"
+            - raise_submission_error:
+                raise: ${e}
+        next: set_submission_execution_name
+
+    - set_submission_execution_name:
+        assign:
+          - submissionExecutionName: '${if(geniesimSubmitExec.metadata != null and geniesimSubmitExec.metadata.name != null, geniesimSubmitExec.metadata.name, geniesimSubmitExec.name)}'
+        next: wait_for_submission_job
+
+    - wait_for_submission_job:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${submissionExecutionName}
+        result: submissionStatus
+        next: check_submission_status
+
+    - check_submission_status:
+        assign:
+          - submissionState: '${if(submissionStatus.state != null, submissionStatus.state, if(submissionStatus.status != null, submissionStatus.status.state, null))}'
+          - submissionFailedCount: '${if(submissionStatus.failedCount != null, submissionStatus.failedCount, if(submissionStatus.status != null, submissionStatus.status.failedCount, null))}'
+          - submissionSucceededCount: '${if(submissionStatus.succeededCount != null, submissionStatus.succeededCount, if(submissionStatus.status != null, submissionStatus.status.succeededCount, null))}'
+        next: submission_status_switch
+
+    - submission_status_switch:
+        switch:
+          - condition: '${submissionState == "FAILED" or (submissionFailedCount != null and submissionFailedCount > 0)}'
+            next: submission_failed
+          - condition: '${submissionState == "SUCCEEDED" or (submissionSucceededCount != null and submissionSucceededCount > 0)}'
+            next: log_submission_complete
+        next: wait_submission_poll
+
+    - wait_submission_poll:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_submission_job
+
+    - submission_failed:
+        call: sys.log
+        args:
+          text: '${"ERROR: Genie Sim submission failed for scene " + sceneId}'
+          severity: "ERROR"
+        next: raise_submission_failed
+
+    - raise_submission_failed:
+        raise:
+          message: '${"Genie Sim submission failed for scene " + sceneId}'
+
+    - log_submission_complete:
+        call: sys.log
+        args:
+          text: '${"Genie Sim submission recorded for scene " + sceneId + " at " + geniesimJobMetadataPath}'
           severity: "INFO"
         next: write_completion_marker
 

@@ -1,0 +1,10 @@
+# Genie Sim Submission Job Dependencies
+
+# HTTP client for GenieSimClient
+requests>=2.31.0
+# Async requests (used by GenieSimClient)
+aiohttp>=3.8.0
+# GCS access
+google-cloud-storage>=2.10.0
+# Optional response validation
+pydantic>=2.0.0
