@@ -65,6 +65,13 @@ from trajectory_solver import ROBOT_CONFIGS
 # =============================================================================
 
 
+def _requires_curobo() -> bool:
+    """Return True when cuRobo is required for production or labs staging runs."""
+    data_quality = os.getenv("DATA_QUALITY_LEVEL", "").lower()
+    labs_staging = os.getenv("LABS_STAGING", "0").lower() in {"1", "true", "yes"}
+    return data_quality == "production" or labs_staging
+
+
 class CollisionGeometryType(str, Enum):
     """Types of collision geometry."""
 
@@ -183,6 +190,11 @@ class CuRoboMotionPlanner:
 
         # Initialize cuRobo (or fallback if not available)
         if not CUROBO_AVAILABLE:
+            if _requires_curobo():
+                raise RuntimeError(
+                    "cuRobo is required for production/labs staging runs. "
+                    "Install cuRobo with CUDA + PyTorch support before continuing."
+                )
             print("[CUROBO] WARNING: cuRobo not available - using simple fallback planner")
             print("[CUROBO] For production quality, install cuRobo: pip install nvidia-curobo")
             self.use_fallback = True
@@ -781,6 +793,11 @@ def create_curobo_planner(
         CuRoboMotionPlanner or None if unavailable
     """
     if not CUROBO_AVAILABLE:
+        if _requires_curobo():
+            raise RuntimeError(
+                "cuRobo is required for production/labs staging runs. "
+                "Install cuRobo with CUDA + PyTorch support before continuing."
+            )
         return None
 
     try:
