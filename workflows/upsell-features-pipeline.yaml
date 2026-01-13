@@ -46,6 +46,13 @@ main:
           - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
           # Force reprocessing even if already completed
           - forceReprocess: '${default(map.get(event, "force_reprocess"), false)}'
+          # Adaptive timeout configuration (seconds)
+          - timeoutOverrideSeconds: '${map.get(event, "timeout_override_seconds")}'
+          - timeoutConfigByTier:
+              standard: 900
+              pro: 1800
+              enterprise: 2700
+          - upsellTimeoutSeconds: '${if(timeoutOverrideSeconds != null, timeoutOverrideSeconds, default(map.get(timeoutConfigByTier, bundleTier), 1800))}'
         next: filter_completion_markers
 
     # Filter for .episodes_complete marker files
@@ -129,6 +136,27 @@ main:
         args:
           text: '${"Upsell features processing triggered for scene " + sceneId + " (tier: " + bundleTier + ")"}'
           severity: "INFO"
+        next: log_upsell_metrics_start
+
+    - log_upsell_metrics_start:
+        assign:
+          - upsellStartTime: '${time.format(sys.now())}'
+        next: emit_upsell_metrics_start
+
+    - emit_upsell_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "upsell-features-pipeline"
+            job: ${upsellJobName}
+            scene_id: ${sceneId}
+            bundle_tier: ${bundleTier}
+            timeout_seconds: ${upsellTimeoutSeconds}
+            retry_max: 0
+            start_time: ${upsellStartTime}
+          severity: "INFO"
         next: run_upsell_job
 
     # Run upsell features job via Cloud Run
@@ -148,6 +176,7 @@ main:
                       value: ${bundleTier}
                     - name: SCENE_PATH
                       value: ${scenePath}
+            timeout: '${string(upsellTimeoutSeconds) + "s"}'
         result: jobResult
         next: set_upsell_execution_name
 
@@ -189,6 +218,35 @@ main:
         next: wait_for_job
 
     - log_upsell_complete:
+        assign:
+          - upsellEndTime: '${time.format(sys.now())}'
+          - upsellDurationSeconds: '${time.parse(upsellEndTime) - time.parse(upsellStartTime)}'
+          - upsellTimeoutUsageRatio: '${upsellDurationSeconds / upsellTimeoutSeconds}'
+          - upsellTimedOut: '${upsellDurationSeconds >= upsellTimeoutSeconds}'
+        next: emit_upsell_metrics_complete
+
+    - emit_upsell_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "upsell-features-pipeline"
+            job: ${upsellJobName}
+            scene_id: ${sceneId}
+            bundle_tier: ${bundleTier}
+            timeout_seconds: ${upsellTimeoutSeconds}
+            duration_seconds: ${upsellDurationSeconds}
+            timeout_usage_ratio: ${upsellTimeoutUsageRatio}
+            timed_out: ${upsellTimedOut}
+            status: "SUCCEEDED"
+            execution_name: ${upsellExecutionName}
+            start_time: ${upsellStartTime}
+            end_time: ${upsellEndTime}
+          severity: "INFO"
+        next: log_upsell_complete_message
+
+    - log_upsell_complete_message:
         call: sys.log
         args:
           text: '${"Upsell features processing completed for scene " + sceneId}'
@@ -208,6 +266,35 @@ main:
 
     - upsell_job_failed:
         # Upsell failure is concerning but not fatal
+        assign:
+          - upsellEndTime: '${time.format(sys.now())}'
+          - upsellDurationSeconds: '${time.parse(upsellEndTime) - time.parse(upsellStartTime)}'
+          - upsellTimeoutUsageRatio: '${upsellDurationSeconds / upsellTimeoutSeconds}'
+          - upsellTimedOut: '${upsellDurationSeconds >= upsellTimeoutSeconds}'
+        next: emit_upsell_metrics_failed
+
+    - emit_upsell_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "upsell-features-pipeline"
+            job: ${upsellJobName}
+            scene_id: ${sceneId}
+            bundle_tier: ${bundleTier}
+            timeout_seconds: ${upsellTimeoutSeconds}
+            duration_seconds: ${upsellDurationSeconds}
+            timeout_usage_ratio: ${upsellTimeoutUsageRatio}
+            timed_out: ${upsellTimedOut}
+            status: "FAILED"
+            execution_name: ${upsellExecutionName}
+            start_time: ${upsellStartTime}
+            end_time: ${upsellEndTime}
+          severity: "ERROR"
+        next: log_upsell_failed_message
+
+    - log_upsell_failed_message:
         call: sys.log
         args:
           text: '${"ERROR: Upsell features processing failed for scene " + sceneId}'

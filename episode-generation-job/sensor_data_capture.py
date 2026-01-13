@@ -97,6 +97,7 @@ def _is_production_run() -> bool:
         or os.getenv("PRODUCTION_MODE", "").lower() == "true"
         or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
         or os.getenv("PRODUCTION", "").lower() == "true"
+        or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
     )
 
 
@@ -2003,21 +2004,27 @@ def create_sensor_capture(
             # Default: fail-closed (production safe)
             capture_mode = get_capture_mode_from_env()
 
+    allow_mock_env = (
+        os.getenv("ALLOW_MOCK_DATA", "").lower() == "true"
+        or os.getenv("ALLOW_MOCK_CAPTURE", "").lower() == "true"
+    )
+
     if _is_production_run():
-        allow_mock_env = (
-            os.getenv("ALLOW_MOCK_DATA", "").lower() == "true"
-            or os.getenv("ALLOW_MOCK_CAPTURE", "").lower() == "true"
-        )
         if allow_mock_env:
             raise RuntimeError(
-                "ALLOW_MOCK_DATA/ALLOW_MOCK_CAPTURE is not permitted in production mode. "
-                "Unset DATA_QUALITY_LEVEL=production/ISAAC_SIM_REQUIRED for development runs."
+                "ALLOW_MOCK_DATA/ALLOW_MOCK_CAPTURE is not permitted in production or labs-staging mode. "
+                "Unset DATA_QUALITY_LEVEL=production/LABS_STAGING=1 for development runs."
             )
         if capture_mode == SensorDataCaptureMode.MOCK_DEV or use_mock or allow_mock_capture:
             raise RuntimeError(
-                "Mock sensor capture requested while ALLOW_MOCK_DATA=false in production mode. "
+                "Mock sensor capture requested in production or labs-staging mode. "
                 "Run with Isaac Sim available or switch to a non-production configuration."
             )
+    elif capture_mode == SensorDataCaptureMode.MOCK_DEV and not (allow_mock_capture and allow_mock_env):
+        raise RuntimeError(
+            "Mock sensor capture requested without explicit allow. "
+            "Set ALLOW_MOCK_CAPTURE=true and allow_mock_capture=True in a non-production run."
+        )
 
     # Check if Isaac Sim is available
     if capture_mode in (SensorDataCaptureMode.ISAAC_SIM, SensorDataCaptureMode.FAIL_CLOSED):
