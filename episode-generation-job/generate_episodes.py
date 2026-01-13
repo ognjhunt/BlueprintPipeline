@@ -95,6 +95,14 @@ def _should_bypass_quality_gates() -> bool:
     return os.getenv("BYPASS_QUALITY_GATES", "").lower() in {"1", "true", "yes", "y"}
 
 
+def _is_service_mode() -> bool:
+    return (
+        os.getenv("SERVICE_MODE", "").lower() in {"1", "true", "yes", "y"}
+        or os.getenv("K_SERVICE") is not None
+        or os.getenv("KUBERNETES_SERVICE_HOST") is not None
+    )
+
+
 def _gate_report_path(root: Path, scene_id: str) -> Path:
     report_path = root / f"scenes/{scene_id}/{JOB_NAME}/quality_gate_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1373,8 +1381,43 @@ class EpisodeGenerator:
         del invalid_episodes
         gc.collect()
 
+        # Service-mode QA validation gate before export
+        if _is_service_mode():
+            self.log("\nStep 5: Running QA validation gate before export...")
+            qa_report_path = self.config.output_dir / "quality" / "qa_validation_report.json"
+            try:
+                from tools.qa_validation.validator import run_qa_validation
+                scene_dir = self.config.manifest_path.parent.parent
+                qa_report = run_qa_validation(
+                    scene_dir=scene_dir,
+                    scene_id=self.config.scene_id,
+                    output_report=qa_report_path,
+                    verbose=self.verbose,
+                )
+            except Exception as e:
+                error_msg = f"QA validation failed to run: {e}"
+                self.log(error_msg, "ERROR")
+                output.errors.append(error_msg)
+                output.total_episodes = len(all_episodes)
+                output.valid_episodes = len(valid_episodes)
+                output.output_dir = self.config.output_dir
+                output.generation_time_seconds = time.time() - start_time
+                return output
+
+            if not qa_report.passed:
+                error_msg = "QA validation failed; skipping dataset export."
+                self.log(error_msg, "ERROR")
+                output.errors.append(error_msg)
+                for issue in qa_report.issues:
+                    self.log(f"  - {issue}", "ERROR")
+                output.total_episodes = len(all_episodes)
+                output.valid_episodes = len(valid_episodes)
+                output.output_dir = self.config.output_dir
+                output.generation_time_seconds = time.time() - start_time
+                return output
+
         # Step 7: Export to LeRobot format (with data pack configuration)
-        self.log("\nStep 5: Exporting LeRobot dataset...")
+        self.log("\nStep 6: Exporting LeRobot dataset...")
         self.log(f"  Data Pack: {self.config.data_pack_tier}")
 
         # Use data pack-aware configuration
@@ -1439,7 +1482,7 @@ class EpisodeGenerator:
         gc.collect()
 
         # Step 8: Write generation manifest
-        self.log("\nStep 6: Writing generation manifest and validation report...")
+        self.log("\nStep 7: Writing generation manifest and validation report...")
         output.manifest_path = self._write_manifest(valid_episodes, tasks_with_specs, output)
 
         # Write validation report
