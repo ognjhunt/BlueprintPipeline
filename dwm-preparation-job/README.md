@@ -25,6 +25,11 @@ This job runs as part of the BlueprintPipeline:
 Image → 3D-RE-GEN → BlueprintPipeline → ... → DWM Preparation → DWM Bundles
 ```
 
+## Dependencies & Availability
+
+- **Isaac Sim rendering is required for production bundles.** Static scene videos must be rendered against the real USD scene using the Isaac Sim backend. The mock renderer is intended only for CI/smoke tests where GPU rendering is unavailable.
+- **DWM model availability gates inference.** The repository prepares conditioning bundles today, but running DWM inference requires access to the released model weights/API. Until the model is available, inference should be treated as optional or disabled.
+
 ### Local Pipeline
 ```bash
 python tools/run_local_pipeline.py --scene-dir ./scene --steps dwm
@@ -89,6 +94,7 @@ gcloud eventarc triggers create dwm-preparation-trigger \
 | NUM_FRAMES | No | 49 | Frames per video |
 | FPS | No | 24 | Frames per second |
 | MANO_MODEL_PATH | No | /mano_models | Path to MANO files |
+| SKIP_DWM | No | false | Skip DWM preparation entirely |
 
 ## Output Structure
 

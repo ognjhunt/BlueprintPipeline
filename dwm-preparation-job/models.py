@@ -404,13 +404,16 @@ class DWMPipelineOutput:
     # Errors encountered
     errors: list[str] = field(default_factory=list)
 
+    # Whether the pipeline was intentionally skipped
+    skipped: bool = False
+
     # Timing
     generation_time_seconds: float = 0.0
 
     @property
     def success(self) -> bool:
         """Check if pipeline completed successfully."""
-        return len(self.bundles) > 0 and len(self.errors) == 0
+        return (self.skipped and not self.errors) or (len(self.bundles) > 0 and len(self.errors) == 0)
 
 
 # =============================================================================
