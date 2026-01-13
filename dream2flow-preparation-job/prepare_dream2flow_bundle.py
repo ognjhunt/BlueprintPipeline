@@ -141,18 +141,29 @@ class Dream2FlowPreparationJob:
             fps=config.fps,
             model_name=config.video_model,
             api_endpoint=config.video_api_endpoint,
+            checkpoint_path=config.video_checkpoint_path,
+            enabled=config.enable_video_generation,
+            allow_placeholder=config.allow_placeholder,
         )
         self.video_generator = VideoGenerator(video_config)
 
         flow_config = FlowExtractorConfig(
             method=config.flow_method,
             num_tracking_points=config.num_tracking_points,
+            segmentation_api=config.segmentation_api,
+            depth_api=config.depth_api,
+            tracking_api=config.tracking_api,
+            enabled=config.enable_flow_extraction,
+            allow_placeholder=config.allow_placeholder,
         )
         self.flow_extractor = FlowExtractor(flow_config)
 
         tracker_config = RobotTrackerConfig(
             method=config.tracking_method,
             robot=config.robot_embodiment,
+            tracking_api=config.robot_tracking_api,
+            enabled=config.enable_robot_tracking,
+            allow_placeholder=config.allow_placeholder,
         )
         self.robot_tracker = RobotTracker(tracker_config)
 

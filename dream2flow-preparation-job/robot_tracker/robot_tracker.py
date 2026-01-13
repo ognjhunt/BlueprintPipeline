@@ -71,6 +71,11 @@ class RobotTrackerConfig:
 
     # Debug
     verbose: bool = True
+    # Remote tracking API (optional)
+    tracking_api: Optional[str] = None
+    # Feature flags
+    enabled: bool = True
+    allow_placeholder: bool = True
 
 
 @dataclass
@@ -111,6 +116,7 @@ class RobotTracker:
     def __init__(self, config: RobotTrackerConfig):
         self.config = config
         self._initialized = False
+        self._disabled_reason: Optional[str] = None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.config.verbose:
@@ -120,6 +126,11 @@ class RobotTracker:
         """Initialize robot tracker."""
         if self._initialized:
             return True
+        if not self.config.enabled:
+            self._disabled_reason = "Robot tracking disabled by configuration."
+            self.log(self._disabled_reason, level="WARNING")
+            self._initialized = True
+            return False
 
         # PLACEHOLDER: Awaiting Dream2Flow and Isaac Lab integration (arXiv:2512.24766)
         # When available, implement:
@@ -130,15 +141,29 @@ class RobotTracker:
         # 5. Set up observation collection (joint state, end-effector pose)
         # 6. Validate robot model compatibility with task execution
         try:
-            # from isaac_lab.controllers import InverseKinematicsController  # Not yet available
-            # from dream2flow.robot_tracker import RobotTracker  # Not yet available
-            self.log("Robot tracker initialized (placeholder mode - awaiting Dream2Flow and Isaac Lab integration)")
+            if self.config.tracking_api:
+                self.log("Robot tracker initialized with API backend")
+            else:
+                self.log("Robot tracker initialized (placeholder mode - awaiting Dream2Flow and Isaac Lab integration)")
+                if not self.config.allow_placeholder:
+                    self._disabled_reason = (
+                        "Robot tracking disabled: no tracking backend configured "
+                        "(set tracking_api or enable placeholders)."
+                    )
+                    self.log(self._disabled_reason, level="ERROR")
+                    self._initialized = True
+                    return False
             self._initialized = True
             return True
         except ImportError as e:
-            self.log(f"Robot tracker initialization skipped: {e}", level="WARNING")
-            self._initialized = True  # Still proceed in placeholder mode
-            return True
+            if self.config.allow_placeholder:
+                self.log(f"Robot tracker initialization skipped: {e}", level="WARNING")
+                self._initialized = True  # Still proceed in placeholder mode
+                return True
+            self._disabled_reason = f"Robot tracker disabled: {e}"
+            self.log(self._disabled_reason, level="ERROR")
+            self._initialized = True
+            return False
 
     def track(
         self,
@@ -157,6 +182,9 @@ class RobotTracker:
         """
         if not self._initialized:
             self.initialize()
+        if self._disabled_reason:
+            self.log(self._disabled_reason, level="ERROR")
+            return TrackingResult(success=False, error=self._disabled_reason)
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -164,6 +192,8 @@ class RobotTracker:
         self.log(f"Tracking flow: {object_flow.flow_id}")
 
         try:
+            if self.config.tracking_api:
+                return self._track_via_api(object_flow, output_dir)
             if self.config.method == RobotTrackingMethod.TRAJECTORY_OPTIMIZATION:
                 return self._track_with_optimization(object_flow, output_dir)
             elif self.config.method == RobotTrackingMethod.REINFORCEMENT_LEARNING:
@@ -175,6 +205,68 @@ class RobotTracker:
             self.log(f"Tracking failed: {e}", "ERROR")
             traceback.print_exc()
             return TrackingResult(success=False, error=str(e))
+
+    def _track_via_api(
+        self,
+        object_flow: ObjectFlow3D,
+        output_dir: Path,
+    ) -> TrackingResult:
+        """Track object flow via remote API."""
+        import requests
+
+        self.log("Tracking via API...")
+        payload = {
+            "flow_id": object_flow.flow_id,
+            "object_id": object_flow.object_id,
+            "fps": object_flow.fps,
+            "trajectory": object_flow.get_center_trajectory().tolist(),
+            "robot": self.config.robot.value,
+            "method": self.config.method.value,
+        }
+
+        response = requests.post(self.config.tracking_api, json=payload, timeout=300)
+        response.raise_for_status()
+        result = response.json()
+
+        if not result.get("success", True):
+            return TrackingResult(success=False, error=result.get("error", "Tracking API failed"))
+
+        trajectory_data = result.get("trajectory")
+        if trajectory_data is None:
+            raise ValueError("Tracking API did not return trajectory data")
+
+        ee_poses = np.array(trajectory_data.get("ee_poses"), dtype=np.float32)
+        joint_positions = None
+        if trajectory_data.get("joint_positions") is not None:
+            joint_positions = np.array(trajectory_data.get("joint_positions"), dtype=np.float32)
+
+        trajectory = RobotTrajectory(
+            trajectory_id=trajectory_data.get("trajectory_id", f"api_{object_flow.flow_id}"),
+            robot=self.config.robot,
+            ee_poses=ee_poses,
+            joint_positions=joint_positions,
+            gripper_states=np.array(trajectory_data.get("gripper_states"))
+            if trajectory_data.get("gripper_states") is not None
+            else None,
+            joint_names=trajectory_data.get("joint_names") or self._get_joint_names(),
+            fps=trajectory_data.get("fps", object_flow.fps),
+            mean_tracking_error=trajectory_data.get("mean_tracking_error", 0.0),
+            max_tracking_error=trajectory_data.get("max_tracking_error", 0.0),
+            success=True,
+        )
+
+        trajectory_path = None
+        if self.config.save_trajectory:
+            trajectory_path = self._save_trajectory(trajectory, output_dir)
+
+        return TrackingResult(
+            success=True,
+            trajectory=trajectory,
+            mean_position_error=trajectory.mean_tracking_error,
+            max_position_error=trajectory.max_tracking_error,
+            final_position_error=trajectory.max_tracking_error,
+            trajectory_path=trajectory_path,
+        )
 
     def _track_with_optimization(
         self,

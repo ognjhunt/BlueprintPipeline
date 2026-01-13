@@ -44,6 +44,11 @@ from .dead_letter import (
     PubSubDeadLetterQueue,
 )
 
+from .job_wrapper import (
+    publish_failure,
+    run_job_with_dead_letter_queue,
+)
+
 from .errors import (
     PipelineError,
     SceneProcessingError,
@@ -86,6 +91,8 @@ __all__ = [
     "DeadLetterMessage",
     "GCSDeadLetterQueue",
     "PubSubDeadLetterQueue",
+    "publish_failure",
+    "run_job_with_dead_letter_queue",
     # Errors
     "PipelineError",
     "SceneProcessingError",

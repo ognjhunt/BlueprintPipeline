@@ -49,6 +49,7 @@ from geniesim_client import (
     DownloadResult,
     GeneratedEpisodeMetadata,
 )
+from tools.metrics.pipeline_metrics import get_metrics
 
 # Import quality validation
 try:
@@ -507,6 +508,7 @@ def run_import_job(
     )
     quality_min_score = 0.0
     quality_max_score = 0.0
+    scene_id = os.getenv("SCENE_ID", "")
 
     try:
         # Step 1: Check/wait for job completion
@@ -521,11 +523,13 @@ def run_import_job(
                 )
 
             try:
-                final_progress = client.wait_for_completion(
-                    config.job_id,
-                    poll_interval=config.poll_interval,
-                    callback=progress_callback,
-                )
+                metrics = get_metrics()
+                with metrics.track_api_call("genie-sim", "wait_for_completion", scene_id):
+                    final_progress = client.wait_for_completion(
+                        config.job_id,
+                        poll_interval=config.poll_interval,
+                        callback=progress_callback,
+                    )
                 print(f"[IMPORT] ✅ Job completed: {final_progress.episodes_generated} episodes generated\n")
 
             except GenieSimAPIError as e:
@@ -534,18 +538,22 @@ def run_import_job(
 
         else:
             # Just check status
-            progress = client.get_job_status(config.job_id)
+            metrics = get_metrics()
+            with metrics.track_api_call("genie-sim", "get_job_status", scene_id):
+                progress = client.get_job_status(config.job_id)
             if progress.status != JobStatus.COMPLETED:
                 result.errors.append(f"Job not completed (status: {progress.status.value})")
                 return result
 
         # Step 2: Download episodes
         print(f"[IMPORT] Downloading episodes...")
-        download_result = client.download_episodes(
-            config.job_id,
-            config.output_dir,
-            validate=True,
-        )
+        metrics = get_metrics()
+        with metrics.track_api_call("genie-sim", "download_episodes", scene_id):
+            download_result = client.download_episodes(
+                config.job_id,
+                config.output_dir,
+                validate=True,
+            )
 
         if not download_result.success:
             result.errors.extend(download_result.errors)
@@ -724,6 +732,11 @@ def run_import_job(
         if output_dir_str.startswith("/mnt/gcs/"):
             gcs_output_path = "gs://" + output_dir_str[len("/mnt/gcs/"):]
 
+        metrics = get_metrics()
+        metrics_summary = {
+            "backend": metrics.backend.value,
+            "stats": metrics.get_stats(),
+        }
         import_manifest = {
             "schema_version": "1.0",
             "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -743,6 +756,7 @@ def run_import_job(
                 "threshold": config.min_quality_score,
                 "validation_enabled": config.enable_validation,
             },
+            "metrics_summary": metrics_summary,
         }
 
         with open(import_manifest_path, "w") as f:
@@ -855,7 +869,9 @@ def main():
 
     # Run import
     try:
-        result = run_import_job(config, client)
+        metrics = get_metrics()
+        with metrics.track_job("genie-sim-import-job", scene_id):
+            result = run_import_job(config, client)
 
         if result.success:
             print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")
