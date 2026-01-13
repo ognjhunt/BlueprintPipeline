@@ -207,6 +207,7 @@ class EpisodeGenerationConfig:
     capture_sensor_data: bool = True  # Enable visual observation capture
     use_mock_capture: bool = False  # [DEPRECATED] Use mock capture (use sensor_capture_mode instead)
     sensor_capture_mode: Optional[str] = None  # "isaac_sim", "mock_dev", "fail_closed" (None = auto-detect)
+    allow_mock_capture: bool = False  # Explicit dev-only guard for mock capture
 
     # Output
     output_dir: Path = Path("./episodes")
@@ -691,6 +692,11 @@ class EpisodeGenerator:
                     capture_mode = get_capture_mode_from_env()
 
                 self.log(f"Sensor capture mode: {capture_mode.value}")
+                if capture_mode == SensorDataCaptureMode.MOCK_DEV and not config.allow_mock_capture:
+                    raise RuntimeError(
+                        "Mock sensor capture requested but allow_mock_capture is False. "
+                        "Enable allow_mock_capture for development/testing only."
+                    )
 
                 # Parse data pack tier
                 tier = data_pack_from_string(config.data_pack_tier)
@@ -702,6 +708,7 @@ class EpisodeGenerator:
                     resolution=config.image_resolution,
                     fps=config.fps,
                     capture_mode=capture_mode,
+                    allow_mock_capture=config.allow_mock_capture,
                     verbose=verbose,
                 )
 
@@ -710,9 +717,9 @@ class EpisodeGenerator:
 
                 self.log(f"Sensor capture initialized: {config.data_pack_tier} pack, {config.num_cameras} cameras")
                 if self._sensor_capture_is_mock:
-                    self.log("⚠️  Using MOCK sensor capture - NOT suitable for production training!", "WARNING")
+                    self.log("⚠️  [TEST] Using MOCK sensor capture - NOT suitable for production training!", "WARNING")
                 else:
-                    self.log("✅ Using Isaac Sim Replicator - production quality data")
+                    self.log("✅ [PRODUCTION] Using Isaac Sim Replicator - production quality data")
 
             except Exception as e:
                 # Sensor capture creation failed - this is expected to raise in fail_closed mode
@@ -1680,6 +1687,7 @@ def run_episode_generation_job(
     image_resolution: Tuple[int, int] = (640, 480),
     capture_sensor_data: bool = True,
     use_mock_capture: bool = False,
+    allow_mock_capture: bool = False,
     bundle_tier: str = "standard",
 ) -> int:
     """
@@ -1702,6 +1710,7 @@ def run_episode_generation_job(
         image_resolution: Image resolution (width, height)
         capture_sensor_data: Enable visual observation capture
         use_mock_capture: Use mock capture (no Isaac Sim)
+        allow_mock_capture: Allow mock capture (development only)
         bundle_tier: Bundle tier for upsell features (standard, pro, enterprise, foundation)
 
     Returns:
@@ -1753,6 +1762,7 @@ def run_episode_generation_job(
         image_resolution=image_resolution,
         capture_sensor_data=capture_sensor_data,
         use_mock_capture=use_mock_capture,
+        allow_mock_capture=allow_mock_capture,
         output_dir=output_dir,
     )
 
@@ -1831,6 +1841,7 @@ def main():
 
     # P0-4 FIX: Explicit Isaac Sim availability check at startup
     isaac_sim_available = False
+    allow_mock_capture = False
 
     capabilities = None
     if HAVE_QUALITY_SYSTEM:
@@ -1851,6 +1862,14 @@ def main():
             capabilities = enforce_isaac_sim_for_production(required_quality)
 
             print("[EPISODE-GEN-JOB] ✅ Environment check passed\n")
+
+            allow_mock_capture_env = os.getenv("ALLOW_MOCK_CAPTURE", os.getenv("ALLOW_MOCK_DATA", "false")).lower() == "true"
+            if required_quality.value == "production":
+                allow_mock_capture = False
+                if allow_mock_capture_env:
+                    print("[EPISODE-GEN-JOB] ⚠️  ALLOW_MOCK_CAPTURE ignored in production quality mode")
+            else:
+                allow_mock_capture = allow_mock_capture_env
 
             # P0-4 FIX: Confirm Isaac Sim is available after enforcement
             if not isaac_sim_available:
@@ -1920,6 +1939,7 @@ def main():
         print(f"[EPISODE-GEN-JOB] Production mode: {is_production}")
         print(f"[EPISODE-GEN-JOB] Require real physics: {require_real_physics}")
         print(f"[EPISODE-GEN-JOB] Allow mock data: {allow_mock_data}")
+        allow_mock_capture = allow_mock_data
 
         # LABS-BLOCKER-001 FIX: Fail hard in production if Isaac Sim not available
         if require_real_physics and not isaac_sim_available:
@@ -2058,6 +2078,7 @@ def main():
     print(f"[EPISODE-GEN-JOB]   Bundle Tier: {bundle_tier}")
     print(f"[EPISODE-GEN-JOB]   Cameras: {num_cameras}")
     print(f"[EPISODE-GEN-JOB]   Resolution: {image_resolution}")
+    print(f"[EPISODE-GEN-JOB]   Allow mock capture: {allow_mock_capture}")
 
     GCS_ROOT = Path("/mnt/gcs")
 
@@ -2078,6 +2099,7 @@ def main():
         image_resolution=image_resolution,
         capture_sensor_data=capture_sensor_data,
         use_mock_capture=use_mock_capture,
+        allow_mock_capture=allow_mock_capture,
         bundle_tier=bundle_tier,
     )
 
