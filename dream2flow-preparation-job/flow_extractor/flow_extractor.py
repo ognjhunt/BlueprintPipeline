@@ -93,6 +93,9 @@ class FlowExtractorConfig:
 
     # Debug
     verbose: bool = True
+    # Feature flags
+    enabled: bool = True
+    allow_placeholder: bool = True
 
 
 class FlowExtractor:
@@ -112,6 +115,7 @@ class FlowExtractor:
         self._depth_model = None
         self._tracking_model = None
         self._initialized = False
+        self._disabled_reason: Optional[str] = None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.config.verbose:
@@ -126,6 +130,11 @@ class FlowExtractor:
         """
         if self._initialized:
             return True
+        if not self.config.enabled:
+            self._disabled_reason = "Flow extraction disabled by configuration."
+            self.log(self._disabled_reason, level="WARNING")
+            self._initialized = True
+            return False
 
         # PLACEHOLDER: Awaiting Dream2Flow model release (arXiv:2512.24766)
         # When available, implement integration with:
@@ -139,14 +148,50 @@ class FlowExtractor:
         # 3. Validate compatibility between model outputs
         # 4. Set up GPU memory management
         try:
-            # from dream2flow.flow_extractor import FlowExtractor  # Not yet available
-            self.log("Flow extractor initialized (placeholder mode - awaiting Dream2Flow release)")
+            if self.config.segmentation_api:
+                self._segmentation_model = "api"
+            if self.config.depth_api:
+                self._depth_model = "api"
+            if self.config.tracking_api:
+                self._tracking_model = "api"
+
+            if not any([self._segmentation_model, self._depth_model, self._tracking_model]):
+                if not self.config.allow_placeholder:
+                    self._disabled_reason = (
+                        "Flow extraction disabled: no model backends configured "
+                        "(set segmentation_api/depth_api/tracking_api)."
+                    )
+                    self.log(self._disabled_reason, level="ERROR")
+                    self._initialized = True
+                    return False
+            if not self.config.allow_placeholder and not all(
+                [self._segmentation_model, self._depth_model, self._tracking_model]
+            ):
+                self._disabled_reason = (
+                    "Flow extraction disabled: missing backends for "
+                    "segmentation, depth, or tracking."
+                )
+                self.log(self._disabled_reason, level="ERROR")
+                self._initialized = True
+                return False
+
+            self.log("Flow extractor initialized")
+            if self.config.allow_placeholder and not all([self._segmentation_model, self._depth_model, self._tracking_model]):
+                self.log(
+                    "Flow extractor running with placeholders for missing backends.",
+                    level="WARNING",
+                )
             self._initialized = True
             return True
         except ImportError as e:
-            self.log(f"Dream2Flow not available: {e}", level="WARNING")
-            self._initialized = True  # Still proceed in placeholder mode
-            return True
+            if self.config.allow_placeholder:
+                self.log(f"Dream2Flow not available: {e}", level="WARNING")
+                self._initialized = True  # Still proceed in placeholder mode
+                return True
+            self._disabled_reason = f"Flow extraction disabled: {e}"
+            self.log(self._disabled_reason, level="ERROR")
+            self._initialized = True
+            return False
 
     def extract(
         self,
@@ -167,6 +212,13 @@ class FlowExtractor:
         """
         if not self._initialized:
             self.initialize()
+        if self._disabled_reason:
+            self.log(self._disabled_reason, level="ERROR")
+            return FlowExtractionResult(
+                video_id=video.video_id,
+                success=False,
+                error=self._disabled_reason,
+            )
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -294,7 +346,14 @@ class FlowExtractor:
         if output_dir:
             output_dir.mkdir(parents=True, exist_ok=True)
 
-        # TODO: Integrate with actual segmentation models (SAM, Grounded-SAM)
+        if self.config.segmentation_api:
+            try:
+                return self._segment_object_via_api(frames, target_object, output_dir)
+            except Exception as e:
+                if not self.config.allow_placeholder:
+                    raise
+                self.log(f"Segmentation API failed, using placeholder: {e}", level="WARNING")
+
         # Placeholder: create simple center-based masks
 
         masks = []
@@ -342,7 +401,14 @@ class FlowExtractor:
         if output_dir:
             output_dir.mkdir(parents=True, exist_ok=True)
 
-        # TODO: Integrate with actual depth models (DepthAnything, ZoeDepth)
+        if self.config.depth_api:
+            try:
+                return self._estimate_depth_via_api(frames, output_dir)
+            except Exception as e:
+                if not self.config.allow_placeholder:
+                    raise
+                self.log(f"Depth API failed, using placeholder: {e}", level="WARNING")
+
         # Placeholder: create simple gradient depth
 
         depth_maps = []
@@ -385,7 +451,14 @@ class FlowExtractor:
         if output_dir:
             output_dir.mkdir(parents=True, exist_ok=True)
 
-        # TODO: Integrate with actual tracking models (CoTracker, TAPIR)
+        if self.config.tracking_api:
+            try:
+                return self._track_points_via_api(frames, masks, output_dir)
+            except Exception as e:
+                if not self.config.allow_placeholder:
+                    raise
+                self.log(f"Tracking API failed, using placeholder: {e}", level="WARNING")
+
         # Placeholder: sample points and add simulated motion
 
         tracked_points = []
@@ -443,6 +516,183 @@ class FlowExtractor:
 
         # Save tracking visualization
         if output_dir and len(tracked_points) > 0:
+            self._save_tracking_visualization(frames, tracked_points, output_dir)
+
+        return tracked_points
+
+    def _segment_object_via_api(
+        self,
+        frames: list[np.ndarray],
+        target_object: Optional[str],
+        output_dir: Optional[Path],
+    ) -> list[ObjectMask]:
+        """Segment objects via remote API."""
+        if Image is None:
+            raise RuntimeError("PIL not available for segmentation API payload encoding.")
+        import base64
+        import io
+        import requests
+
+        self.log("Segmenting objects via API...")
+        payload_frames = []
+        for frame in frames:
+            buffer = io.BytesIO()
+            Image.fromarray(frame).save(buffer, format="PNG")
+            payload_frames.append(base64.b64encode(buffer.getvalue()).decode("utf-8"))
+
+        response = requests.post(
+            self.config.segmentation_api,
+            json={
+                "frames": payload_frames,
+                "prompt": target_object,
+                "model": self.config.segmentation_model,
+            },
+            timeout=300,
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        masks_payload = result.get("masks_base64") or result.get("masks")
+        if not masks_payload:
+            raise ValueError("Segmentation API did not return masks")
+
+        masks = []
+        frame_masks = []
+        for i, mask_item in enumerate(masks_payload):
+            if isinstance(mask_item, str):
+                mask_bytes = base64.b64decode(mask_item)
+                mask = np.array(Image.open(io.BytesIO(mask_bytes)).convert("L"))
+            else:
+                mask = np.array(mask_item, dtype=np.uint8)
+            frame_masks.append((i, mask))
+            if output_dir and Image is not None:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(mask).save(output_dir / f"mask_{i:04d}.png")
+
+        masks.append(
+            ObjectMask(
+                object_id="manipulated_object",
+                category=target_object or "object",
+                frame_masks=frame_masks,
+                confidence_scores=[result.get("confidence", 0.9)] * len(frame_masks),
+                is_manipulated=True,
+            )
+        )
+        return masks
+
+    def _estimate_depth_via_api(
+        self,
+        frames: list[np.ndarray],
+        output_dir: Optional[Path],
+    ) -> list[Optional[np.ndarray]]:
+        """Estimate depth via remote API."""
+        if Image is None:
+            raise RuntimeError("PIL not available for depth API payload encoding.")
+        import base64
+        import io
+        import requests
+
+        self.log("Estimating depth via API...")
+        payload_frames = []
+        for frame in frames:
+            buffer = io.BytesIO()
+            Image.fromarray(frame).save(buffer, format="PNG")
+            payload_frames.append(base64.b64encode(buffer.getvalue()).decode("utf-8"))
+
+        response = requests.post(
+            self.config.depth_api,
+            json={
+                "frames": payload_frames,
+                "model": self.config.depth_model,
+            },
+            timeout=300,
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        depth_payload = result.get("depths_base64") or result.get("depths")
+        if not depth_payload:
+            raise ValueError("Depth API did not return depth maps")
+
+        depth_maps = []
+        for i, depth_item in enumerate(depth_payload):
+            if isinstance(depth_item, str):
+                depth_bytes = base64.b64decode(depth_item)
+                depth = np.array(Image.open(io.BytesIO(depth_bytes)))
+                if depth.dtype != np.float32:
+                    depth = depth.astype(np.float32) / 1000.0
+            else:
+                depth = np.array(depth_item, dtype=np.float32)
+            depth_maps.append(depth)
+
+            if output_dir:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                depth_mm = (depth * 1000).astype(np.uint16)
+                if Image is not None:
+                    Image.fromarray(depth_mm).save(output_dir / f"depth_{i:04d}.png")
+
+        return depth_maps
+
+    def _track_points_via_api(
+        self,
+        frames: list[np.ndarray],
+        masks: list[ObjectMask],
+        output_dir: Optional[Path],
+    ) -> list[TrackedPoint]:
+        """Track points via remote API."""
+        if Image is None:
+            raise RuntimeError("PIL not available for tracking API payload encoding.")
+        import base64
+        import io
+        import requests
+
+        self.log("Tracking points via API...")
+        payload_frames = []
+        for frame in frames:
+            buffer = io.BytesIO()
+            Image.fromarray(frame).save(buffer, format="PNG")
+            payload_frames.append(base64.b64encode(buffer.getvalue()).decode("utf-8"))
+
+        mask_payload = []
+        if masks:
+            for _, mask in masks[0].frame_masks:
+                buffer = io.BytesIO()
+                Image.fromarray(mask).save(buffer, format="PNG")
+                mask_payload.append(base64.b64encode(buffer.getvalue()).decode("utf-8"))
+
+        response = requests.post(
+            self.config.tracking_api,
+            json={
+                "frames": payload_frames,
+                "masks": mask_payload,
+                "num_points": self.config.num_tracking_points,
+                "model": self.config.tracking_model,
+            },
+            timeout=300,
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        tracks_payload = result.get("tracks")
+        if not tracks_payload:
+            raise ValueError("Tracking API did not return tracks")
+
+        tracked_points = []
+        for idx, track in enumerate(tracks_payload):
+            positions_2d = np.array(track.get("positions_2d"), dtype=np.float32)
+            visibility = np.array(track.get("visibility", np.ones(len(positions_2d))), dtype=bool)
+            confidence = np.array(track.get("confidence", np.ones(len(positions_2d))), dtype=np.float32)
+            tracked_points.append(
+                TrackedPoint(
+                    point_id=track.get("point_id", idx),
+                    positions_2d=positions_2d,
+                    visibility=visibility,
+                    confidence=confidence,
+                    object_id=track.get("object_id", masks[0].object_id if masks else None),
+                )
+            )
+
+        if output_dir and tracked_points:
             self._save_tracking_visualization(frames, tracked_points, output_dir)
 
         return tracked_points
