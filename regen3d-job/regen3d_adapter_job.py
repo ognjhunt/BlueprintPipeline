@@ -36,6 +36,7 @@ Environment Variables:
     ENVIRONMENT_TYPE: Environment type hint (kitchen, office, etc.)
     SCALE_FACTOR: Optional scale factor for metric calibration (default: 1.0)
     SKIP_INVENTORY: If "true", skip semantic inventory generation
+    BYPASS_QUALITY_GATES: If "true", skip quality gate evaluation (dev-only)
 
 Reference:
     - Paper: https://arxiv.org/abs/2512.17459
@@ -62,8 +63,10 @@ from tools.regen3d_adapter import (
     layout_from_regen3d,
     Regen3DOutput,
 )
+from tools.quality_gates.quality_gate import QualityGateCheckpoint, QualityGateRegistry
 from tools.scale_authority.authority import REFERENCE_DIMENSIONS
 from tools.scene_manifest.validate_manifest import validate_manifest
+from tools.workflow.failure_markers import FailureMarkerWriter
 from tools.metrics.pipeline_metrics import get_metrics
 
 # Optional: Gemini for semantic inventory
@@ -75,6 +78,17 @@ except ImportError:
     HAVE_GEMINI = False
 
 GCS_ROOT = Path("/mnt/gcs")
+JOB_NAME = "regen3d-job"
+
+
+def _should_bypass_quality_gates() -> bool:
+    return os.getenv("BYPASS_QUALITY_GATES", "").lower() in {"1", "true", "yes", "y"}
+
+
+def _gate_report_path(root: Path, scene_id: str) -> Path:
+    report_path = root / f"scenes/{scene_id}/{JOB_NAME}/quality_gate_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    return report_path
 
 
 # =============================================================================
@@ -486,6 +500,7 @@ def _auto_calibrate_scale(
 
 def run_regen3d_adapter_job(
     root: Path,
+    bucket: str,
     scene_id: str,
     regen3d_prefix: str,
     assets_prefix: str,
@@ -632,7 +647,37 @@ def run_regen3d_adapter_job(
             traceback.print_exc()
             return 1  # Fail the job - inventory is critical for replicator/policy targeting
 
-    # 5. Write completion marker
+    # 5. Run quality gates before writing completion marker
+    if _should_bypass_quality_gates():
+        print("[REGEN3D-JOB] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates")
+    else:
+        quality_gates = QualityGateRegistry(verbose=True)
+        quality_gates.run_checkpoint(
+            QualityGateCheckpoint.MANIFEST_VALIDATED,
+            context={"manifest": manifest, "scene_id": scene_id},
+        )
+        report_path = _gate_report_path(root, scene_id)
+        quality_gates.save_report(scene_id, report_path)
+
+        if not quality_gates.can_proceed():
+            print("[REGEN3D-JOB] ❌ Quality gates blocked downstream pipeline")
+            FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+                exception=RuntimeError("Quality gates blocked: manifest validation failed"),
+                failed_step="quality_gates",
+                input_params={
+                    "scene_id": scene_id,
+                    "assets_prefix": assets_prefix,
+                    "layout_prefix": layout_prefix,
+                },
+                partial_results={"quality_gate_report": str(report_path)},
+                recommendations=[
+                    "Fix manifest validation errors before proceeding.",
+                    f"Review quality gate report: {report_path}",
+                ],
+            )
+            return 1
+
+    # 6. Write completion marker
     # (P2-14) Use only .regen3d_complete as the primary marker.
     # This marker signals that the 3D-RE-GEN adapter job has completed
     # and all outputs (manifest, layout, inventory) are ready for downstream jobs.
@@ -697,6 +742,17 @@ def main() -> int:
     print(f"[REGEN3D-JOB]   Bucket: {bucket}")
     print(f"[REGEN3D-JOB]   Scene ID: {scene_id}")
 
+    exit_code = run_regen3d_adapter_job(
+        root=GCS_ROOT,
+        bucket=bucket,
+        scene_id=scene_id,
+        regen3d_prefix=regen3d_prefix,
+        assets_prefix=assets_prefix,
+        layout_prefix=layout_prefix,
+        environment_type=environment_type,
+        scale_factor=scale_factor,
+        skip_inventory=skip_inventory,
+    )
     metrics = get_metrics()
     with metrics.track_job("regen3d-job", scene_id):
         exit_code = run_regen3d_adapter_job(

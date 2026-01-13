@@ -56,6 +56,7 @@ Environment Variables:
     USE_CPGEN: Enable CP-Gen augmentation - default: true
     MIN_QUALITY_SCORE: Minimum quality score for export - default: 0.7
     MIN_SUCCESS_RATE: Minimum success rate for episode generation - default: 0.5
+    BYPASS_QUALITY_GATES: Skip quality gate evaluation (dev-only)
 """
 
 import gc
@@ -86,6 +87,34 @@ REQUIRED_EXTENSIONS = (
     "omni.physx",
     "omni.replicator.core",
 )
+JOB_NAME = "episode-generation-job"
+
+
+def _should_bypass_quality_gates() -> bool:
+    return os.getenv("BYPASS_QUALITY_GATES", "").lower() in {"1", "true", "yes", "y"}
+
+
+def _gate_report_path(root: Path, scene_id: str) -> Path:
+    report_path = root / f"scenes/{scene_id}/{JOB_NAME}/quality_gate_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    return report_path
+
+
+def _compute_collision_free_rate(
+    validation_report_path: Optional[Path],
+    fallback_rate: float,
+) -> float:
+    if not validation_report_path or not validation_report_path.is_file():
+        return fallback_rate
+    try:
+        report = json.loads(validation_report_path.read_text())
+        episodes = report.get("episodes", [])
+        if not episodes:
+            return fallback_rate
+        collision_free = sum(1 for ep in episodes if not ep.get("collision_events"))
+        return collision_free / len(episodes)
+    except Exception:
+        return fallback_rate
 
 # Core imports
 from motion_planner import AIMotionPlanner, MotionPlan
@@ -117,6 +146,8 @@ from sim_validator import (
     ValidationReportGenerator,
     QualityMetrics,
 )
+from tools.quality_gates.quality_gate import QualityGateCheckpoint, QualityGateRegistry
+from tools.workflow.failure_markers import FailureMarkerWriter
 
 # Sensor data capture (enhanced pipeline)
 try:
@@ -2281,6 +2312,7 @@ class EpisodeGenerator:
 
 def run_episode_generation_job(
     root: Path,
+    bucket: str,
     scene_id: str,
     assets_prefix: str,
     episodes_prefix: str,
@@ -2305,6 +2337,7 @@ def run_episode_generation_job(
 
     Args:
         root: Root path (e.g., /mnt/gcs)
+        bucket: GCS bucket name
         scene_id: Scene identifier
         assets_prefix: Path to scene assets
         episodes_prefix: Output path for episodes
@@ -2446,6 +2479,46 @@ def run_episode_generation_job(
                 except Exception as e:
                     print(f"[EPISODE-GEN-JOB] WARNING: Upsell post-processing failed: {e}")
                     # Don't fail the job for upsell errors
+
+            if _should_bypass_quality_gates():
+                print("[EPISODE-GEN-JOB] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates")
+                return 0
+
+            collision_free_rate = _compute_collision_free_rate(
+                output.validation_report_path,
+                output.pass_rate,
+            )
+            episode_stats = {
+                "total_generated": output.total_episodes,
+                "passed_quality_filter": output.valid_episodes,
+                "average_quality_score": output.average_quality_score,
+                "collision_free_rate": collision_free_rate,
+            }
+
+            quality_gates = QualityGateRegistry(verbose=True)
+            quality_gates.run_checkpoint(
+                QualityGateCheckpoint.EPISODES_GENERATED,
+                context={"episode_stats": episode_stats, "scene_id": scene_id},
+            )
+            report_path = _gate_report_path(root, scene_id)
+            quality_gates.save_report(scene_id, report_path)
+
+            if not quality_gates.can_proceed():
+                print("[EPISODE-GEN-JOB] ❌ Quality gates blocked downstream pipeline")
+                FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+                    exception=RuntimeError("Quality gates blocked: episode validation failed"),
+                    failed_step="quality_gates",
+                    input_params={
+                        "scene_id": scene_id,
+                        "episodes_prefix": episodes_prefix,
+                    },
+                    partial_results={"quality_gate_report": str(report_path)},
+                    recommendations=[
+                        "Review episode quality metrics before proceeding.",
+                        f"Review quality gate report: {report_path}",
+                    ],
+                )
+                return 1
 
             return 0
         else:
@@ -2825,6 +2898,28 @@ def main():
 
     GCS_ROOT = Path("/mnt/gcs")
 
+    exit_code = run_episode_generation_job(
+        root=GCS_ROOT,
+        bucket=bucket,
+        scene_id=scene_id,
+        assets_prefix=assets_prefix,
+        episodes_prefix=episodes_prefix,
+        robot_type=robot_type,
+        episodes_per_variation=episodes_per_variation,
+        max_variations=max_variations,
+        fps=fps,
+        use_llm=use_llm,
+        use_cpgen=use_cpgen,
+        min_quality_score=min_quality_score,
+        min_success_rate=min_success_rate,
+        data_pack_tier=data_pack_tier,
+        num_cameras=num_cameras,
+        image_resolution=image_resolution,
+        capture_sensor_data=capture_sensor_data,
+        use_mock_capture=use_mock_capture,
+        allow_mock_capture=allow_mock_capture,
+        bundle_tier=bundle_tier,
+    )
     metrics = get_metrics()
     with metrics.track_job("episode-generation-job", scene_id):
         exit_code = run_episode_generation_job(
