@@ -213,6 +213,57 @@ print('Isaac Sim environment check complete')
 }
 
 # =============================================================================
+# Isaac Sim Preflight
+# =============================================================================
+
+preflight_isaac_sim() {
+    if [ "${PREFLIGHT_ISAAC_SIM:-true}" = "false" ]; then
+        log_warning "Isaac Sim preflight disabled (PREFLIGHT_ISAAC_SIM=false)"
+        return 0
+    fi
+
+    log_info "Running Isaac Sim + Replicator preflight..."
+
+    ${ISAAC_SIM_PATH}/python.sh - <<'PY'
+import sys
+
+def fail(message: str) -> None:
+    print(message)
+    sys.exit(1)
+
+try:
+    import omni  # noqa: F401
+except ImportError as exc:
+    fail(f"❌ Preflight failed: omni not available ({exc}). Ensure Isaac Sim is installed.")
+
+try:
+    import omni.isaac.core  # noqa: F401
+except ImportError as exc:
+    fail(
+        "❌ Preflight failed: omni.isaac.core not available. "
+        "Run inside the Isaac Sim Python environment."
+    )
+
+try:
+    import omni.replicator.core  # noqa: F401
+except ImportError as exc:
+    fail(
+        "❌ Preflight failed: omni.replicator.core not available. "
+        "Enable the Replicator extension in Isaac Sim before running."
+    )
+
+print("✅ Isaac Sim preflight passed (omni + replicator available)")
+PY
+
+    if [ $? -eq 0 ]; then
+        log_success "Isaac Sim preflight passed"
+    else
+        log_error "Isaac Sim preflight failed"
+        exit 1
+    fi
+}
+
+# =============================================================================
 # Episode Generation
 # =============================================================================
 
@@ -239,6 +290,7 @@ run_episode_generation() {
 
     # IMPORTANT: Set USE_MOCK_CAPTURE=false to use real Isaac Sim capture
     export USE_MOCK_CAPTURE="false"
+    export SENSOR_CAPTURE_MODE="isaac_sim"
 
     # Run with Isaac Sim's Python
     cd ${APP_DIR}
@@ -317,6 +369,9 @@ main() {
 
     # Initialize Isaac Sim
     init_isaac_sim
+
+    # Fail fast if Replicator or core Isaac Sim modules are missing
+    preflight_isaac_sim
 
     # Execute command
     case "${command}" in

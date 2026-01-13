@@ -43,6 +43,7 @@ data:
   USE_CPGEN: "true"
   CAPTURE_SENSOR_DATA: "true"
   USE_MOCK_CAPTURE: "false"
+  SENSOR_CAPTURE_MODE: "isaac_sim"
 
   # Headless mode
   HEADLESS: "1"
