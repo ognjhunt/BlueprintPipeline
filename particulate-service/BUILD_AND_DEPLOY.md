@@ -141,6 +141,22 @@ ARTICULATION_BACKEND=particulate
 PARTICULATE_ENDPOINT=https://particulate-service-xxx.run.app
 ```
 
+### Provisioning the Endpoint for Workflows
+
+For production workflows, make sure the interactive job receives the
+`PARTICULATE_ENDPOINT` value so articulation detection can run. After the Cloud
+Run deployment, capture the service URL and wire it into the pipeline:
+
+```bash
+# Example: set the endpoint on the Cloud Run job used by workflows
+gcloud run jobs update interactive-job \
+  --region us-central1 \
+  --set-env-vars "PARTICULATE_ENDPOINT=https://particulate-service-xxx.run.app"
+```
+
+Alternatively, export `PARTICULATE_ENDPOINT` in the workflow environment or CI
+runtime so `workflows/interactive-pipeline.yaml` can pass it through to the job.
+
 ## Particulate Features
 
 | Feature | Particulate |
