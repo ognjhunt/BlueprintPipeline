@@ -52,7 +52,7 @@ def sample_manifest() -> Dict[str, Any]:
     """Sample BlueprintPipeline manifest for testing."""
     return {
         "scene_id": "test_kitchen_001",
-        "schema_version": "1.0.0",
+        "version": "1.0.0",
         "scene": {
             "environment_type": "kitchen",
             "coordinate_frame": "y_up",
@@ -80,6 +80,7 @@ def sample_manifest() -> Dict[str, Any]:
                 "transform": {
                     "position": {"x": 1.0, "y": 0.9, "z": 0.05},
                     "rotation_euler": {"roll": 0, "pitch": 0, "yaw": 0},
+                    "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
                 "semantics": {
                     "affordances": ["Graspable", "Fillable"],
@@ -110,6 +111,7 @@ def sample_manifest() -> Dict[str, Any]:
                 "transform": {
                     "position": {"x": 1.0, "y": 0.85, "z": 0.0},
                     "rotation_euler": {"roll": 0, "pitch": 0, "yaw": 0},
+                    "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
                 "semantics": {
                     "affordances": ["Supportable"],
@@ -133,6 +135,7 @@ def sample_manifest() -> Dict[str, Any]:
                 "transform": {
                     "position": {"x": 0.3, "y": 1.5, "z": 0.0},
                     "rotation_quaternion": {"w": 1, "x": 0, "y": 0, "z": 0},
+                    "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
                 "semantics": {
                     "affordances": [
@@ -158,7 +161,7 @@ def manifest_with_external_assets() -> Dict[str, Any]:
     """Manifest with mix of own assets and external NC assets."""
     return {
         "scene_id": "test_mixed_assets",
-        "schema_version": "1.0.0",
+        "version": "1.0.0",
         "scene": {
             "environment_type": "kitchen",
             "coordinate_frame": "y_up",
@@ -171,7 +174,10 @@ def manifest_with_external_assets() -> Dict[str, Any]:
                 "category": "mug",
                 "sim_role": "manipulable_object",
                 "dimensions_est": {"width": 0.08, "depth": 0.08, "height": 0.10},
-                "transform": {"position": {"x": 0, "y": 0, "z": 0}},
+                "transform": {
+                    "position": {"x": 0, "y": 0, "z": 0},
+                    "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
+                },
                 "semantics": {"affordances": ["Graspable"]},
                 "asset": {
                     "path": "objects/mug/asset.usdz",
@@ -184,7 +190,10 @@ def manifest_with_external_assets() -> Dict[str, Any]:
                 "category": "bowl",
                 "sim_role": "manipulable_object",
                 "dimensions_est": {"width": 0.15, "depth": 0.15, "height": 0.08},
-                "transform": {"position": {"x": 0.2, "y": 0, "z": 0}},
+                "transform": {
+                    "position": {"x": 0.2, "y": 0, "z": 0},
+                    "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
+                },
                 "semantics": {"affordances": ["Graspable"]},
                 "asset": {
                     "path": "external/bowl.usdz",
@@ -197,7 +206,10 @@ def manifest_with_external_assets() -> Dict[str, Any]:
                 "category": "plate",
                 "sim_role": "manipulable_object",
                 "dimensions_est": {"width": 0.25, "depth": 0.25, "height": 0.02},
-                "transform": {"position": {"x": 0.4, "y": 0, "z": 0}},
+                "transform": {
+                    "position": {"x": 0.4, "y": 0, "z": 0},
+                    "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
+                },
                 "semantics": {"affordances": ["Graspable"]},
                 "asset": {
                     "path": "external/plate.usdz",
