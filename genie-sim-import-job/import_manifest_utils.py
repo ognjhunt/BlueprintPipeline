@@ -12,8 +12,8 @@ MANIFEST_SCHEMA_DEFINITION = {
     "fields": {
         "schema_version": "Schema version string.",
         "generated_at": "UTC timestamp for manifest generation.",
-        "output_dir": "Absolute output directory for downloaded artifacts.",
-        "gcs_output_path": "Optional GCS URI pointing at output_dir.",
+        "output_dir": "Output directory relative to the bundle root (or '.' for the root).",
+        "gcs_output_path": "Optional GCS URI pointing at the bundle root containing output_dir.",
         "episodes": "Episode download summary metrics.",
         "quality": "Quality scoring summary and thresholds.",
         "lerobot": "LeRobot conversion status and outputs.",
