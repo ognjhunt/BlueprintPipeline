@@ -183,6 +183,7 @@ class EpisodeGenerationConfig:
     robot_prim_paths: Optional[List[str]] = None
     camera_specs: Optional[List[Dict[str, str]]] = None
     scene_usd_path: Optional[str] = None
+    robot_urdf_path: Optional[str] = None
 
     # Generation parameters
     episodes_per_variation: int = 10
@@ -1378,6 +1379,8 @@ class EpisodeGenerator:
             scene_id=self.config.scene_id,
             environment_type=manifest.get("environment_type", "unknown"),
             objects=manifest.get("objects", []),
+            scene_usd_path=self.config.scene_usd_path,
+            robot_urdf_path=self.config.robot_urdf_path,
         )
 
         for task, spec in tasks_with_specs:
@@ -1883,6 +1886,8 @@ class EpisodeGenerator:
                         scene_id=self.config.scene_id,
                         environment_type=varied_manifest.get("environment_type", "unknown"),
                         objects=varied_manifest.get("objects", []),
+                        scene_usd_path=self.config.scene_usd_path,
+                        robot_urdf_path=self.config.robot_urdf_path,
                     )
 
                     motion_plan = self.motion_planner.plan_motion(
@@ -2294,6 +2299,7 @@ def run_episode_generation_job(
     scene_config = _load_scene_config(scene_dir)
     scene_usd_path = _resolve_scene_usd_path(scene_dir)
     camera_specs = _load_camera_specs(scene_config)
+    robot_urdf_path = scene_config.get("robot_urdf_path") or os.getenv("ROBOT_URDF_PATH")
 
     robot_prim_paths = scene_config.get("robot_prim_paths")
     if not robot_prim_paths:
@@ -2311,6 +2317,7 @@ def run_episode_generation_job(
         robot_prim_paths=robot_prim_paths,
         camera_specs=camera_specs,
         scene_usd_path=scene_usd_path,
+        robot_urdf_path=robot_urdf_path,
         episodes_per_variation=episodes_per_variation,
         max_variations=max_variations,
         fps=fps,
