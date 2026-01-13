@@ -7,9 +7,9 @@ physics/semantic hints, and background mesh metadata. The schema is defined in
 
 Key fields:
 
-- `schema_version`: Version tag for compatibility checks.
-- `scene_id`: Optional identifier for the scene.
-- `source`: Where the manifest originated (`gemini`, `blueprint_recipe`, `manual`, `unknown`).
+- `version`: Required schema version tag (missing version fails QA validation).
+- `scene_id`: Required identifier for the scene.
+- `scene`: Required block with `coordinate_frame` and `meters_per_unit`.
 - `background`: Background mesh reference and semantics.
 - `objects[]`: One entry per asset with:
   - `id`: Stable object identifier (string or int).
@@ -41,9 +41,12 @@ Resulting manifest excerpt:
 
 ```json
 {
-  "schema_version": "1.0",
-  "source": "gemini",
+  "version": "1.0.0",
   "scene_id": "kitchen_123",
+  "scene": {
+    "coordinate_frame": "y_up",
+    "meters_per_unit": 1.0
+  },
   "background": {
     "mesh": {"path": "scenes/kitchen_123/assets/obj_scene_background/model.glb"},
     "semantics": {"category": "scene_background"}
@@ -92,9 +95,12 @@ Example entry:
 
 ```json
 {
-  "schema_version": "1.0",
-  "source": "blueprint_recipe",
+  "version": "1.0.0",
   "scene_id": "loft_42",
+  "scene": {
+    "coordinate_frame": "y_up",
+    "meters_per_unit": 1.0
+  },
   "objects": [
     {
       "id": "coffee_table",
