@@ -57,6 +57,7 @@ Environment Variables:
     MIN_QUALITY_SCORE: Minimum quality score for export - default: 0.7
     MIN_SUCCESS_RATE: Minimum success rate for episode generation - default: 0.5
     BYPASS_QUALITY_GATES: Skip quality gate evaluation (dev-only)
+    LABS_STAGING: Treat run as labs-staging (requires Isaac Sim + Replicator)
 """
 
 import gc
@@ -2546,6 +2547,7 @@ def main():
             or os.getenv("PRODUCTION_MODE", "").lower() == "true"
             or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
             or os.getenv("PRODUCTION", "").lower() == "true"
+            or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
         )
 
     def _is_production_preflight() -> bool:
