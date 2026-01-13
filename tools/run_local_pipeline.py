@@ -1105,7 +1105,11 @@ class LocalPipelineRunner:
 
         api_key = os.getenv("GENIE_SIM_API_KEY")
         force_local = os.getenv("GENIESIM_FORCE_LOCAL", "false").lower() == "true"
-        submission_mode = "api" if api_key and not force_local else "local"
+        mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
+        if mock_mode:
+            submission_mode = "mock"
+        else:
+            submission_mode = "api" if api_key and not force_local else "local"
         job_id = None
         submission_message = None
         local_run_result = None
@@ -1142,6 +1146,39 @@ class LocalPipelineRunner:
                 )
                 if not result.success or not result.job_id:
                     raise RuntimeError(result.message or "Genie Sim submission failed")
+                job_id = result.job_id
+                submission_message = result.message
+            finally:
+                client.close()
+        elif submission_mode == "mock":
+            try:
+                sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
+                from geniesim_client import GenieSimClient, GenerationParams
+            except ImportError as e:
+                return StepResult(
+                    step=PipelineStep.GENIESIM_SUBMIT,
+                    success=False,
+                    duration_seconds=0,
+                    message=f"Import error (Genie Sim mock client not found): {e}",
+                )
+
+            generation_params = GenerationParams(
+                episodes_per_task=episodes_per_task,
+                num_variations=num_variations,
+                robot_type=robot_type,
+                min_quality_score=min_quality_score,
+            )
+            client = GenieSimClient(mock_mode=True, validate_on_init=False)
+            try:
+                result = client.submit_generation_job(
+                    scene_graph=scene_graph,
+                    asset_index=asset_index,
+                    task_config=task_config,
+                    generation_params=generation_params,
+                    job_name=f"{self.scene_id}-geniesim-mock",
+                )
+                if not result.success or not result.job_id:
+                    raise RuntimeError(result.message or "Genie Sim mock submission failed")
                 job_id = result.job_id
                 submission_message = result.message
             finally:
@@ -1199,13 +1236,16 @@ class LocalPipelineRunner:
                     else "Local Genie Sim execution failed."
                 )
 
-        job_status = (
-            "completed"
-            if local_run_result and local_run_result.success
-            else ("failed" if submission_mode == "local" else "submitted")
-        )
-        if submission_mode == "local" and preflight_status and not preflight_status.get("available", False):
-            job_status = "failed"
+        if submission_mode == "mock":
+            job_status = "completed"
+        else:
+            job_status = (
+                "completed"
+                if local_run_result and local_run_result.success
+                else ("failed" if submission_mode == "local" else "submitted")
+            )
+            if submission_mode == "local" and preflight_status and not preflight_status.get("available", False):
+                job_status = "failed"
 
         job_payload = {
             "job_id": job_id,
@@ -1651,6 +1691,11 @@ def main():
         help="Use Genie Sim execution mode (overrides USE_GENIESIM for this run)",
     )
     parser.add_argument(
+        "--mock-geniesim",
+        action="store_true",
+        help="Run Genie Sim steps in mock mode (no external services required)",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Reduce output verbosity",
@@ -1659,6 +1704,9 @@ def main():
     args = parser.parse_args()
 
     if args.use_geniesim:
+        os.environ["USE_GENIESIM"] = "true"
+    if args.mock_geniesim:
+        os.environ["GENIESIM_MOCK_MODE"] = "true"
         os.environ["USE_GENIESIM"] = "true"
 
     # Parse steps
