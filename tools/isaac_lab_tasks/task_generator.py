@@ -190,6 +190,15 @@ class IsaacLabTaskGenerator:
             recipe, policy, policy_id, robot_type, num_envs, scene_path
         )
 
+        missing_components = self.reward_generator.get_missing_components(
+            list(task_config.reward_weights.keys())
+        )
+        if missing_components:
+            missing_str = ", ".join(missing_components)
+            raise ValueError(
+                f"Missing reward implementations for components: {missing_str}"
+            )
+
         # Generate files
         files = {}
 
