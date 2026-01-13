@@ -441,6 +441,9 @@ class AIMotionPlanner:
                 current_joints = segment_traj[-1].copy()
 
             wp.joint_positions = current_joints.copy()
+            if not self._within_joint_limits(wp.joint_positions):
+                errors.append(f"Waypoint {idx} joint limits violated after cuRobo IK")
+                return None, None, True, None, errors
 
         if not joint_segments:
             return None, None, True, None, ["cuRobo produced empty trajectory"]
@@ -459,6 +462,104 @@ class AIMotionPlanner:
                 errors.append("cuRobo trajectory violates joint limits")
 
         return joint_trajectory, joint_timestamps, True, collision_free, errors
+
+    def _within_joint_limits(self, joints: np.ndarray, tolerance: float = 1e-4) -> bool:
+        """Check whether joints are within configured limits."""
+        lower = self.robot_config.get("joint_limits_lower")
+        upper = self.robot_config.get("joint_limits_upper")
+        if lower is None or upper is None:
+            return True
+        finite_mask = np.isfinite(lower) & np.isfinite(upper)
+        if not np.any(finite_mask):
+            return True
+        below = joints[finite_mask] < (lower[finite_mask] - tolerance)
+        above = joints[finite_mask] > (upper[finite_mask] + tolerance)
+        return not (np.any(below) or np.any(above))
+
+    def _solve_waypoint_ik(
+        self,
+        waypoints: List[Waypoint],
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[str]]:
+        """Solve IK for waypoints to generate a joint trajectory."""
+        if not waypoints:
+            return None, None, ["No waypoints provided for IK"]
+
+        try:
+            from trajectory_solver import IKSolver, ROBOT_CONFIGS
+        except ImportError as exc:
+            return None, None, [f"IK solver unavailable: {exc}"]
+
+        robot_config = ROBOT_CONFIGS.get(self.robot_type)
+        if robot_config is None:
+            return None, None, [f"Unsupported robot type for IK: {self.robot_type}"]
+
+        ik_solver = IKSolver(robot_config, verbose=self.verbose)
+        prev_joints = robot_config.default_joint_positions.copy()
+        joint_positions: List[np.ndarray] = []
+        errors: List[str] = []
+
+        for idx, wp in enumerate(waypoints):
+            seed = wp.joint_positions if wp.joint_positions is not None else prev_joints
+            joints = ik_solver.solve(
+                target_position=wp.position,
+                target_orientation=wp.orientation,
+                seed_joints=seed,
+            )
+            if joints is None:
+                errors.append(f"IK failed at waypoint {idx} (phase={wp.phase.value})")
+                break
+
+            if not self._within_joint_limits(joints):
+                errors.append(f"Waypoint {idx} joint limits violated during IK")
+                break
+
+            wp.joint_positions = joints.copy()
+            joint_positions.append(joints)
+            prev_joints = joints
+
+        if errors:
+            return None, None, errors
+
+        joint_trajectory = np.vstack(joint_positions)
+        joint_timestamps = np.array([wp.timestamp for wp in waypoints])
+
+        return joint_trajectory, joint_timestamps, []
+
+    def _check_scene_collisions(
+        self,
+        waypoints: List[Waypoint],
+        scene_context: Optional[SceneContext],
+        robot_radius: float = 0.08,
+    ) -> Tuple[Optional[bool], List[str]]:
+        """Check for collisions against scene obstacles."""
+        if scene_context is None or not scene_context.objects:
+            return None, []
+
+        try:
+            from collision_aware_planner import SceneCollisionChecker
+        except ImportError as exc:
+            return None, [f"Scene collision checker unavailable: {exc}"]
+
+        checker = SceneCollisionChecker(
+            scene_usd_path=None,
+            robot_type=self.robot_type,
+            verbose=self.verbose,
+        )
+
+        for obj in scene_context.objects:
+            position = np.array(obj.get("position", [0, 0, 0]))
+            dimensions = np.array(obj.get("dimensions", [0.1, 0.1, 0.1]))
+            checker.add_obstacle(position, dimensions)
+
+        for idx in range(len(waypoints) - 1):
+            if checker.check_collision_segment(
+                waypoints[idx].position,
+                waypoints[idx + 1].position,
+                radius=robot_radius,
+            ):
+                return False, [f"Collision detected between waypoints {idx} and {idx + 1}"]
+
+        return True, []
 
     def plan_motion(
         self,
@@ -556,6 +657,29 @@ class AIMotionPlanner:
                 plan.planning_success = False
             if collision_free is False:
                 plan.planning_errors.append("cuRobo reported collision in planned trajectory")
+                plan.planning_success = False
+
+        if not collision_checked:
+            joint_trajectory, joint_timestamps, ik_errors = self._solve_waypoint_ik(waypoints)
+            if ik_errors:
+                plan.planning_errors.extend(ik_errors)
+                plan.planning_success = False
+            else:
+                plan.planning_backend = "ik"
+                plan.joint_trajectory = joint_trajectory
+                plan.joint_trajectory_timestamps = joint_timestamps
+                plan.joint_limits_enforced = True
+
+        if not plan.collision_checked:
+            collision_free, collision_errors = self._check_scene_collisions(waypoints, scene_context)
+            if collision_free is not None:
+                plan.collision_checked = True
+                plan.collision_free = collision_free
+                if not collision_free:
+                    plan.planning_errors.extend(collision_errors)
+                    plan.planning_success = False
+            elif collision_errors:
+                plan.planning_errors.extend(collision_errors)
                 plan.planning_success = False
 
         if plan.planning_errors:
