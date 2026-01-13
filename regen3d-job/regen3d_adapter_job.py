@@ -46,8 +46,10 @@ Reference:
 import json
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 from typing import Any, Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +62,7 @@ from tools.regen3d_adapter import (
     layout_from_regen3d,
     Regen3DOutput,
 )
+from tools.scale_authority.authority import REFERENCE_DIMENSIONS
 from tools.scene_manifest.validate_manifest import validate_manifest
 
 # Optional: Gemini for semantic inventory
@@ -395,6 +398,88 @@ Only include objects from the provided list. Match object IDs exactly.'''
 # Main Job
 # =============================================================================
 
+@dataclass
+class ScaleCalibrationResult:
+    scale_factor: float
+    reference_types: List[str]
+    reference_objects: List[str]
+    method: str
+
+
+def _extract_object_height(obj) -> Optional[float]:
+    bounds = obj.bounds or {}
+    size = bounds.get("size")
+    if size and len(size) == 3:
+        height = size[1]
+        if height and height > 0:
+            return height
+
+    min_pt = bounds.get("min")
+    max_pt = bounds.get("max")
+    if min_pt and max_pt and len(min_pt) == 3 and len(max_pt) == 3:
+        height = max_pt[1] - min_pt[1]
+        if height > 0:
+            return height
+
+    if size and len(size) == 3:
+        largest = max(size)
+        if largest and largest > 0:
+            return largest
+
+    return None
+
+
+def _auto_calibrate_scale(
+    regen3d_output: Regen3DOutput,
+    min_samples: int = 1,
+    min_scale: float = 0.05,
+    max_scale: float = 20.0,
+) -> Optional[ScaleCalibrationResult]:
+    scale_estimates = []
+
+    for obj in regen3d_output.objects:
+        text_parts = [obj.category, obj.description, obj.id]
+        text = " ".join([part for part in text_parts if part]).lower()
+        if not text:
+            continue
+
+        measured_height = _extract_object_height(obj)
+        if not measured_height:
+            continue
+
+        for ref_key, ref_dims in REFERENCE_DIMENSIONS.items():
+            ref_key_text = ref_key.replace("_", " ")
+            if ref_key in text or ref_key_text in text:
+                expected = ref_dims.get("height") or max(ref_dims.values())
+                if not expected or measured_height <= 0:
+                    break
+                scale = expected / measured_height
+                if min_scale <= scale <= max_scale:
+                    scale_estimates.append({
+                        "scale": scale,
+                        "object_id": obj.id,
+                        "reference_type": ref_key,
+                        "expected_m": expected,
+                        "measured_m": measured_height,
+                    })
+                break
+
+    if len(scale_estimates) < min_samples:
+        return None
+
+    scales = [estimate["scale"] for estimate in scale_estimates]
+    calibrated_scale = median(scales)
+    reference_types = sorted({estimate["reference_type"] for estimate in scale_estimates})
+    reference_objects = sorted({estimate["object_id"] for estimate in scale_estimates})
+
+    return ScaleCalibrationResult(
+        scale_factor=calibrated_scale,
+        reference_types=reference_types,
+        reference_objects=reference_objects,
+        method="scene_priors",
+    )
+
+
 def run_regen3d_adapter_job(
     root: Path,
     scene_id: str,
@@ -415,7 +500,7 @@ def run_regen3d_adapter_job(
     print(f"[REGEN3D-JOB] Assets prefix: {assets_prefix}")
     print(f"[REGEN3D-JOB] Layout prefix: {layout_prefix}")
     print(f"[REGEN3D-JOB] Environment type: {environment_type}")
-    print(f"[REGEN3D-JOB] Scale factor: {scale_factor}")
+    print(f"[REGEN3D-JOB] Scale factor (env/default): {scale_factor}")
 
     regen3d_dir = root / regen3d_prefix
     assets_dir = root / assets_prefix
@@ -439,6 +524,25 @@ def run_regen3d_adapter_job(
 
     if not regen3d_output.objects:
         print("[REGEN3D-JOB] WARNING: No objects found in 3D-RE-GEN output")
+    else:
+        try:
+            calibration = _auto_calibrate_scale(regen3d_output)
+        except Exception as e:
+            calibration = None
+            print(f"[REGEN3D-JOB] WARNING: Auto scale calibration failed: {e}")
+
+        if calibration:
+            scale_factor = calibration.scale_factor
+            print(
+                "[REGEN3D-JOB] Auto scale calibration selected "
+                f"scale={scale_factor:.4f} using {calibration.method} "
+                f"(refs={calibration.reference_types}, objects={calibration.reference_objects})"
+            )
+        else:
+            print(
+                "[REGEN3D-JOB] Auto scale calibration unavailable; "
+                f"falling back to SCALE_FACTOR={scale_factor}"
+            )
 
     # Create output directories
     assets_dir.mkdir(parents=True, exist_ok=True)
