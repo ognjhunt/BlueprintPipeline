@@ -249,6 +249,10 @@ main:
                               value: ${episodesPerVariation}
                             - name: REQUIRE_REAL_PHYSICS
                               value: "true"
+                            - name: SENSOR_CAPTURE_MODE
+                              value: "isaac_sim"
+                            - name: USE_MOCK_CAPTURE
+                              value: "false"
                             - name: BUNDLE_TIER
                               value: ${bundleTier}
                             - name: AUDIO_NARRATION_ENABLED

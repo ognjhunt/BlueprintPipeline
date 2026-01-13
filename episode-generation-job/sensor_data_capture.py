@@ -89,6 +89,17 @@ class SensorDataCaptureMode(Enum):
     FAIL_CLOSED = "fail_closed"       # Error if no Isaac Sim (default for production)
 
 
+def _is_production_run() -> bool:
+    """Detect production runs where fail-closed should be enforced."""
+    return (
+        os.getenv("REQUIRE_REAL_PHYSICS", "").lower() == "true"
+        or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
+        or os.getenv("PRODUCTION_MODE", "").lower() == "true"
+        or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
+        or os.getenv("PRODUCTION", "").lower() == "true"
+    )
+
+
 @dataclass
 class CameraCalibration:
     """
@@ -1910,6 +1921,13 @@ def get_capture_mode_from_env() -> SensorDataCaptureMode:
     """
     mode_str = os.getenv("SENSOR_CAPTURE_MODE", "fail_closed").lower()
 
+    if _is_production_run() and mode_str == SensorDataCaptureMode.MOCK_DEV.value:
+        print(
+            "[WARNING] Production run detected - mock capture not allowed. "
+            "Forcing SENSOR_CAPTURE_MODE=fail_closed."
+        )
+        return SensorDataCaptureMode.FAIL_CLOSED
+
     try:
         return SensorDataCaptureMode(mode_str)
     except ValueError:
@@ -1986,6 +2004,14 @@ def create_sensor_capture(
             capture_mode = get_capture_mode_from_env()
 
     # Check if Isaac Sim is available
+    if capture_mode in (SensorDataCaptureMode.ISAAC_SIM, SensorDataCaptureMode.FAIL_CLOSED):
+        if not _HAVE_INTEGRATION_MODULE:
+            raise RuntimeError(
+                "Isaac Sim integration module is not available in this environment. "
+                "Run inside the Isaac Sim Python environment "
+                "(/isaac-sim/python.sh) or use the Isaac Sim container."
+            )
+
     isaac_available = is_isaac_sim_available()
     replicator_available = is_replicator_available()
 
