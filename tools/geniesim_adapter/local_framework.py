@@ -1951,6 +1951,37 @@ def build_geniesim_preflight_report(
     }
 
 
+def run_geniesim_preflight(
+    stage: str,
+    *,
+    require_server: bool = True,
+    require_ready: bool = False,
+    ping_timeout: float = 5.0,
+) -> Dict[str, Any]:
+    """Run a preflight check with remediation guidance and return the report."""
+    status = check_geniesim_availability()
+    report = build_geniesim_preflight_report(
+        status,
+        require_server=require_server,
+        require_ready=require_ready,
+        ping_timeout=ping_timeout,
+    )
+    report["stage"] = stage
+    return report
+
+
+def format_geniesim_preflight_failure(stage: str, report: Dict[str, Any]) -> str:
+    """Format a preflight failure message for logs or UI surfaces."""
+    missing = report.get("missing", [])
+    remediation = report.get("remediation", [])
+    message = f"[GENIESIM-PREFLIGHT] {stage} preflight failed."
+    if missing:
+        message += f" Missing requirements: {', '.join(missing)}."
+    if remediation:
+        message += " Remediation: " + " ".join(remediation)
+    return message
+
+
 def run_geniesim_preflight_or_exit(
     stage: str,
     *,
@@ -1959,9 +1990,8 @@ def run_geniesim_preflight_or_exit(
     ping_timeout: float = 5.0,
 ) -> Dict[str, Any]:
     """Run a preflight check with remediation guidance, exiting on failure."""
-    status = check_geniesim_availability()
-    report = build_geniesim_preflight_report(
-        status,
+    report = run_geniesim_preflight(
+        stage,
         require_server=require_server,
         require_ready=require_ready,
         ping_timeout=ping_timeout,
@@ -1976,7 +2006,7 @@ def run_geniesim_preflight_or_exit(
             print("Remediation steps:", file=sys.stderr)
             for step in report["remediation"]:
                 print(f"  - {step}", file=sys.stderr)
-        print(f"Details: {json.dumps(status, indent=2)}", file=sys.stderr)
+        print(f"Details: {json.dumps(report['status'], indent=2)}", file=sys.stderr)
         raise SystemExit(1)
     return report
 
