@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies
 # - numpy: Matrix math and data handling
-# - usd-core: OpenUSD Python bindings (pxr module)
+# - usd-core: OpenUSD Python bindings (pxr module) required by USD assembly
 # - pygltflib: Parse GLB/GLTF files
 # - Pillow: Image processing for textures
 RUN pip install --no-cache-dir \

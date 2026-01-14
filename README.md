@@ -113,6 +113,13 @@ The pipeline runs on Google Cloud using:
 - **Cloud Storage** for scene data
 - **EventArc** for triggering (on `.regen3d_complete` marker)
 
+### OpenUSD dependency
+
+The USD assembly step relies on the OpenUSD Python bindings (`pxr`). The default
+`usd-assembly-job` image installs these via `usd-core` (see
+`usd-assembly-job/Dockerfile`). If you build a custom image or deployment guide,
+ensure OpenUSD is installed so the USD assembly job can import `pxr`.
+
 ## Jobs
 
 | Job | Purpose | Inputs | Outputs |
