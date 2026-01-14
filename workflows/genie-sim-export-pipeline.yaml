@@ -477,9 +477,18 @@ main:
 
     - maybe_trigger_import:
         switch:
-          - condition: '${submittedJobStatus == "completed"}'
+          - condition: '${submittedJobStatus == "completed" and submittedSubmissionMode == "local"}'
             next: trigger_import_workflow
+          - condition: '${submittedJobStatus == "completed"}'
+            next: skip_import_trigger_api
         next: skip_import_trigger
+
+    - skip_import_trigger_api:
+        call: sys.log
+        args:
+          text: '${"Genie Sim job " + submittedJobId + " completed in API mode; webhook/Eventarc will trigger import"}'
+          severity: "INFO"
+        next: write_completion_marker
 
     - trigger_import_workflow:
         call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.create
