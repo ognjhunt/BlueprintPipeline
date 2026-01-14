@@ -473,6 +473,8 @@ main:
           - submittedJobStatus: ${default(submissionMetadata.status, "submitted")}
           - submittedSubmissionMode: ${default(submissionMetadata.submission_mode, "api")}
           - submittedEpisodesPrefix: ${default(map.get(map.get(submissionMetadata, "artifacts", {}), "episodes_prefix"), null)}
+          - submittedFailureReason: ${default(map.get(submissionMetadata, "failure_reason"), "unknown")}
+          - submittedFailureDetails: ${default(map.get(submissionMetadata, "failure_details"), null)}
         next: maybe_trigger_import
 
     - maybe_trigger_import:
@@ -481,6 +483,8 @@ main:
             next: trigger_import_workflow
           - condition: '${submittedJobStatus == "completed"}'
             next: skip_import_trigger_api
+          - condition: '${submittedJobStatus == "failed"}'
+            next: handle_submission_failure
         next: skip_import_trigger
 
     - skip_import_trigger_api:
@@ -512,6 +516,39 @@ main:
           text: '${"Genie Sim job not yet complete for scene " + sceneId + " (status: " + submittedJobStatus + ")"}'
           severity: "INFO"
         next: write_completion_marker
+
+    - handle_submission_failure:
+        call: sys.log
+        args:
+          text: '${"ERROR: Genie Sim submission failed for scene " + sceneId + " (reason: " + submittedFailureReason + ")"}'
+          severity: "ERROR"
+        next: write_submission_failure_marker
+
+    - write_submission_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${geniesimFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": geniesimSubmitJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "geniesim_submit_failed",
+              "message": submittedFailureReason,
+              "details": submittedFailureDetails
+            },
+            "context": {
+              "job_id": submittedJobId,
+              "job_metadata_path": geniesimJobMetadataPath,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "submission_mode": submittedSubmissionMode
+            }
+          })}
+        result: submissionFailureMarkerResult
+        next: raise_submission_failed
 
     # Write completion marker
     - write_completion_marker:
