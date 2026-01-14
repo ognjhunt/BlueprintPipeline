@@ -177,6 +177,12 @@ These are required for the local framework and health checks:
 | `GENIESIM_HOST` | gRPC host for the Genie Sim server. | `localhost` |
 | `GENIESIM_PORT` | gRPC port for the Genie Sim server. | `50051` |
 
+## Optional Environment Variables
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `GENIESIM_ALLOW_LINEAR_FALLBACK` | Allow linear interpolation fallback when cuRobo is unavailable (`1` to enable, `0` to disable). In non-production, the local framework auto-enables this fallback if cuRobo is missing and this variable is unset; in production, cuRobo is required and the framework fails fast. | Unset (auto-enable in non-production only) |
+
 ## Staged Validation Flow
 
 Use this staged flow to validate Genie Sim before launching a pipeline run:
