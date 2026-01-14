@@ -4,6 +4,14 @@ This directory contains monitoring and alerting configuration for the BlueprintP
 
 ## Dashboard Setup
 
+### Automated setup (recommended)
+
+Run the deployment script to create dashboards, alert policies, and log-based metrics in one step:
+
+```bash
+./infrastructure/monitoring/setup-monitoring.sh --project YOUR_PROJECT_ID --email alerts@example.com
+```
+
 ### Google Cloud Monitoring
 
 1. **Import Dashboard**:
