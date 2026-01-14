@@ -570,6 +570,10 @@ main:
                             env:
                             - name: RUN_STAGING_E2E
                               value: "1"
+                            - name: PIPELINE_ENV
+                              value: "production"
+                            - name: SIMREADY_PHYSICS_MODE
+                              value: "deterministic"
                             - name: STAGING_DATA_ROOT
                               value: ${stagingDataRoot}
                             - name: STAGING_SCENE_ID

@@ -2054,6 +2054,17 @@ def prepare_simready_assets_job(
         allow_heuristic_fallback = _env_flag("SIMREADY_ALLOW_HEURISTIC_FALLBACK")
     physics_mode = (_get_env_value("SIMREADY_PHYSICS_MODE", "auto") or "auto").strip().lower()
     allow_deterministic_physics = _env_flag("SIMREADY_ALLOW_DETERMINISTIC_PHYSICS")
+    pipeline_env_raw = (_get_env_value("PIPELINE_ENV", "") or "").strip().lower()
+    production_mode_set = _env_flag("SIMREADY_PRODUCTION_MODE") or pipeline_env_raw in {
+        "prod",
+        "production",
+    }
+    if physics_mode == "deterministic" and not production_mode_set:
+        logger.warning(
+            "[SIMREADY] Deterministic physics requested but production mode is unset. "
+            "If this run is meant to mirror production, set PIPELINE_ENV=production "
+            "or SIMREADY_PRODUCTION_MODE=1."
+        )
 
     print(f"[SIMREADY] Bucket={bucket}")
     print(f"[SIMREADY] Scene={scene_id}")
