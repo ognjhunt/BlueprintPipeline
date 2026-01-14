@@ -93,7 +93,7 @@ def test_mock_import_contracts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert import_manifest_path.is_file()
     import_manifest = json.loads(import_manifest_path.read_text())
 
-    assert import_manifest["schema_version"] == "1.1"
+    assert import_manifest["schema_version"] == "1.2"
     assert import_manifest["provenance"]["source"] == "genie_sim"
     assert import_manifest["provenance"]["job_id"] == submit_result.job_id
     assert import_manifest["provenance"]["scene_id"] == scene_id
@@ -101,6 +101,8 @@ def test_mock_import_contracts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert import_manifest["quality"]["threshold"] == 0.85
     assert import_manifest["episodes"]["passed_validation"] == 1
     assert import_manifest["episodes"]["filtered"] == 1
+    assert import_manifest["readme_path"] == "README.md"
+    assert "sha256" in import_manifest["package"]
 
     episode_checksums = import_manifest["checksums"]["episodes"]
     assert episode_checksums
