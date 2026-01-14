@@ -47,7 +47,8 @@ python tests/test_pipeline_e2e.py
 ### Local Genie Sim Fixtures
 
 Run the local pipeline with Genie Sim enabled to generate an export bundle and submit
-local data collection (or API submission if configured).
+local data collection. Genie Sim runs in **local-only mode by default**; no API key
+is required for the free/default workflow.
 
 ```bash
 USE_GENIESIM=true \
@@ -56,7 +57,7 @@ python tools/run_local_pipeline.py \
     --use-geniesim
 ```
 
-Expected outputs for fixtures:
+Expected outputs for fixtures (local-only):
 
 ```
 scenes/{scene_id}/geniesim/
@@ -187,7 +188,6 @@ following secret IDs (or equivalent env vars) for jobs that rely on external API
 | `gemini-api-key` | `GEMINI_API_KEY` | `simready-job`, `episode-generation-job` | Gemini API access for physics estimation and task specification |
 | `openai-api-key` | `OPENAI_API_KEY` | `episode-generation-job` | OpenAI API access for task specification |
 | `anthropic-api-key` | `ANTHROPIC_API_KEY` | `episode-generation-job` | Anthropic API access for task specification |
-| `genie-sim-api-key` | `GENIE_SIM_API_KEY` | `genie-sim-*` jobs | Genie-Sim API access |
 | `particulate-api-key` | `PARTICULATE_API_KEY` | `interactive-job` | Particulate articulation service access |
 
 In production, `simready-job` requires a Gemini key; without it, the job falls back to heuristic-only

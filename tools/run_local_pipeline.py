@@ -1068,6 +1068,31 @@ class LocalPipelineRunner:
             },
         )
 
+    @staticmethod
+    def _resolve_geniesim_submission_mode(
+        api_key: Optional[str],
+        force_local: bool,
+        mock_mode: bool,
+    ) -> str:
+        """Resolve Genie Sim submission mode with local default."""
+        if mock_mode:
+            return "mock"
+
+        submission_override = os.getenv("GENIESIM_SUBMISSION_MODE", "").strip().lower()
+        if submission_override == "mock":
+            return "mock"
+        if submission_override == "api":
+            if force_local:
+                return "local"
+            return "api" if api_key else "local"
+        if submission_override == "local":
+            return "local"
+
+        enable_api = os.getenv("GENIESIM_SUBMIT_API", "").strip().lower() in {"1", "true", "yes", "y"}
+        if enable_api and api_key and not force_local:
+            return "api"
+        return "local"
+
     def _run_geniesim_submit(self) -> StepResult:
         """Submit Genie Sim generation (API or local framework)."""
         try:
@@ -1106,10 +1131,11 @@ class LocalPipelineRunner:
         api_key = os.getenv("GENIE_SIM_API_KEY")
         force_local = os.getenv("GENIESIM_FORCE_LOCAL", "false").lower() == "true"
         mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
-        if mock_mode:
-            submission_mode = "mock"
-        else:
-            submission_mode = "api" if api_key and not force_local else "local"
+        submission_mode = self._resolve_geniesim_submission_mode(
+            api_key=api_key,
+            force_local=force_local,
+            mock_mode=mock_mode,
+        )
         job_id = None
         submission_message = None
         local_run_result = None
@@ -1271,7 +1297,9 @@ class LocalPipelineRunner:
             episodes_path = str(self.episodes_dir / f"geniesim_{job_id}")
             job_payload["artifacts"] = {
                 "episodes_path": episodes_path,
+                "episodes_prefix": episodes_path,
                 "lerobot_path": str(Path(episodes_path) / "lerobot"),
+                "lerobot_prefix": str(Path(episodes_path) / "lerobot"),
             }
             job_payload["local_execution"] = {
                 "success": bool(local_run_result and local_run_result.success),
