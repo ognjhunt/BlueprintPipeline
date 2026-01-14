@@ -27,6 +27,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 import traceback
@@ -61,6 +62,19 @@ from hand_motion import (
     RobotConfig,
 )
 from bundle_packager import DWMBundlePackager, generate_text_prompt
+
+
+def _is_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _is_production_level(level: str | None) -> bool:
+    if level is None:
+        return False
+    normalized = level.strip().lower()
+    return normalized in {"production", "prod", "high", "strict"}
 
 
 @dataclass
@@ -106,6 +120,8 @@ class DWMJobConfig:
     robot_demo_roots: Optional[list[Path]] = None
     use_physics_ground_truth: bool = False
     skip_dwm: bool = False
+    data_quality_level: Optional[str] = None
+    allow_mock_rendering: Optional[bool] = None
 
     def __post_init__(self):
         if self.trajectory_types is None:
@@ -121,6 +137,10 @@ class DWMJobConfig:
             ]
         if self.robot_demo_roots is None:
             self.robot_demo_roots = []
+        if self.data_quality_level is None:
+            self.data_quality_level = os.environ.get("DATA_QUALITY_LEVEL")
+        if self.allow_mock_rendering is None:
+            self.allow_mock_rendering = _is_truthy(os.environ.get("ALLOW_MOCK_RENDERING"))
 
 
 class DWMPreparationJob:
@@ -144,6 +164,8 @@ class DWMPreparationJob:
             config: Job configuration
         """
         self.config = config
+        self.production_mode = _is_production_level(config.data_quality_level)
+        self._validate_render_policy()
         self.manifest = None
         self.scene_objects = {}
 
@@ -178,6 +200,26 @@ class DWMPreparationJob:
             fps=config.fps,
             enable_robot_retargeting=config.enable_robot_retargeting,
         )
+
+    def _validate_render_policy(self) -> None:
+        if self.production_mode:
+            if self.config.allow_mock_rendering:
+                raise ValueError(
+                    "Mock rendering is not allowed in production. Remove ALLOW_MOCK_RENDERING."
+                )
+            if self.config.render_backend and self.config.render_backend != RenderBackend.ISAAC_SIM:
+                raise ValueError(
+                    "Production requires RenderBackend.ISAAC_SIM for rendering."
+                )
+            self.config.render_backend = RenderBackend.ISAAC_SIM
+        else:
+            if self.config.render_backend == RenderBackend.PYRENDER and not self.config.allow_mock_rendering:
+                raise ValueError(
+                    "PyRender backend is restricted to CI/dev modes. "
+                    "Set ALLOW_MOCK_RENDERING=true or --allow-mock-rendering to proceed."
+                )
+            if self.config.render_backend is None and not self.config.allow_mock_rendering:
+                self.config.render_backend = RenderBackend.ISAAC_SIM
 
     @staticmethod
     def _vector_from_value(value: Any) -> Optional[np.ndarray]:
@@ -882,6 +924,8 @@ def prepare_dwm_bundles(
     verbose: bool = True,
     use_physics_ground_truth: bool = False,
     skip_dwm: bool = False,
+    data_quality_level: Optional[str] = None,
+    allow_mock_rendering: Optional[bool] = None,
 ) -> DWMPipelineOutput:
     """
     Convenience function to prepare DWM bundles.
@@ -899,6 +943,8 @@ def prepare_dwm_bundles(
         verbose: Print progress
         use_physics_ground_truth: Run Isaac Sim/Lab rollouts for aligned physics logs
         skip_dwm: Skip DWM preparation and return a successful no-op result
+        data_quality_level: Optional data quality level (production enforces Isaac Sim)
+        allow_mock_rendering: Allow mock/PyRender rendering for CI smoke tests
 
     Returns:
         DWMPipelineOutput with results
@@ -916,6 +962,8 @@ def prepare_dwm_bundles(
         verbose=verbose,
         use_physics_ground_truth=use_physics_ground_truth,
         skip_dwm=skip_dwm,
+        data_quality_level=data_quality_level,
+        allow_mock_rendering=allow_mock_rendering,
     )
 
     job = DWMPreparationJob(config)
@@ -929,6 +977,8 @@ def run_dwm_preparation(
     verbose: bool = True,
     use_physics_ground_truth: bool = False,
     skip_dwm: bool = False,
+    data_quality_level: Optional[str] = None,
+    allow_mock_rendering: Optional[bool] = None,
 ) -> DWMPipelineOutput:
     """
     Run DWM preparation on a scene directory.
@@ -946,6 +996,8 @@ def run_dwm_preparation(
         num_trajectories: Number of trajectories
         verbose: Print progress
         skip_dwm: Skip DWM preparation and return a successful no-op result
+        data_quality_level: Optional data quality level (production enforces Isaac Sim)
+        allow_mock_rendering: Allow mock/PyRender rendering for CI smoke tests
 
     Returns:
         DWMPipelineOutput with results
@@ -966,6 +1018,8 @@ def run_dwm_preparation(
         verbose=verbose,
         use_physics_ground_truth=use_physics_ground_truth,
         skip_dwm=skip_dwm,
+        data_quality_level=data_quality_level,
+        allow_mock_rendering=allow_mock_rendering,
     )
 
 
@@ -1165,6 +1219,16 @@ Examples:
         action="store_true",
         help="Skip DWM preparation and exit successfully",
     )
+    parser.add_argument(
+        "--data-quality-level",
+        type=str,
+        help="Data quality level (production enforces Isaac Sim rendering)",
+    )
+    parser.add_argument(
+        "--allow-mock-rendering",
+        action="store_true",
+        help="Allow mock/PyRender rendering (CI smoke tests only)",
+    )
 
     # Episode-based mode (enhanced)
     parser.add_argument(
@@ -1278,6 +1342,9 @@ Examples:
 
     args = parser.parse_args()
 
+    if args.no_render and not args.allow_mock_rendering:
+        parser.error("--no-render requires --allow-mock-rendering for CI smoke tests.")
+
     # Determine manifest path
     if args.scene_dir:
         manifest_path = args.scene_dir / "assets" / "scene_manifest.json"
@@ -1359,6 +1426,8 @@ Examples:
         robot_config_name=args.robot_config,
         robot_demo_roots=args.robot_demo_root,
         use_physics_ground_truth=args.use_physics_ground_truth,
+        data_quality_level=args.data_quality_level,
+        allow_mock_rendering=args.allow_mock_rendering,
     )
 
     # Run job

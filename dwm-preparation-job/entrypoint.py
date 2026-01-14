@@ -129,6 +129,19 @@ def upload_dwm_bundles(
     return upload_count
 
 
+def _is_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _is_production_level(level: str | None) -> bool:
+    if level is None:
+        return False
+    normalized = level.strip().lower()
+    return normalized in {"production", "prod", "high", "strict"}
+
+
 def main():
     """Main entrypoint."""
     print("[DWM-ENTRYPOINT] Starting DWM Preparation Job")
@@ -156,6 +169,8 @@ def main():
     fps = float(os.environ.get("FPS", "24"))
     mano_model_path = os.environ.get("MANO_MODEL_PATH")
     skip_dwm = os.environ.get("SKIP_DWM", "").strip().lower() in {"1", "true", "yes"}
+    data_quality_level = os.environ.get("DATA_QUALITY_LEVEL")
+    allow_mock_rendering = _is_truthy(os.environ.get("ALLOW_MOCK_RENDERING"))
 
     print(f"[DWM-ENTRYPOINT] Configuration:")
     print(f"  BUCKET: {bucket_name}")
@@ -167,6 +182,9 @@ def main():
     print(f"  RESOLUTION: {resolution_width}x{resolution_height}")
     print(f"  FRAMES: {num_frames} @ {fps}fps")
     print(f"  SKIP_DWM: {skip_dwm}")
+    if data_quality_level:
+        print(f"  DATA_QUALITY_LEVEL: {data_quality_level}")
+    print(f"  ALLOW_MOCK_RENDERING: {allow_mock_rendering}")
     if mano_model_path:
         print(f"  MANO_MODEL_PATH: {mano_model_path}")
 
@@ -197,6 +215,16 @@ def main():
                 local_dir=local_scene_dir,
             )
             validate_scene_manifest(manifest_path, label="[DWM-ENTRYPOINT]")
+            if scene_usd_path is None:
+                if _is_production_level(data_quality_level):
+                    raise FileNotFoundError(
+                        "Scene USD is required for production DATA_QUALITY_LEVEL but was not found."
+                    )
+                if not allow_mock_rendering:
+                    raise FileNotFoundError(
+                        "Scene USD missing and mock rendering is not allowed. "
+                        "Set ALLOW_MOCK_RENDERING=true for CI smoke tests."
+                    )
 
             # Step 2: Configure and run DWM preparation
             print("[DWM-ENTRYPOINT] Running DWM preparation...")
@@ -218,6 +246,8 @@ def main():
                     HandActionType.PULL,
                     HandActionType.PUSH,
                 ],
+                data_quality_level=data_quality_level,
+                allow_mock_rendering=allow_mock_rendering,
                 verbose=True,
             )
 
