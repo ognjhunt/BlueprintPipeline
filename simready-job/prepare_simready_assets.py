@@ -102,11 +102,20 @@ def _get_env_value(name: str, default: Optional[str] = None) -> Optional[str]:
 
 
 @lru_cache(maxsize=8)
-def _load_secret_value(secret_id: str, env_var: str) -> Optional[str]:
+def _load_secret_value(
+    secret_id: str,
+    env_var: str,
+    *,
+    allow_env_fallback: bool = True,
+) -> Optional[str]:
     env_value = os.environ.get(env_var)
     if HAVE_SECRET_MANAGER and get_secret_or_env is not None:
         try:
-            value = get_secret_or_env(secret_id, env_var=env_var)
+            value = get_secret_or_env(
+                secret_id,
+                env_var=env_var,
+                fallback_to_env=allow_env_fallback,
+            )
             if value and not env_value:
                 logger.info(
                     "[SIMREADY] Using Secret Manager for %s credentials.",
@@ -114,13 +123,15 @@ def _load_secret_value(secret_id: str, env_var: str) -> Optional[str]:
                 )
             return value
         except Exception as exc:
+            if not allow_env_fallback:
+                raise
             logger.warning(
                 "[SIMREADY] Failed to fetch secret '%s'; falling back to env var '%s': %s",
                 secret_id,
                 env_var,
                 exc,
             )
-    return env_value
+    return env_value if allow_env_fallback else None
 
 
 def _get_secret_value(
@@ -128,10 +139,33 @@ def _get_secret_value(
     env_var: str,
     *,
     purpose: str,
+    production_mode: bool = False,
     required: bool = False,
     log_missing: bool = True,
 ) -> Optional[str]:
-    value = _load_secret_value(secret_id, env_var)
+    if production_mode:
+        if not HAVE_SECRET_MANAGER or get_secret_or_env is None:
+            message = (
+                f"[SIMREADY] Secret Manager is required in production for {purpose}. "
+                f"Env var '{env_var}' is not allowed."
+            )
+            logger.error(message)
+            raise RuntimeError(message)
+        try:
+            value = _load_secret_value(
+                secret_id,
+                env_var,
+                allow_env_fallback=False,
+            )
+        except Exception as exc:
+            message = (
+                f"[SIMREADY] Missing Secret Manager secret '{secret_id}' for {purpose}. "
+                f"Env var '{env_var}' is not allowed in production."
+            )
+            logger.error(message)
+            raise RuntimeError(message) from exc
+    else:
+        value = _load_secret_value(secret_id, env_var)
     if not value and log_missing:
         message = (
             f"[SIMREADY] Missing {purpose} credentials. "
@@ -1750,6 +1784,7 @@ def prepare_simready_assets_job(
             SECRET_ID_GEMINI,
             "GEMINI_API_KEY",
             purpose="Gemini API",
+            production_mode=production_mode,
             required=production_mode,
         )
         if gemini_api_key:
