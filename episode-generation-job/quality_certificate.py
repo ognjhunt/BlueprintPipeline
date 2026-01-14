@@ -562,6 +562,10 @@ class QualityCertificateGenerator:
             cert.add_warning(
                 "Using heuristic physics validation - may miss collisions and instabilities"
             )
+            if cert.data_quality_level == DataQualityLevel.PRODUCTION.value:
+                cert.add_error(
+                    "Heuristic physics validation is not eligible for production packaging"
+                )
 
         if cert.overall_quality_score < 0.5:
             cert.add_warning(f"Low quality score: {cert.overall_quality_score:.2f}")

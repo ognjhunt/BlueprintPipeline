@@ -2344,7 +2344,8 @@ class EpisodeGenerator:
         cert.sensor_source = sensor_source
         cert.physics_backend = physics_backend
         cert.overall_quality_score = episode.quality_score
-        cert.validation_errors = list(episode.validation_errors)
+        for error in episode.validation_errors:
+            cert.add_error(error)
         cert.recommended_use = cert.assess_training_suitability()
         cert.confidence_score = generator._compute_confidence_score(cert)
 
@@ -2659,7 +2660,22 @@ def run_episode_generation_job(
 
     scene_dir = root / f"scenes/{scene_id}"
     scene_config = _load_scene_config(scene_dir)
-    scene_usd_path = _resolve_scene_usd_path(scene_dir)
+    env_scene_usd_path = os.getenv("SCENE_USD_PATH") or os.getenv("USD_SCENE_PATH")
+    scene_usd_path = env_scene_usd_path or _resolve_scene_usd_path(scene_dir)
+    if env_scene_usd_path:
+        print(f"[EPISODE-GEN-JOB] Using USD scene path from environment: {env_scene_usd_path}")
+    production_requested = (
+        os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
+        or os.getenv("PRODUCTION_MODE", "").lower() == "true"
+        or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
+        or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
+    )
+    if production_requested and not scene_usd_path:
+        print(
+            "[EPISODE-GEN-JOB] ERROR: Production runs require a USD scene path for PhysX validation. "
+            "Set SCENE_USD_PATH or ensure scenes/<scene_id>/usd contains a USD file."
+        )
+        return 1
     camera_specs = _load_camera_specs(scene_config)
     robot_urdf_path = scene_config.get("robot_urdf_path") or os.getenv("ROBOT_URDF_PATH")
 
