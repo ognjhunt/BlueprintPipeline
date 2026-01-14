@@ -41,6 +41,7 @@ from .dead_letter import (
     DeadLetterQueue,
     DeadLetterMessage,
     GCSDeadLetterQueue,
+    LocalDeadLetterQueue,
     PubSubDeadLetterQueue,
 )
 
@@ -90,6 +91,7 @@ __all__ = [
     "DeadLetterQueue",
     "DeadLetterMessage",
     "GCSDeadLetterQueue",
+    "LocalDeadLetterQueue",
     "PubSubDeadLetterQueue",
     "publish_failure",
     "run_job_with_dead_letter_queue",
