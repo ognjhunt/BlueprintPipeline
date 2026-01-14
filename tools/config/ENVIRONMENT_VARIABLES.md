@@ -205,6 +205,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework) |
 | `GENIESIM_ROOT` | path | `/opt/geniesim` | Genie Sim repository root (local framework) |
+| `GENIESIM_ALLOW_LINEAR_FALLBACK` | bool | unset | Allow linear interpolation fallback when cuRobo is unavailable (`1` to enable, `0` to disable). In non-production, the local framework auto-enables this fallback if cuRobo is missing and this variable is unset; in production, cuRobo is required and the framework fails fast. |
 | `ISAAC_SIM_ENDPOINT` | url | `http://localhost:8011` | Isaac Sim endpoint |
 | `ISAAC_SIM_PATH` | path | `/isaac-sim` | Isaac Sim installation path (local framework) |
 | `PARTICULATE_SERVICE_PORT` | int | 5000 | Particulate service port |
