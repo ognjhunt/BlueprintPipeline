@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Genie Sim Scene Graph",
+  "type": "object",
+  "required": ["scene_id", "coordinate_system", "meters_per_unit", "nodes", "edges"],
+  "properties": {
+    "scene_id": {"type": "string"},
+    "coordinate_system": {"type": "string"},
+    "meters_per_unit": {"type": "number"},
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["asset_id", "semantic", "size", "pose", "task_tag", "usd_path"],
+        "properties": {
+          "asset_id": {"type": "string"},
+          "semantic": {"type": "string"},
+          "size": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "pose": {
+            "type": "object",
+            "required": ["position", "orientation"],
+            "properties": {
+              "position": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "orientation": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 4,
+                "maxItems": 4
+              }
+            },
+            "additionalProperties": true
+          },
+          "task_tag": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "usd_path": {"type": "string"},
+          "properties": {"type": "object"},
+          "bp_metadata": {"type": "object"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "target", "relation"],
+        "properties": {
+          "source": {"type": "string"},
+          "target": {"type": "string"},
+          "relation": {
+            "type": "string",
+            "enum": ["on", "in", "adjacent", "aligned", "stacked"]
+          },
+          "confidence": {"type": "number"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "metadata": {"type": "object"}
+  },
+  "additionalProperties": true
+}

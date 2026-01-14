@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Genie Sim Asset Index",
+  "type": "object",
+  "required": ["assets"],
+  "properties": {
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["asset_id", "usd_path", "semantic_description", "categories"],
+        "properties": {
+          "asset_id": {"type": "string"},
+          "usd_path": {"type": "string"},
+          "semantic_description": {"type": "string"},
+          "categories": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "mass": {"type": ["number", "null"]},
+          "material": {
+            "type": "object",
+            "properties": {
+              "friction": {"type": "number"},
+              "restitution": {"type": "number"},
+              "density": {"type": "number"}
+            },
+            "additionalProperties": true
+          },
+          "collision_hull_path": {"type": ["string", "null"]},
+          "texture_variants": {"type": "object"},
+          "embedding": {
+            "type": "array",
+            "items": {"type": "number"}
+          },
+          "commercial_ok": {"type": "boolean"},
+          "license": {"type": "string"},
+          "source": {"type": "string"},
+          "bp_metadata": {"type": "object"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "metadata": {"type": "object"}
+  },
+  "additionalProperties": true
+}
