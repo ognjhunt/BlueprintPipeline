@@ -70,6 +70,10 @@ from tools.geniesim_adapter import (
 from tools.quality_reports import generate_asset_provenance
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.workflow.failure_markers import FailureMarkerWriter
+from tools.validation.entrypoint_checks import (
+    validate_required_env_vars,
+    validate_scene_manifest,
+)
 
 # P0-5 FIX: Import quality gates for validation before export
 try:
@@ -151,6 +155,8 @@ try:
     AUDIO_NARRATION_AVAILABLE = True
 except ImportError:
     AUDIO_NARRATION_AVAILABLE = False
+
+JOB_NAME = "genie-sim-export-job"
 
 
 def parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -1040,85 +1046,150 @@ def main():
     except ImportError as e:
         print(f"[GENIESIM-EXPORT-JOB] WARNING: Startup validation unavailable: {e}")
 
-    # Get configuration from environment
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
 
-    if not scene_id:
-        print("[GENIESIM-EXPORT-JOB] ERROR: SCENE_ID is required")
-        sys.exit(1)
-
     # Prefixes with defaults
-    assets_prefix = os.getenv("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
-    geniesim_prefix = os.getenv("GENIESIM_PREFIX", f"scenes/{scene_id}/geniesim")
-    # IMPORTANT: variation_assets_prefix contains YOUR commercial assets
-    variation_assets_prefix = os.getenv("VARIATION_ASSETS_PREFIX", f"scenes/{scene_id}/variation_assets")
-    replicator_prefix = os.getenv("REPLICATOR_PREFIX", f"scenes/{scene_id}/replicator")
+    assets_prefix = os.getenv(
+        "ASSETS_PREFIX",
+        f"scenes/{scene_id}/assets" if scene_id else "",
+    )
+    geniesim_prefix = os.getenv(
+        "GENIESIM_PREFIX",
+        f"scenes/{scene_id}/geniesim" if scene_id else "",
+    )
+    variation_assets_prefix = os.getenv(
+        "VARIATION_ASSETS_PREFIX",
+        f"scenes/{scene_id}/variation_assets" if scene_id else "",
+    )
+    replicator_prefix = os.getenv(
+        "REPLICATOR_PREFIX",
+        f"scenes/{scene_id}/replicator" if scene_id else "",
+    )
 
     # Configuration
     robot_type = os.getenv("ROBOT_TYPE", "franka")
     urdf_path = os.getenv("URDF_PATH")  # Optional custom URDF
     max_tasks = int(os.getenv("MAX_TASKS", "50"))
     generate_embeddings = os.getenv("GENERATE_EMBEDDINGS", "false").lower() == "true"
-    # Default to TRUE for commercial use - only use your own assets
     filter_commercial = os.getenv("FILTER_COMMERCIAL", "true").lower() == "true"
     copy_usd = os.getenv("COPY_USD", "true").lower() == "true"
-
-    # Enhanced features (DEFAULT: ENABLED)
     enable_multi_robot = os.getenv("ENABLE_MULTI_ROBOT", "true").lower() == "true"
     enable_bimanual = os.getenv("ENABLE_BIMANUAL", "true").lower() == "true"
     enable_vla_packages = os.getenv("ENABLE_VLA_PACKAGES", "true").lower() == "true"
     enable_rich_annotations = os.getenv("ENABLE_RICH_ANNOTATIONS", "true").lower() == "true"
-
-    # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
     enable_premium_analytics = os.getenv("ENABLE_PREMIUM_ANALYTICS", "true").lower() == "true"
     require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
 
-    print("[GENIESIM-EXPORT-JOB] Configuration:")
-    print(f"[GENIESIM-EXPORT-JOB]   Bucket: {bucket}")
-    print(f"[GENIESIM-EXPORT-JOB]   Scene ID: {scene_id}")
-    print(f"[GENIESIM-EXPORT-JOB]   Variation Assets: {variation_assets_prefix}")
-    print(f"[GENIESIM-EXPORT-JOB]   Replicator Bundle: {replicator_prefix}")
-    print(f"[GENIESIM-EXPORT-JOB]   Primary Robot Type: {robot_type}")
-    print(f"[GENIESIM-EXPORT-JOB]   Max Tasks: {max_tasks}")
-    print(f"[GENIESIM-EXPORT-JOB]   Multi-Robot: {enable_multi_robot}")
-    print(f"[GENIESIM-EXPORT-JOB]   Bimanual: {enable_bimanual}")
-    print(f"[GENIESIM-EXPORT-JOB]   VLA Packages: {enable_vla_packages}")
-    print(f"[GENIESIM-EXPORT-JOB]   Rich Annotations: {enable_rich_annotations}")
-    print(f"[GENIESIM-EXPORT-JOB]   Commercial Filter: {filter_commercial}")
-    print(f"[GENIESIM-EXPORT-JOB]   Premium Analytics: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
-    print(f"[GENIESIM-EXPORT-JOB]   Require Quality Gates: {require_quality_gates}")
+    input_params = {
+        "bucket": bucket,
+        "scene_id": scene_id,
+        "assets_prefix": assets_prefix,
+        "geniesim_prefix": geniesim_prefix,
+        "variation_assets_prefix": variation_assets_prefix,
+        "replicator_prefix": replicator_prefix,
+        "robot_type": robot_type,
+        "urdf_path": urdf_path,
+        "max_tasks": max_tasks,
+        "generate_embeddings": generate_embeddings,
+        "filter_commercial": filter_commercial,
+        "copy_usd": copy_usd,
+        "enable_multi_robot": enable_multi_robot,
+        "enable_bimanual": enable_bimanual,
+        "enable_vla_packages": enable_vla_packages,
+        "enable_rich_annotations": enable_rich_annotations,
+        "enable_premium_analytics": enable_premium_analytics,
+        "require_quality_gates": require_quality_gates,
+    }
+    partial_results = {
+        "geniesim_output_prefix": geniesim_prefix,
+        "merged_manifest_path": (
+            f"{geniesim_prefix}/merged_scene_manifest.json" if geniesim_prefix else None
+        ),
+    }
 
-    GCS_ROOT = Path("/mnt/gcs")
-
-    metrics = get_metrics()
-    with metrics.track_job("genie-sim-export-job", scene_id):
-        exit_code = run_geniesim_export_job(
-            root=GCS_ROOT,
-            scene_id=scene_id,
-            assets_prefix=assets_prefix,
-            geniesim_prefix=geniesim_prefix,
-            robot_type=robot_type,
-            urdf_path=urdf_path,
-            max_tasks=max_tasks,
-            generate_embeddings=generate_embeddings,
-            filter_commercial=filter_commercial,
-            copy_usd=copy_usd,
-            # Enhanced features (DEFAULT: ENABLED)
-            enable_multi_robot=enable_multi_robot,
-            enable_bimanual=enable_bimanual,
-            enable_vla_packages=enable_vla_packages,
-            enable_rich_annotations=enable_rich_annotations,
-            # YOUR commercial assets for domain randomization
-            variation_assets_prefix=variation_assets_prefix,
-            replicator_prefix=replicator_prefix,
-            # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
-            enable_premium_analytics=enable_premium_analytics,
-            require_quality_gates=require_quality_gates,
-            bucket=bucket,
+    def _write_failure_marker(exc: Exception, failed_step: str) -> None:
+        if not bucket or not scene_id:
+            print(
+                "[GENIESIM-EXPORT-JOB] WARNING: Skipping failure marker; BUCKET/SCENE_ID missing.",
+            )
+            return
+        FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+            exception=exc,
+            failed_step=failed_step,
+            input_params=input_params,
+            partial_results=partial_results,
         )
 
-    sys.exit(exit_code)
+    validated = False
+    try:
+        validate_required_env_vars(
+            {
+                "BUCKET": "GCS bucket name",
+                "SCENE_ID": "Scene identifier",
+            },
+            label="[GENIESIM-EXPORT-JOB]",
+        )
+        if not scene_id:
+            raise ValueError("SCENE_ID is required")
+
+        assets_root = Path("/mnt/gcs") / assets_prefix
+        validate_scene_manifest(assets_root / "scene_manifest.json", label="[GENIESIM-EXPORT-JOB]")
+        validated = True
+
+        print("[GENIESIM-EXPORT-JOB] Configuration:")
+        print(f"[GENIESIM-EXPORT-JOB]   Bucket: {bucket}")
+        print(f"[GENIESIM-EXPORT-JOB]   Scene ID: {scene_id}")
+        print(f"[GENIESIM-EXPORT-JOB]   Variation Assets: {variation_assets_prefix}")
+        print(f"[GENIESIM-EXPORT-JOB]   Replicator Bundle: {replicator_prefix}")
+        print(f"[GENIESIM-EXPORT-JOB]   Primary Robot Type: {robot_type}")
+        print(f"[GENIESIM-EXPORT-JOB]   Max Tasks: {max_tasks}")
+        print(f"[GENIESIM-EXPORT-JOB]   Multi-Robot: {enable_multi_robot}")
+        print(f"[GENIESIM-EXPORT-JOB]   Bimanual: {enable_bimanual}")
+        print(f"[GENIESIM-EXPORT-JOB]   VLA Packages: {enable_vla_packages}")
+        print(f"[GENIESIM-EXPORT-JOB]   Rich Annotations: {enable_rich_annotations}")
+        print(f"[GENIESIM-EXPORT-JOB]   Commercial Filter: {filter_commercial}")
+        print(f"[GENIESIM-EXPORT-JOB]   Premium Analytics: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
+        print(f"[GENIESIM-EXPORT-JOB]   Require Quality Gates: {require_quality_gates}")
+
+        GCS_ROOT = Path("/mnt/gcs")
+
+        metrics = get_metrics()
+        with metrics.track_job(JOB_NAME, scene_id):
+            exit_code = run_geniesim_export_job(
+                root=GCS_ROOT,
+                scene_id=scene_id,
+                assets_prefix=assets_prefix,
+                geniesim_prefix=geniesim_prefix,
+                robot_type=robot_type,
+                urdf_path=urdf_path,
+                max_tasks=max_tasks,
+                generate_embeddings=generate_embeddings,
+                filter_commercial=filter_commercial,
+                copy_usd=copy_usd,
+                # Enhanced features (DEFAULT: ENABLED)
+                enable_multi_robot=enable_multi_robot,
+                enable_bimanual=enable_bimanual,
+                enable_vla_packages=enable_vla_packages,
+                enable_rich_annotations=enable_rich_annotations,
+                # YOUR commercial assets for domain randomization
+                variation_assets_prefix=variation_assets_prefix,
+                replicator_prefix=replicator_prefix,
+                # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
+                enable_premium_analytics=enable_premium_analytics,
+                require_quality_gates=require_quality_gates,
+                bucket=bucket,
+            )
+
+        sys.exit(exit_code)
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            failed_step = "entrypoint_validation" if not validated else "entrypoint_exit"
+            _write_failure_marker(RuntimeError("Job exited early"), failed_step)
+        raise
+    except Exception as exc:
+        _write_failure_marker(exc, "entrypoint")
+        raise
 
 
 if __name__ == "__main__":
