@@ -1,0 +1,11 @@
+colorama==0.4.6
+cv-bridge==1.13.0.post0
+future==1.0.0
+grasp-nms==1.0.2
+msgpack==1.0.8
+open3d==0.19.0
+openai==2.15.0
+pyyaml==6.0.2
+ruckig==0.15.3
+shapely==2.1.2
+trimesh==4.11.0
