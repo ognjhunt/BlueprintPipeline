@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Genie Sim Local Episodes Index Entry",
+  "type": "object",
+  "required": [
+    "episode_id",
+    "episode_index",
+    "num_frames",
+    "duration_seconds",
+    "quality_score",
+    "validation_passed",
+    "file"
+  ],
+  "properties": {
+    "episode_id": {"type": "string"},
+    "episode_index": {"type": "integer"},
+    "num_frames": {"type": "integer"},
+    "duration_seconds": {"type": "number"},
+    "quality_score": {"type": "number"},
+    "validation_passed": {"type": "boolean"},
+    "file": {"type": "string"}
+  },
+  "additionalProperties": true
+}
