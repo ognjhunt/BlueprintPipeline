@@ -136,6 +136,7 @@ class LocalPipelineRunner:
         self.skip_interactive = skip_interactive
         self.environment_type = environment_type
         self.enable_dwm = enable_dwm
+        self.environment = os.getenv("BP_ENV", "development").lower()
 
         # Derive scene ID from directory name
         self.scene_id = self.scene_dir.name
@@ -559,6 +560,7 @@ class LocalPipelineRunner:
 
     def _run_interactive(self) -> StepResult:
         """Run interactive asset processing."""
+        production_mode = self.environment == "production"
         manifest_path = self.assets_dir / "scene_manifest.json"
         required_ids: List[str] = []
         if manifest_path.is_file():
@@ -566,6 +568,17 @@ class LocalPipelineRunner:
             required_ids = self._required_articulation_ids(manifest)
 
         if self.skip_interactive:
+            if production_mode:
+                return StepResult(
+                    step=PipelineStep.INTERACTIVE,
+                    success=False,
+                    duration_seconds=0,
+                    message=(
+                        "Interactive job is required in production. "
+                        "Disable skip_interactive and provide PARTICULATE_ENDPOINT."
+                    ),
+                    outputs={"required_articulations": required_ids},
+                )
             if required_ids:
                 return StepResult(
                     step=PipelineStep.INTERACTIVE,
@@ -588,6 +601,14 @@ class LocalPipelineRunner:
         # Would need PARTICULATE_ENDPOINT to run
         endpoint = os.getenv("PARTICULATE_ENDPOINT")
         if not endpoint:
+            if production_mode:
+                return StepResult(
+                    step=PipelineStep.INTERACTIVE,
+                    success=False,
+                    duration_seconds=0,
+                    message="PARTICULATE_ENDPOINT is required in production",
+                    outputs={"required_articulations": required_ids},
+                )
             if required_ids:
                 return StepResult(
                     step=PipelineStep.INTERACTIVE,
@@ -1249,11 +1270,19 @@ class LocalPipelineRunner:
 
         force_local = os.getenv("GENIESIM_FORCE_LOCAL", "false").lower() == "true"
         mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
+        production_mode = self.environment == "production"
         submission_mode = self._resolve_geniesim_submission_mode(
             api_key=None,
             force_local=force_local,
             mock_mode=mock_mode,
         )
+        if production_mode and submission_mode == "mock":
+            return StepResult(
+                step=PipelineStep.GENIESIM_SUBMIT,
+                success=False,
+                duration_seconds=0,
+                message="Mock Genie Sim submission is not allowed in production",
+            )
         job_id = None
         submission_message = None
         local_run_result = None
@@ -1310,6 +1339,17 @@ class LocalPipelineRunner:
                 "Set ISAAC_SIM_PATH to your Isaac Sim install, ensure gRPC stubs are installed, "
                 "and start or expose the Genie Sim server at the configured host/port."
             )
+            if production_mode and not preflight_status.get("available", False):
+                return StepResult(
+                    step=PipelineStep.GENIESIM_SUBMIT,
+                    success=False,
+                    duration_seconds=0,
+                    message=(
+                        "Production Genie Sim submission requires real dependencies. "
+                        f"Missing: {', '.join(missing_components) or 'unknown'}."
+                    ),
+                    outputs={"missing_components": missing_components},
+                )
 
             output_dir = self.episodes_dir / f"geniesim_{job_id}"
             output_dir.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,13 @@ tests can run without external services.
 **Boundary:** `scenes/{scene_id}/regen3d/` is produced by 3D‑RE‑GEN and treated as
 an external dependency. The fixture `fixtures/generate_mock_regen3d.py` generates
 the stubbed outputs consumed by the pipeline.
+Canonical JSON schemas live in `fixtures/contracts/`:
+- `regen3d_scene_info.schema.json`
+- `regen3d_object_pose.schema.json`
+- `regen3d_object_bounds.schema.json`
+- `regen3d_object_material.schema.json`
+- `regen3d_camera_intrinsics.schema.json`
+- `regen3d_camera_extrinsics.schema.json`
 
 ### Required Directory Layout
 
@@ -167,3 +174,32 @@ fields** required by the pipeline code paths:
 **Minimum Contract:** The pipeline only asserts `success` and consumes the
 fields listed above. Any additional proto fields may be omitted or left defaulted
 by stub implementations.
+
+---
+
+## 3) Genie Sim Local Output Contracts (Episodes + Metadata)
+
+**Boundary:** When Genie Sim runs locally, episode recordings and metadata are
+written to disk for import and validation. Mock generators and schema tests
+validate this interface without requiring Isaac Sim or Particulate.
+
+### Required Directory Layout
+
+```
+geniesim_local/{run_id}/
+├── recordings/
+│   └── episode_000000.json
+└── metadata/
+    ├── dataset_info.json
+    └── episodes.jsonl
+```
+
+### Canonical Schemas
+
+- `fixtures/contracts/geniesim_local_episode.schema.json`
+- `fixtures/contracts/geniesim_local_dataset_info.schema.json`
+- `fixtures/contracts/geniesim_local_episodes_index.schema.json`
+
+**Minimum Contract:** Episode JSONs must include `episode_id`, `task_name`,
+`frames`, `frame_count`, `quality_score`, and `validation_passed`. Metadata
+must include dataset summary plus a JSONL index entry per episode.
