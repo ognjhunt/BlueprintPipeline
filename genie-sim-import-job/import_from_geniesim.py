@@ -45,6 +45,7 @@ from import_manifest_utils import (
     build_file_inventory,
     collect_provenance,
     compute_manifest_checksum,
+    get_git_sha,
     get_episode_file_paths,
     get_lerobot_metadata_paths,
     snapshot_env,
@@ -85,6 +86,8 @@ except ImportError:
 # Data Models
 # =============================================================================
 
+DATASET_INFO_SCHEMA_VERSION = "1.0.0"
+
 
 def _sha256_file(path: Path) -> str:
     hasher = hashlib.sha256()
@@ -101,6 +104,47 @@ def _relative_to_bundle(bundle_root: Path, path: Path) -> str:
         return path.as_posix()
     rel_str = rel_path.as_posix()
     return rel_str if rel_str else "."
+
+
+def _resolve_run_id(job_id: str) -> str:
+    return (
+        os.getenv("RUN_ID")
+        or os.getenv("GENIE_SIM_RUN_ID")
+        or os.getenv("GENIESIM_RUN_ID")
+        or job_id
+    )
+
+
+def _resolve_export_schema_version() -> str:
+    return (
+        os.getenv("GENIESIM_EXPORT_SCHEMA_VERSION")
+        or os.getenv("EXPORT_SCHEMA_VERSION")
+        or "1.0.0"
+    )
+
+
+def _build_dataset_info(
+    job_id: str,
+    scene_id: str,
+    source: str,
+    converted_at: str,
+) -> Dict[str, Any]:
+    pipeline_commit = get_git_sha(REPO_ROOT) or "unknown"
+    return {
+        "dataset_type": "lerobot",
+        "format_version": "1.0",
+        "schema_version": DATASET_INFO_SCHEMA_VERSION,
+        "scene_id": scene_id,
+        "job_id": job_id,
+        "run_id": _resolve_run_id(job_id),
+        "pipeline_commit": pipeline_commit,
+        "export_schema_version": _resolve_export_schema_version(),
+        "episodes": [],
+        "total_frames": 0,
+        "average_quality_score": 0.0,
+        "source": source,
+        "converted_at": converted_at,
+    }
 
 
 def _write_lerobot_readme(output_dir: Path, lerobot_dir: Path) -> Path:
@@ -582,6 +626,8 @@ def convert_to_lerobot(
     output_dir: Path,
     episode_metadata_list: List[GeneratedEpisodeMetadata],
     min_quality_score: float = 0.85,  # LABS-BLOCKER-002 FIX
+    job_id: str = "unknown",
+    scene_id: str = "unknown",
 ) -> Dict[str, Any]:
     """
     Convert Genie Sim episodes to LeRobot format.
@@ -605,15 +651,12 @@ def convert_to_lerobot(
         converted_count = 0
         skipped_count = 0
         total_frames = 0
-        dataset_info = {
-            "dataset_type": "lerobot",
-            "format_version": "1.0",
-            "episodes": [],
-            "total_frames": 0,
-            "average_quality_score": 0.0,
-            "source": "genie_sim_mock",
-            "converted_at": "2025-01-01T00:00:00Z",
-        }
+        dataset_info = _build_dataset_info(
+            job_id=job_id,
+            scene_id=scene_id,
+            source="genie_sim_mock",
+            converted_at="2025-01-01T00:00:00Z",
+        )
         quality_scores = []
 
         for ep_metadata in episode_metadata_list:
@@ -683,15 +726,12 @@ def convert_to_lerobot(
     total_frames = 0
 
     # LeRobot dataset metadata
-    dataset_info = {
-        "dataset_type": "lerobot",
-        "format_version": "1.0",
-        "episodes": [],
-        "total_frames": 0,
-        "average_quality_score": 0.0,
-        "source": "genie_sim",
-        "converted_at": datetime.utcnow().isoformat() + "Z",
-    }
+    dataset_info = _build_dataset_info(
+        job_id=job_id,
+        scene_id=scene_id,
+        source="genie_sim",
+        converted_at=datetime.utcnow().isoformat() + "Z",
+    )
 
     quality_scores = []
 
@@ -1053,6 +1093,8 @@ def run_import_job(
                 output_dir=lerobot_dir,
                 episode_metadata_list=download_result.episodes,
                 min_quality_score=config.min_quality_score,
+                job_id=config.job_id,
+                scene_id=scene_id,
             )
             result.lerobot_conversion_success = True
             print(f"[IMPORT] ✅ Converted {convert_result['converted_count']} episodes to LeRobot format")
