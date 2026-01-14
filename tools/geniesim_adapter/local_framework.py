@@ -53,6 +53,7 @@ Environment Variables:
     GENIESIM_TIMEOUT: Connection timeout in seconds (default: 30)
     GENIESIM_ROOT: Path to Genie Sim installation (default: /opt/geniesim)
     ISAAC_SIM_PATH: Path to Isaac Sim installation (default: /isaac-sim)
+    ALLOW_GENIESIM_MOCK: Allow local mock gRPC server when GENIESIM_ROOT is missing (default: 0)
 """
 
 import json
@@ -794,9 +795,27 @@ class GenieSimLocalFramework:
         self._status = GenieSimServerStatus.STARTING
 
         use_local_server = not self.config.geniesim_root.exists()
+        allow_mock_override = os.getenv("ALLOW_GENIESIM_MOCK", "0") == "1"
+        production_mode = self.config.environment == "production"
         env = os.environ.copy()
 
         if use_local_server:
+            if production_mode:
+                self.log(
+                    "Mock Genie Sim gRPC server is disabled in production. "
+                    "Install GENIESIM_ROOT or run a real server.",
+                    "ERROR",
+                )
+                self._status = GenieSimServerStatus.ERROR
+                return False
+            if not allow_mock_override:
+                self.log(
+                    "GENIESIM_ROOT not found and mock server disabled. "
+                    "Set ALLOW_GENIESIM_MOCK=1 for dev/test usage.",
+                    "ERROR",
+                )
+                self._status = GenieSimServerStatus.ERROR
+                return False
             self.log("GENIESIM_ROOT not found; using local gRPC server module", "INFO")
             cmd = [
                 sys.executable,
@@ -1773,13 +1792,25 @@ def check_geniesim_availability() -> Dict[str, Any]:
         "isaac_sim_available": False,
         "server_running": False,
         "grpc_available": False,
+        "mock_server_allowed": False,
         "details": {},
     }
+    allow_mock_override = os.getenv("ALLOW_GENIESIM_MOCK", "0") == "1"
+    production_mode = config.environment == "production"
+    mock_allowed = allow_mock_override and not production_mode
+    status["mock_server_allowed"] = mock_allowed
+    status["details"]["environment"] = config.environment
+    status["details"]["allow_geniesim_mock"] = allow_mock_override
 
     # Check Genie Sim installation
     if config.geniesim_root.exists():
         status["geniesim_installed"] = True
         status["details"]["geniesim_root"] = str(config.geniesim_root)
+    elif not mock_allowed:
+        status["details"]["mock_server_blocked"] = True
+        status["details"]["mock_server_reason"] = (
+            "production" if production_mode else "ALLOW_GENIESIM_MOCK not set"
+        )
 
     # Check Isaac Sim
     isaac_python = config.isaac_sim_path / "python.sh"
@@ -1800,9 +1831,11 @@ def check_geniesim_availability() -> Dict[str, Any]:
         status["server_running"] = True
 
     # Overall availability
+    local_server_allowed = status["geniesim_installed"] or mock_allowed
     status["available"] = (
         status["isaac_sim_available"] and
-        (status["grpc_available"] or status["server_running"])
+        (status["grpc_available"] or status["server_running"]) and
+        (status["server_running"] or local_server_allowed)
     )
 
     return status

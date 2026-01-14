@@ -1289,6 +1289,7 @@ class LocalPipelineRunner:
         preflight_status = None
         missing_components: List[str] = []
         remediation_guidance = None
+        mock_allowed = False
 
         if submission_mode == "mock":
             try:
@@ -1329,15 +1330,23 @@ class LocalPipelineRunner:
             job_id = f"local-{uuid.uuid4()}"
             submission_message = "Local Genie Sim execution started."
             preflight_status = check_geniesim_availability()
+            mock_allowed = preflight_status.get("mock_server_allowed", False)
             if not preflight_status.get("isaac_sim_available", False):
                 missing_components.append("Isaac Sim path")
             if not preflight_status.get("grpc_available", False):
                 missing_components.append("gRPC stubs")
             if not preflight_status.get("server_running", False):
                 missing_components.append("server running")
+            if (
+                not preflight_status.get("geniesim_installed", False)
+                and not mock_allowed
+                and not preflight_status.get("server_running", False)
+            ):
+                missing_components.append("GENIESIM_ROOT or ALLOW_GENIESIM_MOCK=1 (dev/test)")
             remediation_guidance = (
                 "Set ISAAC_SIM_PATH to your Isaac Sim install, ensure gRPC stubs are installed, "
-                "and start or expose the Genie Sim server at the configured host/port."
+                "start or expose the Genie Sim server at the configured host/port, "
+                "or set ALLOW_GENIESIM_MOCK=1 for dev/test."
             )
             if production_mode and not preflight_status.get("available", False):
                 return StepResult(
@@ -1346,6 +1355,7 @@ class LocalPipelineRunner:
                     duration_seconds=0,
                     message=(
                         "Production Genie Sim submission requires real dependencies. "
+                        "Mock gRPC servers are disabled. "
                         f"Missing: {', '.join(missing_components) or 'unknown'}."
                     ),
                     outputs={"missing_components": missing_components},
