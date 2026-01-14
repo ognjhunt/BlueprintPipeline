@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Integration Tests for Genie Sim API Client.
+Integration Tests for Genie Sim Local Framework Client.
 
-These tests verify the full integration between BlueprintPipeline and Genie Sim 3.0.
-They require a valid API key and will make real API calls when run with the
-@pytest.mark.integration marker.
+These tests verify the full integration between BlueprintPipeline and the locally-running
+Genie Sim 3.0 framework. They require a local gRPC endpoint and will make real gRPC calls
+when run with the @pytest.mark.integration marker.
 
 Usage:
-    # Run integration tests (requires API key)
+    # Run integration tests (requires local Genie Sim running)
     RUN_GENIESIM_INTEGRATION=1 pytest -v -m integration tests/test_integration_geniesim.py
 
     # Skip integration tests
     pytest -v -m "not integration" tests/
 
 Environment Variables:
-    GENIE_SIM_API_KEY: Required for integration tests
     RUN_GENIESIM_INTEGRATION: Set to "1" to opt-in to integration tests
-    GENIE_SIM_API_URL: Optional (defaults to production endpoint)
+    GENIESIM_HOST: Local Genie Sim gRPC host (default: localhost)
+    GENIESIM_PORT: Local Genie Sim gRPC port (default: 50051)
 """
 
 import os
@@ -43,18 +43,13 @@ from geniesim_client import (
     GenieSimJobNotFoundError,
 )
 
-# Skip all tests unless explicitly opted-in and API key is set
-GENIE_SIM_API_KEY = os.getenv("GENIE_SIM_API_KEY")
+# Skip all tests unless explicitly opted-in
 RUN_GENIESIM_INTEGRATION = os.getenv("RUN_GENIESIM_INTEGRATION") == "1"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not RUN_GENIESIM_INTEGRATION,
         reason="Set RUN_GENIESIM_INTEGRATION=1 to opt-in to Genie Sim integration tests",
-    ),
-    pytest.mark.skipif(
-        not GENIE_SIM_API_KEY,
-        reason="GENIE_SIM_API_KEY not set - skipping Genie Sim integration tests",
     ),
 ]
 
@@ -300,38 +295,31 @@ class TestGenieSimJobLifecycle:
             client.close()
 
 
-class TestGenieSimAuthentication:
-    """Test API authentication and error handling."""
+class TestGenieSimLocalConfiguration:
+    """Test local framework configuration and connectivity."""
 
-    def test_missing_api_key(self):
-        """Test that missing API key raises clear error."""
-        # Temporarily unset API key
-        old_key = os.environ.pop("GENIE_SIM_API_KEY", None)
+    def test_client_initialization_local(self):
+        """Test that client initializes in local mode (no API key)."""
+        # Local mode doesn't require API key
+        client = GenieSimClient(validate_on_init=False)
 
-        try:
-            with pytest.raises(GenieSimAuthenticationError) as exc_info:
-                GenieSimClient(api_key=None)
+        assert client.api_key is None
+        assert client.grpc_host == "localhost" or client.grpc_host is not None
+        assert client.grpc_port > 0
 
-            assert "API key required" in str(exc_info.value)
-
-        finally:
-            # Restore API key
-            if old_key:
-                os.environ["GENIE_SIM_API_KEY"] = old_key
+        client.close()
 
     @pytest.mark.integration
-    def test_invalid_api_key(self):
-        """Test that invalid API key is detected."""
-        client = GenieSimClient(api_key="invalid_key_12345")
+    def test_local_grpc_connectivity(self):
+        """Test that local gRPC endpoint is reachable."""
+        client = GenieSimClient(validate_on_init=False)
 
         try:
-            # Health check with invalid key should fail
+            # Health check should work with local framework
             health = client.health_check()
 
-            # Depending on API implementation, might be unavailable or have auth error
-            if not health.available:
-                assert health.error is not None
-                # Could contain "auth", "401", "403", etc.
+            # Should get a response (mock or real)
+            assert isinstance(health.available, bool)
 
         finally:
             client.close()

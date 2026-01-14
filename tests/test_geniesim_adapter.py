@@ -547,35 +547,31 @@ class TestPipelineSelector:
         assert "episode-generation-job" not in jobs
         assert "isaac-lab-job" not in jobs
 
-    def test_geniesim_submission_defaults_local_with_api_key(self, monkeypatch):
-        """Ensure Genie Sim is always local even when API-related env vars are set."""
+    def test_geniesim_submission_always_local(self, monkeypatch):
+        """Ensure Genie Sim always runs locally (no API mode)."""
         from tools.run_local_pipeline import LocalPipelineRunner
 
         monkeypatch.setenv("USE_GENIESIM", "true")
-        monkeypatch.setenv("GENIE_SIM_API_KEY", "test-key")
-        monkeypatch.setenv("GENIESIM_SUBMIT_API", "true")
-        monkeypatch.setenv("GENIESIM_SUBMISSION_MODE", "api")
         monkeypatch.delenv("GENIESIM_FORCE_LOCAL", raising=False)
         monkeypatch.delenv("GENIESIM_MOCK_MODE", raising=False)
 
         mode = LocalPipelineRunner._resolve_geniesim_submission_mode(
-            api_key=os.getenv("GENIE_SIM_API_KEY"),
+            api_key=None,
             force_local=False,
             mock_mode=False,
         )
 
         assert mode == "local"
 
-    def test_geniesim_submission_api_opt_in_requires_key(self, monkeypatch):
-        """Ensure API opt-in does not change the local-only default."""
+    def test_geniesim_submission_local_only(self, monkeypatch):
+        """Ensure Genie Sim operates in local-only mode."""
         from tools.run_local_pipeline import LocalPipelineRunner
 
         monkeypatch.setenv("USE_GENIESIM", "true")
-        monkeypatch.setenv("GENIESIM_SUBMISSION_MODE", "api")
-        monkeypatch.delenv("GENIE_SIM_API_KEY", raising=False)
+        monkeypatch.delenv("GENIESIM_FORCE_LOCAL", raising=False)
 
         mode = LocalPipelineRunner._resolve_geniesim_submission_mode(
-            api_key=os.getenv("GENIE_SIM_API_KEY"),
+            api_key=None,
             force_local=False,
             mock_mode=False,
         )
