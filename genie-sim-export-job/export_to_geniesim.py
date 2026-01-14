@@ -68,6 +68,7 @@ from tools.geniesim_adapter import (
     GenieSimExportResult,
 )
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.workflow.failure_markers import FailureMarkerWriter
 
 # P0-5 FIX: Import quality gates for validation before export
 try:
@@ -157,6 +158,47 @@ def parse_bool(value: Optional[str], default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _is_service_mode() -> bool:
+    return (
+        os.getenv("SERVICE_MODE", "").lower() in {"1", "true", "yes", "y"}
+        or os.getenv("K_SERVICE") is not None
+        or os.getenv("KUBERNETES_SERVICE_HOST") is not None
+    )
+
+
+def _fail_variation_assets_requirement(
+    *,
+    bucket: str,
+    scene_id: str,
+    variation_assets_prefix: Optional[str],
+    reason: str,
+    filter_commercial: bool,
+    service_mode: bool,
+) -> int:
+    requirement_message = (
+        "Sellable datasets require variation-gen-job assets. "
+        "Run variation-gen-job and set VARIATION_ASSETS_PREFIX to its output."
+    )
+    print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {reason}")
+    print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {requirement_message}")
+    FailureMarkerWriter(bucket, scene_id, "genie-sim-export-job").write_failure(
+        exception=RuntimeError(requirement_message),
+        failed_step="variation_assets_validation",
+        input_params={
+            "scene_id": scene_id,
+            "variation_assets_prefix": variation_assets_prefix,
+            "filter_commercial": filter_commercial,
+            "service_mode": service_mode,
+        },
+        recommendations=[
+            "Run variation-gen-job to generate commercial-safe variation assets.",
+            "Set VARIATION_ASSETS_PREFIX to the variation-gen-job output path.",
+        ],
+        error_code="missing_variation_assets",
+    )
+    return 1
+
+
 def run_geniesim_export_job(
     root: Path,
     scene_id: str,
@@ -176,6 +218,7 @@ def run_geniesim_export_job(
     replicator_prefix: Optional[str] = None,  # Path to replicator bundle
     enable_premium_analytics: bool = True,  # DEFAULT: ENABLED (no longer upsell!)
     require_quality_gates: bool = True,
+    bucket: str = "",
 ) -> int:
     """
     Run the Genie Sim export job.
@@ -199,6 +242,7 @@ def run_geniesim_export_job(
         replicator_prefix: Path to replicator bundle
         enable_premium_analytics: Enable premium analytics capture (DEFAULT: True - NO LONGER UPSELL!)
         require_quality_gates: Fail when quality gates are unavailable or error (DEFAULT: True)
+        bucket: GCS bucket for failure markers (optional)
 
     Returns:
         0 on success, 1 on failure
@@ -222,6 +266,7 @@ def run_geniesim_export_job(
 
     assets_dir = root / assets_prefix
     output_dir = root / geniesim_prefix
+    service_mode = _is_service_mode()
 
     # P1-7 FIX: Validate upstream job completion before starting export
     print("\n[GENIESIM-EXPORT-JOB] Validating upstream job completion...")
@@ -285,7 +330,19 @@ def run_geniesim_export_job(
     # This is CRITICAL for commercial use - Genie Sim's assets are CC BY-NC-SA 4.0
     variation_assets_dir = None
     variation_objects = []
-    if variation_assets_prefix:
+    if not variation_assets_prefix or not variation_assets_prefix.strip():
+        if filter_commercial or service_mode:
+            return _fail_variation_assets_requirement(
+                bucket=bucket,
+                scene_id=scene_id,
+                variation_assets_prefix=variation_assets_prefix,
+                reason="Missing VARIATION_ASSETS_PREFIX for commercial/service export.",
+                filter_commercial=filter_commercial,
+                service_mode=service_mode,
+            )
+        print("[GENIESIM-EXPORT-JOB] WARNING: No variation_assets_prefix specified")
+        print("[GENIESIM-EXPORT-JOB] WARNING: Without YOUR variation assets, you cannot sell the data commercially!")
+    else:
         variation_assets_dir = root / variation_assets_prefix
         variation_assets_json = variation_assets_dir / "variation_assets.json"
         if variation_assets_json.is_file():
@@ -295,6 +352,18 @@ def run_geniesim_export_job(
                     variation_data = json.load(f)
                 raw_variation_objects = variation_data.get("objects", [])
                 print(f"[GENIESIM-EXPORT-JOB] Found {len(raw_variation_objects)} variation assets")
+                if not raw_variation_objects:
+                    if filter_commercial or service_mode:
+                        return _fail_variation_assets_requirement(
+                            bucket=bucket,
+                            scene_id=scene_id,
+                            variation_assets_prefix=variation_assets_prefix,
+                            reason="variation_assets.json contains no variation assets.",
+                            filter_commercial=filter_commercial,
+                            service_mode=service_mode,
+                        )
+                    print("[GENIESIM-EXPORT-JOB] WARNING: variation_assets.json has no assets")
+                    raw_variation_objects = []
 
                 # Mark these as YOUR commercial assets
                 for obj in raw_variation_objects:
@@ -322,20 +391,43 @@ def run_geniesim_export_job(
                     if non_commercial_count > 0:
                         print(f"[GENIESIM-EXPORT-JOB] ✓ Filtered out {non_commercial_count} NC-licensed variation assets")
                         print(f"[GENIESIM-EXPORT-JOB] ✓ Retained {len(variation_objects)} commercial-safe variation assets")
+                    if not variation_objects and (filter_commercial or service_mode):
+                        return _fail_variation_assets_requirement(
+                            bucket=bucket,
+                            scene_id=scene_id,
+                            variation_assets_prefix=variation_assets_prefix,
+                            reason="All variation assets were filtered out as non-commercial.",
+                            filter_commercial=filter_commercial,
+                            service_mode=service_mode,
+                        )
                 else:
                     variation_objects = raw_variation_objects
                     print("[GENIESIM-EXPORT-JOB] WARNING: Commercial filtering disabled - NC-licensed assets may be included")
 
             except Exception as e:
+                if filter_commercial or service_mode:
+                    return _fail_variation_assets_requirement(
+                        bucket=bucket,
+                        scene_id=scene_id,
+                        variation_assets_prefix=variation_assets_prefix,
+                        reason=f"Failed to load variation assets: {e}",
+                        filter_commercial=filter_commercial,
+                        service_mode=service_mode,
+                    )
                 print(f"[GENIESIM-EXPORT-JOB] WARNING: Failed to load variation assets: {e}")
                 variation_objects = []
         else:
+            if filter_commercial or service_mode:
+                return _fail_variation_assets_requirement(
+                    bucket=bucket,
+                    scene_id=scene_id,
+                    variation_assets_prefix=variation_assets_prefix,
+                    reason=f"Variation assets file not found: {variation_assets_json}",
+                    filter_commercial=filter_commercial,
+                    service_mode=service_mode,
+                )
             print(f"[GENIESIM-EXPORT-JOB] No variation assets found at: {variation_assets_json}")
             variation_objects = []
-    else:
-        variation_objects = []
-        print("[GENIESIM-EXPORT-JOB] WARNING: No variation_assets_prefix specified")
-        print("[GENIESIM-EXPORT-JOB] WARNING: Without YOUR variation assets, you cannot sell the data commercially!")
 
     # Find USD source directory
     usd_source_dir = None
@@ -995,6 +1087,7 @@ def main():
             # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
             enable_premium_analytics=enable_premium_analytics,
             require_quality_gates=require_quality_gates,
+            bucket=bucket,
         )
 
     sys.exit(exit_code)
