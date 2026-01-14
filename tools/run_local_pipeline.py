@@ -32,7 +32,8 @@ Pipeline Steps:
     13. dwm-inference - Run DWM model to generate interaction videos for each bundle
     14. validate  - QA validation
 
-Note: DWM steps are optional and only included by default when --enable-dwm is set.
+Note: DWM and Dream2Flow steps are optional and only included by default when
+--enable-dwm or --enable-dream2flow is set.
 
 References:
 - 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
@@ -99,20 +100,23 @@ class StepResult:
 class LocalPipelineRunner:
     """Run BlueprintPipeline locally for testing."""
 
-    # Default step order
+    # Default step order (free/default workflow)
     DEFAULT_STEPS = [
         PipelineStep.REGEN3D,
         PipelineStep.SIMREADY,
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
         PipelineStep.ISAAC_LAB,
-        PipelineStep.DREAM2FLOW,  # Dream2Flow conditioning data (arXiv:2512.24766)
-        PipelineStep.DREAM2FLOW_INFERENCE,  # Run Dream2Flow inference
     ]
 
     DWM_STEPS = [
         PipelineStep.DWM,  # DWM conditioning data generation
         PipelineStep.DWM_INFERENCE,  # Run DWM model on bundles
+    ]
+
+    DREAM2FLOW_STEPS = [
+        PipelineStep.DREAM2FLOW,  # Dream2Flow conditioning data (arXiv:2512.24766)
+        PipelineStep.DREAM2FLOW_INFERENCE,  # Run Dream2Flow inference
     ]
 
     def __init__(
@@ -122,6 +126,7 @@ class LocalPipelineRunner:
         skip_interactive: bool = True,
         environment_type: str = "kitchen",
         enable_dwm: bool = False,
+        enable_dream2flow: bool = False,
     ):
         """Initialize the local pipeline runner.
 
@@ -130,12 +135,15 @@ class LocalPipelineRunner:
             verbose: Print detailed progress
             skip_interactive: Skip interactive-job (requires external service)
             environment_type: Environment type for policy selection
+            enable_dwm: Include optional DWM steps in default pipeline
+            enable_dream2flow: Include optional Dream2Flow steps in default pipeline
         """
         self.scene_dir = Path(scene_dir).resolve()
         self.verbose = verbose
         self.skip_interactive = skip_interactive
         self.environment_type = environment_type
         self.enable_dwm = enable_dwm
+        self.enable_dream2flow = enable_dream2flow
         self.environment = os.getenv("BP_ENV", "development").lower()
 
         # Derive scene ID from directory name
@@ -254,10 +262,7 @@ class LocalPipelineRunner:
         except ImportError:
             self.log("Pipeline selector not available; falling back to default steps", "WARNING")
             steps = self.DEFAULT_STEPS.copy()
-            if self.enable_dwm:
-                insert_at = self.DEFAULT_STEPS.index(PipelineStep.DREAM2FLOW)
-                steps[insert_at:insert_at] = self.DWM_STEPS
-            return steps
+            return self._apply_optional_steps(steps)
 
         selector = PipelineSelector(scene_root=self.scene_dir)
         decision = selector.select(self.scene_dir)
@@ -269,10 +274,16 @@ class LocalPipelineRunner:
         else:
             steps = self.DEFAULT_STEPS.copy()
 
-        if self.enable_dwm:
-            insert_at = steps.index(PipelineStep.DREAM2FLOW) if PipelineStep.DREAM2FLOW in steps else len(steps)
-            steps[insert_at:insert_at] = self.DWM_STEPS
+        steps = self._apply_optional_steps(steps)
 
+        return steps
+
+    def _apply_optional_steps(self, steps: List[PipelineStep]) -> List[PipelineStep]:
+        """Append optional steps gated by explicit flags."""
+        if self.enable_dwm:
+            steps.extend(self.DWM_STEPS)
+        if self.enable_dream2flow:
+            steps.extend(self.DREAM2FLOW_STEPS)
         return steps
 
     def _map_jobs_to_steps(self, job_sequence: List[str]) -> List[PipelineStep]:
@@ -1941,6 +1952,11 @@ def main():
         help="Include optional DWM preparation/inference steps in the default pipeline",
     )
     parser.add_argument(
+        "--enable-dream2flow",
+        action="store_true",
+        help="Include optional Dream2Flow preparation/inference steps in the default pipeline",
+    )
+    parser.add_argument(
         "--use-geniesim",
         action="store_true",
         help="Use Genie Sim execution mode (overrides USE_GENIESIM for this run)",
@@ -1984,6 +2000,7 @@ def main():
         skip_interactive=not args.with_interactive,
         environment_type=args.environment,
         enable_dwm=args.enable_dwm,
+        enable_dream2flow=args.enable_dream2flow,
     )
 
     success = runner.run(steps=steps, run_validation=args.validate)
