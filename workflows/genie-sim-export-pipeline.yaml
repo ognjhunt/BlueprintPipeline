@@ -70,7 +70,7 @@ main:
           - region: "us-central1"
           - workflowName: "genie-sim-export-pipeline"
           - geniesimExportTimeoutSeconds: 2700
-          - geniesimSubmissionTimeoutSeconds: 3600
+          - geniesimSubmissionTimeoutSeconds: 14400
           - geniesimGenerationSlaSeconds: 14400
           # Default to commercial-only assets (your own assets, not GenieSimAssets)
           - filterCommercial: true
@@ -80,6 +80,11 @@ main:
           - maxTasks: '${default(map.get(event, "max_tasks"), "50")}'
           # Submission mode: api or local (API requires explicit opt-in)
           - geniesimSubmissionMode: '${default(map.get(event, "geniesim_submission_mode"), "local")}'
+          - gkeCluster: '${default(map.get(event, "gke_cluster"), "blueprint-cluster")}'
+          - gkeZone: '${default(map.get(event, "gke_zone"), "us-central1-a")}'
+          - gkeNamespace: '${default(map.get(event, "gke_namespace"), "blueprint")}'
+          - gkeGpuAccelerator: '${default(map.get(event, "gke_gpu_accelerator"), "nvidia-tesla-t4")}'
+          - gkeServiceAccount: '${default(map.get(event, "gke_service_account"), "blueprint-pipeline-sa")}'
         next: filter_completion_markers
 
     # Filter for .variation_pipeline_complete marker files
@@ -396,44 +401,157 @@ main:
             next: run_geniesim_gpu_job
         next: run_geniesim_submission_job
 
-    # Run local Genie Sim execution (no hosted API)
+    # Run local Genie Sim execution (GKE GPU job via Cloud Build)
     - run_geniesim_gpu_job:
         try:
-          call: googleapis.run.v2.projects.locations.jobs.run
+          call: googleapis.cloudbuild.v1.projects.builds.create
           args:
-            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + geniesimGpuJobName}'
+            projectId: ${projectId}
             body:
-              overrides:
-                containerOverrides:
-                  - env:
-                      - name: BUCKET
-                        value: ${bucket}
-                      - name: SCENE_ID
-                        value: ${sceneId}
-                      - name: GENIESIM_PREFIX
-                        value: ${geniesimPrefix}
-                      - name: JOB_OUTPUT_PATH
-                        value: ${geniesimJobMetadataPath}
-                      - name: ROBOT_TYPE
-                        value: ${robotType}
-                      - name: EPISODES_PER_TASK
-                        value: "10"
-                      - name: NUM_VARIATIONS
-                        value: "5"
-                      - name: OUTPUT_PREFIX
-                        value: '${"scenes/" + sceneId + "/episodes"}'
-                      - name: GENIESIM_FORCE_LOCAL
-                        value: "true"
-                      - name: GENIESIM_HOST
-                        value: '${default(sys.get_env("GENIESIM_HOST"), "localhost")}'
-                      - name: GENIESIM_PORT
-                        value: '${default(sys.get_env("GENIESIM_PORT"), "50051")}'
-                      - name: GENIESIM_ROOT
-                        value: '${default(sys.get_env("GENIESIM_ROOT"), "/opt/geniesim")}'
-                      - name: ISAAC_SIM_PATH
-                        value: '${default(sys.get_env("ISAAC_SIM_PATH"), "/isaac-sim")}'
-            timeout: '${string(geniesimSubmissionTimeoutSeconds) + "s"}'
-        result: geniesimSubmitExec
+              steps:
+                - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+                  entrypoint: 'bash'
+                  args:
+                    - '-c'
+                    - |
+                      set -e
+
+                      gcloud container clusters get-credentials ${gkeCluster} \
+                        --zone=${gkeZone} \
+                        --project=${projectId}
+
+                      GPU_NODE_COUNT=$(kubectl get nodes \
+                        -l cloud.google.com/gke-accelerator=${gkeGpuAccelerator} \
+                        -o name | wc -l | tr -d ' ')
+                      if [ "${GPU_NODE_COUNT}" -eq 0 ]; then
+                        echo "ERROR: No GPU nodes found with accelerator label ${gkeGpuAccelerator}."
+                        exit 1
+                      fi
+
+                      GPU_CAPACITY=$(kubectl get nodes \
+                        -l cloud.google.com/gke-accelerator=${gkeGpuAccelerator} \
+                        -o jsonpath='{range .items[*]}{.status.capacity.nvidia\.com/gpu}{"\n"}{end}' \
+                        | awk 'BEGIN{sum=0} {if ($1 ~ /^[0-9]+$/) sum+=$1} END{print sum}')
+                      if [ "${GPU_CAPACITY:-0}" -le 0 ]; then
+                        echo "ERROR: GPU capacity is not reported on GPU nodes."
+                        exit 1
+                      fi
+
+                      JOB_NAME="geniesim-gpu-${sceneId}-$(date +%s)"
+
+                      cat <<EOFK8S | kubectl apply -f -
+                      apiVersion: batch/v1
+                      kind: Job
+                      metadata:
+                        name: ${JOB_NAME}
+                        namespace: ${gkeNamespace}
+                        labels:
+                          app: blueprint-pipeline
+                          component: genie-sim-gpu-local
+                          scene-id: ${sceneId}
+                      spec:
+                        backoffLimit: 2
+                        ttlSecondsAfterFinished: 3600
+                        activeDeadlineSeconds: 14400
+                        template:
+                          metadata:
+                            labels:
+                              app: blueprint-pipeline
+                              component: genie-sim-gpu-local
+                          spec:
+                            restartPolicy: OnFailure
+                            serviceAccountName: ${gkeServiceAccount}
+                            nodeSelector:
+                              cloud.google.com/gke-accelerator: ${gkeGpuAccelerator}
+                            tolerations:
+                              - key: nvidia.com/gpu
+                                operator: Exists
+                                effect: NoSchedule
+                            containers:
+                              - name: genie-sim-local
+                                image: gcr.io/${projectId}/blueprint-genie-sim:isaacsim
+                                imagePullPolicy: Always
+                                env:
+                                  - name: BUCKET
+                                    value: ${bucket}
+                                  - name: SCENE_ID
+                                    value: ${sceneId}
+                                  - name: GENIESIM_PREFIX
+                                    value: ${geniesimPrefix}
+                                  - name: JOB_OUTPUT_PATH
+                                    value: ${geniesimJobMetadataPath}
+                                  - name: ROBOT_TYPE
+                                    value: ${robotType}
+                                  - name: EPISODES_PER_TASK
+                                    value: "10"
+                                  - name: NUM_VARIATIONS
+                                    value: "5"
+                                  - name: OUTPUT_PREFIX
+                                    value: ${"scenes/" + sceneId + "/episodes"}
+                                  - name: GENIESIM_FORCE_LOCAL
+                                    value: "true"
+                                  - name: GENIESIM_HOST
+                                    value: ${default(sys.get_env("GENIESIM_HOST"), "localhost")}
+                                  - name: GENIESIM_PORT
+                                    value: ${default(sys.get_env("GENIESIM_PORT"), "50051")}
+                                  - name: GENIESIM_ROOT
+                                    value: ${default(sys.get_env("GENIESIM_ROOT"), "/opt/geniesim")}
+                                  - name: ISAAC_SIM_PATH
+                                    value: ${default(sys.get_env("ISAAC_SIM_PATH"), "/isaac-sim")}
+                                  - name: GOOGLE_APPLICATION_CREDENTIALS
+                                    value: /secrets/gcs/key.json
+                                resources:
+                                  requests:
+                                    cpu: "4"
+                                    memory: "16Gi"
+                                    nvidia.com/gpu: 1
+                                  limits:
+                                    cpu: "8"
+                                    memory: "32Gi"
+                                    nvidia.com/gpu: 1
+                                volumeMounts:
+                                  - name: gcs-credentials
+                                    mountPath: /secrets/gcs
+                                    readOnly: true
+                                  - name: dshm
+                                    mountPath: /dev/shm
+                                  - name: isaac-cache
+                                    mountPath: /root/.cache/ov
+                            volumes:
+                              - name: gcs-credentials
+                                secret:
+                                  secretName: gcs-service-account
+                              - name: dshm
+                                emptyDir:
+                                  medium: Memory
+                                  sizeLimit: 16Gi
+                              - name: isaac-cache
+                                emptyDir:
+                                  sizeLimit: 50Gi
+                      EOFK8S
+
+                      echo "Created Kubernetes Job: ${JOB_NAME}"
+
+                      while true; do
+                        STATUS=$(kubectl get job ${JOB_NAME} -n ${gkeNamespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
+                        FAILED=$(kubectl get job ${JOB_NAME} -n ${gkeNamespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
+
+                        if [ "$STATUS" == "True" ]; then
+                          echo "Job completed successfully!"
+                          exit 0
+                        elif [ "$FAILED" == "True" ]; then
+                          echo "Job failed!"
+                          kubectl logs job/${JOB_NAME} -n ${gkeNamespace} --tail=200 || true
+                          exit 1
+                        fi
+
+                        echo "Job still running... ($(date))"
+                        sleep 30
+                      done
+              timeout: '${string(geniesimSubmissionTimeoutSeconds) + "s"}'
+              options:
+                logging: CLOUD_LOGGING_ONLY
+        result: geniesimGpuBuild
         retry:
           predicate: ${http.default_retry_predicate}
           max_retries: 3
@@ -458,11 +576,38 @@ main:
             - log_submission_error:
                 call: sys.log
                 args:
-                  text: '${"Failed to execute local Genie Sim job: " + e.message}'
+                  text: '${"Failed to execute local Genie Sim job on GKE: " + e.message}'
                   severity: "ERROR"
             - raise_submission_error:
                 raise: ${e}
-        next: set_submission_execution_name
+        next: set_gke_submission_execution_name
+
+    - set_gke_submission_execution_name:
+        assign:
+          - submissionExecutionName: ${geniesimGpuBuild.metadata.build.id}
+        next: wait_for_gke_submission_job
+
+    - wait_for_gke_submission_job:
+        call: googleapis.cloudbuild.v1.projects.builds.get
+        args:
+          projectId: ${projectId}
+          id: ${submissionExecutionName}
+        result: gkeSubmissionStatus
+        next: check_gke_submission_status
+
+    - check_gke_submission_status:
+        switch:
+          - condition: '${gkeSubmissionStatus.status == "FAILURE" or gkeSubmissionStatus.status == "TIMEOUT" or gkeSubmissionStatus.status == "CANCELLED"}'
+            next: submission_failed
+          - condition: '${gkeSubmissionStatus.status == "SUCCESS"}'
+            next: log_submission_complete
+        next: wait_gke_submission_poll
+
+    - wait_gke_submission_poll:
+        call: sys.sleep
+        args:
+          seconds: 30
+        next: wait_for_gke_submission_job
 
     # Submit the Genie Sim generation job (local or API-backed)
     - run_geniesim_submission_job:
