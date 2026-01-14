@@ -197,6 +197,8 @@ main:
                   name: ${objectsLegacyFailedMarker}
                   uploadType: "media"
                   body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"failed\\", \\"error\\": \\"" + e.message + "\\"}" }
+            - raise_objects_job_error:
+                raise: ${e}
         next: set_objects_execution_name
 
     - set_objects_execution_name:
