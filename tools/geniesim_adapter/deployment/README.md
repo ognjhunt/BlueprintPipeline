@@ -9,6 +9,9 @@ compatible with the BlueprintPipeline gRPC adapter in `tools/geniesim_adapter/`.
 # From the repo root
 cd tools/geniesim_adapter/deployment
 
+# Bootstrap Genie Sim runtime + health check
+./bootstrap_geniesim_runtime.sh
+
 # Install/clone Genie Sim
 ./install_geniesim.sh
 
@@ -40,3 +43,5 @@ The local framework relies on these variables:
   your environment (CUDA/driver requirements vary across hosts).
 - If you already have Genie Sim cloned, set `GENIESIM_ROOT` and re-run the script to
   install dependencies.
+- The bootstrap script starts the server (unless `GENIESIM_START_SERVER=0`) and runs
+  `python -m tools.geniesim_adapter.geniesim_healthcheck` for a readiness check.
