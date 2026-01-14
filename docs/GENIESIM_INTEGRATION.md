@@ -151,6 +151,13 @@ handles data generation (tasks, trajectories, episodes, evaluation).
 **Genie Sim is the default data generation backend.** To use BlueprintPipeline's own episode
 generation instead, set `USE_GENIESIM=false`.
 
+## Mock vs Real Genie Sim (Decision Table)
+
+| Mode | When to use | Required setup | Validation commands | Data quality + lab validation |
+| --- | --- | --- | --- | --- |
+| **Real Genie Sim** (Isaac Sim + gRPC) | Production data capture, lab validation, quality gating, and any dataset meant for training/eval. | Use [Runtime Bootstrap](#runtime-bootstrap-reproducible) or [Containerized Genie Sim Server](#containerized-genie-sim-server-docker-compose). Ensure Isaac Sim + Genie Sim repo installed, gRPC server running. | [Health check](#validation-checklist) + [local framework check](#validation-checklist). For lab/staging, run the [Staging E2E Test](#staging-e2e-test-real-grpc--isaac-sim). | **High-fidelity** physics + sensor outputs. **Required** for lab validation; mock is explicitly disallowed. |
+| **Mock Genie Sim** (stubbed local gRPC) | Dev/test workflows, CI smoke tests, or integration checks when Isaac Sim isn’t available. | Use [Local gRPC Server Runner](#local-grpc-server-runner-fallback). Set `ALLOW_GENIESIM_MOCK=1` and `GENIESIM_MOCK_MODE=true`, or run `tools/run_local_pipeline.py --mock-geniesim`. | Run `python -m tools.geniesim_adapter.geniesim_server --health-check` and/or `python -m tools.geniesim_adapter.local_framework check` against the local stub server. | **Low-fidelity** stubbed outputs; **not suitable** for training data or lab validation. Must be re-run with real Genie Sim before release. |
+
 ## Runtime Bootstrap (Reproducible)
 
 Use the deployment scripts under `tools/geniesim_adapter/deployment/` to install Genie Sim,
