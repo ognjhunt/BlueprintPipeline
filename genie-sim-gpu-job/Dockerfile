@@ -13,18 +13,22 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ARG GENIESIM_REPO=https://github.com/AgibotTech/genie_sim.git
-ARG GENIESIM_REF=main
+ARG GENIESIM_REF=4208030d556b3d025b8b1de4e8acf09f66c494bc
 
-RUN git clone --depth 1 --branch ${GENIESIM_REF} ${GENIESIM_REPO} ${GENIESIM_ROOT}
+RUN git clone --no-checkout ${GENIESIM_REPO} ${GENIESIM_ROOT} \
+    && cd ${GENIESIM_ROOT} \
+    && git fetch --depth 1 origin ${GENIESIM_REF} \
+    && git checkout ${GENIESIM_REF}
 
 WORKDIR /app
 
 COPY genie-sim-local-job/requirements.txt /app/requirements.txt
 COPY genie-sim-local-job/requirements.lock /app/requirements.lock
+COPY genie-sim-gpu-job/requirements.geniesim.lock /app/requirements.geniesim.lock
 
 RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --upgrade pip \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir -r /app/requirements.txt -c /app/requirements.lock \
-    && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir -r ${GENIESIM_ROOT}/requirements.txt
+    && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir -r ${GENIESIM_ROOT}/requirements.txt -c /app/requirements.geniesim.lock
 
 COPY genie-sim-submit-job/ /app/genie-sim-submit-job/
 COPY genie-sim-export-job/ /app/genie-sim-export-job/
