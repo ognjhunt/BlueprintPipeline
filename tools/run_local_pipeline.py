@@ -106,7 +106,6 @@ class LocalPipelineRunner:
         PipelineStep.SIMREADY,
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
-        PipelineStep.ISAAC_LAB,
     ]
 
     DWM_STEPS = [
