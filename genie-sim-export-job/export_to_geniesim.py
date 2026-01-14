@@ -464,6 +464,25 @@ def run_geniesim_export_job(
     original_object_count = len(manifest.get("objects", []))
     print(f"[GENIESIM-EXPORT-JOB] Original manifest has {original_object_count} objects")
 
+    # Inject USD scene path if available
+    usd_path = None
+    usd_search_dirs = [path for path in [usd_source_dir, output_dir / "usd"] if path]
+    for usd_dir in usd_search_dirs:
+        for usd_filename in ("scene.usda", "scene.usd", "scene.usdc"):
+            candidate = usd_dir / usd_filename
+            if candidate.is_file():
+                usd_path = candidate
+                break
+        if usd_path:
+            break
+
+    if usd_path:
+        if not manifest.get("usd_path") or not Path(str(manifest.get("usd_path"))).is_file():
+            manifest["usd_path"] = str(usd_path)
+            print(f"[GENIESIM-EXPORT-JOB] Added usd_path to manifest: {usd_path}")
+    else:
+        print("[GENIESIM-EXPORT-JOB] No USD scene file found for manifest injection")
+
     # Merge variation assets into manifest
     if variation_objects:
         print(f"[GENIESIM-EXPORT-JOB] Merging {len(variation_objects)} variation assets into manifest")

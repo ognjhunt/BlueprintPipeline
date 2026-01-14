@@ -22,7 +22,7 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from google.cloud import storage
 
@@ -73,6 +73,40 @@ def _write_failure_marker(
     payload: Dict[str, Any],
 ) -> None:
     _write_json_blob(client, bucket, f"{geniesim_prefix}/.failed", payload)
+
+
+def _find_scene_usd_path(
+    *,
+    scene_manifest: Dict[str, Any],
+    scene_id: str,
+    geniesim_prefix: str,
+    gcs_root: Path,
+    local_root: Path,
+    use_gcs_fuse: bool,
+) -> Optional[Path]:
+    existing_path = scene_manifest.get("usd_path")
+    if existing_path:
+        candidate = Path(existing_path)
+        if candidate.is_file():
+            return candidate
+        if not candidate.is_absolute():
+            relative_candidate = (gcs_root if use_gcs_fuse else local_root) / candidate
+            if relative_candidate.is_file():
+                return relative_candidate
+
+    base_root = gcs_root if use_gcs_fuse else local_root
+    candidates = []
+    for usd_filename in ("scene.usda", "scene.usd", "scene.usdc"):
+        candidates.extend(
+            [
+                base_root / "scenes" / scene_id / "usd" / usd_filename,
+                base_root / geniesim_prefix / "usd" / usd_filename,
+            ]
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _parse_version(version: str) -> tuple:
@@ -335,6 +369,17 @@ def main() -> int:
         config_dir = output_dir / "config"
         scene_manifest_path = config_dir / "scene_manifest.json"
         task_config_path = config_dir / "task_config.json"
+        scene_usd_path = _find_scene_usd_path(
+            scene_manifest=scene_manifest,
+            scene_id=scene_id,
+            geniesim_prefix=geniesim_prefix,
+            gcs_root=gcs_root,
+            local_root=local_root,
+            use_gcs_fuse=use_gcs_fuse,
+        )
+        if scene_usd_path:
+            scene_manifest["usd_path"] = str(scene_usd_path)
+            print(f"[GENIESIM-SUBMIT-JOB] Using USD scene path: {scene_usd_path}")
         _write_local_json(scene_manifest_path, scene_manifest)
         _write_local_json(task_config_path, task_config_local)
 
