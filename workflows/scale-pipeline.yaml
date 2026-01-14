@@ -185,6 +185,8 @@ main:
                   name: ${scaleLegacyFailedMarker}
                   uploadType: "media"
                   body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"failed\\", \\"error\\": \\"" + e.message + "\\"}" }
+            - raise_scale_job_error:
+                raise: ${e}
         next: log_scale_metrics_complete
 
     - log_scale_metrics_complete:
