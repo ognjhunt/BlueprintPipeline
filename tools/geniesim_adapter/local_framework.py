@@ -723,6 +723,8 @@ class GenieSimLocalFramework:
         self.config = config or GenieSimConfig.from_env()
         self.verbose = verbose
 
+        self._apply_curobo_fallback_policy()
+
         self._client = GenieSimGRPCClient(
             host=self.config.host,
             port=self.config.port,
@@ -735,6 +737,40 @@ class GenieSimLocalFramework:
         # Ensure directories exist
         self.config.recording_dir.mkdir(parents=True, exist_ok=True)
         self.config.log_dir.mkdir(parents=True, exist_ok=True)
+
+    def _apply_curobo_fallback_policy(self) -> None:
+        """Apply cuRobo availability policy to config/runtime behavior."""
+        production_mode = self.config.environment == "production"
+        curobo_enabled = CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo
+        allow_fallback_env = os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK")
+
+        if production_mode and not curobo_enabled:
+            raise RuntimeError(
+                "cuRobo motion planning is required in production. "
+                "Install the cuRobo integration and enable use_curobo, or "
+                "run with GENIESIM_ENV=development for local testing."
+            )
+
+        if not production_mode and not curobo_enabled:
+            if allow_fallback_env is None:
+                self.config.allow_linear_fallback = True
+                self.log(
+                    "cuRobo unavailable; enabling linear interpolation fallback by default "
+                    "for non-production. Set GENIESIM_ALLOW_LINEAR_FALLBACK=0 to disable.",
+                    "WARNING",
+                )
+            elif self.config.allow_linear_fallback:
+                self.log(
+                    "cuRobo unavailable; linear interpolation fallback explicitly enabled "
+                    "via GENIESIM_ALLOW_LINEAR_FALLBACK.",
+                    "WARNING",
+                )
+            else:
+                self.log(
+                    "cuRobo unavailable; linear interpolation fallback disabled via "
+                    "GENIESIM_ALLOW_LINEAR_FALLBACK=0.",
+                    "WARNING",
+                )
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
