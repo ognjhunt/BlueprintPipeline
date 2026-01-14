@@ -34,12 +34,14 @@ image → 3D-RE-GEN → regen3d-job → simready-job → usd-assembly-job → re
 ### Local Testing (Without GCS/Cloud Run)
 
 Genie Sim is the **default** episode-generation backend when `USE_GENIESIM` is
-unset (equivalent to `USE_GENIESIM=true`). The default path requires the Genie
-Sim prerequisites below; if you don't have them, use the lightweight path in
-step 2b.
+unset (equivalent to `USE_GENIESIM=true`). The local runner will follow the
+Genie Sim job sequence, including variation asset generation and Genie Sim
+export/submit/import. The default path requires the Genie Sim prerequisites
+below; if you don't have them, use the lightweight path in step 2b.
 
 - Isaac Sim installed and reachable via `ISAAC_SIM_PATH` (must include `python.sh`).
 - Genie Sim repo installed at `GENIESIM_ROOT`.
+- `grpcio` installed in the active Python environment.
 - Genie Sim gRPC server running at `GENIESIM_HOST:GENIESIM_PORT` (default `localhost:50051`).
 
 ```bash
@@ -48,7 +50,8 @@ python fixtures/generate_mock_regen3d.py --scene-id test_kitchen --output-dir ./
 
 # 2. Run the local pipeline (default Genie Sim path)
 python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen --validate
-# Default steps: regen3d → simready → usd → replicator
+# Default steps: regen3d → scale → interactive → simready → usd → replicator →
+# variation-gen → genie-sim-export → genie-sim-submit → genie-sim-import
 # Optional steps: add --enable-dwm or --enable-dream2flow for extra bundles
 
 # 2b. Lightweight local run without Genie Sim
