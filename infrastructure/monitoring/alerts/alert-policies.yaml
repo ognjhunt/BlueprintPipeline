@@ -47,6 +47,109 @@ spec:
     - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
 
 ---
+# Episode Quality Score SLI Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-episode-quality-low
+spec:
+  displayName: "[Blueprint] Episode Quality Score Below Threshold"
+  documentation:
+    content: |
+      Average episode quality score fell below the production threshold.
+
+      Actions:
+      1. Inspect episode-generation logs and quality reports
+      2. Verify Isaac Sim sensor capture and validation settings
+      3. Regenerate episodes after addressing the root cause
+    mimeType: text/markdown
+  conditions:
+    - displayName: Episode Quality Score < 0.85
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="custom.googleapis.com/blueprint_pipeline/episode_quality_score"
+        comparison: COMPARISON_LT
+        thresholdValue: 0.85
+        duration: 600s
+        aggregations:
+          - alignmentPeriod: 300s
+            perSeriesAligner: ALIGN_MEAN
+            crossSeriesReducer: REDUCE_MEAN
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Physics Validation Rate SLI Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-physics-validation-low
+spec:
+  displayName: "[Blueprint] Physics Validation Rate Below Threshold"
+  documentation:
+    content: |
+      Physics validation coverage fell below the production threshold.
+
+      Actions:
+      1. Confirm Isaac Sim/Isaac Lab validation is enabled
+      2. Investigate any heuristic-only validation fallbacks
+      3. Re-run episode generation after restoring physics validation
+    mimeType: text/markdown
+  conditions:
+    - displayName: Physics Validation Rate < 0.90
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="custom.googleapis.com/blueprint_pipeline/physics_validation_score"
+        comparison: COMPARISON_LT
+        thresholdValue: 0.90
+        duration: 600s
+        aggregations:
+          - alignmentPeriod: 300s
+            perSeriesAligner: ALIGN_MEAN
+            crossSeriesReducer: REDUCE_MEAN
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Sensor Capture Source SLI Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-sensor-capture-mock-detected
+spec:
+  displayName: "[Blueprint] Mock/Unknown Sensor Capture Detected"
+  documentation:
+    content: |
+      Non-production sensor capture sources were detected (mock/unknown).
+
+      Actions:
+      1. Verify Replicator capture is enabled in Isaac Sim jobs
+      2. Disable ALLOW_MOCK_CAPTURE and other dev-only flags in production
+      3. Re-run episode generation after fixing capture configuration
+    mimeType: text/markdown
+  conditions:
+    - displayName: Mock Sensor Capture Episodes > 0
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="custom.googleapis.com/blueprint_pipeline/sensor_capture_source_total" AND
+          metric.label.source="mock_random"
+        comparison: COMPARISON_GT
+        thresholdValue: 0
+        duration: 600s
+        aggregations:
+          - alignmentPeriod: 300s
+            perSeriesAligner: ALIGN_SUM
+            crossSeriesReducer: REDUCE_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
 # Workflow Job Timeout Alert
 apiVersion: monitoring.googleapis.com/v1
 kind: AlertPolicy

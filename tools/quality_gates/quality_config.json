@@ -19,6 +19,20 @@
       "min_episodes_required": 1,
       "description": "Episode generation quality thresholds"
     },
+    "data_quality": {
+      "min_average_quality_score": 0.85,
+      "min_sensor_capture_rate": 0.90,
+      "min_physics_validation_rate": 0.90,
+      "allowed_sensor_sources": [
+        "isaac_sim_replicator",
+        "simulation"
+      ],
+      "allowed_physics_backends": [
+        "isaac_sim",
+        "isaac_lab"
+      ],
+      "description": "SLI thresholds for sensor capture + physics validation"
+    },
     "simulation": {
       "min_stable_steps": 10,
       "max_penetration_depth_m": 0.01,
