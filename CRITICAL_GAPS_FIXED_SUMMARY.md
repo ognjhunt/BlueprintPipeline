@@ -1,8 +1,9 @@
 # Critical Gaps - Implementation Summary
 
 **Date:** January 9, 2026
+**Last verified:** 2026-01-14
 **Branch:** `claude/fix-pipeline-gaps-PSeD3`
-**Status:** ✅ All critical infrastructure created + 6 major integrations completed
+**Status:** ✅ All critical infrastructure created + 8 major integrations completed
 
 ---
 
@@ -12,8 +13,8 @@ This document summarizes the complete implementation of critical gap fixes for t
 
 **Implementation Status:**
 - ✅ **All 10 Critical Infrastructure Modules Created** (100%)
-- ✅ **6 Major Integrations Completed** (Production-Ready)
-- 📋 **4 Remaining Integrations** (Infrastructure ready, integration pending)
+- ✅ **8 Major Integrations Completed** (Production-Ready)
+- 📋 **1 Remaining Integration** (Infrastructure ready, integration pending)
 
 ---
 
@@ -57,12 +58,13 @@ if self._circuit_breaker:
 
 ### 2. Secret Manager Integration for API Keys (GAP-SEC-001)
 
-**File:** `genie-sim-export-job/geniesim_client.py`
+**Files:** `genie-sim-export-job/geniesim_client.py`, `simready-job/prepare_simready_assets.py`, `episode-generation-job/task_specifier.py`
 
 **What Was Fixed:**
 - Removed Genie Sim API mode - runs locally only
 - Simplified client initialization without API key requirements
 - Uses local gRPC endpoint for client-server communication
+- Added Secret Manager-backed API key lookup for Gemini and LLM providers
 
 **Code Changes:**
 ```python
@@ -75,6 +77,12 @@ self.grpc_host = os.getenv("GENIESIM_HOST", "localhost")
 self.grpc_port = int(os.getenv("GENIESIM_PORT", "50051"))
 self.local_endpoint = f"{self.grpc_host}:{self.grpc_port}"
 self.api_key = None  # Not needed for local operation
+```
+
+```python
+# Secret Manager-backed lookup (simready/task_specifier):
+gemini_key = _load_secret_value("GEMINI_API_KEY_SECRET_ID", "GEMINI_API_KEY")
+openai_key = _load_secret_value("OPENAI_API_KEY_SECRET_ID", "OPENAI_API_KEY")
 ```
 
 **Expected Impact:**
@@ -204,45 +212,40 @@ result = process_parallel_threaded(
 
 ---
 
-## 📦 Infrastructure Created (Ready for Integration)
-
-These utilities are fully implemented and ready to use, but not yet integrated into all relevant files:
-
 ### 7. Partial Failure Handling (GAP-EH-004)
 
-**Module:** `tools/error_handling/partial_failure.py`
+**File:** `episode-generation-job/generate_episodes.py`
 
-**Capabilities:**
-- Save successful episodes even when some fail
-- Track failure reasons for each failed item
-- Configurable minimum success rate thresholds
-- Detailed failure reporting
+**What Was Fixed:**
+- Preserve successful episodes while tracking per-task failures
+- Enforce minimum success rate thresholds before marking job complete
+- Emit per-task failure summaries for debugging
 
-**Usage Example:**
+**Code Changes:**
 ```python
-handler = PartialFailureHandler(min_success_rate=0.5)
-for episode in episodes:
-    result = handler.execute(generate_episode, episode)
-
-if handler.success_rate < handler.min_success_rate:
-    raise RuntimeError(f"Success rate {handler.success_rate} too low")
+self._partial_failure_handler = PartialFailureHandler(
+    min_success_rate=self.min_success_rate,
+    max_failures=self.max_failures,
+)
+result = self._partial_failure_handler.execute(run_episode, task)
 ```
 
-**Integration Status:** 📋 Infrastructure ready, not yet integrated into `generate_episodes.py`
+**Expected Impact:**
+- Successful episodes persist even when individual tasks fail
+- Faster recovery from partial batch failures
 
 ---
 
 ### 8. Enhanced Failure Markers (GAP-EH-003)
 
-**Module:** `tools/workflow/failure_markers.py`
+**Files:** `genie-sim-export-job/export_to_geniesim.py`, `simready-job/prepare_simready_assets.py`, `episode-generation-job/generate_episodes.py`
 
-**Capabilities:**
-- Rich error context (stack traces, input params, environment info)
-- Automatic recommendations based on error type
-- Logs URLs for easy debugging
-- Partial results captured
+**What Was Fixed:**
+- Emit structured failure markers with stack traces and context
+- Capture partial results for faster debugging
+- Ensure entry-point failures produce actionable logs
 
-**Usage Example:**
+**Code Changes:**
 ```python
 try:
     result = run_job()
@@ -257,9 +260,15 @@ except Exception as e:
     )
 ```
 
-**Integration Status:** 📋 Infrastructure ready, not yet integrated into job entry points
+**Expected Impact:**
+- Faster debugging with contextual failure metadata
+- Consistent failure handling across job entry points
 
 ---
+
+## 📦 Infrastructure Created (Ready for Integration)
+
+These utilities are fully implemented and ready to use, but not yet integrated into all relevant files:
 
 ### 9. Configuration Validation (GAP-CM-001)
 
@@ -284,20 +293,6 @@ manifest = SceneManifest(**manifest_data)  # Raises ValidationError if invalid
 
 ---
 
-### 10. Rate Limiting (GAP-SEC-003)
-
-**Module:** `tools/external_services/service_client.py`
-
-**Capabilities:**
-- Token bucket rate limiter
-- Configurable calls per second
-- Automatic blocking when quota exhausted
-- Prevents API quota overruns
-
-**Status:** ✅ Integrated into `geniesim_client.py`
-
----
-
 ## 📊 Impact Summary
 
 | Metric | Before | After | Improvement |
@@ -318,44 +313,33 @@ manifest = SceneManifest(**manifest_data)  # Raises ValidationError if invalid
 These fixes have infrastructure ready but need integration into actual job code:
 
 ### High Priority (P0)
-1. **Partial Failure Handling** → `episode-generation-job/generate_episodes.py`
-   - Ensure successful episodes are saved even when some fail
-   - Add minimum success rate validation
-
-2. **Enhanced Failure Markers** → All job entry points
-   - `genie-sim-export-job/export_to_geniesim.py`
-   - `simready-job/prepare_simready_assets.py`
-   - `episode-generation-job/generate_episodes.py`
-
-### Medium Priority (P1)
-3. **Configuration Validation** → All job entry points
+1. **Configuration Validation** → All job entry points
    - Validate environment variables on startup
    - Validate manifest schemas before processing
-
-4. **Secret Manager** → LLM/Gemini API clients
-   - `simready-job/prepare_simready_assets.py` (Gemini API key)
-   - `episode-generation-job/task_specifier.py` (LLM API keys)
 
 ---
 
 ## 📁 Files Modified
 
-### Core Integrations (6 files)
+### Core Integrations (7 files)
 1. ✅ `genie-sim-export-job/geniesim_client.py` - Retry + circuit breaker + Secret Manager + rate limiting
 2. ✅ `episode-generation-job/isaac_sim_integration.py` - Timeout handling
 3. ✅ `tools/geniesim_adapter/scene_graph.py` - Input validation + streaming parser
 4. ✅ `simready-job/prepare_simready_assets.py` - Parallel processing
+5. ✅ `episode-generation-job/generate_episodes.py` - Partial failure handling + failure markers
+6. ✅ `genie-sim-export-job/export_to_geniesim.py` - Failure markers
+7. ✅ `episode-generation-job/task_specifier.py` - Secret Manager for LLM API keys
 
 ### Infrastructure Created (9 new modules)
-5. ✅ `tools/external_services/service_client.py` - Unified service client
-6. ✅ `tools/error_handling/timeout.py` - Timeout utilities
-7. ✅ `tools/error_handling/partial_failure.py` - Partial failure handler
-8. ✅ `tools/validation/input_validation.py` - Input sanitization
-9. ✅ `tools/validation/config_schemas.py` - Pydantic schemas
-10. ✅ `tools/secrets/secret_manager.py` - Secret Manager integration
-11. ✅ `tools/performance/streaming_json.py` - Streaming JSON parser
-12. ✅ `tools/performance/parallel_processing.py` - Parallelization utilities
-13. ✅ `tools/workflow/failure_markers.py` - Enhanced failure markers
+1. ✅ `tools/external_services/service_client.py` - Unified service client
+2. ✅ `tools/error_handling/timeout.py` - Timeout utilities
+3. ✅ `tools/error_handling/partial_failure.py` - Partial failure handler
+4. ✅ `tools/validation/input_validation.py` - Input sanitization
+5. ✅ `tools/validation/config_schemas.py` - Pydantic schemas
+6. ✅ `tools/secrets/secret_manager.py` - Secret Manager integration
+7. ✅ `tools/performance/streaming_json.py` - Streaming JSON parser
+8. ✅ `tools/performance/parallel_processing.py` - Parallelization utilities
+9. ✅ `tools/workflow/failure_markers.py` - Enhanced failure markers
 
 ### Documentation
 14. ✅ `CRITICAL_GAPS_IMPLEMENTATION_GUIDE.md` - Integration guide
@@ -398,10 +382,7 @@ Before production deployment:
 - [x] Deploy parallel processing (simready-job)
 
 ### Phase 2: Deploy Remaining Integrations (Week 2)
-- [ ] Integrate partial failure handling (generate_episodes.py)
-- [ ] Integrate enhanced failure markers (all jobs)
 - [ ] Integrate config validation (all jobs)
-- [ ] Integrate Secret Manager for Gemini API
 
 ### Phase 3: Monitor and Optimize (Week 3)
 - [ ] Monitor success rates
@@ -427,7 +408,7 @@ Track these KPIs to measure impact:
 
 **Status: Production-Ready for Core Fixes**
 
-All critical infrastructure has been created and 6 major integrations are complete and production-ready. The remaining 4 integrations have infrastructure ready and can be deployed incrementally.
+All critical infrastructure has been created and 8 major integrations are complete and production-ready. The remaining 1 integration has infrastructure ready and can be deployed incrementally.
 
 **Immediate Benefits Available:**
 - ✅ 50% reduction in transient failures (retry + circuit breaker)
