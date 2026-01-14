@@ -68,6 +68,57 @@ These flags must be enforced for production validation runs:
   - `summary.can_proceed == true`
   - `summary.blocking_failures == 0`
 
+### Quality Gate Preflight Criteria (Downstream Consumers)
+Downstream workflows that consume episode bundles (training, import, upsell) must pass the quality gate preflight before proceeding. The preflight checks:
+
+1. **Primary (recommended):** `quality_gate_report.json`
+   - `summary.can_proceed` must be `true`.
+   - `summary.blocking_failures` must be `0`.
+2. **Fallback (legacy runs without a gate report):** per-episode `quality_certificate.json`
+   - `validation_passed` must be `true`.
+   - `recommended_use` must **not** be `testing` (accepted: `production_training`, `fine_tuning`).
+
+If the report or certificate fails these criteria, the downstream workflow writes a `.failed` marker and exits with an error that includes the report path.
+
+#### Expected `quality_gate_report.json` Schema (summary)
+```json
+{
+  "scene_id": "kitchen_001",
+  "timestamp": "2024-05-08T12:34:56Z",
+  "summary": {
+    "total_gates": 12,
+    "passed": 11,
+    "failed": 1,
+    "blocking_failures": 1,
+    "can_proceed": false
+  },
+  "results": [
+    {
+      "gate_id": "QG-EPISODES-GENERATED",
+      "checkpoint": "episodes_generated",
+      "passed": false,
+      "severity": "error",
+      "message": "Blocking failure details...",
+      "details": {},
+      "recommendations": [],
+      "requires_human_approval": true,
+      "timestamp": "2024-05-08T12:34:56Z"
+    }
+  ]
+}
+```
+
+#### Expected `quality_certificate.json` Fields (fallback)
+```json
+{
+  "episode_id": "episode_000001",
+  "scene_id": "kitchen_001",
+  "validation_passed": true,
+  "recommended_use": "production_training",
+  "overall_quality_score": 0.92
+}
+```
+
 ### 3) Sim Validation (Genie Sim Import)
 **Workflow:** `genie-sim-import-pipeline`
 
