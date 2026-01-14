@@ -1,0 +1,17 @@
+# Log-based metric: blueprint_quality_gate_failures_total
+name: blueprint_quality_gate_failures_total
+description: "Count of quality gate job invocations that failed across workflows."
+filter: >
+  resource.type="workflows.googleapis.com/Workflow" AND
+  jsonPayload.bp_metric="job_invocation" AND
+  jsonPayload.job="quality-gate-job" AND
+  jsonPayload.event="complete" AND
+  jsonPayload.status="FAILED"
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+labelExtractors:
+  workflow: EXTRACT(jsonPayload.workflow)
+  job: EXTRACT(jsonPayload.job)
+  scene_id: EXTRACT(jsonPayload.scene_id)
