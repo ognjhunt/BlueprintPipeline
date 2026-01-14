@@ -3,7 +3,8 @@
 # Google Cloud Workflows pipeline that:
 #   1. Triggers on completion marker file from variation-gen-job (.variation_pipeline_complete)
 #   2. Runs genie-sim-export-job to convert scene to Genie Sim 3.0 format
-#   3. Writes .geniesim_complete marker when finished
+#   3. Writes .geniesim_submitted marker after submission (non-complete states)
+#   4. Writes .geniesim_complete marker after job completion (and local import)
 #   4. Triggers arena-export-pipeline for policy evaluation infrastructure
 #
 # This pipeline replaces episode-generation-pipeline and isaac-lab-job when
@@ -16,6 +17,7 @@
 #
 # ARENA INTEGRATION:
 #   After .geniesim_complete is written, arena-export-pipeline automatically triggers.
+#   .geniesim_submitted does NOT trigger Arena.
 #   This ensures you have BOTH:
 #     - Training DATA (episodes from Genie Sim)
 #     - Evaluation INFRASTRUCTURE (Arena benchmarks) to test trained policies
@@ -97,6 +99,8 @@ main:
           - geniesimSubmitJobName: "genie-sim-submit-job"
           - geniesimGpuJobName: "genie-sim-gpu-job"
           - geniesimCompleteMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_complete"}'
+          - geniesimSubmittedMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_submitted"}'
+          - geniesimImportCompleteMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_import_complete"}'
           - geniesimJobMetadataPath: '${"scenes/" + sceneId + "/geniesim/job.json"}'
           - geniesimFailedMarker: '${"scenes/" + sceneId + "/geniesim/.failed"}'
           - geniesimLegacyFailedMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_failed"}'
@@ -462,8 +466,16 @@ main:
                 args:
                   text: '${"Unable to read Genie Sim job metadata for scene " + sceneId + ": " + e.message}'
                   severity: "WARNING"
+            - set_missing_submission_metadata_defaults:
+                assign:
+                  - submittedJobId: "unknown"
+                  - submittedJobStatus: "submitted"
+                  - submittedSubmissionMode: ${geniesimSubmissionMode}
+                  - submittedEpisodesPrefix: null
+                  - submittedFailureReason: "unknown"
+                  - submittedFailureDetails: null
             - skip_import_trigger_missing:
-                next: write_completion_marker
+                next: write_submitted_marker
         next: parse_submission_metadata
 
     - parse_submission_metadata:
@@ -485,7 +497,7 @@ main:
             next: skip_import_trigger_api
           - condition: '${submittedJobStatus == "failed"}'
             next: handle_submission_failure
-        next: skip_import_trigger
+        next: write_submitted_marker
 
     - skip_import_trigger_api:
         call: sys.log
@@ -508,14 +520,33 @@ main:
         args:
           text: '${"Triggered import workflow for completed Genie Sim job " + submittedJobId}'
           severity: "INFO"
+        next: wait_for_import_completion
+
+    - wait_for_import_completion:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${geniesimImportCompleteMarker}
+          result: importCompletionMarker
+        except:
+          as: e
+          steps:
+            - check_import_marker_missing:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: wait_for_import_marker
+                next: raise_import_marker_error
         next: write_completion_marker
 
-    - skip_import_trigger:
-        call: sys.log
+    - wait_for_import_marker:
+        call: sys.sleep
         args:
-          text: '${"Genie Sim job not yet complete for scene " + sceneId + " (status: " + submittedJobStatus + ")"}'
-          severity: "INFO"
-        next: write_completion_marker
+          seconds: 10
+        next: wait_for_import_completion
+
+    - raise_import_marker_error:
+        raise: '${e}'
 
     - handle_submission_failure:
         call: sys.log
@@ -549,6 +580,23 @@ main:
           })}
         result: submissionFailureMarkerResult
         next: raise_submission_failed
+
+    - write_submitted_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${geniesimSubmittedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "status": submittedJobStatus,
+            "timestamp": time.format(sys.now()),
+            "submission_mode": submittedSubmissionMode,
+            "job_id": submittedJobId,
+            "job_metadata_path": geniesimJobMetadataPath
+          })}
+        result: submittedMarkerResult
+        next: done
 
     # Write completion marker
     - write_completion_marker:

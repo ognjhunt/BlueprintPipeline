@@ -135,7 +135,7 @@ if [ ${fail_count} -eq 0 ]; then
     echo "Pipeline Triggers Created:"
     echo "  1. usd-assembly-trigger      → Trigger on .regen3d_complete"
     echo "  2. genie-sim-export-trigger  → Trigger on .variation_pipeline_complete"
-    echo "  3. arena-export-* (3 triggers) → Trigger on .usd_complete, .geniesim_complete, .isaac_lab_complete"
+    echo "  3. arena-export-* (3 triggers) → Trigger on .usd_complete, .geniesim_complete, .isaac_lab_complete (ignores .geniesim_submitted)"
     echo "  4. objects-trigger           → Trigger on scene_layout.json uploads"
     echo "  5. genie-sim-import (webhook) → Receives Genie Sim callbacks"
     echo "  6. genie-sim-import-poller → Scheduled fallback poller"
