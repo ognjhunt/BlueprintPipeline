@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-MANIFEST_SCHEMA_VERSION = "1.1"
+MANIFEST_SCHEMA_VERSION = "1.2"
 MANIFEST_SCHEMA_DEFINITION = {
     "version": MANIFEST_SCHEMA_VERSION,
     "description": "Genie Sim import manifest schema for downstream workflow integration.",
@@ -14,6 +14,9 @@ MANIFEST_SCHEMA_DEFINITION = {
         "generated_at": "UTC timestamp for manifest generation.",
         "output_dir": "Output directory relative to the bundle root (or '.' for the root).",
         "gcs_output_path": "Optional GCS URI pointing at the bundle root containing output_dir.",
+        "readme_path": "Relative path to the bundle README describing LeRobot usage.",
+        "checksums_path": "Relative path to the checksums JSON file for bundle artifacts.",
+        "package": "Packaged bundle archive details (path, checksum, size, format).",
         "episodes": "Episode download summary metrics.",
         "quality": "Quality scoring summary and thresholds.",
         "lerobot": "LeRobot conversion status and outputs.",
