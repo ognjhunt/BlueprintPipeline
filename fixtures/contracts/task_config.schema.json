@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Genie Sim Task Config",
+  "type": "object",
+  "required": ["scene_id", "environment_type", "suggested_tasks", "robot_config"],
+  "properties": {
+    "scene_id": {"type": "string"},
+    "environment_type": {"type": "string"},
+    "suggested_tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task_type", "target_object", "difficulty", "priority"],
+        "properties": {
+          "task_type": {"type": "string"},
+          "target_object": {"type": "string"},
+          "goal_region": {"type": "string"},
+          "difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]},
+          "priority": {"type": "integer"},
+          "description_hint": {"type": "string"},
+          "constraints": {"type": "object"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "robot_config": {
+      "type": "object",
+      "required": ["type", "base_position", "workspace_bounds"],
+      "properties": {
+        "type": {"type": "string"},
+        "urdf_path": {"type": "string"},
+        "base_position": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "workspace_bounds": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 3,
+            "maxItems": 3
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "metadata": {"type": "object"}
+  },
+  "additionalProperties": true
+}
