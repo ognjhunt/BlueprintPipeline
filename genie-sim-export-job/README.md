@@ -90,7 +90,7 @@ scenes/{scene_id}/geniesim/
 ├── asset_index.json      # Asset metadata for RAG retrieval
 ├── task_config.json      # Task generation hints
 ├── scene_config.yaml     # Genie Sim scene configuration
-├── export_manifest.json  # Export metadata
+├── export_manifest.json  # Export metadata + file inventory + checksums
 └── usd/                  # (optional) Copied USD files
     └── scene.usda
 ```
