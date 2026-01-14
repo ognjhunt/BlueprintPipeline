@@ -13,11 +13,12 @@ for running the GPU-capable Genie Sim job image built from `genie-sim-gpu-job/`.
    - The image is built on `nvcr.io/nvidia/isaac-sim:2024.1.0`.
    - Configure NGC access if you pull from NVIDIA NGC.
 
-3. **Kubernetes/GKE (if applicable)**
+3. **GKE (required for `genie-sim-gpu-job`)**
+   - The Genie Sim GPU job is dispatched to **GKE** (not Cloud Run) for GPU access.
    - A GPU node pool is required (example: `nvidia-tesla-t4`).
    - Install the NVIDIA device plugin on the cluster.
    - Provide a service account secret for GCS access.
-   - See `k8s/genie-sim-gpu-job.yaml` for an example spec.
+   - See `k8s/genie-sim-gpu-job.yaml` and `scripts/deploy-genie-sim-gpu-job.sh`.
 
 ## Required Environment Variables
 
@@ -39,5 +40,7 @@ These variables map to the same defaults referenced in
 ## Example (GKE)
 
 ```bash
-kubectl apply -f k8s/genie-sim-gpu-job.yaml
+export SCENE_ID="kitchen_001"
+export BUCKET="my-scenes-bucket"
+./scripts/deploy-genie-sim-gpu-job.sh
 ```
