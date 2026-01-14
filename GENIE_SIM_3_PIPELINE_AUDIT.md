@@ -1,9 +1,9 @@
 # BlueprintPipeline Genie Sim 3.0 Mode - Comprehensive Audit & Improvement Specification
 
 **Generated:** 2026-01-09
-**Last verified:** 2026-01-14
-**Branch:** `claude/audit-codebase-pipeline-hbMk7`
-**Auditor:** Claude Code
+**Last updated:** 2026-01-14
+**Branch:** `claude/audit-production-readiness-jajgv`
+**Auditor:** Claude Code, verified with Codex analysis
 
 ---
 
@@ -38,6 +38,101 @@ This document provides a deep audit of the BlueprintPipeline's default **Genie S
 - **Configuration validation (GAP-CM-001)** across job entry points remains the primary outstanding integration.
 
 Recent integrations completed include partial failure handling, enhanced failure markers, and Secret Manager usage for Gemini/LLM credentials.
+
+---
+
+## Production Output Format & Structure
+
+An end-to-end pipeline run produces the following structured outputs:
+
+### Core Scene Outputs
+```
+scenes/{scene_id}/
+├── input/
+│   └── room.jpg                         # Input image
+├── regen3d/                             # 3D-RE-GEN output or fixture
+│   ├── scene_info.json
+│   ├── objects/obj_{id}/
+│   │   ├── mesh.glb
+│   │   ├── pose.json
+│   │   └── bounds.json
+│   └── background/
+├── assets/
+│   ├── scene_manifest.json              # Canonical manifest (JSON)
+│   ├── .regen3d_complete                # Completion marker
+│   └── obj_{id}/asset.glb
+├── layout/
+│   └── scene_layout_scaled.json         # JSON layout with transforms
+├── seg/
+│   └── inventory.json                   # Semantic inventory (JSON)
+├── usd/
+│   └── scene.usda                       # Final USD scene
+├── replicator/
+│   ├── placement_regions.usda           # USD placement surfaces
+│   ├── bundle_metadata.json             # JSON metadata
+│   ├── policies/                        # Replicator scripts
+│   └── variation_assets/manifest.json
+├── isaac_lab/
+│   ├── env_cfg.py                       # Isaac Lab config
+│   ├── task_{policy}.py
+│   ├── train_cfg.yaml
+│   ├── randomizations.py
+│   └── reward_functions.py
+└── dwm/
+    ├── dwm_bundles_manifest.json        # JSON manifest
+    └── {bundle_id}/
+        ├── manifest.json
+        ├── static_scene_video.mp4
+        ├── hand_mesh_video.mp4
+        ├── camera_trajectory.json
+        ├── hand_trajectory.json
+        └── metadata/prompt.txt
+```
+
+### Genie Sim 3.0 Export Artifacts (Default Mode)
+When Genie Sim export is enabled:
+```
+scenes/{scene_id}/geniesim/
+├── scene_graph.json
+├── asset_index.json
+├── task_config.json
+├── job.json
+└── merged_scene_manifest.json
+
+# After Genie Sim processes data (external service):
+scenes/{scene_id}/episodes/geniesim_{job_id}/
+├── config/
+│   ├── scene_manifest.json
+│   └── task_config.json
+└── import_manifest.json
+```
+
+### Episode/LeRobot Outputs
+When episode generation completes:
+```
+scenes/{scene_id}/episodes/
+├── meta/
+│   ├── info.json                        # Dataset metadata
+│   ├── stats.json                       # Statistics
+│   ├── tasks.jsonl                      # Task definitions
+│   └── episodes.jsonl                   # Episode index
+├── data/
+│   └── chunk-000/
+│       └── episode_*.parquet            # Parquet episodes (LeRobot v2.0)
+├── manifests/
+│   ├── generation_manifest.json         # Full generation record
+│   └── task_coverage.json               # Task coverage report
+└── quality/
+    └── validation_report.json           # Quality scores & metrics
+```
+
+### Data Format Summary
+- **USD**: scene.usda, placement_regions.usda
+- **JSON**: manifests, configs, inventories, trajectories, task specs
+- **GLB**: object meshes
+- **YAML/Python**: Isaac Lab configs and task code
+- **MP4**: DWM conditioning videos
+- **Parquet**: LeRobot episodes and per-frame data
 
 ---
 
