@@ -287,10 +287,42 @@ run_episode_generation() {
     export NUM_CAMERAS="${NUM_CAMERAS:-1}"
     export IMAGE_RESOLUTION="${IMAGE_RESOLUTION:-640,480}"
     export CAPTURE_SENSOR_DATA="${CAPTURE_SENSOR_DATA:-true}"
+    export DATA_QUALITY_LEVEL="${DATA_QUALITY_LEVEL:-production}"
+    export PRODUCTION_MODE="${PRODUCTION_MODE:-true}"
+    export ISAAC_SIM_REQUIRED="${ISAAC_SIM_REQUIRED:-true}"
 
     # IMPORTANT: Set USE_MOCK_CAPTURE=false to use real Isaac Sim capture
     export USE_MOCK_CAPTURE="false"
     export SENSOR_CAPTURE_MODE="isaac_sim"
+
+    if [ -z "${SCENE_USD_PATH}" ]; then
+        usd_dir="${GCS_MOUNT}/scenes/${SCENE_ID}/usd"
+        for ext in usd usda usdz; do
+            candidate="${usd_dir}/scene.${ext}"
+            if [ -f "${candidate}" ]; then
+                export SCENE_USD_PATH="${candidate}"
+                break
+            fi
+        done
+
+        if [ -z "${SCENE_USD_PATH}" ] && [ -d "${usd_dir}" ]; then
+            shopt -s nullglob
+            for candidate in "${usd_dir}"/*.usd "${usd_dir}"/*.usda "${usd_dir}"/*.usdz; do
+                if [ -f "${candidate}" ]; then
+                    export SCENE_USD_PATH="${candidate}"
+                    break
+                fi
+            done
+            shopt -u nullglob
+        fi
+    fi
+
+    if [ -n "${SCENE_USD_PATH}" ]; then
+        log_info "Using USD scene path: ${SCENE_USD_PATH}"
+    elif [ "${DATA_QUALITY_LEVEL}" = "production" ]; then
+        log_error "USD scene path is required for production validation (set SCENE_USD_PATH)."
+        return 1
+    fi
 
     # Run with Isaac Sim's Python
     cd ${APP_DIR}

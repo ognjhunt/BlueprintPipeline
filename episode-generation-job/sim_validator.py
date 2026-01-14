@@ -486,21 +486,26 @@ class SimulationValidator:
 
     def _guard_dev_only_fallback(self) -> None:
         """Block heuristic fallback when production quality is requested."""
+        production_requested = self._is_production_requested()
         capabilities = get_environment_capabilities()
-        data_quality = os.environ.get("DATA_QUALITY_LEVEL", "development").lower()
-        labs_staging = os.environ.get("LABS_STAGING", "").lower() in {"1", "true", "yes"}
-        production_requested = (
-            capabilities.production_mode
-            or data_quality == DataQualityLevel.PRODUCTION.value
-            or os.environ.get("ISAAC_SIM_REQUIRED", "false").lower() == "true"
-            or labs_staging
-        )
 
         if production_requested and not capabilities.can_generate_production_data:
             raise ProductionDataQualityError(
                 "DEV-ONLY heuristic fallback blocked in production. "
                 "Run inside Isaac Sim with PhysX enabled to validate episodes."
             )
+
+    def _is_production_requested(self) -> bool:
+        """Return True when production or labs-staging requirements are active."""
+        capabilities = get_environment_capabilities()
+        data_quality = os.environ.get("DATA_QUALITY_LEVEL", "development").lower()
+        labs_staging = os.environ.get("LABS_STAGING", "").lower() in {"1", "true", "yes"}
+        return (
+            capabilities.production_mode
+            or data_quality == DataQualityLevel.PRODUCTION.value
+            or os.environ.get("ISAAC_SIM_REQUIRED", "false").lower() == "true"
+            or labs_staging
+        )
 
     def is_using_real_physics(self) -> bool:
         """Check if using real PhysX simulation."""
@@ -881,6 +886,12 @@ class SimulationValidator:
         This uses geometric collision checking and kinematic analysis.
         Less accurate than real physics but useful for testing.
         """
+        if self._is_production_requested():
+            raise ProductionDataQualityError(
+                "Heuristic validation attempted in production/labs-staging. "
+                "Run inside Isaac Sim with PhysX enabled to validate episodes."
+            )
+
         self.log("  Running heuristic validation...")
 
         # Run all heuristic checks
