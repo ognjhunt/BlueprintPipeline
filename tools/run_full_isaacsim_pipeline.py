@@ -465,9 +465,9 @@ class IsaacSimPipeline:
             EpisodeGenerationConfig,
         )
         from episode_generation_job.sensor_data_capture import (
-            IsaacSimSensorCapture,
-            SensorDataConfig,
             DataPackTier,
+            SensorDataCaptureMode,
+            create_sensor_capture,
         )
 
         # Load scene manifest
@@ -479,20 +479,26 @@ class IsaacSimPipeline:
 
         # Create sensor capture with real Isaac Sim integration
         tier = DataPackTier[self.config.data_pack_tier.upper()]
+        camera_specs = [
+            {
+                "prim_path": camera["prim_path"],
+                "camera_type": camera["name"],
+                "camera_id": camera["name"],
+            }
+            for camera in self.cameras
+        ]
 
-        sensor_config = SensorDataConfig(
-            tier=tier,
-            cameras=self.cameras,
-            render_products=self.render_products,
+        sensor_capture = create_sensor_capture(
+            data_pack=tier,
+            num_cameras=self.config.num_cameras,
+            resolution=self.config.image_resolution,
             fps=self.config.fps,
+            camera_specs=camera_specs,
+            scene_usd_path=str(self.config.data_root / f"scenes/{self.config.scene_id}/scene.usd"),
+            capture_mode=SensorDataCaptureMode.ISAAC_SIM,
+            allow_mock_capture=False,
+            verbose=self.verbose,
         )
-
-        sensor_capture = IsaacSimSensorCapture(
-            config=sensor_config,
-            world=self.world,
-            stage=self.stage,
-        )
-        sensor_capture.initialize()
 
         # Create episode generator config
         output_dir = self.config.output_root / f"scenes/{self.config.scene_id}/episodes"
