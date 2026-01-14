@@ -391,6 +391,7 @@ def main() -> int:
             "scene_graph": f"gs://{bucket}/{geniesim_prefix}/scene_graph.json",
             "asset_index": f"gs://{bucket}/{geniesim_prefix}/asset_index.json",
             "task_config": f"gs://{bucket}/{geniesim_prefix}/task_config.json",
+            "asset_provenance": f"gs://{bucket}/{geniesim_prefix}/legal/asset_provenance.json",
         },
         "generation_params": {
             "robot_type": robot_type,

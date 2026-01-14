@@ -106,6 +106,28 @@ def _relative_to_bundle(bundle_root: Path, path: Path) -> str:
     return rel_str if rel_str else "."
 
 
+def _resolve_asset_provenance_reference(
+    bundle_root: Path,
+    output_dir: Path,
+    job_metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    local_path = output_dir / "legal" / "asset_provenance.json"
+    if local_path.exists():
+        return _relative_to_bundle(bundle_root, local_path)
+    if job_metadata:
+        artifacts = job_metadata.get("artifacts", {})
+        bundle = job_metadata.get("bundle", {})
+        reference = (
+            artifacts.get("asset_provenance")
+            or artifacts.get("asset_provenance_path")
+            or bundle.get("asset_provenance")
+            or bundle.get("asset_provenance_path")
+        )
+        if reference:
+            return reference
+    return None
+
+
 def _resolve_run_id(job_id: str) -> str:
     return (
         os.getenv("RUN_ID")
@@ -847,6 +869,7 @@ def convert_to_lerobot(
 def run_import_job(
     config: ImportConfig,
     client: GenieSimClient,
+    job_metadata: Optional[Dict[str, Any]] = None,
 ) -> ImportResult:
     """
     Run episode import job.
@@ -1296,6 +1319,11 @@ def run_import_job(
         )
         package_checksum = _sha256_file(package_path)
         file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
+        asset_provenance_path = _resolve_asset_provenance_reference(
+            bundle_root=bundle_root,
+            output_dir=config.output_dir,
+            job_metadata=job_metadata,
+        )
         import_manifest["package"] = {
             "path": _relative_to_bundle(bundle_root, package_path),
             "sha256": package_checksum,
@@ -1309,6 +1337,7 @@ def run_import_job(
             ],
         }
         import_manifest["file_inventory"] = file_inventory
+        import_manifest["asset_provenance_path"] = asset_provenance_path
         import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
             "sha256": compute_manifest_checksum(import_manifest),
         }
@@ -1620,6 +1649,11 @@ def run_local_import_job(
     )
     package_checksum = _sha256_file(package_path)
     file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
+    asset_provenance_path = _resolve_asset_provenance_reference(
+        bundle_root=bundle_root,
+        output_dir=config.output_dir,
+        job_metadata=job_metadata,
+    )
     import_manifest["package"] = {
         "path": _relative_to_bundle(bundle_root, package_path),
         "sha256": package_checksum,
@@ -1633,6 +1667,7 @@ def run_local_import_job(
         ],
     }
     import_manifest["file_inventory"] = file_inventory
+    import_manifest["asset_provenance_path"] = asset_provenance_path
     import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
         "sha256": compute_manifest_checksum(import_manifest),
     }
@@ -1776,7 +1811,7 @@ def main():
                     print(f"[GENIE-SIM-IMPORT] ERROR: Failed to create Genie Sim client: {e}")
                     print("[GENIE-SIM-IMPORT] Make sure GENIE_SIM_API_KEY is set")
                     sys.exit(1)
-                result = run_import_job(config, client)
+                result = run_import_job(config, client, job_metadata=job_metadata)
 
         if result.success:
             print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")

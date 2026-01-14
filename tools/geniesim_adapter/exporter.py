@@ -479,6 +479,7 @@ source:
             "fields": {
                 "schema_version": "Schema version string.",
                 "export_info": "Export metadata and provenance.",
+                "asset_provenance_path": "Relative path to asset provenance JSON for legal review.",
                 "config": "Export configuration snapshot.",
                 "result": "Export output paths, statistics, warnings, and errors.",
                 "geniesim_compatibility": "Target Genie Sim compatibility metadata.",
@@ -494,6 +495,10 @@ source:
         output_dir = output_path.parent
         file_inventory = self._build_file_inventory(output_dir, exclude_paths=[output_path])
         file_checksums = self._build_directory_checksums(output_dir, exclude_paths=[output_path])
+        asset_provenance_path = None
+        asset_provenance_file = output_dir / "legal" / "asset_provenance.json"
+        if asset_provenance_file.exists():
+            asset_provenance_path = asset_provenance_file.relative_to(output_dir).as_posix()
         manifest = {
             "schema_version": schema_version,
             "schema_definition": schema_definition,
@@ -502,6 +507,7 @@ source:
                 "exporter_version": "1.0.0",
                 "source_pipeline": "blueprintpipeline",
             },
+            "asset_provenance_path": asset_provenance_path,
             "config": {
                 "robot_type": config.robot_type,
                 "generate_embeddings": config.generate_embeddings,

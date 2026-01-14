@@ -67,6 +67,7 @@ from tools.geniesim_adapter import (
     GenieSimExportConfig,
     GenieSimExportResult,
 )
+from tools.quality_reports import generate_asset_provenance
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.workflow.failure_markers import FailureMarkerWriter
 
@@ -164,6 +165,14 @@ def _is_service_mode() -> bool:
         or os.getenv("K_SERVICE") is not None
         or os.getenv("KUBERNETES_SERVICE_HOST") is not None
     )
+
+
+def _resolve_scene_root_for_provenance(assets_dir: Path) -> Path:
+    if (assets_dir / "assets" / "scene_manifest.json").is_file():
+        return assets_dir
+    if (assets_dir / "scene_manifest.json").is_file():
+        return assets_dir.parent
+    return assets_dir
 
 
 def _fail_variation_assets_requirement(
@@ -474,6 +483,20 @@ def run_geniesim_export_job(
     with open(merged_manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"[GENIESIM-EXPORT-JOB] Wrote merged manifest to: {merged_manifest_path}")
+
+    print("\n[GENIESIM-EXPORT-JOB] Generating asset provenance...")
+    provenance_scene_root = _resolve_scene_root_for_provenance(assets_dir)
+    asset_provenance_path = output_dir / "legal" / "asset_provenance.json"
+    try:
+        generate_asset_provenance(
+            scene_dir=provenance_scene_root,
+            output_path=asset_provenance_path,
+            scene_id=scene_id,
+        )
+        print(f"[GENIESIM-EXPORT-JOB] ✓ Asset provenance written: {asset_provenance_path}")
+    except Exception as exc:
+        print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: Failed to generate asset provenance: {exc}")
+        return 1
 
     # P0-5 FIX: Run quality gates before export
     gate_names = [
