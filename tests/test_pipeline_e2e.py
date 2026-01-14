@@ -33,6 +33,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+GENIESIM_EXPORT_DIR = REPO_ROOT / "genie-sim-export-job"
+GENIESIM_IMPORT_DIR = REPO_ROOT / "genie-sim-import-job"
+for path in [GENIESIM_EXPORT_DIR, GENIESIM_IMPORT_DIR]:
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from geniesim_client import GenieSimClient, GenerationParams
+from import_from_geniesim import ImportConfig, run_import_job
+from import_manifest_utils import compute_manifest_checksum, compute_sha256
+
 
 class PipelineTestHarness:
     """Test harness for running and validating pipeline tests."""
@@ -293,6 +303,123 @@ class PipelineTestHarness:
 
         return results
 
+    def run_geniesim_mock_import(self, output_dir: Optional[Path] = None) -> Path:
+        """Run Genie Sim mock import against exported scene bundle."""
+        scene_graph_path = self.scene_dir / "geniesim" / "scene_graph.json"
+        asset_index_path = self.scene_dir / "geniesim" / "asset_index.json"
+        task_config_path = self.scene_dir / "geniesim" / "task_config.json"
+
+        scene_graph = json.loads(scene_graph_path.read_text())
+        asset_index = json.loads(asset_index_path.read_text())
+        task_config = json.loads(task_config_path.read_text())
+
+        client = GenieSimClient(mock_mode=True, validate_on_init=False)
+        generation_params = GenerationParams(
+            episodes_per_task=1,
+            num_variations=1,
+            robot_type="franka",
+            min_quality_score=0.85,
+        )
+        try:
+            submit_result = client.submit_generation_job(
+                scene_graph=scene_graph,
+                asset_index=asset_index,
+                task_config=task_config,
+                generation_params=generation_params,
+                job_name=f"{self.scene_id}-geniesim-mock",
+            )
+            assert submit_result.success
+            assert submit_result.job_id
+
+            import_output_dir = output_dir or (
+                self.scene_dir / "episodes" / f"geniesim_{submit_result.job_id}"
+            )
+
+            config = ImportConfig(
+                job_id=submit_result.job_id,
+                output_dir=import_output_dir,
+                min_quality_score=0.85,
+                enable_validation=True,
+                filter_low_quality=True,
+                require_lerobot=True,
+                wait_for_completion=True,
+                poll_interval=0,
+            )
+            result = run_import_job(config, client)
+            assert result.success, f"Import job failed: {result.errors}"
+        finally:
+            client.close()
+
+        return import_output_dir
+
+    def validate_geniesim_import_bundle(self, output_dir: Path) -> Dict[str, Any]:
+        """Validate Genie Sim import bundle outputs and checksums."""
+        results = {
+            "passed": True,
+            "issues": [],
+        }
+
+        manifest_path = output_dir / "import_manifest.json"
+        checksums_path = output_dir / "checksums.json"
+        lerobot_dir = output_dir / "lerobot"
+
+        if not manifest_path.is_file():
+            results["passed"] = False
+            results["issues"].append("import_manifest.json missing")
+            return results
+
+        if not checksums_path.is_file():
+            results["passed"] = False
+            results["issues"].append("checksums.json missing")
+            return results
+
+        if not lerobot_dir.is_dir():
+            results["passed"] = False
+            results["issues"].append("LeRobot directory missing")
+            return results
+
+        manifest = json.loads(manifest_path.read_text())
+        checksums_payload = json.loads(checksums_path.read_text())
+        checksum_entries = checksums_payload.get("files", {})
+
+        if manifest.get("schema_version") != "1.2":
+            results["passed"] = False
+            results["issues"].append("Manifest schema_version mismatch")
+
+        manifest_checksum = manifest.get("checksums", {}).get("metadata", {}).get("import_manifest.json", {}).get("sha256")
+        if manifest_checksum != compute_manifest_checksum(manifest):
+            results["passed"] = False
+            results["issues"].append("import_manifest.json checksum mismatch")
+
+        dataset_info = lerobot_dir / "dataset_info.json"
+        episodes_index = lerobot_dir / "episodes.jsonl"
+        episode_files = sorted(lerobot_dir.glob("episode_*.parquet"))
+
+        for path in [dataset_info, episodes_index]:
+            if not path.is_file():
+                results["passed"] = False
+                results["issues"].append(f"Missing LeRobot metadata: {path.name}")
+
+        if not episode_files:
+            results["passed"] = False
+            results["issues"].append("No LeRobot episode parquet files found")
+
+        for path in [dataset_info, episodes_index, *episode_files]:
+            if not path.exists():
+                continue
+            rel_path = path.relative_to(output_dir).as_posix()
+            checksum_entry = checksum_entries.get(rel_path)
+            if not checksum_entry:
+                results["passed"] = False
+                results["issues"].append(f"Missing checksum entry for {rel_path}")
+                continue
+            expected_sha = compute_sha256(path)
+            if checksum_entry.get("sha256") != expected_sha:
+                results["passed"] = False
+                results["issues"].append(f"Checksum mismatch for {rel_path}")
+
+        return results
+
     def run_qa_validation(self) -> Dict[str, Any]:
         """Run the full QA validation.
 
@@ -515,14 +642,24 @@ def test_isaac_lab_task_generation():
         harness.cleanup()
 
 
-def test_full_pipeline():
+def test_full_pipeline(monkeypatch=None):
     """Test the complete end-to-end pipeline."""
     harness = PipelineTestHarness()
     try:
+        if monkeypatch:
+            monkeypatch.setenv("USE_GENIESIM", "true")
+            monkeypatch.setenv("GENIESIM_MOCK_MODE", "true")
+            monkeypatch.setenv("GENIESIM_FORCE_LOCAL", "false")
+        else:
+            os.environ["USE_GENIESIM"] = "true"
+            os.environ["GENIESIM_MOCK_MODE"] = "true"
+            os.environ["GENIESIM_FORCE_LOCAL"] = "false"
         harness.setup()
 
         # Run full pipeline with validation
-        success = harness.run_pipeline()
+        success = harness.run_pipeline(
+            steps="regen3d,simready,usd,replicator,genie-sim-export,genie-sim-submit"
+        )
         assert success, "Full pipeline failed"
 
         # Validate all outputs
@@ -538,10 +675,28 @@ def test_full_pipeline():
         assert usd_results["passed"], f"USD validation failed: {usd_results['issues']}"
 
         # Validate Isaac Lab
-        isaac_lab_results = harness.validate_isaac_lab()
-        # Isaac Lab may have warnings but shouldn't fail
-        if isaac_lab_results["issues"]:
-            print(f"  Isaac Lab warnings: {isaac_lab_results['issues']}")
+        if (harness.scene_dir / "isaac_lab" / "env_cfg.py").is_file():
+            isaac_lab_results = harness.validate_isaac_lab()
+            # Isaac Lab may have warnings but shouldn't fail
+            if isaac_lab_results["issues"]:
+                print(f"  Isaac Lab warnings: {isaac_lab_results['issues']}")
+        else:
+            isaac_lab_results = {"files": []}
+
+        # Validate Genie Sim export bundle
+        geniesim_dir = harness.scene_dir / "geniesim"
+        for rel_path in [
+            "scene_graph.json",
+            "asset_index.json",
+            "task_config.json",
+            "export_manifest.json",
+        ]:
+            assert (geniesim_dir / rel_path).is_file(), f"Missing Genie Sim export: {rel_path}"
+
+        # Run Genie Sim mock import and validate bundle outputs
+        import_output_dir = harness.run_geniesim_mock_import()
+        import_results = harness.validate_geniesim_import_bundle(import_output_dir)
+        assert import_results["passed"], f"Import bundle validation failed: {import_results['issues']}"
 
         # Run QA validation
         qa_results = harness.run_qa_validation()
