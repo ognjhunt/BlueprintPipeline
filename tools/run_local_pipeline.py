@@ -126,6 +126,7 @@ class LocalPipelineRunner:
         environment_type: str = "kitchen",
         enable_dwm: bool = False,
         enable_dream2flow: bool = False,
+        disable_articulated_assets: bool = False,
     ):
         """Initialize the local pipeline runner.
 
@@ -143,6 +144,7 @@ class LocalPipelineRunner:
         self.environment_type = environment_type
         self.enable_dwm = enable_dwm
         self.enable_dream2flow = enable_dream2flow
+        self.disable_articulated_assets = disable_articulated_assets
         self.environment = os.getenv("BP_ENV", "development").lower()
 
         # Derive scene ID from directory name
@@ -163,6 +165,7 @@ class LocalPipelineRunner:
 
         self.results: List[StepResult] = []
         self._geniesim_preflight_report: Optional[Dict[str, Any]] = None
+        self._pending_articulation_preflight = False
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -217,6 +220,9 @@ class LocalPipelineRunner:
             self.log("Run: python fixtures/generate_mock_regen3d.py first", "ERROR")
             return False
 
+        if not self._preflight_articulation_requirements(steps):
+            return False
+
         if self._steps_require_geniesim_preflight(steps):
             require_server = self._geniesim_requires_server(steps)
             if not self._run_geniesim_preflight(require_server=require_server):
@@ -239,6 +245,9 @@ class LocalPipelineRunner:
                 all_success = False
                 self.log(f"Step {step.value} failed: {result.message}", "ERROR")
                 # Continue with remaining steps for partial results
+            if step == PipelineStep.REGEN3D and self._pending_articulation_preflight:
+                if not self._preflight_articulation_requirements(steps):
+                    return False
 
         # Print summary
         self._print_summary()
@@ -378,6 +387,90 @@ class LocalPipelineRunner:
                 continue
             steps.append(step)
         return steps
+
+    def _preflight_articulation_requirements(self, steps: List[PipelineStep]) -> bool:
+        """Validate articulation requirements before running steps."""
+        manifest_path = self.assets_dir / "scene_manifest.json"
+        if not manifest_path.is_file():
+            if PipelineStep.REGEN3D in steps:
+                self._pending_articulation_preflight = True
+                return True
+            return True
+
+        manifest = json.loads(manifest_path.read_text())
+        required_ids = self._required_articulation_ids(manifest)
+        if not required_ids:
+            self._pending_articulation_preflight = False
+            return True
+
+        if self.disable_articulated_assets:
+            self._disable_articulations_in_manifest(manifest, manifest_path, required_ids)
+            self.log(
+                "Articulated assets disabled; proceeding without interactive processing.",
+                "WARNING",
+            )
+            self._pending_articulation_preflight = False
+            return True
+
+        endpoint = os.getenv("PARTICULATE_ENDPOINT", "").strip()
+        interactive_requested = PipelineStep.INTERACTIVE in steps
+
+        if self.skip_interactive or not interactive_requested:
+            self.log(
+                "ERROR: Articulated assets detected but interactive processing is not enabled.",
+                "ERROR",
+            )
+            self.log(
+                "Enable articulation by running with --with-interactive and setting PARTICULATE_ENDPOINT, "
+                "or explicitly disable articulated assets with DISABLE_ARTICULATED_ASSETS=true.",
+                "ERROR",
+            )
+            self.log(f"Articulated object IDs: {required_ids}", "ERROR")
+            return False
+
+        if not endpoint:
+            self.log(
+                "ERROR: Articulated assets detected but PARTICULATE_ENDPOINT is not set.",
+                "ERROR",
+            )
+            self.log(
+                "Set PARTICULATE_ENDPOINT and re-run, or set DISABLE_ARTICULATED_ASSETS=true to proceed "
+                "without articulated assets.",
+                "ERROR",
+            )
+            self.log(f"Articulated object IDs: {required_ids}", "ERROR")
+            return False
+
+        self._pending_articulation_preflight = False
+        return True
+
+    def _disable_articulations_in_manifest(
+        self,
+        manifest: Dict[str, Any],
+        manifest_path: Path,
+        required_ids: List[str],
+    ) -> None:
+        """Disable articulation requirements in the manifest."""
+        disabled_ids = set(required_ids)
+        for obj in manifest.get("objects", []):
+            if obj.get("id") not in disabled_ids:
+                continue
+            articulation = obj.get("articulation") or {}
+            articulation["required"] = False
+            articulation["disabled"] = True
+            obj["articulation"] = articulation
+            if obj.get("sim_role") in {"articulated_furniture", "articulated_appliance"}:
+                obj["sim_role"] = "static"
+
+        metadata = manifest.get("metadata") or {}
+        metadata["articulation_disabled"] = {
+            "disabled_count": len(disabled_ids),
+            "disabled_objects": sorted(disabled_ids),
+            "disabled_at": datetime.utcnow().isoformat() + "Z",
+            "reason": "DISABLE_ARTICULATED_ASSETS=true",
+        }
+        manifest["metadata"] = metadata
+        manifest_path.write_text(json.dumps(manifest, indent=2))
 
     def _run_step(self, step: PipelineStep) -> StepResult:
         """Run a single pipeline step."""
@@ -1984,6 +2077,11 @@ def main():
         help="Include optional Dream2Flow preparation/inference steps in the default pipeline",
     )
     parser.add_argument(
+        "--disable-articulations",
+        action="store_true",
+        help="Explicitly disable articulated assets (avoids requiring PARTICULATE_ENDPOINT)",
+    )
+    parser.add_argument(
         "--use-geniesim",
         action="store_true",
         help="Use Genie Sim execution mode (overrides USE_GENIESIM for this run)",
@@ -2028,6 +2126,10 @@ def main():
         environment_type=args.environment,
         enable_dwm=args.enable_dwm,
         enable_dream2flow=args.enable_dream2flow,
+        disable_articulated_assets=(
+            args.disable_articulations
+            or os.getenv("DISABLE_ARTICULATED_ASSETS", "").lower() in {"1", "true", "yes", "y"}
+        ),
     )
 
     success = runner.run(steps=steps, run_validation=args.validate)
