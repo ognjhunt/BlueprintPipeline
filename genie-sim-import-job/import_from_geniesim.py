@@ -93,6 +93,82 @@ def _sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def _parse_gcs_uri(uri: str) -> Optional[Dict[str, str]]:
+    if not uri.startswith("gs://"):
+        return None
+    remainder = uri[len("gs://"):]
+    if "/" not in remainder:
+        return {"bucket": remainder, "object": ""}
+    bucket, obj = remainder.split("/", 1)
+    return {"bucket": bucket, "object": obj}
+
+
+def _resolve_local_path(bucket: str, uri_or_path: str) -> Path:
+    if uri_or_path.startswith("/mnt/gcs/"):
+        return Path(uri_or_path)
+    parsed = _parse_gcs_uri(uri_or_path)
+    if parsed:
+        return Path("/mnt/gcs") / parsed["bucket"] / parsed["object"]
+    return Path("/mnt/gcs") / bucket / uri_or_path
+
+
+def _resolve_local_output_dir(
+    bucket: str,
+    output_prefix: str,
+    job_id: str,
+    local_episodes_prefix: Optional[str],
+) -> Path:
+    if local_episodes_prefix:
+        return _resolve_local_path(bucket, local_episodes_prefix)
+    return Path("/mnt/gcs") / bucket / output_prefix / f"geniesim_{job_id}"
+
+
+def _load_local_job_metadata(
+    bucket: str,
+    job_metadata_path: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if not job_metadata_path:
+        return None
+    metadata_path = _resolve_local_path(bucket, job_metadata_path)
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Job metadata not found at {metadata_path}")
+    with open(metadata_path, "r") as handle:
+        return json.load(handle)
+
+
+def _collect_local_episode_metadata(
+    recordings_dir: Path,
+) -> List[GeneratedEpisodeMetadata]:
+    episode_metadata_list: List[GeneratedEpisodeMetadata] = []
+    for episode_file in sorted(recordings_dir.rglob("*.json")):
+        try:
+            with open(episode_file, "r") as handle:
+                payload = json.load(handle)
+            frames = payload.get("frames", [])
+            frame_count = payload.get("frame_count", len(frames))
+            duration_seconds = 0.0
+            if frames:
+                last_timestamp = frames[-1].get("timestamp")
+                if isinstance(last_timestamp, (int, float)):
+                    duration_seconds = float(last_timestamp)
+                else:
+                    duration_seconds = max(0.0, frame_count / 30.0)
+            episode_metadata_list.append(
+                GeneratedEpisodeMetadata(
+                    episode_id=payload.get("episode_id", episode_file.stem),
+                    task_name=payload.get("task_name", "unknown"),
+                    quality_score=float(payload.get("quality_score", 0.0)),
+                    frame_count=int(frame_count),
+                    duration_seconds=duration_seconds,
+                    validation_passed=bool(payload.get("validation_passed", True)),
+                    file_size_bytes=episode_file.stat().st_size,
+                )
+            )
+        except Exception as exc:
+            print(f"[IMPORT] ⚠️  Failed to parse local episode {episode_file}: {exc}")
+    return episode_metadata_list
+
+
 @dataclass
 class ImportConfig:
     """Configuration for episode import."""
@@ -115,6 +191,11 @@ class ImportConfig:
 
     # P0-8 FIX: Error handling for partial failures
     fail_on_partial_error: bool = False  # If True, fail the job if any episodes failed
+
+    # Submission mode
+    submission_mode: str = "api"
+    job_metadata_path: Optional[str] = None
+    local_episodes_prefix: Optional[str] = None
 
 
 @dataclass
@@ -909,7 +990,7 @@ def run_import_job(
         directory_checksums = build_directory_checksums(config.output_dir, exclude_paths=[import_manifest_path])
         episode_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in episode_paths}
         metadata_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in metadata_paths}
-        checksums = {
+        file_checksums = {
             "episodes": {
                 rel_path: checksum
                 for rel_path, checksum in directory_checksums.items()
@@ -923,6 +1004,16 @@ def run_import_job(
             "missing_episode_ids": missing_episode_ids,
             "missing_metadata_files": missing_metadata_files,
         }
+        checksums_payload = {
+            "download_manifest": download_manifest_checksum,
+            "episodes": episode_checksums,
+            "filtered_episodes": filtered_checksums,
+            "lerobot": lerobot_checksums,
+            "metadata": file_checksums["metadata"],
+            "missing_episode_ids": file_checksums["missing_episode_ids"],
+            "missing_metadata_files": file_checksums["missing_metadata_files"],
+            "episode_files": file_checksums["episodes"],
+        }
         config_snapshot = {
             "env": snapshot_env(ENV_SNAPSHOT_KEYS),
             "config": {
@@ -935,6 +1026,9 @@ def run_import_job(
                 "poll_interval": config.poll_interval,
                 "wait_for_completion": config.wait_for_completion,
                 "fail_on_partial_error": config.fail_on_partial_error,
+                "submission_mode": config.submission_mode,
+                "job_metadata_path": config.job_metadata_path,
+                "local_episodes_prefix": config.local_episodes_prefix,
             },
         }
         provenance = collect_provenance(REPO_ROOT, config_snapshot)
@@ -966,16 +1060,9 @@ def run_import_job(
                 "required": config.require_lerobot or config.enable_validation,
             },
             "metrics_summary": metrics_summary,
-            "checksums": {
-                "download_manifest": download_manifest_checksum,
-                "episodes": episode_checksums,
-                "filtered_episodes": filtered_checksums,
-                "lerobot": lerobot_checksums,
-            },
+            "checksums": checksums_payload,
             "provenance": provenance,
             "file_inventory": file_inventory,
-            "checksums": checksums,
-            "provenance": provenance,
         }
 
         import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
@@ -1007,6 +1094,215 @@ def run_import_job(
         return result
 
 
+def run_local_import_job(
+    config: ImportConfig,
+    job_metadata: Optional[Dict[str, Any]] = None,
+) -> ImportResult:
+    """
+    Run episode import using already-generated local artifacts.
+
+    Args:
+        config: Import configuration
+        job_metadata: Optional job.json payload for additional context
+
+    Returns:
+        ImportResult with statistics and output paths
+    """
+    print("\n" + "=" * 80)
+    print("GENIE SIM LOCAL EPISODE IMPORT JOB")
+    print("=" * 80)
+    print(f"Job ID: {config.job_id}")
+    print(f"Output: {config.output_dir}")
+    print("=" * 80 + "\n")
+
+    result = ImportResult(
+        success=False,
+        job_id=config.job_id,
+    )
+    result.output_dir = config.output_dir
+    scene_id = os.getenv("SCENE_ID", "")
+
+    recordings_dir = config.output_dir / "recordings"
+    if not recordings_dir.exists():
+        result.errors.append(f"Local recordings directory missing: {recordings_dir}")
+        return result
+
+    episode_metadata_list = _collect_local_episode_metadata(recordings_dir)
+    if not episode_metadata_list:
+        result.errors.append(f"No local episode files found under {recordings_dir}")
+        return result
+
+    total_size_bytes = 0
+    for episode_file in recordings_dir.rglob("*.json"):
+        total_size_bytes += episode_file.stat().st_size
+
+    result.total_episodes_downloaded = len(episode_metadata_list)
+    result.episodes_passed_validation = len(episode_metadata_list)
+    result.episodes_filtered = 0
+    quality_scores = [ep.quality_score for ep in episode_metadata_list]
+    result.average_quality_score = float(np.mean(quality_scores)) if quality_scores else 0.0
+    quality_min_score = float(np.min(quality_scores)) if quality_scores else 0.0
+    quality_max_score = float(np.max(quality_scores)) if quality_scores else 0.0
+
+    if config.enable_validation:
+        result.warnings.append("Local import skipped API validation; local episodes are assumed valid.")
+
+    lerobot_dir = config.output_dir / "lerobot"
+    lerobot_error = None
+    lerobot_episode_files = []
+    if lerobot_dir.exists():
+        lerobot_episode_files = [
+            path for path in lerobot_dir.glob("*.json") if path.name != "dataset_info.json"
+        ]
+        result.lerobot_conversion_success = True
+    else:
+        result.lerobot_conversion_success = False
+        lerobot_error = "LeRobot output directory not found for local import."
+        result.warnings.append(lerobot_error)
+
+    # Write machine-readable import manifest for workflows
+    import_manifest_path = config.output_dir / "import_manifest.json"
+    gcs_output_path = None
+    output_dir_str = str(config.output_dir)
+    if output_dir_str.startswith("/mnt/gcs/"):
+        gcs_output_path = "gs://" + output_dir_str[len("/mnt/gcs/"):]
+
+    metrics = get_metrics()
+    metrics_summary = {
+        "backend": metrics.backend.value,
+        "stats": metrics.get_stats(),
+    }
+
+    episode_checksums = []
+    for episode_file in sorted(recordings_dir.rglob("*.json")):
+        episode_checksums.append({
+            "episode_id": episode_file.stem,
+            "file_name": episode_file.relative_to(config.output_dir).as_posix(),
+            "sha256": _sha256_file(episode_file),
+        })
+
+    lerobot_checksums = {
+        "dataset_info": None,
+        "episodes_index": None,
+        "episodes": [],
+    }
+    dataset_info_path = lerobot_dir / "dataset_info.json"
+    if dataset_info_path.exists():
+        lerobot_checksums["dataset_info"] = _sha256_file(dataset_info_path)
+    for lerobot_file in sorted(lerobot_episode_files):
+        lerobot_checksums["episodes"].append({
+            "file_name": lerobot_file.name,
+            "sha256": _sha256_file(lerobot_file),
+        })
+
+    episode_paths = sorted(recordings_dir.rglob("*.json"))
+    metadata_paths = get_lerobot_metadata_paths(config.output_dir)
+    missing_metadata_files = []
+    lerobot_info_path = config.output_dir / "lerobot" / "meta" / "info.json"
+    if not lerobot_info_path.exists():
+        missing_metadata_files.append(lerobot_info_path.relative_to(config.output_dir).as_posix())
+    file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
+    directory_checksums = build_directory_checksums(config.output_dir, exclude_paths=[import_manifest_path])
+    episode_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in episode_paths}
+    metadata_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in metadata_paths}
+    file_checksums = {
+        "episodes": {
+            rel_path: checksum
+            for rel_path, checksum in directory_checksums.items()
+            if rel_path in episode_rel_paths
+        },
+        "metadata": {
+            rel_path: checksum
+            for rel_path, checksum in directory_checksums.items()
+            if rel_path in metadata_rel_paths
+        },
+        "missing_episode_ids": [],
+        "missing_metadata_files": missing_metadata_files,
+    }
+    checksums_payload = {
+        "download_manifest": None,
+        "episodes": episode_checksums,
+        "filtered_episodes": [],
+        "lerobot": lerobot_checksums,
+        "metadata": file_checksums["metadata"],
+        "missing_episode_ids": file_checksums["missing_episode_ids"],
+        "missing_metadata_files": file_checksums["missing_metadata_files"],
+        "episode_files": file_checksums["episodes"],
+    }
+    config_snapshot = {
+        "env": snapshot_env(ENV_SNAPSHOT_KEYS),
+        "config": {
+            "job_id": config.job_id,
+            "output_dir": output_dir_str,
+            "min_quality_score": config.min_quality_score,
+            "enable_validation": config.enable_validation,
+            "filter_low_quality": config.filter_low_quality,
+            "require_lerobot": config.require_lerobot,
+            "poll_interval": config.poll_interval,
+            "wait_for_completion": config.wait_for_completion,
+            "fail_on_partial_error": config.fail_on_partial_error,
+            "submission_mode": config.submission_mode,
+            "job_metadata_path": config.job_metadata_path,
+            "local_episodes_prefix": config.local_episodes_prefix,
+        },
+        "job_metadata": job_metadata or {},
+    }
+    provenance = collect_provenance(REPO_ROOT, config_snapshot)
+
+    import_manifest = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "schema_definition": MANIFEST_SCHEMA_DEFINITION,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "job_id": config.job_id,
+        "output_dir": output_dir_str,
+        "gcs_output_path": gcs_output_path,
+        "episodes": {
+            "downloaded": result.total_episodes_downloaded,
+            "passed_validation": result.episodes_passed_validation,
+            "filtered": result.episodes_filtered,
+            "download_errors": 0,
+        },
+        "quality": {
+            "average_score": result.average_quality_score,
+            "min_score": quality_min_score,
+            "max_score": quality_max_score,
+            "threshold": config.min_quality_score,
+            "validation_enabled": config.enable_validation,
+        },
+        "lerobot": {
+            "conversion_success": result.lerobot_conversion_success,
+            "converted_count": len(lerobot_episode_files),
+            "output_dir": str(lerobot_dir),
+            "error": lerobot_error,
+            "required": False,
+        },
+        "metrics_summary": metrics_summary,
+        "checksums": checksums_payload,
+        "provenance": provenance,
+        "file_inventory": file_inventory,
+    }
+
+    import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
+        "sha256": compute_manifest_checksum(import_manifest),
+    }
+
+    with open(import_manifest_path, "w") as f:
+        json.dump(import_manifest, f, indent=2)
+
+    result.import_manifest_path = import_manifest_path
+    result.success = len(result.errors) == 0
+
+    print("=" * 80)
+    print("LOCAL IMPORT COMPLETE")
+    print("=" * 80)
+    print(f"{'✅' if result.success else '❌'} Imported {result.episodes_passed_validation} local episodes")
+    print(f"Output directory: {result.output_dir}")
+    print(f"Manifest: {result.import_manifest_path}")
+    print("=" * 80 + "\n")
+
+    return result
+
+
 # =============================================================================
 # Main Entry Point
 # =============================================================================
@@ -1015,23 +1311,6 @@ def run_import_job(
 def main():
     """Main entry point for import job."""
     print("\n[GENIE-SIM-IMPORT] Starting import job...")
-
-    # P0-7 FIX: Validate credentials at startup
-    sys.path.insert(0, str(REPO_ROOT / "tools"))
-    try:
-        from startup_validation import validate_and_fail_fast
-        # Import job REQUIRES Genie Sim credentials
-        validate_and_fail_fast(
-            job_name="GENIE-SIM-IMPORT",
-            require_geniesim=True,
-            require_gemini=False,
-            validate_gcs=True,
-        )
-    except ImportError as e:
-        print(f"[GENIE-SIM-IMPORT] WARNING: Startup validation unavailable: {e}")
-    except SystemExit:
-        # Re-raise to exit immediately
-        raise
 
     # Get configuration from environment
     job_id = os.getenv("GENIE_SIM_JOB_ID")
@@ -1043,6 +1322,22 @@ def main():
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "unknown")
     output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
+    submission_mode = os.getenv("GENIESIM_SUBMISSION_MODE", "api").lower()
+    job_metadata_path = os.getenv("JOB_METADATA_PATH") or None
+    local_episodes_prefix = os.getenv("LOCAL_EPISODES_PREFIX") or None
+
+    job_metadata = None
+    if job_metadata_path:
+        try:
+            job_metadata = _load_local_job_metadata(bucket, job_metadata_path)
+            submission_mode = job_metadata.get("submission_mode", submission_mode)
+            artifacts = job_metadata.get("artifacts", {})
+            if not local_episodes_prefix:
+                local_episodes_prefix = artifacts.get("episodes_prefix")
+        except FileNotFoundError as e:
+            print(f"[GENIE-SIM-IMPORT] WARNING: {e}")
+            if submission_mode == "local" and not local_episodes_prefix:
+                sys.exit(1)
 
     # Quality configuration
     # LABS-BLOCKER-002 FIX: Default raised from 0.7 to 0.85
@@ -1058,9 +1353,26 @@ def main():
     # P0-8 FIX: Error handling configuration
     fail_on_partial_error = os.getenv("FAIL_ON_PARTIAL_ERROR", "false").lower() == "true"
 
+    # P0-7 FIX: Validate credentials at startup
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    try:
+        from startup_validation import validate_and_fail_fast
+        validate_and_fail_fast(
+            job_name="GENIE-SIM-IMPORT",
+            require_geniesim=submission_mode != "local",
+            require_gemini=False,
+            validate_gcs=True,
+        )
+    except ImportError as e:
+        print(f"[GENIE-SIM-IMPORT] WARNING: Startup validation unavailable: {e}")
+    except SystemExit:
+        # Re-raise to exit immediately
+        raise
+
     print(f"[GENIE-SIM-IMPORT] Configuration:")
     print(f"[GENIE-SIM-IMPORT]   Job ID: {job_id}")
     print(f"[GENIE-SIM-IMPORT]   Output Prefix: {output_prefix}")
+    print(f"[GENIE-SIM-IMPORT]   Submission Mode: {submission_mode}")
     print(f"[GENIE-SIM-IMPORT]   Min Quality: {min_quality_score}")
     print(f"[GENIE-SIM-IMPORT]   Enable Validation: {enable_validation}")
     print(f"[GENIE-SIM-IMPORT]   Require LeRobot: {require_lerobot}")
@@ -1069,7 +1381,15 @@ def main():
 
     # Setup paths
     GCS_ROOT = Path("/mnt/gcs")
-    output_dir = GCS_ROOT / bucket / output_prefix / f"geniesim_{job_id}"
+    if submission_mode == "local":
+        output_dir = _resolve_local_output_dir(
+            bucket=bucket,
+            output_prefix=output_prefix,
+            job_id=job_id,
+            local_episodes_prefix=local_episodes_prefix,
+        )
+    else:
+        output_dir = GCS_ROOT / bucket / output_prefix / f"geniesim_{job_id}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create configuration
@@ -1083,24 +1403,29 @@ def main():
         poll_interval=poll_interval,
         wait_for_completion=wait_for_completion,
         fail_on_partial_error=fail_on_partial_error,  # P0-8 FIX
+        submission_mode=submission_mode,
+        job_metadata_path=job_metadata_path,
+        local_episodes_prefix=local_episodes_prefix,
     )
 
-    # Create client
-    try:
-        client = GenieSimClient(
-            mock_mode=os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true",
-            validate_on_init=False,
-        )
-    except Exception as e:
-        print(f"[GENIE-SIM-IMPORT] ERROR: Failed to create Genie Sim client: {e}")
-        print("[GENIE-SIM-IMPORT] Make sure GENIE_SIM_API_KEY is set")
-        sys.exit(1)
-
     # Run import
+    client = None
     try:
         metrics = get_metrics()
         with metrics.track_job("genie-sim-import-job", scene_id):
-            result = run_import_job(config, client)
+            if submission_mode == "local":
+                result = run_local_import_job(config, job_metadata=job_metadata)
+            else:
+                try:
+                    client = GenieSimClient(
+                        mock_mode=os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true",
+                        validate_on_init=False,
+                    )
+                except Exception as e:
+                    print(f"[GENIE-SIM-IMPORT] ERROR: Failed to create Genie Sim client: {e}")
+                    print("[GENIE-SIM-IMPORT] Make sure GENIE_SIM_API_KEY is set")
+                    sys.exit(1)
+                result = run_import_job(config, client)
 
         if result.success:
             print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")
@@ -1114,7 +1439,8 @@ def main():
             sys.exit(1)
 
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 if __name__ == "__main__":
