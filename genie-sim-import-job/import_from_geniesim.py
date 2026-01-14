@@ -1808,8 +1808,8 @@ def main():
                         validate_on_init=False,
                     )
                 except Exception as e:
-                    print(f"[GENIE-SIM-IMPORT] ERROR: Failed to create Genie Sim client: {e}")
-                    print("[GENIE-SIM-IMPORT] Make sure GENIE_SIM_API_KEY is set")
+                    print(f"[GENIE-SIM-IMPORT] ERROR: Failed to create Genie Sim local client: {e}")
+                    print("[GENIE-SIM-IMPORT] Make sure local Genie Sim gRPC server is running (GENIESIM_HOST:GENIESIM_PORT)")
                     sys.exit(1)
                 result = run_import_job(config, client, job_metadata=job_metadata)
 

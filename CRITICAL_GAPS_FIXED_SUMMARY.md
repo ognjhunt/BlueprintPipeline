@@ -60,26 +60,27 @@ if self._circuit_breaker:
 **File:** `genie-sim-export-job/geniesim_client.py`
 
 **What Was Fixed:**
-- Eliminated plain-text API keys in environment variables
-- Integrated Google Secret Manager with fallback to env vars
-- Backward compatible migration path
+- Removed Genie Sim API mode - runs locally only
+- Simplified client initialization without API key requirements
+- Uses local gRPC endpoint for client-server communication
 
 **Code Changes:**
 ```python
-# Before (insecure):
-self.api_key = os.getenv("GENIE_SIM_API_KEY")  # Plain text
+# Before (API mode):
+self.api_key = os.getenv("GENIE_SIM_API_KEY")
+self.endpoint = os.getenv("GENIE_SIM_API_URL")
 
-# After (secure):
-self.api_key = get_secret_or_env(
-    SecretIds.GENIE_SIM_API_KEY,
-    env_var="GENIE_SIM_API_KEY"  # Fallback during migration
-)
+# After (local mode):
+self.grpc_host = os.getenv("GENIESIM_HOST", "localhost")
+self.grpc_port = int(os.getenv("GENIESIM_PORT", "50051"))
+self.local_endpoint = f"{self.grpc_host}:{self.grpc_port}"
+self.api_key = None  # Not needed for local operation
 ```
 
 **Expected Impact:**
-- 0 credential leaks (vs unknown before)
-- Compliance with security best practices
-- Centralized secret rotation
+- No API key management overhead
+- Simpler deployment and configuration
+- Direct local gRPC communication
 
 ---
 
