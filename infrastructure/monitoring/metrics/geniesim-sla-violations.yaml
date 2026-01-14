@@ -1,0 +1,14 @@
+# Log-based metric: blueprint_geniesim_sla_violations
+name: blueprint_geniesim_sla_violations
+description: "Count of Genie Sim job SLA violations detected by workflows."
+filter: >
+  resource.type="workflows.googleapis.com/Workflow" AND
+  jsonPayload.bp_metric="geniesim_sla_violation"
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+labelExtractors:
+  workflow: EXTRACT(jsonPayload.workflow)
+  scene_id: EXTRACT(jsonPayload.scene_id)
+  job_id: EXTRACT(jsonPayload.job_id)

@@ -31,7 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
-from geniesim_client import GenerationParams
+from geniesim_client import GenerationParams, GenieSimClient, JobStatus
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 from geniesim_adapter.local_framework import (
@@ -285,6 +285,8 @@ def main() -> int:
     failure_reason = None
     failure_details: Dict[str, Any] = {}
     episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
+    submitted_at = datetime.utcnow().isoformat() + "Z"
+    local_run_end = None
 
     job_id = f"local-{uuid.uuid4()}"
     submission_message = "Local Genie Sim execution started."
@@ -344,6 +346,7 @@ def main() -> int:
             episodes_per_task=episodes_per_task,
             verbose=True,
         )
+        local_run_end = datetime.utcnow()
         if local_run_result and local_run_result.success:
             submission_message = "Local Genie Sim execution completed."
         else:
@@ -385,7 +388,7 @@ def main() -> int:
         "scene_id": scene_id,
         "status": job_status,
         "submission_mode": submission_mode,
-        "submitted_at": datetime.utcnow().isoformat() + "Z",
+        "submitted_at": submitted_at,
         "message": submission_message,
         "bundle": {
             "scene_graph": f"gs://{bucket}/{geniesim_prefix}/scene_graph.json",
@@ -408,6 +411,27 @@ def main() -> int:
         },
         "metrics_summary": metrics_summary,
     }
+    metrics_client = GenieSimClient(mock_mode=True, validate_on_init=False)
+    metrics_client.register_mock_job_metrics(
+        job_id=job_id,
+        generation_params=generation_params,
+        task_config=task_config,
+        created_at=submitted_at,
+        completed_at=(local_run_end.isoformat() + "Z") if local_run_end else None,
+        status=JobStatus.COMPLETED if job_status == "completed" else JobStatus.FAILED,
+        episodes_collected=(
+            getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0
+        ),
+        episodes_passed=(
+            getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0
+        ),
+        failure_reason=failure_reason,
+        failure_details=failure_details if failure_details else None,
+    )
+    try:
+        job_payload["job_metrics"] = metrics_client.get_job_metrics(job_id)
+    except Exception as exc:
+        job_payload["job_metrics_error"] = str(exc)
     if job_status == "failed":
         job_payload["failure_reason"] = failure_reason
         job_payload["failure_details"] = failure_details
