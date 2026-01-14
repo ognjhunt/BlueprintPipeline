@@ -1,0 +1,5 @@
+# Pinned constraints for replicator-job
+# This file is used as a constraints file with pip -c.
+google-genai==1.0.0
+Pillow==10.0.0
+python-dateutil==2.9.0.post0

@@ -15,8 +15,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 WORKDIR /app
 
 # Python dependencies
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+COPY requirements.txt requirements.lock /app/
+RUN pip install --no-cache-dir --prefer-binary -r /app/requirements.lock
 
 # Job scripts
 COPY generate_variation_assets.py /app/generate_variation_assets.py
