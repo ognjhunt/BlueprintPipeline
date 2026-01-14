@@ -21,6 +21,7 @@ References:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from dataclasses import dataclass, field
@@ -471,7 +472,31 @@ source:
         output_path: Path,
     ) -> None:
         """Write export manifest JSON."""
+        schema_version = "2.0"
+        schema_definition = {
+            "version": schema_version,
+            "description": "Genie Sim export manifest schema for BlueprintPipeline exports.",
+            "fields": {
+                "schema_version": "Schema version string.",
+                "export_info": "Export metadata and provenance.",
+                "config": "Export configuration snapshot.",
+                "result": "Export output paths, statistics, warnings, and errors.",
+                "geniesim_compatibility": "Target Genie Sim compatibility metadata.",
+                "file_inventory": "List of output files (path + size).",
+                "checksums": "SHA256 checksums for all output files.",
+            },
+            "notes": [
+                "file_inventory excludes export_manifest.json to avoid self-reference.",
+                "checksums.files['export_manifest.json'] is computed from a canonical JSON representation of the "
+                "manifest with that checksum entry removed.",
+            ],
+        }
+        output_dir = output_path.parent
+        file_inventory = self._build_file_inventory(output_dir, exclude_paths=[output_path])
+        file_checksums = self._build_directory_checksums(output_dir, exclude_paths=[output_path])
         manifest = {
+            "schema_version": schema_version,
+            "schema_definition": schema_definition,
             "export_info": {
                 "timestamp": datetime.utcnow().isoformat() + "Z",
                 "exporter_version": "1.0.0",
@@ -495,10 +520,78 @@ source:
                     "scene_config": "yaml",
                 },
             },
+            "file_inventory": file_inventory,
+            "checksums": {
+                "files": file_checksums,
+            },
+        }
+
+        manifest["checksums"]["files"][output_path.name] = {
+            "sha256": self._compute_manifest_checksum(manifest),
         }
 
         with open(output_path, "w") as f:
             json.dump(manifest, f, indent=2)
+
+    @staticmethod
+    def _compute_sha256(path: Path) -> str:
+        hasher = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    @staticmethod
+    def _iter_files_sorted(root: Path) -> List[Path]:
+        files = [path for path in root.rglob("*") if path.is_file()]
+        return sorted(files, key=lambda path: path.as_posix())
+
+    def _build_file_inventory(
+        self,
+        root: Path,
+        exclude_paths: Optional[List[Path]] = None,
+    ) -> List[Dict[str, Any]]:
+        exclude_set = {path.resolve() for path in exclude_paths or []}
+        inventory = []
+        for path in self._iter_files_sorted(root):
+            if path.resolve() in exclude_set:
+                continue
+            inventory.append(
+                {
+                    "path": path.relative_to(root).as_posix(),
+                    "size_bytes": path.stat().st_size,
+                }
+            )
+        return inventory
+
+    def _build_directory_checksums(
+        self,
+        root: Path,
+        exclude_paths: Optional[List[Path]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        exclude_set = {path.resolve() for path in exclude_paths or []}
+        checksums: Dict[str, Dict[str, Any]] = {}
+        for path in self._iter_files_sorted(root):
+            if path.resolve() in exclude_set:
+                continue
+            rel_path = path.relative_to(root).as_posix()
+            checksums[rel_path] = {
+                "sha256": self._compute_sha256(path),
+                "size_bytes": path.stat().st_size,
+            }
+        return checksums
+
+    @staticmethod
+    def _compute_manifest_checksum(manifest: Dict[str, Any]) -> str:
+        manifest_copy = json.loads(json.dumps(manifest))
+        checksums = manifest_copy.get("checksums", {})
+        file_checksums = checksums.get("files", {})
+        file_checksums.pop("export_manifest.json", None)
+        if "files" in checksums:
+            checksums["files"] = file_checksums
+        manifest_copy["checksums"] = checksums
+        payload = json.dumps(manifest_copy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
     def _write_enhanced_features_config(
         self,
