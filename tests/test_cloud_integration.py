@@ -510,7 +510,10 @@ class TestEpisodeGeneration:
 
     def test_trajectory_solver_robot_configs(self):
         """Test trajectory solver has all robot configs."""
-        from episode_generation_job.trajectory_solver import ROBOT_CONFIGS
+        episode_job_dir = REPO_ROOT / "episode-generation-job"
+        if str(episode_job_dir) not in sys.path:
+            sys.path.insert(0, str(episode_job_dir))
+        from trajectory_solver import ROBOT_CONFIGS
 
         # Check all expected robots are configured
         expected_robots = ["franka", "ur10", "fetch"]
