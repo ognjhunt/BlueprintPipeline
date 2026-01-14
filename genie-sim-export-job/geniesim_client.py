@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-Genie Sim 3.0 API Client.
+Genie Sim Local Framework Client.
 
-This module provides a comprehensive client for interacting with the Genie Sim 3.0
-service API, enabling bidirectional communication for:
+This module provides a client for interacting with the locally-running Genie Sim 3.0
+framework, enabling bidirectional communication for:
 - Submitting data generation jobs
 - Monitoring generation progress
 - Downloading generated episodes
 - Quality validation
 - Error handling and retries
 
-This completes the missing "import" side of the Genie Sim integration, which
-previously only had export capabilities.
+Genie Sim 3.0 is an open-source LOCAL simulation framework that runs on your
+own Isaac Sim installation using gRPC for client-server communication.
 
-**IMPORTANT: LOCAL FRAMEWORK ALTERNATIVE**
-
-Genie Sim 3.0 is an open-source LOCAL simulation framework, not a hosted API service.
-If you're running the free/default pipeline, use the local framework instead:
-
+Usage:
     from tools.geniesim_adapter.local_framework import (
         GenieSimLocalFramework,
         run_local_data_collection,
@@ -31,14 +27,12 @@ If you're running the free/default pipeline, use the local framework instead:
         output_dir=Path("./output"),
     )
 
-The local framework runs Genie Sim on your own Isaac Sim installation using gRPC
-for client-server communication. See tools/geniesim_adapter/local_framework.py.
-
-This API client module is preserved for compatibility with any future hosted
-Genie Sim API services.
+For local framework details, see tools/geniesim_adapter/local_framework.py.
 
 Environment Variables:
     GENIESIM_MOCK_MODE: Enable mock mode for testing (default: false)
+    GENIESIM_HOST: gRPC host (default: localhost)
+    GENIESIM_PORT: gRPC port (default: 50051)
 """
 
 import asyncio
@@ -537,22 +531,19 @@ class GenieSimClient:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        endpoint: Optional[str] = None,
         timeout: int = 300,
         max_retries: int = 3,
         validate_on_init: bool = True,
         mock_mode: Optional[bool] = None,
     ):
         """
-        Initialize Genie Sim client.
+        Initialize Genie Sim local framework client.
 
         Args:
-            api_key: API authentication key (or from GENIE_SIM_API_KEY env var)
-            endpoint: API endpoint URL (or from GENIE_SIM_API_URL env var)
             timeout: Request timeout in seconds
             max_retries: Maximum retries for failed requests
-            validate_on_init: Validate endpoint is reachable on initialization (P0-1 FIX)
+            validate_on_init: Validate local framework is reachable on initialization
+            mock_mode: Enable mock mode for testing (default: disabled)
         """
         self.mock_mode = (
             mock_mode
@@ -560,14 +551,20 @@ class GenieSimClient:
             else os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
         )
 
+        # For local framework operation, use gRPC endpoint configuration
+        self.grpc_host = os.getenv("GENIESIM_HOST", "localhost")
+        self.grpc_port = int(os.getenv("GENIESIM_PORT", "50051"))
+        self.local_endpoint = f"{self.grpc_host}:{self.grpc_port}"
+
+        # For mock mode, use dummy values
         if self.mock_mode:
-            self.api_key = api_key or "mock-api-key"
-            self.endpoint = endpoint or "mock://geniesim"
+            self.api_key = "mock-api-key"
+            self.endpoint = "mock://geniesim"
         else:
-            raise GenieSimConfigurationError(
-                "Hosted Genie Sim API usage is not supported. "
-                "Use the local framework or enable mock mode for tests."
-            )
+            # Local framework uses gRPC, not HTTP REST API
+            self.api_key = None
+            self.endpoint = self.local_endpoint
+
         self.timeout = timeout
         self.max_retries = max_retries
 
@@ -580,7 +577,7 @@ class GenieSimClient:
 
         # P0-1 FIX: Validate endpoint is reachable on initialization
         if validate_on_init and not self.mock_mode:
-            self._validate_endpoint()
+            self._validate_local_endpoint()
 
     @property
     def session(self) -> requests.Session:
@@ -625,45 +622,46 @@ class GenieSimClient:
         self.close()
 
     # =========================================================================
-    # Endpoint Validation (P0-1 FIX)
+    # Local Framework Validation
     # =========================================================================
 
-    def _validate_endpoint(self) -> None:
+    def _validate_local_endpoint(self) -> None:
         """
-        Validate that the Genie Sim API endpoint is reachable and properly configured.
+        Validate that the Genie Sim local gRPC endpoint is reachable.
 
-        P0-1 FIX: This method is called during initialization to fail fast if the
-        endpoint is not reachable or misconfigured.
+        This method is called during initialization to fail fast if the
+        gRPC endpoint is not reachable or misconfigured.
 
         Raises:
             GenieSimAPIError: If endpoint is not reachable or returns unexpected response
-            GenieSimAuthenticationError: If authentication fails
         """
-        logger.info(f"Validating Genie Sim API endpoint: {self.endpoint}")
+        logger.info(f"Validating Genie Sim local gRPC endpoint: {self.local_endpoint}")
 
         try:
-            health_status = self.health_check()
+            # For local gRPC endpoint, we do a simple connectivity check
+            # In real implementation, this would use gRPC health check
+            import socket
 
-            if not health_status.available:
-                error_msg = f"Genie Sim API endpoint is not available: {health_status.error}"
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((self.grpc_host, self.grpc_port))
+            sock.close()
+
+            if result == 0:
+                logger.info(
+                    f"✓ Genie Sim local gRPC endpoint validated successfully\n"
+                    f"  Host: {self.grpc_host}\n"
+                    f"  Port: {self.grpc_port}"
+                )
+            else:
+                error_msg = f"Cannot connect to Genie Sim gRPC endpoint at {self.local_endpoint}"
                 logger.error(error_msg)
                 raise GenieSimAPIError(error_msg)
 
-            logger.info(
-                f"✓ Genie Sim API endpoint validated successfully\n"
-                f"  Endpoint: {self.endpoint}\n"
-                f"  API Version: {health_status.api_version}\n"
-                f"  Rate Limit Remaining: {health_status.rate_limit_remaining}\n"
-                f"  Estimated Queue Time: {health_status.estimated_queue_time_seconds}s"
-            )
-
-        except GenieSimAuthenticationError:
-            logger.error("Authentication failed - check GENIE_SIM_API_KEY")
-            raise
         except GenieSimAPIError:
             raise
         except Exception as e:
-            error_msg = f"Failed to validate Genie Sim API endpoint: {e}"
+            error_msg = f"Failed to validate Genie Sim local gRPC endpoint: {e}"
             logger.error(error_msg)
             raise GenieSimAPIError(error_msg) from e
 
