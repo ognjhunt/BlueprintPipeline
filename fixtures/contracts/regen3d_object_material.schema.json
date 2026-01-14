@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "3D-RE-GEN Object Material",
+  "type": "object",
+  "required": [
+    "base_color",
+    "metallic",
+    "roughness",
+    "material_type"
+  ],
+  "properties": {
+    "base_color": {
+      "type": "array",
+      "items": {"type": "number"},
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "metallic": {"type": "number"},
+    "roughness": {"type": "number"},
+    "material_type": {"type": "string"}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "3D-RE-GEN Camera Intrinsics",
+  "type": "object",
+  "required": [
+    "matrix",
+    "width",
+    "height"
+  ],
+  "properties": {
+    "matrix": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 3,
+        "items": {"type": "number"}
+      }
+    },
+    "width": {"type": "integer"},
+    "height": {"type": "integer"}
+  },
+  "additionalProperties": true
+}

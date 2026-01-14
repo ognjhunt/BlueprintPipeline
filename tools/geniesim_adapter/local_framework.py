@@ -1192,6 +1192,11 @@ class GenieSimLocalFramework:
             # Stop recording
             self._client.stop_recording()
 
+            # Calculate quality score
+            quality_score = self._calculate_quality_score(frames, task)
+            min_quality = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
+            validation_passed = quality_score >= min_quality
+
             # Save episode
             episode_path = output_dir / f"{episode_id}.json"
             with open(episode_path, "w") as f:
@@ -1200,14 +1205,14 @@ class GenieSimLocalFramework:
                     "task_name": task.get("task_name"),
                     "frames": frames,
                     "frame_count": len(frames),
+                    "quality_score": quality_score,
+                    "validation_passed": validation_passed,
                 }, f)
-
-            # Calculate quality score
-            quality_score = self._calculate_quality_score(frames, task)
 
             result["success"] = True
             result["frame_count"] = len(frames)
             result["quality_score"] = quality_score
+            result["validation_passed"] = validation_passed
             result["output_path"] = str(episode_path)
 
         except Exception as e:
