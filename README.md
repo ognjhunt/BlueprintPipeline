@@ -33,8 +33,10 @@ image → 3D-RE-GEN → regen3d-job → simready-job → usd-assembly-job → re
 
 ### Local Testing (Without GCS/Cloud Run)
 
-Genie Sim is the **default** episode-generation backend (`USE_GENIESIM=true`). For
-real Genie Sim runs, ensure these prerequisites are available:
+Genie Sim is the **default** episode-generation backend when `USE_GENIESIM` is
+unset (equivalent to `USE_GENIESIM=true`). The default path requires the Genie
+Sim prerequisites below; if you don't have them, use the lightweight path in
+step 2b.
 
 - Isaac Sim installed and reachable via `ISAAC_SIM_PATH` (must include `python.sh`).
 - Genie Sim repo installed at `GENIESIM_ROOT`.
@@ -44,7 +46,7 @@ real Genie Sim runs, ensure these prerequisites are available:
 # 1. Generate mock 3D-RE-GEN outputs
 python fixtures/generate_mock_regen3d.py --scene-id test_kitchen --output-dir ./test_scenes
 
-# 2. Run the local pipeline
+# 2. Run the local pipeline (default Genie Sim path)
 python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen --validate
 # Default steps: regen3d → simready → usd → replicator
 # Optional steps: add --enable-dwm or --enable-dream2flow for extra bundles
@@ -52,6 +54,8 @@ python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen
 # 2b. Lightweight local run without Genie Sim
 USE_GENIESIM=false \
 python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen --validate
+# Or explicitly request mock Genie Sim
+python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen --validate --mock-geniesim
 # Uses BlueprintPipeline episode generation instead of Genie Sim
 
 # 3. Run end-to-end tests
@@ -62,8 +66,9 @@ python tests/test_pipeline_e2e.py
 
 Run the local pipeline with Genie Sim enabled to generate an export bundle and submit
 local data collection. Genie Sim runs in **local-only mode by default**; no API key
-is required for the free/default workflow. This is the default backend (`USE_GENIESIM=true`);
-see the prerequisites in the Quick Start section above before running locally.
+is required for the free/default workflow. This is the default backend when
+`USE_GENIESIM` is unset (equivalent to `USE_GENIESIM=true`); see the prerequisites
+in the Quick Start section above before running locally.
 
 Prereqs for the default Genie Sim path:
 - `ISAAC_SIM_PATH` points to your Isaac Sim install (must include `python.sh`).
