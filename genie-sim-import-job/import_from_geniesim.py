@@ -1046,7 +1046,7 @@ def run_import_job(
             if result.manifest_path and result.manifest_path.exists()
             else None
         )
-        provenance = {
+        base_provenance = {
             "source": "genie_sim",
             "job_id": config.job_id,
             "scene_id": scene_id or None,
@@ -1108,6 +1108,7 @@ def run_import_job(
             },
         }
         provenance = collect_provenance(REPO_ROOT, config_snapshot)
+        provenance.update(base_provenance)
         import_manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "schema_definition": MANIFEST_SCHEMA_DEFINITION,
@@ -1350,7 +1351,16 @@ def run_local_import_job(
         },
         "job_metadata": job_metadata or {},
     }
+    base_provenance = {
+        "source": "genie_sim",
+        "job_id": config.job_id,
+        "scene_id": scene_id or None,
+        "imported_by": "BlueprintPipeline",
+        "importer": "genie-sim-import-job",
+        "client_mode": "local",
+    }
     provenance = collect_provenance(REPO_ROOT, config_snapshot)
+    provenance.update(base_provenance)
 
     import_manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
