@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import logging
 import os
@@ -32,6 +33,22 @@ except ImportError:
 import numpy as np
 from PIL import Image  # type: ignore
 from tools.asset_catalog import AssetCatalogClient
+
+# Deterministic material-based physics hints
+_material_transfer_spec = importlib.util.find_spec("tools.material_transfer.material_transfer")
+if _material_transfer_spec:
+    from tools.material_transfer.material_transfer import (  # type: ignore
+        infer_material_type,
+        MATERIAL_PHYSICS,
+        MaterialType,
+    )
+    HAVE_MATERIAL_TRANSFER = True
+else:  # pragma: no cover
+    HAVE_MATERIAL_TRANSFER = False
+    infer_material_type = None
+    MATERIAL_PHYSICS = {}
+    MaterialType = None
+    print("[SIMREADY] WARNING: Material transfer module unavailable; using generic physics", file=sys.stderr)
 
 # Secret Manager for secure API key storage
 try:
@@ -413,6 +430,109 @@ GENERIC_FALLBACK: Dict[str, Any] = {
     "surface_roughness": 0.5,  # 0=smooth, 1=rough (for tactile simulation)
 }
 
+VALID_SEMANTIC_CLASSES = {
+    "object", "container", "tool", "food", "electronics", "furniture",
+    "toy", "clothing", "book", "kitchenware", "bottle", "can", "box",
+    "bag", "utensil", "appliance", "decoration", "plant", "sporting_goods",
+    "office_supply", "hygiene", "cleaning", "storage", "hardware",
+}
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in {"1", "true", "yes", "y"}:
+            return True
+        if lower in {"0", "false", "no", "n"}:
+            return False
+    return None
+
+
+def _collect_material_candidates(obj: Dict[str, Any], metadata: Dict[str, Any]) -> List[str]:
+    candidates: List[str] = []
+    for key in (
+        "material_name",
+        "material",
+        "surface_material",
+        "dominant_material",
+        "materialType",
+    ):
+        value = metadata.get(key) or obj.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+
+    for key in ("category", "class_name", "label", "name", "description"):
+        value = obj.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+
+    tags = obj.get("tags")
+    if isinstance(tags, list):
+        for tag in tags:
+            if isinstance(tag, str) and tag.strip():
+                candidates.append(tag.strip())
+
+    return candidates
+
+
+def _infer_material_profile(obj: Dict[str, Any], metadata: Dict[str, Any]) -> Tuple[Optional[str], Optional[dict]]:
+    candidates = _collect_material_candidates(obj, metadata)
+    if not candidates:
+        return None, None
+
+    if HAVE_MATERIAL_TRANSFER and infer_material_type is not None and MaterialType is not None:
+        for candidate in candidates:
+            material_type = infer_material_type(candidate)
+            if material_type in MATERIAL_PHYSICS:
+                return candidate, MATERIAL_PHYSICS[material_type]
+
+    # Fallback keyword lookup
+    lowered = " ".join(candidates).lower()
+    keyword_map = {
+        "metal": "metal",
+        "steel": "metal",
+        "aluminum": "metal",
+        "plastic": "plastic",
+        "rubber": "rubber",
+        "wood": "wood",
+        "glass": "glass",
+        "ceramic": "ceramic",
+        "fabric": "fabric",
+        "cloth": "fabric",
+        "leather": "leather",
+        "paper": "paper",
+        "cardboard": "paper",
+        "stone": "stone",
+        "concrete": "concrete",
+    }
+
+    for key, mat_name in keyword_map.items():
+        if key in lowered:
+            props = MATERIAL_PHYSICS.get(MaterialType(mat_name)) if MaterialType else None
+            if props:
+                return mat_name, props
+
+    return None, None
+
+
+def _extract_metadata_physics(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    if not metadata:
+        return {}
+    for key in ("physics", "simready", "simready_metadata"):
+        value = metadata.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
 
 # ---------- Sim2Real Distribution Parameters ----------
 # These define uncertainty ranges for physics properties to enable
@@ -527,7 +647,141 @@ def estimate_default_physics(obj: Dict[str, Any], bounds: Dict[str, Any]) -> Dic
         "contact_offset_m": float(GENERIC_FALLBACK["contact_offset_m"]),
         "rest_offset_m": float(GENERIC_FALLBACK["rest_offset_m"]),
         "surface_roughness": float(GENERIC_FALLBACK["surface_roughness"]),
+        "estimation_source": "heuristic_default",
     }
+
+
+def estimate_deterministic_physics(
+    obj: Dict[str, Any],
+    bounds: Dict[str, Any],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Deterministic physics estimate that uses metadata and material priors.
+
+    This path is LLM-free and can be enabled in production for predictable results.
+    """
+    metadata = metadata or {}
+    volume = float(bounds.get("volume_m3") or 0.0)
+    base = estimate_default_physics(obj, bounds)
+    base["estimation_source"] = "deterministic_default"
+
+    notes: List[str] = ["deterministic"]
+
+    metadata_physics = _extract_metadata_physics(metadata)
+    has_metadata_overrides = False
+    friction_override = False
+    restitution_override = False
+    density_override_flag = False
+    mass_override = None
+
+    # Apply explicit physics overrides from metadata if present.
+    if metadata_physics:
+        mass_override = _coerce_float(metadata_physics.get("mass_kg") or metadata_physics.get("mass"))
+        density_override = _coerce_float(
+            metadata_physics.get("bulk_density_kg_per_m3")
+            or metadata_physics.get("density_kg_per_m3")
+            or metadata_physics.get("density")
+        )
+        if mass_override is not None:
+            base["mass_kg"] = _clamp(mass_override, 0.001, 1000.0)
+            has_metadata_overrides = True
+        if density_override is not None:
+            base["bulk_density_kg_per_m3"] = _clamp(density_override, 0.5, 20000.0)
+            if volume > 0.0 and mass_override is None:
+                base["mass_kg"] = _clamp(base["bulk_density_kg_per_m3"] * volume, 0.001, 1000.0)
+            has_metadata_overrides = True
+            density_override_flag = True
+
+        static_override = _coerce_float(metadata_physics.get("static_friction"))
+        dynamic_override = _coerce_float(metadata_physics.get("dynamic_friction"))
+        restitution_override = _coerce_float(metadata_physics.get("restitution"))
+        if static_override is not None:
+            base["static_friction"] = _clamp(static_override, 0.0, 2.0)
+            has_metadata_overrides = True
+            friction_override = True
+        if dynamic_override is not None:
+            base["dynamic_friction"] = _clamp(dynamic_override, 0.0, 2.0)
+            has_metadata_overrides = True
+            friction_override = True
+        if restitution_override is not None:
+            base["restitution"] = _clamp(restitution_override, 0.0, 1.0)
+            has_metadata_overrides = True
+            restitution_override = True
+
+        material_override = metadata_physics.get("material_name") or metadata_physics.get("material")
+        if isinstance(material_override, str) and material_override.strip():
+            base["material_name"] = material_override.strip()
+            has_metadata_overrides = True
+
+        collision_override = metadata_physics.get("collision_shape") or metadata_physics.get("collision_approximation")
+        if isinstance(collision_override, str) and collision_override.strip():
+            collision_shape = collision_override.strip().lower()
+            if collision_shape in {"box", "sphere", "capsule", "convex_hull", "convex_decomposition"}:
+                base["collision_shape"] = collision_shape
+                has_metadata_overrides = True
+
+        semantic_override = metadata_physics.get("semantic_class")
+        if isinstance(semantic_override, str) and semantic_override.strip():
+            semantic = semantic_override.strip().lower().replace(" ", "_")
+            if semantic in VALID_SEMANTIC_CLASSES:
+                base["semantic_class"] = semantic
+                has_metadata_overrides = True
+
+        com_override = metadata_physics.get("center_of_mass_offset")
+        if _as_float_list(com_override, 3):
+            base["center_of_mass_offset"] = [float(v) for v in com_override]
+            has_metadata_overrides = True
+
+        graspable_override = _coerce_bool(metadata_physics.get("graspable"))
+        if graspable_override is not None:
+            base["graspable"] = graspable_override
+            has_metadata_overrides = True
+
+        if "grasp_regions" in metadata_physics and isinstance(metadata_physics["grasp_regions"], list):
+            base["grasp_regions"] = list(metadata_physics["grasp_regions"])
+            has_metadata_overrides = True
+
+        roughness_override = _coerce_float(metadata_physics.get("surface_roughness"))
+        if roughness_override is not None:
+            base["surface_roughness"] = _clamp(roughness_override, 0.0, 1.0)
+            has_metadata_overrides = True
+
+    material_name, material_props = _infer_material_profile(obj, metadata)
+    if material_props:
+        if material_name:
+            base["material_name"] = material_name
+        if not friction_override:
+            base["static_friction"] = float(material_props.get("friction_static", base["static_friction"]))
+            base["dynamic_friction"] = float(material_props.get("friction_dynamic", base["dynamic_friction"]))
+        if not restitution_override:
+            base["restitution"] = float(material_props.get("restitution", base["restitution"]))
+        if volume > 0.0 and not density_override_flag and mass_override is None:
+            density = float(material_props.get("density", base["bulk_density_kg_per_m3"]))
+            base["bulk_density_kg_per_m3"] = _clamp(density, 0.5, 20000.0)
+            base["mass_kg"] = _clamp(base["bulk_density_kg_per_m3"] * volume, 0.001, 1000.0)
+        if base["estimation_source"] == "deterministic_default":
+            base["estimation_source"] = "deterministic_material"
+            notes.append(f"material={base['material_name']}")
+
+    if has_metadata_overrides:
+        base["estimation_source"] = "deterministic_metadata"
+        notes.append("metadata_overrides")
+
+    if mass_override is not None and volume > 0.0 and not density_override_flag:
+        base["bulk_density_kg_per_m3"] = _clamp(mass_override / volume, 0.5, 20000.0)
+
+    # Enforce friction constraint
+    if base["dynamic_friction"] > base["static_friction"]:
+        base["dynamic_friction"] = max(0.0, base["static_friction"] - 0.05)
+
+    if base["mass_kg"] > 25.0:
+        base["graspable"] = False
+
+    notes.append(f"volume={volume:.6f} m^3")
+    base["notes"] = " | ".join([note for note in notes if note])
+
+    return base
 
 
 def _compact_obj_description(obj: Dict[str, Any]) -> Dict[str, Any]:
@@ -1252,6 +1506,8 @@ def build_physics_config(
     mesh_center: Optional[List[float]] = None,
     gemini_client: Optional["genai.Client"] = None,
     reference_image: Optional["Image.Image"] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    deterministic_physics: bool = False,
 ) -> Dict[str, Any]:
     """
     Build complete physics configuration for an object.
@@ -1271,8 +1527,8 @@ def build_physics_config(
     Returns:
         Complete physics configuration dict
     """
-    # Try Gemini-based estimation first
-    if gemini_client is not None and have_gemini():
+    # Try Gemini-based estimation first unless deterministic is requested
+    if not deterministic_physics and gemini_client is not None and have_gemini():
         try:
             physics_cfg = call_gemini_for_object(
                 client=gemini_client,
@@ -1281,6 +1537,7 @@ def build_physics_config(
                 bounds=bounds,
                 reference_image=reference_image,
             )
+            physics_cfg["estimation_source"] = "gemini"
             # Store mesh bounds info for catalog
             if mesh_bounds:
                 physics_cfg["mesh_bounds"] = {
@@ -1295,13 +1552,16 @@ def build_physics_config(
                 obj.get("id"),
             )
 
-    # Fallback to heuristic defaults
-    if gemini_client is None or not have_gemini():
-        logger.warning(
-            "[SIMREADY] Using heuristic physics estimates for obj %s (no Gemini client available).",
-            obj.get("id"),
-        )
-    physics_cfg = estimate_default_physics(obj, bounds)
+    if deterministic_physics:
+        physics_cfg = estimate_deterministic_physics(obj, bounds, metadata)
+    else:
+        # Fallback to heuristic defaults
+        if gemini_client is None or not have_gemini():
+            logger.warning(
+                "[SIMREADY] Using heuristic physics estimates for obj %s (no Gemini client available).",
+                obj.get("id"),
+            )
+        physics_cfg = estimate_default_physics(obj, bounds)
 
     # Store mesh bounds info for catalog
     if mesh_bounds:
@@ -1743,6 +2003,8 @@ def prepare_simready_assets_job(
         production_mode = _resolve_production_mode()
     if allow_heuristic_fallback is None:
         allow_heuristic_fallback = _env_flag("SIMREADY_ALLOW_HEURISTIC_FALLBACK")
+    physics_mode = (_get_env_value("SIMREADY_PHYSICS_MODE", "auto") or "auto").strip().lower()
+    allow_deterministic_physics = _env_flag("SIMREADY_ALLOW_DETERMINISTIC_PHYSICS")
 
     print(f"[SIMREADY] Bucket={bucket}")
     print(f"[SIMREADY] Scene={scene_id}")
@@ -1750,6 +2012,15 @@ def prepare_simready_assets_job(
     print(f"[SIMREADY] Loading {manifest_path} (or legacy scene_assets.json)")
     print(f"[SIMREADY] Production mode={'true' if production_mode else 'false'}")
     print(f"[SIMREADY] Heuristic fallback allowed={'true' if allow_heuristic_fallback else 'false'}")
+    print(f"[SIMREADY] Physics estimation mode={physics_mode}")
+    print(f"[SIMREADY] Deterministic physics allowed={'true' if allow_deterministic_physics else 'false'}")
+    try:
+        fallback_min_coverage = float(_get_env_value("SIMREADY_FALLBACK_MIN_COVERAGE", "0.6"))
+    except ValueError:
+        fallback_min_coverage = 0.6
+    fallback_min_coverage = _clamp(fallback_min_coverage, 0.0, 1.0)
+    if fallback_min_coverage:
+        print(f"[SIMREADY] Fallback physics min coverage={fallback_min_coverage:.2f}")
 
     scene_assets = load_manifest_or_scene_assets(assets_root)
     if scene_assets is None:
@@ -1778,8 +2049,16 @@ def prepare_simready_assets_job(
             "[SIMREADY] SIMREADY_ALLOW_HEURISTIC_FALLBACK is ignored in production mode."
         )
 
+    use_deterministic_physics = physics_mode == "deterministic"
+    if physics_mode not in {"auto", "gemini", "deterministic"}:
+        logger.warning(
+            "[SIMREADY] Unknown SIMREADY_PHYSICS_MODE '%s'; defaulting to auto.",
+            physics_mode,
+        )
+        physics_mode = "auto"
+
     client = None
-    if have_gemini():
+    if physics_mode == "gemini" or (physics_mode == "auto" and have_gemini()):
         gemini_api_key = _get_secret_value(
             SECRET_ID_GEMINI,
             "GEMINI_API_KEY",
@@ -1790,7 +2069,7 @@ def prepare_simready_assets_job(
         if gemini_api_key:
             client = genai.Client(api_key=gemini_api_key)
             print("[SIMREADY] Gemini client initialized")
-        elif production_mode:
+        elif production_mode and physics_mode != "deterministic":
             logger.error(
                 "[SIMREADY] Gemini API key is required in production mode. "
                 "Set Secret Manager ID '%s' or env var 'GEMINI_API_KEY'.",
@@ -1799,15 +2078,24 @@ def prepare_simready_assets_job(
             return 2
         else:
             logger.warning(
-                "[SIMREADY] Gemini API key missing; continuing with heuristic fallback."
+                "[SIMREADY] Gemini API key missing; continuing with non-LLM physics."
             )
-    else:
+
+    if client is None and physics_mode == "gemini":
+        logger.error(
+            "[SIMREADY] SIMREADY_PHYSICS_MODE=gemini but Gemini client is unavailable."
+        )
+        return 2
+
+    if client is None and physics_mode == "auto" and allow_deterministic_physics:
+        use_deterministic_physics = True
+
+    if client is None and physics_mode == "auto" and not allow_deterministic_physics:
         if production_mode:
             logger.error(
-                "[SIMREADY] Production mode requires Gemini-backed physics estimation. "
-                "Heuristic-only physics is not allowed. "
-                "Set Secret Manager ID '%s' or env var 'GEMINI_API_KEY', or disable production mode.",
-                SECRET_ID_GEMINI,
+                "[SIMREADY] Production mode requires Gemini or deterministic physics. "
+                "Set SIMREADY_PHYSICS_MODE=deterministic or SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1, "
+                "or provide Gemini credentials."
             )
             return 2
         if allow_heuristic_fallback:
@@ -1820,12 +2108,17 @@ def prepare_simready_assets_job(
                 "Set SIMREADY_ALLOW_HEURISTIC_FALLBACK=1 to acknowledge this fallback for CI/testing."
             )
 
+    if production_mode and physics_mode == "deterministic":
+        use_deterministic_physics = True
+
     simready_paths: Dict[Any, str] = {}
+    fallback_stats = {"total": 0, "covered": 0}
+    fallback_mode = use_deterministic_physics
 
     # GAP-PERF-002 FIX: Process objects in parallel for 10-50x speedup
-    def process_single_object(obj: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+    def process_single_object(obj: Dict[str, Any]) -> Optional[Tuple[str, str, str, bool]]:
         """
-        Process a single object. Returns (oid, sim_rel, sim_path) or None on failure.
+        Process a single object. Returns (oid, sim_rel, sim_path, fallback_covered) or None on failure.
 
         This function is thread-safe and can be called in parallel.
         """
@@ -1873,7 +2166,12 @@ def prepare_simready_assets_job(
                 mesh_center=mesh_center_metadata,
                 gemini_client=client,
                 reference_image=ref_img,
+                metadata=obj_metadata,
+                deterministic_physics=use_deterministic_physics,
             )
+
+            estimation_source = str(physics_cfg.get("estimation_source", ""))
+            fallback_covered = estimation_source in {"deterministic_metadata", "deterministic_material"}
 
             # Compute sim2real distribution ranges for domain randomization
             physics_distributions = compute_physics_distributions(physics_cfg, bounds)
@@ -1916,7 +2214,7 @@ def prepare_simready_assets_job(
                 sim_rel = f"{assets_prefix}/static/obj_{oid}/simready.usda"
 
             print(f"[SIMREADY] ✓ Processed obj {oid}")
-            return (oid, sim_rel, str(sim_path))
+            return (oid, sim_rel, str(sim_path), fallback_covered)
 
         except Exception as e:
             print(f"[SIMREADY] ERROR: Failed to process obj {oid}: {e}", file=sys.stderr)
@@ -1934,9 +2232,13 @@ def prepare_simready_assets_job(
         # Collect successful results
         for success_item in result.successful_results:
             if success_item:
-                oid, sim_rel, sim_path = success_item
+                oid, sim_rel, sim_path, fallback_covered = success_item
                 simready_paths[oid] = sim_rel
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
+                if fallback_mode:
+                    fallback_stats["total"] += 1
+                    if fallback_covered:
+                        fallback_stats["covered"] += 1
 
         # Report failures
         if result.failed_count > 0:
@@ -1950,9 +2252,28 @@ def prepare_simready_assets_job(
         for obj in objects:
             result = process_single_object(obj)
             if result:
-                oid, sim_rel, sim_path = result
+                oid, sim_rel, sim_path, fallback_covered = result
                 simready_paths[oid] = sim_rel
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
+                if fallback_mode:
+                    fallback_stats["total"] += 1
+                    if fallback_covered:
+                        fallback_stats["covered"] += 1
+
+    if fallback_mode and fallback_stats["total"] > 0 and fallback_min_coverage > 0.0:
+        coverage = fallback_stats["covered"] / float(fallback_stats["total"])
+        print(
+            f"[SIMREADY] Fallback physics coverage: {coverage * 100.0:.1f}% "
+            f"({fallback_stats['covered']}/{fallback_stats['total']})"
+        )
+        if coverage < fallback_min_coverage:
+            logger.error(
+                "[SIMREADY] Fallback physics coverage %.1f%% is below the minimum %.1f%%. "
+                "Increase metadata/material coverage or lower SIMREADY_FALLBACK_MIN_COVERAGE.",
+                coverage * 100.0,
+                fallback_min_coverage * 100.0,
+            )
+            return 3
 
     marker_path = assets_root / ".simready_complete"
     if simready_paths:

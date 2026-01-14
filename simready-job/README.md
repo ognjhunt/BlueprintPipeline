@@ -38,8 +38,11 @@ The published document includes:
 | `ASSET_CATALOG_COLLECTION` | Collection name for metadata | `asset_metadata` |
 | `ASSET_CATALOG_CREDENTIALS` | Path to service account JSON | None |
 | `ASSET_CATALOG_EMULATOR_HOST` | Host for emulator/local testing | None |
-| `SIMREADY_PRODUCTION_MODE` | Enforce Gemini-backed physics estimates (no heuristic-only physics) | `false` |
-| `SIMREADY_ALLOW_HEURISTIC_FALLBACK` | Allow heuristic-only physics estimation in CI/testing when Gemini is unavailable | `false` |
+| `SIMREADY_PRODUCTION_MODE` | Enforce production physics rules (requires Gemini or deterministic mode) | `false` |
+| `SIMREADY_PHYSICS_MODE` | Physics estimation mode (`auto`/`gemini`/`deterministic`) | `auto` |
+| `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | Allow deterministic (LLM-free) physics estimation when Gemini is unavailable | `false` |
+| `SIMREADY_ALLOW_HEURISTIC_FALLBACK` | Allow heuristic-only physics estimation in CI/testing when Gemini and deterministic modes are unavailable | `false` |
+| `SIMREADY_FALLBACK_MIN_COVERAGE` | Minimum coverage ratio for deterministic fallback physics (0-1) | `0.6` |
 | `PIPELINE_ENV` | Marks environment (`production`/`prod` enables production mode) | None |
 
 If these variables are unset, catalog calls are skipped and the job continues
@@ -48,10 +51,14 @@ with local metadata.
 ### Physics estimation fallback policy
 
 Simready prefers Gemini-backed physics estimation. When Gemini is unavailable,
-it will fall back to heuristic estimates. In **production mode**
-(`SIMREADY_PRODUCTION_MODE=1` or `PIPELINE_ENV=production`), heuristic-only
+you can enable **deterministic physics** (LLM-free, metadata/material-driven)
+by setting `SIMREADY_PHYSICS_MODE=deterministic` or `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1`.
+In **production mode** (`SIMREADY_PRODUCTION_MODE=1` or `PIPELINE_ENV=production`),
+Gemini is required unless deterministic mode is explicitly enabled; heuristic-only
 physics is rejected and the job exits with an error. In production, Gemini
-credentials must come from Secret Manager; env var fallbacks are rejected. For
-CI/testing runs where Gemini is intentionally unavailable, set
-`SIMREADY_ALLOW_HEURISTIC_FALLBACK=1` to acknowledge and allow the heuristic
-fallback explicitly.
+credentials must come from Secret Manager; env var fallbacks are rejected.
+
+When deterministic fallback is used, simready enforces a minimum physics coverage
+ratio (`SIMREADY_FALLBACK_MIN_COVERAGE`, default 0.6). Coverage counts objects
+that were estimated with metadata/material priors; if too many assets fall back
+to generic defaults the job fails, prompting you to improve metadata coverage.

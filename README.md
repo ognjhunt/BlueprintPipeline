@@ -177,6 +177,9 @@ report = run_qa_validation(scene_dir=Path("scenes/scene_123"))
 | `ENVIRONMENT_TYPE` | Environment hint | `generic` |
 | `PARTICULATE_ENDPOINT` | Particulate articulation service URL | - |
 | `LLM_PROVIDER` | LLM provider (`gemini`/`openai`/`auto`) | `auto` |
+| `SIMREADY_PHYSICS_MODE` | Simready physics estimation (`auto`/`gemini`/`deterministic`) | `auto` |
+| `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | Allow deterministic (LLM-free) physics when Gemini is unavailable | `false` |
+| `SIMREADY_FALLBACK_MIN_COVERAGE` | Minimum coverage ratio for deterministic fallback physics (0-1) | `0.6` |
 
 ## Secrets
 
@@ -191,8 +194,9 @@ following secret IDs for jobs that rely on external APIs:
 | `anthropic-api-key` | `ANTHROPIC_API_KEY` | `episode-generation-job` | Anthropic API access for task specification |
 | `particulate-api-key` | `PARTICULATE_API_KEY` | `interactive-job` | Particulate articulation service access |
 
-In production, `simready-job` requires a Gemini key; without it, the job falls back to heuristic-only
-physics and will fail in production mode.
+In production, `simready-job` normally uses Gemini for physics estimation. You can opt into deterministic,
+LLM-free physics by setting `SIMREADY_PHYSICS_MODE=deterministic` (or `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1`);
+otherwise, missing Gemini credentials cause the job to fail in production mode.
 
 ## Documentation
 
