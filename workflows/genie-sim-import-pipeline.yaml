@@ -151,7 +151,159 @@ main:
           - importJobMetadata: ${json.decode(importJobMetadataRaw)}
           - submission_mode: ${default(map.get(importJobMetadata, "submission_mode"), submission_mode)}
           - local_episodes_prefix: ${default(map.get(map.get(importJobMetadata, "artifacts", {}), "episodes_prefix"), default(map.get(map.get(importJobMetadata, "artifacts", {}), "episodes_path"), local_episodes_prefix))}
+        next: init_quality_gate_preflight
+
+    # Preflight quality gate check (downstream guardrail)
+    - init_quality_gate_preflight:
+        assign:
+          - qualityGateReportObject: ${"scenes/" + scene_id + "/episode-generation-job/quality_gate_report.json"}
+          - qualityGateReportPath: ${"gs://" + bucket + "/" + qualityGateReportObject}
+          - qualityGateFailedMarker: ${"scenes/" + scene_id + "/geniesim/.failed"}
+          - qualityCertPrefix: ${"scenes/" + scene_id + "/episodes/"}
+          - qualityCertObject: null
+          - qualityCertPageToken: null
+        next: maybe_check_quality_gates
+
+    - maybe_check_quality_gates:
+        switch:
+          - condition: ${scene_id == null or scene_id == "" or scene_id == "unknown"}
+            next: log_quality_gate_skip
+        next: read_quality_gate_report
+
+    - log_quality_gate_skip:
+        call: sys.log
+        args:
+          text: "Skipping quality gate preflight; scene_id is missing."
+          severity: "WARNING"
         next: log_start
+
+    - read_quality_gate_report:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${qualityGateReportObject}
+            alt: "media"
+          result: qualityGateReportRaw
+        except:
+          as: e
+          steps:
+            - handle_quality_gate_report_missing:
+                switch:
+                  - condition: ${e.code == 404}
+                    next: list_quality_certificates
+                next: raise_quality_gate_report_error
+
+    - raise_quality_gate_report_error:
+        raise:
+          message: ${"Failed to read quality gate report at " + qualityGateReportPath}
+
+    - parse_quality_gate_report:
+        assign:
+          - qualityGateReport: ${json.decode(qualityGateReportRaw)}
+        next: evaluate_quality_gate_report
+
+    - evaluate_quality_gate_report:
+        switch:
+          - condition: ${"summary" in qualityGateReport and qualityGateReport.summary.can_proceed == true and qualityGateReport.summary.blocking_failures == 0}
+            next: log_quality_gate_passed
+        next: quality_gate_failed
+
+    - list_quality_certificates:
+        call: googleapis.storage.v1.objects.list
+        args:
+          bucket: ${bucket}
+          prefix: ${qualityCertPrefix}
+          maxResults: 1000
+          pageToken: ${qualityCertPageToken}
+        result: qualityCertList
+        next: scan_quality_certificates
+
+    - scan_quality_certificates:
+        for:
+          value: certItem
+          in: ${default(qualityCertList.items, [])}
+          steps:
+            - check_quality_cert_match:
+                switch:
+                  - condition: ${qualityCertObject == null and text.match_regex(certItem.name, "quality_certificate\\.json$")}
+                    assign:
+                      - qualityCertObject: ${certItem.name}
+        next: check_quality_cert_scan_results
+
+    - check_quality_cert_scan_results:
+        switch:
+          - condition: ${qualityCertObject != null}
+            next: read_quality_certificate
+          - condition: ${qualityCertList.nextPageToken != null}
+            assign:
+              - qualityCertPageToken: ${qualityCertList.nextPageToken}
+            next: list_quality_certificates
+        next: quality_gate_missing_artifacts
+
+    - read_quality_certificate:
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: ${bucket}
+          object: ${qualityCertObject}
+          alt: "media"
+        result: qualityCertRaw
+        next: parse_quality_certificate
+
+    - parse_quality_certificate:
+        assign:
+          - qualityCertificate: ${json.decode(qualityCertRaw)}
+        next: evaluate_quality_certificate
+
+    - evaluate_quality_certificate:
+        switch:
+          - condition: ${qualityCertificate.validation_passed == true and qualityCertificate.recommended_use != "testing"}
+            next: log_quality_gate_passed_with_certificate
+        next: quality_gate_failed
+
+    - log_quality_gate_passed_with_certificate:
+        call: sys.log
+        args:
+          text: ${"Quality gate report missing; proceeding based on certificate " + qualityCertObject}
+          severity: "WARNING"
+        next: log_start
+
+    - quality_gate_missing_artifacts:
+        call: sys.log
+        args:
+          text: ${"Missing quality gate report and quality certificates for scene " + scene_id}
+          severity: "ERROR"
+        next: quality_gate_failed
+
+    - log_quality_gate_passed:
+        call: sys.log
+        args:
+          text: ${"Quality gate passed for scene " + scene_id}
+          severity: "INFO"
+        next: log_start
+
+    - quality_gate_failed:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${qualityGateFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": scene_id,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "quality_gate_failed",
+              "message": "Downstream quality gate preflight blocked import",
+              "report_path": qualityGateReportPath
+            }
+          })}
+        result: qualityGateFailedMarkerResult
+        next: raise_quality_gate_failed
+
+    - raise_quality_gate_failed:
+        raise:
+          message: ${"Quality gate failed; report: " + qualityGateReportPath}
 
     - log_start:
         call: sys.log
