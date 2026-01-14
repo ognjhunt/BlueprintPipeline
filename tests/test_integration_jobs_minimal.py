@@ -52,7 +52,7 @@ def _write_scene_manifest(path: Path, scene_id: str) -> None:
             "environment_type": "kitchen",
             "coordinate_frame": "y_up",
             "meters_per_unit": 1.0,
-            "room": {"bounds": [[-1, -1, 0], [1, 1, 2]]},
+            "room": {"bounds": {"width": 2.0, "depth": 2.0, "height": 2.0}},
         },
         "objects": [
             {
@@ -237,3 +237,36 @@ def test_geniesim_export_job_minimal_end_to_end(tmp_path: Path) -> None:
     assert (output_dir / "export_manifest.json").is_file()
     assert (output_dir / "enhanced_features.json").is_file()
     assert (output_dir / "_GENIESIM_EXPORT_COMPLETE").is_file()
+
+
+def test_geniesim_export_job_blocks_on_error_gate(tmp_path: Path) -> None:
+    scene_id = "blocked_scene"
+    assets_dir = tmp_path / "scenes" / scene_id / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "version": "1.0.0",
+        "scene_id": scene_id,
+        "objects": [],
+    }
+    (assets_dir / "scene_manifest.json").write_text(json.dumps(manifest, indent=2))
+    (assets_dir / ".usd_assembly_complete").write_text("ok")
+
+    exit_code = geniesim_export_module.run_geniesim_export_job(
+        root=tmp_path,
+        scene_id=scene_id,
+        assets_prefix=f"scenes/{scene_id}/assets",
+        geniesim_prefix=f"scenes/{scene_id}/geniesim",
+        robot_type="franka",
+        max_tasks=1,
+        generate_embeddings=False,
+        filter_commercial=True,
+        copy_usd=False,
+        enable_multi_robot=False,
+        enable_bimanual=False,
+        enable_vla_packages=False,
+        enable_rich_annotations=False,
+        enable_premium_analytics=False,
+        require_quality_gates=True,
+    )
+
+    assert exit_code == 1
