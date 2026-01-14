@@ -95,7 +95,7 @@ main:
           - geniesimPrefix: '${"scenes/" + sceneId + "/geniesim"}'
           - geniesimJobName: "genie-sim-export-job"
           - geniesimSubmitJobName: "genie-sim-submit-job"
-          - geniesimLocalJobName: "genie-sim-local-job"
+          - geniesimGpuJobName: "genie-sim-gpu-job"
           - geniesimCompleteMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_complete"}'
           - geniesimJobMetadataPath: '${"scenes/" + sceneId + "/geniesim/job.json"}'
           - geniesimFailedMarker: '${"scenes/" + sceneId + "/geniesim/.failed"}'
@@ -292,15 +292,15 @@ main:
     - select_geniesim_submission_job:
         switch:
           - condition: '${geniesimSubmissionMode == "local"}'
-            next: run_geniesim_local_job
+            next: run_geniesim_gpu_job
         next: run_geniesim_submission_job
 
     # Run local Genie Sim execution (no hosted API)
-    - run_geniesim_local_job:
+    - run_geniesim_gpu_job:
         try:
           call: googleapis.run.v2.projects.locations.jobs.run
           args:
-            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + geniesimLocalJobName}'
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + geniesimGpuJobName}'
             body:
               overrides:
                 containerOverrides:
