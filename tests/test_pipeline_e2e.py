@@ -732,8 +732,14 @@ def test_pipeline_outputs_for_robotics_labs():
     """
     harness = PipelineTestHarness()
     try:
+        os.environ["USE_GENIESIM"] = "true"
+        os.environ["GENIESIM_MOCK_MODE"] = "true"
+        os.environ["GENIESIM_FORCE_LOCAL"] = "false"
+        os.environ["VARIATION_ASSETS_PREFIX"] = f"{harness.scene_id}/variation_assets"
         harness.setup()
-        success = harness.run_pipeline()
+        success = harness.run_pipeline(
+            steps="regen3d,simready,usd,replicator,variation-gen,genie-sim-export,genie-sim-submit"
+        )
         assert success, "Pipeline failed"
 
         print("\n" + "=" * 60)
