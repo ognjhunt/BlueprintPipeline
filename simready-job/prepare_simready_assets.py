@@ -19,6 +19,7 @@ from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
 )
+from tools.workflow.failure_markers import FailureMarkerWriter
 
 # GAP-PHYSICS-011 FIX: Import physics profile selector
 try:
@@ -72,6 +73,7 @@ except ImportError:  # pragma: no cover
     print("[SIMREADY] WARNING: Parallel processing not available - will use sequential processing", file=sys.stderr)
 
 GCS_ROOT = Path("/mnt/gcs")
+JOB_NAME = "simready-job"
 
 
 # ---------- Small helpers ----------
@@ -101,9 +103,16 @@ def _get_env_value(name: str, default: Optional[str] = None) -> Optional[str]:
 
 @lru_cache(maxsize=8)
 def _load_secret_value(secret_id: str, env_var: str) -> Optional[str]:
+    env_value = os.environ.get(env_var)
     if HAVE_SECRET_MANAGER and get_secret_or_env is not None:
         try:
-            return get_secret_or_env(secret_id, env_var=env_var)
+            value = get_secret_or_env(secret_id, env_var=env_var)
+            if value and not env_value:
+                logger.info(
+                    "[SIMREADY] Using Secret Manager for %s credentials.",
+                    env_var,
+                )
+            return value
         except Exception as exc:
             logger.warning(
                 "[SIMREADY] Failed to fetch secret '%s'; falling back to env var '%s': %s",
@@ -111,7 +120,7 @@ def _load_secret_value(secret_id: str, env_var: str) -> Optional[str]:
                 env_var,
                 exc,
             )
-    return os.environ.get(env_var)
+    return env_value
 
 
 def _get_secret_value(
@@ -1942,19 +1951,58 @@ def main() -> None:
 
     from blueprint_sim.simready import run_from_env
 
-    validate_required_env_vars(
-        {
-            "BUCKET": "GCS bucket name",
-            "SCENE_ID": "Scene identifier",
-            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
-        },
-        label="[SIMREADY]",
-    )
-    assets_prefix = _get_env_value("ASSETS_PREFIX", "")
-    assets_root = GCS_ROOT / assets_prefix
-    validate_scene_manifest(assets_root / "scene_manifest.json", label="[SIMREADY]")
+    bucket = os.getenv("BUCKET", "")
+    scene_id = os.getenv("SCENE_ID", "")
+    assets_prefix = _get_env_value("ASSETS_PREFIX", "") or ""
+    input_params = {
+        "bucket": bucket,
+        "scene_id": scene_id,
+        "assets_prefix": assets_prefix,
+    }
+    partial_results = {
+        "simready_prefix": assets_prefix,
+        "simready_marker": (
+            f"{assets_prefix}/.simready_complete" if assets_prefix else None
+        ),
+    }
 
-    sys.exit(run_from_env(root=GCS_ROOT))
+    def _write_failure_marker(exc: Exception, failed_step: str) -> None:
+        if not bucket or not scene_id:
+            print(
+                "[SIMREADY] WARNING: Skipping failure marker; BUCKET/SCENE_ID missing.",
+                file=sys.stderr,
+            )
+            return
+        FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+            exception=exc,
+            failed_step=failed_step,
+            input_params=input_params,
+            partial_results=partial_results,
+        )
+
+    validated = False
+    try:
+        validate_required_env_vars(
+            {
+                "BUCKET": "GCS bucket name",
+                "SCENE_ID": "Scene identifier",
+                "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+            },
+            label="[SIMREADY]",
+        )
+        assets_root = GCS_ROOT / assets_prefix
+        validate_scene_manifest(assets_root / "scene_manifest.json", label="[SIMREADY]")
+        validated = True
+
+        sys.exit(run_from_env(root=GCS_ROOT))
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            failed_step = "entrypoint_validation" if not validated else "entrypoint_exit"
+            _write_failure_marker(RuntimeError("Job exited early"), failed_step)
+        raise
+    except Exception as exc:
+        _write_failure_marker(exc, "entrypoint")
+        raise
 
 
 if __name__ == "__main__":
