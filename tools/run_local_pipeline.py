@@ -1077,20 +1077,8 @@ class LocalPipelineRunner:
         """Resolve Genie Sim submission mode with local default."""
         if mock_mode:
             return "mock"
-
-        submission_override = os.getenv("GENIESIM_SUBMISSION_MODE", "").strip().lower()
-        if submission_override == "mock":
-            return "mock"
-        if submission_override == "api":
-            if force_local:
-                return "local"
-            return "api" if api_key else "local"
-        if submission_override == "local":
+        if force_local:
             return "local"
-
-        enable_api = os.getenv("GENIESIM_SUBMIT_API", "").strip().lower() in {"1", "true", "yes", "y"}
-        if enable_api and api_key and not force_local:
-            return "api"
         return "local"
 
     def _run_geniesim_submit(self) -> StepResult:
@@ -1128,11 +1116,10 @@ class LocalPipelineRunner:
         num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
         min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
 
-        api_key = os.getenv("GENIE_SIM_API_KEY")
         force_local = os.getenv("GENIESIM_FORCE_LOCAL", "false").lower() == "true"
         mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
         submission_mode = self._resolve_geniesim_submission_mode(
-            api_key=api_key,
+            api_key=None,
             force_local=force_local,
             mock_mode=mock_mode,
         )
@@ -1143,40 +1130,7 @@ class LocalPipelineRunner:
         missing_components: List[str] = []
         remediation_guidance = None
 
-        if submission_mode == "api":
-            try:
-                sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
-                from geniesim_client import GenieSimClient, GenerationParams
-            except ImportError as e:
-                return StepResult(
-                    step=PipelineStep.GENIESIM_SUBMIT,
-                    success=False,
-                    duration_seconds=0,
-                    message=f"Import error (Genie Sim API client not found): {e}",
-                )
-
-            generation_params = GenerationParams(
-                episodes_per_task=episodes_per_task,
-                num_variations=num_variations,
-                robot_type=robot_type,
-                min_quality_score=min_quality_score,
-            )
-            client = GenieSimClient()
-            try:
-                result = client.submit_generation_job(
-                    scene_graph=scene_graph,
-                    asset_index=asset_index,
-                    task_config=task_config,
-                    generation_params=generation_params,
-                    job_name=f"{self.scene_id}-geniesim",
-                )
-                if not result.success or not result.job_id:
-                    raise RuntimeError(result.message or "Genie Sim submission failed")
-                job_id = result.job_id
-                submission_message = result.message
-            finally:
-                client.close()
-        elif submission_mode == "mock":
+        if submission_mode == "mock":
             try:
                 sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
                 from geniesim_client import GenieSimClient, GenerationParams
