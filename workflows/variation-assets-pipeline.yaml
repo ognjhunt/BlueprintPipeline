@@ -306,6 +306,8 @@ main:
                         value: '${sceneId + "_variation"}'
                       - name: ASSETS_PREFIX
                         value: ${variationAssetsPrefix}
+                      - name: SIMREADY_PHYSICS_MODE
+                        value: "deterministic"
               timeout: '${string(simreadyTimeoutSeconds) + "s"}'
           result: simreadyExec
         retry:
