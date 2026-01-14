@@ -154,30 +154,81 @@ main:
             scene_id: ${sceneId}
             bundle_tier: ${bundleTier}
             timeout_seconds: ${upsellTimeoutSeconds}
-            retry_max: 0
+            duration_seconds: 0
+            retry_max: 3
             start_time: ${upsellStartTime}
           severity: "INFO"
         next: run_upsell_job
 
     # Run upsell features job via Cloud Run
     - run_upsell_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/upsell-features-job"}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: BUNDLE_TIER
-                      value: ${bundleTier}
-                    - name: SCENE_PATH
-                      value: ${scenePath}
-            timeout: '${string(upsellTimeoutSeconds) + "s"}'
-        result: jobResult
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/upsell-features-job"}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: BUNDLE_TIER
+                        value: ${bundleTier}
+                      - name: SCENE_PATH
+                        value: ${scenePath}
+              timeout: '${string(upsellTimeoutSeconds) + "s"}'
+          result: jobResult
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_upsell_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "upsell-features-pipeline"
+                    job: ${upsellJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - write_upsell_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${upsellFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": upsellJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "upsell_job_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "bundle_tier": bundleTier,
+                        "scene_path": scenePath
+                      }
+                    }
+                  })}
+            - raise_upsell_job_error:
+                raise: ${e}
         next: set_upsell_execution_name
 
     - set_upsell_execution_name:

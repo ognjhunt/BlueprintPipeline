@@ -29,6 +29,8 @@ main:
           - sceneId: ${parts[1]}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "scale-job"
+          # Explicitly set to the Cloud Run default for consistency/metrics.
+          - scaleTimeoutSeconds: 3600
           - doneMarkerPath: ${"scenes/" + sceneId + "/layout/scene_layout_scaled.done"}
           - scaleFailedMarker: ${"scenes/" + sceneId + "/layout/.failed"}
           - scaleLegacyFailedMarker: ${"scenes/" + sceneId + "/layout/.scale_failed"}
@@ -55,6 +57,29 @@ main:
                     next: run_scale_job
             - raise_error:
                 raise: ${e}
+        next: init_scale_metrics
+
+    - init_scale_metrics:
+        assign:
+          - scaleStartTime: '${time.format(sys.now())}'
+        next: emit_scale_metrics_start
+
+    - emit_scale_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "scale-pipeline"
+            job: ${jobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${scaleTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${scaleStartTime}
+          severity: "INFO"
         next: run_scale_job
 
     - run_scale_job:
@@ -72,6 +97,7 @@ main:
                         value: ${sceneId}
                       - name: LAYOUT_PREFIX
                         value: ${layoutPrefix}
+              timeout: '${string(scaleTimeoutSeconds) + "s"}'
           result: scaleExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -83,6 +109,40 @@ main:
         except:
           as: e
           steps:
+            - log_scale_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "scale-pipeline"
+                    job: ${jobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - capture_scale_failure_metrics:
+                assign:
+                  - scaleEndTime: '${time.format(sys.now())}'
+                  - scaleDurationSeconds: '${time.parse(scaleEndTime) - time.parse(scaleStartTime)}'
+                  - scaleTimeoutUsageRatio: '${scaleDurationSeconds / scaleTimeoutSeconds}'
+                  - scaleTimedOut: '${scaleDurationSeconds >= scaleTimeoutSeconds}'
+            - emit_scale_metrics_failed:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_invocation"
+                    event: "complete"
+                    workflow: "scale-pipeline"
+                    job: ${jobName}
+                    scene_id: ${sceneId}
+                    timeout_seconds: ${scaleTimeoutSeconds}
+                    duration_seconds: ${scaleDurationSeconds}
+                    timeout_usage_ratio: ${scaleTimeoutUsageRatio}
+                    timed_out: ${scaleTimedOut}
+                    status: "FAILED"
+                    start_time: ${scaleStartTime}
+                    end_time: ${scaleEndTime}
+                  severity: "ERROR"
             - log_job_error:
                 call: sys.log
                 args:
@@ -125,6 +185,33 @@ main:
                   name: ${scaleLegacyFailedMarker}
                   uploadType: "media"
                   body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"failed\\", \\"error\\": \\"" + e.message + "\\"}" }
+        next: log_scale_metrics_complete
+
+    - log_scale_metrics_complete:
+        assign:
+          - scaleEndTime: '${time.format(sys.now())}'
+          - scaleDurationSeconds: '${time.parse(scaleEndTime) - time.parse(scaleStartTime)}'
+          - scaleTimeoutUsageRatio: '${scaleDurationSeconds / scaleTimeoutSeconds}'
+          - scaleTimedOut: '${scaleDurationSeconds >= scaleTimeoutSeconds}'
+        next: emit_scale_metrics_complete
+
+    - emit_scale_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "scale-pipeline"
+            job: ${jobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${scaleTimeoutSeconds}
+            duration_seconds: ${scaleDurationSeconds}
+            timeout_usage_ratio: ${scaleTimeoutUsageRatio}
+            timed_out: ${scaleTimedOut}
+            status: "SUBMITTED"
+            start_time: ${scaleStartTime}
+            end_time: ${scaleEndTime}
+          severity: "INFO"
         next: mark_scale_complete
 
     - mark_scale_complete:
