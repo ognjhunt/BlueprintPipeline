@@ -35,7 +35,7 @@ sys.path.insert(0, str(EPISODE_JOB_DIR))
 sys.path.insert(0, str(GENIESIM_EXPORT_DIR))
 
 episode_module = _load_module(
-    "episode_generation_job.generate_episodes",
+    "generate_episodes",
     EPISODE_JOB_DIR / "generate_episodes.py",
 )
 geniesim_export_module = _load_module(
