@@ -1,0 +1,129 @@
+# =============================================================================
+# Kubernetes Job: Genie Sim GPU Local Execution
+# =============================================================================
+# Runs the GPU-capable Genie Sim image to execute local data collection.
+#
+# Prerequisites:
+#   1. GKE cluster with GPU node pool (T4/A100/etc.)
+#   2. NVIDIA GPU device plugin installed
+#   3. Secret with GCS service account credentials
+#
+# Apply:
+#   kubectl apply -f k8s/genie-sim-gpu-job.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: genie-sim-gpu-config
+  namespace: blueprint
+data:
+  EPISODES_PER_TASK: "10"
+  NUM_VARIATIONS: "5"
+  GENIESIM_HOST: "localhost"
+  GENIESIM_PORT: "50051"
+  GENIESIM_ROOT: "/opt/geniesim"
+  ISAAC_SIM_PATH: "/isaac-sim"
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: genie-sim-gpu-local
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: genie-sim-gpu-local
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: genie-sim-gpu-local
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-tesla-t4
+
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      initContainers:
+        - name: gpu-check
+          image: nvidia/cuda:12.1.0-base-ubuntu22.04
+          command:
+            - sh
+            - -c
+            - |
+              echo "Checking GPU availability for Genie Sim..."
+              nvidia-smi
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+
+      containers:
+        - name: genie-sim-local
+          image: gcr.io/${PROJECT_ID}/blueprint-genie-sim:isaacsim
+          imagePullPolicy: Always
+
+          envFrom:
+            - configMapRef:
+                name: genie-sim-gpu-config
+
+          env:
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: GENIESIM_PREFIX
+              value: "scenes/${SCENE_ID}/geniesim"
+            - name: JOB_OUTPUT_PATH
+              value: "scenes/${SCENE_ID}/geniesim/job.json"
+            - name: OUTPUT_PREFIX
+              value: "scenes/${SCENE_ID}/episodes"
+            - name: ROBOT_TYPE
+              value: "franka"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+              nvidia.com/gpu: 1
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+            - name: isaac-cache
+              mountPath: /root/.cache/ov
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: isaac-cache
+          emptyDir:
+            sizeLimit: 50Gi
