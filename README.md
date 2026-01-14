@@ -33,6 +33,13 @@ image → 3D-RE-GEN → regen3d-job → simready-job → usd-assembly-job → re
 
 ### Local Testing (Without GCS/Cloud Run)
 
+Genie Sim is the **default** episode-generation backend (`USE_GENIESIM=true`). For
+real Genie Sim runs, ensure these prerequisites are available:
+
+- Isaac Sim installed and reachable via `ISAAC_SIM_PATH` (must include `python.sh`).
+- Genie Sim repo installed at `GENIESIM_ROOT`.
+- Genie Sim gRPC server running at `GENIESIM_HOST:GENIESIM_PORT` (default `localhost:50051`).
+
 ```bash
 # 1. Generate mock 3D-RE-GEN outputs
 python fixtures/generate_mock_regen3d.py --scene-id test_kitchen --output-dir ./test_scenes
@@ -42,6 +49,11 @@ python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen
 # Default steps: regen3d → simready → usd → replicator
 # Optional steps: add --enable-dwm or --enable-dream2flow for extra bundles
 
+# 2b. Lightweight local run without Genie Sim
+USE_GENIESIM=false \
+python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen --validate
+# Uses BlueprintPipeline episode generation instead of Genie Sim
+
 # 3. Run end-to-end tests
 python tests/test_pipeline_e2e.py
 ```
@@ -50,7 +62,8 @@ python tests/test_pipeline_e2e.py
 
 Run the local pipeline with Genie Sim enabled to generate an export bundle and submit
 local data collection. Genie Sim runs in **local-only mode by default**; no API key
-is required for the free/default workflow.
+is required for the free/default workflow. This is the default backend (`USE_GENIESIM=true`);
+see the prerequisites in the Quick Start section above before running locally.
 
 ```bash
 USE_GENIESIM=true \
