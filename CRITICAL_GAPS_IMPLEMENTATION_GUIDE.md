@@ -3,7 +3,8 @@
 This guide provides step-by-step instructions for applying all 10 critical gap fixes (GAP-EH-001 through GAP-PERF-002) to the BlueprintPipeline codebase.
 
 **Date:** January 9, 2026
-**Status:** ✅ All infrastructure created - Ready for integration
+**Last verified:** 2026-01-14
+**Status:** ✅ All infrastructure created - Partial integrations complete (failure markers, partial failure handling, Secret Manager for simready/task_specifier)
 **Priority:** P0 - Critical for production reliability
 
 ---
@@ -23,6 +24,12 @@ All critical infrastructure has been created and is ready for integration:
 7. **Parallel Processing** - `tools/performance/parallel_processing.py`
 8. **Partial Failure Handling** - `tools/error_handling/partial_failure.py`
 9. **Enhanced Failure Markers** - `tools/workflow/failure_markers.py`
+
+---
+
+## Remaining Integrations (as of last verified)
+
+- **Configuration validation (GAP-CM-001)** across job entry points remains pending.
 
 ---
 
@@ -329,6 +336,7 @@ def main():
 **Files to Update:**
 - All files using API keys
 - Workflow YAML files (if feasible)
+**Status:** ✅ Integrated in `simready-job/prepare_simready_assets.py` and `episode-generation-job/task_specifier.py` for Gemini/LLM credentials.
 
 **Instructions:**
 
@@ -733,7 +741,7 @@ from tools.workflow import write_failure_marker
 
 1. ✅ Review this implementation guide
 2. 🔄 Create unit tests for new utilities
-3. 🔄 Apply fixes to codebase (follow priority order)
+3. 🔄 Complete configuration validation integrations
 4. 🔄 Run integration tests
 5. 🔄 Deploy to staging environment
 6. 🔄 Monitor metrics
