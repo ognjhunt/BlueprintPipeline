@@ -39,6 +39,8 @@ python fixtures/generate_mock_regen3d.py --scene-id test_kitchen --output-dir ./
 
 # 2. Run the local pipeline
 python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen --validate
+# Default steps: regen3d → simready → usd → replicator → isaac-lab
+# Optional steps: add --enable-dwm or --enable-dream2flow for extra bundles
 
 # 3. Run end-to-end tests
 python tests/test_pipeline_e2e.py
