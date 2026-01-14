@@ -153,8 +153,13 @@ Staging runs also require collision-aware planning dependencies:
 - **CUDA** runtime + compatible NVIDIA drivers
 - **PyTorch with CUDA support**
 
+For lab staging runs, enforce the deterministic production path so SimReady uses
+LLM-free physics with production gating.
+
 ```bash
 RUN_STAGING_E2E=1 \
+PIPELINE_ENV=production \
+SIMREADY_PHYSICS_MODE=deterministic \
 STAGING_SCENE_DIR=/mnt/gcs/scenes/<scene_id> \
 /isaac-sim/python.sh -m pytest tests/test_pipeline_e2e_staging.py -v
 ```
@@ -163,6 +168,8 @@ You can also provide a data root + scene id instead of a full scene path:
 
 ```bash
 RUN_STAGING_E2E=1 \
+PIPELINE_ENV=production \
+SIMREADY_PHYSICS_MODE=deterministic \
 STAGING_DATA_ROOT=/mnt/gcs \
 STAGING_SCENE_ID=<scene_id> \
 /isaac-sim/python.sh -m pytest tests/test_pipeline_e2e_staging.py -v
