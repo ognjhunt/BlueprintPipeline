@@ -31,6 +31,8 @@ main:
           - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           - jobName: "objects-job"
+          # Explicitly set to the Cloud Run default for consistency/metrics.
+          - objectsTimeoutSeconds: 3600
           - objectsFailedMarker: ${"scenes/" + sceneId + "/objects/.failed"}
           - objectsLegacyFailedMarker: ${"scenes/" + sceneId + "/objects/.objects_failed"}
         next: check_if_done
@@ -61,6 +63,29 @@ main:
                 args:
                   text: '${"Failed to check if objects already exist: " + e.message + ". Proceeding with job."}'
                   severity: "WARNING"
+        next: init_objects_metrics
+
+    - init_objects_metrics:
+        assign:
+          - objectsStartTime: '${time.format(sys.now())}'
+        next: emit_objects_metrics_start
+
+    - emit_objects_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "objects-pipeline"
+            job: ${jobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${objectsTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${objectsStartTime}
+          severity: "INFO"
         next: run_objects_job
 
     - run_objects_job:
@@ -82,6 +107,7 @@ main:
                         value: ${segDatasetPrefix}
                       - name: LAYOUT_PREFIX
                         value: ${layoutPrefix}
+              timeout: '${string(objectsTimeoutSeconds) + "s"}'
           result: objectsExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -93,6 +119,40 @@ main:
         except:
           as: e
           steps:
+            - log_objects_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "objects-pipeline"
+                    job: ${jobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - capture_objects_failure_metrics:
+                assign:
+                  - objectsEndTime: '${time.format(sys.now())}'
+                  - objectsDurationSeconds: '${time.parse(objectsEndTime) - time.parse(objectsStartTime)}'
+                  - objectsTimeoutUsageRatio: '${objectsDurationSeconds / objectsTimeoutSeconds}'
+                  - objectsTimedOut: '${objectsDurationSeconds >= objectsTimeoutSeconds}'
+            - emit_objects_metrics_failed:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_invocation"
+                    event: "complete"
+                    workflow: "objects-pipeline"
+                    job: ${jobName}
+                    scene_id: ${sceneId}
+                    timeout_seconds: ${objectsTimeoutSeconds}
+                    duration_seconds: ${objectsDurationSeconds}
+                    timeout_usage_ratio: ${objectsTimeoutUsageRatio}
+                    timed_out: ${objectsTimedOut}
+                    status: "FAILED"
+                    start_time: ${objectsStartTime}
+                    end_time: ${objectsEndTime}
+                  severity: "ERROR"
             - log_job_error:
                 call: sys.log
                 args:
@@ -163,7 +223,7 @@ main:
           - condition: '${objectsState == "FAILED" or (objectsFailedCount != null and objectsFailedCount > 0)}'
             next: objects_failed
           - condition: '${objectsState == "SUCCEEDED" or (objectsSucceededCount != null and objectsSucceededCount > 0)}'
-            next: mark_objects_complete
+            next: log_objects_complete
         next: wait_objects_poll
 
     - wait_objects_poll:
@@ -173,11 +233,65 @@ main:
         next: wait_for_objects
 
     - objects_failed:
+        assign:
+          - objectsEndTime: '${time.format(sys.now())}'
+          - objectsDurationSeconds: '${time.parse(objectsEndTime) - time.parse(objectsStartTime)}'
+          - objectsTimeoutUsageRatio: '${objectsDurationSeconds / objectsTimeoutSeconds}'
+          - objectsTimedOut: '${objectsDurationSeconds >= objectsTimeoutSeconds}'
+        next: emit_objects_metrics_failed
+
+    - emit_objects_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "objects-pipeline"
+            job: ${jobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${objectsTimeoutSeconds}
+            duration_seconds: ${objectsDurationSeconds}
+            timeout_usage_ratio: ${objectsTimeoutUsageRatio}
+            timed_out: ${objectsTimedOut}
+            status: "FAILED"
+            start_time: ${objectsStartTime}
+            end_time: ${objectsEndTime}
+          severity: "ERROR"
+        next: log_objects_failed_message
+
+    - log_objects_failed_message:
         call: sys.log
         args:
           text: ${"WARNING: Objects job failed for scene " + sceneId + " but continuing pipeline"}
           severity: "WARNING"
         next: read_objects_failure_marker
+
+    - log_objects_complete:
+        assign:
+          - objectsEndTime: '${time.format(sys.now())}'
+          - objectsDurationSeconds: '${time.parse(objectsEndTime) - time.parse(objectsStartTime)}'
+          - objectsTimeoutUsageRatio: '${objectsDurationSeconds / objectsTimeoutSeconds}'
+          - objectsTimedOut: '${objectsDurationSeconds >= objectsTimeoutSeconds}'
+        next: emit_objects_metrics_complete
+
+    - emit_objects_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "objects-pipeline"
+            job: ${jobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${objectsTimeoutSeconds}
+            duration_seconds: ${objectsDurationSeconds}
+            timeout_usage_ratio: ${objectsTimeoutUsageRatio}
+            timed_out: ${objectsTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${objectsStartTime}
+            end_time: ${objectsEndTime}
+          severity: "INFO"
+        next: mark_objects_complete
 
     - read_objects_failure_marker:
         try:

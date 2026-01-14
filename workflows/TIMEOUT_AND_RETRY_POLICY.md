@@ -40,6 +40,10 @@ Retries are applied to transient failures:
 
 ## Timeout Policies by Pipeline
 
+### Adaptive Timeout Alignment
+- Workflows that accept `bundle_tier` or `scene_complexity` inputs should use the defaults in `policy_configs/adaptive_timeouts.yaml` unless overridden by the pipeline-specific values below.
+- When a workflow does not receive adaptive inputs, we set explicit per-workflow defaults (often 3600s) to keep metrics consistent and document any overrides here.
+
 ### Episode Generation Pipeline
 - **GKE Job Timeout:** 6 hours (21600s) - Isaac Sim GPU processing
 - **Cloud Build Timeout:** 6 hours (21600s)
@@ -72,36 +76,51 @@ Retries are applied to transient failures:
 - **Reason:** Episode validation and manifests are I/O intensive
 
 ### Objects Pipeline
-- **Job Timeout:** No explicit timeout (uses Cloud Run default)
+- **Job Timeout:** 3600s (explicit Cloud Run default)
 - **Retry:** 3 retries with exponential backoff
-- **Reason:** Object detection is typically fast, non-critical
+- **Reason:** Object detection is typically fast, non-critical, but explicit timeout supports metrics
 
 ### Scale Pipeline
-- **Job Timeout:** No explicit timeout (uses Cloud Run default)
+- **Job Timeout:** 3600s (explicit Cloud Run default)
 - **Retry:** 3 retries with exponential backoff
-- **Reason:** Layout scaling is typically fast, non-critical
+- **Reason:** Layout scaling is typically fast, non-critical, but explicit timeout supports metrics
 
 ### Dream2Flow Preparation Pipeline
-- **Preparation Job Timeout:** No explicit timeout
-- **Inference Job Timeout:** No explicit timeout
+- **Preparation Job Timeout:** 3600s (explicit Cloud Run default)
+- **Inference Job Timeout:** 3600s (explicit Cloud Run default)
 - **Retry:** 3 retries with exponential backoff (both jobs)
-- **Reason:** 3D flow extraction and inference can be I/O intensive
+- **Reason:** 3D flow extraction and inference can be I/O intensive; explicit timeout supports metrics
 
 ### DWM Preparation Pipeline
-- **Preparation Job Timeout:** No explicit timeout
-- **Inference Job Timeout:** No explicit timeout
+- **Preparation Job Timeout:** 3600s (explicit Cloud Run default)
+- **Inference Job Timeout:** 3600s (explicit Cloud Run default)
 - **Retry:** 3 retries with exponential backoff (both jobs)
-- **Reason:** Hand mesh video rendering and inference is compute-intensive
+- **Reason:** Hand mesh video rendering and inference is compute-intensive; explicit timeout supports metrics
 
 ### Variation Assets Pipeline
-- **Variation-Gen Job Timeout:** No explicit timeout
-- **Simready Job Timeout:** No explicit timeout
+- **Variation-Gen Job Timeout:** 1800s (explicit override)
+- **Simready Job Timeout:** 3600s (explicit override)
 - **Retry:** 3 retries with exponential backoff (both jobs)
 - **Reason:** Domain randomization asset generation is I/O intensive
 
+### Scene Generation Pipeline
+- **Job Timeout:** 3600s (explicit Cloud Run default)
+- **Retry:** 3 retries with exponential backoff
+- **Reason:** Daily batch generation benefits from default timeout + metrics
+
+### Interactive Pipeline
+- **Job Timeout:** 1800s (explicit override)
+- **Retry:** 3 retries with exponential backoff
+- **Reason:** Interactive articulation extraction has bounded runtime
+
+### Training Pipeline
+- **Job Timeout:** 21600s (6 hours)
+- **Retry:** 3 retries with exponential backoff
+- **Reason:** Model training is long-running and CPU/GPU intensive
+
 ### Regen3D Pipeline
 - **Job Timeout:** 3600s (1 hour) - explicit
-- **Retry:** No explicit job-level retries (marker polling has exponential backoff)
+- **Retry:** 3 retries with exponential backoff (job start); marker polling has exponential backoff
 - **Marker Verification:** Exponential backoff polling, max 6 attempts, capped at 30s between attempts
 - **Reason:** 3D reconstruction is compute-intensive, marker polling must handle eventual consistency
 

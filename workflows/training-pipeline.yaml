@@ -66,6 +66,12 @@ main:
           - condition: ${output_path == null or output_path == ""}
             raise:
               message: "output_path is required"
+        next: set_training_markers
+
+    - set_training_markers:
+        assign:
+          - trainingFailedMarker: ${output_path + "/.failed"}
+        next: log_start
 
     - log_start:
         call: sys.log
@@ -113,36 +119,109 @@ main:
 
     # Launch training job
     - run_training_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + trainingJobName}
-          body:
-            overrides:
-              containerOverrides:
-                - name: "training"
-                  env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${scene_id}
-                    - name: OUTPUT_PATH
-                      value: ${output_path}
-                    - name: EPISODE_COUNT
-                      value: ${string(episode_count)}
-                    - name: TRAINING_MODE
-                      value: "lerobot"
-                    - name: MODEL_ARCHITECTURE
-                      value: "act"  # Default to ACT (Action Chunking Transformer)
-                    - name: TRAINING_EPOCHS
-                      value: "100"
-                    - name: BATCH_SIZE
-                      value: "32"
-                    - name: LEARNING_RATE
-                      value: "0.0001"
-                    - name: CHECKPOINT_INTERVAL
-                      value: "10"
-              timeout: "21600s"  # 6 hours max for training
-        result: training_job_execution
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + trainingJobName}
+            body:
+              overrides:
+                containerOverrides:
+                  - name: "training"
+                    env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${scene_id}
+                      - name: OUTPUT_PATH
+                        value: ${output_path}
+                      - name: EPISODE_COUNT
+                        value: ${string(episode_count)}
+                      - name: TRAINING_MODE
+                        value: "lerobot"
+                      - name: MODEL_ARCHITECTURE
+                        value: "act"  # Default to ACT (Action Chunking Transformer)
+                      - name: TRAINING_EPOCHS
+                        value: "100"
+                      - name: BATCH_SIZE
+                        value: "32"
+                      - name: LEARNING_RATE
+                        value: "0.0001"
+                      - name: CHECKPOINT_INTERVAL
+                        value: "10"
+                timeout: "21600s"  # 6 hours max for training
+          result: training_job_execution
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 60
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_training_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "training-pipeline"
+                    job: ${trainingJobName}
+                    scene_id: ${scene_id}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - capture_training_failure_metrics:
+                assign:
+                  - trainingEndTime: '${time.format(sys.now())}'
+                  - trainingDurationSeconds: '${time.parse(trainingEndTime) - time.parse(trainingStartTime)}'
+                  - trainingTimeoutUsageRatio: '${trainingDurationSeconds / trainingTimeoutSeconds}'
+                  - trainingTimedOut: '${trainingDurationSeconds >= trainingTimeoutSeconds}'
+            - emit_training_metrics_failed_on_start:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_invocation"
+                    event: "complete"
+                    workflow: "training-pipeline"
+                    job: ${trainingJobName}
+                    scene_id: ${scene_id}
+                    timeout_seconds: ${trainingTimeoutSeconds}
+                    duration_seconds: ${trainingDurationSeconds}
+                    timeout_usage_ratio: ${trainingTimeoutUsageRatio}
+                    timed_out: ${trainingTimedOut}
+                    status: "FAILED"
+                    start_time: ${trainingStartTime}
+                    end_time: ${trainingEndTime}
+                  severity: "ERROR"
+            - write_training_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${trainingFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "job_id": job_id,
+                    "scene_id": scene_id,
+                    "job_name": trainingJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "training_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "output_path": output_path
+                      }
+                    }
+                  })}
+            - raise_training_job_error:
+                raise: ${e}
 
     - set_training_execution_name:
         assign:
@@ -209,6 +288,35 @@ main:
         args:
           text: ${"Training job failed for job " + job_id}
           severity: ERROR
+        next: write_training_failure_marker_on_failure
+
+    - write_training_failure_marker_on_failure:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${trainingFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "job_id": job_id,
+            "scene_id": scene_id,
+            "job_name": trainingJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "training_failed",
+              "message": "Training job failed",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": trainingExecutionName,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "output_path": output_path
+              }
+            }
+          })}
         next: raise_training_error
 
     - raise_training_error:

@@ -112,6 +112,7 @@ main:
                         value: ${usdPrefix}
                       - name: CONVERT_ONLY
                         value: "true"
+              timeout: '${string(convertTimeoutSeconds) + "s"}'
           result: convertExec
         retry:
           predicate: ${http.default_retry_predicate}
