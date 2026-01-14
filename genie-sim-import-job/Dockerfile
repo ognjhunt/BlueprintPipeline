@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for caching
-COPY genie-sim-import-job/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY genie-sim-import-job/requirements.lock ./requirements.lock
+RUN pip install --no-cache-dir -r requirements.lock && pip check
 
 # Copy shared tools and dependencies
 COPY tools/ ./tools/
