@@ -105,6 +105,7 @@ main:
                       # Set to empty string to generate all
                       - name: PRIORITY_FILTER
                         value: ""
+              timeout: '${string(variationGenTimeoutSeconds) + "s"}'
           result: variationGenExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -305,6 +306,7 @@ main:
                         value: '${sceneId + "_variation"}'
                       - name: ASSETS_PREFIX
                         value: ${variationAssetsPrefix}
+              timeout: '${string(simreadyTimeoutSeconds) + "s"}'
           result: simreadyExec
         retry:
           predicate: ${http.default_retry_predicate}
