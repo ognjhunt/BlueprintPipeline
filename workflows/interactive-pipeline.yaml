@@ -37,6 +37,8 @@ main:
           - articulationBackend: ${if(particulateEndpoint != "", "particulate", "heuristic")}
           - jobName: "interactive-job"
           - simreadyJobName: "simready-job"
+          # Explicit override: 30 minutes for interactive processing.
+          - interactiveTimeoutSeconds: 1800
           - interactiveFailedMarker: ${"scenes/" + sceneId + "/assets/.failed"}
         next: log_articulation_mode
 
@@ -44,6 +46,29 @@ main:
         call: sys.log
         args:
           text: ${"Using " + articulationBackend + " backend for articulation detection in scene " + sceneId}
+          severity: "INFO"
+        next: init_interactive_metrics
+
+    - init_interactive_metrics:
+        assign:
+          - interactiveStartTime: '${time.format(sys.now())}'
+        next: emit_interactive_metrics_start
+
+    - emit_interactive_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "interactive-pipeline"
+            job: ${jobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${interactiveTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${interactiveStartTime}
           severity: "INFO"
         next: run_interactive_job
 
@@ -73,16 +98,84 @@ main:
                         value: ${particulateEndpoint}
                       - name: DISALLOW_PLACEHOLDER_URDF
                         value: ${disallowPlaceholderUrdf}
-                timeout: "1800s"
+                timeout: '${string(interactiveTimeoutSeconds) + "s"}'
           result: interactiveJobExecution
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
         except:
           as: e
           steps:
+            - log_interactive_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "interactive-pipeline"
+                    job: ${jobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - capture_interactive_start_failure_metrics:
+                assign:
+                  - interactiveEndTime: '${time.format(sys.now())}'
+                  - interactiveDurationSeconds: '${time.parse(interactiveEndTime) - time.parse(interactiveStartTime)}'
+                  - interactiveTimeoutUsageRatio: '${interactiveDurationSeconds / interactiveTimeoutSeconds}'
+                  - interactiveTimedOut: '${interactiveDurationSeconds >= interactiveTimeoutSeconds}'
+            - emit_interactive_metrics_failed:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_invocation"
+                    event: "complete"
+                    workflow: "interactive-pipeline"
+                    job: ${jobName}
+                    scene_id: ${sceneId}
+                    timeout_seconds: ${interactiveTimeoutSeconds}
+                    duration_seconds: ${interactiveDurationSeconds}
+                    timeout_usage_ratio: ${interactiveTimeoutUsageRatio}
+                    timed_out: ${interactiveTimedOut}
+                    status: "FAILED"
+                    start_time: ${interactiveStartTime}
+                    end_time: ${interactiveEndTime}
+                  severity: "ERROR"
             - log_interactive_error:
                 call: sys.log
                 args:
                   text: ${"ERROR: Interactive job failed: " + e.message}
                   severity: "ERROR"
+            - write_interactive_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${interactiveFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": jobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "interactive_job_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "assets_prefix": assetsPrefix,
+                        "layout_prefix": layoutPrefix,
+                        "multiview_prefix": multiviewPrefix
+                      }
+                    }
+                  })}
             - next: done_failed
         next: set_interactive_execution_name
 
@@ -120,10 +213,67 @@ main:
         next: wait_for_interactive_job
 
     - check_interactive_failure:
+        assign:
+          - interactiveEndTime: '${time.format(sys.now())}'
+          - interactiveDurationSeconds: '${time.parse(interactiveEndTime) - time.parse(interactiveStartTime)}'
+          - interactiveTimeoutUsageRatio: '${interactiveDurationSeconds / interactiveTimeoutSeconds}'
+          - interactiveTimedOut: '${interactiveDurationSeconds >= interactiveTimeoutSeconds}'
+        next: emit_interactive_metrics_failed_from_status
+
+    - emit_interactive_metrics_failed_from_status:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "interactive-pipeline"
+            job: ${jobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${interactiveTimeoutSeconds}
+            duration_seconds: ${interactiveDurationSeconds}
+            timeout_usage_ratio: ${interactiveTimeoutUsageRatio}
+            timed_out: ${interactiveTimedOut}
+            status: "FAILED"
+            start_time: ${interactiveStartTime}
+            end_time: ${interactiveEndTime}
+          severity: "ERROR"
+        next: log_interactive_failed_message
+
+    - log_interactive_failed_message:
         call: sys.log
         args:
           text: ${"Interactive job failed for scene " + sceneId}
           severity: "ERROR"
+        next: write_interactive_failure_marker_on_failure
+
+    - write_interactive_failure_marker_on_failure:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${interactiveFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": jobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "interactive_job_failed",
+              "message": "Interactive job failed",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": interactiveExecutionName,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "assets_prefix": assetsPrefix,
+                "layout_prefix": layoutPrefix,
+                "multiview_prefix": multiviewPrefix
+              }
+            }
+          })}
         next: read_interactive_failure_marker
 
     - read_interactive_failure_marker:
@@ -152,6 +302,33 @@ main:
         next: done_failed
 
     - log_interactive_success:
+        assign:
+          - interactiveEndTime: '${time.format(sys.now())}'
+          - interactiveDurationSeconds: '${time.parse(interactiveEndTime) - time.parse(interactiveStartTime)}'
+          - interactiveTimeoutUsageRatio: '${interactiveDurationSeconds / interactiveTimeoutSeconds}'
+          - interactiveTimedOut: '${interactiveDurationSeconds >= interactiveTimeoutSeconds}'
+        next: emit_interactive_metrics_complete
+
+    - emit_interactive_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "interactive-pipeline"
+            job: ${jobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${interactiveTimeoutSeconds}
+            duration_seconds: ${interactiveDurationSeconds}
+            timeout_usage_ratio: ${interactiveTimeoutUsageRatio}
+            timed_out: ${interactiveTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${interactiveStartTime}
+            end_time: ${interactiveEndTime}
+          severity: "INFO"
+        next: log_interactive_success_message
+
+    - log_interactive_success_message:
         call: sys.log
         args:
           text: ${"Interactive job completed successfully for scene " + sceneId}

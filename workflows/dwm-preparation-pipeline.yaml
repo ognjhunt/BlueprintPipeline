@@ -66,8 +66,12 @@ main:
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - dwmPrefix: '${"scenes/" + sceneId + "/dwm"}'
           - dwmJobName: "dwm-preparation-job"
+          # Explicitly set to the Cloud Run default for consistency/metrics.
+          - dwmTimeoutSeconds: 3600
           - dwmCompleteMarker: '${"scenes/" + sceneId + "/dwm/.dwm_complete"}'
           - dwmInferenceJobName: "dwm-inference-job"
+          # Explicitly set to the Cloud Run default for consistency/metrics.
+          - dwmInferenceTimeoutSeconds: 3600
           - dwmInferenceCompleteMarker: '${"scenes/" + sceneId + "/dwm/.dwm_inference_complete"}'
           - dwmFailedMarker: '${"scenes/" + sceneId + "/dwm/.failed"}'
           - dwmLegacyFailedMarker: '${"scenes/" + sceneId + "/dwm/.dwm_failed"}'
@@ -121,6 +125,29 @@ main:
         args:
           text: '${"DWM preparation triggered for scene " + sceneId}'
           severity: "INFO"
+        next: init_dwm_metrics
+
+    - init_dwm_metrics:
+        assign:
+          - dwmStartTime: '${time.format(sys.now())}'
+        next: emit_dwm_metrics_start
+
+    - emit_dwm_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "dwm-preparation-pipeline"
+            job: ${dwmJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dwmTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${dwmStartTime}
+          severity: "INFO"
         next: run_dwm_job
 
     # Run the DWM preparation job
@@ -153,6 +180,7 @@ main:
                         value: "49"
                       - name: FPS
                         value: "24"
+              timeout: '${string(dwmTimeoutSeconds) + "s"}'
           result: dwmExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -164,11 +192,70 @@ main:
         except:
           as: e
           steps:
+            - log_dwm_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "dwm-preparation-pipeline"
+                    job: ${dwmJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - capture_dwm_failure_metrics:
+                assign:
+                  - dwmEndTime: '${time.format(sys.now())}'
+                  - dwmDurationSeconds: '${time.parse(dwmEndTime) - time.parse(dwmStartTime)}'
+                  - dwmTimeoutUsageRatio: '${dwmDurationSeconds / dwmTimeoutSeconds}'
+                  - dwmTimedOut: '${dwmDurationSeconds >= dwmTimeoutSeconds}'
+            - emit_dwm_metrics_failed:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_invocation"
+                    event: "complete"
+                    workflow: "dwm-preparation-pipeline"
+                    job: ${dwmJobName}
+                    scene_id: ${sceneId}
+                    timeout_seconds: ${dwmTimeoutSeconds}
+                    duration_seconds: ${dwmDurationSeconds}
+                    timeout_usage_ratio: ${dwmTimeoutUsageRatio}
+                    timed_out: ${dwmTimedOut}
+                    status: "FAILED"
+                    start_time: ${dwmStartTime}
+                    end_time: ${dwmEndTime}
+                  severity: "ERROR"
             - log_dwm_job_error:
                 call: sys.log
                 args:
                   text: '${"Failed to start DWM job after retries: " + e.message}'
                   severity: "ERROR"
+            - write_dwm_start_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${dwmFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": dwmJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "dwm_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "dwm_prefix": dwmPrefix
+                      }
+                    }
+                  })}
             - raise_dwm_job_error:
                 raise: ${e}
         next: set_dwm_execution_name
@@ -209,6 +296,33 @@ main:
         next: wait_for_dwm
 
     - log_dwm_complete:
+        assign:
+          - dwmEndTime: '${time.format(sys.now())}'
+          - dwmDurationSeconds: '${time.parse(dwmEndTime) - time.parse(dwmStartTime)}'
+          - dwmTimeoutUsageRatio: '${dwmDurationSeconds / dwmTimeoutSeconds}'
+          - dwmTimedOut: '${dwmDurationSeconds >= dwmTimeoutSeconds}'
+        next: emit_dwm_metrics_complete
+
+    - emit_dwm_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "dwm-preparation-pipeline"
+            job: ${dwmJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dwmTimeoutSeconds}
+            duration_seconds: ${dwmDurationSeconds}
+            timeout_usage_ratio: ${dwmTimeoutUsageRatio}
+            timed_out: ${dwmTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${dwmStartTime}
+            end_time: ${dwmEndTime}
+          severity: "INFO"
+        next: log_dwm_complete_message
+
+    - log_dwm_complete_message:
         call: sys.log
         args:
           text: '${"DWM preparation completed for scene " + sceneId}'
@@ -231,6 +345,29 @@ main:
         args:
           text: '${"Starting DWM inference for scene " + sceneId}'
           severity: "INFO"
+        next: init_dwm_inference_metrics
+
+    - init_dwm_inference_metrics:
+        assign:
+          - dwmInferenceStartTime: '${time.format(sys.now())}'
+        next: emit_dwm_inference_metrics_start
+
+    - emit_dwm_inference_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "dwm-preparation-pipeline"
+            job: ${dwmInferenceJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dwmInferenceTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${dwmInferenceStartTime}
+          severity: "INFO"
         next: run_dwm_inference_job
 
     # Run the DWM inference job
@@ -249,6 +386,7 @@ main:
                         value: ${sceneId}
                       - name: DWM_PREFIX
                         value: ${dwmPrefix}
+              timeout: '${string(dwmInferenceTimeoutSeconds) + "s"}'
           result: dwmInferenceExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -260,11 +398,70 @@ main:
         except:
           as: e
           steps:
+            - log_dwm_inference_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "dwm-preparation-pipeline"
+                    job: ${dwmInferenceJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - capture_dwm_inference_failure_metrics:
+                assign:
+                  - dwmInferenceEndTime: '${time.format(sys.now())}'
+                  - dwmInferenceDurationSeconds: '${time.parse(dwmInferenceEndTime) - time.parse(dwmInferenceStartTime)}'
+                  - dwmInferenceTimeoutUsageRatio: '${dwmInferenceDurationSeconds / dwmInferenceTimeoutSeconds}'
+                  - dwmInferenceTimedOut: '${dwmInferenceDurationSeconds >= dwmInferenceTimeoutSeconds}'
+            - emit_dwm_inference_metrics_failed:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_invocation"
+                    event: "complete"
+                    workflow: "dwm-preparation-pipeline"
+                    job: ${dwmInferenceJobName}
+                    scene_id: ${sceneId}
+                    timeout_seconds: ${dwmInferenceTimeoutSeconds}
+                    duration_seconds: ${dwmInferenceDurationSeconds}
+                    timeout_usage_ratio: ${dwmInferenceTimeoutUsageRatio}
+                    timed_out: ${dwmInferenceTimedOut}
+                    status: "FAILED"
+                    start_time: ${dwmInferenceStartTime}
+                    end_time: ${dwmInferenceEndTime}
+                  severity: "ERROR"
             - log_dwm_inference_job_error:
                 call: sys.log
                 args:
                   text: '${"Failed to start DWM inference job after retries: " + e.message}'
                   severity: "ERROR"
+            - write_dwm_inference_start_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${dwmInferenceFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": dwmInferenceJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "dwm_inference_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "dwm_prefix": dwmPrefix
+                      }
+                    }
+                  })}
             - raise_dwm_inference_job_error:
                 raise: ${e}
         next: set_dwm_inference_execution_name
@@ -303,6 +500,33 @@ main:
         next: wait_for_dwm_inference
 
     - log_dwm_inference_complete:
+        assign:
+          - dwmInferenceEndTime: '${time.format(sys.now())}'
+          - dwmInferenceDurationSeconds: '${time.parse(dwmInferenceEndTime) - time.parse(dwmInferenceStartTime)}'
+          - dwmInferenceTimeoutUsageRatio: '${dwmInferenceDurationSeconds / dwmInferenceTimeoutSeconds}'
+          - dwmInferenceTimedOut: '${dwmInferenceDurationSeconds >= dwmInferenceTimeoutSeconds}'
+        next: emit_dwm_inference_metrics_complete
+
+    - emit_dwm_inference_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "dwm-preparation-pipeline"
+            job: ${dwmInferenceJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dwmInferenceTimeoutSeconds}
+            duration_seconds: ${dwmInferenceDurationSeconds}
+            timeout_usage_ratio: ${dwmInferenceTimeoutUsageRatio}
+            timed_out: ${dwmInferenceTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${dwmInferenceStartTime}
+            end_time: ${dwmInferenceEndTime}
+          severity: "INFO"
+        next: log_dwm_inference_complete_message
+
+    - log_dwm_inference_complete_message:
         call: sys.log
         args:
           text: '${"DWM inference completed for scene " + sceneId}'
@@ -319,6 +543,33 @@ main:
         next: done
 
     - dwm_inference_failed:
+        assign:
+          - dwmInferenceEndTime: '${time.format(sys.now())}'
+          - dwmInferenceDurationSeconds: '${time.parse(dwmInferenceEndTime) - time.parse(dwmInferenceStartTime)}'
+          - dwmInferenceTimeoutUsageRatio: '${dwmInferenceDurationSeconds / dwmInferenceTimeoutSeconds}'
+          - dwmInferenceTimedOut: '${dwmInferenceDurationSeconds >= dwmInferenceTimeoutSeconds}'
+        next: emit_dwm_inference_metrics_failed_from_status
+
+    - emit_dwm_inference_metrics_failed_from_status:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "dwm-preparation-pipeline"
+            job: ${dwmInferenceJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dwmInferenceTimeoutSeconds}
+            duration_seconds: ${dwmInferenceDurationSeconds}
+            timeout_usage_ratio: ${dwmInferenceTimeoutUsageRatio}
+            timed_out: ${dwmInferenceTimedOut}
+            status: "FAILED"
+            start_time: ${dwmInferenceStartTime}
+            end_time: ${dwmInferenceEndTime}
+          severity: "ERROR"
+        next: log_dwm_inference_failed_message
+
+    - log_dwm_inference_failed_message:
         call: sys.log
         args:
           text: '${"WARNING: DWM inference failed for scene " + sceneId}'
@@ -400,6 +651,33 @@ main:
 
     - dwm_failed:
         # DWM failure is non-fatal - scene is still usable for other purposes
+        assign:
+          - dwmEndTime: '${time.format(sys.now())}'
+          - dwmDurationSeconds: '${time.parse(dwmEndTime) - time.parse(dwmStartTime)}'
+          - dwmTimeoutUsageRatio: '${dwmDurationSeconds / dwmTimeoutSeconds}'
+          - dwmTimedOut: '${dwmDurationSeconds >= dwmTimeoutSeconds}'
+        next: emit_dwm_metrics_failed_from_status
+
+    - emit_dwm_metrics_failed_from_status:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "dwm-preparation-pipeline"
+            job: ${dwmJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dwmTimeoutSeconds}
+            duration_seconds: ${dwmDurationSeconds}
+            timeout_usage_ratio: ${dwmTimeoutUsageRatio}
+            timed_out: ${dwmTimedOut}
+            status: "FAILED"
+            start_time: ${dwmStartTime}
+            end_time: ${dwmEndTime}
+          severity: "ERROR"
+        next: log_dwm_failed_message
+
+    - log_dwm_failed_message:
         call: sys.log
         args:
           text: '${"WARNING: DWM preparation failed for scene " + sceneId + " - scene still usable for simulation"}'

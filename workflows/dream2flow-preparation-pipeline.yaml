@@ -66,8 +66,12 @@ main:
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - dream2flowPrefix: '${"scenes/" + sceneId + "/dream2flow"}'
           - dream2flowJobName: "dream2flow-preparation-job"
+          # Explicitly set to the Cloud Run default for consistency/metrics.
+          - dream2flowTimeoutSeconds: 3600
           - dream2flowCompleteMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_complete"}'
           - dream2flowInferenceJobName: "dream2flow-inference-job"
+          # Explicitly set to the Cloud Run default for consistency/metrics.
+          - dream2flowInferenceTimeoutSeconds: 3600
           - dream2flowInferenceCompleteMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_inference_complete"}'
           - dream2flowFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.failed"}'
           - dream2flowLegacyFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_failed"}'
@@ -108,6 +112,29 @@ main:
         args:
           text: '${"Dream2Flow preparation triggered for scene " + sceneId}'
           severity: "INFO"
+        next: init_dream2flow_metrics
+
+    - init_dream2flow_metrics:
+        assign:
+          - dream2flowStartTime: '${time.format(sys.now())}'
+        next: emit_dream2flow_metrics_start
+
+    - emit_dream2flow_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "dream2flow-preparation-pipeline"
+            job: ${dream2flowJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dream2flowTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${dream2flowStartTime}
+          severity: "INFO"
         next: run_dream2flow_job
 
     # Run the Dream2Flow preparation job
@@ -142,6 +169,7 @@ main:
                         value: "24"
                       - name: ROBOT
                         value: "franka_panda"
+              timeout: '${string(dream2flowTimeoutSeconds) + "s"}'
           result: dream2flowExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -153,11 +181,70 @@ main:
         except:
           as: e
           steps:
+            - log_dream2flow_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "dream2flow-preparation-pipeline"
+                    job: ${dream2flowJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - capture_dream2flow_failure_metrics:
+                assign:
+                  - dream2flowEndTime: '${time.format(sys.now())}'
+                  - dream2flowDurationSeconds: '${time.parse(dream2flowEndTime) - time.parse(dream2flowStartTime)}'
+                  - dream2flowTimeoutUsageRatio: '${dream2flowDurationSeconds / dream2flowTimeoutSeconds}'
+                  - dream2flowTimedOut: '${dream2flowDurationSeconds >= dream2flowTimeoutSeconds}'
+            - emit_dream2flow_metrics_failed:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_invocation"
+                    event: "complete"
+                    workflow: "dream2flow-preparation-pipeline"
+                    job: ${dream2flowJobName}
+                    scene_id: ${sceneId}
+                    timeout_seconds: ${dream2flowTimeoutSeconds}
+                    duration_seconds: ${dream2flowDurationSeconds}
+                    timeout_usage_ratio: ${dream2flowTimeoutUsageRatio}
+                    timed_out: ${dream2flowTimedOut}
+                    status: "FAILED"
+                    start_time: ${dream2flowStartTime}
+                    end_time: ${dream2flowEndTime}
+                  severity: "ERROR"
             - log_dream2flow_job_error:
                 call: sys.log
                 args:
                   text: '${"Failed to start Dream2Flow job after retries: " + e.message}'
                   severity: "ERROR"
+            - write_dream2flow_start_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${dream2flowFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": dream2flowJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "dream2flow_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "dream2flow_prefix": dream2flowPrefix
+                      }
+                    }
+                  })}
             - raise_dream2flow_job_error:
                 raise: ${e}
         next: set_dream2flow_execution_name
@@ -197,6 +284,33 @@ main:
         next: wait_for_dream2flow
 
     - log_dream2flow_complete:
+        assign:
+          - dream2flowEndTime: '${time.format(sys.now())}'
+          - dream2flowDurationSeconds: '${time.parse(dream2flowEndTime) - time.parse(dream2flowStartTime)}'
+          - dream2flowTimeoutUsageRatio: '${dream2flowDurationSeconds / dream2flowTimeoutSeconds}'
+          - dream2flowTimedOut: '${dream2flowDurationSeconds >= dream2flowTimeoutSeconds}'
+        next: emit_dream2flow_metrics_complete
+
+    - emit_dream2flow_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "dream2flow-preparation-pipeline"
+            job: ${dream2flowJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dream2flowTimeoutSeconds}
+            duration_seconds: ${dream2flowDurationSeconds}
+            timeout_usage_ratio: ${dream2flowTimeoutUsageRatio}
+            timed_out: ${dream2flowTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${dream2flowStartTime}
+            end_time: ${dream2flowEndTime}
+          severity: "INFO"
+        next: log_dream2flow_complete_message
+
+    - log_dream2flow_complete_message:
         call: sys.log
         args:
           text: '${"Dream2Flow preparation completed for scene " + sceneId}'
@@ -219,6 +333,29 @@ main:
         args:
           text: '${"Starting Dream2Flow inference for scene " + sceneId}'
           severity: "INFO"
+        next: init_dream2flow_inference_metrics
+
+    - init_dream2flow_inference_metrics:
+        assign:
+          - dream2flowInferenceStartTime: '${time.format(sys.now())}'
+        next: emit_dream2flow_inference_metrics_start
+
+    - emit_dream2flow_inference_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "dream2flow-preparation-pipeline"
+            job: ${dream2flowInferenceJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dream2flowInferenceTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${dream2flowInferenceStartTime}
+          severity: "INFO"
         next: run_dream2flow_inference_job
 
     # Run the Dream2Flow inference job
@@ -237,6 +374,7 @@ main:
                         value: ${sceneId}
                       - name: DREAM2FLOW_PREFIX
                         value: ${dream2flowPrefix}
+              timeout: '${string(dream2flowInferenceTimeoutSeconds) + "s"}'
           result: dream2flowInferenceExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -248,11 +386,70 @@ main:
         except:
           as: e
           steps:
+            - log_dream2flow_inference_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "dream2flow-preparation-pipeline"
+                    job: ${dream2flowInferenceJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - capture_dream2flow_inference_failure_metrics:
+                assign:
+                  - dream2flowInferenceEndTime: '${time.format(sys.now())}'
+                  - dream2flowInferenceDurationSeconds: '${time.parse(dream2flowInferenceEndTime) - time.parse(dream2flowInferenceStartTime)}'
+                  - dream2flowInferenceTimeoutUsageRatio: '${dream2flowInferenceDurationSeconds / dream2flowInferenceTimeoutSeconds}'
+                  - dream2flowInferenceTimedOut: '${dream2flowInferenceDurationSeconds >= dream2flowInferenceTimeoutSeconds}'
+            - emit_dream2flow_inference_metrics_failed:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_invocation"
+                    event: "complete"
+                    workflow: "dream2flow-preparation-pipeline"
+                    job: ${dream2flowInferenceJobName}
+                    scene_id: ${sceneId}
+                    timeout_seconds: ${dream2flowInferenceTimeoutSeconds}
+                    duration_seconds: ${dream2flowInferenceDurationSeconds}
+                    timeout_usage_ratio: ${dream2flowInferenceTimeoutUsageRatio}
+                    timed_out: ${dream2flowInferenceTimedOut}
+                    status: "FAILED"
+                    start_time: ${dream2flowInferenceStartTime}
+                    end_time: ${dream2flowInferenceEndTime}
+                  severity: "ERROR"
             - log_dream2flow_inference_job_error:
                 call: sys.log
                 args:
                   text: '${"Failed to start Dream2Flow inference job after retries: " + e.message}'
                   severity: "ERROR"
+            - write_dream2flow_inference_start_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${dream2flowInferenceFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": dream2flowInferenceJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "dream2flow_inference_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "dream2flow_prefix": dream2flowPrefix
+                      }
+                    }
+                  })}
             - raise_dream2flow_inference_job_error:
                 raise: ${e}
         next: set_dream2flow_inference_execution_name
@@ -291,6 +488,33 @@ main:
         next: wait_for_dream2flow_inference
 
     - log_dream2flow_inference_complete:
+        assign:
+          - dream2flowInferenceEndTime: '${time.format(sys.now())}'
+          - dream2flowInferenceDurationSeconds: '${time.parse(dream2flowInferenceEndTime) - time.parse(dream2flowInferenceStartTime)}'
+          - dream2flowInferenceTimeoutUsageRatio: '${dream2flowInferenceDurationSeconds / dream2flowInferenceTimeoutSeconds}'
+          - dream2flowInferenceTimedOut: '${dream2flowInferenceDurationSeconds >= dream2flowInferenceTimeoutSeconds}'
+        next: emit_dream2flow_inference_metrics_complete
+
+    - emit_dream2flow_inference_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "dream2flow-preparation-pipeline"
+            job: ${dream2flowInferenceJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dream2flowInferenceTimeoutSeconds}
+            duration_seconds: ${dream2flowInferenceDurationSeconds}
+            timeout_usage_ratio: ${dream2flowInferenceTimeoutUsageRatio}
+            timed_out: ${dream2flowInferenceTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${dream2flowInferenceStartTime}
+            end_time: ${dream2flowInferenceEndTime}
+          severity: "INFO"
+        next: log_dream2flow_inference_complete_message
+
+    - log_dream2flow_inference_complete_message:
         call: sys.log
         args:
           text: '${"Dream2Flow inference completed for scene " + sceneId}'
@@ -307,6 +531,33 @@ main:
         next: done
 
     - dream2flow_inference_failed:
+        assign:
+          - dream2flowInferenceEndTime: '${time.format(sys.now())}'
+          - dream2flowInferenceDurationSeconds: '${time.parse(dream2flowInferenceEndTime) - time.parse(dream2flowInferenceStartTime)}'
+          - dream2flowInferenceTimeoutUsageRatio: '${dream2flowInferenceDurationSeconds / dream2flowInferenceTimeoutSeconds}'
+          - dream2flowInferenceTimedOut: '${dream2flowInferenceDurationSeconds >= dream2flowInferenceTimeoutSeconds}'
+        next: emit_dream2flow_inference_metrics_failed_from_status
+
+    - emit_dream2flow_inference_metrics_failed_from_status:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "dream2flow-preparation-pipeline"
+            job: ${dream2flowInferenceJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dream2flowInferenceTimeoutSeconds}
+            duration_seconds: ${dream2flowInferenceDurationSeconds}
+            timeout_usage_ratio: ${dream2flowInferenceTimeoutUsageRatio}
+            timed_out: ${dream2flowInferenceTimedOut}
+            status: "FAILED"
+            start_time: ${dream2flowInferenceStartTime}
+            end_time: ${dream2flowInferenceEndTime}
+          severity: "ERROR"
+        next: log_dream2flow_inference_failed_message
+
+    - log_dream2flow_inference_failed_message:
         call: sys.log
         args:
           text: '${"WARNING: Dream2Flow inference failed for scene " + sceneId}'
@@ -388,6 +639,33 @@ main:
 
     - dream2flow_failed:
         # Dream2Flow failure is non-fatal - scene is still usable for other purposes
+        assign:
+          - dream2flowEndTime: '${time.format(sys.now())}'
+          - dream2flowDurationSeconds: '${time.parse(dream2flowEndTime) - time.parse(dream2flowStartTime)}'
+          - dream2flowTimeoutUsageRatio: '${dream2flowDurationSeconds / dream2flowTimeoutSeconds}'
+          - dream2flowTimedOut: '${dream2flowDurationSeconds >= dream2flowTimeoutSeconds}'
+        next: emit_dream2flow_metrics_failed_from_status
+
+    - emit_dream2flow_metrics_failed_from_status:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "dream2flow-preparation-pipeline"
+            job: ${dream2flowJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${dream2flowTimeoutSeconds}
+            duration_seconds: ${dream2flowDurationSeconds}
+            timeout_usage_ratio: ${dream2flowTimeoutUsageRatio}
+            timed_out: ${dream2flowTimedOut}
+            status: "FAILED"
+            start_time: ${dream2flowStartTime}
+            end_time: ${dream2flowEndTime}
+          severity: "ERROR"
+        next: log_dream2flow_failed_message
+
+    - log_dream2flow_failed_message:
         call: sys.log
         args:
           text: '${"WARNING: Dream2Flow preparation failed for scene " + sceneId + " - scene still usable for simulation"}'

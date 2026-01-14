@@ -59,6 +59,7 @@ main:
           - segPrefix: '${"scenes/" + sceneId + "/seg"}'
           - layoutPrefix: '${"scenes/" + sceneId + "/layout"}'
           - regen3dJobName: "regen3d-adapter-job"
+          - regen3dTimeoutSeconds: 3600
           - regen3dCompleteMarker: '${assetsPrefix + "/.regen3d_complete"}'
           - regen3dFailedMarker: '${assetsPrefix + "/.failed"}'
           - regen3dLegacyFailedMarker: '${assetsPrefix + "/.regen3d_failed"}'
@@ -97,31 +98,128 @@ main:
         args:
           text: '${"3D reconstruction (3D-RE-GEN) triggered for scene " + sceneId}'
           severity: "INFO"
+        next: init_regen3d_metrics
+
+    - init_regen3d_metrics:
+        assign:
+          - regen3dStartTime: '${time.format(sys.now())}'
+        next: emit_regen3d_metrics_start
+
+    - emit_regen3d_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "regen3d-pipeline"
+            job: ${regen3dJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${regen3dTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${regen3dStartTime}
+          severity: "INFO"
         next: run_regen3d_job
 
     # Run 3D-RE-GEN adapter job to convert 2D images to 3D scene
     - run_regen3d_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
-        args:
-          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + regen3dJobName}'
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${sceneId}
-                    - name: ASSETS_PREFIX
-                      value: ${assetsPrefix}
-                    - name: SEG_PREFIX
-                      value: ${segPrefix}
-                    - name: LAYOUT_PREFIX
-                      value: ${layoutPrefix}
-                    - name: USE_MOCK_DATA
-                      value: "false"
-              timeoutSeconds: 3600  # 1 hour timeout
-        result: regen3dExec
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + regen3dJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: SEG_PREFIX
+                        value: ${segPrefix}
+                      - name: LAYOUT_PREFIX
+                        value: ${layoutPrefix}
+                      - name: USE_MOCK_DATA
+                        value: "false"
+              timeout: '${string(regen3dTimeoutSeconds) + "s"}'
+          result: regen3dExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_regen3d_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "regen3d-pipeline"
+                    job: ${regen3dJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - capture_regen3d_failure_metrics:
+                assign:
+                  - regen3dEndTime: '${time.format(sys.now())}'
+                  - regen3dDurationSeconds: '${time.parse(regen3dEndTime) - time.parse(regen3dStartTime)}'
+                  - regen3dTimeoutUsageRatio: '${regen3dDurationSeconds / regen3dTimeoutSeconds}'
+                  - regen3dTimedOut: '${regen3dDurationSeconds >= regen3dTimeoutSeconds}'
+            - emit_regen3d_metrics_failed:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_invocation"
+                    event: "complete"
+                    workflow: "regen3d-pipeline"
+                    job: ${regen3dJobName}
+                    scene_id: ${sceneId}
+                    timeout_seconds: ${regen3dTimeoutSeconds}
+                    duration_seconds: ${regen3dDurationSeconds}
+                    timeout_usage_ratio: ${regen3dTimeoutUsageRatio}
+                    timed_out: ${regen3dTimedOut}
+                    status: "FAILED"
+                    start_time: ${regen3dStartTime}
+                    end_time: ${regen3dEndTime}
+                  severity: "ERROR"
+            - write_regen3d_start_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${regen3dFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": regen3dJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "regen3d_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "assets_prefix": assetsPrefix,
+                        "layout_prefix": layoutPrefix,
+                        "seg_prefix": segPrefix
+                      }
+                    }
+                  })}
+            - raise_regen3d_job_error:
+                raise: ${e}
         next: set_regen3d_execution_name
 
     - set_regen3d_execution_name:
@@ -230,6 +328,33 @@ main:
         raise: ${errorMsg}
 
     - log_regen3d_complete:
+        assign:
+          - regen3dEndTime: '${time.format(sys.now())}'
+          - regen3dDurationSeconds: '${time.parse(regen3dEndTime) - time.parse(regen3dStartTime)}'
+          - regen3dTimeoutUsageRatio: '${regen3dDurationSeconds / regen3dTimeoutSeconds}'
+          - regen3dTimedOut: '${regen3dDurationSeconds >= regen3dTimeoutSeconds}'
+        next: emit_regen3d_metrics_complete
+
+    - emit_regen3d_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "regen3d-pipeline"
+            job: ${regen3dJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${regen3dTimeoutSeconds}
+            duration_seconds: ${regen3dDurationSeconds}
+            timeout_usage_ratio: ${regen3dTimeoutUsageRatio}
+            timed_out: ${regen3dTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${regen3dStartTime}
+            end_time: ${regen3dEndTime}
+          severity: "INFO"
+        next: log_regen3d_complete_message
+
+    - log_regen3d_complete_message:
         call: sys.log
         args:
           text: '${"3D reconstruction (3D-RE-GEN) completed for scene " + sceneId}'
@@ -239,6 +364,29 @@ main:
     - regen3d_failed:
         assign:
           - errorMsg: '${"3D reconstruction (3D-RE-GEN) job FAILED for scene " + sceneId}'
+          - regen3dEndTime: '${time.format(sys.now())}'
+          - regen3dDurationSeconds: '${time.parse(regen3dEndTime) - time.parse(regen3dStartTime)}'
+          - regen3dTimeoutUsageRatio: '${regen3dDurationSeconds / regen3dTimeoutSeconds}'
+          - regen3dTimedOut: '${regen3dDurationSeconds >= regen3dTimeoutSeconds}'
+        next: emit_regen3d_metrics_failed_from_status
+
+    - emit_regen3d_metrics_failed_from_status:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "regen3d-pipeline"
+            job: ${regen3dJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${regen3dTimeoutSeconds}
+            duration_seconds: ${regen3dDurationSeconds}
+            timeout_usage_ratio: ${regen3dTimeoutUsageRatio}
+            timed_out: ${regen3dTimedOut}
+            status: "FAILED"
+            start_time: ${regen3dStartTime}
+            end_time: ${regen3dEndTime}
+          severity: "ERROR"
         next: log_regen3d_error
 
     - log_regen3d_error:
