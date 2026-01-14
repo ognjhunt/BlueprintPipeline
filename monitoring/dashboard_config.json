@@ -360,6 +360,74 @@
             }
           }
         }
+      },
+      {
+        "yPos": 28,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Physics Validation Rate",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/blueprint_pipeline/physics_validation_score\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_MEAN"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "Validation rate (0-1)",
+              "scale": "LINEAR"
+            },
+            "thresholds": [
+              {
+                "value": 0.9,
+                "label": "Min Physics Validation Rate"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 28,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "Sensor Capture Source Mix",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/blueprint_pipeline/sensor_capture_source_total\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.source"]
+                    }
+                  }
+                },
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "Episodes/min",
+              "scale": "LINEAR"
+            }
+          }
+        }
       }
     ]
   }
