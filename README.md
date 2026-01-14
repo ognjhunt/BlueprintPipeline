@@ -281,4 +281,4 @@ for step in range(1000):
 
 ## License
 
-[Add license information]
+Licensed under the [MIT License](LICENSE).
