@@ -61,6 +61,15 @@ def _write_json_blob(client: storage.Client, bucket: str, blob_name: str, payloa
     blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
 
 
+def _write_failure_marker(
+    client: storage.Client,
+    bucket: str,
+    geniesim_prefix: str,
+    payload: Dict[str, Any],
+) -> None:
+    _write_json_blob(client, bucket, f"{geniesim_prefix}/.failed", payload)
+
+
 def _parse_version(version: str) -> tuple:
     parts = version.split(".")
     padded = (parts + ["0", "0", "0"])[:3]
@@ -164,6 +173,8 @@ def main() -> int:
     preflight_status = None
     missing_components = []
     remediation_guidance = None
+    failure_reason = None
+    failure_details: Dict[str, Any] = {}
     episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
 
     job_id = f"local-{uuid.uuid4()}"
@@ -187,6 +198,12 @@ def main() -> int:
             f"{', '.join(missing_components) or 'unknown components'}. "
             "See local_execution.remediation for next steps."
         )
+        failure_reason = "Local Genie Sim preflight failed"
+        failure_details = {
+            "missing_components": missing_components,
+            "remediation": remediation_guidance,
+            "preflight": preflight_status,
+        }
     else:
         try:
             scene_manifest = _read_json_blob(
@@ -222,6 +239,15 @@ def main() -> int:
             submission_message = "Local Genie Sim execution completed."
         else:
             submission_message = "Local Genie Sim execution failed."
+            failure_reason = "Local Genie Sim execution failed"
+            failure_details = {
+                "episodes_collected": getattr(local_run_result, "episodes_collected", 0)
+                if local_run_result
+                else 0,
+                "episodes_passed": getattr(local_run_result, "episodes_passed", 0)
+                if local_run_result
+                else 0,
+            }
 
         if not use_gcs_fuse:
             for file_path in output_dir.rglob("*"):
@@ -242,6 +268,8 @@ def main() -> int:
     )
     if submission_mode == "local" and preflight_status and not preflight_status.get("available", False):
         job_status = "failed"
+    if job_status == "failed" and not failure_reason:
+        failure_reason = "Genie Sim submission failed"
 
     job_payload = {
         "job_id": job_id,
@@ -270,6 +298,9 @@ def main() -> int:
         },
         "metrics_summary": metrics_summary,
     }
+    if job_status == "failed":
+        job_payload["failure_reason"] = failure_reason
+        job_payload["failure_details"] = failure_details
     if submission_mode == "local":
         job_payload["artifacts"] = {
             "episodes_prefix": f"gs://{bucket}/{episodes_output_prefix}/geniesim_{job_id}",
@@ -303,8 +334,23 @@ def main() -> int:
         }
 
     _write_json_blob(storage_client, bucket, job_output_path, job_payload)
+    if job_status == "failed":
+        _write_failure_marker(
+            storage_client,
+            bucket,
+            geniesim_prefix,
+            {
+                "scene_id": scene_id,
+                "job_id": job_id,
+                "status": job_status,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "reason": failure_reason,
+                "details": failure_details,
+                "job_metadata_path": f"gs://{bucket}/{job_output_path}",
+            },
+        )
     print(f"[GENIESIM-SUBMIT] Stored job metadata at gs://{bucket}/{job_output_path}")
-    return 0
+    return 1 if job_status == "failed" else 0
 
 
 if __name__ == "__main__":
