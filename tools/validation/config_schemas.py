@@ -347,7 +347,6 @@ class EnvironmentConfig(BaseModel):
 
     # External services
     particulate_endpoint: Optional[str] = None
-    genie_sim_api_endpoint: Optional[str] = None
 
     # Processing options
     max_tasks: int = Field(default=10, ge=1, le=100)
@@ -521,7 +520,6 @@ def load_and_validate_env_config() -> EnvironmentConfig:
         enable_cuRobo=os.getenv("ENABLE_CUROBO", "true").lower() == "true",
         enable_cp_gen=os.getenv("ENABLE_CP_GEN", "true").lower() == "true",
         particulate_endpoint=os.getenv("PARTICULATE_ENDPOINT"),
-        genie_sim_api_endpoint=os.getenv("GENIE_SIM_API_ENDPOINT"),
         max_tasks=int(os.getenv("MAX_TASKS", "10")),
         episodes_per_variation=int(os.getenv("EPISODES_PER_VARIATION", "5")),
         num_variations=int(os.getenv("NUM_VARIATIONS", "3")),

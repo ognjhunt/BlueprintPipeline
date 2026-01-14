@@ -19,48 +19,33 @@ class ValidationError(Exception):
 
 def validate_genie_sim_credentials(required: bool = False) -> Dict[str, any]:
     """
-    Validate Genie Sim API credentials.
+    Validate Genie Sim local framework configuration.
 
-    P0-7 FIX: Verify GENIESIM_API_KEY is set and valid format.
+    Genie Sim runs locally via gRPC, no API credentials required.
 
     Args:
-        required: If True, raise ValidationError if credentials missing
+        required: Ignored (no credentials needed for local operation)
 
     Returns:
         Dict with validation results
-
-    Raises:
-        ValidationError: If required=True and validation fails
     """
-    api_key = os.getenv("GENIE_SIM_API_KEY") or os.getenv("GENIESIM_API_KEY")
-    api_url = os.getenv("GENIE_SIM_API_URL") or os.getenv("GENIESIM_API_URL")
-
-    errors = []
     warnings = []
 
-    if not api_key:
-        errors.append("GENIE_SIM_API_KEY not set")
-    elif len(api_key) < 10:
-        errors.append("GENIE_SIM_API_KEY appears invalid (too short)")
+    # Check for gRPC host/port configuration
+    grpc_host = os.getenv("GENIESIM_HOST", "localhost")
+    grpc_port = os.getenv("GENIESIM_PORT", "50051")
+    geniesim_root = os.getenv("GENIESIM_ROOT", "/opt/geniesim")
 
-    if not api_url:
-        warnings.append("GENIE_SIM_API_URL not set - using default")
-    elif not api_url.startswith("http"):
-        errors.append(f"GENIE_SIM_API_URL invalid format: {api_url}")
-
-    if required and errors:
-        error_msg = "\n".join([
-            "Genie Sim credential validation failed:",
-            *[f"  - {e}" for e in errors],
-        ])
-        raise ValidationError(error_msg)
+    if grpc_host != "localhost":
+        warnings.append(f"GENIESIM_HOST set to {grpc_host} (typical: localhost)")
 
     return {
-        "valid": len(errors) == 0,
-        "errors": errors,
+        "valid": True,
+        "errors": [],
         "warnings": warnings,
-        "api_key_set": bool(api_key),
-        "api_url_set": bool(api_url),
+        "grpc_host": grpc_host,
+        "grpc_port": grpc_port,
+        "geniesim_root": geniesim_root,
     }
 
 

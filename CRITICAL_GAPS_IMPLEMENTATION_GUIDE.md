@@ -44,34 +44,33 @@ All critical infrastructure has been created and is ready for integration:
 
 **File:** `genie-sim-export-job/geniesim_client.py`
 
-Add import:
+Initialize with local gRPC configuration:
 ```python
-from tools.external_services import create_genie_sim_client
-```
+def __init__(self, ...):
+    # Local framework operation uses gRPC endpoints
+    self.grpc_host = os.getenv("GENIESIM_HOST", "localhost")
+    self.grpc_port = int(os.getenv("GENIESIM_PORT", "50051"))
+    self.local_endpoint = f"{self.grpc_host}:{self.grpc_port}"
 
-Replace the `__init__` method's retry logic with:
-```python
-def __init__(self, api_key: Optional[str] = None, ...):
-    # Use pre-configured service client
-    self.service_client = create_genie_sim_client()
-
-    # Keep existing initialization
-    self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
+    # No API key needed for local operation
+    self.api_key = None
+    self.endpoint = self.local_endpoint
     ...
 ```
 
-Wrap API calls:
+Validate local gRPC endpoint:
 ```python
-def submit_generation_job(self, config: dict) -> str:
-    """Submit job with automatic retry and circuit breaker."""
-    return self.service_client.call(
-        func=lambda: self._submit_generation_job_impl(config),
-        timeout=60.0,
-        operation_name="submit_generation_job",
-    )
+def _validate_local_endpoint(self) -> None:
+    """Check that local gRPC endpoint is reachable."""
+    import socket
 
-def _submit_generation_job_impl(self, config: dict) -> str:
-    """Implementation without retry logic (handled by service_client)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    result = sock.connect_ex((self.grpc_host, self.grpc_port))
+    sock.close()
+
+    if result != 0:
+        raise GenieSimAPIError(f"Cannot connect to {self.local_endpoint}")
     response = self.session.post(f"{self.api_url}/jobs", json=config)
     response.raise_for_status()
     return response.json()["job_id"]
@@ -341,13 +340,11 @@ def main():
 from tools.secrets import get_secret_or_env, SecretIds
 
 class GenieSimClient:
-    def __init__(self, api_key: Optional[str] = None, ...):
-        # Try Secret Manager first, fall back to env var
-        self.api_key = api_key or get_secret_or_env(
-            secret_id=SecretIds.GENIE_SIM_API_KEY,
-            env_var="GENIE_SIM_API_KEY",
-            fallback_to_env=True,  # Allow fallback during migration
-        )
+    def __init__(self, ...):
+        # Local framework operation - no API key needed
+        self.api_key = None
+        self.grpc_host = os.getenv("GENIESIM_HOST", "localhost")
+        self.grpc_port = int(os.getenv("GENIESIM_PORT", "50051"))
 ```
 
 #### 5.2 Batch Load Secrets at Startup

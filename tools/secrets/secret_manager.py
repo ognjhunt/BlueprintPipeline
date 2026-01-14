@@ -109,8 +109,8 @@ def get_secret_or_env(
     Example:
         # Try Secret Manager first, fall back to env var
         api_key = get_secret_or_env(
-            secret_id="genie-sim-api-key",
-            env_var="GENIE_SIM_API_KEY",
+            secret_id="gemini-api-key",
+            env_var="GEMINI_API_KEY",
         )
     """
     # Try Secret Manager first
@@ -222,7 +222,6 @@ def get_global_secret_cache(project_id: Optional[str] = None) -> SecretCache:
 # Pre-defined secret IDs for BlueprintPipeline
 class SecretIds:
     """Standard secret IDs used in BlueprintPipeline."""
-    GENIE_SIM_API_KEY = "genie-sim-api-key"
     GEMINI_API_KEY = "gemini-api-key"
     OPENAI_API_KEY = "openai-api-key"
     ANTHROPIC_API_KEY = "anthropic-api-key"
