@@ -492,6 +492,12 @@ class PipelineMetricsCollector:
             MetricType.HISTOGRAM,
         )
 
+        self.sensor_capture_source_total = self._create_metric(
+            "sensor_capture_source_total",
+            "Sensor capture source counts",
+            MetricType.COUNTER,
+        )
+
         # Resource metrics
         self.scenes_in_progress = self._create_metric(
             "scenes_in_progress",

@@ -262,6 +262,23 @@ class JobRegistry:
             ),
         )
 
+        self._jobs["quality-gate-job"] = JobInfo(
+            name="quality-gate-job",
+            description="Evaluates production SLIs and enforces quality gates on episode outputs",
+            status=JobStatus.NEW,
+            category=JobCategory.TRAINING,
+            entry_script="tools/quality_gates/sli_gate_runner.py",
+            docker_image="quality-gate-job",
+            required_env_vars=["BUCKET", "SCENE_ID", "EPISODES_PREFIX"],
+            optional_env_vars=["DATA_ROOT", "QUALITY_GATE_REPORT_PATH"],
+            depends_on=["episode-generation-job"],
+            outputs=["episodes/quality/quality_gate_report.json"],
+            migration_notes=(
+                "Runs quality gates using dataset_quality_manifest.json and "
+                "generation_manifest.json to block production runs when SLIs fall below thresholds."
+            ),
+        )
+
         self._jobs["scale-job"] = JobInfo(
             name="scale-job",
             description="Scale calibration and reference object detection",

@@ -47,6 +47,20 @@ class EpisodeThresholds:
 
 
 @dataclass
+class DataQualityThresholds:
+    """Data quality SLI thresholds."""
+    min_average_quality_score: float = 0.85
+    min_sensor_capture_rate: float = 0.90
+    min_physics_validation_rate: float = 0.90
+    allowed_sensor_sources: List[str] = field(
+        default_factory=lambda: ["isaac_sim_replicator", "simulation"]
+    )
+    allowed_physics_backends: List[str] = field(
+        default_factory=lambda: ["isaac_sim", "isaac_lab"]
+    )
+
+
+@dataclass
 class SimulationThresholds:
     """Simulation stability thresholds."""
     min_stable_steps: int = 10
@@ -81,6 +95,7 @@ class QualityConfig:
     """Complete quality gate configuration."""
     physics: PhysicsThresholds = field(default_factory=PhysicsThresholds)
     episodes: EpisodeThresholds = field(default_factory=EpisodeThresholds)
+    data_quality: DataQualityThresholds = field(default_factory=DataQualityThresholds)
     simulation: SimulationThresholds = field(default_factory=SimulationThresholds)
     human_approval: HumanApprovalConfig = field(default_factory=HumanApprovalConfig)
     gate_overrides: GateOverrideConfig = field(default_factory=GateOverrideConfig)
@@ -483,6 +498,7 @@ class ConfigLoader:
 
         # Parse into dataclass
         thresholds = config.get("thresholds", {})
+        data_quality = thresholds.get("data_quality", {})
 
         return QualityConfig(
             physics=PhysicsThresholds(
@@ -496,6 +512,19 @@ class ConfigLoader:
                 quality_score_min=thresholds.get("episodes", {}).get("quality_score_min", 0.85),
                 quality_pass_rate_min=thresholds.get("episodes", {}).get("quality_pass_rate_min", 0.50),
                 min_episodes_required=thresholds.get("episodes", {}).get("min_episodes_required", 1),
+            ),
+            data_quality=DataQualityThresholds(
+                min_average_quality_score=data_quality.get("min_average_quality_score", 0.85),
+                min_sensor_capture_rate=data_quality.get("min_sensor_capture_rate", 0.90),
+                min_physics_validation_rate=data_quality.get("min_physics_validation_rate", 0.90),
+                allowed_sensor_sources=data_quality.get(
+                    "allowed_sensor_sources",
+                    ["isaac_sim_replicator", "simulation"],
+                ),
+                allowed_physics_backends=data_quality.get(
+                    "allowed_physics_backends",
+                    ["isaac_sim", "isaac_lab"],
+                ),
             ),
             simulation=SimulationThresholds(
                 min_stable_steps=thresholds.get("simulation", {}).get("min_stable_steps", 10),
@@ -827,6 +856,20 @@ class ConfigLoader:
                                 val = episodes[key]
                                 if not (0.0 <= val <= 1.0):
                                     errors[f"thresholds.episodes.{key}"] = "Must be between 0.0 and 1.0"
+
+                # Data quality thresholds
+                if "data_quality" in thresholds:
+                    data_quality = thresholds["data_quality"]
+                    if isinstance(data_quality, dict):
+                        for key in [
+                            "min_average_quality_score",
+                            "min_sensor_capture_rate",
+                            "min_physics_validation_rate",
+                        ]:
+                            if key in data_quality:
+                                val = data_quality[key]
+                                if not (0.0 <= val <= 1.0):
+                                    errors[f"thresholds.data_quality.{key}"] = "Must be between 0.0 and 1.0"
 
         return errors
 
