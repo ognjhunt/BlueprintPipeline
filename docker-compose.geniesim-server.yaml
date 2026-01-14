@@ -1,0 +1,63 @@
+# =============================================================================
+# BlueprintPipeline - Genie Sim Server (Isaac Sim) Docker Compose
+# =============================================================================
+# This compose file provisions Isaac Sim and launches the Genie Sim gRPC server.
+#
+# Prerequisites:
+#   - NVIDIA GPU with 8GB+ VRAM
+#   - NVIDIA Container Toolkit installed
+#   - NGC authentication for Isaac Sim image pulls
+#
+# Usage:
+#   export GENIESIM_HOST=0.0.0.0
+#   export GENIESIM_PORT=50051
+#   docker-compose -f docker-compose.geniesim-server.yaml up
+# =============================================================================
+
+version: "3.8"
+
+services:
+  geniesim-server:
+    image: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:2024.1.0}
+    container_name: geniesim-server
+    environment:
+      ISAAC_SIM_PATH: ${ISAAC_SIM_PATH:-/isaac-sim}
+      GENIESIM_ROOT: ${GENIESIM_ROOT:-/opt/geniesim}
+      GENIESIM_REPO: ${GENIESIM_REPO:-https://github.com/AgibotTech/genie_sim.git}
+      GENIESIM_HOST: ${GENIESIM_HOST:-0.0.0.0}
+      GENIESIM_PORT: ${GENIESIM_PORT:-50051}
+      GENIESIM_HEADLESS: ${GENIESIM_HEADLESS:-1}
+      GENIESIM_START_SERVER: ${GENIESIM_START_SERVER:-1}
+      GENIESIM_HEALTHCHECK: ${GENIESIM_HEALTHCHECK:-1}
+      GENIESIM_SERVER_LOG: ${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
+    volumes:
+      - ./:/workspace/BlueprintPipeline:rw
+      - geniesim-root:${GENIESIM_ROOT:-/opt/geniesim}
+      - isaac-sim-cache:/root/.cache/ov
+      - isaac-sim-data:/root/.local/share/ov
+    working_dir: /workspace/BlueprintPipeline
+    command:
+      - /bin/bash
+      - -lc
+      - >
+        ./tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh &&
+        tail -f ${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
+    ports:
+      - "${GENIESIM_PORT:-50051}:50051"
+    shm_size: "16gb"
+    privileged: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  geniesim-root:
+    driver: local
+  isaac-sim-cache:
+    driver: local
+  isaac-sim-data:
+    driver: local

@@ -166,6 +166,41 @@ The bootstrap script performs the following:
 2. Starts the Genie Sim gRPC server (unless `GENIESIM_START_SERVER=0`).
 3. Runs the health check CLI (`python -m tools.geniesim_adapter.geniesim_healthcheck`).
 
+## Containerized Genie Sim Server (Docker Compose)
+
+For a reproducible **containerized** server that provisions Isaac Sim + Genie Sim in one
+place, use `docker-compose.geniesim-server.yaml`:
+
+```bash
+export GENIESIM_HOST=0.0.0.0
+export GENIESIM_PORT=50051
+docker-compose -f docker-compose.geniesim-server.yaml up
+```
+
+The compose file calls `tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh`,
+which clones Genie Sim, installs dependencies inside Isaac Sim, starts the gRPC server,
+and runs a health check.
+
+## Setup Checklist
+
+1. **Install Isaac Sim** or pull the Isaac Sim container image.
+2. **Clone Genie Sim** or allow the scripts to clone it into `GENIESIM_ROOT`.
+3. **Set environment variables** (see tables below).
+4. **Start the server** via:
+   - `./tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh`, **or**
+   - `docker-compose -f docker-compose.geniesim-server.yaml up`.
+
+## Validation Checklist
+
+1. **Preflight check** (shared by submit job + local runner):
+   ```bash
+   python -m tools.geniesim_adapter.geniesim_healthcheck
+   ```
+2. **Local availability check** (CLI wrapper around the same shared checks):
+   ```bash
+   python -m tools.geniesim_adapter.local_framework check
+   ```
+
 ## Required Environment Variables
 
 These are required for the local framework and health checks:
@@ -182,6 +217,11 @@ These are required for the local framework and health checks:
 | Variable | Description | Default |
 | --- | --- | --- |
 | `GENIESIM_ALLOW_LINEAR_FALLBACK` | Allow linear interpolation fallback when cuRobo is unavailable (`1` to enable, `0` to disable). In non-production, the local framework auto-enables this fallback if cuRobo is missing and this variable is unset; in production, cuRobo is required and the framework fails fast. | Unset (auto-enable in non-production only) |
+| `GENIESIM_REPO` | Genie Sim git repository URL (used by install scripts/containers). | `https://github.com/AgibotTech/genie_sim.git` |
+| `GENIESIM_HEADLESS` | Run the server in headless mode (`1` to enable). | `1` |
+| `GENIESIM_START_SERVER` | Auto-start the gRPC server in bootstrap/compose (`1` to enable). | `1` |
+| `GENIESIM_HEALTHCHECK` | Run the health check after starting the server. | `1` |
+| `GENIESIM_SERVER_LOG` | Log path for the server process. | `/tmp/geniesim_server.log` |
 
 ## Staged Validation Flow
 
@@ -197,7 +237,7 @@ Use this staged flow to validate Genie Sim before launching a pipeline run:
    ```
 3. **Local preflight** (called automatically by submit/run jobs):
    - `genie-sim-submit-job/submit_to_geniesim.py` runs the shared preflight helper.
-   - `tools/geniesim_adapter/local_framework.py` runs the same preflight before data collection.
+   - `tools/run_local_pipeline.py` runs the same shared preflight before local runs.
 
 ## Staging E2E Test (Real gRPC + Isaac Sim)
 
