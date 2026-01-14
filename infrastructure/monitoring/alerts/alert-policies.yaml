@@ -150,6 +150,115 @@ spec:
     - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
 
 ---
+# End-to-End Success Rate SLO Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-slo-e2e-success-rate
+spec:
+  displayName: "[Blueprint SLO] End-to-End Success Rate Below 99%"
+  documentation:
+    content: |
+      End-to-end workflow success rate dropped below the 99% SLO.
+
+      This SLO represents completed Cloud Workflow executions across all pipelines.
+
+      Actions:
+      1. Identify workflows with FAILED executions in Cloud Monitoring
+      2. Review workflow logs for systemic failures or dependency outages
+      3. Escalate to on-call if error budget burn exceeds 2% in 24h
+    mimeType: text/markdown
+  conditions:
+    - displayName: E2E Success Rate < 99% (1h)
+      conditionMonitoringQueryLanguage:
+        query: |
+          fetch workflows.googleapis.com/Workflow
+          | metric 'workflows.googleapis.com/finished_execution_count'
+          | group_by 1h, [
+              failed: sum(if(metric.label.status == "FAILED", value, 0)),
+              total: sum(value)
+            ]
+          | value [success_rate: (total - failed) / total]
+          | condition success_rate < 0.99
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Stage Latency SLO Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-slo-stage-latency
+spec:
+  displayName: "[Blueprint SLO] Stage Latency P95 Above 900s"
+  documentation:
+    content: |
+      P95 stage latency exceeded the 900 second SLO.
+
+      Stage latency is derived from bp_metric job_invocation duration_seconds.
+
+      Actions:
+      1. Identify offending workflow/job labels in the metric explorer
+      2. Check recent deploys or infrastructure saturation
+      3. Consider raising per-stage timeouts or scaling resources
+    mimeType: text/markdown
+  conditions:
+    - displayName: Job Invocation P95 Duration > 900s
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="logging.googleapis.com/user/blueprint_job_invocation_duration_seconds"
+        comparison: COMPARISON_GT
+        thresholdValue: 900
+        duration: 900s
+        aggregations:
+          - alignmentPeriod: 300s
+            perSeriesAligner: ALIGN_PERCENTILE_95
+            crossSeriesReducer: REDUCE_MAX
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Quality Pass-Rate SLO Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-slo-quality-pass-rate
+spec:
+  displayName: "[Blueprint SLO] Quality Gate Pass Rate Below 98%"
+  documentation:
+    content: |
+      Quality gate pass rate dropped below the 98% SLO.
+
+      This alert tracks quality gate failures based on validation_report.json
+      thresholds and quality_gate_report.json outcomes.
+
+      Actions:
+      1. Inspect failed quality gate reports for pass_rate and average_score
+      2. Verify validation thresholds in validation_report.json are met
+      3. Escalate if quality gate failures persist for > 30 minutes
+    mimeType: text/markdown
+  conditions:
+    - displayName: Quality Gate Pass Rate < 98% (1h)
+      conditionMonitoringQueryLanguage:
+        query: |
+          fetch global
+          | metric 'logging.googleapis.com/user/blueprint_job_invocation_total'
+          | filter metric.label.job == "quality-gate-job"
+              && metric.label.event == "complete"
+          | group_by 1h, [
+              failed: sum(if(metric.label.status == "FAILED", value, 0)),
+              total: sum(value)
+            ]
+          | value [pass_rate: (total - failed) / total]
+          | condition pass_rate < 0.98
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
 # Workflow Job Timeout Alert
 apiVersion: monitoring.googleapis.com/v1
 kind: AlertPolicy

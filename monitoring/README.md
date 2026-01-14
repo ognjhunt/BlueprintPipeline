@@ -52,6 +52,10 @@ Run the deployment script to create dashboards, alert policies, and log-based me
   - Monitor: P95 should be < 10 minutes per scene
 - **scenes_in_progress**: Concurrent scenes being processed
   - Limit: Based on max_concurrent setting
+- **blueprint_job_invocation_total**: Workflow job invocations emitted via `bp_metric`
+  - SLO: 99% end-to-end success rate across workflows
+- **blueprint_job_invocation_duration_seconds**: Stage duration from `bp_metric` logs
+  - SLO: P95 < 900s per stage
 
 ### API Usage
 - **gemini_api_calls_total**: Total Gemini API calls
@@ -71,6 +75,8 @@ Run the deployment script to create dashboards, alert policies, and log-based me
 - **episode_quality_score**: Episode quality distribution
   - Alert: If average < 0.7
 - **physics_validation_score**: Physics validation scores
+- **blueprint_quality_gate_failures_total**: Quality gate failure count
+  - SLO: Quality pass rate >= 98%
 
 ### Resource Usage
 - **objects_processed_total**: Objects processed
@@ -135,6 +141,9 @@ Run the deployment script to create dashboards, alert policies, and log-based me
 gcloud logging metrics create --config-from-file=../infrastructure/monitoring/metrics/job-timeout-events.yaml
 gcloud logging metrics create --config-from-file=../infrastructure/monitoring/metrics/job-retry-exhausted.yaml
 gcloud logging metrics create --config-from-file=../infrastructure/monitoring/metrics/job-timeout-usage.yaml
+gcloud logging metrics create --config-from-file=../infrastructure/monitoring/metrics/job-invocation-total.yaml
+gcloud logging metrics create --config-from-file=../infrastructure/monitoring/metrics/job-invocation-duration.yaml
+gcloud logging metrics create --config-from-file=../infrastructure/monitoring/metrics/quality-gate-failures.yaml
 ```
 
 ```bash
@@ -198,6 +207,19 @@ print(f"Gemini: ${breakdown.gemini:.4f}")
 print(f"Genie Sim: ${breakdown.geniesim:.4f}")
 print(f"Compute: ${breakdown.cloud_run:.4f}")
 ```
+
+## SLO Targets & On-Call Escalation
+
+### SLO Targets
+- **End-to-end success rate:** ≥ 99% over a rolling 1-hour window (Cloud Workflow executions). This is enforced by the alert policy `blueprint-slo-e2e-success-rate`.
+- **Stage latency:** P95 job invocation duration ≤ 900s over a rolling 15-minute window (from `bp_metric` job_invocation duration_seconds). This is enforced by `blueprint-slo-stage-latency`.
+- **Quality pass-rate:** ≥ 98% successful quality gate evaluations. Quality gates validate `validation_report.json` thresholds (pass_rate/average_score) and `quality_gate_report.json` can_proceed outcomes. This is enforced by `blueprint-slo-quality-pass-rate`.
+
+### On-Call Escalation
+1. **Initial page:** Primary on-call engineer via PagerDuty/Email for any SLO breach.
+2. **15 minutes:** If user impact is confirmed or the SLO remains breached, escalate to the incident commander and post in `#blueprint-oncall`.
+3. **30 minutes:** Engage service owners for the affected workflow(s) and start mitigation (rollback, scale, or disable downstream consumers).
+4. **Post-incident:** File a follow-up with root-cause analysis and error budget impact within 24 hours.
 
 ## Dashboard Queries
 
