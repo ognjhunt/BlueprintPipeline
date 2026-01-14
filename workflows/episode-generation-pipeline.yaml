@@ -45,6 +45,7 @@ main:
           - gkeCluster: "blueprint-cluster"
           - gkeZone: "us-central1-a"
           - namespace: "blueprint"
+          - enforceQualityGates: '${default(map.get(event, "enforce_quality_gates"), sys.get_env("BP_ENV") == "production")}'
           # Bundle tier for upsell features (standard, pro, enterprise, foundation)
           # Can be passed in event or read from scene config
           - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
@@ -77,6 +78,7 @@ main:
           - episodesFailedMarker: '${"scenes/" + sceneId + "/episodes/.failed"}'
           - episodesLegacyFailedMarker: '${"scenes/" + sceneId + "/episodes/.episodes_failed"}'
           - sceneConfigPath: '${"scenes/" + sceneId + "/config.json"}'
+          - qualityGateJobName: "quality-gate-job"
         next: lookup_scene_config
 
     # Lookup scene config from GCS to get customer-specific bundle tier
@@ -375,7 +377,114 @@ main:
         args:
           text: '${"Episode generation completed for scene " + sceneId}'
           severity: "INFO"
+        next: check_quality_gates
+
+    - check_quality_gates:
+        switch:
+          - condition: '${enforceQualityGates == true}'
+            next: run_quality_gate_job
         next: write_completion_marker
+
+    - run_quality_gate_job:
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + qualityGateJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: EPISODES_PREFIX
+                        value: ${episodesPrefix}
+        result: qualityGateExec
+        except:
+          as: e
+          steps:
+            - log_quality_gate_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to start quality gate job: " + e.message}'
+                  severity: "ERROR"
+            - raise_quality_gate_error:
+                raise: ${e}
+        next: set_quality_gate_execution_name
+
+    - set_quality_gate_execution_name:
+        assign:
+          - qualityGateExecutionName: '${if(qualityGateExec.metadata != null and qualityGateExec.metadata.name != null, qualityGateExec.metadata.name, qualityGateExec.name)}'
+        next: wait_for_quality_gate
+
+    - wait_for_quality_gate:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${qualityGateExecutionName}
+        result: qualityGateStatus
+        next: check_quality_gate_status
+
+    - check_quality_gate_status:
+        assign:
+          - qualityGateState: '${if(qualityGateStatus.state != null, qualityGateStatus.state, if(qualityGateStatus.status != null, qualityGateStatus.status.state, null))}'
+          - qualityGateFailedCount: '${if(qualityGateStatus.failedCount != null, qualityGateStatus.failedCount, if(qualityGateStatus.status != null, qualityGateStatus.status.failedCount, null))}'
+          - qualityGateSucceededCount: '${if(qualityGateStatus.succeededCount != null, qualityGateStatus.succeededCount, if(qualityGateStatus.status != null, qualityGateStatus.status.succeededCount, null))}'
+        next: quality_gate_status_switch
+
+    - quality_gate_status_switch:
+        switch:
+          - condition: '${qualityGateState == "FAILED" or (qualityGateFailedCount != null and qualityGateFailedCount > 0)}'
+            next: quality_gate_failed
+          - condition: '${qualityGateState == "SUCCEEDED" or (qualityGateSucceededCount != null and qualityGateSucceededCount > 0)}'
+            next: write_completion_marker
+        next: wait_for_quality_gate_poll
+
+    - wait_for_quality_gate_poll:
+        call: sys.sleep
+        args:
+          seconds: 15
+        next: wait_for_quality_gate
+
+    - quality_gate_failed:
+        call: sys.log
+        args:
+          text: '${"ERROR: Quality gate SLIs failed for scene " + sceneId}'
+          severity: "ERROR"
+        next: write_quality_gate_failure_marker
+
+    - write_quality_gate_failure_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${episodesFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": qualityGateJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "quality_gate_failed",
+              "message": "Production SLIs failed; quality gate blocked delivery",
+              "type": "workflow_failure",
+              "stack_trace": null
+            },
+            "context": {
+              "execution_id": qualityGateExecutionName,
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": 1,
+              "config_context": {
+                "episodes_prefix": episodesPrefix
+              }
+            },
+            "input_params": {
+              "scene_id": sceneId,
+              "bucket": bucket
+            }
+          })}
+        result: qualityFailMarkerResult
+        next: write_legacy_failure_marker
 
     # Write completion marker for downstream processes
     - write_completion_marker:

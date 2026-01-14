@@ -1194,6 +1194,169 @@ class QualityGateRegistry:
             notify_on_pass=True,  # Also notify on success for this one
         ))
 
+        # QG-6a: Average Quality Score SLI (blocking)
+        def check_quality_score_sli(ctx: Dict[str, Any]) -> QualityGateResult:
+            episode_stats = ctx.get("episode_stats", {})
+
+            if self.config and hasattr(self.config, "data_quality"):
+                min_avg_quality = self.config.data_quality.min_average_quality_score
+            else:
+                min_avg_quality = float(os.getenv("BP_QUALITY_AVG_SCORE_MIN", "0.85"))
+
+            avg_quality = episode_stats.get("average_quality_score", 0.0) or 0.0
+            total = episode_stats.get("total_generated", 0) or 0
+            passed = total > 0 and avg_quality >= min_avg_quality
+
+            return QualityGateResult(
+                gate_id="qg-6a-quality-score-sli",
+                checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    f"Average quality score: {avg_quality:.2f} "
+                    f"(min {min_avg_quality:.2f})"
+                ),
+                details={
+                    "average_quality_score": avg_quality,
+                    "total_episodes": total,
+                    "threshold": min_avg_quality,
+                },
+                recommendations=[
+                    "Increase episodes or adjust task constraints",
+                    "Review validation failures and sensor capture quality",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-6a-quality-score-sli",
+            name="Average Quality Score SLI",
+            checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+            severity=QualityGateSeverity.ERROR,
+            description="Ensures average episode quality meets production SLI thresholds",
+            check_fn=check_quality_score_sli,
+            notify_on_fail=True,
+            require_human_approval=True,
+        ))
+
+        # QG-6c: Sensor Capture Source SLI
+        def check_sensor_capture_sli(ctx: Dict[str, Any]) -> QualityGateResult:
+            data_quality = ctx.get("data_quality", {})
+
+            if self.config and hasattr(self.config, "data_quality"):
+                min_sensor_rate = self.config.data_quality.min_sensor_capture_rate
+                allowed_sources = self.config.data_quality.allowed_sensor_sources
+            else:
+                min_sensor_rate = float(os.getenv("BP_QUALITY_SENSOR_CAPTURE_RATE_MIN", "0.90"))
+                allowed_sources = [
+                    source.strip()
+                    for source in os.getenv(
+                        "BP_QUALITY_SENSOR_SOURCES",
+                        "isaac_sim_replicator,simulation",
+                    ).split(",")
+                    if source.strip()
+                ]
+
+            sensor_rate = float(data_quality.get("sensor_capture_rate", 0.0) or 0.0)
+            sources = data_quality.get("sensor_sources", [])
+            unexpected_sources = [
+                source for source in sources
+                if source and source not in allowed_sources
+            ]
+
+            passed = sensor_rate >= min_sensor_rate and not unexpected_sources
+
+            return QualityGateResult(
+                gate_id="qg-6c-sensor-capture",
+                checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    f"Sensor capture rate: {sensor_rate:.1%} "
+                    f"(min {min_sensor_rate:.1%})"
+                ),
+                details={
+                    "sensor_capture_rate": sensor_rate,
+                    "allowed_sources": allowed_sources,
+                    "observed_sources": sources,
+                    "unexpected_sources": unexpected_sources,
+                },
+                recommendations=[
+                    "Ensure Isaac Sim Replicator capture is enabled",
+                    "Disable mock capture in production",
+                    "Verify sensor backend configuration",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-6c-sensor-capture",
+            name="Sensor Capture Source SLI",
+            checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates sensor capture source and coverage meet SLI thresholds",
+            check_fn=check_sensor_capture_sli,
+            notify_on_fail=True,
+            require_human_approval=True,
+        ))
+
+        # QG-6d: Physics Validation SLI
+        def check_physics_validation_sli(ctx: Dict[str, Any]) -> QualityGateResult:
+            data_quality = ctx.get("data_quality", {})
+
+            if self.config and hasattr(self.config, "data_quality"):
+                min_physics_rate = self.config.data_quality.min_physics_validation_rate
+                allowed_backends = self.config.data_quality.allowed_physics_backends
+            else:
+                min_physics_rate = float(os.getenv("BP_QUALITY_PHYSICS_VALIDATION_RATE_MIN", "0.90"))
+                allowed_backends = [
+                    backend.strip()
+                    for backend in os.getenv(
+                        "BP_QUALITY_PHYSICS_BACKENDS",
+                        "isaac_sim,isaac_lab",
+                    ).split(",")
+                    if backend.strip()
+                ]
+
+            physics_rate = float(data_quality.get("physics_validation_rate", 0.0) or 0.0)
+            backends = data_quality.get("physics_backends", [])
+            unexpected_backends = [
+                backend for backend in backends
+                if backend and backend not in allowed_backends
+            ]
+
+            passed = physics_rate >= min_physics_rate and not unexpected_backends
+
+            return QualityGateResult(
+                gate_id="qg-6d-physics-validation",
+                checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    f"Physics validation rate: {physics_rate:.1%} "
+                    f"(min {min_physics_rate:.1%})"
+                ),
+                details={
+                    "physics_validation_rate": physics_rate,
+                    "allowed_backends": allowed_backends,
+                    "observed_backends": backends,
+                    "unexpected_backends": unexpected_backends,
+                },
+                recommendations=[
+                    "Run physics validation with Isaac Sim or Isaac Lab",
+                    "Disable heuristic-only validation in production",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-6d-physics-validation",
+            name="Physics Validation SLI",
+            checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates physics-backed episode validation coverage",
+            check_fn=check_physics_validation_sli,
+            notify_on_fail=True,
+            require_human_approval=True,
+        ))
+
         # LABS P1 FIX: QG-6b - Sim2Real Transfer Validation
         # This gate validates that generated episodes will transfer well to real robots
         def check_sim2real(ctx: Dict[str, Any]) -> QualityGateResult:
