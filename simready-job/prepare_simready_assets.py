@@ -784,6 +784,55 @@ def estimate_deterministic_physics(
     return base
 
 
+def _validate_non_llm_physics_quality(
+    physics_cfg: Dict[str, Any],
+    bounds: Dict[str, Any],
+) -> Tuple[bool, List[str]]:
+    """
+    Validate deterministic/heuristic physics for minimum simulation fidelity.
+
+    Returns (passed, reasons). This is intended for non-LLM paths.
+    """
+    reasons: List[str] = []
+
+    estimation_source = str(physics_cfg.get("estimation_source") or "")
+    if estimation_source in {"deterministic_default", "heuristic_default"}:
+        reasons.append("default_estimation_source")
+
+    mass = _coerce_float(physics_cfg.get("mass_kg"))
+    if mass is None or mass <= 0.0:
+        reasons.append("mass_missing_or_nonpositive")
+    elif mass > 2000.0:
+        reasons.append("mass_too_large")
+
+    volume = float(bounds.get("volume_m3") or 0.0)
+    if mass is not None and volume > 0.0:
+        density = mass / volume
+        if density < 50.0 or density > 20000.0:
+            reasons.append("density_out_of_range")
+
+    static_f = _coerce_float(physics_cfg.get("static_friction"))
+    dynamic_f = _coerce_float(physics_cfg.get("dynamic_friction"))
+    if static_f is None or dynamic_f is None:
+        reasons.append("friction_missing")
+    else:
+        if not (0.0 <= static_f <= 2.0) or not (0.0 <= dynamic_f <= 2.0):
+            reasons.append("friction_out_of_range")
+        if dynamic_f > static_f:
+            reasons.append("dynamic_friction_gt_static")
+
+    restitution = _coerce_float(physics_cfg.get("restitution"))
+    if restitution is None or restitution < 0.0 or restitution > 1.0:
+        reasons.append("restitution_out_of_range")
+
+    collision_shape = str(physics_cfg.get("collision_shape") or "").lower()
+    valid_shapes = {"box", "sphere", "capsule", "convex_hull", "convex_decomposition"}
+    if collision_shape and collision_shape not in valid_shapes:
+        reasons.append("collision_shape_invalid")
+
+    return len(reasons) == 0, reasons
+
+
 def _compact_obj_description(obj: Dict[str, Any]) -> Dict[str, Any]:
     """
     Keep prompt context rich but bounded (avoid dumping huge dicts).
@@ -2022,6 +2071,14 @@ def prepare_simready_assets_job(
     if fallback_min_coverage:
         print(f"[SIMREADY] Fallback physics min coverage={fallback_min_coverage:.2f}")
 
+    try:
+        non_llm_min_quality = float(_get_env_value("SIMREADY_NON_LLM_MIN_QUALITY", "0.85"))
+    except ValueError:
+        non_llm_min_quality = 0.85
+    non_llm_min_quality = _clamp(non_llm_min_quality, 0.0, 1.0)
+    if non_llm_min_quality:
+        print(f"[SIMREADY] Non-LLM physics min quality={non_llm_min_quality:.2f}")
+
     scene_assets = load_manifest_or_scene_assets(assets_root)
     if scene_assets is None:
         legacy_path = assets_root / "scene_assets.json"
@@ -2113,12 +2170,14 @@ def prepare_simready_assets_job(
 
     simready_paths: Dict[Any, str] = {}
     fallback_stats = {"total": 0, "covered": 0}
+    quality_stats = {"total": 0, "passed": 0}
     fallback_mode = use_deterministic_physics
 
     # GAP-PERF-002 FIX: Process objects in parallel for 10-50x speedup
-    def process_single_object(obj: Dict[str, Any]) -> Optional[Tuple[str, str, str, bool]]:
+    def process_single_object(obj: Dict[str, Any]) -> Optional[Tuple[str, str, str, bool, Optional[bool]]]:
         """
-        Process a single object. Returns (oid, sim_rel, sim_path, fallback_covered) or None on failure.
+        Process a single object. Returns (oid, sim_rel, sim_path, fallback_covered, quality_passed)
+        or None on failure.
 
         This function is thread-safe and can be called in parallel.
         """
@@ -2172,6 +2231,15 @@ def prepare_simready_assets_job(
 
             estimation_source = str(physics_cfg.get("estimation_source", ""))
             fallback_covered = estimation_source in {"deterministic_metadata", "deterministic_material"}
+            quality_passed: Optional[bool] = None
+            if use_deterministic_physics:
+                quality_passed, reasons = _validate_non_llm_physics_quality(physics_cfg, bounds)
+                if not quality_passed:
+                    print(
+                        f"[SIMREADY] WARNING: deterministic physics quality check failed for obj {oid}: "
+                        + ", ".join(reasons),
+                        file=sys.stderr,
+                    )
 
             # Compute sim2real distribution ranges for domain randomization
             physics_distributions = compute_physics_distributions(physics_cfg, bounds)
@@ -2214,7 +2282,7 @@ def prepare_simready_assets_job(
                 sim_rel = f"{assets_prefix}/static/obj_{oid}/simready.usda"
 
             print(f"[SIMREADY] ✓ Processed obj {oid}")
-            return (oid, sim_rel, str(sim_path), fallback_covered)
+            return (oid, sim_rel, str(sim_path), fallback_covered, quality_passed)
 
         except Exception as e:
             print(f"[SIMREADY] ERROR: Failed to process obj {oid}: {e}", file=sys.stderr)
@@ -2232,13 +2300,17 @@ def prepare_simready_assets_job(
         # Collect successful results
         for success_item in result.successful_results:
             if success_item:
-                oid, sim_rel, sim_path, fallback_covered = success_item
+                oid, sim_rel, sim_path, fallback_covered, quality_passed = success_item
                 simready_paths[oid] = sim_rel
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
                 if fallback_mode:
                     fallback_stats["total"] += 1
                     if fallback_covered:
                         fallback_stats["covered"] += 1
+                if quality_passed is not None:
+                    quality_stats["total"] += 1
+                    if quality_passed:
+                        quality_stats["passed"] += 1
 
         # Report failures
         if result.failed_count > 0:
@@ -2252,13 +2324,17 @@ def prepare_simready_assets_job(
         for obj in objects:
             result = process_single_object(obj)
             if result:
-                oid, sim_rel, sim_path, fallback_covered = result
+                oid, sim_rel, sim_path, fallback_covered, quality_passed = result
                 simready_paths[oid] = sim_rel
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
                 if fallback_mode:
                     fallback_stats["total"] += 1
                     if fallback_covered:
                         fallback_stats["covered"] += 1
+                if quality_passed is not None:
+                    quality_stats["total"] += 1
+                    if quality_passed:
+                        quality_stats["passed"] += 1
 
     if fallback_mode and fallback_stats["total"] > 0 and fallback_min_coverage > 0.0:
         coverage = fallback_stats["covered"] / float(fallback_stats["total"])
@@ -2274,6 +2350,21 @@ def prepare_simready_assets_job(
                 fallback_min_coverage * 100.0,
             )
             return 3
+
+    if use_deterministic_physics and quality_stats["total"] > 0 and non_llm_min_quality > 0.0:
+        quality_ratio = quality_stats["passed"] / float(quality_stats["total"])
+        print(
+            f"[SIMREADY] Non-LLM physics quality: {quality_ratio * 100.0:.1f}% "
+            f"({quality_stats['passed']}/{quality_stats['total']})"
+        )
+        if quality_ratio < non_llm_min_quality:
+            logger.error(
+                "[SIMREADY] Non-LLM physics quality %.1f%% is below the minimum %.1f%%. "
+                "Improve metadata/material coverage or lower SIMREADY_NON_LLM_MIN_QUALITY.",
+                quality_ratio * 100.0,
+                non_llm_min_quality * 100.0,
+            )
+            return 4
 
     marker_path = assets_root / ".simready_complete"
     if simready_paths:

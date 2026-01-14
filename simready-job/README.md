@@ -43,6 +43,7 @@ The published document includes:
 | `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | Allow deterministic (LLM-free) physics estimation when Gemini is unavailable | `false` |
 | `SIMREADY_ALLOW_HEURISTIC_FALLBACK` | Allow heuristic-only physics estimation in CI/testing when Gemini and deterministic modes are unavailable | `false` |
 | `SIMREADY_FALLBACK_MIN_COVERAGE` | Minimum coverage ratio for deterministic fallback physics (0-1) | `0.6` |
+| `SIMREADY_NON_LLM_MIN_QUALITY` | Minimum quality ratio for non-LLM physics checks (0-1) | `0.85` |
 | `PIPELINE_ENV` | Marks environment (`production`/`prod` enables production mode) | None |
 
 If these variables are unset, catalog calls are skipped and the job continues
@@ -62,3 +63,22 @@ When deterministic fallback is used, simready enforces a minimum physics coverag
 ratio (`SIMREADY_FALLBACK_MIN_COVERAGE`, default 0.6). Coverage counts objects
 that were estimated with metadata/material priors; if too many assets fall back
 to generic defaults the job fails, prompting you to improve metadata coverage.
+
+Deterministic (non-LLM) physics also enforces a minimum quality ratio
+(`SIMREADY_NON_LLM_MIN_QUALITY`, default 0.85). Quality checks validate that
+mass, density, friction, restitution, and collision shape remain within
+simulation-safe bounds. If the quality ratio is too low, the job fails to
+prompt richer metadata or tuned material priors.
+
+### Production modes (free vs. paid)
+
+**Free production (deterministic, no Gemini)**:
+- Required flags: `SIMREADY_PRODUCTION_MODE=1` (or `PIPELINE_ENV=production`) and
+  `SIMREADY_PHYSICS_MODE=deterministic`.
+- Enforces `SIMREADY_FALLBACK_MIN_COVERAGE` and `SIMREADY_NON_LLM_MIN_QUALITY`.
+
+**Paid production (Gemini-backed)**:
+- Required flags: `SIMREADY_PRODUCTION_MODE=1` (or `PIPELINE_ENV=production`) and
+  either `SIMREADY_PHYSICS_MODE=gemini` or `SIMREADY_PHYSICS_MODE=auto` with Gemini
+  credentials available.
+- Configure `gemini-api-key` in Secret Manager (production rejects env var fallbacks).
