@@ -94,9 +94,14 @@ def test_mock_import_contracts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     import_manifest = json.loads(import_manifest_path.read_text())
 
     assert import_manifest["schema_version"] == "1.2"
-    assert import_manifest["provenance"]["source"] == "genie_sim"
-    assert import_manifest["provenance"]["job_id"] == submit_result.job_id
-    assert import_manifest["provenance"]["scene_id"] == scene_id
+    provenance = import_manifest["provenance"]
+    assert provenance["source"] == "genie_sim"
+    assert provenance["job_id"] == submit_result.job_id
+    assert provenance["scene_id"] == scene_id
+    assert provenance["importer"] == "genie-sim-import-job"
+    assert provenance["client_mode"] == "mock"
+    assert "git_sha" in provenance
+    assert "config_snapshot" in provenance
 
     assert import_manifest["quality"]["threshold"] == 0.85
     assert import_manifest["episodes"]["passed_validation"] == 1
