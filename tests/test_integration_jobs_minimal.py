@@ -134,6 +134,23 @@ def _write_episode_outputs(output_dir: Path, scene_id: str) -> None:
     )
 
 
+def _write_variation_assets(path: Path, scene_id: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    variation_assets = {
+        "scene_id": scene_id,
+        "objects": [
+            {
+                "id": "variation_mug_1",
+                "name": "variation_mug_1",
+                "category": "mug",
+                "description": "variation mug",
+                "asset": {"path": "variation_mug_1.usd", "license": "CC0"},
+            }
+        ],
+    }
+    path.write_text(json.dumps(variation_assets, indent=2))
+
+
 def test_episode_generation_job_minimal_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     scene_id = "mock_scene"
     assets_dir = tmp_path / "scenes" / scene_id / "assets"
@@ -198,6 +215,10 @@ def test_geniesim_export_job_minimal_end_to_end(tmp_path: Path) -> None:
     assets_dir.mkdir(parents=True, exist_ok=True)
     _write_scene_manifest(assets_dir / "scene_manifest.json", scene_id)
     (assets_dir / ".usd_assembly_complete").write_text("ok")
+    _write_variation_assets(
+        tmp_path / "scenes" / scene_id / "variation_assets" / "variation_assets.json",
+        scene_id,
+    )
 
     exit_code = geniesim_export_module.run_geniesim_export_job(
         root=tmp_path,
@@ -214,6 +235,7 @@ def test_geniesim_export_job_minimal_end_to_end(tmp_path: Path) -> None:
         enable_vla_packages=False,
         enable_rich_annotations=False,
         enable_premium_analytics=False,
+        variation_assets_prefix=f"scenes/{scene_id}/variation_assets",
     )
 
     assert exit_code == 0
@@ -250,6 +272,10 @@ def test_geniesim_export_job_blocks_on_error_gate(tmp_path: Path) -> None:
     }
     (assets_dir / "scene_manifest.json").write_text(json.dumps(manifest, indent=2))
     (assets_dir / ".usd_assembly_complete").write_text("ok")
+    _write_variation_assets(
+        tmp_path / "scenes" / scene_id / "variation_assets" / "variation_assets.json",
+        scene_id,
+    )
 
     exit_code = geniesim_export_module.run_geniesim_export_job(
         root=tmp_path,
@@ -267,6 +293,67 @@ def test_geniesim_export_job_blocks_on_error_gate(tmp_path: Path) -> None:
         enable_rich_annotations=False,
         enable_premium_analytics=False,
         require_quality_gates=True,
+        variation_assets_prefix=f"scenes/{scene_id}/variation_assets",
+    )
+
+    assert exit_code == 1
+
+
+def test_geniesim_export_job_requires_variation_assets_in_commercial_mode(tmp_path: Path) -> None:
+    scene_id = "missing_variation_assets"
+    assets_dir = tmp_path / "scenes" / scene_id / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    _write_scene_manifest(assets_dir / "scene_manifest.json", scene_id)
+    (assets_dir / ".usd_assembly_complete").write_text("ok")
+
+    exit_code = geniesim_export_module.run_geniesim_export_job(
+        root=tmp_path,
+        scene_id=scene_id,
+        assets_prefix=f"scenes/{scene_id}/assets",
+        geniesim_prefix=f"scenes/{scene_id}/geniesim",
+        robot_type="franka",
+        max_tasks=1,
+        generate_embeddings=False,
+        filter_commercial=True,
+        copy_usd=False,
+        enable_multi_robot=False,
+        enable_bimanual=False,
+        enable_vla_packages=False,
+        enable_rich_annotations=False,
+        enable_premium_analytics=False,
+        variation_assets_prefix=None,
+    )
+
+    assert exit_code == 1
+
+
+def test_geniesim_export_job_requires_variation_assets_in_service_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scene_id = "service_mode_missing_variation_assets"
+    assets_dir = tmp_path / "scenes" / scene_id / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    _write_scene_manifest(assets_dir / "scene_manifest.json", scene_id)
+    (assets_dir / ".usd_assembly_complete").write_text("ok")
+    monkeypatch.setenv("SERVICE_MODE", "true")
+
+    exit_code = geniesim_export_module.run_geniesim_export_job(
+        root=tmp_path,
+        scene_id=scene_id,
+        assets_prefix=f"scenes/{scene_id}/assets",
+        geniesim_prefix=f"scenes/{scene_id}/geniesim",
+        robot_type="franka",
+        max_tasks=1,
+        generate_embeddings=False,
+        filter_commercial=False,
+        copy_usd=False,
+        enable_multi_robot=False,
+        enable_bimanual=False,
+        enable_vla_packages=False,
+        enable_rich_annotations=False,
+        enable_premium_analytics=False,
+        variation_assets_prefix="",
     )
 
     assert exit_code == 1
