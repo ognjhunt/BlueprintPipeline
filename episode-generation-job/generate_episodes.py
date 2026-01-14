@@ -157,6 +157,10 @@ from sim_validator import (
 )
 from tools.quality_gates.quality_gate import QualityGateCheckpoint, QualityGateRegistry
 from tools.workflow.failure_markers import FailureMarkerWriter
+from tools.validation.entrypoint_checks import (
+    validate_required_env_vars,
+    validate_scene_manifest,
+)
 
 # Sensor data capture (enhanced pipeline)
 try:
@@ -2815,7 +2819,7 @@ def run_episode_generation_job(
         return 1
 
 
-def main():
+def _run_main():
     """Main entry point."""
     print("\n[EPISODE-GEN-JOB] ================================")
     print("[EPISODE-GEN-JOB] Episode Generation Job (SOTA)")
@@ -3240,6 +3244,82 @@ def main():
         )
 
     sys.exit(exit_code)
+
+
+def main() -> None:
+    bucket = os.getenv("BUCKET", "")
+    scene_id = os.getenv("SCENE_ID", "")
+    assets_prefix = os.getenv(
+        "ASSETS_PREFIX",
+        f"scenes/{scene_id}/assets" if scene_id else "",
+    )
+    episodes_prefix = os.getenv(
+        "EPISODES_PREFIX",
+        f"scenes/{scene_id}/episodes" if scene_id else "",
+    )
+    input_params = {
+        "bucket": bucket,
+        "scene_id": scene_id,
+        "assets_prefix": assets_prefix,
+        "episodes_prefix": episodes_prefix,
+        "robot_type": os.getenv("ROBOT_TYPE", "franka"),
+        "episodes_per_variation": os.getenv("EPISODES_PER_VARIATION", "10"),
+        "max_variations": os.getenv("MAX_VARIATIONS"),
+        "fps": os.getenv("FPS", "30"),
+        "use_llm": os.getenv("USE_LLM", "true"),
+        "use_cpgen": os.getenv("USE_CPGEN", "true"),
+        "min_quality_score": os.getenv("MIN_QUALITY_SCORE", "0.85"),
+        "min_success_rate": os.getenv("MIN_SUCCESS_RATE", "0.5"),
+        "data_pack_tier": os.getenv("DATA_PACK_TIER", "core"),
+        "num_cameras": os.getenv("NUM_CAMERAS", "1"),
+        "image_resolution": os.getenv("IMAGE_RESOLUTION", "640,480"),
+        "capture_sensor_data": os.getenv("CAPTURE_SENSOR_DATA", "true"),
+        "use_mock_capture": os.getenv("USE_MOCK_CAPTURE", "false"),
+        "bundle_tier": os.getenv("BUNDLE_TIER", "standard"),
+    }
+    partial_results = {
+        "episodes_prefix": episodes_prefix,
+        "quality_report": (
+            f"{episodes_prefix}/quality/validation_report.json" if episodes_prefix else None
+        ),
+    }
+
+    def _write_failure_marker(exc: Exception, failed_step: str) -> None:
+        if not bucket or not scene_id:
+            print(
+                "[EPISODE-GEN-JOB] WARNING: Skipping failure marker; BUCKET/SCENE_ID missing.",
+            )
+            return
+        FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+            exception=exc,
+            failed_step=failed_step,
+            input_params=input_params,
+            partial_results=partial_results,
+        )
+
+    validated = False
+    try:
+        validate_required_env_vars(
+            {
+                "BUCKET": "GCS bucket name",
+                "SCENE_ID": "Scene identifier",
+            },
+            label="[EPISODE-GEN-JOB]",
+        )
+        if not scene_id:
+            raise ValueError("SCENE_ID is required")
+        assets_root = Path("/mnt/gcs") / assets_prefix
+        validate_scene_manifest(assets_root / "scene_manifest.json", label="[EPISODE-GEN-JOB]")
+        validated = True
+        _run_main()
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            failed_step = "entrypoint_validation" if not validated else "entrypoint_exit"
+            _write_failure_marker(RuntimeError("Job exited early"), failed_step)
+        raise
+    except Exception as exc:
+        _write_failure_marker(exc, "entrypoint")
+        raise
 
 
 if __name__ == "__main__":

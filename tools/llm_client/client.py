@@ -47,6 +47,49 @@ except ImportError:
     HAVE_SECRET_MANAGER = False
 
 
+def _get_secret_or_env_with_log(
+    secret_id: str,
+    env_var: str,
+    label: str,
+) -> Optional[str]:
+    env_value = os.getenv(env_var)
+    if HAVE_SECRET_MANAGER:
+        try:
+            value = get_secret_or_env(secret_id, env_var=env_var)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(
+                f"[LLM] WARNING: Failed to fetch secret for {label}: {exc}",
+                file=sys.stderr,
+            )
+            value = env_value
+        if value and not env_value:
+            print(
+                f"[LLM] Using Secret Manager for {label} credentials.",
+                file=sys.stderr,
+            )
+        return value
+    return env_value
+
+
+def _has_secret_or_env(secret_id: str, env_var: str) -> bool:
+    if os.getenv(env_var):
+        return True
+    if HAVE_SECRET_MANAGER:
+        try:
+            return bool(get_secret_or_env(secret_id, env_var=env_var))
+        except Exception:  # pragma: no cover - defensive
+            return False
+    return False
+
+
+def _is_production_env() -> bool:
+    return (
+        os.getenv("PRODUCTION", "").lower() == "true"
+        or os.getenv("K_SERVICE") is not None
+        or os.getenv("KUBERNETES_SERVICE_HOST") is not None
+    )
+
+
 # =============================================================================
 # Enums and Data Classes
 # =============================================================================
@@ -203,16 +246,11 @@ class GeminiClient(LLMClient):
 
         # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
         if api_key is None:
-            if HAVE_SECRET_MANAGER:
-                try:
-                    self.api_key = get_secret_or_env(
-                        SecretIds.GEMINI_API_KEY,
-                        env_var="GEMINI_API_KEY"
-                    )
-                except Exception:
-                    self.api_key = os.getenv("GEMINI_API_KEY")
-            else:
-                self.api_key = os.getenv("GEMINI_API_KEY")
+            self.api_key = _get_secret_or_env_with_log(
+                SecretIds.GEMINI_API_KEY if HAVE_SECRET_MANAGER else "gemini-api-key",
+                env_var="GEMINI_API_KEY",
+                label="Gemini",
+            )
         else:
             self.api_key = api_key
 
@@ -422,16 +460,11 @@ class OpenAIClient(LLMClient):
 
         # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
         if api_key is None:
-            if HAVE_SECRET_MANAGER:
-                try:
-                    self.api_key = get_secret_or_env(
-                        SecretIds.OPENAI_API_KEY,
-                        env_var="OPENAI_API_KEY"
-                    )
-                except Exception:
-                    self.api_key = os.getenv("OPENAI_API_KEY")
-            else:
-                self.api_key = os.getenv("OPENAI_API_KEY")
+            self.api_key = _get_secret_or_env_with_log(
+                SecretIds.OPENAI_API_KEY if HAVE_SECRET_MANAGER else "openai-api-key",
+                env_var="OPENAI_API_KEY",
+                label="OpenAI",
+            )
         else:
             self.api_key = api_key
 
@@ -661,16 +694,11 @@ class AnthropicClient(LLMClient):
 
         # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
         if api_key is None:
-            if HAVE_SECRET_MANAGER:
-                try:
-                    self.api_key = get_secret_or_env(
-                        SecretIds.ANTHROPIC_API_KEY,
-                        env_var="ANTHROPIC_API_KEY"
-                    )
-                except Exception:
-                    self.api_key = os.getenv("ANTHROPIC_API_KEY")
-            else:
-                self.api_key = os.getenv("ANTHROPIC_API_KEY")
+            self.api_key = _get_secret_or_env_with_log(
+                SecretIds.ANTHROPIC_API_KEY if HAVE_SECRET_MANAGER else "anthropic-api-key",
+                env_var="ANTHROPIC_API_KEY",
+                label="Anthropic",
+            )
         else:
             self.api_key = api_key
 
@@ -852,13 +880,26 @@ def get_default_provider() -> LLMProvider:
         return LLMProvider.GEMINI
     else:
         # Auto-detect based on available API keys (Gemini preferred)
-        if os.getenv("GEMINI_API_KEY"):
+        if _has_secret_or_env(
+            SecretIds.GEMINI_API_KEY if HAVE_SECRET_MANAGER else "gemini-api-key",
+            "GEMINI_API_KEY",
+        ):
             return LLMProvider.GEMINI
-        elif os.getenv("ANTHROPIC_API_KEY"):
+        elif _has_secret_or_env(
+            SecretIds.ANTHROPIC_API_KEY if HAVE_SECRET_MANAGER else "anthropic-api-key",
+            "ANTHROPIC_API_KEY",
+        ):
             return LLMProvider.ANTHROPIC
-        elif os.getenv("OPENAI_API_KEY"):
+        elif _has_secret_or_env(
+            SecretIds.OPENAI_API_KEY if HAVE_SECRET_MANAGER else "openai-api-key",
+            "OPENAI_API_KEY",
+        ):
             return LLMProvider.OPENAI
         else:
+            if _is_production_env():
+                raise ValueError(
+                    "No LLM provider credentials found in Secret Manager or environment variables."
+                )
             # Default to Gemini even without key (will fail with helpful error)
             return LLMProvider.GEMINI
 
