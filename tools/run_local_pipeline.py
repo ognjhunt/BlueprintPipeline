@@ -162,6 +162,7 @@ class LocalPipelineRunner:
         self.dream2flow_dir = self.scene_dir / "dream2flow"  # Dream2Flow conditioning data
 
         self.results: List[StepResult] = []
+        self._geniesim_preflight_report: Optional[Dict[str, Any]] = None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -216,6 +217,11 @@ class LocalPipelineRunner:
             self.log("Run: python fixtures/generate_mock_regen3d.py first", "ERROR")
             return False
 
+        if self._steps_require_geniesim_preflight(steps):
+            require_server = self._geniesim_requires_server(steps)
+            if not self._run_geniesim_preflight(require_server=require_server):
+                return False
+
         # Create output directories
         for d in [self.assets_dir, self.layout_dir, self.seg_dir,
                   self.usd_dir, self.replicator_dir, self.isaac_lab_dir,
@@ -238,6 +244,56 @@ class LocalPipelineRunner:
         self._print_summary()
 
         return all_success
+
+    def _steps_require_geniesim_preflight(self, steps: List[PipelineStep]) -> bool:
+        """Return True if any Genie Sim step is requested."""
+        return any(
+            step in {
+                PipelineStep.GENIESIM_EXPORT,
+                PipelineStep.GENIESIM_SUBMIT,
+                PipelineStep.GENIESIM_IMPORT,
+            }
+            for step in steps
+        )
+
+    def _geniesim_requires_server(self, steps: List[PipelineStep]) -> bool:
+        """Return True if Genie Sim server is required for requested steps."""
+        if PipelineStep.GENIESIM_SUBMIT not in steps:
+            return False
+        mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
+        return not mock_mode
+
+    def _run_geniesim_preflight(self, *, require_server: bool) -> bool:
+        """Run Genie Sim preflight checks for local steps."""
+        try:
+            from tools.geniesim_adapter.local_framework import GenieSimConfig, run_geniesim_preflight
+        except ImportError as e:
+            self.log(f"ERROR: Genie Sim preflight dependencies not found: {e}", "ERROR")
+            return False
+
+        report = run_geniesim_preflight(
+            "local-pipeline",
+            require_server=require_server,
+        )
+        self._geniesim_preflight_report = report
+        if report.get("ok", False):
+            return True
+
+        config = GenieSimConfig.from_env()
+        server_command = (
+            f"{config.isaac_sim_path}/python.sh "
+            f"{config.geniesim_root}/source/data_collection/scripts/data_collector_server.py "
+            f"--headless --port {config.port}"
+        )
+        message = (
+            "[GENIESIM-PREFLIGHT] Genie Sim prerequisites missing. "
+            f"Set ISAAC_SIM_PATH (current: {config.isaac_sim_path}), "
+            f"set GENIESIM_ROOT (current: {config.geniesim_root}), "
+            "install grpcio (pip install grpcio), "
+            f"and start the Genie Sim server: {server_command}"
+        )
+        self.log(message, "ERROR")
+        return False
 
     def _apply_labs_flags(self, run_validation: bool) -> None:
         """Apply production/labs flags for staging or lab validation runs."""
