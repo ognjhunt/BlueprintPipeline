@@ -305,6 +305,26 @@ setup_log_metrics() {
         return 0
     fi
 
+    METRICS_DIR="${SCRIPT_DIR}/metrics"
+
+    if [[ -d "$METRICS_DIR" ]]; then
+        for metric_file in "$METRICS_DIR"/*.yaml; do
+            if [[ ! -f "$metric_file" ]]; then
+                continue
+            fi
+
+            metric_name=$(grep -m1 "^name:" "$metric_file" | awk '{print $2}' || echo "$(basename "$metric_file")")
+            log_info "Creating logs-based metric from config: $metric_name"
+
+            gcloud logging metrics create \
+                --project="$PROJECT_ID" \
+                --config-from-file="$metric_file" \
+                2>/dev/null || log_info "Metric already exists: $metric_name"
+        done
+    else
+        log_warning "Metrics config directory not found: $METRICS_DIR"
+    fi
+
     # Error count by job type
     gcloud logging metrics create blueprint_error_count \
         --project="$PROJECT_ID" \
