@@ -1,0 +1,5 @@
+# Pinned constraints for variation-gen-job
+# This file is used as a constraints file with pip -c.
+google-genai==1.0.0
+pillow==10.0.0
+requests==2.32.3
