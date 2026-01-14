@@ -50,7 +50,8 @@ with local metadata.
 Simready prefers Gemini-backed physics estimation. When Gemini is unavailable,
 it will fall back to heuristic estimates. In **production mode**
 (`SIMREADY_PRODUCTION_MODE=1` or `PIPELINE_ENV=production`), heuristic-only
-physics is rejected and the job exits with an error. For CI/testing runs where
-Gemini is intentionally unavailable, set
+physics is rejected and the job exits with an error. In production, Gemini
+credentials must come from Secret Manager; env var fallbacks are rejected. For
+CI/testing runs where Gemini is intentionally unavailable, set
 `SIMREADY_ALLOW_HEURISTIC_FALLBACK=1` to acknowledge and allow the heuristic
 fallback explicitly.
