@@ -52,6 +52,18 @@ Run the local pipeline with Genie Sim enabled to generate an export bundle and s
 local data collection. Genie Sim runs in **local-only mode by default**; no API key
 is required for the free/default workflow.
 
+Prereqs for the default Genie Sim path:
+- `ISAAC_SIM_PATH` points to your Isaac Sim install (must include `python.sh`).
+- `GENIESIM_ROOT` points to your Genie Sim checkout.
+- `grpcio` is installed in the active Python environment.
+- Genie Sim gRPC server is running for local submit/import steps.
+
+Preflight command (recommended before running Genie Sim steps):
+
+```bash
+python -m tools.geniesim_adapter.geniesim_healthcheck
+```
+
 ```bash
 USE_GENIESIM=true \
 python tools/run_local_pipeline.py \
