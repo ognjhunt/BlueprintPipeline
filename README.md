@@ -76,6 +76,35 @@ scenes/{scene_id}/episodes/geniesim_{job_id}/
 └── import_manifest.json            # Produced by genie-sim-import-job
 ```
 
+### Staging Genie Sim E2E (Real gRPC + Isaac Sim)
+
+Use the staging test to validate **export → submit → import** against a real
+Genie Sim gRPC server and Isaac Sim runtime. This is intended for lab staging
+environments and is gated behind an explicit flag.
+
+Prereqs:
+- Isaac Sim installed and reachable via `ISAAC_SIM_PATH` (must include `python.sh`).
+- Genie Sim repo installed at `GENIESIM_ROOT`.
+- Genie Sim gRPC server running at `GENIESIM_HOST:GENIESIM_PORT` (default `localhost:50051`).
+- Scene data includes:
+  - `assets/scene_manifest.json`
+  - `.usd_assembly_complete` marker
+  - `.replicator_complete` marker
+  - `usd/scene.usda`
+  - `variation_assets/variation_assets.json`
+
+Run (inside Isaac Sim):
+
+```bash
+RUN_GENIESIM_STAGING_E2E=1 \
+STAGING_SCENE_DIR=/mnt/gcs/scenes/<scene_id> \
+GENIESIM_HOST=localhost \
+GENIESIM_PORT=50051 \
+ALLOW_GENIESIM_MOCK=0 \
+GENIESIM_MOCK_MODE=false \
+/isaac-sim/python.sh -m pytest tests/test_geniesim_staging_e2e.py -v
+```
+
 ### Cloud Deployment
 
 The pipeline runs on Google Cloud using:
