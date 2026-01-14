@@ -101,6 +101,15 @@ def _is_production_run() -> bool:
     )
 
 
+def _mock_capture_disallowed() -> bool:
+    """Block mock capture in production or staging environments."""
+    return (
+        os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
+        or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
+        or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
+    )
+
+
 @dataclass
 class CameraCalibration:
     """
@@ -747,17 +756,14 @@ class IsaacSimSensorCapture:
     Supports all annotation types in Isaac Sim Replicator.
 
     IMPORTANT: This class requires Isaac Sim to be running for real sensor capture.
-    When running outside Isaac Sim, initialization will fail and the caller should
-    use MockSensorCapture instead.
+    When running outside Isaac Sim, initialization will fail.
 
     Usage (inside Isaac Sim):
         capture = IsaacSimSensorCapture(config)
         if capture.initialize():
             frame_data = capture.capture_frame(0, 0.0, scene_objects)
         else:
-            # Fall back to mock capture
-            capture = MockSensorCapture(config)
-            capture.initialize()
+            raise RuntimeError("Isaac Sim not available; use dev-only mock capture explicitly.")
     """
 
     def __init__(
@@ -1510,6 +1516,15 @@ class MockSensorCapture(IsaacSimSensorCapture):
 
     # Class-level warning tracker to avoid spam
     _warning_shown = False
+
+    def __init__(self, config: SensorDataConfig, verbose: bool = True):
+        if _mock_capture_disallowed():
+            raise RuntimeError(
+                "MockSensorCapture is not allowed when DATA_QUALITY_LEVEL=production, "
+                "LABS_STAGING is enabled, or ISAAC_SIM_REQUIRED=true. "
+                "Use create_sensor_capture() to enforce production-safe behavior."
+            )
+        super().__init__(config=config, verbose=verbose)
 
     def is_mock(self) -> bool:
         """
