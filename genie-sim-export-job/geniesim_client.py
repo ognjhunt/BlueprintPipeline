@@ -419,27 +419,35 @@ def safe_extract_tar(archive_path: Path, output_dir: Path) -> None:
 
     output_dir = Path(output_dir).resolve()
 
+    def _validate_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
+        member_path = Path(member.name)
+        if member_path.is_absolute():
+            raise ValueError(f"Suspicious path in archive: {member.name}")
+
+        if ".." in member_path.parts:
+            raise ValueError(f"Path traversal detected in archive: {member.name}")
+
+        if member.issym() or member.islnk():
+            raise ValueError(f"Symlink detected in archive: {member.name}")
+
+        resolved_target = (output_dir / member.name).resolve()
+        try:
+            resolved_target.relative_to(output_dir)
+        except ValueError:
+            raise ValueError(f"Path traversal detected in archive: {member.name}")
+
+        return member
+
     with tarfile.open(archive_path, "r:gz") as tar:
-        for member in tar.getmembers():
-            # Normalize the member path
-            member_path = (output_dir / member.name).resolve()
-
-            # Check if extracted path would be outside output_dir
-            try:
-                member_path.relative_to(output_dir)
-            except ValueError:
-                raise ValueError(
-                    f"Path traversal detected in archive: {member.name}"
-                )
-
-            # Check for absolute paths or parent directory references
-            if member.name.startswith('/') or member.name.startswith('..'):
-                raise ValueError(
-                    f"Suspicious path in archive: {member.name}"
-                )
-
-        # All members validated - safe to extract
-        tar.extractall(output_dir)
+        try:
+            tar.extractall(
+                output_dir,
+                filter=lambda member, _: _validate_member(member),
+            )
+        except TypeError:
+            for member in tar.getmembers():
+                _validate_member(member)
+                tar.extract(member, output_dir)
 
 
 class GenieSimClient:
