@@ -68,6 +68,10 @@ main:
           - object: ${event.data.name}
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: "us-central1"
+          - workflowName: "genie-sim-export-pipeline"
+          - geniesimExportTimeoutSeconds: 2700
+          - geniesimSubmissionTimeoutSeconds: 3600
+          - geniesimGenerationSlaSeconds: 14400
           # Default to commercial-only assets (your own assets, not GenieSimAssets)
           - filterCommercial: true
           # Robot type (franka, g2, ur10)
@@ -192,6 +196,26 @@ main:
         args:
           text: '${"Genie Sim export triggered for scene " + sceneId + " (robot: " + robotType + ", commercial_only: " + string(filterCommercial) + ")"}'
           severity: "INFO"
+        next: init_export_metrics
+
+    - init_export_metrics:
+        assign:
+          - exportStartTime: '${time.format(sys.now())}'
+        next: emit_export_metrics_start
+
+    - emit_export_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: ${workflowName}
+            job: ${geniesimJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${geniesimExportTimeoutSeconds}
+            retry_max: 5
+            start_time: ${exportStartTime}
+          severity: "INFO"
         next: run_geniesim_job
 
     # Run the Genie Sim export job
@@ -233,6 +257,7 @@ main:
                         value: "true"
                       - name: ENABLE_VLA_PACKAGES
                         value: "true"
+            timeout: '${string(geniesimExportTimeoutSeconds) + "s"}'
           result: geniesimExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -244,6 +269,17 @@ main:
         except:
           as: e
           steps:
+            - log_export_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: ${workflowName}
+                    job: ${geniesimJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 5
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_job_error:
                 call: sys.log
                 args:
@@ -287,6 +323,34 @@ main:
         next: wait_for_job
 
     - log_job_complete:
+        assign:
+          - exportEndTime: '${time.format(sys.now())}'
+          - exportDurationSeconds: '${time.parse(exportEndTime) - time.parse(exportStartTime)}'
+          - exportTimeoutUsageRatio: '${exportDurationSeconds / geniesimExportTimeoutSeconds}'
+          - exportTimedOut: '${exportDurationSeconds >= geniesimExportTimeoutSeconds}'
+        next: emit_export_metrics_complete
+
+    - emit_export_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: ${workflowName}
+            job: ${geniesimJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${geniesimExportTimeoutSeconds}
+            duration_seconds: ${exportDurationSeconds}
+            timeout_usage_ratio: ${exportTimeoutUsageRatio}
+            timed_out: ${exportTimedOut}
+            status: "SUCCEEDED"
+            execution_name: ${executionName}
+            start_time: ${exportStartTime}
+            end_time: ${exportEndTime}
+          severity: "INFO"
+        next: log_export_complete_message
+
+    - log_export_complete_message:
         call: sys.log
         args:
           text: '${"Genie Sim export completed for scene " + sceneId}'
@@ -294,6 +358,39 @@ main:
         next: select_geniesim_submission_job
 
     - select_geniesim_submission_job:
+        switch:
+          - condition: '${geniesimSubmissionMode == "local"}'
+            next: init_local_submission_metrics
+        next: init_api_submission_metrics
+
+    - init_local_submission_metrics:
+        assign:
+          - submissionStartTime: '${time.format(sys.now())}'
+          - submissionJobName: ${geniesimGpuJobName}
+        next: emit_submission_metrics_start
+
+    - init_api_submission_metrics:
+        assign:
+          - submissionStartTime: '${time.format(sys.now())}'
+          - submissionJobName: ${geniesimSubmitJobName}
+        next: emit_submission_metrics_start
+
+    - emit_submission_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: ${workflowName}
+            job: ${submissionJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${geniesimSubmissionTimeoutSeconds}
+            retry_max: 3
+            start_time: ${submissionStartTime}
+          severity: "INFO"
+        next: dispatch_submission_job
+
+    - dispatch_submission_job:
         switch:
           - condition: '${geniesimSubmissionMode == "local"}'
             next: run_geniesim_gpu_job
@@ -335,6 +432,7 @@ main:
                         value: '${default(sys.get_env("GENIESIM_ROOT"), "/opt/geniesim")}'
                       - name: ISAAC_SIM_PATH
                         value: '${default(sys.get_env("ISAAC_SIM_PATH"), "/isaac-sim")}'
+            timeout: '${string(geniesimSubmissionTimeoutSeconds) + "s"}'
         result: geniesimSubmitExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -346,6 +444,17 @@ main:
         except:
           as: e
           steps:
+            - log_local_submission_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: ${workflowName}
+                    job: ${geniesimGpuJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_submission_error:
                 call: sys.log
                 args:
@@ -379,6 +488,7 @@ main:
                         value: "10"
                       - name: NUM_VARIATIONS
                         value: "5"
+            timeout: '${string(geniesimSubmissionTimeoutSeconds) + "s"}'
         result: geniesimSubmitExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -390,6 +500,17 @@ main:
         except:
           as: e
           steps:
+            - log_submission_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: ${workflowName}
+                    job: ${geniesimSubmitJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_submission_error:
                 call: sys.log
                 args:
@@ -433,6 +554,34 @@ main:
         next: wait_for_submission_job
 
     - submission_failed:
+        assign:
+          - submissionEndTime: '${time.format(sys.now())}'
+          - submissionDurationSeconds: '${time.parse(submissionEndTime) - time.parse(submissionStartTime)}'
+          - submissionTimeoutUsageRatio: '${submissionDurationSeconds / geniesimSubmissionTimeoutSeconds}'
+          - submissionTimedOut: '${submissionDurationSeconds >= geniesimSubmissionTimeoutSeconds}'
+        next: emit_submission_metrics_failed
+
+    - emit_submission_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: ${workflowName}
+            job: ${submissionJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${geniesimSubmissionTimeoutSeconds}
+            duration_seconds: ${submissionDurationSeconds}
+            timeout_usage_ratio: ${submissionTimeoutUsageRatio}
+            timed_out: ${submissionTimedOut}
+            status: "FAILED"
+            execution_name: ${submissionExecutionName}
+            start_time: ${submissionStartTime}
+            end_time: ${submissionEndTime}
+          severity: "ERROR"
+        next: log_submission_failed_message
+
+    - log_submission_failed_message:
         call: sys.log
         args:
           text: '${"ERROR: Genie Sim submission failed for scene " + sceneId}'
@@ -444,6 +593,34 @@ main:
           message: '${"Genie Sim submission failed for scene " + sceneId}'
 
     - log_submission_complete:
+        assign:
+          - submissionEndTime: '${time.format(sys.now())}'
+          - submissionDurationSeconds: '${time.parse(submissionEndTime) - time.parse(submissionStartTime)}'
+          - submissionTimeoutUsageRatio: '${submissionDurationSeconds / geniesimSubmissionTimeoutSeconds}'
+          - submissionTimedOut: '${submissionDurationSeconds >= geniesimSubmissionTimeoutSeconds}'
+        next: emit_submission_metrics_complete
+
+    - emit_submission_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: ${workflowName}
+            job: ${submissionJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${geniesimSubmissionTimeoutSeconds}
+            duration_seconds: ${submissionDurationSeconds}
+            timeout_usage_ratio: ${submissionTimeoutUsageRatio}
+            timed_out: ${submissionTimedOut}
+            status: "SUCCEEDED"
+            execution_name: ${submissionExecutionName}
+            start_time: ${submissionStartTime}
+            end_time: ${submissionEndTime}
+          severity: "INFO"
+        next: log_submission_complete_message
+
+    - log_submission_complete_message:
         call: sys.log
         args:
           text: '${"Genie Sim submission recorded for scene " + sceneId + " at " + geniesimJobMetadataPath}'
@@ -487,7 +664,52 @@ main:
           - submittedEpisodesPrefix: ${default(map.get(map.get(submissionMetadata, "artifacts", {}), "episodes_prefix"), null)}
           - submittedFailureReason: ${default(map.get(submissionMetadata, "failure_reason"), "unknown")}
           - submittedFailureDetails: ${default(map.get(submissionMetadata, "failure_details"), null)}
+          - submittedJobMetrics: ${default(map.get(submissionMetadata, "job_metrics"), null)}
+          - submittedMetricsDuration: ${default(map.get(submittedJobMetrics, "duration_seconds"), null)}
+          - submittedMetricsStatus: ${default(map.get(submittedJobMetrics, "status"), null)}
+          - submittedMetricsQualityPassRate: ${default(map.get(submittedJobMetrics, "quality_pass_rate"), null)}
+        next: evaluate_submission_metrics
+
+    - evaluate_submission_metrics:
+        switch:
+          - condition: '${submittedJobStatus == "completed" and submittedJobMetrics != null}'
+            next: check_submission_sla
+          - condition: '${submittedJobStatus == "completed" and submittedJobMetrics == null}'
+            next: log_missing_submission_metrics
         next: maybe_trigger_import
+
+    - log_missing_submission_metrics:
+        call: sys.log
+        args:
+          text: '${"Genie Sim job metrics missing for scene " + sceneId + " (job: " + submittedJobId + ")"}'
+          severity: "WARNING"
+        next: maybe_trigger_import
+
+    - check_submission_sla:
+        switch:
+          - condition: '${submittedMetricsDuration != null and submittedMetricsDuration > geniesimGenerationSlaSeconds}'
+            next: log_submission_sla_violation
+        next: maybe_trigger_import
+
+    - log_submission_sla_violation:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "geniesim_sla_violation"
+            workflow: ${workflowName}
+            scene_id: ${sceneId}
+            job_id: ${submittedJobId}
+            sla_seconds: ${geniesimGenerationSlaSeconds}
+            duration_seconds: ${submittedMetricsDuration}
+            status: ${submittedMetricsStatus}
+            quality_pass_rate: ${submittedMetricsQualityPassRate}
+            job_metadata_path: ${geniesimJobMetadataPath}
+          severity: "ERROR"
+        next: raise_submission_sla_violation
+
+    - raise_submission_sla_violation:
+        raise:
+          message: '${"Genie Sim job SLA breached for scene " + sceneId + " (job: " + submittedJobId + ")"}'
 
     - maybe_trigger_import:
         switch:
@@ -613,6 +835,34 @@ main:
         call: sys.log
         args:
           text: '${"ERROR: Genie Sim export failed for scene " + sceneId}'
+          severity: "ERROR"
+        next: capture_export_failure_metrics
+
+    - capture_export_failure_metrics:
+        assign:
+          - exportEndTime: '${time.format(sys.now())}'
+          - exportDurationSeconds: '${time.parse(exportEndTime) - time.parse(exportStartTime)}'
+          - exportTimeoutUsageRatio: '${exportDurationSeconds / geniesimExportTimeoutSeconds}'
+          - exportTimedOut: '${exportDurationSeconds >= geniesimExportTimeoutSeconds}'
+        next: emit_export_metrics_failed
+
+    - emit_export_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: ${workflowName}
+            job: ${geniesimJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${geniesimExportTimeoutSeconds}
+            duration_seconds: ${exportDurationSeconds}
+            timeout_usage_ratio: ${exportTimeoutUsageRatio}
+            timed_out: ${exportTimedOut}
+            status: "FAILED"
+            execution_name: ${executionName}
+            start_time: ${exportStartTime}
+            end_time: ${exportEndTime}
           severity: "ERROR"
         next: read_failure_marker
 

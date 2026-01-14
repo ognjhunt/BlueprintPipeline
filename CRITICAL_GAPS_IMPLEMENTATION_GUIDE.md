@@ -198,6 +198,47 @@ from tools.validation import (
 )
 ```
 
+---
+
+## Genie Sim Export SLI/SLOs and Error Budgets
+
+This section defines the service-level indicators (SLIs), service-level objectives (SLOs), and error budgets that the Genie Sim export pipeline enforces and alerts on.
+
+### SLIs
+
+1. **Export Job Duration (Genie Sim Export Job):** Time from job start to completion for the export job.
+2. **Submission Job Duration (Genie Sim Submit/GPU Job):** Time from submission job start to completion.
+3. **Genie Sim Generation Duration:** End-to-end duration from submission to generation completion (from `job_metrics.duration_seconds`).
+4. **Job Failure Rate:** Count of workflow job invocations that complete with `FAILED` status.
+
+### SLOs
+
+| SLI | Objective | Workflow Field | Default |
+| --- | --- | --- | --- |
+| Export Job Duration | 99% of export jobs complete within 45 minutes | `geniesimExportTimeoutSeconds` | 2700 seconds |
+| Submission Job Duration | 99% of submission jobs complete within 60 minutes | `geniesimSubmissionTimeoutSeconds` | 3600 seconds |
+| Generation Duration | 95% of Genie Sim generation jobs complete within 4 hours | `geniesimGenerationSlaSeconds` | 14400 seconds |
+| Job Failure Rate | <1% failures per 7-day window | `bp_metric=job_invocation` | 1% error budget |
+
+### Error Budgets
+
+- **Export/Submission Duration:** 1% of runs per 7-day window may exceed SLOs before paging.
+- **Generation Duration:** 5% of runs per 7-day window may exceed 4 hours before paging.
+- **Failure Rate:** 1% of workflow invocations may fail per 7-day window.
+
+### Monitoring & Alerting Wiring
+
+The following log-based metrics and alert policies are wired into Cloud Monitoring:
+
+- `blueprint_job_failure_events` → Alert policy: **[Blueprint] Workflow Job Failure Detected**
+- `blueprint_geniesim_sla_violations` → Alert policy: **[Blueprint] Genie Sim SLA Violation**
+- `blueprint_job_timeout_events`, `blueprint_job_timeout_usage_ratio`, `blueprint_job_retry_exhausted_total`
+
+These metrics are emitted via structured workflow logs and should be deployed alongside existing monitoring infrastructure:
+
+- Metrics definitions: `infrastructure/monitoring/metrics/*.yaml`
+- Alert policies: `infrastructure/monitoring/alerts/alert-policies.yaml`
+
 Add validation in `_convert_object_to_node`:
 ```python
 def _convert_object_to_node(self, obj: Dict, usd_base_path: str) -> Optional[SceneNode]:

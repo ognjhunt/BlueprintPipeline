@@ -115,6 +115,74 @@ spec:
     - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
 
 ---
+# Workflow Job Failure Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-workflow-job-failure
+spec:
+  displayName: "[Blueprint] Workflow Job Failure Detected"
+  documentation:
+    content: |
+      A workflow job invocation completed with FAILED status.
+
+      Actions:
+      1. Inspect workflow logs for failure root cause
+      2. Check Genie Sim job metadata for metrics and failure details
+      3. Verify job inputs and upstream asset generation
+    mimeType: text/markdown
+  conditions:
+    - displayName: Job Failure Events > 0
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="logging.googleapis.com/user/blueprint_job_failure_events"
+        comparison: COMPARISON_GT
+        thresholdValue: 0
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_SUM
+            crossSeriesReducer: REDUCE_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Genie Sim SLA Violation Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-geniesim-sla-violation
+spec:
+  displayName: "[Blueprint] Genie Sim SLA Violation"
+  documentation:
+    content: |
+      Genie Sim job duration exceeded the configured SLA threshold.
+
+      Actions:
+      1. Check Genie Sim job metrics in job.json
+      2. Review local runtime environment for bottlenecks
+      3. Adjust SLA thresholds or increase compute if needed
+    mimeType: text/markdown
+  conditions:
+    - displayName: Genie Sim SLA Violations > 0
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="logging.googleapis.com/user/blueprint_geniesim_sla_violations"
+        comparison: COMPARISON_GT
+        thresholdValue: 0
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_SUM
+            crossSeriesReducer: REDUCE_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
 # Workflow Job Timeout Usage Alert
 apiVersion: monitoring.googleapis.com/v1
 kind: AlertPolicy
