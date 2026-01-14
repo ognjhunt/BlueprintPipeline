@@ -77,6 +77,7 @@ class TestSafeExtractTar:
         # Should raise ValueError
         with pytest.raises(ValueError, match="Suspicious path"):
             safe_extract_tar(archive_path, output_dir)
+        assert list(output_dir.iterdir()) == []
 
     def test_blocks_parent_directory_traversal(self, tmp_path):
         """Test that parent directory references are blocked."""
@@ -97,6 +98,7 @@ class TestSafeExtractTar:
         # Should raise ValueError
         with pytest.raises(ValueError, match="Suspicious path|Path traversal"):
             safe_extract_tar(archive_path, output_dir)
+        assert list(output_dir.iterdir()) == []
 
     def test_blocks_complex_traversal(self, tmp_path):
         """Test that complex traversal attempts are blocked."""
@@ -117,6 +119,25 @@ class TestSafeExtractTar:
         # Should raise ValueError (path normalization will catch this)
         with pytest.raises(ValueError, match="Path traversal"):
             safe_extract_tar(archive_path, output_dir)
+        assert list(output_dir.iterdir()) == []
+
+    def test_blocks_mixed_traversal_payload(self, tmp_path):
+        """Test that mixed traversal payloads are blocked."""
+        archive_path = tmp_path / "mixed_traversal.tar.gz"
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        with tarfile.open(archive_path, "w:gz") as tar:
+            content = b"Malicious content"
+            tarinfo = tarfile.TarInfo(name="safe/../../escape.txt")
+            tarinfo.size = len(content)
+
+            import io
+            tar.addfile(tarinfo, io.BytesIO(content))
+
+        with pytest.raises(ValueError, match="Path traversal"):
+            safe_extract_tar(archive_path, output_dir)
+        assert list(output_dir.iterdir()) == []
 
     def test_allows_safe_relative_paths(self, tmp_path):
         """Test that safe relative paths within output dir are allowed."""
