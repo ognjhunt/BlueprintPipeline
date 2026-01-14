@@ -266,8 +266,13 @@ to keep CI lightweight.
 
 **Run**
 
+Use production deterministic settings during staging so SimReady enforces the
+production gating path.
+
 ```bash
 RUN_GENIESIM_STAGING_E2E=1 \
+PIPELINE_ENV=production \
+SIMREADY_PHYSICS_MODE=deterministic \
 STAGING_SCENE_DIR=/mnt/gcs/scenes/<scene_id> \
 GENIESIM_HOST=localhost \
 GENIESIM_PORT=50051 \

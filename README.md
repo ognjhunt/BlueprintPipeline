@@ -93,10 +93,13 @@ Prereqs:
   - `usd/scene.usda`
   - `variation_assets/variation_assets.json`
 
-Run (inside Isaac Sim):
+Run (inside Isaac Sim). For the deterministic production path used in staging, set
+`PIPELINE_ENV=production` and `SIMREADY_PHYSICS_MODE=deterministic`:
 
 ```bash
 RUN_GENIESIM_STAGING_E2E=1 \
+PIPELINE_ENV=production \
+SIMREADY_PHYSICS_MODE=deterministic \
 STAGING_SCENE_DIR=/mnt/gcs/scenes/<scene_id> \
 GENIESIM_HOST=localhost \
 GENIESIM_PORT=50051 \
