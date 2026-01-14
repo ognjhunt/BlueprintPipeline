@@ -7,7 +7,7 @@
 # workflow whenever completion markers are uploaded to GCS:
 #
 #   1. .usd_complete - USD baseline scene
-#   2. .geniesim_complete - Genie Sim export complete
+#   2. .geniesim_complete - Genie Sim export complete (.geniesim_submitted ignored)
 #   3. .isaac_lab_complete - Isaac Lab task generation complete
 #
 # The pipeline exports scenes to Isaac Lab-Arena format for policy evaluation.
@@ -116,7 +116,7 @@ if ! gcloud workflows describe ${WORKFLOW_NAME} --location=${REGION} --project=$
     gcloud workflows deploy ${WORKFLOW_NAME} \
         --location=${REGION} \
         --source=arena-export-pipeline.yaml \
-        --description="Arena export pipeline (triggered by .usd_complete, .geniesim_complete, or .isaac_lab_complete)" \
+        --description="Arena export pipeline (triggered by .usd_complete, .geniesim_complete, or .isaac_lab_complete; ignores .geniesim_submitted)" \
         --service-account=${SA_EMAIL} \
         --project=${PROJECT_ID}
 else
@@ -198,6 +198,7 @@ echo "The pipeline will trigger when ANY of these markers are uploaded:"
 echo "  gs://${BUCKET}/scenes/{scene_id}/usd/.usd_complete"
 echo "  gs://${BUCKET}/scenes/{scene_id}/geniesim/.geniesim_complete"
 echo "  gs://${BUCKET}/scenes/{scene_id}/isaac_lab/.isaac_lab_complete"
+echo "  (Note: .geniesim_submitted does not trigger Arena export)"
 echo ""
 echo "This will generate Arena format for policy evaluation infrastructure."
 echo ""
