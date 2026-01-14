@@ -538,13 +538,14 @@ class TestPipelineSelector:
         selector = PipelineSelector()
         jobs = selector._get_geniesim_jobs()
 
-        # Should end with genie-sim-export-job
-        assert jobs[-1] == "genie-sim-export-job"
+        # Should end with local Genie Sim submission
+        assert jobs[-1] == "genie-sim-submit-job"
+        assert "genie-sim-export-job" in jobs
+        assert "variation-gen-job" in jobs
 
         # Should NOT include episode-generation-job or isaac-lab-job
         assert "episode-generation-job" not in jobs
         assert "isaac-lab-job" not in jobs
-        assert "variation-gen-job" not in jobs
 
     def test_geniesim_submission_defaults_local_with_api_key(self, monkeypatch):
         """Ensure Genie Sim is always local even when API-related env vars are set."""
