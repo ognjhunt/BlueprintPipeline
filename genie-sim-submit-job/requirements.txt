@@ -8,5 +8,9 @@ aiohttp==3.9.5
 google-cloud-storage==2.18.2
 # Optional response validation
 pydantic==2.8.2
+# gRPC client + tooling
+grpcio==1.66.1
+grpcio-tools==1.66.1
+protobuf==5.27.3
 # Local framework dependencies
 numpy==1.26.4
