@@ -486,6 +486,12 @@ class PipelineMetricsCollector:
             MetricType.HISTOGRAM,
         )
 
+        self.collision_free_rate = self._create_metric(
+            "collision_free_rate",
+            "Collision-free episode rate",
+            MetricType.GAUGE,
+        )
+
         self.physics_validation_score = self._create_metric(
             "physics_validation_score",
             "Physics validation scores",

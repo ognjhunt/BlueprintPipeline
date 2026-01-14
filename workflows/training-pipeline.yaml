@@ -25,6 +25,8 @@ main:
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT")}
           - region: "us-central1"
           - bucket: ${sys.get_env("GCS_BUCKET", "blueprintpipeline-data")}
+          - trainingJobName: "training-job"
+          - trainingTimeoutSeconds: 21600
 
     - extract_event:
         switch:
@@ -87,11 +89,33 @@ main:
                     job_id: ${job_id}
                     reason: "Insufficient episodes for training"
 
+    - init_training_metrics:
+        assign:
+          - trainingStartTime: '${time.format(sys.now())}'
+        next: emit_training_metrics_start
+
+    - emit_training_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "training-pipeline"
+            job: ${trainingJobName}
+            scene_id: ${scene_id}
+            timeout_seconds: ${trainingTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${trainingStartTime}
+          severity: "INFO"
+
     # Launch training job
     - run_training_job:
         call: googleapis.run.v2.projects.locations.jobs.run
         args:
-          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/training-job"}
+          name: ${"projects/" + project_id + "/locations/" + region + "/jobs/" + trainingJobName}
           body:
             overrides:
               containerOverrides:
@@ -154,6 +178,33 @@ main:
         next: wait_for_training
 
     - check_training_failure:
+        assign:
+          - trainingEndTime: '${time.format(sys.now())}'
+          - trainingDurationSeconds: '${time.parse(trainingEndTime) - time.parse(trainingStartTime)}'
+          - trainingTimeoutUsageRatio: '${trainingDurationSeconds / trainingTimeoutSeconds}'
+          - trainingTimedOut: '${trainingDurationSeconds >= trainingTimeoutSeconds}'
+        next: emit_training_metrics_failed
+
+    - emit_training_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "training-pipeline"
+            job: ${trainingJobName}
+            scene_id: ${scene_id}
+            timeout_seconds: ${trainingTimeoutSeconds}
+            duration_seconds: ${trainingDurationSeconds}
+            timeout_usage_ratio: ${trainingTimeoutUsageRatio}
+            timed_out: ${trainingTimedOut}
+            status: "FAILED"
+            start_time: ${trainingStartTime}
+            end_time: ${trainingEndTime}
+          severity: "ERROR"
+        next: log_training_failed_message
+
+    - log_training_failed_message:
         call: sys.log
         args:
           text: ${"Training job failed for job " + job_id}
@@ -165,6 +216,33 @@ main:
           message: ${"Training failed for job " + job_id}
 
     - log_training_success:
+        assign:
+          - trainingEndTime: '${time.format(sys.now())}'
+          - trainingDurationSeconds: '${time.parse(trainingEndTime) - time.parse(trainingStartTime)}'
+          - trainingTimeoutUsageRatio: '${trainingDurationSeconds / trainingTimeoutSeconds}'
+          - trainingTimedOut: '${trainingDurationSeconds >= trainingTimeoutSeconds}'
+        next: emit_training_metrics_complete
+
+    - emit_training_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "training-pipeline"
+            job: ${trainingJobName}
+            scene_id: ${scene_id}
+            timeout_seconds: ${trainingTimeoutSeconds}
+            duration_seconds: ${trainingDurationSeconds}
+            timeout_usage_ratio: ${trainingTimeoutUsageRatio}
+            timed_out: ${trainingTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${trainingStartTime}
+            end_time: ${trainingEndTime}
+          severity: "INFO"
+        next: log_training_success_message
+
+    - log_training_success_message:
         call: sys.log
         args:
           text: ${"Training job completed successfully for " + job_id}
