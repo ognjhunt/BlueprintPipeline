@@ -531,7 +531,12 @@ def run_geniesim_export_job(
                 for obj in ctx["manifest"].get("objects", []):
                     asset_path = obj.get("asset", {}).get("path")
                     if asset_path:
-                        full_path = ctx["assets_dir"] / asset_path
+                        if asset_path.startswith("assets/"):
+                            full_path = ctx["assets_dir"] / asset_path.removeprefix("assets/")
+                        elif asset_path.startswith("variation_assets/"):
+                            full_path = ctx["assets_dir"].parent / asset_path
+                        else:
+                            full_path = ctx["assets_dir"] / asset_path
                         if not full_path.exists():
                             missing_assets.append(asset_path)
                 if missing_assets:
