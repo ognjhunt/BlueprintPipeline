@@ -151,6 +151,48 @@ handles data generation (tasks, trajectories, episodes, evaluation).
 **Genie Sim is the default data generation backend.** To use BlueprintPipeline's own episode
 generation instead, set `USE_GENIESIM=false`.
 
+## Runtime Bootstrap (Reproducible)
+
+Use the deployment scripts under `tools/geniesim_adapter/deployment/` to install Genie Sim,
+start the local gRPC server, and validate readiness:
+
+```bash
+cd tools/geniesim_adapter/deployment
+./bootstrap_geniesim_runtime.sh
+```
+
+The bootstrap script performs the following:
+1. Installs/clones Genie Sim (`install_geniesim.sh`).
+2. Starts the Genie Sim gRPC server (unless `GENIESIM_START_SERVER=0`).
+3. Runs the health check CLI (`python -m tools.geniesim_adapter.geniesim_healthcheck`).
+
+## Required Environment Variables
+
+These are required for the local framework and health checks:
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `ISAAC_SIM_PATH` | Path to Isaac Sim install (must contain `python.sh`). | `/isaac-sim` |
+| `GENIESIM_ROOT` | Path to the Genie Sim repository checkout. | `/opt/geniesim` |
+| `GENIESIM_HOST` | gRPC host for the Genie Sim server. | `localhost` |
+| `GENIESIM_PORT` | gRPC port for the Genie Sim server. | `50051` |
+
+## Staged Validation Flow
+
+Use this staged flow to validate Genie Sim before launching a pipeline run:
+
+1. **Runtime bootstrap** (installs and starts server):
+   ```bash
+   ./tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh
+   ```
+2. **Health check** (Isaac Sim + gRPC + server readiness):
+   ```bash
+   python -m tools.geniesim_adapter.geniesim_healthcheck
+   ```
+3. **Local preflight** (called automatically by submit/run jobs):
+   - `genie-sim-submit-job/submit_to_geniesim.py` runs the shared preflight helper.
+   - `tools/geniesim_adapter/local_framework.py` runs the same preflight before data collection.
+
 ## Architecture
 
 ```

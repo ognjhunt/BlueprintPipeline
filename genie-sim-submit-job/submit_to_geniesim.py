@@ -35,7 +35,7 @@ from geniesim_client import GenerationParams, GenieSimClient, JobStatus
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 from geniesim_adapter.local_framework import (
-    check_geniesim_availability,
+    run_geniesim_preflight_or_exit,
     run_local_data_collection,
 )
 from tools.metrics.pipeline_metrics import get_metrics
@@ -275,6 +275,11 @@ def main() -> int:
     if not bucket or not scene_id:
         raise RuntimeError("BUCKET and SCENE_ID must be set")
 
+    preflight_report = run_geniesim_preflight_or_exit(
+        "genie-sim-submit-job",
+        require_server=False,
+    )
+
     geniesim_prefix = os.getenv("GENIESIM_PREFIX", f"scenes/{scene_id}/geniesim")
     job_output_path = os.getenv("JOB_OUTPUT_PATH", f"{geniesim_prefix}/job.json")
 
@@ -313,9 +318,6 @@ def main() -> int:
     job_id = None
     submission_message = None
     local_run_result = None
-    preflight_status = None
-    missing_components = []
-    remediation_guidance = None
     failure_reason = None
     failure_details: Dict[str, Any] = {}
     episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
@@ -324,94 +326,68 @@ def main() -> int:
 
     job_id = f"local-{uuid.uuid4()}"
     submission_message = "Local Genie Sim execution started."
-    preflight_status = check_geniesim_availability()
-    missing_components = []
-    if not preflight_status.get("isaac_sim_available", False):
-        missing_components.append("Isaac Sim path")
-    if not preflight_status.get("grpc_available", False):
-        missing_components.append("gRPC stubs")
-    if not preflight_status.get("server_running", False):
-        missing_components.append("server running")
-    remediation_guidance = (
-        "Set ISAAC_SIM_PATH to your Isaac Sim install, ensure gRPC stubs are installed, "
-        "and start or expose the Genie Sim server at the configured host/port."
+    try:
+        scene_manifest = _read_json_blob(
+            storage_client,
+            bucket,
+            f"{geniesim_prefix}/merged_scene_manifest.json",
+        )
+    except FileNotFoundError:
+        scene_manifest = {"scene_graph": scene_graph}
+    task_config_local = task_config
+
+    gcs_root = Path("/mnt/gcs") / bucket
+    use_gcs_fuse = gcs_root.exists()
+    local_root = gcs_root if use_gcs_fuse else Path("/tmp") / "geniesim-local"
+    output_dir = local_root / episodes_output_prefix / f"geniesim_{job_id}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    config_dir = output_dir / "config"
+    scene_manifest_path = config_dir / "scene_manifest.json"
+    task_config_path = config_dir / "task_config.json"
+    scene_usd_path = _find_scene_usd_path(
+        scene_manifest=scene_manifest,
+        scene_id=scene_id,
+        geniesim_prefix=geniesim_prefix,
+        gcs_root=gcs_root,
+        local_root=local_root,
+        use_gcs_fuse=use_gcs_fuse,
     )
+    if scene_usd_path:
+        scene_manifest["usd_path"] = str(scene_usd_path)
+        print(f"[GENIESIM-SUBMIT-JOB] Using USD scene path: {scene_usd_path}")
+    _write_local_json(scene_manifest_path, scene_manifest)
+    _write_local_json(task_config_path, task_config_local)
 
-    if not preflight_status.get("available", False):
-        submission_message = (
-            "Local Genie Sim preflight failed; missing: "
-            f"{', '.join(missing_components) or 'unknown components'}. "
-            "See local_execution.remediation for next steps."
-        )
-        failure_reason = "Local Genie Sim preflight failed"
-        failure_details = {
-            "missing_components": missing_components,
-            "remediation": remediation_guidance,
-            "preflight": preflight_status,
-        }
+    local_run_result = run_local_data_collection(
+        scene_manifest_path=scene_manifest_path,
+        task_config_path=task_config_path,
+        output_dir=output_dir,
+        robot_type=robot_type,
+        episodes_per_task=episodes_per_task,
+        verbose=True,
+    )
+    local_run_end = datetime.utcnow()
+    if local_run_result and local_run_result.success:
+        submission_message = "Local Genie Sim execution completed."
     else:
-        try:
-            scene_manifest = _read_json_blob(
-                storage_client,
-                bucket,
-                f"{geniesim_prefix}/merged_scene_manifest.json",
-            )
-        except FileNotFoundError:
-            scene_manifest = {"scene_graph": scene_graph}
-        task_config_local = task_config
+        submission_message = "Local Genie Sim execution failed."
+        failure_reason = "Local Genie Sim execution failed"
+        failure_details = {
+            "episodes_collected": getattr(local_run_result, "episodes_collected", 0)
+            if local_run_result
+            else 0,
+            "episodes_passed": getattr(local_run_result, "episodes_passed", 0)
+            if local_run_result
+            else 0,
+        }
 
-        gcs_root = Path("/mnt/gcs") / bucket
-        use_gcs_fuse = gcs_root.exists()
-        local_root = gcs_root if use_gcs_fuse else Path("/tmp") / "geniesim-local"
-        output_dir = local_root / episodes_output_prefix / f"geniesim_{job_id}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        config_dir = output_dir / "config"
-        scene_manifest_path = config_dir / "scene_manifest.json"
-        task_config_path = config_dir / "task_config.json"
-        scene_usd_path = _find_scene_usd_path(
-            scene_manifest=scene_manifest,
-            scene_id=scene_id,
-            geniesim_prefix=geniesim_prefix,
-            gcs_root=gcs_root,
-            local_root=local_root,
-            use_gcs_fuse=use_gcs_fuse,
-        )
-        if scene_usd_path:
-            scene_manifest["usd_path"] = str(scene_usd_path)
-            print(f"[GENIESIM-SUBMIT-JOB] Using USD scene path: {scene_usd_path}")
-        _write_local_json(scene_manifest_path, scene_manifest)
-        _write_local_json(task_config_path, task_config_local)
-
-        local_run_result = run_local_data_collection(
-            scene_manifest_path=scene_manifest_path,
-            task_config_path=task_config_path,
-            output_dir=output_dir,
-            robot_type=robot_type,
-            episodes_per_task=episodes_per_task,
-            verbose=True,
-        )
-        local_run_end = datetime.utcnow()
-        if local_run_result and local_run_result.success:
-            submission_message = "Local Genie Sim execution completed."
-        else:
-            submission_message = "Local Genie Sim execution failed."
-            failure_reason = "Local Genie Sim execution failed"
-            failure_details = {
-                "episodes_collected": getattr(local_run_result, "episodes_collected", 0)
-                if local_run_result
-                else 0,
-                "episodes_passed": getattr(local_run_result, "episodes_passed", 0)
-                if local_run_result
-                else 0,
-            }
-
-        if not use_gcs_fuse:
-            for file_path in output_dir.rglob("*"):
-                if file_path.is_file():
-                    relative_path = file_path.relative_to(local_root)
-                    blob = storage_client.bucket(bucket).blob(str(relative_path))
-                    blob.upload_from_filename(str(file_path))
+    if not use_gcs_fuse:
+        for file_path in output_dir.rglob("*"):
+            if file_path.is_file():
+                relative_path = file_path.relative_to(local_root)
+                blob = storage_client.bucket(bucket).blob(str(relative_path))
+                blob.upload_from_filename(str(file_path))
 
     metrics = get_metrics()
     metrics_summary = {
@@ -423,8 +399,6 @@ def main() -> int:
         if local_run_result and local_run_result.success
         else ("failed" if local_run_result else "submitted")
     )
-    if submission_mode == "local" and preflight_status and not preflight_status.get("available", False):
-        job_status = "failed"
     if job_status == "failed" and not failure_reason:
         failure_reason = "Genie Sim submission failed"
 
@@ -455,6 +429,9 @@ def main() -> int:
             "schema_compatibility": export_marker.get("schema_compatibility", {}),
         },
         "metrics_summary": metrics_summary,
+        "local_execution": {
+            "preflight": preflight_report,
+        },
     }
     metrics_client = GenieSimClient(mock_mode=True, validate_on_init=False)
     metrics_client.register_mock_job_metrics(
@@ -491,25 +468,7 @@ def main() -> int:
             "success": bool(local_run_result and local_run_result.success),
             "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
             "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
-            "preflight": {
-                "available": preflight_status.get("available", False) if preflight_status else False,
-                "isaac_sim_available": (
-                    preflight_status.get("isaac_sim_available", False) if preflight_status else False
-                ),
-                "grpc_available": (
-                    preflight_status.get("grpc_available", False) if preflight_status else False
-                ),
-                "server_running": (
-                    preflight_status.get("server_running", False) if preflight_status else False
-                ),
-                "missing_components": missing_components if preflight_status else [],
-                "details": preflight_status.get("details", {}) if preflight_status else {},
-            },
-            "remediation": (
-                remediation_guidance
-                if preflight_status and not preflight_status.get("available", False)
-                else None
-            ),
+            "preflight": preflight_report,
         }
 
     _write_json_blob(storage_client, bucket, job_output_path, job_payload)
