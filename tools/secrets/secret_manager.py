@@ -244,12 +244,11 @@ def load_pipeline_secrets(project_id: Optional[str] = None) -> SecretCache:
         secrets = load_pipeline_secrets()
 
         # Access secrets
-        genie_key = secrets.get(SecretIds.GENIE_SIM_API_KEY)
+        gemini_key = secrets.get(SecretIds.GEMINI_API_KEY)
     """
     cache = get_global_secret_cache(project_id=project_id)
 
     secret_ids = [
-        SecretIds.GENIE_SIM_API_KEY,
         SecretIds.GEMINI_API_KEY,
         SecretIds.OPENAI_API_KEY,
         SecretIds.ANTHROPIC_API_KEY,
