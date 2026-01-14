@@ -1,6 +1,5 @@
-# Genie Sim Local Execution Job Dependencies
-
-# HTTP client for GenieSimClient
+# Pinned constraints for genie-sim-local-job
+# This file is used as a constraints file with pip -c.
 requests==2.31.0
 # Async requests (used by GenieSimClient)
 aiohttp==3.8.0
