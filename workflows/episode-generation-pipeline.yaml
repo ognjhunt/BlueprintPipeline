@@ -46,6 +46,8 @@ main:
           - gkeZone: "us-central1-a"
           - namespace: "blueprint"
           - enforceQualityGates: '${default(map.get(event, "enforce_quality_gates"), sys.get_env("BP_ENV") == "production")}'
+          - runStagingE2E: '${default(map.get(event, "run_staging_e2e"), sys.get_env("BP_ENV") == "production")}'
+          - stagingDataRoot: '${default(map.get(event, "staging_data_root"), "/mnt/gcs")}'
           - monitoringGateEnabled: '${sys.get_env("BP_ENV") == "production"}'
           # Bundle tier for upsell features (standard, pro, enterprise, foundation)
           # Can be passed in event or read from scene config
@@ -431,6 +433,190 @@ main:
         call: sys.log
         args:
           text: '${"Episode generation completed for scene " + sceneId}'
+          severity: "INFO"
+        next: check_staging_e2e_tests
+
+    - check_staging_e2e_tests:
+        switch:
+          - condition: '${runStagingE2E == true}'
+            next: run_staging_e2e_job_via_cloudbuild
+        next: check_quality_gates
+
+    - run_staging_e2e_job_via_cloudbuild:
+        call: googleapis.cloudbuild.v1.projects.builds.create
+        args:
+          projectId: ${projectId}
+          body:
+            steps:
+              - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+                entrypoint: 'bash'
+                args:
+                  - '-c'
+                  - |
+                    set -e
+
+                    # Get GKE credentials
+                    gcloud container clusters get-credentials ${gkeCluster} \
+                      --zone=${gkeZone} \
+                      --project=${projectId}
+
+                    # Create unique job name
+                    JOB_NAME="staging-e2e-${sceneId}-$(date +%s)"
+
+                    # Create the Kubernetes Job to run staging tests in Isaac Sim
+                    cat <<EOFK8S | kubectl apply -f -
+                    apiVersion: batch/v1
+                    kind: Job
+                    metadata:
+                      name: ${JOB_NAME}
+                      namespace: ${namespace}
+                      labels:
+                        app: staging-e2e
+                        scene-id: ${sceneId}
+                        triggered-by: workflow
+                    spec:
+                      backoffLimit: 1
+                      activeDeadlineSeconds: 21600  # 6 hours max
+                      template:
+                        metadata:
+                          labels:
+                            app: staging-e2e
+                        spec:
+                          restartPolicy: Never
+                          serviceAccountName: blueprint-pipeline-sa
+                          nodeSelector:
+                            cloud.google.com/gke-accelerator: nvidia-tesla-t4
+                          tolerations:
+                          - key: nvidia.com/gpu
+                            operator: Equal
+                            value: present
+                            effect: NoSchedule
+                          containers:
+                          - name: staging-e2e
+                            image: ${region}-docker.pkg.dev/${projectId}/blueprint-jobs/episode-gen-job:latest
+                            command: ["/bin/bash", "-lc"]
+                            args:
+                              - |
+                                set -o pipefail
+
+                                echo "Syncing scene data for staging tests..."
+                                mkdir -p ${stagingDataRoot}/scenes/${sceneId}
+                                gsutil -m rsync -r gs://${bucket}/scenes/${sceneId} ${stagingDataRoot}/scenes/${sceneId}
+
+                                TEST_OUTPUT=$(/isaac-sim/python.sh -m pytest tests/test_pipeline_e2e_staging.py -v 2>&1)
+                                TEST_STATUS=$?
+                                echo "${TEST_OUTPUT}"
+
+                                if [ "${TEST_STATUS}" -ne 0 ]; then
+                                  exit ${TEST_STATUS}
+                                fi
+
+                                if echo "${TEST_OUTPUT}" | grep -E -q "SKIPPED|skipped"; then
+                                  echo "ERROR: Staging E2E tests were skipped."
+                                  exit 1
+                                fi
+                            env:
+                            - name: RUN_STAGING_E2E
+                              value: "1"
+                            - name: STAGING_DATA_ROOT
+                              value: ${stagingDataRoot}
+                            - name: STAGING_SCENE_ID
+                              value: ${sceneId}
+                            - name: GOOGLE_APPLICATION_CREDENTIALS
+                              value: /secrets/gcs/key.json
+                            resources:
+                              requests:
+                                cpu: "4"
+                                memory: 16Gi
+                                nvidia.com/gpu: "1"
+                              limits:
+                                cpu: "8"
+                                memory: 32Gi
+                                nvidia.com/gpu: "1"
+                            volumeMounts:
+                            - name: gcs-credentials
+                              mountPath: /secrets/gcs
+                              readOnly: true
+                            - name: dshm
+                              mountPath: /dev/shm
+                          volumes:
+                          - name: gcs-credentials
+                            secret:
+                              secretName: gcs-service-account
+                          - name: dshm
+                            emptyDir:
+                              medium: Memory
+                              sizeLimit: 16Gi
+                    EOFK8S
+
+                    echo "Created Kubernetes Job: ${JOB_NAME}"
+
+                    # Wait for job to complete (poll every 30 seconds)
+                    echo "Waiting for staging test job completion..."
+                    while true; do
+                      STATUS=$(kubectl get job ${JOB_NAME} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
+                      FAILED=$(kubectl get job ${JOB_NAME} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
+
+                      if [ "$STATUS" == "True" ]; then
+                        echo "Staging tests completed successfully!"
+                        exit 0
+                      elif [ "$FAILED" == "True" ]; then
+                        echo "Staging tests failed!"
+                        kubectl logs job/${JOB_NAME} -n ${namespace} --tail=200 || true
+                        exit 1
+                      fi
+
+                      echo "Staging tests still running... ($(date))"
+                      sleep 30
+                    done
+            timeout: '21600s'  # 6 hours
+            options:
+              logging: CLOUD_LOGGING_ONLY
+        result: stagingBuildResult
+        next: wait_for_staging_build
+
+    - wait_for_staging_build:
+        call: sys.sleep
+        args:
+          seconds: 30
+        next: check_staging_build_status
+
+    - check_staging_build_status:
+        call: googleapis.cloudbuild.v1.projects.builds.get
+        args:
+          projectId: ${projectId}
+          id: ${stagingBuildResult.metadata.build.id}
+        result: stagingBuildStatus
+        next: staging_build_status_switch
+
+    - staging_build_status_switch:
+        switch:
+          - condition: '${stagingBuildStatus.status == "FAILURE" or stagingBuildStatus.status == "TIMEOUT" or stagingBuildStatus.status == "CANCELLED"}'
+            next: staging_tests_failed
+          - condition: '${stagingBuildStatus.status == "SUCCESS"}'
+            next: staging_tests_succeeded
+        next: wait_for_staging_build_poll
+
+    - wait_for_staging_build_poll:
+        call: sys.sleep
+        args:
+          seconds: 30
+        next: check_staging_build_status
+
+    - staging_tests_failed:
+        call: sys.log
+        args:
+          text: '${"ERROR: Staging E2E tests failed or were skipped for scene " + sceneId}'
+          severity: "ERROR"
+        next: raise_staging_tests_failed
+
+    - raise_staging_tests_failed:
+        raise: '${"Staging E2E tests failed or were skipped for scene " + sceneId}'
+
+    - staging_tests_succeeded:
+        call: sys.log
+        args:
+          text: '${"Staging E2E tests succeeded for scene " + sceneId}'
           severity: "INFO"
         next: check_quality_gates
 
