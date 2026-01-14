@@ -257,6 +257,7 @@ class PlannerResult:
 
     backend: str
     success: bool
+    collision_aware_backend: bool
     joint_trajectory: Optional[np.ndarray]
     joint_timestamps: Optional[np.ndarray]
     collision_checked: bool
@@ -294,6 +295,7 @@ class CuRoboPlannerBackend(PlannerBackend):
         return PlannerResult(
             backend=self.name,
             success=success,
+            collision_aware_backend=True,
             joint_trajectory=joint_trajectory,
             joint_timestamps=joint_timestamps,
             collision_checked=collision_checked,
@@ -328,6 +330,7 @@ class OmplPlannerBackend(PlannerBackend):
         return PlannerResult(
             backend=self.name,
             success=success,
+            collision_aware_backend=True,
             joint_trajectory=joint_trajectory,
             joint_timestamps=joint_timestamps,
             collision_checked=new_waypoints is not None,
@@ -357,6 +360,7 @@ class IKPlannerBackend(PlannerBackend):
         return PlannerResult(
             backend=self.name,
             success=success,
+            collision_aware_backend=False,
             joint_trajectory=joint_trajectory,
             joint_timestamps=joint_timestamps,
             collision_checked=collision_free is not None,
@@ -464,6 +468,7 @@ class AIMotionPlanner:
         production_quality = os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
         require_collision_env = os.getenv("REQUIRE_COLLISION_PLANNER", "false").lower() in {"1", "true", "yes"}
         self._require_collision_planner = require_collision_env or production_quality or labs_staging
+        self._production_guard = production_quality or labs_staging
         self._timing = load_motion_planner_timing()
         self._planner_backend_order = [
             name.strip().lower()
@@ -695,6 +700,21 @@ class AIMotionPlanner:
         above = joints[finite_mask] > (upper[finite_mask] + tolerance)
         return not (np.any(below) or np.any(above))
 
+    def _validate_joint_trajectory_limits(self, joint_trajectory: np.ndarray) -> List[str]:
+        """Validate joint trajectory against configured limits."""
+        lower = self.robot_config.get("joint_limits_lower")
+        upper = self.robot_config.get("joint_limits_upper")
+        if lower is None or upper is None:
+            return []
+        finite_mask = np.isfinite(lower) & np.isfinite(upper)
+        if not np.any(finite_mask):
+            return []
+        below = joint_trajectory[:, finite_mask] < (lower[finite_mask] - 1e-5)
+        above = joint_trajectory[:, finite_mask] > (upper[finite_mask] + 1e-5)
+        if np.any(below) or np.any(above):
+            return ["Joint trajectory violates configured joint limits"]
+        return []
+
     def _build_planning_context(self, scene_context: Optional[SceneContext]) -> PlanningContext:
         """Build planner context from scene inputs."""
         if scene_context is None:
@@ -842,6 +862,11 @@ class AIMotionPlanner:
             MotionPlan with waypoint sequence
         """
         self.log(f"Planning motion: {task_name}")
+        if self._production_guard:
+            if scene_context is None:
+                raise ValueError("SceneContext is required in production for collision-aware planning.")
+            if not scene_context.scene_usd_path and not scene_context.objects:
+                raise ValueError("Production planning requires scene geometry via SceneContext or USD path.")
 
         # Determine task type
         task_type = self._classify_task(task_name, task_description)
@@ -903,11 +928,17 @@ class AIMotionPlanner:
         collision_planner_used = False
         plan.planning_success = False
         collected_errors: List[str] = []
+        collision_aware_backend_used = False
 
         for backend in self._get_planner_backends():
             result = backend.plan(plan.waypoints, planning_context)
-            if result.collision_checked:
+            if result.collision_aware_backend:
                 collision_planner_used = True
+            if result.joint_trajectory is not None:
+                limit_errors = self._validate_joint_trajectory_limits(result.joint_trajectory)
+                if limit_errors:
+                    result.errors.extend(limit_errors)
+                    result.success = False
             if result.errors:
                 collected_errors.extend(result.errors)
             if result.success:
@@ -920,8 +951,9 @@ class AIMotionPlanner:
                 plan.trajectory_backend = result.backend
                 plan.collision_checked = result.collision_checked
                 plan.collision_free = result.collision_free
-                plan.joint_limits_enforced = True
+                plan.joint_limits_enforced = result.joint_trajectory is not None
                 plan.planning_success = True
+                collision_aware_backend_used = result.collision_aware_backend
                 break
 
         if not plan.collision_checked:
@@ -940,9 +972,17 @@ class AIMotionPlanner:
             plan.planning_errors.append("Collision planner required but unavailable")
             plan.planning_success = False
 
-        if plan.joint_trajectory is None:
-            plan.planning_errors.append("No joint trajectory produced by planner backends")
+        if self._production_guard and (plan.planning_backend == "ik" or not collision_aware_backend_used):
+            plan.planning_errors.append("Production planning requires a collision-aware backend (cuRobo/OMPL/RRT).")
             plan.planning_success = False
+
+        if plan.joint_trajectory is None:
+            if self._production_guard:
+                plan.planning_errors.append("Production planning requires a joint trajectory output.")
+                plan.planning_success = False
+            else:
+                plan.planning_errors.append("No joint trajectory produced by planner backends")
+                plan.planning_success = False
 
         if not plan.planning_success and collected_errors:
             plan.planning_errors.extend(collected_errors)
