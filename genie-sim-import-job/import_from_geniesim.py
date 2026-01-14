@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 import sys
+import tarfile
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -91,6 +92,80 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(8192), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _relative_to_bundle(bundle_root: Path, path: Path) -> str:
+    try:
+        rel_path = path.resolve().relative_to(bundle_root.resolve())
+    except ValueError:
+        return path.as_posix()
+    rel_str = rel_path.as_posix()
+    return rel_str if rel_str else "."
+
+
+def _write_lerobot_readme(output_dir: Path, lerobot_dir: Path) -> Path:
+    readme_path = output_dir / "README.md"
+    lerobot_rel = _relative_to_bundle(output_dir, lerobot_dir)
+    content = f"""# Genie Sim LeRobot Bundle
+
+This bundle includes a LeRobot-compatible dataset generated from Genie Sim episodes.
+
+## Dataset layout
+- `{lerobot_rel}/`: LeRobot dataset directory
+- `{lerobot_rel}/dataset_info.json`: dataset summary and episode metadata
+- `{lerobot_rel}/episodes.jsonl`: episode index
+- `{lerobot_rel}/episode_*.parquet`: per-episode data
+
+## Load with LeRobot
+Install LeRobot and load the dataset directory:
+
+```bash
+pip install lerobot
+```
+
+```python
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+
+dataset = LeRobotDataset("{lerobot_rel}")
+sample = dataset[0]
+print(sample.keys())
+```
+
+## Train with LeRobot
+Use your preferred LeRobot training entrypoint and point it at `{lerobot_rel}`.
+For example, supply the dataset path in your training config or CLI to start training.
+"""
+    readme_path.write_text(content)
+    return readme_path
+
+
+def _write_checksums_file(output_dir: Path, checksums: Dict[str, Any]) -> Path:
+    checksums_path = output_dir / "checksums.json"
+    payload = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "root": ".",
+        "files": checksums,
+    }
+    with open(checksums_path, "w") as handle:
+        json.dump(payload, handle, indent=2)
+    return checksums_path
+
+
+def _create_bundle_package(
+    output_dir: Path,
+    package_name: str,
+    files: List[Path],
+    directories: List[Path],
+) -> Path:
+    package_path = output_dir / package_name
+    with tarfile.open(package_path, "w:gz") as archive:
+        for path in files:
+            if path.exists():
+                archive.add(path, arcname=_relative_to_bundle(output_dir, path))
+        for directory in directories:
+            if directory.exists():
+                archive.add(directory, arcname=_relative_to_bundle(output_dir, directory))
+    return package_path
 
 
 def _parse_gcs_uri(uri: str) -> Optional[Dict[str, str]]:
@@ -918,20 +993,11 @@ def run_import_job(
         # Step 7: Write machine-readable import manifest for workflows
         import_manifest_path = config.output_dir / "import_manifest.json"
         gcs_output_path = None
-        bundle_root = config.output_dir.resolve()
         output_dir_str = str(config.output_dir)
         if output_dir_str.startswith("/mnt/gcs/"):
             gcs_output_path = "gs://" + output_dir_str[len("/mnt/gcs/"):]
-
-        def _relative_to_bundle(path: Path) -> str:
-            try:
-                rel_path = path.resolve().relative_to(bundle_root)
-            except ValueError:
-                return path.as_posix()
-            rel_str = rel_path.as_posix()
-            return rel_str if rel_str else "."
-
-        output_dir_str = _relative_to_bundle(config.output_dir)
+        bundle_root = config.output_dir.resolve()
+        output_dir_str = _relative_to_bundle(bundle_root, config.output_dir)
 
         metrics = get_metrics()
         metrics_summary = {
@@ -988,9 +1054,6 @@ def run_import_job(
             "importer": "genie-sim-import-job",
             "client_mode": "mock" if getattr(client, "mock_mode", False) else "api",
         }
-        import_manifest = {
-            "schema_version": "1.1",
-        }
         episode_ids = [episode.episode_id for episode in download_result.episodes]
         episode_paths, missing_episode_ids = get_episode_file_paths(config.output_dir, episode_ids)
         metadata_paths = get_lerobot_metadata_paths(config.output_dir)
@@ -998,7 +1061,7 @@ def run_import_job(
         missing_metadata_files = []
         if not lerobot_info_path.exists():
             missing_metadata_files.append(lerobot_info_path.relative_to(config.output_dir).as_posix())
-        file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
+        readme_path = _write_lerobot_readme(config.output_dir, lerobot_dir)
         directory_checksums = build_directory_checksums(config.output_dir, exclude_paths=[import_manifest_path])
         episode_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in episode_paths}
         metadata_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in metadata_paths}
@@ -1026,6 +1089,7 @@ def run_import_job(
             "missing_metadata_files": file_checksums["missing_metadata_files"],
             "episode_files": file_checksums["episodes"],
         }
+        checksums_path = _write_checksums_file(config.output_dir, directory_checksums)
         config_snapshot = {
             "env": snapshot_env(ENV_SNAPSHOT_KEYS),
             "config": {
@@ -1051,6 +1115,8 @@ def run_import_job(
             "job_id": config.job_id,
             "output_dir": output_dir_str,
             "gcs_output_path": gcs_output_path,
+            "readme_path": _relative_to_bundle(bundle_root, readme_path),
+            "checksums_path": _relative_to_bundle(bundle_root, checksums_path),
             "episodes": {
                 "downloaded": result.total_episodes_downloaded,
                 "passed_validation": result.episodes_passed_validation,
@@ -1067,16 +1133,39 @@ def run_import_job(
             "lerobot": {
                 "conversion_success": result.lerobot_conversion_success,
                 "converted_count": convert_result.get("converted_count", 0),
-                "output_dir": _relative_to_bundle(lerobot_dir),
+                "output_dir": _relative_to_bundle(bundle_root, lerobot_dir),
                 "error": lerobot_error,
                 "required": config.require_lerobot or config.enable_validation,
             },
             "metrics_summary": metrics_summary,
             "checksums": checksums_payload,
             "provenance": provenance,
-            "file_inventory": file_inventory,
         }
 
+        with open(import_manifest_path, "w") as f:
+            json.dump(import_manifest, f, indent=2)
+
+        package_path = _create_bundle_package(
+            config.output_dir,
+            f"lerobot_bundle_{config.job_id}.tar.gz",
+            files=[import_manifest_path, readme_path, checksums_path],
+            directories=[lerobot_dir],
+        )
+        package_checksum = _sha256_file(package_path)
+        file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
+        import_manifest["package"] = {
+            "path": _relative_to_bundle(bundle_root, package_path),
+            "sha256": package_checksum,
+            "size_bytes": package_path.stat().st_size,
+            "format": "tar.gz",
+            "includes": [
+                _relative_to_bundle(bundle_root, import_manifest_path),
+                _relative_to_bundle(bundle_root, readme_path),
+                _relative_to_bundle(bundle_root, checksums_path),
+                _relative_to_bundle(bundle_root, lerobot_dir),
+            ],
+        }
+        import_manifest["file_inventory"] = file_inventory
         import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
             "sha256": compute_manifest_checksum(import_manifest),
         }
@@ -1213,7 +1302,8 @@ def run_local_import_job(
     lerobot_info_path = config.output_dir / "lerobot" / "meta" / "info.json"
     if not lerobot_info_path.exists():
         missing_metadata_files.append(lerobot_info_path.relative_to(config.output_dir).as_posix())
-    file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
+    bundle_root = config.output_dir.resolve()
+    readme_path = _write_lerobot_readme(config.output_dir, lerobot_dir)
     directory_checksums = build_directory_checksums(config.output_dir, exclude_paths=[import_manifest_path])
     episode_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in episode_paths}
     metadata_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in metadata_paths}
@@ -1241,6 +1331,7 @@ def run_local_import_job(
         "missing_metadata_files": file_checksums["missing_metadata_files"],
         "episode_files": file_checksums["episodes"],
     }
+    checksums_path = _write_checksums_file(config.output_dir, directory_checksums)
     config_snapshot = {
         "env": snapshot_env(ENV_SNAPSHOT_KEYS),
         "config": {
@@ -1268,6 +1359,8 @@ def run_local_import_job(
         "job_id": config.job_id,
         "output_dir": output_dir_str,
         "gcs_output_path": gcs_output_path,
+        "readme_path": _relative_to_bundle(bundle_root, readme_path),
+        "checksums_path": _relative_to_bundle(bundle_root, checksums_path),
         "episodes": {
             "downloaded": result.total_episodes_downloaded,
             "passed_validation": result.episodes_passed_validation,
@@ -1284,16 +1377,39 @@ def run_local_import_job(
         "lerobot": {
             "conversion_success": result.lerobot_conversion_success,
             "converted_count": len(lerobot_episode_files),
-            "output_dir": str(lerobot_dir),
+            "output_dir": _relative_to_bundle(bundle_root, lerobot_dir),
             "error": lerobot_error,
             "required": False,
         },
         "metrics_summary": metrics_summary,
         "checksums": checksums_payload,
         "provenance": provenance,
-        "file_inventory": file_inventory,
     }
 
+    with open(import_manifest_path, "w") as f:
+        json.dump(import_manifest, f, indent=2)
+
+    package_path = _create_bundle_package(
+        config.output_dir,
+        f"lerobot_bundle_{config.job_id}.tar.gz",
+        files=[import_manifest_path, readme_path, checksums_path],
+        directories=[lerobot_dir],
+    )
+    package_checksum = _sha256_file(package_path)
+    file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
+    import_manifest["package"] = {
+        "path": _relative_to_bundle(bundle_root, package_path),
+        "sha256": package_checksum,
+        "size_bytes": package_path.stat().st_size,
+        "format": "tar.gz",
+        "includes": [
+            _relative_to_bundle(bundle_root, import_manifest_path),
+            _relative_to_bundle(bundle_root, readme_path),
+            _relative_to_bundle(bundle_root, checksums_path),
+            _relative_to_bundle(bundle_root, lerobot_dir),
+        ],
+    }
+    import_manifest["file_inventory"] = file_inventory
     import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
         "sha256": compute_manifest_checksum(import_manifest),
     }
