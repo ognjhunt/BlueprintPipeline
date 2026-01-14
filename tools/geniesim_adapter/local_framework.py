@@ -1741,6 +1741,11 @@ def run_local_data_collection(
     Returns:
         DataCollectionResult
     """
+    run_geniesim_preflight_or_exit(
+        "geniesim-local-data-collection",
+        require_server=False,
+    )
+
     # Load configs
     with open(scene_manifest_path) as f:
         scene_manifest = json.load(f)
@@ -1792,6 +1797,7 @@ def check_geniesim_availability() -> Dict[str, Any]:
         "isaac_sim_available": False,
         "server_running": False,
         "grpc_available": False,
+        "grpc_stubs_available": GRPC_STUBS_AVAILABLE,
         "mock_server_allowed": False,
         "details": {},
     }
@@ -1839,6 +1845,104 @@ def check_geniesim_availability() -> Dict[str, Any]:
     )
 
     return status
+
+
+def build_geniesim_preflight_report(
+    status: Dict[str, Any],
+    *,
+    require_server: bool = True,
+    require_ready: bool = False,
+    ping_timeout: float = 5.0,
+) -> Dict[str, Any]:
+    """Build a preflight report with remediation guidance."""
+    config = GenieSimConfig.from_env()
+    missing: List[str] = []
+    remediation: List[str] = []
+    server_ready = False
+
+    if not status.get("isaac_sim_available", False):
+        missing.append("Isaac Sim runtime (ISAAC_SIM_PATH)")
+        remediation.append(
+            f"Set ISAAC_SIM_PATH to your Isaac Sim install (found python.sh). "
+            f"Current: {config.isaac_sim_path}"
+        )
+
+    if not status.get("grpc_available", False):
+        missing.append("Python grpcio package")
+        remediation.append("Install grpcio in the current environment: pip install grpcio")
+
+    if not status.get("grpc_stubs_available", False):
+        missing.append("Genie Sim gRPC stubs")
+        remediation.append(
+            "Regenerate stubs or ensure tools/geniesim_adapter/geniesim_grpc_pb2*.py "
+            "is available on PYTHONPATH."
+        )
+
+    if not status.get("geniesim_installed", False) and not status.get("mock_server_allowed", False):
+        missing.append("Genie Sim checkout (GENIESIM_ROOT)")
+        remediation.append(
+            "Run tools/geniesim_adapter/deployment/install_geniesim.sh or set GENIESIM_ROOT. "
+            "For dev/test, set ALLOW_GENIESIM_MOCK=1."
+        )
+
+    if require_server and not status.get("server_running", False):
+        missing.append("Genie Sim gRPC server")
+        remediation.append(
+            "Start the server: "
+            f"{config.isaac_sim_path}/python.sh "
+            f"{config.geniesim_root}/source/data_collection/scripts/data_collector_server.py "
+            f"--headless --port {config.port}"
+        )
+
+    if require_ready:
+        if status.get("server_running", False):
+            client = GenieSimGRPCClient(config.host, config.port, timeout=ping_timeout)
+            server_ready = client.ping(timeout=ping_timeout)
+        if not server_ready:
+            missing.append("Genie Sim gRPC readiness")
+            remediation.append(
+                "Verify the server is fully loaded and responding to gRPC calls. "
+                "Re-run: python -m tools.geniesim_adapter.geniesim_healthcheck"
+            )
+
+    ok = len(missing) == 0
+    return {
+        "ok": ok,
+        "missing": missing,
+        "remediation": remediation,
+        "status": status,
+        "server_ready": server_ready,
+    }
+
+
+def run_geniesim_preflight_or_exit(
+    stage: str,
+    *,
+    require_server: bool = True,
+    require_ready: bool = False,
+    ping_timeout: float = 5.0,
+) -> Dict[str, Any]:
+    """Run a preflight check with remediation guidance, exiting on failure."""
+    status = check_geniesim_availability()
+    report = build_geniesim_preflight_report(
+        status,
+        require_server=require_server,
+        require_ready=require_ready,
+        ping_timeout=ping_timeout,
+    )
+    if not report["ok"]:
+        print(f"[GENIESIM-PREFLIGHT] {stage} preflight failed.", file=sys.stderr)
+        if report["missing"]:
+            print("Missing requirements:", file=sys.stderr)
+            for item in report["missing"]:
+                print(f"  - {item}", file=sys.stderr)
+        if report["remediation"]:
+            print("Remediation steps:", file=sys.stderr)
+            for step in report["remediation"]:
+                print(f"  - {step}", file=sys.stderr)
+        print(f"Details: {json.dumps(status, indent=2)}", file=sys.stderr)
+        raise SystemExit(1)
+    return report
 
 
 # =============================================================================
