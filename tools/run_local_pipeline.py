@@ -261,7 +261,16 @@ class LocalPipelineRunner:
         if PipelineStep.GENIESIM_SUBMIT not in steps:
             return False
         mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
-        return not mock_mode
+        if mock_mode:
+            return False
+        try:
+            from tools.geniesim_adapter.local_framework import GenieSimConfig
+        except ImportError:
+            return True
+        config = GenieSimConfig.from_env()
+        if config.host not in {"localhost", "127.0.0.1"}:
+            return True
+        return False
 
     def _run_geniesim_preflight(self, *, require_server: bool) -> bool:
         """Run Genie Sim preflight checks for local steps."""
@@ -276,6 +285,11 @@ class LocalPipelineRunner:
             require_server=require_server,
         )
         self._geniesim_preflight_report = report
+        if not require_server and not report.get("status", {}).get("server_running", False):
+            self.log(
+                "Genie Sim server is not running; the local framework will start it automatically if needed.",
+                "WARNING",
+            )
         if report.get("ok", False):
             return True
 
