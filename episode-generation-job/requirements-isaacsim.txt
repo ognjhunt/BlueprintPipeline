@@ -1,6 +1,9 @@
 # Additional requirements for Isaac Sim environment
 # These complement the base requirements.txt
 
+# Test tooling for staging E2E validation
+pytest>=7.4.0
+
 # Video/Image processing for sensor capture
 opencv-python-headless>=4.8.0
 imageio>=2.31.0
