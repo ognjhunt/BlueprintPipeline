@@ -32,7 +32,12 @@ if str(USD_ASSEMBLY_DIR) not in sys.path:
 try:
     from pxr import Sdf, Usd, UsdGeom
 except ImportError as exc:  # pragma: no cover - runtime guard
-    raise
+    print(
+        "[USD-ASSEMBLY] ❌ OpenUSD (pxr) Python bindings are missing. "
+        "Install OpenUSD (usd-core) in the job image before running USD assembly.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from exc
 
 from build_scene_usd import (  # noqa: E402
     build_scene,
