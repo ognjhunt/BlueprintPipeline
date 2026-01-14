@@ -28,5 +28,5 @@ def test_curobo_missing_production_fails_fast(monkeypatch):
 
     config = lf.GenieSimConfig.from_env()
 
-    with pytest.raises(RuntimeError, match="cuRobo"):
+    with pytest.raises(RuntimeError, match="pip install nvidia-curobo"):
         lf.GenieSimLocalFramework(config=config, verbose=False)

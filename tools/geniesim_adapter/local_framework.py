@@ -747,8 +747,8 @@ class GenieSimLocalFramework:
         if production_mode and not curobo_enabled:
             raise RuntimeError(
                 "cuRobo motion planning is required in production. "
-                "Install the cuRobo integration and enable use_curobo, or "
-                "run with GENIESIM_ENV=development for local testing."
+                "Install cuRobo (pip install nvidia-curobo) and enable use_curobo, "
+                "or set GENIESIM_ENV=development for local testing with linear fallback."
             )
 
         if not production_mode and not curobo_enabled:
