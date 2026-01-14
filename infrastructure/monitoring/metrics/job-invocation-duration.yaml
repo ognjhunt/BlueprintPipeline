@@ -1,0 +1,17 @@
+# Log-based metric: blueprint_job_invocation_duration_seconds
+name: blueprint_job_invocation_duration_seconds
+description: "Duration (seconds) for completed workflow job invocations from bp_metric logs."
+filter: >
+  resource.type="workflows.googleapis.com/Workflow" AND
+  jsonPayload.bp_metric="job_invocation" AND
+  jsonPayload.event="complete"
+metricDescriptor:
+  metricKind: DELTA
+  valueType: DOUBLE
+  unit: "s"
+valueExtractor: EXTRACT(jsonPayload.duration_seconds)
+labelExtractors:
+  workflow: EXTRACT(jsonPayload.workflow)
+  job: EXTRACT(jsonPayload.job)
+  scene_id: EXTRACT(jsonPayload.scene_id)
+  status: EXTRACT(jsonPayload.status)
