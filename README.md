@@ -180,8 +180,9 @@ report = run_qa_validation(scene_dir=Path("scenes/scene_123"))
 
 ## Secrets
 
-BlueprintPipeline uses Google Secret Manager with environment variable fallbacks. Configure the
-following secret IDs (or equivalent env vars) for jobs that rely on external APIs:
+BlueprintPipeline uses Google Secret Manager with environment variable fallbacks for development.
+In production, Secret Manager is required and env var fallbacks are rejected. Configure the
+following secret IDs for jobs that rely on external APIs:
 
 | Secret ID | Env var fallback | Used by | Description |
 |-----------|------------------|---------|-------------|

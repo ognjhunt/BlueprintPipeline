@@ -156,7 +156,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
 
 | Variable | Type | Required | Description |
 |----------|------|----------|-------------|
-| `GEMINI_API_KEY` | str | No | Google Gemini API key for LLM features |
+| `GEMINI_API_KEY` | str | No | Google Gemini API key for LLM features (dev fallback only; production requires Secret Manager) |
 | `HF_TOKEN` | str | No | HuggingFace API token for model downloads |
 | `GENIE_SIM_API_KEY` | str | No | Genie Sim API key (only used when API submission is explicitly enabled) |
 | `MESHY_API_KEY` | str | No | Meshy API key for 3D generation |

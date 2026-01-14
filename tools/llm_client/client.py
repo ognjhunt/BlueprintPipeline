@@ -53,10 +53,20 @@ def _get_secret_or_env_with_log(
     label: str,
 ) -> Optional[str]:
     env_value = os.getenv(env_var)
+    production_mode = _is_production_env()
     if HAVE_SECRET_MANAGER:
         try:
-            value = get_secret_or_env(secret_id, env_var=env_var)
+            value = get_secret_or_env(
+                secret_id,
+                env_var=env_var,
+                fallback_to_env=not production_mode,
+            )
         except Exception as exc:  # pragma: no cover - defensive
+            if production_mode:
+                raise ValueError(
+                    f"{label} credentials must be stored in Secret Manager in production. "
+                    f"Missing secret '{secret_id}' (env var '{env_var}' is not allowed)."
+                ) from exc
             print(
                 f"[LLM] WARNING: Failed to fetch secret for {label}: {exc}",
                 file=sys.stderr,
@@ -68,6 +78,11 @@ def _get_secret_or_env_with_log(
                 file=sys.stderr,
             )
         return value
+    if production_mode:
+        raise ValueError(
+            f"{label} credentials must be stored in Secret Manager in production. "
+            f"Secret Manager is unavailable; env var '{env_var}' is not allowed."
+        )
     return env_value
 
 
