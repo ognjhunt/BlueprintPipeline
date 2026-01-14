@@ -42,6 +42,11 @@ from tools.metrics.pipeline_metrics import get_metrics
 
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
 EXPECTED_GENIESIM_API_VERSION = "3.0.0"
+CONTRACT_SCHEMAS = {
+    "scene_graph": "scene_graph.schema.json",
+    "asset_index": "asset_index.schema.json",
+    "task_config": "task_config.schema.json",
+}
 
 
 def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -133,6 +138,103 @@ def _validate_export_marker(marker: Dict[str, Any]) -> None:
         )
 
 
+def _load_contract_schema(schema_name: str) -> Dict[str, Any]:
+    schema_path = REPO_ROOT / "fixtures" / "contracts" / schema_name
+    if not schema_path.exists():
+        raise RuntimeError(f"Missing contract schema file: {schema_path}")
+    return json.loads(schema_path.read_text())
+
+
+def _validate_minimal_schema(payload: Any, schema: Dict[str, Any], path: str) -> None:
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        if not isinstance(payload, dict):
+            raise ValueError(f"{path}: expected object")
+        for key in schema.get("required", []):
+            if key not in payload:
+                raise ValueError(f"{path}: missing required field '{key}'")
+        for key, prop_schema in schema.get("properties", {}).items():
+            if key in payload:
+                _validate_minimal_schema(payload[key], prop_schema, f"{path}.{key}")
+    elif schema_type == "array":
+        if not isinstance(payload, list):
+            raise ValueError(f"{path}: expected array")
+        min_items = schema.get("minItems")
+        max_items = schema.get("maxItems")
+        if min_items is not None and len(payload) < min_items:
+            raise ValueError(f"{path}: expected at least {min_items} items")
+        if max_items is not None and len(payload) > max_items:
+            raise ValueError(f"{path}: expected at most {max_items} items")
+        items_schema = schema.get("items")
+        if items_schema:
+            for idx, item in enumerate(payload):
+                _validate_minimal_schema(item, items_schema, f"{path}[{idx}]")
+    elif schema_type == "string":
+        if not isinstance(payload, str):
+            raise ValueError(f"{path}: expected string")
+        enum = schema.get("enum")
+        if enum and payload not in enum:
+            raise ValueError(f"{path}: value '{payload}' not in enum {enum}")
+    elif schema_type == "integer":
+        if not isinstance(payload, int):
+            raise ValueError(f"{path}: expected integer")
+    elif schema_type == "number":
+        if not isinstance(payload, (int, float)):
+            raise ValueError(f"{path}: expected number")
+    elif schema_type == "boolean":
+        if not isinstance(payload, bool):
+            raise ValueError(f"{path}: expected boolean")
+    elif isinstance(schema_type, list):
+        if not any(_type_matches(payload, schema_type_option) for schema_type_option in schema_type):
+            raise ValueError(f"{path}: expected one of types {schema_type}")
+
+
+def _type_matches(payload: Any, schema_type: str) -> bool:
+    if schema_type == "object":
+        return isinstance(payload, dict)
+    if schema_type == "array":
+        return isinstance(payload, list)
+    if schema_type == "string":
+        return isinstance(payload, str)
+    if schema_type == "integer":
+        return isinstance(payload, int)
+    if schema_type == "number":
+        return isinstance(payload, (int, float))
+    if schema_type == "boolean":
+        return isinstance(payload, bool)
+    if schema_type == "null":
+        return payload is None
+    return False
+
+
+def _validate_json_schema(payload: Any, schema: Dict[str, Any]) -> None:
+    try:
+        import jsonschema  # type: ignore
+    except ImportError:
+        _validate_minimal_schema(payload, schema, path="$")
+    else:
+        jsonschema.validate(instance=payload, schema=schema)
+
+
+def _validate_bundle_schemas(payloads: Dict[str, Any]) -> None:
+    errors = []
+    for label, payload in payloads.items():
+        schema_name = CONTRACT_SCHEMAS.get(label)
+        if not schema_name:
+            continue
+        schema = _load_contract_schema(schema_name)
+        try:
+            _validate_json_schema(payload, schema)
+        except Exception as exc:
+            errors.append(f"{label}.json: {exc}")
+    if errors:
+        error_text = "\n".join(f"- {error}" for error in errors)
+        raise RuntimeError(
+            "Export bundle schema validation failed:\n"
+            f"{error_text}"
+        )
+
+
 def main() -> int:
     bucket = os.getenv("BUCKET")
     scene_id = os.getenv("SCENE_ID")
@@ -156,6 +258,13 @@ def main() -> int:
         storage_client,
         bucket,
         f"{geniesim_prefix}/_GENIESIM_EXPORT_COMPLETE",
+    )
+    _validate_bundle_schemas(
+        {
+            "scene_graph": scene_graph,
+            "asset_index": asset_index,
+            "task_config": task_config,
+        }
     )
     _validate_export_marker(export_marker)
 
