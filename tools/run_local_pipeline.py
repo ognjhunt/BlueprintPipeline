@@ -1248,7 +1248,8 @@ class LocalPipelineRunner:
         """Submit Genie Sim generation (API or local framework)."""
         try:
             from tools.geniesim_adapter.local_framework import (
-                check_geniesim_availability,
+                format_geniesim_preflight_failure,
+                run_geniesim_preflight,
                 run_local_data_collection,
             )
         except ImportError as e:
@@ -1297,10 +1298,7 @@ class LocalPipelineRunner:
         job_id = None
         submission_message = None
         local_run_result = None
-        preflight_status = None
-        missing_components: List[str] = []
-        remediation_guidance = None
-        mock_allowed = False
+        preflight_report = None
 
         if submission_mode == "mock":
             try:
@@ -1340,36 +1338,20 @@ class LocalPipelineRunner:
 
             job_id = f"local-{uuid.uuid4()}"
             submission_message = "Local Genie Sim execution started."
-            preflight_status = check_geniesim_availability()
-            mock_allowed = preflight_status.get("mock_server_allowed", False)
-            if not preflight_status.get("isaac_sim_available", False):
-                missing_components.append("Isaac Sim path")
-            if not preflight_status.get("grpc_available", False):
-                missing_components.append("gRPC stubs")
-            if not preflight_status.get("server_running", False):
-                missing_components.append("server running")
-            if (
-                not preflight_status.get("geniesim_installed", False)
-                and not mock_allowed
-                and not preflight_status.get("server_running", False)
-            ):
-                missing_components.append("GENIESIM_ROOT or ALLOW_GENIESIM_MOCK=1 (dev/test)")
-            remediation_guidance = (
-                "Set ISAAC_SIM_PATH to your Isaac Sim install, ensure gRPC stubs are installed, "
-                "start or expose the Genie Sim server at the configured host/port, "
-                "or set ALLOW_GENIESIM_MOCK=1 for dev/test."
+            preflight_report = run_geniesim_preflight(
+                "genie-sim-local-runner",
+                require_server=False,
             )
-            if production_mode and not preflight_status.get("available", False):
+            if not preflight_report.get("ok", False):
                 return StepResult(
                     step=PipelineStep.GENIESIM_SUBMIT,
                     success=False,
                     duration_seconds=0,
-                    message=(
-                        "Production Genie Sim submission requires real dependencies. "
-                        "Mock gRPC servers are disabled. "
-                        f"Missing: {', '.join(missing_components) or 'unknown'}."
+                    message=format_geniesim_preflight_failure(
+                        "genie-sim-local-runner",
+                        preflight_report,
                     ),
-                    outputs={"missing_components": missing_components},
+                    outputs={"preflight": preflight_report},
                 )
 
             output_dir = self.episodes_dir / f"geniesim_{job_id}"
@@ -1388,25 +1370,19 @@ class LocalPipelineRunner:
             scene_manifest_path.write_text(json.dumps(scene_manifest, indent=2))
             task_config_local_path.write_text(json.dumps(task_config, indent=2))
 
-            if not preflight_status.get("available", False):
-                submission_message = (
-                    "Local Genie Sim preflight failed; missing: "
-                    f"{', '.join(missing_components) or 'unknown components'}."
-                )
-            else:
-                local_run_result = run_local_data_collection(
-                    scene_manifest_path=scene_manifest_path,
-                    task_config_path=task_config_local_path,
-                    output_dir=output_dir,
-                    robot_type=robot_type,
-                    episodes_per_task=episodes_per_task,
-                    verbose=True,
-                )
-                submission_message = (
-                    "Local Genie Sim execution completed."
-                    if local_run_result and local_run_result.success
-                    else "Local Genie Sim execution failed."
-                )
+            local_run_result = run_local_data_collection(
+                scene_manifest_path=scene_manifest_path,
+                task_config_path=task_config_local_path,
+                output_dir=output_dir,
+                robot_type=robot_type,
+                episodes_per_task=episodes_per_task,
+                verbose=True,
+            )
+            submission_message = (
+                "Local Genie Sim execution completed."
+                if local_run_result and local_run_result.success
+                else "Local Genie Sim execution failed."
+            )
 
         if submission_mode == "mock":
             job_status = "completed"
@@ -1416,7 +1392,7 @@ class LocalPipelineRunner:
                 if local_run_result and local_run_result.success
                 else ("failed" if submission_mode == "local" else "submitted")
             )
-            if submission_mode == "local" and preflight_status and not preflight_status.get("available", False):
+            if submission_mode == "local" and preflight_report and not preflight_report.get("ok", False):
                 job_status = "failed"
 
         job_payload = {
@@ -1451,25 +1427,7 @@ class LocalPipelineRunner:
                 "success": bool(local_run_result and local_run_result.success),
                 "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
                 "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
-                "preflight": {
-                    "available": preflight_status.get("available", False) if preflight_status else False,
-                    "isaac_sim_available": (
-                        preflight_status.get("isaac_sim_available", False) if preflight_status else False
-                    ),
-                    "grpc_available": (
-                        preflight_status.get("grpc_available", False) if preflight_status else False
-                    ),
-                    "server_running": (
-                        preflight_status.get("server_running", False) if preflight_status else False
-                    ),
-                    "missing_components": missing_components,
-                    "details": preflight_status.get("details", {}) if preflight_status else {},
-                },
-                "remediation": (
-                    remediation_guidance
-                    if preflight_status and not preflight_status.get("available", False)
-                    else None
-                ),
+                "preflight": preflight_report,
             }
 
         job_path = self.geniesim_dir / "job.json"
