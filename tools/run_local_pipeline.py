@@ -27,9 +27,10 @@ Pipeline Steps:
     8. isaac-lab - Generate Isaac Lab task package
     9. genie-sim-export - Export scene bundle for Genie Sim
     10. genie-sim-submit - Submit/run Genie Sim generation (API or local)
-    11. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
-    12. dwm-inference - Run DWM model to generate interaction videos for each bundle
-    13. validate  - QA validation
+    11. genie-sim-import - Import Genie Sim episodes into local bundle
+    12. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
+    13. dwm-inference - Run DWM model to generate interaction videos for each bundle
+    14. validate  - QA validation
 
 Note: DWM steps are optional and only included by default when --enable-dwm is set.
 
@@ -73,6 +74,7 @@ class PipelineStep(str, Enum):
     ISAAC_LAB = "isaac-lab"
     GENIESIM_EXPORT = "genie-sim-export"
     GENIESIM_SUBMIT = "genie-sim-submit"
+    GENIESIM_IMPORT = "genie-sim-import"
     DWM = "dwm"  # Dexterous World Model preparation
     DWM_INFERENCE = "dwm-inference"  # Run DWM model on prepared bundles
     DREAM2FLOW = "dream2flow"  # Dream2Flow preparation (arXiv:2512.24766)
@@ -186,6 +188,10 @@ class LocalPipelineRunner:
         if run_validation and PipelineStep.VALIDATE not in steps:
             steps.append(PipelineStep.VALIDATE)
 
+        if PipelineStep.GENIESIM_SUBMIT in steps and PipelineStep.GENIESIM_IMPORT not in steps:
+            submit_index = steps.index(PipelineStep.GENIESIM_SUBMIT)
+            steps.insert(submit_index + 1, PipelineStep.GENIESIM_IMPORT)
+
         self._apply_labs_flags(run_validation=run_validation)
 
         self.log("=" * 60)
@@ -256,6 +262,9 @@ class LocalPipelineRunner:
         decision = selector.select(self.scene_dir)
         if decision.data_backend == DataGenerationBackend.GENIESIM:
             steps = self._map_jobs_to_steps(decision.job_sequence)
+            if PipelineStep.GENIESIM_SUBMIT in steps and PipelineStep.GENIESIM_IMPORT not in steps:
+                submit_index = steps.index(PipelineStep.GENIESIM_SUBMIT)
+                steps.insert(submit_index + 1, PipelineStep.GENIESIM_IMPORT)
         else:
             steps = self.DEFAULT_STEPS.copy()
 
@@ -278,6 +287,7 @@ class LocalPipelineRunner:
             "isaac-lab-job": PipelineStep.ISAAC_LAB,
             "genie-sim-export-job": PipelineStep.GENIESIM_EXPORT,
             "genie-sim-submit-job": PipelineStep.GENIESIM_SUBMIT,
+            "genie-sim-import-job": PipelineStep.GENIESIM_IMPORT,
         }
         steps: List[PipelineStep] = []
         for job_name in job_sequence:
@@ -316,6 +326,8 @@ class LocalPipelineRunner:
                 result = self._run_geniesim_export()
             elif step == PipelineStep.GENIESIM_SUBMIT:
                 result = self._run_geniesim_submit()
+            elif step == PipelineStep.GENIESIM_IMPORT:
+                result = self._run_geniesim_import()
             elif step == PipelineStep.DWM:
                 result = self._run_dwm()
             elif step == PipelineStep.DWM_INFERENCE:
@@ -1409,7 +1421,99 @@ class LocalPipelineRunner:
             message=submission_message or "Genie Sim submission completed",
             outputs={
                 "job_id": job_id,
+                "submission_mode": submission_mode,
+                "job_status": job_status,
                 "job_payload": str(job_path),
+            },
+        )
+
+    def _run_geniesim_import(self) -> StepResult:
+        """Import Genie Sim episodes into the local bundle."""
+        try:
+            sys.path.insert(0, str(REPO_ROOT / "genie-sim-import-job"))
+            from import_from_geniesim import ImportConfig, run_local_import_job
+        except ImportError as e:
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=0,
+                message=f"Import error (Genie Sim import job not found): {e}",
+            )
+
+        job_path = self.geniesim_dir / "job.json"
+        if not job_path.is_file():
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=0,
+                message="Genie Sim job metadata missing - run genie-sim-submit first",
+            )
+
+        job_payload = json.loads(job_path.read_text())
+        job_id = job_payload.get("job_id")
+        if not job_id:
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=0,
+                message="Genie Sim job metadata missing job_id",
+            )
+        submission_mode = job_payload.get("submission_mode", "local")
+        job_status = job_payload.get("status", "submitted")
+        artifacts = job_payload.get("artifacts", {})
+        local_episodes_prefix = (
+            artifacts.get("episodes_prefix")
+            or artifacts.get("episodes_path")
+            or str(self.episodes_dir / f"geniesim_{job_id}")
+        )
+
+        if submission_mode != "local":
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=True,
+                duration_seconds=0,
+                message=f"Skipping import for submission_mode={submission_mode}",
+                outputs={
+                    "job_id": job_id,
+                    "submission_mode": submission_mode,
+                },
+            )
+
+        if job_status != "completed":
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=0,
+                message=f"Genie Sim job status is {job_status}; import requires completed job",
+                outputs={"job_id": job_id, "job_status": job_status},
+            )
+
+        output_dir = Path(local_episodes_prefix)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config = ImportConfig(
+            job_id=job_id,
+            output_dir=output_dir,
+            min_quality_score=float(os.getenv("MIN_QUALITY_SCORE", "0.85")),
+            enable_validation=os.getenv("ENABLE_VALIDATION", "true").lower() == "true",
+            filter_low_quality=os.getenv("FILTER_LOW_QUALITY", "true").lower() == "true",
+            require_lerobot=os.getenv("REQUIRE_LEROBOT", "false").lower() == "true",
+            wait_for_completion=True,
+            poll_interval=0,
+            submission_mode="local",
+            job_metadata_path=str(job_path),
+            local_episodes_prefix=local_episodes_prefix,
+        )
+        result = run_local_import_job(config, job_metadata=job_payload)
+
+        return StepResult(
+            step=PipelineStep.GENIESIM_IMPORT,
+            success=result.success,
+            duration_seconds=0,
+            message="Genie Sim import completed" if result.success else "Genie Sim import failed",
+            outputs={
+                "job_id": job_id,
+                "import_manifest": str(result.import_manifest_path) if result.import_manifest_path else None,
+                "output_dir": str(output_dir),
             },
         )
 
