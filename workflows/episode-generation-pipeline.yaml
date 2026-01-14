@@ -46,6 +46,7 @@ main:
           - gkeZone: "us-central1-a"
           - namespace: "blueprint"
           - enforceQualityGates: '${default(map.get(event, "enforce_quality_gates"), sys.get_env("BP_ENV") == "production")}'
+          - monitoringGateEnabled: '${sys.get_env("BP_ENV") == "production"}'
           # Bundle tier for upsell features (standard, pro, enterprise, foundation)
           # Can be passed in event or read from scene config
           - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
@@ -131,7 +132,61 @@ main:
         args:
           text: '${"Scene " + sceneId + " resolved config - tier: " + bundleTier + ", data_pack: " + dataPackTier}'
           severity: "INFO"
+        next: check_monitoring_gate
+
+    - check_monitoring_gate:
+        switch:
+          - condition: '${monitoringGateEnabled == true}'
+            next: list_monitoring_dashboards
         next: check_already_processed
+
+    - list_monitoring_dashboards:
+        call: googleapis.monitoring.v1.projects.dashboards.list
+        args:
+          parent: '${"projects/" + projectId}'
+        result: dashboardsResult
+        next: list_monitoring_alerts
+
+    - list_monitoring_alerts:
+        call: googleapis.monitoring.v3.projects.alertPolicies.list
+        args:
+          parent: '${"projects/" + projectId}'
+        result: alertPoliciesResult
+        next: list_monitoring_log_metrics
+
+    - list_monitoring_log_metrics:
+        call: googleapis.logging.v2.projects.metrics.list
+        args:
+          parent: '${"projects/" + projectId}'
+        result: logMetricsResult
+        next: evaluate_monitoring_gate
+
+    - evaluate_monitoring_gate:
+        assign:
+          - dashboardsPayload: '${json.encode(dashboardsResult)}'
+          - alertsPayload: '${json.encode(alertPoliciesResult)}'
+          - metricsPayload: '${json.encode(logMetricsResult)}'
+          - dashboardsOk: '${text.contains(dashboardsPayload, "BlueprintPipeline - Overview") && text.contains(dashboardsPayload, "BlueprintPipeline - GPU Metrics")}'
+          - alertsOk: '${text.contains(alertsPayload, "[Blueprint] Workflow Job Timeout Detected") && text.contains(alertsPayload, "[Blueprint] Workflow Job Retry Spike")}'
+          - metricsOk: '${text.contains(metricsPayload, "blueprint_job_timeout_events") && text.contains(metricsPayload, "blueprint_job_retry_exhausted_total") && text.contains(metricsPayload, "blueprint_job_timeout_usage_ratio") && text.contains(metricsPayload, "blueprint_geniesim_sla_violations") && text.contains(metricsPayload, "blueprint_job_failure_events")}'
+          - monitoringGateOk: '${dashboardsOk && alertsOk && metricsOk}'
+        next: monitoring_gate_decision
+
+    - monitoring_gate_decision:
+        switch:
+          - condition: '${monitoringGateOk == true}'
+            next: check_already_processed
+        next: monitoring_gate_failed
+
+    - monitoring_gate_failed:
+        call: sys.log
+        args:
+          text: '${"Monitoring gate failed; dashboardsOk=" + json.encode(dashboardsOk) + ", alertsOk=" + json.encode(alertsOk) + ", metricsOk=" + json.encode(metricsOk)}'
+          severity: "ERROR"
+        next: raise_monitoring_gate_error
+
+    - raise_monitoring_gate_error:
+        raise: '${"Monitoring gate failed; deploy dashboards, alert policies, and log-based metrics before production runs."}'
 
     # Check if episodes already generated (idempotence)
     - check_already_processed:
