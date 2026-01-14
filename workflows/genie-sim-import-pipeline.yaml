@@ -38,7 +38,7 @@ main:
               - job_id: ${event.job_id}
               - status: ${event.status}
               - scene_id: ${default(event.scene_id, "unknown")}
-              - submission_mode: ${default(event.submission_mode, "api")}
+              - submission_mode: ${default(event.submission_mode, "local")}
               - local_episodes_prefix: ${default(event.local_episodes_prefix, null)}
               - job_metadata_path: ${default(event.job_metadata_path, null)}
 
@@ -48,7 +48,7 @@ main:
               - job_id: ${event.data.job_id}
               - status: ${event.data.status}
               - scene_id: ${default(event.data.scene_id, "unknown")}
-              - submission_mode: ${default(event.data.submission_mode, "api")}
+              - submission_mode: ${default(event.data.submission_mode, "local")}
               - local_episodes_prefix: ${default(event.data.local_episodes_prefix, null)}
               - job_metadata_path: ${default(event.data.job_metadata_path, null)}
 
@@ -58,7 +58,7 @@ main:
               - job_id: ${event.job_id}
               - status: ${default(event.status, "completed")}
               - scene_id: ${default(event.scene_id, "unknown")}
-              - submission_mode: ${default(event.submission_mode, "api")}
+              - submission_mode: ${default(event.submission_mode, "local")}
               - local_episodes_prefix: ${default(event.local_episodes_prefix, null)}
               - job_metadata_path: ${default(event.job_metadata_path, null)}
         next: resolve_job_id
@@ -121,7 +121,7 @@ main:
 
     - maybe_read_job_metadata_for_import:
         switch:
-          - condition: ${job_metadata_path != null and (submission_mode == null or submission_mode == "api" or local_episodes_prefix == null)}
+          - condition: ${job_metadata_path != null and (submission_mode == null or local_episodes_prefix == null)}
             next: read_job_metadata_for_import
         next: log_start
 
@@ -150,7 +150,7 @@ main:
         assign:
           - importJobMetadata: ${json.decode(importJobMetadataRaw)}
           - submission_mode: ${default(map.get(importJobMetadata, "submission_mode"), submission_mode)}
-          - local_episodes_prefix: ${default(map.get(map.get(importJobMetadata, "artifacts", {}), "episodes_prefix"), local_episodes_prefix)}
+          - local_episodes_prefix: ${default(map.get(map.get(importJobMetadata, "artifacts", {}), "episodes_prefix"), default(map.get(map.get(importJobMetadata, "artifacts", {}), "episodes_path"), local_episodes_prefix))}
         next: log_start
 
     - log_start:
@@ -225,7 +225,7 @@ main:
                       - name: FILTER_LOW_QUALITY
                         value: ${default(event.filter_low_quality, "true")}
                       - name: GENIESIM_SUBMISSION_MODE
-                        value: ${default(submission_mode, "api")}
+                        value: ${default(submission_mode, "local")}
                       - name: JOB_METADATA_PATH
                         value: ${default(job_metadata_path, "")}
                       - name: LOCAL_EPISODES_PREFIX
