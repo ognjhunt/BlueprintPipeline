@@ -53,6 +53,22 @@ Common failure modes in BlueprintPipeline and recommended fixes.
 
 ## usd-assembly-job
 
+### OpenUSD (`pxr`) import fails
+**Symptoms**: Job logs show `ImportError: No module named 'pxr'` or USD assembly exits early.
+
+**Likely causes**
+- OpenUSD bindings were not installed in the usd-assembly-job image.
+- A custom image was built without `usd-core`.
+
+**Fixes**
+- Confirm the image installs `usd-core` (OpenUSD) and rebuild if needed.
+- Run this smoke check inside the job image:
+
+```bash
+docker build -t usd-assembly-job:smoke usd-assembly-job
+docker run --rm usd-assembly-job:smoke python -c "from pxr import Usd, UsdGeom, Sdf; print('pxr import OK')"
+```
+
 ### `scene.usda` missing or empty
 **Symptoms**: Final USD not created or size is 0 bytes.
 
