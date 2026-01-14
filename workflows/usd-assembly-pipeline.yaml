@@ -288,6 +288,8 @@ main:
                         value: ${sceneId}
                       - name: ASSETS_PREFIX
                         value: ${assetsPrefix}
+                      - name: SIMREADY_PHYSICS_MODE
+                        value: "deterministic"
               timeout: "3600s"  # 1 hour max for simready
         result: simreadyExec
         retry:
