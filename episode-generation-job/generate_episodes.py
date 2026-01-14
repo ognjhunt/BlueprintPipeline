@@ -1514,6 +1514,22 @@ class EpisodeGenerator:
             if seed_episodes else 0
         )
 
+        metrics = get_metrics()
+        metrics_labels = {"scene_id": self.config.scene_id, "job": JOB_NAME}
+        for episode in valid_episodes:
+            metrics.episode_quality_score.observe(
+                episode.quality_score,
+                labels=metrics_labels,
+            )
+        collision_free_rate = _compute_collision_free_rate(
+            output.validation_report_path,
+            output.pass_rate,
+        )
+        metrics.collision_free_rate.set(
+            collision_free_rate,
+            labels=metrics_labels,
+        )
+
         if self._partial_failure_errors:
             output.errors.extend(self._partial_failure_errors)
 

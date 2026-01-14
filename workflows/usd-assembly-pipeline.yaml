@@ -53,13 +53,41 @@ main:
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
           - usdJobName: "usd-assembly-job"
+          - convertTimeoutSeconds: 1800
+          - simreadyTimeoutSeconds: 3600
+          - usdAssemblyTimeoutSeconds: 3600
           - replicatorJobName: "replicator-job"
+          - replicatorTimeoutSeconds: 1800
+          - isaacLabTimeoutSeconds: 1800
         next: log_start
 
     - log_start:
         call: sys.log
         args:
           text: '${"USD assembly triggered for scene " + sceneId + " (3D-RE-GEN) - starting pre-simready GLB->USDZ conversion"}'
+          severity: "INFO"
+        next: init_convert_metrics
+
+    - init_convert_metrics:
+        assign:
+          - convertStartTime: '${time.format(sys.now())}'
+        next: emit_convert_metrics_start
+
+    - emit_convert_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "usd-assembly-pipeline"
+            job: ${usdJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${convertTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${convertStartTime}
           severity: "INFO"
         next: run_convert_job
 
@@ -95,6 +123,17 @@ main:
         except:
           as: e
           steps:
+            - log_convert_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "usd-assembly-pipeline"
+                    job: ${usdJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 5
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_convert_error:
                 call: sys.log
                 args:
@@ -139,15 +178,88 @@ main:
         next: wait_for_convert
 
     - log_convert_complete:
+        assign:
+          - convertEndTime: '${time.format(sys.now())}'
+          - convertDurationSeconds: '${time.parse(convertEndTime) - time.parse(convertStartTime)}'
+          - convertTimeoutUsageRatio: '${convertDurationSeconds / convertTimeoutSeconds}'
+          - convertTimedOut: '${convertDurationSeconds >= convertTimeoutSeconds}'
+        next: emit_convert_metrics_complete
+
+    - emit_convert_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: ${usdJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${convertTimeoutSeconds}
+            duration_seconds: ${convertDurationSeconds}
+            timeout_usage_ratio: ${convertTimeoutUsageRatio}
+            timed_out: ${convertTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${convertStartTime}
+            end_time: ${convertEndTime}
+          severity: "INFO"
+        next: log_convert_complete_message
+
+    - log_convert_complete_message:
         call: sys.log
         args:
           text: '${"GLB->USDZ conversion completed for scene " + sceneId + " - starting simready-job"}'
+          severity: "INFO"
+        next: init_simready_metrics
+
+    - init_simready_metrics:
+        assign:
+          - simreadyStartTime: '${time.format(sys.now())}'
+        next: emit_simready_metrics_start
+
+    - emit_simready_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "usd-assembly-pipeline"
+            job: "simready-job"
+            scene_id: ${sceneId}
+            timeout_seconds: ${simreadyTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${simreadyStartTime}
           severity: "INFO"
         next: run_simready_job
 
     - convert_failed:
         assign:
           - errorMsg: '${"USD conversion job FAILED for scene " + sceneId}'
+          - convertEndTime: '${time.format(sys.now())}'
+          - convertDurationSeconds: '${time.parse(convertEndTime) - time.parse(convertStartTime)}'
+          - convertTimeoutUsageRatio: '${convertDurationSeconds / convertTimeoutSeconds}'
+          - convertTimedOut: '${convertDurationSeconds >= convertTimeoutSeconds}'
+        next: emit_convert_metrics_failed
+
+    - emit_convert_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: ${usdJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${convertTimeoutSeconds}
+            duration_seconds: ${convertDurationSeconds}
+            timeout_usage_ratio: ${convertTimeoutUsageRatio}
+            timed_out: ${convertTimedOut}
+            status: "FAILED"
+            start_time: ${convertStartTime}
+            end_time: ${convertEndTime}
+          severity: "ERROR"
         next: log_convert_error
 
     - log_convert_error:
@@ -187,6 +299,17 @@ main:
         except:
           as: e
           steps:
+            - log_simready_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "usd-assembly-pipeline"
+                    job: "simready-job"
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_simready_error:
                 call: sys.log
                 args:
@@ -234,15 +357,88 @@ main:
         next: wait_for_simready_complete
 
     - log_simready_complete:
+        assign:
+          - simreadyEndTime: '${time.format(sys.now())}'
+          - simreadyDurationSeconds: '${time.parse(simreadyEndTime) - time.parse(simreadyStartTime)}'
+          - simreadyTimeoutUsageRatio: '${simreadyDurationSeconds / simreadyTimeoutSeconds}'
+          - simreadyTimedOut: '${simreadyDurationSeconds >= simreadyTimeoutSeconds}'
+        next: emit_simready_metrics_complete
+
+    - emit_simready_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: "simready-job"
+            scene_id: ${sceneId}
+            timeout_seconds: ${simreadyTimeoutSeconds}
+            duration_seconds: ${simreadyDurationSeconds}
+            timeout_usage_ratio: ${simreadyTimeoutUsageRatio}
+            timed_out: ${simreadyTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${simreadyStartTime}
+            end_time: ${simreadyEndTime}
+          severity: "INFO"
+        next: log_simready_complete_message
+
+    - log_simready_complete_message:
         call: sys.log
         args:
           text: '${"Simready job completed for scene " + sceneId + " - proceeding with USD assembly"}'
+          severity: "INFO"
+        next: init_usd_metrics
+
+    - init_usd_metrics:
+        assign:
+          - usdStartTime: '${time.format(sys.now())}'
+        next: emit_usd_metrics_start
+
+    - emit_usd_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "usd-assembly-pipeline"
+            job: ${usdJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${usdAssemblyTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${usdStartTime}
           severity: "INFO"
         next: run_usd_job
 
     - simready_failed:
         assign:
           - errorMsg: '${"Simready job FAILED for scene " + sceneId + " (missing .simready_complete after " + string(simreadyAttempts) + " checks)"}'
+          - simreadyEndTime: '${time.format(sys.now())}'
+          - simreadyDurationSeconds: '${time.parse(simreadyEndTime) - time.parse(simreadyStartTime)}'
+          - simreadyTimeoutUsageRatio: '${simreadyDurationSeconds / simreadyTimeoutSeconds}'
+          - simreadyTimedOut: '${simreadyDurationSeconds >= simreadyTimeoutSeconds}'
+        next: emit_simready_metrics_failed
+
+    - emit_simready_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: "simready-job"
+            scene_id: ${sceneId}
+            timeout_seconds: ${simreadyTimeoutSeconds}
+            duration_seconds: ${simreadyDurationSeconds}
+            timeout_usage_ratio: ${simreadyTimeoutUsageRatio}
+            timed_out: ${simreadyTimedOut}
+            status: "FAILED"
+            start_time: ${simreadyStartTime}
+            end_time: ${simreadyEndTime}
+          severity: "ERROR"
         next: log_simready_error
 
     - log_simready_error:
@@ -286,6 +482,17 @@ main:
         except:
           as: e
           steps:
+            - log_usd_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "usd-assembly-pipeline"
+                    job: ${usdJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_usd_error:
                 call: sys.log
                 args:
@@ -330,15 +537,88 @@ main:
         next: wait_for_usd
 
     - log_usd_complete:
+        assign:
+          - usdEndTime: '${time.format(sys.now())}'
+          - usdDurationSeconds: '${time.parse(usdEndTime) - time.parse(usdStartTime)}'
+          - usdTimeoutUsageRatio: '${usdDurationSeconds / usdAssemblyTimeoutSeconds}'
+          - usdTimedOut: '${usdDurationSeconds >= usdAssemblyTimeoutSeconds}'
+        next: emit_usd_metrics_complete
+
+    - emit_usd_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: ${usdJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${usdAssemblyTimeoutSeconds}
+            duration_seconds: ${usdDurationSeconds}
+            timeout_usage_ratio: ${usdTimeoutUsageRatio}
+            timed_out: ${usdTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${usdStartTime}
+            end_time: ${usdEndTime}
+          severity: "INFO"
+        next: log_usd_complete_message
+
+    - log_usd_complete_message:
         call: sys.log
         args:
           text: '${"USD assembly completed for scene " + sceneId + " - starting replicator bundle generation"}'
+          severity: "INFO"
+        next: init_replicator_metrics
+
+    - init_replicator_metrics:
+        assign:
+          - replicatorStartTime: '${time.format(sys.now())}'
+        next: emit_replicator_metrics_start
+
+    - emit_replicator_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "usd-assembly-pipeline"
+            job: ${replicatorJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${replicatorTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${replicatorStartTime}
           severity: "INFO"
         next: run_replicator_job
 
     - usd_failed:
         assign:
           - errorMsg: '${"USD assembly job FAILED for scene " + sceneId}'
+          - usdEndTime: '${time.format(sys.now())}'
+          - usdDurationSeconds: '${time.parse(usdEndTime) - time.parse(usdStartTime)}'
+          - usdTimeoutUsageRatio: '${usdDurationSeconds / usdAssemblyTimeoutSeconds}'
+          - usdTimedOut: '${usdDurationSeconds >= usdAssemblyTimeoutSeconds}'
+        next: emit_usd_metrics_failed
+
+    - emit_usd_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: ${usdJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${usdAssemblyTimeoutSeconds}
+            duration_seconds: ${usdDurationSeconds}
+            timeout_usage_ratio: ${usdTimeoutUsageRatio}
+            timed_out: ${usdTimedOut}
+            status: "FAILED"
+            start_time: ${usdStartTime}
+            end_time: ${usdEndTime}
+          severity: "ERROR"
         next: log_usd_error
 
     - log_usd_error:
@@ -388,6 +668,17 @@ main:
         except:
           as: e
           steps:
+            - log_replicator_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "usd-assembly-pipeline"
+                    job: ${replicatorJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_replicator_error:
                 call: sys.log
                 args:
@@ -431,18 +722,95 @@ main:
         next: wait_for_replicator
 
     - log_replicator_complete:
+        assign:
+          - replicatorEndTime: '${time.format(sys.now())}'
+          - replicatorDurationSeconds: '${time.parse(replicatorEndTime) - time.parse(replicatorStartTime)}'
+          - replicatorTimeoutUsageRatio: '${replicatorDurationSeconds / replicatorTimeoutSeconds}'
+          - replicatorTimedOut: '${replicatorDurationSeconds >= replicatorTimeoutSeconds}'
+        next: emit_replicator_metrics_complete
+
+    - emit_replicator_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: ${replicatorJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${replicatorTimeoutSeconds}
+            duration_seconds: ${replicatorDurationSeconds}
+            timeout_usage_ratio: ${replicatorTimeoutUsageRatio}
+            timed_out: ${replicatorTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${replicatorStartTime}
+            end_time: ${replicatorEndTime}
+          severity: "INFO"
+        next: log_replicator_complete_message
+
+    - log_replicator_complete_message:
         call: sys.log
         args:
           text: '${"Replicator bundle generation completed for scene " + sceneId + " - starting Isaac Lab task generation"}'
           severity: "INFO"
-        next: run_isaac_lab_job
+        next: init_isaac_lab_metrics
 
     - replicator_failed:
         # Replicator failure is non-fatal - scene is still usable without it
+        assign:
+          - replicatorEndTime: '${time.format(sys.now())}'
+          - replicatorDurationSeconds: '${time.parse(replicatorEndTime) - time.parse(replicatorStartTime)}'
+          - replicatorTimeoutUsageRatio: '${replicatorDurationSeconds / replicatorTimeoutSeconds}'
+          - replicatorTimedOut: '${replicatorDurationSeconds >= replicatorTimeoutSeconds}'
+        next: emit_replicator_metrics_failed
+
+    - emit_replicator_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: ${replicatorJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${replicatorTimeoutSeconds}
+            duration_seconds: ${replicatorDurationSeconds}
+            timeout_usage_ratio: ${replicatorTimeoutUsageRatio}
+            timed_out: ${replicatorTimedOut}
+            status: "FAILED"
+            start_time: ${replicatorStartTime}
+            end_time: ${replicatorEndTime}
+          severity: "WARNING"
+        next: log_replicator_failed_message
+
+    - log_replicator_failed_message:
         call: sys.log
         args:
           text: '${"WARNING: Replicator job failed for scene " + sceneId + " - proceeding with Isaac Lab generation anyway"}'
           severity: "WARNING"
+        next: init_isaac_lab_metrics
+
+    - init_isaac_lab_metrics:
+        assign:
+          - isaacLabStartTime: '${time.format(sys.now())}'
+        next: emit_isaac_lab_metrics_start
+
+    - emit_isaac_lab_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "usd-assembly-pipeline"
+            job: "isaac-lab-job"
+            scene_id: ${sceneId}
+            timeout_seconds: ${isaacLabTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${isaacLabStartTime}
+          severity: "INFO"
         next: run_isaac_lab_job
 
     # =========================================================================
@@ -482,6 +850,17 @@ main:
         except:
           as: e
           steps:
+            - log_isaac_lab_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "usd-assembly-pipeline"
+                    job: "isaac-lab-job"
+                    scene_id: ${sceneId}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
             - log_isaac_lab_error:
                 call: sys.log
                 args:
@@ -525,6 +904,33 @@ main:
         next: wait_for_isaac_lab
 
     - log_isaac_lab_complete:
+        assign:
+          - isaacLabEndTime: '${time.format(sys.now())}'
+          - isaacLabDurationSeconds: '${time.parse(isaacLabEndTime) - time.parse(isaacLabStartTime)}'
+          - isaacLabTimeoutUsageRatio: '${isaacLabDurationSeconds / isaacLabTimeoutSeconds}'
+          - isaacLabTimedOut: '${isaacLabDurationSeconds >= isaacLabTimeoutSeconds}'
+        next: emit_isaac_lab_metrics_complete
+
+    - emit_isaac_lab_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: "isaac-lab-job"
+            scene_id: ${sceneId}
+            timeout_seconds: ${isaacLabTimeoutSeconds}
+            duration_seconds: ${isaacLabDurationSeconds}
+            timeout_usage_ratio: ${isaacLabTimeoutUsageRatio}
+            timed_out: ${isaacLabTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${isaacLabStartTime}
+            end_time: ${isaacLabEndTime}
+          severity: "INFO"
+        next: log_isaac_lab_complete_message
+
+    - log_isaac_lab_complete_message:
         call: sys.log
         args:
           text: '${"Isaac Lab task generation completed for scene " + sceneId}'
@@ -533,6 +939,33 @@ main:
 
     - isaac_lab_failed:
         # Isaac Lab failure is non-fatal - scene is usable for sim without RL tasks
+        assign:
+          - isaacLabEndTime: '${time.format(sys.now())}'
+          - isaacLabDurationSeconds: '${time.parse(isaacLabEndTime) - time.parse(isaacLabStartTime)}'
+          - isaacLabTimeoutUsageRatio: '${isaacLabDurationSeconds / isaacLabTimeoutSeconds}'
+          - isaacLabTimedOut: '${isaacLabDurationSeconds >= isaacLabTimeoutSeconds}'
+        next: emit_isaac_lab_metrics_failed
+
+    - emit_isaac_lab_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "usd-assembly-pipeline"
+            job: "isaac-lab-job"
+            scene_id: ${sceneId}
+            timeout_seconds: ${isaacLabTimeoutSeconds}
+            duration_seconds: ${isaacLabDurationSeconds}
+            timeout_usage_ratio: ${isaacLabTimeoutUsageRatio}
+            timed_out: ${isaacLabTimedOut}
+            status: "FAILED"
+            start_time: ${isaacLabStartTime}
+            end_time: ${isaacLabEndTime}
+          severity: "WARNING"
+        next: log_isaac_lab_failed_message
+
+    - log_isaac_lab_failed_message:
         call: sys.log
         args:
           text: '${"WARNING: Isaac Lab task generation failed for scene " + sceneId + " - scene is still usable but without RL training packages"}'

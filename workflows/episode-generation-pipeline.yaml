@@ -77,11 +77,13 @@ main:
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - episodesPrefix: '${"scenes/" + sceneId + "/episodes"}'
           - episodeJobName: "episode-generation-job"
+          - episodeJobTimeoutSeconds: 21600
           - episodesCompleteMarker: '${"scenes/" + sceneId + "/episodes/.episodes_complete"}'
           - episodesFailedMarker: '${"scenes/" + sceneId + "/episodes/.failed"}'
           - episodesLegacyFailedMarker: '${"scenes/" + sceneId + "/episodes/.episodes_failed"}'
           - sceneConfigPath: '${"scenes/" + sceneId + "/config.json"}'
           - qualityGateJobName: "quality-gate-job"
+          - qualityGateTimeoutSeconds: 1800
         next: lookup_scene_config
 
     # Lookup scene config from GCS to get customer-specific bundle tier
@@ -222,6 +224,29 @@ main:
         call: sys.log
         args:
           text: '${"Episode generation triggered for scene " + sceneId + " (Isaac Sim GPU job)"}'
+          severity: "INFO"
+        next: init_episode_metrics
+
+    - init_episode_metrics:
+        assign:
+          - episodeStartTime: '${time.format(sys.now())}'
+        next: emit_episode_metrics_start
+
+    - emit_episode_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "episode-generation-pipeline"
+            job: ${episodeJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${episodeJobTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${episodeStartTime}
           severity: "INFO"
         next: create_gke_job
 
@@ -430,6 +455,33 @@ main:
         next: check_build_status
 
     - log_episode_complete:
+        assign:
+          - episodeEndTime: '${time.format(sys.now())}'
+          - episodeDurationSeconds: '${time.parse(episodeEndTime) - time.parse(episodeStartTime)}'
+          - episodeTimeoutUsageRatio: '${episodeDurationSeconds / episodeJobTimeoutSeconds}'
+          - episodeTimedOut: '${episodeDurationSeconds >= episodeJobTimeoutSeconds or buildStatus.status == "TIMEOUT"}'
+        next: emit_episode_metrics_complete
+
+    - emit_episode_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "episode-generation-pipeline"
+            job: ${episodeJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${episodeJobTimeoutSeconds}
+            duration_seconds: ${episodeDurationSeconds}
+            timeout_usage_ratio: ${episodeTimeoutUsageRatio}
+            timed_out: ${episodeTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${episodeStartTime}
+            end_time: ${episodeEndTime}
+          severity: "INFO"
+        next: log_episode_complete_message
+
+    - log_episode_complete_message:
         call: sys.log
         args:
           text: '${"Episode generation completed for scene " + sceneId}'
@@ -623,8 +675,31 @@ main:
     - check_quality_gates:
         switch:
           - condition: '${enforceQualityGates == true}'
-            next: run_quality_gate_job
+            next: init_quality_gate_metrics
         next: write_completion_marker
+
+    - init_quality_gate_metrics:
+        assign:
+          - qualityGateStartTime: '${time.format(sys.now())}'
+        next: emit_quality_gate_metrics_start
+
+    - emit_quality_gate_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "episode-generation-pipeline"
+            job: ${qualityGateJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${qualityGateTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${qualityGateStartTime}
+          severity: "INFO"
+        next: run_quality_gate_job
 
     - run_quality_gate_job:
         try:
@@ -678,8 +753,35 @@ main:
           - condition: '${qualityGateState == "FAILED" or (qualityGateFailedCount != null and qualityGateFailedCount > 0)}'
             next: quality_gate_failed
           - condition: '${qualityGateState == "SUCCEEDED" or (qualityGateSucceededCount != null and qualityGateSucceededCount > 0)}'
-            next: write_completion_marker
+            next: log_quality_gate_complete
         next: wait_for_quality_gate_poll
+
+    - log_quality_gate_complete:
+        assign:
+          - qualityGateEndTime: '${time.format(sys.now())}'
+          - qualityGateDurationSeconds: '${time.parse(qualityGateEndTime) - time.parse(qualityGateStartTime)}'
+          - qualityGateTimeoutUsageRatio: '${qualityGateDurationSeconds / qualityGateTimeoutSeconds}'
+          - qualityGateTimedOut: '${qualityGateDurationSeconds >= qualityGateTimeoutSeconds}'
+        next: emit_quality_gate_metrics_complete
+
+    - emit_quality_gate_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "episode-generation-pipeline"
+            job: ${qualityGateJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${qualityGateTimeoutSeconds}
+            duration_seconds: ${qualityGateDurationSeconds}
+            timeout_usage_ratio: ${qualityGateTimeoutUsageRatio}
+            timed_out: ${qualityGateTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${qualityGateStartTime}
+            end_time: ${qualityGateEndTime}
+          severity: "INFO"
+        next: write_completion_marker
 
     - wait_for_quality_gate_poll:
         call: sys.sleep
@@ -688,6 +790,33 @@ main:
         next: wait_for_quality_gate
 
     - quality_gate_failed:
+        assign:
+          - qualityGateEndTime: '${time.format(sys.now())}'
+          - qualityGateDurationSeconds: '${time.parse(qualityGateEndTime) - time.parse(qualityGateStartTime)}'
+          - qualityGateTimeoutUsageRatio: '${qualityGateDurationSeconds / qualityGateTimeoutSeconds}'
+          - qualityGateTimedOut: '${qualityGateDurationSeconds >= qualityGateTimeoutSeconds}'
+        next: emit_quality_gate_metrics_failed
+
+    - emit_quality_gate_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "episode-generation-pipeline"
+            job: ${qualityGateJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${qualityGateTimeoutSeconds}
+            duration_seconds: ${qualityGateDurationSeconds}
+            timeout_usage_ratio: ${qualityGateTimeoutUsageRatio}
+            timed_out: ${qualityGateTimedOut}
+            status: "FAILED"
+            start_time: ${qualityGateStartTime}
+            end_time: ${qualityGateEndTime}
+          severity: "ERROR"
+        next: log_quality_gate_failed
+
+    - log_quality_gate_failed:
         call: sys.log
         args:
           text: '${"ERROR: Quality gate SLIs failed for scene " + sceneId}'
@@ -740,6 +869,33 @@ main:
 
     - episode_job_failed:
         # Episode generation failure is concerning but not fatal
+        assign:
+          - episodeEndTime: '${time.format(sys.now())}'
+          - episodeDurationSeconds: '${time.parse(episodeEndTime) - time.parse(episodeStartTime)}'
+          - episodeTimeoutUsageRatio: '${episodeDurationSeconds / episodeJobTimeoutSeconds}'
+          - episodeTimedOut: '${episodeDurationSeconds >= episodeJobTimeoutSeconds or buildStatus.status == "TIMEOUT"}'
+        next: emit_episode_metrics_failed
+
+    - emit_episode_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "episode-generation-pipeline"
+            job: ${episodeJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${episodeJobTimeoutSeconds}
+            duration_seconds: ${episodeDurationSeconds}
+            timeout_usage_ratio: ${episodeTimeoutUsageRatio}
+            timed_out: ${episodeTimedOut}
+            status: "FAILED"
+            start_time: ${episodeStartTime}
+            end_time: ${episodeEndTime}
+          severity: "ERROR"
+        next: log_episode_failed
+
+    - log_episode_failed:
         call: sys.log
         args:
           text: '${"ERROR: Episode generation failed for scene " + sceneId}'
