@@ -211,6 +211,7 @@ report = run_qa_validation(scene_dir=Path("scenes/scene_123"))
 | `SIMREADY_PHYSICS_MODE` | Simready physics estimation (`auto`/`gemini`/`deterministic`) | `auto` |
 | `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | Allow deterministic (LLM-free) physics when Gemini is unavailable | `false` |
 | `SIMREADY_FALLBACK_MIN_COVERAGE` | Minimum coverage ratio for deterministic fallback physics (0-1) | `0.6` |
+| `SIMREADY_NON_LLM_MIN_QUALITY` | Minimum quality ratio for non-LLM physics checks (0-1) | `0.85` |
 
 ## Secrets
 
@@ -228,6 +229,19 @@ following secret IDs for jobs that rely on external APIs:
 In production, `simready-job` normally uses Gemini for physics estimation. You can opt into deterministic,
 LLM-free physics by setting `SIMREADY_PHYSICS_MODE=deterministic` (or `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1`);
 otherwise, missing Gemini credentials cause the job to fail in production mode.
+
+### Production modes (free vs. paid)
+
+**Free production (deterministic, no Gemini)**:
+- Required flags: `SIMREADY_PRODUCTION_MODE=1` (or `PIPELINE_ENV=production`) and
+  `SIMREADY_PHYSICS_MODE=deterministic`.
+- The run enforces metadata/material coverage (`SIMREADY_FALLBACK_MIN_COVERAGE`) and
+  non-LLM quality checks (`SIMREADY_NON_LLM_MIN_QUALITY`) to maintain simulation fidelity.
+
+**Paid production (Gemini-backed)**:
+- Required flags: `SIMREADY_PRODUCTION_MODE=1` (or `PIPELINE_ENV=production`) and either
+  `SIMREADY_PHYSICS_MODE=gemini` or `SIMREADY_PHYSICS_MODE=auto` with Gemini credentials available.
+- Configure the `gemini-api-key` Secret Manager entry (production rejects env var fallbacks).
 
 ## Documentation
 
