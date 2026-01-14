@@ -136,6 +136,30 @@ export BP_ENABLE_CONFIG_AUDIT=1
 
 ---
 
+## Simready Physics Configuration
+
+Environment variables that control simready physics estimation behavior.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SIMREADY_PHYSICS_MODE` | str | "auto" | Physics estimation mode: "auto", "gemini", or "deterministic". Production workflows set this to "deterministic" to avoid Gemini dependencies. |
+| `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | bool | "0" | When `SIMREADY_PHYSICS_MODE=auto`, allow deterministic physics when Gemini is unavailable. |
+| `SIMREADY_PRODUCTION_MODE` | bool | "0" | Force production-mode behavior (Secret Manager required for Gemini). |
+| `SIMREADY_ALLOW_HEURISTIC_FALLBACK` | bool | "0" | Allow heuristic-only fallback when Gemini is unavailable in non-production runs. |
+| `SIMREADY_FALLBACK_MIN_COVERAGE` | float | 0.6 | Minimum coverage ratio required for deterministic fallback physics. |
+| `SIMREADY_NON_LLM_MIN_QUALITY` | float | 0.85 | Minimum quality threshold for non-LLM physics estimation. |
+
+**Example**:
+```bash
+# Force deterministic physics in production workflows
+export SIMREADY_PHYSICS_MODE=deterministic
+
+# Allow deterministic fallback in auto mode
+export SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1
+```
+
+---
+
 ## Credentials & Authentication
 
 ### Google Cloud
