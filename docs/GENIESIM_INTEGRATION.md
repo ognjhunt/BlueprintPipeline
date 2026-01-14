@@ -199,6 +199,36 @@ Use this staged flow to validate Genie Sim before launching a pipeline run:
    - `genie-sim-submit-job/submit_to_geniesim.py` runs the shared preflight helper.
    - `tools/geniesim_adapter/local_framework.py` runs the same preflight before data collection.
 
+## Staging E2E Test (Real gRPC + Isaac Sim)
+
+The staging E2E test validates the **export → submit → import** flow using real gRPC
+connections and an Isaac Sim runtime. It is gated behind `RUN_GENIESIM_STAGING_E2E=1`
+to keep CI lightweight.
+
+**Requirements**
+- Isaac Sim installed and available at `ISAAC_SIM_PATH`.
+- Genie Sim repo installed at `GENIESIM_ROOT`.
+- Genie Sim gRPC server running at `GENIESIM_HOST:GENIESIM_PORT`.
+- Scene directory with:
+  - `assets/scene_manifest.json`
+  - `.usd_assembly_complete` marker
+  - `.replicator_complete` marker
+  - `usd/scene.usda`
+  - `variation_assets/variation_assets.json`
+- Mock flags disabled: `ALLOW_GENIESIM_MOCK=0`, `GENIESIM_MOCK_MODE=false`.
+
+**Run**
+
+```bash
+RUN_GENIESIM_STAGING_E2E=1 \
+STAGING_SCENE_DIR=/mnt/gcs/scenes/<scene_id> \
+GENIESIM_HOST=localhost \
+GENIESIM_PORT=50051 \
+ALLOW_GENIESIM_MOCK=0 \
+GENIESIM_MOCK_MODE=false \
+/isaac-sim/python.sh -m pytest tests/test_geniesim_staging_e2e.py -v
+```
+
 ## Architecture
 
 ```
