@@ -31,7 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
-from geniesim_client import GenieSimClient, GenerationParams
+from geniesim_client import GenerationParams
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 from geniesim_adapter.local_framework import (
@@ -59,10 +59,6 @@ def _read_json_blob(client: storage.Client, bucket: str, blob_name: str) -> Dict
 def _write_json_blob(client: storage.Client, bucket: str, blob_name: str, payload: Dict[str, Any]) -> None:
     blob = client.bucket(bucket).blob(blob_name)
     blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
-
-
-def _env_flag(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _parse_version(version: str) -> tuple:
@@ -161,10 +157,7 @@ def main() -> int:
         min_quality_score=min_quality_score,
     )
 
-    api_key = os.getenv("GENIE_SIM_API_KEY")
-    force_local = _env_flag("GENIESIM_FORCE_LOCAL")
-    enable_api_submission = _env_flag("GENIESIM_SUBMIT_API")
-    submission_mode = "api" if api_key and enable_api_submission and not force_local else "local"
+    submission_mode = "local"
     job_id = None
     submission_message = None
     local_run_result = None
@@ -173,88 +166,69 @@ def main() -> int:
     remediation_guidance = None
     episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
 
-    if submission_mode == "api":
-        client = GenieSimClient()
-        try:
-            metrics = get_metrics()
-            with metrics.track_api_call("genie-sim", "submit_generation_job", scene_id):
-                result = client.submit_generation_job(
-                    scene_graph=scene_graph,
-                    asset_index=asset_index,
-                    task_config=task_config,
-                    generation_params=generation_params,
-                    job_name=f"{scene_id}-geniesim",
-                )
-            if not result.success or not result.job_id:
-                raise RuntimeError(result.message or "Genie Sim submission failed")
-            job_id = result.job_id
-            submission_message = result.message
-        finally:
-            client.close()
-    else:
-        job_id = f"local-{uuid.uuid4()}"
-        submission_message = "Local Genie Sim execution started (no API key provided)."
-        preflight_status = check_geniesim_availability()
-        missing_components = []
-        if not preflight_status.get("isaac_sim_available", False):
-            missing_components.append("Isaac Sim path")
-        if not preflight_status.get("grpc_available", False):
-            missing_components.append("gRPC stubs")
-        if not preflight_status.get("server_running", False):
-            missing_components.append("server running")
-        remediation_guidance = (
-            "Set ISAAC_SIM_PATH to your Isaac Sim install, ensure gRPC stubs are installed, "
-            "and start or expose the Genie Sim server at the configured host/port."
+    job_id = f"local-{uuid.uuid4()}"
+    submission_message = "Local Genie Sim execution started."
+    preflight_status = check_geniesim_availability()
+    missing_components = []
+    if not preflight_status.get("isaac_sim_available", False):
+        missing_components.append("Isaac Sim path")
+    if not preflight_status.get("grpc_available", False):
+        missing_components.append("gRPC stubs")
+    if not preflight_status.get("server_running", False):
+        missing_components.append("server running")
+    remediation_guidance = (
+        "Set ISAAC_SIM_PATH to your Isaac Sim install, ensure gRPC stubs are installed, "
+        "and start or expose the Genie Sim server at the configured host/port."
+    )
+
+    if not preflight_status.get("available", False):
+        submission_message = (
+            "Local Genie Sim preflight failed; missing: "
+            f"{', '.join(missing_components) or 'unknown components'}. "
+            "See local_execution.remediation for next steps."
         )
-
-        if not preflight_status.get("available", False):
-            submission_message = (
-                "Local Genie Sim preflight failed; missing: "
-                f"{', '.join(missing_components) or 'unknown components'}. "
-                "See local_execution.remediation for next steps."
+    else:
+        try:
+            scene_manifest = _read_json_blob(
+                storage_client,
+                bucket,
+                f"{geniesim_prefix}/merged_scene_manifest.json",
             )
+        except FileNotFoundError:
+            scene_manifest = {"scene_graph": scene_graph}
+        task_config_local = task_config
+
+        gcs_root = Path("/mnt/gcs") / bucket
+        use_gcs_fuse = gcs_root.exists()
+        local_root = gcs_root if use_gcs_fuse else Path("/tmp") / "geniesim-local"
+        output_dir = local_root / episodes_output_prefix / f"geniesim_{job_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        config_dir = output_dir / "config"
+        scene_manifest_path = config_dir / "scene_manifest.json"
+        task_config_path = config_dir / "task_config.json"
+        _write_local_json(scene_manifest_path, scene_manifest)
+        _write_local_json(task_config_path, task_config_local)
+
+        local_run_result = run_local_data_collection(
+            scene_manifest_path=scene_manifest_path,
+            task_config_path=task_config_path,
+            output_dir=output_dir,
+            robot_type=robot_type,
+            episodes_per_task=episodes_per_task,
+            verbose=True,
+        )
+        if local_run_result and local_run_result.success:
+            submission_message = "Local Genie Sim execution completed."
         else:
-            try:
-                scene_manifest = _read_json_blob(
-                    storage_client,
-                    bucket,
-                    f"{geniesim_prefix}/merged_scene_manifest.json",
-                )
-            except FileNotFoundError:
-                scene_manifest = {"scene_graph": scene_graph}
-            task_config_local = task_config
+            submission_message = "Local Genie Sim execution failed."
 
-            gcs_root = Path("/mnt/gcs") / bucket
-            use_gcs_fuse = gcs_root.exists()
-            local_root = gcs_root if use_gcs_fuse else Path("/tmp") / "geniesim-local"
-            output_dir = local_root / episodes_output_prefix / f"geniesim_{job_id}"
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            config_dir = output_dir / "config"
-            scene_manifest_path = config_dir / "scene_manifest.json"
-            task_config_path = config_dir / "task_config.json"
-            _write_local_json(scene_manifest_path, scene_manifest)
-            _write_local_json(task_config_path, task_config_local)
-
-            local_run_result = run_local_data_collection(
-                scene_manifest_path=scene_manifest_path,
-                task_config_path=task_config_path,
-                output_dir=output_dir,
-                robot_type=robot_type,
-                episodes_per_task=episodes_per_task,
-                verbose=True,
-            )
-            if local_run_result and local_run_result.success:
-                submission_message = "Local Genie Sim execution completed."
-            else:
-                submission_message = "Local Genie Sim execution failed."
-
-            if not use_gcs_fuse:
-                for file_path in output_dir.rglob("*"):
-                    if file_path.is_file():
-                        relative_path = file_path.relative_to(local_root)
-                        blob = storage_client.bucket(bucket).blob(str(relative_path))
-                        blob.upload_from_filename(str(file_path))
+        if not use_gcs_fuse:
+            for file_path in output_dir.rglob("*"):
+                if file_path.is_file():
+                    relative_path = file_path.relative_to(local_root)
+                    blob = storage_client.bucket(bucket).blob(str(relative_path))
+                    blob.upload_from_filename(str(file_path))
 
     metrics = get_metrics()
     metrics_summary = {

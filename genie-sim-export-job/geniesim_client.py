@@ -38,14 +38,12 @@ This API client module is preserved for compatibility with any future hosted
 Genie Sim API services.
 
 Environment Variables:
-    GENIE_SIM_API_URL: Genie Sim API endpoint (default: https://api.agibot.com/geniesim/v3)
-    GENIE_SIM_API_KEY: API authentication key (required for hosted API)
-    GENIE_SIM_TIMEOUT: Request timeout in seconds (default: 300)
-    GENIE_SIM_MAX_RETRIES: Maximum retries for failed requests (default: 3)
+    GENIESIM_MOCK_MODE: Enable mock mode for testing (default: false)
 """
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -60,43 +58,30 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiohttp
 import requests
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # LABS-BLOCKER-003 FIX: Add Pydantic for API response validation
-try:
+if importlib.util.find_spec("pydantic") is not None:
     import pydantic
     from pydantic import BaseModel, Field, ValidationError, validator
     _pydantic_major_version = int(pydantic.__version__.split(".", 1)[0])
     if _pydantic_major_version >= 2:
         HAVE_PYDANTIC = False
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "Pydantic v2 detected - disabling response validation for compatibility"
         )
     else:
         HAVE_PYDANTIC = True
-except ImportError:
+else:
     HAVE_PYDANTIC = False
-    logging.getLogger(__name__).warning(
-        "Pydantic not available - API response validation will be limited"
-    )
+    logger.warning("Pydantic not available - API response validation will be limited")
 
 # Add repo root to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-
-# Import resilience infrastructure
-try:
-    from tools.secrets import get_secret_or_env, SecretIds
-    from tools.external_services import ServiceClient, ServiceClientConfig, RateLimiter
-    from tools.error_handling import CircuitBreaker
-    HAVE_RESILIENCE_TOOLS = True
-except ImportError:
-    HAVE_RESILIENCE_TOOLS = False
-    logger.warning("Resilience tools not available - using basic retry logic")
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 
 # =============================================================================
 # Data Models
@@ -389,6 +374,12 @@ class GenieSimAuthenticationError(GenieSimAPIError):
     pass
 
 
+class GenieSimConfigurationError(GenieSimAPIError):
+    """Hosted API usage disabled or misconfigured."""
+
+    pass
+
+
 class GenieSimJobNotFoundError(GenieSimAPIError):
     """Job not found."""
 
@@ -538,26 +529,9 @@ class GenieSimClient:
             self.api_key = api_key or "mock-api-key"
             self.endpoint = endpoint or "mock://geniesim"
         else:
-            # GAP-SEC-001 FIX: Use Secret Manager for API key (with fallback to env var)
-            if HAVE_RESILIENCE_TOOLS:
-                try:
-                    self.api_key = api_key or get_secret_or_env(
-                        SecretIds.GENIE_SIM_API_KEY,
-                        env_var="GENIE_SIM_API_KEY"
-                    )
-                except Exception as e:
-                    logger.warning(f"Secret Manager unavailable, falling back to env var: {e}")
-                    self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
-            else:
-                self.api_key = api_key or os.getenv("GENIE_SIM_API_KEY")
-
-            if not self.api_key:
-                raise GenieSimAuthenticationError(
-                    "API key required. Set GENIE_SIM_API_KEY environment variable or pass api_key parameter."
-                )
-
-            self.endpoint = endpoint or os.getenv(
-                "GENIE_SIM_API_URL", "https://api.agibot.com/geniesim/v3"
+            raise GenieSimConfigurationError(
+                "Hosted Genie Sim API usage is not supported. "
+                "Use the local framework or enable mock mode for tests."
             )
         self.timeout = timeout
         self.max_retries = max_retries
@@ -566,17 +540,8 @@ class GenieSimClient:
         self._async_session: Optional[aiohttp.ClientSession] = None
 
         # GAP-EH-002 FIX: Add circuit breaker to prevent cascading failures
-        if HAVE_RESILIENCE_TOOLS and not self.mock_mode:
-            self._circuit_breaker = CircuitBreaker(
-                failure_threshold=5,
-                recovery_timeout=60.0,
-                expected_exception=GenieSimAPIError
-            )
-            # GAP-SEC-003 FIX: Add rate limiting (10 requests/second)
-            self._rate_limiter = RateLimiter(calls_per_second=10.0)
-        else:
-            self._circuit_breaker = None
-            self._rate_limiter = None
+        self._circuit_breaker = None
+        self._rate_limiter = None
 
         # P0-1 FIX: Validate endpoint is reachable on initialization
         if validate_on_init and not self.mock_mode:
