@@ -494,10 +494,45 @@ class GenieSimClient:
     ) -> None:
         cls._mock_jobs[job_id] = {
             "created_at": created_at,
+            "completed_at": created_at,
             "generation_params": generation_params,
             "task_config": task_config,
             "status": JobStatus.COMPLETED,
             "total_episodes": cls._mock_total_episodes(generation_params, task_config),
+            "episodes_collected": cls._mock_total_episodes(generation_params, task_config),
+            "episodes_passed": cls._mock_total_episodes(generation_params, task_config),
+            "failure_reason": None,
+            "failure_details": None,
+        }
+
+    def register_mock_job_metrics(
+        self,
+        job_id: str,
+        generation_params: GenerationParams,
+        task_config: Dict[str, Any],
+        created_at: str,
+        status: JobStatus = JobStatus.COMPLETED,
+        completed_at: Optional[str] = None,
+        episodes_collected: Optional[int] = None,
+        episodes_passed: Optional[int] = None,
+        failure_reason: Optional[str] = None,
+        failure_details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Register mock job metrics for local workflow consumption."""
+        if not self.mock_mode:
+            return
+        total_episodes = self._mock_total_episodes(generation_params, task_config)
+        self._mock_jobs[job_id] = {
+            "created_at": created_at,
+            "completed_at": completed_at,
+            "generation_params": generation_params,
+            "task_config": task_config,
+            "status": status,
+            "total_episodes": total_episodes,
+            "episodes_collected": episodes_collected,
+            "episodes_passed": episodes_passed,
+            "failure_reason": failure_reason,
+            "failure_details": failure_details,
         }
 
     def __init__(
@@ -1617,6 +1652,45 @@ class GenieSimClient:
             GenieSimJobNotFoundError: If job not found
         """
         try:
+            if self.mock_mode:
+                job_data = self._mock_jobs.get(job_id)
+                if not job_data:
+                    raise GenieSimJobNotFoundError(f"Job {job_id} not found")
+                created_at = job_data.get("created_at")
+                completed_at = job_data.get("completed_at")
+                duration_seconds = None
+                if created_at and completed_at:
+                    try:
+                        created_dt = datetime.fromisoformat(created_at.replace("Z", ""))
+                        completed_dt = datetime.fromisoformat(completed_at.replace("Z", ""))
+                        duration_seconds = max(
+                            0.0,
+                            (completed_dt - created_dt).total_seconds(),
+                        )
+                    except ValueError:
+                        duration_seconds = None
+                total_episodes = job_data.get("total_episodes")
+                episodes_collected = job_data.get("episodes_collected")
+                episodes_passed = job_data.get("episodes_passed")
+                quality_pass_rate = None
+                if episodes_collected and episodes_collected > 0 and episodes_passed is not None:
+                    quality_pass_rate = episodes_passed / episodes_collected
+                status_value = job_data.get("status")
+                if isinstance(status_value, Enum):
+                    status_value = status_value.value
+                return {
+                    "job_id": job_id,
+                    "status": status_value,
+                    "created_at": created_at,
+                    "completed_at": completed_at,
+                    "duration_seconds": duration_seconds,
+                    "total_episodes": total_episodes,
+                    "episodes_collected": episodes_collected,
+                    "episodes_passed": episodes_passed,
+                    "quality_pass_rate": quality_pass_rate,
+                    "failure_reason": job_data.get("failure_reason"),
+                    "failure_details": job_data.get("failure_details"),
+                }
             response = self._make_request_with_retry(
                 "GET",
                 f"{self.endpoint}/jobs/{job_id}/metrics",
