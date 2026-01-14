@@ -5,6 +5,12 @@
   "required": [
     "dataset_type",
     "format_version",
+    "schema_version",
+    "scene_id",
+    "job_id",
+    "run_id",
+    "pipeline_commit",
+    "export_schema_version",
     "episodes",
     "total_frames",
     "average_quality_score",
@@ -16,6 +22,12 @@
   "properties": {
     "dataset_type": {"type": "string"},
     "format_version": {"type": "string"},
+    "schema_version": {"type": "string"},
+    "scene_id": {"type": "string"},
+    "job_id": {"type": "string"},
+    "run_id": {"type": "string"},
+    "pipeline_commit": {"type": "string"},
+    "export_schema_version": {"type": "string"},
     "episodes": {
       "type": "array",
       "items": {
