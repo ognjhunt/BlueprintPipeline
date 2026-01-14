@@ -1,0 +1,113 @@
+# Production E2E Validation Runbook
+
+## Purpose
+Run a full production end-to-end validation for a scene, including workflow execution, artifact checks, and quality thresholds. This runbook is designed for production-only runs and explicitly prohibits mock capture fallbacks.
+
+## Required Inputs
+| Input | Description | Example |
+| --- | --- | --- |
+| `scene_id` | Scene identifier | `kitchen_001` |
+| `bucket` | GCS bucket hosting scene artifacts | `blueprintpipeline-data` |
+| `project_id` | Google Cloud project | `my-prod-project` |
+| `region` | Workflow region | `us-central1` |
+| `variation_assets_marker` | GCS marker for Genie Sim export trigger | `scenes/<scene_id>/variation_assets/.variation_pipeline_complete` |
+| `usd_marker` | GCS marker for episode generation trigger | `scenes/<scene_id>/usd/.usd_complete` |
+| `regen3d_marker` | GCS marker for DWM prep trigger | `scenes/<scene_id>/assets/.regen3d_complete` |
+
+## Required Production Flags (No Mock Fallbacks)
+These flags must be enforced for production validation runs:
+
+### Episode Generation (Isaac Sim)
+- `DATA_QUALITY_LEVEL=production`
+- `REQUIRE_REAL_PHYSICS=true`
+- `ISAAC_SIM_REQUIRED=true`
+- `SENSOR_CAPTURE_MODE=isaac_sim`
+- `USE_MOCK_CAPTURE=false`
+- `ALLOW_MOCK_DATA=false`
+- `ALLOW_MOCK_CAPTURE=false`
+
+### Genie Sim Import Validation
+- `MIN_QUALITY_SCORE=0.85` (or stricter)
+- `ENABLE_VALIDATION=true`
+- `FILTER_LOW_QUALITY=true`
+
+## Expected Artifacts & Metrics by Stage
+
+### 1) Genie Sim Export
+**Workflow:** `genie-sim-export-pipeline`
+
+**Inputs**
+- Marker: `scenes/<scene_id>/variation_assets/.variation_pipeline_complete`
+
+**Expected GCS Artifacts**
+- `scenes/<scene_id>/geniesim/.geniesim_submitted`
+- `scenes/<scene_id>/geniesim/.geniesim_complete`
+- `scenes/<scene_id>/geniesim/job.json`
+
+**Notes**
+- If `use_geniesim=false` in `scenes/<scene_id>/config.json`, the workflow will skip.
+
+### 2) Episode Generation (Isaac Sim)
+**Workflow:** `episode-generation-pipeline`
+
+**Inputs**
+- Marker: `scenes/<scene_id>/usd/.usd_complete`
+
+**Expected GCS Artifacts**
+- `scenes/<scene_id>/episodes/.episodes_complete`
+- `scenes/<scene_id>/episodes/quality/validation_report.json`
+- `scenes/<scene_id>/episode-generation-job/quality_gate_report.json`
+
+**Validation Metrics**
+- `validation_report.json`:
+  - `summary.pass_rate >= 0.90`
+  - `summary.average_score >= 0.85`
+  - `physics_validation.physx_used == true`
+  - `physics_validation.non_physx_episode_count == 0`
+- `quality_gate_report.json`:
+  - `summary.can_proceed == true`
+  - `summary.blocking_failures == 0`
+
+### 3) Sim Validation (Genie Sim Import)
+**Workflow:** `genie-sim-import-pipeline`
+
+**Inputs**
+- Genie Sim `job_id` from `scenes/<scene_id>/geniesim/job.json`
+
+**Expected GCS Artifacts**
+- `scenes/<scene_id>/geniesim/.geniesim_import_complete`
+- `scenes/<scene_id>/episodes/import_manifest.json`
+
+**Validation Metrics** (from `import_manifest.json`)
+- `quality.average_score >= 0.85`
+- `quality.threshold == min_quality_score`
+- `episodes.passed_validation > 0`
+
+### 4) DWM Preparation
+**Workflow:** `dwm-preparation-pipeline`
+
+**Inputs**
+- Marker: `scenes/<scene_id>/assets/.regen3d_complete`
+
+**Expected GCS Artifacts**
+- `scenes/<scene_id>/dwm/.dwm_complete`
+
+## Execution (Harness Script)
+Run the production harness to execute workflows in sequence and validate outputs:
+
+```bash
+python scripts/run_production_e2e_validation.py \
+  --project-id <project_id> \
+  --region us-central1 \
+  --bucket <bucket> \
+  --scene-id <scene_id>
+```
+
+## Pass/Fail Criteria
+A run is **PASS** when all of the following are true:
+- All required GCS markers exist after each stage.
+- `quality_gate_report.json` shows no blocking failures.
+- `validation_report.json` meets pass-rate and average-score thresholds.
+- No mock capture fallbacks detected (non-PhysX backend, dev-only fallback, or mock indicators).
+
+A run is **FAIL** if any marker is missing, a threshold is violated, or mock fallback indicators are found.
