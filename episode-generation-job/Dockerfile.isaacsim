@@ -117,6 +117,7 @@ COPY episode-generation-job/ ./episode-generation-job/
 COPY tools/ ./tools/
 COPY policy_configs/ ./policy_configs/
 COPY dwm-preparation-job/ ./dwm_preparation_job/
+COPY tests/ ./tests/
 
 # Copy Isaac Lab job (for task generation integration)
 COPY isaac-lab-job/ ./isaac-lab-job/
