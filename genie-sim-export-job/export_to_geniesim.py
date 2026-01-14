@@ -72,7 +72,13 @@ from tools.metrics.pipeline_metrics import get_metrics
 # P0-5 FIX: Import quality gates for validation before export
 try:
     sys.path.insert(0, str(REPO_ROOT / "tools"))
-    from quality_gates.quality_gate import QualityGate, QualityGateSeverity, QualityGateCheckpoint
+    from quality_gates.quality_gate import (
+        QualityGate,
+        QualityGateCheckpoint,
+        QualityGateRegistry,
+        QualityGateResult,
+        QualityGateSeverity,
+    )
     HAVE_QUALITY_GATES = True
 except ImportError:
     HAVE_QUALITY_GATES = False
@@ -392,108 +398,186 @@ def run_geniesim_export_job(
                 "GENIESIM_EXPORT_READY",
                 QualityGateCheckpoint.REPLICATOR_COMPLETE,
             )
-            quality_gate = QualityGate(
-                checkpoint=checkpoint,
-                scene_id=scene_id,
-            )
+            registry = QualityGateRegistry(verbose=True)
 
-            # Gate 1: Manifest completeness
-            required_fields = ["objects", "scene"]
-            missing_fields = [f for f in required_fields if f not in manifest]
-            if missing_fields:
-                quality_gate.add_check(
-                    name="manifest_completeness",
-                    passed=False,
-                    message=f"Manifest missing required fields: {missing_fields}",
-                    severity=QualityGateSeverity.ERROR,
+            def _build_result(
+                gate_id: str,
+                passed: bool,
+                severity: QualityGateSeverity,
+                message: str,
+                details: Optional[dict] = None,
+            ) -> QualityGateResult:
+                return QualityGateResult(
+                    gate_id=gate_id,
+                    checkpoint=checkpoint,
+                    passed=passed,
+                    severity=severity,
+                    message=message,
+                    details=details or {},
                 )
-            else:
-                quality_gate.add_check(
-                    name="manifest_completeness",
+
+            def _check_manifest(ctx: dict) -> QualityGateResult:
+                required_fields = ["objects", "scene"]
+                missing_fields = [f for f in required_fields if f not in ctx["manifest"]]
+                if missing_fields:
+                    return _build_result(
+                        gate_id="manifest_completeness",
+                        passed=False,
+                        severity=QualityGateSeverity.ERROR,
+                        message=f"Manifest missing required fields: {missing_fields}",
+                        details={"missing_fields": missing_fields},
+                    )
+                return _build_result(
+                    gate_id="manifest_completeness",
                     passed=True,
+                    severity=QualityGateSeverity.INFO,
                     message="Manifest contains all required fields",
-                    severity=QualityGateSeverity.INFO,
                 )
 
-            # Gate 2: Asset file existence
-            assets_dir = root / assets_prefix
-            missing_assets = []
-            for obj in manifest.get("objects", []):
-                asset_path = obj.get("asset", {}).get("path")
-                if asset_path:
-                    full_path = assets_dir / asset_path
-                    if not full_path.exists():
-                        missing_assets.append(asset_path)
-
-            if missing_assets:
-                quality_gate.add_check(
-                    name="asset_existence",
-                    passed=len(missing_assets) < 5,  # Warn if some missing, error if many
-                    message=f"Missing {len(missing_assets)} asset files (first few: {missing_assets[:3]})",
-                    severity=QualityGateSeverity.WARNING if len(missing_assets) < 5 else QualityGateSeverity.ERROR,
-                )
-            else:
-                quality_gate.add_check(
-                    name="asset_existence",
+            def _check_assets(ctx: dict) -> QualityGateResult:
+                missing_assets = []
+                for obj in ctx["manifest"].get("objects", []):
+                    asset_path = obj.get("asset", {}).get("path")
+                    if asset_path:
+                        full_path = ctx["assets_dir"] / asset_path
+                        if not full_path.exists():
+                            missing_assets.append(asset_path)
+                if missing_assets:
+                    severity = (
+                        QualityGateSeverity.WARNING
+                        if len(missing_assets) < 5
+                        else QualityGateSeverity.ERROR
+                    )
+                    return _build_result(
+                        gate_id="asset_existence",
+                        passed=False,
+                        severity=severity,
+                        message=(
+                            f"Missing {len(missing_assets)} asset files "
+                            f"(first few: {missing_assets[:3]})"
+                        ),
+                        details={"missing_assets": missing_assets},
+                    )
+                return _build_result(
+                    gate_id="asset_existence",
                     passed=True,
+                    severity=QualityGateSeverity.INFO,
                     message="All asset files exist",
-                    severity=QualityGateSeverity.INFO,
                 )
 
-            # Gate 3: Physics properties validation
-            objects_with_physics = sum(1 for obj in manifest.get("objects", []) if obj.get("physics"))
-            if objects_with_physics == 0:
-                quality_gate.add_check(
-                    name="physics_properties",
-                    passed=False,
-                    message="No objects have physics properties - scene may not simulate properly",
-                    severity=QualityGateSeverity.WARNING,
+            def _check_physics(ctx: dict) -> QualityGateResult:
+                objects_with_physics = sum(
+                    1 for obj in ctx["manifest"].get("objects", []) if obj.get("physics")
                 )
-            else:
-                quality_gate.add_check(
-                    name="physics_properties",
+                if objects_with_physics == 0:
+                    return _build_result(
+                        gate_id="physics_properties",
+                        passed=False,
+                        severity=QualityGateSeverity.WARNING,
+                        message="No objects have physics properties - scene may not simulate properly",
+                        details={"objects_with_physics": objects_with_physics},
+                    )
+                return _build_result(
+                    gate_id="physics_properties",
                     passed=True,
+                    severity=QualityGateSeverity.INFO,
                     message=f"{objects_with_physics} objects have physics properties",
-                    severity=QualityGateSeverity.INFO,
+                    details={"objects_with_physics": objects_with_physics},
                 )
 
-            # Gate 4: Scale sanity check
-            scale_issues = []
-            for obj in manifest.get("objects", []):
-                scale = obj.get("transform", {}).get("scale", [1, 1, 1])
-                if any(s < 0.001 or s > 1000 for s in scale):
-                    scale_issues.append(f"{obj.get('name', 'unknown')}: {scale}")
-
-            if scale_issues:
-                quality_gate.add_check(
-                    name="scale_sanity",
-                    passed=len(scale_issues) < 3,
-                    message=f"Objects with suspicious scale: {scale_issues[:3]}",
-                    severity=QualityGateSeverity.WARNING,
-                )
-            else:
-                quality_gate.add_check(
-                    name="scale_sanity",
+            def _check_scale(ctx: dict) -> QualityGateResult:
+                scale_issues = []
+                for obj in ctx["manifest"].get("objects", []):
+                    scale = obj.get("transform", {}).get("scale", [1, 1, 1])
+                    if isinstance(scale, dict):
+                        scale_values = [scale.get("x", 1), scale.get("y", 1), scale.get("z", 1)]
+                    else:
+                        scale_values = list(scale)
+                    if any(s < 0.001 or s > 1000 for s in scale_values):
+                        scale_issues.append(f"{obj.get('name', 'unknown')}: {scale_values}")
+                if scale_issues:
+                    return _build_result(
+                        gate_id="scale_sanity",
+                        passed=False,
+                        severity=QualityGateSeverity.WARNING,
+                        message=f"Objects with suspicious scale: {scale_issues[:3]}",
+                        details={"scale_issues": scale_issues},
+                    )
+                return _build_result(
+                    gate_id="scale_sanity",
                     passed=True,
-                    message="All objects have reasonable scale",
                     severity=QualityGateSeverity.INFO,
+                    message="All objects have reasonable scale",
                 )
 
-            # Evaluate gates and block if ERROR
-            gate_result = quality_gate.evaluate()
-            print(f"[GENIESIM-EXPORT-JOB] Quality gate result: {gate_result['status']}")
-            print(f"[GENIESIM-EXPORT-JOB]   Passed: {gate_result['checks_passed']}/{gate_result['total_checks']}")
+            registry.register(QualityGate(
+                id="manifest_completeness",
+                name="Manifest Completeness",
+                checkpoint=checkpoint,
+                severity=QualityGateSeverity.ERROR,
+                description="Ensure required manifest sections are present.",
+                check_fn=_check_manifest,
+            ))
+            registry.register(QualityGate(
+                id="asset_existence",
+                name="Asset Existence",
+                checkpoint=checkpoint,
+                severity=QualityGateSeverity.WARNING,
+                description="Verify referenced assets exist on disk.",
+                check_fn=_check_assets,
+            ))
+            registry.register(QualityGate(
+                id="physics_properties",
+                name="Physics Properties",
+                checkpoint=checkpoint,
+                severity=QualityGateSeverity.WARNING,
+                description="Ensure objects include physics metadata.",
+                check_fn=_check_physics,
+            ))
+            registry.register(QualityGate(
+                id="scale_sanity",
+                name="Scale Sanity",
+                checkpoint=checkpoint,
+                severity=QualityGateSeverity.WARNING,
+                description="Check for out-of-range object scales.",
+                check_fn=_check_scale,
+            ))
 
-            if gate_result["status"] == "blocked":
+            context = {
+                "manifest": manifest,
+                "assets_dir": assets_dir,
+                "scene_id": scene_id,
+            }
+            results = registry.run_checkpoint(checkpoint, context)
+            total_checks = len(results)
+            checks_passed = sum(1 for result in results if result.passed)
+            error_count = sum(
+                1 for result in results
+                if not result.passed and result.severity == QualityGateSeverity.ERROR
+            )
+            warning_count = sum(
+                1 for result in results
+                if not result.passed and result.severity == QualityGateSeverity.WARNING
+            )
+            status = "passed"
+            if error_count:
+                status = "blocked"
+            elif warning_count:
+                status = "warning"
+
+            print(f"[GENIESIM-EXPORT-JOB] Quality gate result: {status}")
+            print(f"[GENIESIM-EXPORT-JOB]   Passed: {checks_passed}/{total_checks}")
+
+            if status == "blocked":
                 print("\n[GENIESIM-EXPORT-JOB] ❌ Quality gates BLOCKED export")
-                print(f"[GENIESIM-EXPORT-JOB] Errors: {gate_result['error_count']}")
-                for check in gate_result["checks"]:
-                    if check["severity"] == "error":
-                        print(f"[GENIESIM-EXPORT-JOB]   ERROR: {check['name']}: {check['message']}")
+                print(f"[GENIESIM-EXPORT-JOB] Errors: {error_count}")
+                for result in results:
+                    if result.severity == QualityGateSeverity.ERROR and not result.passed:
+                        print(f"[GENIESIM-EXPORT-JOB]   ERROR: {result.gate_id}: {result.message}")
                 return 1
 
-            if gate_result["status"] == "warning":
-                print(f"[GENIESIM-EXPORT-JOB] ⚠️  Quality gates passed with warnings ({gate_result['warning_count']})")
+            if status == "warning":
+                print(f"[GENIESIM-EXPORT-JOB] ⚠️  Quality gates passed with warnings ({warning_count})")
 
             print("[GENIESIM-EXPORT-JOB] ✅ Quality gates passed\n")
         except Exception as e:
