@@ -1,0 +1,91 @@
+name: Genie Sim Staging E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_scene_id:
+        description: "Scene ID under STAGING_DATA_ROOT/scenes"
+        required: false
+        type: string
+  schedule:
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: geniesim-staging-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  geniesim-staging-e2e:
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 240
+    env:
+      GENIESIM_HOST: 0.0.0.0
+      GENIESIM_PORT: 50051
+      GENIESIM_HEADLESS: "1"
+      RUN_GENIESIM_STAGING_E2E: "1"
+      STAGING_DATA_ROOT: ${{ secrets.STAGING_DATA_ROOT }}
+      STAGING_SCENE_ID: ${{ inputs.staging_scene_id || secrets.STAGING_SCENE_ID }}
+      STAGING_ENVIRONMENT_TYPE: ${{ secrets.STAGING_ENVIRONMENT_TYPE || 'kitchen' }}
+      NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare artifact directories
+        run: |
+          mkdir -p logs/ci/geniesim
+
+      - name: Authenticate to NVIDIA NGC
+        if: env.NGC_API_KEY != ''
+        run: |
+          echo "$NGC_API_KEY" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
+      - name: Start Genie Sim gRPC server
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml up -d
+
+      - name: Wait for Genie Sim server to become ready
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml exec -T geniesim-server \
+            /bin/bash -lc \
+            "python3 -m tools.geniesim_adapter.geniesim_healthcheck"
+
+      - name: Run staging E2E test
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml exec -T \
+            -e RUN_GENIESIM_STAGING_E2E=1 \
+            -e STAGING_DATA_ROOT="$STAGING_DATA_ROOT" \
+            -e STAGING_SCENE_ID="$STAGING_SCENE_ID" \
+            -e STAGING_ENVIRONMENT_TYPE="$STAGING_ENVIRONMENT_TYPE" \
+            -e GENIESIM_HOST=localhost \
+            -e GENIESIM_PORT=50051 \
+            geniesim-server \
+            /bin/bash -lc \
+            "/isaac-sim/python.sh -m pytest tests/test_geniesim_staging_e2e.py -v --junitxml=logs/ci/geniesim/pytest-junit.xml" \
+            | tee logs/ci/geniesim/pytest.log
+
+      - name: Capture Genie Sim server log
+        if: always()
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml exec -T geniesim-server \
+            /bin/bash -lc "cat ${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}" \
+            > logs/ci/geniesim/geniesim-server.log || true
+
+      - name: Capture container status
+        if: always()
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml ps > logs/ci/geniesim/docker-ps.log || true
+          docker compose -f docker-compose.geniesim-server.yaml logs --no-color > logs/ci/geniesim/docker-compose.log || true
+
+      - name: Upload Genie Sim staging artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: geniesim-staging-e2e-artifacts
+          path: logs/ci/geniesim
+          if-no-files-found: warn
+
+      - name: Shutdown Genie Sim server
+        if: always()
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml down -v
