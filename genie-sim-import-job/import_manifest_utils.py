@@ -16,6 +16,7 @@ MANIFEST_SCHEMA_DEFINITION = {
         "gcs_output_path": "Optional GCS URI pointing at the bundle root containing output_dir.",
         "readme_path": "Relative path to the bundle README describing LeRobot usage.",
         "checksums_path": "Relative path to the checksums JSON file for bundle artifacts.",
+        "asset_provenance_path": "Relative path or URI to asset provenance JSON for legal review.",
         "package": "Packaged bundle archive details (path, checksum, size, format).",
         "episodes": "Episode download summary metrics.",
         "quality": "Quality scoring summary and thresholds.",
