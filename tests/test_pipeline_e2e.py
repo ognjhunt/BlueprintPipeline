@@ -650,15 +650,17 @@ def test_full_pipeline(monkeypatch=None):
             monkeypatch.setenv("USE_GENIESIM", "true")
             monkeypatch.setenv("GENIESIM_MOCK_MODE", "true")
             monkeypatch.setenv("GENIESIM_FORCE_LOCAL", "false")
+            monkeypatch.setenv("VARIATION_ASSETS_PREFIX", f"{harness.scene_id}/variation_assets")
         else:
             os.environ["USE_GENIESIM"] = "true"
             os.environ["GENIESIM_MOCK_MODE"] = "true"
             os.environ["GENIESIM_FORCE_LOCAL"] = "false"
+            os.environ["VARIATION_ASSETS_PREFIX"] = f"{harness.scene_id}/variation_assets"
         harness.setup()
 
         # Run full pipeline with validation
         success = harness.run_pipeline(
-            steps="regen3d,simready,usd,replicator,genie-sim-export,genie-sim-submit"
+            steps="regen3d,simready,usd,replicator,variation-gen,genie-sim-export,genie-sim-submit"
         )
         assert success, "Full pipeline failed"
 
@@ -692,6 +694,8 @@ def test_full_pipeline(monkeypatch=None):
             "export_manifest.json",
         ]:
             assert (geniesim_dir / rel_path).is_file(), f"Missing Genie Sim export: {rel_path}"
+        variation_assets_path = harness.scene_dir / "variation_assets" / "variation_assets.json"
+        assert variation_assets_path.is_file(), "Missing variation_assets.json for Genie Sim export"
 
         # Run Genie Sim mock import and validate bundle outputs
         import_output_dir = harness.run_geniesim_mock_import()
