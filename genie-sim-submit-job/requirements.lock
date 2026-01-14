@@ -3,4 +3,7 @@ requests==2.32.3
 aiohttp==3.9.5
 google-cloud-storage==2.18.2
 pydantic==2.8.2
+grpcio==1.66.1
+grpcio-tools==1.66.1
+protobuf==5.27.3
 numpy==1.26.4
