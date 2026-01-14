@@ -471,6 +471,8 @@ main:
           - submissionMetadata: ${json.decode(submissionMetadataRaw)}
           - submittedJobId: ${submissionMetadata.job_id}
           - submittedJobStatus: ${default(submissionMetadata.status, "submitted")}
+          - submittedSubmissionMode: ${default(submissionMetadata.submission_mode, "api")}
+          - submittedEpisodesPrefix: ${default(map.get(map.get(submissionMetadata, "artifacts", {}), "episodes_prefix"), null)}
         next: maybe_trigger_import
 
     - maybe_trigger_import:
@@ -484,7 +486,7 @@ main:
         args:
           parent: '${"projects/" + projectId + "/locations/" + region + "/workflows/genie-sim-import-pipeline"}'
           body:
-            argument: '${json.encode({"job_id": submittedJobId, "scene_id": sceneId, "status": submittedJobStatus})}'
+            argument: '${json.encode({"job_id": submittedJobId, "scene_id": sceneId, "status": submittedJobStatus, "submission_mode": submittedSubmissionMode, "local_episodes_prefix": submittedEpisodesPrefix, "job_metadata_path": geniesimJobMetadataPath})}'
         result: importExecution
         next: log_import_trigger
 
