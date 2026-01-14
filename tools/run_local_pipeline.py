@@ -23,12 +23,13 @@ Pipeline Steps:
     4. simready  - Prepare physics-ready assets
     5. usd       - Assemble scene.usda
     6. replicator - Generate Replicator bundle
-    7. isaac-lab - Generate Isaac Lab task package
-    8. genie-sim-export - Export scene bundle for Genie Sim
-    9. genie-sim-submit - Submit/run Genie Sim generation (API or local)
-    10. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
-    11. dwm-inference - Run DWM model to generate interaction videos for each bundle
-    12. validate  - QA validation
+    7. variation-gen - Generate variation assets for Genie Sim export
+    8. isaac-lab - Generate Isaac Lab task package
+    9. genie-sim-export - Export scene bundle for Genie Sim
+    10. genie-sim-submit - Submit/run Genie Sim generation (API or local)
+    11. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
+    12. dwm-inference - Run DWM model to generate interaction videos for each bundle
+    13. validate  - QA validation
 
 Note: DWM steps are optional and only included by default when --enable-dwm is set.
 
@@ -68,6 +69,7 @@ class PipelineStep(str, Enum):
     SIMREADY = "simready"
     USD = "usd"
     REPLICATOR = "replicator"
+    VARIATION_GEN = "variation-gen"
     ISAAC_LAB = "isaac-lab"
     GENIESIM_EXPORT = "genie-sim-export"
     GENIESIM_SUBMIT = "genie-sim-submit"
@@ -272,6 +274,7 @@ class LocalPipelineRunner:
             "simready-job": PipelineStep.SIMREADY,
             "usd-assembly-job": PipelineStep.USD,
             "replicator-job": PipelineStep.REPLICATOR,
+            "variation-gen-job": PipelineStep.VARIATION_GEN,
             "isaac-lab-job": PipelineStep.ISAAC_LAB,
             "genie-sim-export-job": PipelineStep.GENIESIM_EXPORT,
             "genie-sim-submit-job": PipelineStep.GENIESIM_SUBMIT,
@@ -305,6 +308,8 @@ class LocalPipelineRunner:
                 result = self._run_usd_assembly()
             elif step == PipelineStep.REPLICATOR:
                 result = self._run_replicator()
+            elif step == PipelineStep.VARIATION_GEN:
+                result = self._run_variation_gen()
             elif step == PipelineStep.ISAAC_LAB:
                 result = self._run_isaac_lab()
             elif step == PipelineStep.GENIESIM_EXPORT:
@@ -882,6 +887,102 @@ class LocalPipelineRunner:
             },
         )
 
+    def _run_variation_gen(self) -> StepResult:
+        """Run variation asset generation for local testing."""
+        manifest_path = self.replicator_dir / "variation_assets" / "manifest.json"
+        if not manifest_path.is_file():
+            return StepResult(
+                step=PipelineStep.VARIATION_GEN,
+                success=False,
+                duration_seconds=0,
+                message="Variation manifest not found - run replicator step first",
+            )
+
+        variation_assets_dir = self.scene_dir / "variation_assets"
+        variation_assets_dir.mkdir(parents=True, exist_ok=True)
+
+        variation_assets_prefix = f"{self.scene_id}/variation_assets"
+        os.environ.setdefault("VARIATION_ASSETS_PREFIX", variation_assets_prefix)
+
+        manifest = json.loads(manifest_path.read_text())
+        assets = manifest.get("assets", [])
+        if not assets:
+            return StepResult(
+                step=PipelineStep.VARIATION_GEN,
+                success=False,
+                duration_seconds=0,
+                message="Variation manifest contains no assets",
+            )
+
+        self._generate_mock_variation_assets(assets, variation_assets_dir)
+        marker_path = variation_assets_dir / ".variation_pipeline_complete"
+        self._write_marker(marker_path, status="completed")
+
+        return StepResult(
+            step=PipelineStep.VARIATION_GEN,
+            success=True,
+            duration_seconds=0,
+            message="Variation assets generated (mock)",
+            outputs={
+                "variation_assets": str(variation_assets_dir / "variation_assets.json"),
+                "variation_marker": str(marker_path),
+            },
+        )
+
+    def _generate_mock_variation_assets(
+        self,
+        assets: List[Dict[str, Any]],
+        output_dir: Path,
+    ) -> None:
+        """Generate mock variation assets for local runs."""
+        objects = []
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+            b"\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc`\x00\x00\x00\x02\x00\x01"
+            b"\xe2!\xbc\x33\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+
+        for asset in assets:
+            name = asset.get("name") or asset.get("id") or "variation_asset"
+            category = asset.get("category", "object")
+            description = asset.get("description") or f"Variation of {category}"
+            asset_dir = output_dir / name
+            asset_dir.mkdir(parents=True, exist_ok=True)
+            reference_path = asset_dir / "reference.png"
+            if not reference_path.exists():
+                reference_path.write_bytes(png_bytes)
+
+            objects.append({
+                "id": name,
+                "name": name,
+                "category": category,
+                "short_description": description,
+                "sim_role": "manipulable_object",
+                "must_be_separate_asset": True,
+                "preferred_view": f"variation_assets/{name}/reference.png",
+                "multiview_dir": None,
+                "crop_path": None,
+                "physics_hints": asset.get("physics_hints", {}),
+                "semantic_class": asset.get("semantic_class", category),
+                "asset": {
+                    "license": "CC0",
+                    "commercial_ok": True,
+                },
+            })
+
+        payload = {
+            "scene_id": self.scene_id,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "source": "variation-gen-job-mock",
+            "objects": objects,
+            "metadata": {
+                "total_objects": len(objects),
+                "generation_type": "variation_assets",
+            },
+        }
+        (output_dir / "variation_assets.json").write_text(json.dumps(payload, indent=2))
+
     def _generate_placement_regions(self, manifest: Dict) -> str:
         """Generate minimal placement_regions.usda."""
         lines = [
@@ -931,6 +1032,23 @@ class LocalPipelineRunner:
                     "priority": "recommended",
                     "source_hint": "generate",
                 })
+
+        if not assets:
+            for obj in manifest.get("objects", []):
+                if obj.get("sim_role") in {"background", "scene_shell"}:
+                    continue
+                category = (obj.get("category")
+                            or (obj.get("semantics") or {}).get("category")
+                            or "object")
+                assets.append({
+                    "name": f"variation_{category}",
+                    "category": category,
+                    "description": f"Variation of {category}",
+                    "priority": "recommended",
+                    "source_hint": "generate",
+                })
+                if len(assets) >= 3:
+                    break
 
         return {
             "scene_id": self.scene_id,
@@ -1037,6 +1155,7 @@ class LocalPipelineRunner:
         variation_assets_prefix = f"{self.scene_id}/variation_assets"
         replicator_prefix = f"{self.scene_id}/replicator"
         robot_type = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
+        os.environ.setdefault("VARIATION_ASSETS_PREFIX", variation_assets_prefix)
 
         exit_code = run_geniesim_export_job(
             root=root,
