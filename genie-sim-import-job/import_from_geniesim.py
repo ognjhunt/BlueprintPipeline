@@ -151,6 +151,79 @@ def _write_checksums_file(output_dir: Path, checksums: Dict[str, Any]) -> Path:
     return checksums_path
 
 
+def _load_contract_schema(schema_name: str) -> Dict[str, Any]:
+    schema_path = REPO_ROOT / "fixtures" / "contracts" / schema_name
+    return json.loads(schema_path.read_text())
+
+
+def _validate_minimal_schema(payload: Any, schema: Dict[str, Any], path: str) -> None:
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        if not isinstance(payload, dict):
+            raise ValueError(f"{path}: expected object")
+        for key in schema.get("required", []):
+            if key not in payload:
+                raise ValueError(f"{path}: missing required field '{key}'")
+        for key, prop_schema in schema.get("properties", {}).items():
+            if key in payload:
+                _validate_minimal_schema(payload[key], prop_schema, f"{path}.{key}")
+    elif schema_type == "array":
+        if not isinstance(payload, list):
+            raise ValueError(f"{path}: expected array")
+        min_items = schema.get("minItems")
+        max_items = schema.get("maxItems")
+        if min_items is not None and len(payload) < min_items:
+            raise ValueError(f"{path}: expected at least {min_items} items")
+        if max_items is not None and len(payload) > max_items:
+            raise ValueError(f"{path}: expected at most {max_items} items")
+        items_schema = schema.get("items")
+        if items_schema:
+            for idx, item in enumerate(payload):
+                _validate_minimal_schema(item, items_schema, f"{path}[{idx}]")
+    elif schema_type == "string":
+        if not isinstance(payload, str):
+            raise ValueError(f"{path}: expected string")
+        enum = schema.get("enum")
+        if enum and payload not in enum:
+            raise ValueError(f"{path}: value '{payload}' not in enum {enum}")
+    elif schema_type == "integer":
+        if not isinstance(payload, int):
+            raise ValueError(f"{path}: expected integer")
+    elif schema_type == "number":
+        if not isinstance(payload, (int, float)):
+            raise ValueError(f"{path}: expected number")
+    elif schema_type == "boolean":
+        if not isinstance(payload, bool):
+            raise ValueError(f"{path}: expected boolean")
+
+
+def _validate_json_schema(payload: Any, schema: Dict[str, Any]) -> None:
+    try:
+        import jsonschema  # type: ignore
+    except ImportError:
+        _validate_minimal_schema(payload, schema, path="$")
+    else:
+        jsonschema.validate(instance=payload, schema=schema)
+
+
+def _validate_schema_payload(
+    payload: Any,
+    schema_name: str,
+    payload_label: str,
+) -> List[str]:
+    schema = _load_contract_schema(schema_name)
+    try:
+        _validate_json_schema(payload, schema)
+    except Exception as exc:
+        return [f"{payload_label}: {exc}"]
+    return []
+
+
+def _load_json_file(path: Path) -> Any:
+    with open(path, "r") as handle:
+        return json.load(handle)
+
+
 def _create_bundle_package(
     output_dir: Path,
     package_name: str,
@@ -895,13 +968,31 @@ def run_import_job(
             print(f"[IMPORT]   Passed: {validation_result['passed_count']}")
             print(f"[IMPORT]   Failed: {validation_result['failed_count']}")
             print(f"[IMPORT]   Avg Quality: {validation_result['average_quality_score']:.2f}")
-            print(f"[IMPORT]   Quality Range: [{validation_result['min_quality_score']:.2f}, {validation_result['max_quality_score']:.2f}]\n")
+            print(
+                f"[IMPORT]   Quality Range: "
+                f"[{validation_result['min_quality_score']:.2f}, {validation_result['max_quality_score']:.2f}]\n"
+            )
 
             result.episodes_passed_validation = validation_result['passed_count']
             result.episodes_filtered = validation_result['failed_count']
             result.average_quality_score = validation_result['average_quality_score']
             quality_min_score = validation_result["min_quality_score"]
             quality_max_score = validation_result["max_quality_score"]
+
+            if validation_result["failed_count"] > 0:
+                result.errors.append(
+                    f"{validation_result['failed_count']} episodes failed validation (min_quality_score={config.min_quality_score})"
+                )
+
+            low_quality_episodes = [
+                ep.episode_id
+                for ep in download_result.episodes
+                if ep.quality_score < config.min_quality_score
+            ]
+            if low_quality_episodes:
+                result.errors.append(
+                    f"{len(low_quality_episodes)} episodes below min_quality_score={config.min_quality_score}"
+                )
 
             # Step 4: Filter low-quality episodes
             if config.filter_low_quality:
@@ -941,6 +1032,15 @@ def run_import_job(
             result.average_quality_score = np.mean(quality_scores) if quality_scores else 0.0
             quality_min_score = float(np.min(quality_scores)) if quality_scores else 0.0
             quality_max_score = float(np.max(quality_scores)) if quality_scores else 0.0
+            low_quality_episodes = [
+                ep.episode_id
+                for ep in download_result.episodes
+                if ep.quality_score < config.min_quality_score
+            ]
+            if low_quality_episodes:
+                result.errors.append(
+                    f"{len(low_quality_episodes)} episodes below min_quality_score={config.min_quality_score}"
+                )
 
         # Step 5: Convert episodes to LeRobot format
         print(f"[IMPORT] Converting episodes to LeRobot format...")
@@ -1229,27 +1329,98 @@ def run_local_import_job(
         result.errors.append(f"Local recordings directory missing: {recordings_dir}")
         return result
 
+    schema_errors: List[str] = []
+    for episode_file in sorted(recordings_dir.rglob("*.json")):
+        try:
+            payload = _load_json_file(episode_file)
+        except Exception as exc:
+            schema_errors.append(f"recording {episode_file.relative_to(config.output_dir)}: {exc}")
+            continue
+        schema_errors.extend(
+            _validate_schema_payload(
+                payload,
+                "geniesim_local_episode.schema.json",
+                f"recording {episode_file.relative_to(config.output_dir)}",
+            )
+        )
+
     episode_metadata_list = _collect_local_episode_metadata(recordings_dir)
     if not episode_metadata_list:
         result.errors.append(f"No local episode files found under {recordings_dir}")
         return result
+
+    lerobot_dir = config.output_dir / "lerobot"
+    dataset_info_path = lerobot_dir / "dataset_info.json"
+    episodes_index_path = lerobot_dir / "episodes.jsonl"
+    if dataset_info_path.exists():
+        try:
+            dataset_info_payload = _load_json_file(dataset_info_path)
+            schema_errors.extend(
+                _validate_schema_payload(
+                    dataset_info_payload,
+                    "geniesim_local_dataset_info.schema.json",
+                    f"metadata {dataset_info_path.relative_to(config.output_dir)}",
+                )
+            )
+        except Exception as exc:
+            schema_errors.append(
+                f"metadata {dataset_info_path.relative_to(config.output_dir)}: {exc}"
+            )
+    else:
+        schema_errors.append(
+            f"metadata {dataset_info_path.relative_to(config.output_dir)}: missing dataset_info.json"
+        )
+
+    if episodes_index_path.exists():
+        try:
+            with open(episodes_index_path, "r") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    entry = json.loads(stripped)
+                    schema_errors.extend(
+                        _validate_schema_payload(
+                            entry,
+                            "geniesim_local_episodes_index.schema.json",
+                            f"metadata {episodes_index_path.relative_to(config.output_dir)}:{line_number}",
+                        )
+                    )
+        except Exception as exc:
+            schema_errors.append(
+                f"metadata {episodes_index_path.relative_to(config.output_dir)}: {exc}"
+            )
+    else:
+        schema_errors.append(
+            f"metadata {episodes_index_path.relative_to(config.output_dir)}: missing episodes.jsonl"
+        )
+
+    if schema_errors:
+        result.errors.extend(schema_errors)
 
     total_size_bytes = 0
     for episode_file in recordings_dir.rglob("*.json"):
         total_size_bytes += episode_file.stat().st_size
 
     result.total_episodes_downloaded = len(episode_metadata_list)
-    result.episodes_passed_validation = len(episode_metadata_list)
-    result.episodes_filtered = 0
+    low_quality_episodes = [
+        ep for ep in episode_metadata_list if ep.quality_score < config.min_quality_score
+    ]
+    result.episodes_passed_validation = len(episode_metadata_list) - len(low_quality_episodes)
+    result.episodes_filtered = len(low_quality_episodes)
     quality_scores = [ep.quality_score for ep in episode_metadata_list]
     result.average_quality_score = float(np.mean(quality_scores)) if quality_scores else 0.0
     quality_min_score = float(np.min(quality_scores)) if quality_scores else 0.0
     quality_max_score = float(np.max(quality_scores)) if quality_scores else 0.0
 
+    if low_quality_episodes:
+        result.errors.append(
+            f"{len(low_quality_episodes)} local episodes below min_quality_score={config.min_quality_score}"
+        )
+
     if config.enable_validation:
         result.warnings.append("Local import skipped API validation; local episodes are assumed valid.")
 
-    lerobot_dir = config.output_dir / "lerobot"
     lerobot_error = None
     lerobot_episode_files = []
     if lerobot_dir.exists():
