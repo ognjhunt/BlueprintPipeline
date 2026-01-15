@@ -12,6 +12,14 @@ from .errors import ErrorContext, PipelineError
 
 logger = logging.getLogger(__name__)
 
+# Import tracing (graceful degradation if not available)
+try:
+    from tools.tracing import trace_job, set_trace_attribute, set_trace_error
+    TRACING_AVAILABLE = True
+except ImportError:
+    TRACING_AVAILABLE = False
+    logger.debug("Tracing not available")
+
 
 def _build_context(
     *,
@@ -109,28 +117,71 @@ def run_job_with_dead_letter_queue(
 ) -> int:
     """
     Run a job entrypoint and publish failures to the DLQ.
+
+    Includes distributed tracing when enabled.
     """
-    try:
-        result = job_fn()
-        if isinstance(result, int):
-            return result
-        return 0
-    except SystemExit as exc:
-        if exc.code not in (0, None):
+    # Context manager for tracing (no-op if tracing not available)
+    if TRACING_AVAILABLE:
+        trace_context = trace_job(
+            job_name=job_type,
+            scene_id=scene_id,
+            step=step,
+            **(input_params or {}),
+        )
+    else:
+        from contextlib import nullcontext
+        trace_context = nullcontext()
+
+    with trace_context:
+        # Set trace attributes
+        if TRACING_AVAILABLE and input_params:
+            for key, value in input_params.items():
+                # Only set simple types as attributes
+                if isinstance(value, (str, int, float, bool)):
+                    set_trace_attribute(f"input.{key}", value)
+
+        try:
+            result = job_fn()
+
+            # Mark success in trace
+            if TRACING_AVAILABLE:
+                set_trace_attribute("job.status", "success")
+                set_trace_attribute("job.exit_code", result if isinstance(result, int) else 0)
+
+            if isinstance(result, int):
+                return result
+            return 0
+
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                # Mark failure in trace
+                if TRACING_AVAILABLE:
+                    set_trace_attribute("job.status", "failure")
+                    set_trace_attribute("job.exit_code", exc.code)
+                    set_trace_error(RuntimeError(f"Job exited with code {exc.code}"))
+
+                publish_failure(
+                    RuntimeError(f"Job exited with code {exc.code}"),
+                    scene_id=scene_id,
+                    job_type=job_type,
+                    step=step,
+                    input_params=input_params,
+                )
+            raise
+
+        except Exception as exc:
+            # Mark error in trace
+            if TRACING_AVAILABLE:
+                set_trace_attribute("job.status", "error")
+                set_trace_attribute("error.type", type(exc).__name__)
+                set_trace_attribute("error.message", str(exc))
+                set_trace_error(exc)
+
             publish_failure(
-                RuntimeError(f"Job exited with code {exc.code}"),
+                exc,
                 scene_id=scene_id,
                 job_type=job_type,
                 step=step,
                 input_params=input_params,
             )
-        raise
-    except Exception as exc:
-        publish_failure(
-            exc,
-            scene_id=scene_id,
-            job_type=job_type,
-            step=step,
-            input_params=input_params,
-        )
-        return failure_exit_code
+            return failure_exit_code
