@@ -1,0 +1,26 @@
+# OpenTelemetry Distributed Tracing Dependencies
+# Install with: pip install -r tools/tracing/requirements.txt
+
+# Core OpenTelemetry
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+
+# Exporters (install based on your needs)
+
+# Google Cloud Trace (for GCP deployments)
+opentelemetry-exporter-gcp-trace>=1.5.0
+
+# OTLP (standard protocol, works with many backends)
+opentelemetry-exporter-otlp>=1.20.0
+opentelemetry-exporter-otlp-proto-grpc>=1.20.0
+
+# Jaeger (for local development / on-prem)
+# opentelemetry-exporter-jaeger>=1.20.0
+
+# Optional: Automatic instrumentation
+# opentelemetry-instrumentation>=0.41b0
+# opentelemetry-instrumentation-requests>=0.41b0
+# opentelemetry-instrumentation-grpc>=0.41b0
+
+# Optional: Propagation
+opentelemetry-propagator-gcp>=1.5.0
