@@ -1,0 +1,74 @@
+# Coverage.py configuration for BlueprintPipeline
+[run]
+branch = True
+source = .
+omit =
+    # Test files
+    tests/*
+    */tests/*
+    # Setup and configuration
+    setup.py
+    */setup.py
+    # Virtual environments
+    .venv/*
+    venv/*
+    */venv/*
+    */.venv/*
+    # Third-party code
+    */site-packages/*
+    # Build artifacts
+    build/*
+    dist/*
+    *.egg-info/*
+    # Fixtures and mocks
+    fixtures/*
+    */fixtures/*
+    # CI/CD
+    .github/*
+    # Documentation
+    docs/*
+    # Protobuf generated files
+    *_pb2.py
+    *_pb2_grpc.py
+    # Temporary files
+    tmp/*
+    */tmp/*
+    .tmp/*
+    */.tmp/*
+
+[report]
+# Reporting options
+precision = 2
+show_missing = True
+skip_covered = False
+sort = Cover
+
+# Exclude lines from coverage
+exclude_lines =
+    # Standard pragma
+    pragma: no cover
+    # Debug code
+    def __repr__
+    if self\.debug
+    # Unreachable code
+    if False:
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    # Abstract methods
+    @(abc\.)?abstractmethod
+    # Raise not implemented
+    raise AssertionError
+    raise NotImplementedError
+    # Pass statements
+    pass
+    # Ellipsis
+    \.\.\.
+    # Type checking imports
+    if typing.TYPE_CHECKING:
+
+[html]
+directory = htmlcov
+title = BlueprintPipeline Coverage Report
+
+[xml]
+output = coverage.xml
