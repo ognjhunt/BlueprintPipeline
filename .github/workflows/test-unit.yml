@@ -76,13 +76,40 @@ jobs:
             -v \
             -m "unit or (not gpu and not slow and not requires_secrets and not staging)" \
             --tb=short \
-            --cov \
+            --cov=. \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
             --cov-report=html:htmlcov \
             --junitxml=junit.xml \
             --durations=10 \
             -n auto
+
+      - name: Enforce coverage threshold
+        if: matrix.python-version == '3.10'
+        env:
+          COVERAGE_THRESHOLD: '75'
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          threshold = float(os.environ.get("COVERAGE_THRESHOLD", "75"))
+          tree = ET.parse("coverage.xml")
+          rate = float(tree.getroot().get("line-rate", "0")) * 100
+          if rate + 1e-9 < threshold:
+              print(
+                  "::error::Coverage gate failed: total line coverage "
+                  f"{rate:.2f}% is below {threshold:.2f}%. "
+                  "Add unit tests or adjust the threshold in "
+                  ".github/workflows/test-unit.yml."
+              )
+              sys.exit(1)
+          print(
+              "Coverage gate passed: total line coverage "
+              f"{rate:.2f}% >= {threshold:.2f}%."
+          )
+          PY
 
       - name: Run integration tests (non-GPU, non-GCS)
         env:
