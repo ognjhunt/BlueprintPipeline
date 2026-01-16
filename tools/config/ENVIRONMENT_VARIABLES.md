@@ -46,6 +46,12 @@ export BP_SPLIT_TEST_RATIO=0.15
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `PIPELINE_SEED` | int | unset | Global seed applied to Python, NumPy, and supported ML frameworks |
+| `PIPELINE_RETENTION_DAYS` | int | 30 | Default retention window (days) for intermediate pipeline artifacts |
+| `PIPELINE_INPUT_RETENTION_DAYS` | int | 90 | Retention window (days) for input artifacts |
+| `PIPELINE_INTERMEDIATE_RETENTION_DAYS` | int | 30 | Retention window (days) for intermediate artifacts |
+| `PIPELINE_OUTPUT_RETENTION_DAYS` | int | 365 | Retention window (days) for output artifacts |
+| `PIPELINE_LOG_RETENTION_DAYS` | int | 180 | Retention window (days) for pipeline logs |
+| `PIPELINE_RETENTION_DRY_RUN` | bool | false | Log retention deletions without removing files |
 
 **Example**:
 ```bash
