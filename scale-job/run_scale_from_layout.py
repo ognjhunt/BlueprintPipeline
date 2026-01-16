@@ -71,6 +71,7 @@ def gather_reference_scales(metadata: dict, objects: List[dict]) -> Tuple[List[f
     Turn explicit references into scale samples. Supports:
       - scale_factors: list[float]
       - known_heights: list[{object_id, height_m}]
+      - reference_objects: list[{object_id?, class_name?, height_m}]
     """
     scales: List[float] = []
     samples: List[dict] = []
@@ -119,6 +120,125 @@ def gather_reference_scales(metadata: dict, objects: List[dict]) -> Tuple[List[f
                 "scale_sample": s,
             }
         )
+
+    for entry in metadata.get("reference_objects", []):
+        if not isinstance(entry, dict):
+            continue
+        height_m = entry.get("height_m")
+        if height_m is None:
+            continue
+        try:
+            height_m = float(height_m)
+        except (TypeError, ValueError):
+            continue
+        match = None
+        obj_id = entry.get("object_id")
+        class_name = entry.get("class_name")
+        if obj_id is not None:
+            match = next((o for o in objects if o.get("id") == obj_id), None)
+        elif class_name:
+            normalized = normalize_class_name(str(class_name))
+            match = next(
+                (o for o in objects if normalize_class_name(o.get("class_name", "")) == normalized),
+                None,
+            )
+        if not match:
+            continue
+        obb = match.get("obb")
+        if not isinstance(obb, dict):
+            continue
+        extents = obb.get("extents")
+        if not isinstance(extents, list) or len(extents) != 3:
+            continue
+        measured_h = 2.0 * float(extents[1])
+        if measured_h <= 1e-6:
+            continue
+        s = height_m / measured_h
+        scales.append(s)
+        samples.append(
+            {
+                "source": "reference_object",
+                "object_id": obj_id,
+                "class_name": class_name,
+                "height_m": height_m,
+                "measured_h_units": measured_h,
+                "scale_sample": s,
+            }
+        )
+
+    return scales, samples
+
+
+def gather_scene_metric_scales(metadata: dict, room_box: Optional[dict]) -> Tuple[List[float], List[dict]]:
+    scales: List[float] = []
+    samples: List[dict] = []
+
+    if not isinstance(room_box, dict):
+        return scales, samples
+
+    mins = room_box.get("min")
+    maxs = room_box.get("max")
+    if not (isinstance(mins, list) and isinstance(maxs, list) and len(mins) == 3 and len(maxs) == 3):
+        return scales, samples
+
+    dims = np.array(maxs, dtype=np.float32) - np.array(mins, dtype=np.float32)
+    if np.any(dims <= 1e-6):
+        return scales, samples
+
+    scene_metrics = metadata.get("scene_metrics", {})
+    if isinstance(scene_metrics, dict):
+        metric_map = {
+            "room_width_m": 0,
+            "room_height_m": 1,
+            "room_depth_m": 2,
+        }
+        for key, axis in metric_map.items():
+            value = scene_metrics.get(key)
+            if value is None:
+                continue
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+            s = value / float(dims[axis])
+            scales.append(s)
+            samples.append(
+                {
+                    "source": "scene_metric",
+                    "metric": key,
+                    "metric_value_m": value,
+                    "measured_units": float(dims[axis]),
+                    "scale_sample": s,
+                }
+            )
+
+        room_box_m = scene_metrics.get("room_box_m")
+        if isinstance(room_box_m, dict):
+            room_min = room_box_m.get("min")
+            room_max = room_box_m.get("max")
+            if (
+                isinstance(room_min, list)
+                and isinstance(room_max, list)
+                and len(room_min) == 3
+                and len(room_max) == 3
+            ):
+                known_dims = np.array(room_max, dtype=np.float32) - np.array(room_min, dtype=np.float32)
+                for axis, axis_name in enumerate(["x", "y", "z"]):
+                    if known_dims[axis] <= 1e-6:
+                        continue
+                    s = float(known_dims[axis]) / float(dims[axis])
+                    scales.append(s)
+                    samples.append(
+                        {
+                            "source": "scene_metric",
+                            "metric": f"room_box_{axis_name}_m",
+                            "metric_value_m": float(known_dims[axis]),
+                            "measured_units": float(dims[axis]),
+                            "scale_sample": s,
+                        }
+                    )
 
     return scales, samples
 
@@ -196,13 +316,17 @@ def main() -> None:
     if metadata_path:
         print(f"[SCALE] Found metric metadata at {metadata_path}")
 
-    # Collect scale samples from explicit references then class priors
+    # Collect scale samples from explicit references then scene metrics and class priors
     scales: List[float] = []
     used_samples: List[dict] = []
 
     ref_scales, ref_samples = gather_reference_scales(metric_metadata, objects)
     scales.extend(ref_scales)
     used_samples.extend(ref_samples)
+
+    metric_scales, metric_samples = gather_scene_metric_scales(metric_metadata, room_box)
+    scales.extend(metric_scales)
+    used_samples.extend(metric_samples)
 
     # We assume Y-axis (index 1) is "up" in world frame
     UP_AXIS = 1
@@ -266,12 +390,15 @@ def main() -> None:
 
     source_flags = {
         "reference": len(ref_scales) > 0,
-        "prior": len(scales) > len(ref_scales),
+        "scene_metric": len(metric_scales) > 0,
+        "prior": len(scales) > (len(ref_scales) + len(metric_scales)),
     }
-    if source_flags["reference"] and source_flags["prior"]:
+    if sum(source_flags.values()) > 1:
         source_label = "blend"
     elif source_flags["reference"]:
         source_label = "reference"
+    elif source_flags["scene_metric"]:
+        source_label = "scene_metric"
     else:
         source_label = "class_priors"
 

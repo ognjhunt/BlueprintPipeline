@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scale Job Metric Metadata",
+  "type": "object",
+  "properties": {
+    "scale_factors": {
+      "type": "array",
+      "items": {"type": "number"}
+    },
+    "known_heights": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["object_id", "height_m"],
+        "properties": {
+          "object_id": {"type": "string"},
+          "height_m": {"type": "number"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "reference_objects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["height_m"],
+        "anyOf": [
+          {"required": ["object_id"]},
+          {"required": ["class_name"]}
+        ],
+        "properties": {
+          "object_id": {"type": "string"},
+          "class_name": {"type": "string"},
+          "height_m": {"type": "number"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "scene_metrics": {
+      "type": "object",
+      "properties": {
+        "room_width_m": {"type": "number"},
+        "room_height_m": {"type": "number"},
+        "room_depth_m": {"type": "number"},
+        "room_box_m": {
+          "type": "object",
+          "required": ["min", "max"],
+          "properties": {
+            "min": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {"type": "number"}
+            },
+            "max": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {"type": "number"}
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
