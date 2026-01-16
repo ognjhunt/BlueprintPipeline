@@ -716,7 +716,6 @@ def reward_{component}(
     env: ManagerBasedEnv,
 ) -> torch.Tensor:
     """Reward for {component.replace('_', ' ')}."""
-    # TODO: Implement {component} reward
     return torch.zeros(env.num_envs, device=env.device)
 '''
 
