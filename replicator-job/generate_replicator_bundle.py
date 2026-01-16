@@ -1432,7 +1432,9 @@ def process_scene(
     print(f"[REPLICATOR] Processing scene: {scene_id}")
 
     # Load scene data
-    inventory_path = root / seg_prefix / "inventory.json"
+    inventory_path = root / seg_prefix / "inventory_enriched.json"
+    if not inventory_path.is_file():
+        inventory_path = root / seg_prefix / "inventory.json"
     assets_root = root / assets_prefix
 
     if not inventory_path.is_file():
