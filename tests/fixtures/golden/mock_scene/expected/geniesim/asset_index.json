@@ -1,0 +1,67 @@
+{
+  "assets": [
+    {
+      "asset_id": "mug_0",
+      "usd_path": "<USD_SOURCE_DIR>/mug_0.usd",
+      "semantic_description": "A mug named mug_0 - coffee mug approximately 0.08m x 0.08m x 0.10m made of ceramic can be graspable, containable suitable for robot manipulation",
+      "categories": [
+        "kitchen",
+        "container",
+        "graspable"
+      ],
+      "mass": 0.2,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 2300.0
+      },
+      "collision_hull_path": "<USD_SOURCE_DIR>/mug_0.usd",
+      "texture_variants": {},
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "manipulable_object",
+        "category": "mug",
+        "affordances": [
+          "Graspable",
+          "Containable"
+        ],
+        "articulation": {}
+      }
+    },
+    {
+      "asset_id": "variation_mug_1",
+      "usd_path": "<USD_SOURCE_DIR>/variation_mug_1.usd",
+      "semantic_description": "A mug named variation_mug_1 - variation mug",
+      "categories": [
+        "kitchen",
+        "container",
+        "graspable"
+      ],
+      "mass": 1.0000000000000002,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "<USD_SOURCE_DIR>/variation_mug_1.usd",
+      "texture_variants": {},
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline_generated",
+      "bp_metadata": {
+        "sim_role": "unknown",
+        "category": "mug",
+        "affordances": [],
+        "articulation": {}
+      }
+    }
+  ],
+  "metadata": {
+    "source_scene": "mock_scene",
+    "total_assets": 2,
+    "commercial_assets": 2,
+    "embedding_model": null
+  }
+}
