@@ -41,6 +41,31 @@ Resource needs vary by scene size and number of objects. Use these as starting p
 - Remove hidden or occluded geometry to reduce collision complexity.
 - Normalize transforms and scales to avoid extreme values.
 
+## Reproducing GPU tests locally
+
+Use a host with an NVIDIA GPU and drivers installed. Verify the driver runtime with:
+
+```bash
+nvidia-smi
+```
+
+Then install dependencies and run the GPU-marked tests:
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
+pip install pytest pytest-cov pytest-timeout pytest-xdist pytest-mock
+pip install -r tools/requirements.txt || true
+pip install -r simready-job/requirements.txt || true
+pip install -r usd-assembly-job/requirements.txt || true
+pip install -r replicator-job/requirements.txt || true
+
+export PIPELINE_ENV=test
+export PYTHONPATH="$(pwd)"
+pytest tests/ -v -m gpu --tb=short --durations=10
+```
+
+If you are running in a container, make sure the NVIDIA Container Toolkit is configured and pass `--gpus all` to `docker run` so the tests can access the GPU.
+
 ## Pipeline scaling tips
 
 ### Parallelization
