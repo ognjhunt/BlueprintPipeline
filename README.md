@@ -79,6 +79,9 @@ is required for the free/default workflow. This is the default backend when
 `USE_GENIESIM` is unset (equivalent to `USE_GENIESIM=true`); see the prerequisites
 in the Quick Start section above before running locally.
 
+For a detailed integration checklist (ports, credentials, health checks), see
+[`docs/GENIESIM_INTEGRATION.md`](docs/GENIESIM_INTEGRATION.md).
+
 Prereqs for the default Genie Sim path:
 - `ISAAC_SIM_PATH` points to your Isaac Sim install (must include `python.sh`).
 - `GENIESIM_ROOT` points to your Genie Sim checkout.
