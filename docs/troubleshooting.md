@@ -80,10 +80,63 @@ docker run --rm usd-assembly-job:smoke python -c "from pxr import Usd, UsdGeom, 
 - Check `assets/scene_manifest.json` for bad paths.
 - Validate numeric values in `layout/scene_layout_scaled.json`.
 
+## genie-sim services
+
+### Genie Sim gRPC health check fails
+**Symptoms**: gRPC client cannot connect, `UNAVAILABLE`, or pipeline stages report the Genie Sim server is not ready.
+
+**Health check commands**
+- **Preflight CLI (recommended)**:
+  ```bash
+  python -m tools.geniesim_adapter.geniesim_healthcheck --json
+  ```
+  **Expected response (healthy)**: `ok: true`, `status.server_running: true`, `server_ready: true`, with exit code `0`.
+- **Direct gRPC check (local server)**:
+  ```bash
+  python -m tools.geniesim_adapter.geniesim_server --health-check --host <host> --port 50051
+  ```
+  **Expected response (healthy)**: logs `Health check status: SERVING`, exit code `0`.
+
+**Common failure modes**
+- **Server not running**: `status.server_running: false` in the preflight report.
+- **Isaac Sim not found**: `missing` contains `ISAAC_SIM_PATH` guidance (wrong or missing install path).
+- **gRPC packages/stubs missing**: `missing` lists `grpcio` or gRPC stubs; regenerate or install dependencies.
+- **Server not ready**: `server_ready: false` after a successful socket connection (server still loading or stuck).
+
+**Related tooling**
+- Preflight CLI: [`tools/geniesim_adapter/geniesim_healthcheck.py`](../tools/geniesim_adapter/geniesim_healthcheck.py)
+- Local gRPC server + health check: [`tools/geniesim_adapter/geniesim_server.py`](../tools/geniesim_adapter/geniesim_server.py)
+
 ## particulate-service
 
 ### Health checks failing or timing out
 **Symptoms**: Cloud Run or GKE health checks return `503`, or upstream callers get `Service warming up` / `Warmup failed` errors.
+
+**Health check URLs/commands**
+- **Liveness**:
+  ```bash
+  curl -s -i http://<host>:<port>/
+  ```
+  **Expected response (healthy)**: `HTTP/1.1 200` with JSON body:
+  ```json
+  {
+    "status": "ok",
+    "ready": true,
+    "service": "particulate"
+  }
+  ```
+  **Expected response (warming up/failed)**: `HTTP/1.1 503` with JSON body containing `status: "warming_up"` or `status: "error"`.
+- **Readiness**:
+  ```bash
+  curl -s -i http://<host>:<port>/ready
+  ```
+  **Expected response (healthy)**: `HTTP/1.1 200` with body `ready`.
+  **Expected response (loading/error)**: `HTTP/1.1 503` with body `not ready: <reason>`.
+- **Debug metadata**:
+  ```bash
+  curl -s http://<host>:<port>/debug | jq .
+  ```
+  **Expected response**: `HTTP/1.1 200` with JSON fields `models_ready`, `warmup_error`, `warmup_details`, and `installation_validation`.
 
 **Expected behavior**
 - `GET /` returns `200` once model warmup completes; `503` during warmup or if warmup fails.
@@ -93,6 +146,7 @@ docker run --rm usd-assembly-job:smoke python -c "from pxr import Usd, UsdGeom, 
 **Likely causes**
 - Model warmup still running (first deploy or cold start).
 - Missing Particulate files or CUDA/GPU misconfiguration during warmup.
+- Installation validation failures (missing model files or invalid paths).
 
 **Fixes**
 - Wait for warmup to finish and re-check `GET /` or `GET /ready`.
