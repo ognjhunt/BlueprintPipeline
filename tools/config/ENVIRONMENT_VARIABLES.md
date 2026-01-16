@@ -203,6 +203,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
 | `GEMINI_API_KEY` | str | No | Google Gemini API key for LLM features (dev fallback only; production requires Secret Manager) |
 | `HF_TOKEN` | str | No | HuggingFace API token for model downloads |
 | `MESHY_API_KEY` | str | No | Meshy API key for 3D generation |
+| `INVENTORY_ENRICHMENT_API_KEY` | str | No | Inventory enrichment API key (dev fallback; Secret Manager preferred) |
 
 ---
 
@@ -223,6 +224,7 @@ Feature flags allow opt-in/opt-out of capabilities.
 | `ENABLE_DWM_CONDITIONING` | bool | "0" | Enable DWM-style conditioning |
 | `ENABLE_AUDIO_NARRATION` | bool | "0" | Enable audio narration |
 | `ENABLE_SUBTITLE_GENERATION` | bool | "0" | Enable subtitle generation |
+| `ENABLE_INVENTORY_ENRICHMENT` | bool | "0" | Enable inventory enrichment before replicator generation |
 
 **Example**:
 ```bash
@@ -253,6 +255,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `ISAAC_SIM_ENDPOINT` | url | `http://localhost:8011` | Isaac Sim endpoint |
 | `ISAAC_SIM_PATH` | path | `/isaac-sim` | Isaac Sim installation path (local framework) |
 | `PARTICULATE_SERVICE_PORT` | int | 5000 | Particulate service port |
+| `INVENTORY_ENRICHMENT_ENDPOINT` | url | unset | Inventory enrichment service endpoint |
 
 ---
 
@@ -317,6 +320,7 @@ export LOG_LEVEL=WARNING
 | `SKIP_QUALITY_GATES` | bool | "0" | Skip quality validation (⚠️ dev only) |
 | `DRY_RUN` | bool | "0" | Dry run (no output generated) |
 | `PYTEST_VERBOSE` | bool | "0" | Verbose test output |
+| `INVENTORY_ENRICHMENT_MODE` | str | "mock" | Inventory enrichment mode (`mock` or `external`) |
 
 ---
 
