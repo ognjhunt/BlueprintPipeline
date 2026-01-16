@@ -33,6 +33,8 @@ from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 import logging
 
+from tools.config.seed_manager import set_global_seed
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ultrashape")
@@ -235,8 +237,7 @@ class UltraShapeRefiner:
             coarse_mesh = trimesh.load(str(coarse_mesh_path))
 
             # Set seed
-            torch.manual_seed(seed)
-            np.random.seed(seed)
+            set_global_seed(seed)
 
             # Run refinement
             with torch.autocast("cuda", dtype=torch.bfloat16 if self.config.use_bf16 else torch.float32):

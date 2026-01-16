@@ -41,6 +41,20 @@ export BP_SPLIT_TEST_RATIO=0.15
 
 ---
 
+## Pipeline Controls
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PIPELINE_SEED` | int | unset | Global seed applied to Python, NumPy, and supported ML frameworks |
+
+**Example**:
+```bash
+# Ensure deterministic pipeline outputs
+export PIPELINE_SEED=1234
+```
+
+---
+
 ### BP_QUALITY_* - Quality Gate Configuration
 
 Quality validation thresholds can be overridden via environment variables.

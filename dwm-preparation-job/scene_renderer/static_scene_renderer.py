@@ -31,7 +31,6 @@ Based on DWM paper:
 """
 
 import json
-import random
 import shutil
 import subprocess
 from abc import ABC, abstractmethod
@@ -46,6 +45,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tools.config.seed_manager import set_global_seed
 from models import CameraPose, CameraTrajectory
 
 
@@ -106,8 +106,7 @@ class BaseRenderer(ABC):
     def _apply_determinism(self) -> None:
         """Apply deterministic settings for reproducible rendering."""
         if self.config.deterministic:
-            random.seed(self.config.deterministic_seed)
-            np.random.seed(self.config.deterministic_seed)
+            set_global_seed(self.config.deterministic_seed)
 
     def _frame_metadata(
         self,
