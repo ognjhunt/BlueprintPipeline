@@ -179,7 +179,7 @@ jobs:
 
       - name: Check code formatting (black)
         run: |
-          black --check --diff . || true
+          black --check --diff .
 
       - name: Check import sorting (isort)
         run: |
@@ -191,7 +191,7 @@ jobs:
 
       - name: Type checking (mypy) on tools/
         run: |
-          mypy tools/ --ignore-missing-imports --no-strict-optional || true
+          mypy tools/ --ignore-missing-imports --no-strict-optional
 
   security:
     name: Security Scan
