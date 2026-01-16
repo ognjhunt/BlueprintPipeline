@@ -115,6 +115,11 @@ output "gpu_node_pool" {
   description = "GPU node pool name"
 }
 
+output "gpu_ci_node_pool" {
+  value       = try(google_container_node_pool.gpu_ci_pool[0].name, null)
+  description = "GPU CI node pool name"
+}
+
 output "gpu_type" {
   value       = var.gpu_type
   description = "GPU type in the GPU node pool"

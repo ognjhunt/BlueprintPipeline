@@ -157,6 +157,59 @@ jobs:
           check_name: Unit Test Results (Python ${{ matrix.python-version }})
           comment_mode: off
 
+  gpu-tests:
+    name: GPU Tests
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 60
+    needs: unit-tests
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libgl1-mesa-glx \
+            libglib2.0-0
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install pytest pytest-cov pytest-timeout pytest-xdist pytest-mock
+          pip install -r tools/requirements.txt || true
+          pip install -r simready-job/requirements.txt || true
+          pip install -r usd-assembly-job/requirements.txt || true
+          pip install -r replicator-job/requirements.txt || true
+
+      - name: Run GPU tests
+        env:
+          PIPELINE_ENV: test
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          pytest tests/ \
+            -v \
+            -m gpu \
+            --tb=short \
+            --junitxml=junit-gpu.xml \
+            --durations=10
+
+      - name: Upload GPU test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-results
+          path: junit-gpu.xml
+          if-no-files-found: warn
+
   lint:
     name: Code Quality Checks
     runs-on: ubuntu-latest
@@ -223,7 +276,7 @@ jobs:
   status-check:
     name: All Tests Passed
     if: always()
-    needs: [unit-tests, lint, security]
+    needs: [unit-tests, gpu-tests, lint, security]
     runs-on: ubuntu-latest
     steps:
       - name: Check test results
