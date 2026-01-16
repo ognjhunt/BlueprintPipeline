@@ -155,6 +155,9 @@ The pipeline runs on Google Cloud using:
 - **Cloud Storage** for scene data
 - **EventArc** for triggering (on `.regen3d_complete` marker)
 
+See the deployment runbook for step-by-step infrastructure, secrets, and workflow activation guidance:
+[`docs/deployment_runbook.md`](docs/deployment_runbook.md).
+
 ### OpenUSD dependency
 
 The USD assembly step relies on the OpenUSD Python bindings (`pxr`). The default
