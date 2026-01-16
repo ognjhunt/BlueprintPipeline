@@ -80,6 +80,24 @@ docker run --rm usd-assembly-job:smoke python -c "from pxr import Usd, UsdGeom, 
 - Check `assets/scene_manifest.json` for bad paths.
 - Validate numeric values in `layout/scene_layout_scaled.json`.
 
+## particulate-service
+
+### Health checks failing or timing out
+**Symptoms**: Cloud Run or GKE health checks return `503`, or upstream callers get `Service warming up` / `Warmup failed` errors.
+
+**Expected behavior**
+- `GET /` returns `200` once model warmup completes; `503` during warmup or if warmup fails.
+- `GET /ready` returns `200` when warmup is complete; `503` while loading or on warmup failure.
+- `GET /debug` returns `200` with detailed warmup/validation metadata for diagnosing failures.
+
+**Likely causes**
+- Model warmup still running (first deploy or cold start).
+- Missing Particulate files or CUDA/GPU misconfiguration during warmup.
+
+**Fixes**
+- Wait for warmup to finish and re-check `GET /` or `GET /ready`.
+- Use `GET /debug` to confirm installation validation and CUDA checks, then fix missing files or GPU config.
+
 ## replicator-job
 
 ### Replicator script errors
