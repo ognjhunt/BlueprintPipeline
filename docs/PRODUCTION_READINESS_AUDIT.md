@@ -131,8 +131,8 @@ grep -n "Quick Start\|Usage\|Run" README.md
 | Command | Status | Evidence |
 |---------|--------|----------|
 | Dependency Install | ✅ Defined | `.github/workflows/test-unit.yml:52-55` - multiple requirements.txt files |
-| Lint/Format | ⚠️ Soft fail | `.github/workflows/test-unit.yml:165-168` - `black --check . \|\| true` |
-| Typecheck | ⚠️ Soft fail | `.github/workflows/test-unit.yml:175-180` - `mypy tools/ \|\| true` |
+| Lint/Format | ✅ Enforced | `.github/workflows/test-unit.yml:165-168` - `black --check .` |
+| Typecheck | ✅ Enforced | `.github/workflows/test-unit.yml:175-180` - `mypy tools/` |
 | Unit Tests | ✅ Enforced | `.github/workflows/test-unit.yml:70-85`, 75% coverage gate |
 | Integration Tests | ⚠️ Soft fail | `.github/workflows/test-unit.yml:114-128` - `\|\| true` |
 | Build Artifacts | ✅ Defined | 27 Dockerfiles across job directories |
@@ -314,7 +314,7 @@ BlueprintPipeline is production-grade infrastructure with:
 **Top 3 Items Requiring Attention:**
 
 1. **3D-RE-GEN code pending release** - `README.md:377` - "code pending release ~Q1 2025" - Pipeline uses mock data until upstream releases
-2. **Lint/typecheck soft failures in CI** - `.github/workflows/test-unit.yml:165-180` - `|| true` allows failures to pass
+2. **Integration test soft failures in CI** - `.github/workflows/test-unit.yml:114-128` - `|| true` allows failures to pass
 3. **Particulate service deployment required** - `particulate-service/README.md:54-68` - Self-hostable but needs GPU deployment
 
 **What can be run today:**
@@ -358,14 +358,14 @@ rg -n "3D-RE-GEN|pending release" README.md
 
 #### Category (B): Fixable Now (Repo-Contained)
 
-**B-1: Lint/Typecheck Soft Failures**
+**B-1: Integration Test Soft Failures**
 
 | Field | Value |
 |-------|-------|
 | **Impact** | Code quality issues may slip through CI |
 | **Category** | (B) Fixable now |
-| **Where** | `.github/workflows/test-unit.yml:165-180` |
-| **Current Code** | `black --check . \|\| true` and `mypy tools/ \|\| true` |
+| **Where** | `.github/workflows/test-unit.yml:114-128` |
+| **Current Code** | `pytest tests/ ... \|\| true` |
 | **Fix** | Remove `\|\| true` to enforce passing |
 | **Effort** | Small (30 min) |
 
@@ -398,7 +398,7 @@ gcloud run deploy particulate-service \
 | Priority | Category | Area | Task | Why it matters | Where (path:lines) | Effort |
 |----------|----------|------|------|----------------|-------------------|--------|
 | P0 | A | Pipeline | Monitor 3D-RE-GEN release | Core input dependency | `README.md:377` | - |
-| P1 | B | CI | Remove `\|\| true` from lint/typecheck | Enforce code quality | `.github/workflows/test-unit.yml:165-180` | S |
+| P1 | B | CI | Remove `\|\| true` from integration tests | Enforce test coverage | `.github/workflows/test-unit.yml:114-128` | S |
 | P1 | B | Infra | Deploy Particulate service | Enable articulation | `particulate-service/README.md` | M |
 | P2 | B | Testing | Add GPU CI runner | GPU code untested in CI | `.github/workflows/` | M |
 | P2 | B | Docs | Add deployment runbook | Ops documentation | `docs/` | S |
@@ -496,7 +496,7 @@ python -c "from tools.qa_validation import run_qa_validation; from pathlib impor
 
 | # | Task | File | Effort |
 |---|------|------|--------|
-| 1 | Remove `\|\| true` from lint/typecheck in CI | `.github/workflows/test-unit.yml:165-180` | 30min |
+| 1 | Remove `\|\| true` from integration tests in CI | `.github/workflows/test-unit.yml:114-128` | 30min |
 | 2 | Add integration test for resume functionality | `tests/test_run_local_pipeline_resume.py` | 2hr |
 | 3 | Document Genie Sim server prerequisites as checklist | `docs/GENIESIM_INTEGRATION.md` | 2hr |
 | 4 | Add explicit health check endpoint docs | `docs/troubleshooting.md` | 2hr |
