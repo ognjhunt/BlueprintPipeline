@@ -57,6 +57,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tools.checkpoint import load_checkpoint, should_skip_step, write_checkpoint
+
 # Add repository root to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -184,12 +186,14 @@ class LocalPipelineRunner:
         self,
         steps: Optional[List[PipelineStep]] = None,
         run_validation: bool = False,
+        resume_from: Optional[PipelineStep] = None,
     ) -> bool:
         """Run the pipeline.
 
         Args:
             steps: Specific steps to run (default: all applicable)
             run_validation: Run QA validation at the end
+            resume_from: Resume from the given step (skip completed steps with checkpoints)
 
         Returns:
             True if all steps succeeded
@@ -205,6 +209,15 @@ class LocalPipelineRunner:
             steps.insert(submit_index + 1, PipelineStep.GENIESIM_IMPORT)
 
         self._apply_labs_flags(run_validation=run_validation)
+
+        if resume_from is not None:
+            if resume_from not in steps:
+                self.log(
+                    f"ERROR: resume-from step {resume_from.value} is not in requested steps",
+                    "ERROR",
+                )
+                return False
+            steps = steps[steps.index(resume_from):]
 
         self.log("=" * 60)
         self.log("BlueprintPipeline Local Runner")
@@ -238,13 +251,42 @@ class LocalPipelineRunner:
         # Run each step
         all_success = True
         for step in steps:
+            if resume_from is not None:
+                expected_outputs = self._expected_output_paths(step)
+                if should_skip_step(self.scene_dir, step.value, expected_outputs=expected_outputs):
+                    checkpoint = load_checkpoint(self.scene_dir, step.value)
+                    self.log(f"Skipping step {step.value} (checkpoint found)", "INFO")
+                    self.results.append(
+                        StepResult(
+                            step=step,
+                            success=True,
+                            duration_seconds=0,
+                            message="Skipped (checkpointed)",
+                            outputs=checkpoint.outputs if checkpoint else {},
+                        )
+                    )
+                    continue
+
+            started_at = datetime.utcnow().isoformat() + "Z"
             result = self._run_step(step)
+            completed_at = datetime.utcnow().isoformat() + "Z"
             self.results.append(result)
 
             if not result.success:
                 all_success = False
                 self.log(f"Step {step.value} failed: {result.message}", "ERROR")
                 # Continue with remaining steps for partial results
+            else:
+                write_checkpoint(
+                    self.scene_dir,
+                    step.value,
+                    status="completed",
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    outputs=result.outputs,
+                    output_paths=self._expected_output_paths(step),
+                    scene_id=self.scene_id,
+                )
             if step == PipelineStep.REGEN3D and self._pending_articulation_preflight:
                 if not self._preflight_articulation_requirements(steps):
                     return False
@@ -723,12 +765,15 @@ class LocalPipelineRunner:
         """Run scale calibration (optional)."""
         # For local testing, we trust the 3D-RE-GEN scale
         self.log("Scale calibration: using 3D-RE-GEN scale (trusted)")
+        marker_path = self.assets_dir / ".scale_complete"
+        self._write_marker(marker_path, status="completed")
 
         return StepResult(
             step=PipelineStep.SCALE,
             success=True,
             duration_seconds=0,
             message="Using 3D-RE-GEN scale",
+            outputs={"completion_marker": str(marker_path)},
         )
 
     def _run_interactive(self) -> StepResult:
@@ -764,11 +809,14 @@ class LocalPipelineRunner:
                     outputs={"required_articulations": required_ids},
                 )
             self.log("Interactive job skipped (requires PARTICULATE_ENDPOINT)")
+            marker_path = self.assets_dir / ".interactive_complete"
+            self._write_marker(marker_path, status="completed")
             return StepResult(
                 step=PipelineStep.INTERACTIVE,
                 success=True,
                 duration_seconds=0,
                 message="Skipped (no PARTICULATE_ENDPOINT)",
+                outputs={"completion_marker": str(marker_path)},
             )
 
         # Would need PARTICULATE_ENDPOINT to run
@@ -790,11 +838,14 @@ class LocalPipelineRunner:
                     message="Articulation required but PARTICULATE_ENDPOINT not set",
                     outputs={"required_articulations": required_ids},
                 )
+            marker_path = self.assets_dir / ".interactive_complete"
+            self._write_marker(marker_path, status="completed")
             return StepResult(
                 step=PipelineStep.INTERACTIVE,
                 success=True,
                 duration_seconds=0,
                 message="Skipped (PARTICULATE_ENDPOINT not set)",
+                outputs={"completion_marker": str(marker_path)},
             )
 
         interactive_script = REPO_ROOT / "interactive-job" / "run_interactive_assets.py"
@@ -861,6 +912,8 @@ class LocalPipelineRunner:
                     outputs={"missing_articulations": missing},
                 )
 
+        marker_path = self.assets_dir / ".interactive_complete"
+        self._write_marker(marker_path, status="completed")
         return StepResult(
             step=PipelineStep.INTERACTIVE,
             success=True,
@@ -869,6 +922,7 @@ class LocalPipelineRunner:
             outputs={
                 "interactive_results": str(results_path),
                 "articulated_count": results_data.get("articulated_count", 0),
+                "completion_marker": str(marker_path),
             },
         )
 
@@ -1315,6 +1369,8 @@ class LocalPipelineRunner:
 
             # Save task files
             saved_files = generator.save(task, str(self.isaac_lab_dir))
+            marker_path = self.isaac_lab_dir / ".isaac_lab_complete"
+            self._write_marker(marker_path, status="completed")
 
             self.log(f"Generated Isaac Lab task: {task.task_name}")
             self.log(f"Files: {list(saved_files.keys())}")
@@ -1324,7 +1380,7 @@ class LocalPipelineRunner:
                 success=True,
                 duration_seconds=0,
                 message=f"Generated task: {task.task_name}",
-                outputs={"files": list(saved_files.keys())},
+                outputs={"files": list(saved_files.keys()), "completion_marker": str(marker_path)},
             )
 
         except ImportError as e:
@@ -1649,6 +1705,8 @@ class LocalPipelineRunner:
         )
 
         if submission_mode != "local":
+            marker_path = self.geniesim_dir / ".geniesim_import_complete"
+            self._write_marker(marker_path, status="completed")
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=True,
@@ -1657,6 +1715,7 @@ class LocalPipelineRunner:
                 outputs={
                     "job_id": job_id,
                     "submission_mode": submission_mode,
+                    "completion_marker": str(marker_path),
                 },
             )
 
@@ -1686,6 +1745,11 @@ class LocalPipelineRunner:
         )
         result = run_local_import_job(config, job_metadata=job_payload)
 
+        marker_path = None
+        if result.success:
+            marker_path = self.geniesim_dir / ".geniesim_import_complete"
+            self._write_marker(marker_path, status="completed")
+
         return StepResult(
             step=PipelineStep.GENIESIM_IMPORT,
             success=result.success,
@@ -1695,6 +1759,7 @@ class LocalPipelineRunner:
                 "job_id": job_id,
                 "import_manifest": str(result.import_manifest_path) if result.import_manifest_path else None,
                 "output_dir": str(output_dir),
+                "completion_marker": str(marker_path) if result.success else None,
             },
         )
 
@@ -2007,6 +2072,64 @@ class LocalPipelineRunner:
                 message=f"Import error: {e}",
             )
 
+    def _expected_output_paths(self, step: PipelineStep) -> List[Path]:
+        """Expected output paths for checkpoint validation."""
+        if step == PipelineStep.REGEN3D:
+            return [
+                self.assets_dir / "scene_manifest.json",
+                self.layout_dir / "scene_layout_scaled.json",
+                self.seg_dir / "inventory.json",
+                self.assets_dir / ".regen3d_complete",
+            ]
+        if step == PipelineStep.SCALE:
+            return [self.assets_dir / ".scale_complete"]
+        if step == PipelineStep.INTERACTIVE:
+            return [self.assets_dir / ".interactive_complete"]
+        if step == PipelineStep.SIMREADY:
+            return [
+                self.assets_dir / "scene_manifest.json",
+                self.assets_dir / ".simready_complete",
+            ]
+        if step == PipelineStep.USD:
+            return [
+                self.usd_dir / "scene.usda",
+                self.assets_dir / ".usd_assembly_complete",
+            ]
+        if step == PipelineStep.REPLICATOR:
+            return [
+                self.replicator_dir / "bundle_metadata.json",
+                self.replicator_dir / "placement_regions.usda",
+                self.replicator_dir / ".replicator_complete",
+            ]
+        if step == PipelineStep.VARIATION_GEN:
+            return [
+                self.scene_dir / "variation_assets" / "variation_assets.json",
+                self.scene_dir / "variation_assets" / ".variation_pipeline_complete",
+            ]
+        if step == PipelineStep.ISAAC_LAB:
+            return [self.isaac_lab_dir / ".isaac_lab_complete"]
+        if step == PipelineStep.GENIESIM_EXPORT:
+            return [
+                self.geniesim_dir / "scene_graph.json",
+                self.geniesim_dir / "task_config.json",
+                self.geniesim_dir / "asset_index.json",
+            ]
+        if step == PipelineStep.GENIESIM_SUBMIT:
+            return [self.geniesim_dir / "job.json"]
+        if step == PipelineStep.GENIESIM_IMPORT:
+            return [self.geniesim_dir / ".geniesim_import_complete"]
+        if step == PipelineStep.DWM:
+            return [self.dwm_dir / ".dwm_complete"]
+        if step == PipelineStep.DWM_INFERENCE:
+            return [self.dwm_dir / ".dwm_inference_complete"]
+        if step == PipelineStep.DREAM2FLOW:
+            return [self.dream2flow_dir / ".dream2flow_complete"]
+        if step == PipelineStep.DREAM2FLOW_INFERENCE:
+            return [self.dream2flow_dir / ".dream2flow_inference_complete"]
+        if step == PipelineStep.VALIDATE:
+            return [self.scene_dir / "validation_report.json"]
+        return []
+
     def _print_summary(self) -> None:
         """Print pipeline execution summary."""
         self.log("\n" + "=" * 60)
@@ -2087,6 +2210,11 @@ def main():
         help="Use Genie Sim execution mode (overrides USE_GENIESIM for this run)",
     )
     parser.add_argument(
+        "--resume-from",
+        type=str,
+        help="Resume pipeline from the specified step (skip completed steps with checkpoints)",
+    )
+    parser.add_argument(
         "--mock-geniesim",
         action="store_true",
         help="Run Genie Sim steps in mock mode (no external services required)",
@@ -2104,6 +2232,15 @@ def main():
     if args.mock_geniesim:
         os.environ["GENIESIM_MOCK_MODE"] = "true"
         os.environ["USE_GENIESIM"] = "true"
+
+    resume_from = None
+    if args.resume_from:
+        try:
+            resume_from = PipelineStep(args.resume_from.strip().lower())
+        except ValueError:
+            print(f"Unknown resume-from step: {args.resume_from}")
+            print(f"Available: {[s.value for s in PipelineStep]}")
+            sys.exit(1)
 
     # Parse steps
     steps = None
@@ -2132,7 +2269,11 @@ def main():
         ),
     )
 
-    success = runner.run(steps=steps, run_validation=args.validate)
+    success = runner.run(
+        steps=steps,
+        run_validation=args.validate,
+        resume_from=resume_from,
+    )
 
     sys.exit(0 if success else 1)
 
