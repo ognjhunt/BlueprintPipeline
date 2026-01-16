@@ -325,6 +325,80 @@ resource "google_container_node_pool" "gpu_pool" {
 }
 
 # =============================================================================
+# GPU CI Node Pool (for GitHub Actions runners)
+# =============================================================================
+
+resource "google_container_node_pool" "gpu_ci_pool" {
+  count    = var.ci_gpu_node_count_max > 0 ? 1 : 0
+  name     = "gpu-ci-pool"
+  location = var.zone
+  cluster  = google_container_cluster.blueprint.name
+  project  = var.project_id
+
+  autoscaling {
+    min_node_count  = var.ci_gpu_node_count_min
+    max_node_count  = var.ci_gpu_node_count_max
+    location_policy = "ANY"
+  }
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
+  node_config {
+    machine_type = var.ci_gpu_node_machine_type
+    disk_size_gb = 200
+    disk_type    = "pd-ssd"
+
+    guest_accelerator {
+      type  = var.gpu_type
+      count = var.ci_gpus_per_node
+
+      gpu_driver_installation_config {
+        gpu_driver_version = "DEFAULT"
+      }
+    }
+
+    service_account = google_service_account.gke_nodes.email
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform",
+    ]
+
+    labels = {
+      node_type = "gpu-ci"
+      gpu_type  = var.gpu_type
+      workload  = "github-actions"
+    }
+
+    taint {
+      key    = "github-actions"
+      value  = "ci"
+      effect = "NO_SCHEDULE"
+    }
+
+    metadata = {
+      disable-legacy-endpoints = "true"
+    }
+
+    shielded_instance_config {
+      enable_secure_boot          = var.enable_shielded_nodes
+      enable_integrity_monitoring = var.enable_shielded_nodes
+    }
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      node_config[0].labels,
+    ]
+  }
+}
+
+# =============================================================================
 # Kubernetes Resources
 # =============================================================================
 

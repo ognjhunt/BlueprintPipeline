@@ -115,6 +115,34 @@ variable "gpus_per_node" {
 }
 
 # =============================================================================
+# GPU CI Node Pool Configuration
+# =============================================================================
+
+variable "ci_gpu_node_machine_type" {
+  type        = string
+  description = "Machine type for CI GPU nodes"
+  default     = "n1-standard-8"
+}
+
+variable "ci_gpu_node_count_min" {
+  type        = number
+  description = "Minimum number of CI GPU nodes"
+  default     = 0
+}
+
+variable "ci_gpu_node_count_max" {
+  type        = number
+  description = "Maximum number of CI GPU nodes"
+  default     = 2
+}
+
+variable "ci_gpus_per_node" {
+  type        = number
+  description = "Number of GPUs per CI node"
+  default     = 1
+}
+
+# =============================================================================
 # Networking
 # =============================================================================
 
