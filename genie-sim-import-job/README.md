@@ -2,7 +2,7 @@
 
 ## Updating Python dependencies
 
-The Docker image installs dependencies from `requirements.lock` for reproducible builds. When you change `requirements.txt`, regenerate the lockfile with a clean virtual environment:
+The Docker image installs dependencies from `requirements.lock` for reproducible builds. When you change `requirements.txt`, update `tools/requirements-pins.txt` (the single source of truth) and run `python tools/sync_requirements_pins.py` before regenerating the lockfile with a clean virtual environment:
 
 ```bash
 python -m venv /tmp/genie-sim-import-job-lock

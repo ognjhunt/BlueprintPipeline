@@ -1,13 +1,13 @@
 # Genie Sim Import Job Dependencies
 
 # Core
-numpy>=1.24.0
-pandas>=2.0.0
-pyarrow>=12.0.0
+numpy==1.26.4
+pandas==2.2.2
+pyarrow==14.0.2
 
 # HTTP clients for Genie Sim API
-requests>=2.31.0
-aiohttp>=3.8.0
+requests==2.32.3
+aiohttp==3.9.5
 
 # Optional: API response validation
-pydantic>=1.10.0
+pydantic==2.8.2

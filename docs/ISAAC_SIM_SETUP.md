@@ -80,16 +80,12 @@ WORKDIR /workspace
 # Copy BlueprintPipeline
 COPY . /workspace/BlueprintPipeline
 
-# Install additional Python dependencies
+# Install pinned Python dependencies
 RUN /isaac-sim/python.sh -m pip install --upgrade pip && \
-    /isaac-sim/python.sh -m pip install -r /workspace/BlueprintPipeline/requirements.txt
+    /isaac-sim/python.sh -m pip install -r /workspace/BlueprintPipeline/tools/requirements-pins.txt
 
-# Install critical gap fixes
-RUN /isaac-sim/python.sh -m pip install \
-    tenacity \
-    pydantic \
-    pyarrow \
-    google-cloud-secret-manager
+# Install critical gap fixes (pinned)
+RUN /isaac-sim/python.sh -m pip install -r /workspace/BlueprintPipeline/requirements-critical-gaps.txt
 
 # Set entrypoint to Isaac Sim Python
 ENTRYPOINT ["/isaac-sim/python.sh"]

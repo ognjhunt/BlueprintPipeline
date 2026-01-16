@@ -1,19 +1,19 @@
 # Episode Generation Job Requirements
 
 # Core dependencies
-numpy>=1.24.0
-scipy>=1.10.0
+numpy==1.26.4
+scipy==1.11.4
 
 # Data serialization
-pyarrow>=14.0.0
-pandas>=2.0.0
+pyarrow==14.0.2
+pandas==2.2.2
 
 # Cloud storage (for Cloud Run)
-google-cloud-storage>=2.10.0
+google-cloud-storage==2.18.2
 
 # LLM client (optional, for enhanced planning)
-google-generativeai>=0.3.0
+google-generativeai==0.3.2
 
 # Utilities
-tqdm>=4.65.0
-pyyaml>=6.0
+tqdm==4.66.5
+pyyaml==6.0.2
