@@ -1,0 +1,64 @@
+{
+  "version": "1.0.0",
+  "scene_id": "mock_scene",
+  "scene": {
+    "environment_type": "kitchen",
+    "coordinate_frame": "y_up",
+    "meters_per_unit": 1.0,
+    "room": {
+      "bounds": {
+        "width": 2.0,
+        "depth": 2.0,
+        "height": 2.0
+      }
+    }
+  },
+  "objects": [
+    {
+      "id": "mug_0",
+      "name": "mug_0",
+      "category": "mug",
+      "description": "coffee mug",
+      "sim_role": "manipulable_object",
+      "dimensions_est": {
+        "width": 0.08,
+        "depth": 0.08,
+        "height": 0.1
+      },
+      "transform": {
+        "position": {
+          "x": 0.1,
+          "y": 0.2,
+          "z": 0.8
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      },
+      "asset": {
+        "path": "mug_0.usd"
+      },
+      "physics": {
+        "mass": 0.2
+      },
+      "physics_hints": {
+        "material_type": "ceramic"
+      },
+      "semantics": {
+        "affordances": [
+          "Graspable",
+          "Containable"
+        ]
+      },
+      "relationships": []
+    }
+  ]
+}

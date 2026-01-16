@@ -1,0 +1,15 @@
+{
+  "scene_id": "mock_scene",
+  "objects": [
+    {
+      "id": "variation_mug_1",
+      "name": "variation_mug_1",
+      "category": "mug",
+      "description": "variation mug",
+      "asset": {
+        "path": "variation_mug_1.usd",
+        "license": "CC0"
+      }
+    }
+  ]
+}

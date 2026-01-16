@@ -1,0 +1,12 @@
+{
+  "scene_id": "mock_scene",
+  "episodes": [
+    {
+      "id": "episode_000000",
+      "task_name": "pick_mug",
+      "quality_score": 1.0
+    }
+  ],
+  "generated_at": "2025-01-01T00:00:00Z",
+  "generator_version": "test"
+}

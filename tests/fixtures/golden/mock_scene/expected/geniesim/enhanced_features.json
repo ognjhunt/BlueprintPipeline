@@ -1,0 +1,86 @@
+{
+  "version": "1.0.0",
+  "description": "BlueprintPipeline enhanced features for Genie Sim 3.0 output",
+  "multi_robot": {
+    "enabled": false,
+    "robots": [
+      "franka",
+      "g2",
+      "ur10",
+      "gr1"
+    ],
+    "categories": {
+      "humanoid": [
+        "g2",
+        "gr1"
+      ],
+      "arm": [
+        "franka",
+        "ur10"
+      ],
+      "mobile": [],
+      "dual_arm": []
+    }
+  },
+  "bimanual": {
+    "enabled": false,
+    "robots": [
+      "g2",
+      "yumi"
+    ],
+    "task_types": [
+      "coordinated_lift",
+      "hold_and_manipulate",
+      "lid_opening",
+      "handoff"
+    ]
+  },
+  "multi_robot_coordination": {
+    "enabled": false,
+    "pairs": [
+      {
+        "robot_a": "franka",
+        "robot_b": "ur10"
+      },
+      {
+        "robot_a": "franka",
+        "robot_b": "fetch"
+      }
+    ],
+    "scenarios": [
+      "handoff",
+      "collaborative_assembly",
+      "fleet_coordination"
+    ]
+  },
+  "rich_annotations": {
+    "enabled": false,
+    "types": [],
+    "formats": [
+      "json",
+      "coco",
+      "pascal_voc"
+    ]
+  },
+  "vla_finetuning": {
+    "enabled": false,
+    "models": [],
+    "includes": []
+  },
+  "enhancement_summary": {
+    "genie_sim_provides": [
+      "episodes_lerobot_format",
+      "visual_observations",
+      "robot_states_actions",
+      "llm_task_generation",
+      "vlm_evaluation"
+    ],
+    "blueprintpipeline_adds": [
+      "multi_robot_embodiment_data",
+      "bimanual_manipulation_data",
+      "multi_robot_coordination_data",
+      "rich_ground_truth_annotations",
+      "vla_finetuning_packages"
+    ]
+  }
+}

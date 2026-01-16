@@ -1,0 +1,5 @@
+{
+  "dataset_name": "mock_scene",
+  "robot_type": "franka",
+  "episodes": 1
+}

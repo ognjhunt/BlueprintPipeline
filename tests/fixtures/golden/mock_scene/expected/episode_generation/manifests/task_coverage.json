@@ -1,0 +1,7 @@
+{
+  "tasks": {
+    "pick_mug": 1
+  },
+  "total_unique_tasks": 1,
+  "average_episodes_per_task": 1.0
+}
