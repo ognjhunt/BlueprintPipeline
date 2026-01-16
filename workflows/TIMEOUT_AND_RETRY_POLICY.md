@@ -118,6 +118,12 @@ Retries are applied to transient failures:
 - **Retry:** 3 retries with exponential backoff
 - **Reason:** Model training is long-running and CPU/GPU intensive
 
+## Maintenance workflows
+
+Maintenance workflows (for example, retention cleanup) should run in off-peak windows, use
+Cloud Scheduler for invocation, and emit explicit start/complete metrics in Cloud Logging so
+auditors can trace deletions back to workflow executions.
+
 ### Regen3D Pipeline
 - **Job Timeout:** 3600s (1 hour) - explicit
 - **Retry:** 3 retries with exponential backoff (job start); marker polling has exponential backoff
