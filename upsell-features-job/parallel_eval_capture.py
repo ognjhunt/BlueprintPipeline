@@ -27,6 +27,7 @@ from pathlib import Path
 import statistics
 import hashlib
 
+from tools.config.seed_manager import set_global_seed
 
 class GPUBackend(Enum):
     """GPU compute backends supported."""
@@ -205,7 +206,7 @@ class ParallelEvalCapture:
             strategy = ParallelizationStrategy.MULTI_GPU_SPLIT
 
         # Generate deterministic seeds for each environment
-        np.random.seed(base_seed)
+        set_global_seed(base_seed)
         env_seeds = list(np.random.randint(0, 2**31, size=num_environments))
 
         self.current_config = ParallelEvalConfig(

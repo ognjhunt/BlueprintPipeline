@@ -63,6 +63,7 @@ from tools.cost_tracking.estimate import (
     format_estimate_summary,
     load_estimate_config,
 )
+from tools.config.seed_manager import configure_pipeline_seed
 
 # Add repository root to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -203,6 +204,10 @@ class LocalPipelineRunner:
         Returns:
             True if all steps succeeded
         """
+        seed = configure_pipeline_seed()
+        if seed is not None:
+            self.log(f"Using pipeline seed: {seed}")
+
         if steps is None:
             steps = self._resolve_default_steps()
 

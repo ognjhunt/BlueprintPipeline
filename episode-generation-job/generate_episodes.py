@@ -79,6 +79,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.config.seed_manager import set_global_seed
 from tools.metrics.pipeline_metrics import get_metrics
 
 REQUIRED_ISAAC_SIM_VERSION = "2024.1.0+"
@@ -2035,7 +2036,7 @@ class EpisodeGenerator:
 
         def process_variation(task: Tuple[GeneratedEpisode, int]) -> GeneratedEpisode:
             seed, var_idx = task
-            np.random.seed(var_idx)
+            set_global_seed(var_idx)
             varied_manifest = json.loads(json.dumps(manifest))
 
             for obj in varied_manifest.get("objects", []):
@@ -2136,7 +2137,7 @@ class EpisodeGenerator:
         variation_index: int,
     ) -> Dict[str, ObjectTransform]:
         """Generate random transforms for a variation."""
-        np.random.seed(variation_index)
+        set_global_seed(variation_index)
         transforms = {}
 
         for obj in objects:
