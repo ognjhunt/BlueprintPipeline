@@ -6,7 +6,8 @@ Docker image.
 
 ## Updating dependencies
 
-1. Edit `requirements.txt` and pin new versions using exact `==` specifiers.
+1. Update versions in `tools/requirements-pins.txt` (the single source of truth), then
+   run `python tools/sync_requirements_pins.py` to refresh all `requirements.txt` files.
 2. Regenerate the lock file using Python 3.11 (to match the Docker base image):
 
    ```bash
