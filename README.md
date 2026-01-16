@@ -295,6 +295,7 @@ otherwise, missing Gemini credentials cause the job to fail in production mode.
 ## Documentation
 
 - [Troubleshooting](docs/troubleshooting.md)
+- [Rollback Procedures](docs/rollback.md)
 - [Performance Tuning](docs/performance_tuning.md)
 
 ## Testing
