@@ -314,6 +314,10 @@ python tools/run_local_pipeline.py \
     --validate
 ```
 
+CI enforces a unit-test coverage gate: the unit-test job publishes `coverage.xml`
+from `pytest-cov` and fails if total line coverage drops below 75%. Update the
+threshold in `.github/workflows/test-unit.yml` if the baseline changes.
+
 ### Staging Isaac Sim E2E (Labs pre-production)
 
 Before production rollouts, labs should run the staging E2E harness against a
