@@ -22,15 +22,16 @@ Pipeline Steps:
     3. interactive - Particulate articulation (requires PARTICULATE_ENDPOINT)
     4. simready  - Prepare physics-ready assets
     5. usd       - Assemble scene.usda
-    6. replicator - Generate Replicator bundle
-    7. variation-gen - Generate variation assets for Genie Sim export
-    8. isaac-lab - Generate Isaac Lab task package
-    9. genie-sim-export - Export scene bundle for Genie Sim
-    10. genie-sim-submit - Submit/run Genie Sim generation (API or local)
-    11. genie-sim-import - Import Genie Sim episodes into local bundle
-    12. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
-    13. dwm-inference - Run DWM model to generate interaction videos for each bundle
-    14. validate  - QA validation
+    6. inventory-enrichment - (Optional) Enrich inventory metadata
+    7. replicator - Generate Replicator bundle
+    8. variation-gen - Generate variation assets for Genie Sim export
+    9. isaac-lab - Generate Isaac Lab task package
+    10. genie-sim-export - Export scene bundle for Genie Sim
+    11. genie-sim-submit - Submit/run Genie Sim generation (API or local)
+    12. genie-sim-import - Import Genie Sim episodes into local bundle
+    13. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
+    14. dwm-inference - Run DWM model to generate interaction videos for each bundle
+    15. validate  - QA validation
 
 Note: DWM and Dream2Flow steps are optional and only included by default when
 --enable-dwm or --enable-dream2flow is set.
@@ -64,6 +65,7 @@ from tools.cost_tracking.estimate import (
     load_estimate_config,
 )
 from tools.config.seed_manager import configure_pipeline_seed
+from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 
 # Add repository root to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +80,7 @@ class PipelineStep(str, Enum):
     INTERACTIVE = "interactive"
     SIMREADY = "simready"
     USD = "usd"
+    INVENTORY_ENRICHMENT = "inventory-enrichment"
     REPLICATOR = "replicator"
     VARIATION_GEN = "variation-gen"
     ISAAC_LAB = "isaac-lab"
@@ -134,6 +137,7 @@ class LocalPipelineRunner:
         environment_type: str = "kitchen",
         enable_dwm: bool = False,
         enable_dream2flow: bool = False,
+        enable_inventory_enrichment: Optional[bool] = None,
         disable_articulated_assets: bool = False,
     ):
         """Initialize the local pipeline runner.
@@ -145,6 +149,7 @@ class LocalPipelineRunner:
             environment_type: Environment type for policy selection
             enable_dwm: Include optional DWM steps in default pipeline
             enable_dream2flow: Include optional Dream2Flow steps in default pipeline
+            enable_inventory_enrichment: Enable optional inventory enrichment step
         """
         self.scene_dir = Path(scene_dir).resolve()
         self.verbose = verbose
@@ -152,6 +157,13 @@ class LocalPipelineRunner:
         self.environment_type = environment_type
         self.enable_dwm = enable_dwm
         self.enable_dream2flow = enable_dream2flow
+        if enable_inventory_enrichment is None:
+            self.enable_inventory_enrichment = os.getenv(
+                "ENABLE_INVENTORY_ENRICHMENT",
+                "0",
+            ).lower() in {"1", "true", "yes", "y"}
+        else:
+            self.enable_inventory_enrichment = enable_inventory_enrichment
         self.disable_articulated_assets = disable_articulated_assets
         self.environment = os.getenv("BP_ENV", "development").lower()
 
@@ -410,10 +422,23 @@ class LocalPipelineRunner:
 
     def _apply_optional_steps(self, steps: List[PipelineStep]) -> List[PipelineStep]:
         """Append optional steps gated by explicit flags."""
+        if self.enable_inventory_enrichment:
+            steps = self._inject_inventory_enrichment_step(steps)
         if self.enable_dwm:
             steps.extend(self.DWM_STEPS)
         if self.enable_dream2flow:
             steps.extend(self.DREAM2FLOW_STEPS)
+        return steps
+
+    @staticmethod
+    def _inject_inventory_enrichment_step(steps: List[PipelineStep]) -> List[PipelineStep]:
+        if PipelineStep.INVENTORY_ENRICHMENT in steps:
+            return steps
+        if PipelineStep.REPLICATOR in steps:
+            insert_at = steps.index(PipelineStep.REPLICATOR)
+            steps.insert(insert_at, PipelineStep.INVENTORY_ENRICHMENT)
+        else:
+            steps.append(PipelineStep.INVENTORY_ENRICHMENT)
         return steps
 
     def _map_jobs_to_steps(self, job_sequence: List[str]) -> List[PipelineStep]:
@@ -542,6 +567,8 @@ class LocalPipelineRunner:
                 result = self._run_simready()
             elif step == PipelineStep.USD:
                 result = self._run_usd_assembly()
+            elif step == PipelineStep.INVENTORY_ENRICHMENT:
+                result = self._run_inventory_enrichment()
             elif step == PipelineStep.REPLICATOR:
                 result = self._run_replicator()
             elif step == PipelineStep.VARIATION_GEN:
@@ -1097,11 +1124,47 @@ class LocalPipelineRunner:
 
         return '\n'.join(lines)
 
+    def _run_inventory_enrichment(self) -> StepResult:
+        """Run inventory enrichment before replicator generation."""
+        inventory_path = self.seg_dir / "inventory.json"
+        if not inventory_path.is_file():
+            message = "Inventory not found; skipping enrichment"
+            self.log(message, "WARNING")
+            return StepResult(
+                step=PipelineStep.INVENTORY_ENRICHMENT,
+                success=True,
+                duration_seconds=0,
+                message=message,
+            )
+
+        output_path = self.seg_dir / "inventory_enriched.json"
+        try:
+            enrich_inventory_file(inventory_path, output_path=output_path)
+        except InventoryEnrichmentError as exc:
+            message = f"Inventory enrichment skipped: {exc}"
+            self.log(message, "WARNING")
+            return StepResult(
+                step=PipelineStep.INVENTORY_ENRICHMENT,
+                success=True,
+                duration_seconds=0,
+                message=message,
+            )
+
+        return StepResult(
+            step=PipelineStep.INVENTORY_ENRICHMENT,
+            success=True,
+            duration_seconds=0,
+            message="Inventory enrichment completed",
+            outputs={"inventory_enriched": str(output_path)},
+        )
+
     def _run_replicator(self) -> StepResult:
         """Run replicator bundle generation."""
         # Load manifest and inventory
         manifest_path = self.assets_dir / "scene_manifest.json"
-        inventory_path = self.seg_dir / "inventory.json"
+        inventory_path = self.seg_dir / "inventory_enriched.json"
+        if not inventory_path.is_file():
+            inventory_path = self.seg_dir / "inventory.json"
 
         if not manifest_path.is_file():
             return StepResult(
@@ -2105,6 +2168,8 @@ class LocalPipelineRunner:
                 self.usd_dir / "scene.usda",
                 self.assets_dir / ".usd_assembly_complete",
             ]
+        if step == PipelineStep.INVENTORY_ENRICHMENT:
+            return [self.seg_dir / "inventory_enriched.json"]
         if step == PipelineStep.REPLICATOR:
             return [
                 self.replicator_dir / "bundle_metadata.json",

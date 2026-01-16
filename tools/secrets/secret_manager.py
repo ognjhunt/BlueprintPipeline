@@ -226,6 +226,7 @@ class SecretIds:
     OPENAI_API_KEY = "openai-api-key"
     ANTHROPIC_API_KEY = "anthropic-api-key"
     PARTICULATE_API_KEY = "particulate-api-key"
+    INVENTORY_ENRICHMENT_API_KEY = "inventory-enrichment-api-key"
 
 
 def load_pipeline_secrets(project_id: Optional[str] = None) -> SecretCache:
@@ -252,6 +253,7 @@ def load_pipeline_secrets(project_id: Optional[str] = None) -> SecretCache:
         SecretIds.OPENAI_API_KEY,
         SecretIds.ANTHROPIC_API_KEY,
         SecretIds.PARTICULATE_API_KEY,
+        SecretIds.INVENTORY_ENRICHMENT_API_KEY,
     ]
 
     for secret_id in secret_ids:
