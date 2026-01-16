@@ -58,6 +58,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from tools.checkpoint import load_checkpoint, should_skip_step, write_checkpoint
+from tools.cost_tracking.estimate import (
+    estimate_gpu_costs,
+    format_estimate_summary,
+    load_estimate_config,
+)
 
 # Add repository root to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -2220,6 +2225,16 @@ def main():
         help="Run Genie Sim steps in mock mode (no external services required)",
     )
     parser.add_argument(
+        "--estimate-costs",
+        action="store_true",
+        help="Print estimated GPU-hours and costs before running",
+    )
+    parser.add_argument(
+        "--estimate-config",
+        type=str,
+        help="Path to JSON config for GPU rate + duration overrides",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Reduce output verbosity",
@@ -2268,6 +2283,17 @@ def main():
             or os.getenv("DISABLE_ARTICULATED_ASSETS", "").lower() in {"1", "true", "yes", "y"}
         ),
     )
+
+    if args.estimate_costs:
+        config_path = Path(args.estimate_config) if args.estimate_config else None
+        config = load_estimate_config(config_path)
+        resolved_steps = steps or runner._resolve_default_steps()
+        step_names = [
+            step.value if isinstance(step, PipelineStep) else str(step)
+            for step in resolved_steps
+        ]
+        summary = estimate_gpu_costs(step_names, config)
+        print(format_estimate_summary(summary))
 
     success = runner.run(
         steps=steps,
