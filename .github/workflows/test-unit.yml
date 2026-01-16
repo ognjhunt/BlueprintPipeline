@@ -187,11 +187,11 @@ jobs:
 
       - name: Run bandit security scan
         run: |
-          bandit -r . -ll -x ./tests,./venv,./.venv || true
+          bandit -r . -ll -x ./tests,./venv,./.venv
 
       - name: Check for known vulnerabilities
         run: |
-          safety check --json || true
+          safety check --json
 
   status-check:
     name: All Tests Passed

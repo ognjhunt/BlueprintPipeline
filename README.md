@@ -65,6 +65,12 @@ python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen
 python tests/test_pipeline_e2e.py
 ```
 
+## CI Security Scans
+
+The unit-test workflow runs Bandit and Safety checks. Both scans are expected to
+fail the workflow when they detect findings, so address reported vulnerabilities
+before merging changes that touch Python dependencies or code.
+
 ### Local Genie Sim Fixtures
 
 Run the local pipeline with Genie Sim enabled to generate an export bundle and submit
