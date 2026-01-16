@@ -1,0 +1,17 @@
+{
+  "room_box": {
+    "min": [0.0, 0.0, 0.0],
+    "max": [1.0, 1.0, 1.0]
+  },
+  "objects": [
+    {
+      "id": "ref-object",
+      "class_name": "custom_object",
+      "center3d": [0.0, 0.5, 0.0],
+      "obb": {
+        "center": [0.0, 0.5, 0.0],
+        "extents": [0.25, 0.5, 0.25]
+      }
+    }
+  ]
+}
