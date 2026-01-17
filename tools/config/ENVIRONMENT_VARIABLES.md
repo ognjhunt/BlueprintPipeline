@@ -61,6 +61,35 @@ export PIPELINE_SEED=1234
 
 ---
 
+## Production Mode Resolution
+
+Production mode is resolved through a shared helper (`tools/config/production_mode.py`). It treats the following
+environment variables as production indicators, in the order below. The first match that evaluates to production
+enables production mode; there is no explicit "false override" once any flag is set to a production value.
+
+**Canonical flags (preferred)**:
+1. `PIPELINE_ENV=production` or `PIPELINE_ENV=prod`
+2. `PRODUCTION_MODE=1|true|yes`
+3. `SIMREADY_PRODUCTION_MODE=1|true|yes`
+
+**Legacy compatibility flags (still honored)**:
+- `DATA_QUALITY_LEVEL=production`
+- `ISAAC_SIM_REQUIRED=1|true|yes`
+- `REQUIRE_REAL_PHYSICS=1|true|yes`
+- `PRODUCTION=1|true|yes`
+- `LABS_STAGING=1|true|yes`
+
+**Example**:
+```bash
+# Canonical production indicator
+export PIPELINE_ENV=production
+
+# Legacy compatibility (still supported)
+export DATA_QUALITY_LEVEL=production
+```
+
+---
+
 ### BP_QUALITY_* - Quality Gate Configuration
 
 Quality validation thresholds can be overridden via environment variables.

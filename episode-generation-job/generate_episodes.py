@@ -83,6 +83,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from monitoring.alerting import send_alert
+from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import set_global_seed
 from tools.metrics.pipeline_metrics import get_metrics
 
@@ -2712,12 +2713,7 @@ def run_episode_generation_job(
             "[EPISODE-GEN-JOB] Using USD scene path from environment: %s",
             env_scene_usd_path,
         )
-    production_requested = (
-        os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
-        or os.getenv("PRODUCTION_MODE", "").lower() == "true"
-        or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
-        or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
-    )
+    production_requested = resolve_production_mode()
     if production_requested and not scene_usd_path:
         logger.error(
             "[EPISODE-GEN-JOB] ERROR: Production runs require a USD scene path for PhysX validation. "
@@ -2894,18 +2890,8 @@ def _run_main():
     logger.info("[EPISODE-GEN-JOB] Episode Generation Job (SOTA)")
     logger.info("[EPISODE-GEN-JOB] ================================")
 
-    def _production_env_flags() -> bool:
-        return (
-            os.getenv("REQUIRE_REAL_PHYSICS", "").lower() == "true"
-            or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
-            or os.getenv("PRODUCTION_MODE", "").lower() == "true"
-            or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
-            or os.getenv("PRODUCTION", "").lower() == "true"
-            or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
-        )
-
     def _is_production_preflight() -> bool:
-        env_flags = _production_env_flags()
+        env_flags = resolve_production_mode()
         if HAVE_QUALITY_SYSTEM:
             try:
                 return get_data_quality_level().value == "production" or env_flags
@@ -3032,7 +3018,7 @@ def _run_main():
             logger.info("[EPISODE-GEN-JOB] ✅ Environment check passed")
 
             allow_mock_capture_env = os.getenv("ALLOW_MOCK_CAPTURE", os.getenv("ALLOW_MOCK_DATA", "false")).lower() == "true"
-            if required_quality.value == "production" or _production_env_flags():
+            if required_quality.value == "production" or resolve_production_mode():
                 allow_mock_capture = False
                 if allow_mock_capture_env:
                     logger.warning(
@@ -3076,7 +3062,7 @@ def _run_main():
 
         # Detect if running in production environment
         # Production indicators: running in container, K8s, or Cloud Run
-        production_env_flags = _production_env_flags()
+        production_env_flags = resolve_production_mode()
         is_production = (
             os.getenv("KUBERNETES_SERVICE_HOST") is not None or  # K8s
             os.getenv("K_SERVICE") is not None or  # Cloud Run
