@@ -55,6 +55,7 @@ from trajectory_generator import EgocentricTrajectoryGenerator
 from trajectory_generator.physics_policy_runner import PhysicsPolicyRunner
 from scene_renderer import RenderBackend, RenderConfig, SceneRenderer
 from hand_motion import (
+    HandModel,
     HandMeshRenderer,
     HandRenderConfig,
     HandTrajectoryGenerator,
@@ -191,6 +192,8 @@ class DWMPreparationJob:
         hand_render_config = HandRenderConfig(
             width=config.resolution[0],
             height=config.resolution[1],
+            hand_model=HandModel.MANO,
+            require_mano=self.production_mode,
         )
         self.hand_renderer = HandMeshRenderer(config=hand_render_config)
 
