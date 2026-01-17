@@ -222,8 +222,9 @@ class HumanApprovalManager:
                 os.getenv("ALLOW_AUTO_APPROVE_ON_TIMEOUT_NON_PROD", "false").lower() == "true"
             )
 
+        auto_approve_requested = auto_approve_on_timeout
         if self._is_production_mode():
-            if auto_approve_on_timeout:
+            if auto_approve_requested:
                 self.log(
                     "Auto-approve on timeout requested but disabled in production; "
                     "requests will expire instead.",
@@ -231,13 +232,13 @@ class HumanApprovalManager:
                 )
             self.auto_approve_on_timeout = False
         else:
-            if auto_approve_on_timeout and not allow_auto_approve_non_prod:
+            if auto_approve_requested and not allow_auto_approve_non_prod:
                 self.log(
                     "Auto-approve on timeout requested but not permitted; "
                     "set allow_auto_approve_on_timeout_non_production to enable.",
                     "WARNING",
                 )
-            self.auto_approve_on_timeout = auto_approve_on_timeout and allow_auto_approve_non_prod
+            self.auto_approve_on_timeout = auto_approve_requested and allow_auto_approve_non_prod
 
         # Ensure approvals directory exists
         self.approvals_dir = self.APPROVALS_DIR / scene_id
@@ -296,7 +297,10 @@ class HumanApprovalManager:
             if request.expires_at:
                 expires = datetime.fromisoformat(request.expires_at.replace("Z", "+00:00"))
                 if datetime.now(expires.tzinfo) > expires:
-                    if self.auto_approve_on_timeout:
+                    allow_auto_approve = (
+                        self.auto_approve_on_timeout and not self._is_production_mode()
+                    )
+                    if allow_auto_approve:
                         request.status = ApprovalStatus.APPROVED
                         request.approved_by = "SYSTEM:auto_timeout"
                         request.approved_at = datetime.utcnow().isoformat() + "Z"
@@ -315,7 +319,12 @@ class HumanApprovalManager:
                         return request
 
                     request.status = ApprovalStatus.EXPIRED
-                    request.approval_notes = f"Expired after {self.timeout_hours}h timeout"
+                    if self._is_production_mode():
+                        request.approval_notes = (
+                            f"Expired after {self.timeout_hours}h timeout (auto-approve disabled in production)"
+                        )
+                    else:
+                        request.approval_notes = f"Expired after {self.timeout_hours}h timeout"
                     self._save_request(request)
                     self._log_audit(
                         "EXPIRED",
