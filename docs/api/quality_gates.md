@@ -40,6 +40,18 @@ The production SLI runner also supports runtime env configuration:
 - `SCENE_ID`, `BUCKET`, `EPISODES_PREFIX`, `DATA_ROOT`, `SCENE_DIR`
 - `QUALITY_GATE_REPORT_PATH` for saving gate reports to disk【F:tools/quality_gates/quality_gate.py†L1-L41】【F:tools/quality_gates/quality_gate.py†L1026-L1517】【F:tools/quality_gates/sli_gate_runner.py†L153-L176】
 
+## Threshold updates (v1.1.0) and migration notes
+
+### Rationale
+
+The default thresholds in `tools/quality_gates/quality_config.json` were raised to reduce collision-heavy episode output, improve SLI consistency, and enforce higher-quality downstream datasets. This aligns the default bar with production expectations for collision-free rates, quality scores, and sensor/physics capture health.
+
+### Migration notes for existing labs
+
+1. **Update custom configs**: If you maintain a local copy of `quality_config.json`, update your overrides to reflect the new defaults (or consciously retain older, lower thresholds). Expect more gates to fail until content is re-tuned.
+2. **Environment overrides**: Review `BP_QUALITY_*` overrides in staging/prod to ensure they still match your accepted thresholds.
+3. **Override metadata schema**: Manual override requests must now include `category`, `ticket`, and `justification` fields per the configured schema (see `gate_overrides.override_reason_schema`).
+
 ## Request/response payloads & data models
 
 ### Gate registration and results
@@ -87,4 +99,3 @@ registry.run_checkpoint(
 if not registry.can_proceed():
     registry.save_report(scene_id="kitchen_001", output_path="/tmp/gate_report.json")
 ```
-

@@ -40,18 +40,18 @@ class PhysicsThresholds:
 @dataclass
 class EpisodeThresholds:
     """Episode quality thresholds."""
-    collision_free_rate_min: float = 0.80
-    quality_score_min: float = 0.85
-    quality_pass_rate_min: float = 0.50
-    min_episodes_required: int = 1
+    collision_free_rate_min: float = 0.90
+    quality_score_min: float = 0.90
+    quality_pass_rate_min: float = 0.70
+    min_episodes_required: int = 3
 
 
 @dataclass
 class DataQualityThresholds:
     """Data quality SLI thresholds."""
-    min_average_quality_score: float = 0.85
-    min_sensor_capture_rate: float = 0.90
-    min_physics_validation_rate: float = 0.90
+    min_average_quality_score: float = 0.90
+    min_sensor_capture_rate: float = 0.95
+    min_physics_validation_rate: float = 0.95
     allowed_sensor_sources: List[str] = field(
         default_factory=lambda: ["isaac_sim_replicator", "simulation"]
     )
@@ -63,8 +63,8 @@ class DataQualityThresholds:
 @dataclass
 class SimulationThresholds:
     """Simulation stability thresholds."""
-    min_stable_steps: int = 10
-    max_penetration_depth_m: float = 0.01
+    min_stable_steps: int = 20
+    max_penetration_depth_m: float = 0.005
     physics_stability_timeout_s: float = 30.0
 
 
@@ -91,6 +91,18 @@ class GateOverrideConfig:
     override_requires_reason: bool = True
     override_log_retention_days: int = 90
     allowed_overriders: List[str] = field(default_factory=list)
+    override_reason_schema: "OverrideReasonSchema" = field(default_factory=lambda: OverrideReasonSchema())
+
+
+@dataclass
+class OverrideReasonSchema:
+    """Schema definition for structured override reasons."""
+    required_fields: List[str] = field(default_factory=lambda: ["category", "ticket", "justification"])
+    categories: List[str] = field(
+        default_factory=lambda: ["data_gap", "tooling_failure", "known_issue", "customer_exception", "other"]
+    )
+    ticket_pattern: str = r"^(https?://|[A-Za-z][A-Za-z0-9._-]*-\d+)$"
+    justification_min_length: int = 50
 
 
 @dataclass
@@ -511,15 +523,15 @@ class ConfigLoader:
                 friction_max=thresholds.get("physics", {}).get("friction_max", 2.0),
             ),
             episodes=EpisodeThresholds(
-                collision_free_rate_min=thresholds.get("episodes", {}).get("collision_free_rate_min", 0.80),
-                quality_score_min=thresholds.get("episodes", {}).get("quality_score_min", 0.85),
-                quality_pass_rate_min=thresholds.get("episodes", {}).get("quality_pass_rate_min", 0.50),
-                min_episodes_required=thresholds.get("episodes", {}).get("min_episodes_required", 1),
+                collision_free_rate_min=thresholds.get("episodes", {}).get("collision_free_rate_min", 0.90),
+                quality_score_min=thresholds.get("episodes", {}).get("quality_score_min", 0.90),
+                quality_pass_rate_min=thresholds.get("episodes", {}).get("quality_pass_rate_min", 0.70),
+                min_episodes_required=thresholds.get("episodes", {}).get("min_episodes_required", 3),
             ),
             data_quality=DataQualityThresholds(
-                min_average_quality_score=data_quality.get("min_average_quality_score", 0.85),
-                min_sensor_capture_rate=data_quality.get("min_sensor_capture_rate", 0.90),
-                min_physics_validation_rate=data_quality.get("min_physics_validation_rate", 0.90),
+                min_average_quality_score=data_quality.get("min_average_quality_score", 0.90),
+                min_sensor_capture_rate=data_quality.get("min_sensor_capture_rate", 0.95),
+                min_physics_validation_rate=data_quality.get("min_physics_validation_rate", 0.95),
                 allowed_sensor_sources=data_quality.get(
                     "allowed_sensor_sources",
                     ["isaac_sim_replicator", "simulation"],
@@ -530,8 +542,8 @@ class ConfigLoader:
                 ),
             ),
             simulation=SimulationThresholds(
-                min_stable_steps=thresholds.get("simulation", {}).get("min_stable_steps", 10),
-                max_penetration_depth_m=thresholds.get("simulation", {}).get("max_penetration_depth_m", 0.01),
+                min_stable_steps=thresholds.get("simulation", {}).get("min_stable_steps", 20),
+                max_penetration_depth_m=thresholds.get("simulation", {}).get("max_penetration_depth_m", 0.005),
                 physics_stability_timeout_s=thresholds.get("simulation", {}).get("physics_stability_timeout_s", 30.0),
             ),
             human_approval=HumanApprovalConfig(
@@ -552,6 +564,26 @@ class ConfigLoader:
                     {},
                 ).get("allow_override_in_production", False),
                 override_requires_reason=config.get("gate_overrides", {}).get("override_requires_reason", True),
+                override_log_retention_days=config.get("gate_overrides", {}).get("override_log_retention_days", 90),
+                allowed_overriders=config.get("gate_overrides", {}).get("allowed_overriders", []),
+                override_reason_schema=OverrideReasonSchema(
+                    required_fields=config.get("gate_overrides", {}).get("override_reason_schema", {}).get(
+                        "required_fields",
+                        ["category", "ticket", "justification"],
+                    ),
+                    categories=config.get("gate_overrides", {}).get("override_reason_schema", {}).get(
+                        "categories",
+                        ["data_gap", "tooling_failure", "known_issue", "customer_exception", "other"],
+                    ),
+                    ticket_pattern=config.get("gate_overrides", {}).get("override_reason_schema", {}).get(
+                        "ticket_pattern",
+                        r"^(https?://|[A-Za-z][A-Za-z0-9._-]*-\d+)$",
+                    ),
+                    justification_min_length=config.get("gate_overrides", {}).get("override_reason_schema", {}).get(
+                        "justification_min_length",
+                        50,
+                    ),
+                ),
             ),
         )
 
@@ -881,6 +913,23 @@ class ConfigLoader:
                                 val = data_quality[key]
                                 if not (0.0 <= val <= 1.0):
                                     errors[f"thresholds.data_quality.{key}"] = "Must be between 0.0 and 1.0"
+
+        if "gate_overrides" in config:
+            gate_overrides = config["gate_overrides"]
+            if isinstance(gate_overrides, dict):
+                schema = gate_overrides.get("override_reason_schema", {})
+                if schema:
+                    required_fields = schema.get("required_fields")
+                    if required_fields is not None and not isinstance(required_fields, list):
+                        errors["gate_overrides.override_reason_schema.required_fields"] = "Must be a list"
+                    categories = schema.get("categories")
+                    if categories is not None and not isinstance(categories, list):
+                        errors["gate_overrides.override_reason_schema.categories"] = "Must be a list"
+                    justification_min_length = schema.get("justification_min_length")
+                    if justification_min_length is not None and justification_min_length <= 0:
+                        errors["gate_overrides.override_reason_schema.justification_min_length"] = (
+                            "Must be a positive integer"
+                        )
 
         return errors
 
