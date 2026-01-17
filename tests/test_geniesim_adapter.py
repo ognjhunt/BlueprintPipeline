@@ -547,38 +547,6 @@ class TestPipelineSelector:
         assert "episode-generation-job" not in jobs
         assert "isaac-lab-job" not in jobs
 
-    def test_geniesim_submission_always_local(self, monkeypatch):
-        """Ensure Genie Sim always runs locally (no API mode)."""
-        from tools.run_local_pipeline import LocalPipelineRunner
-
-        monkeypatch.setenv("USE_GENIESIM", "true")
-        monkeypatch.delenv("GENIESIM_FORCE_LOCAL", raising=False)
-        monkeypatch.delenv("GENIESIM_MOCK_MODE", raising=False)
-
-        mode = LocalPipelineRunner._resolve_geniesim_submission_mode(
-            api_key=None,
-            force_local=False,
-            mock_mode=False,
-        )
-
-        assert mode == "local"
-
-    def test_geniesim_submission_local_only(self, monkeypatch):
-        """Ensure Genie Sim operates in local-only mode."""
-        from tools.run_local_pipeline import LocalPipelineRunner
-
-        monkeypatch.setenv("USE_GENIESIM", "true")
-        monkeypatch.delenv("GENIESIM_FORCE_LOCAL", raising=False)
-
-        mode = LocalPipelineRunner._resolve_geniesim_submission_mode(
-            api_key=None,
-            force_local=False,
-            mock_mode=False,
-        )
-
-        assert mode == "local"
-
-
 # =============================================================================
 # Run tests
 # =============================================================================

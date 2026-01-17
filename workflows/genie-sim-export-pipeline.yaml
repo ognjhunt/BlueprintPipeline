@@ -78,8 +78,6 @@ main:
           - robotType: '${default(map.get(event, "robot_type"), "franka")}'
           # Max tasks to generate hints for
           - maxTasks: '${default(map.get(event, "max_tasks"), "50")}'
-          # Submission mode: local-only (other values are unsupported)
-          - geniesimSubmissionMode: '${default(map.get(event, "geniesim_submission_mode"), "local")}'
           - gkeCluster: '${default(map.get(event, "gke_cluster"), "blueprint-cluster")}'
           - gkeZone: '${default(map.get(event, "gke_zone"), "us-central1-a")}'
           - gkeNamespace: '${default(map.get(event, "gke_namespace"), "blueprint")}'
@@ -143,8 +141,6 @@ main:
             - useGeniesim: '${default(map.get(sceneConfig, "use_geniesim"), true)}'
             # Get robot type from config if specified
             - robotType: '${default(map.get(sceneConfig, "robot_type"), robotType)}'
-            # Allow per-scene override for local execution
-            - geniesimSubmissionMode: '${default(map.get(sceneConfig, "geniesim_submission_mode"), geniesimSubmissionMode)}'
         except:
           as: e
           steps:
@@ -402,24 +398,12 @@ main:
         args:
           text: '${"Genie Sim export completed for scene " + sceneId}'
           severity: "INFO"
-        next: select_geniesim_submission_job
+        next: init_submission_metrics
 
-    - select_geniesim_submission_job:
-        switch:
-          - condition: '${geniesimSubmissionMode == "local"}'
-            next: init_local_submission_metrics
-        next: init_submit_job_metrics
-
-    - init_local_submission_metrics:
+    - init_submission_metrics:
         assign:
           - submissionStartTime: '${time.format(sys.now())}'
           - submissionJobName: ${geniesimGpuJobName}
-        next: emit_submission_metrics_start
-
-    - init_submit_job_metrics:
-        assign:
-          - submissionStartTime: '${time.format(sys.now())}'
-          - submissionJobName: ${geniesimSubmitJobName}
         next: emit_submission_metrics_start
 
     - emit_submission_metrics_start:
@@ -438,10 +422,7 @@ main:
         next: dispatch_submission_job
 
     - dispatch_submission_job:
-        switch:
-          - condition: '${geniesimSubmissionMode == "local"}'
-            next: run_geniesim_gpu_job
-        next: run_geniesim_submission_job
+        next: run_geniesim_gpu_job
 
     # Run local Genie Sim execution (GKE GPU job via Cloud Build)
     - run_geniesim_gpu_job:
@@ -530,8 +511,6 @@ main:
                                     value: "5"
                                   - name: OUTPUT_PREFIX
                                     value: ${"scenes/" + sceneId + "/episodes"}
-                                  - name: GENIESIM_SUBMISSION_MODE
-                                    value: ${geniesimSubmissionMode}
                                   - name: GENIESIM_FORCE_LOCAL
                                     value: "true"
                                   - name: GENIESIM_HOST
@@ -695,139 +674,6 @@ main:
           seconds: 30
         next: wait_for_gke_submission_job
 
-    # Submit the Genie Sim generation job via Cloud Run
-    - run_geniesim_submission_job:
-        try:
-          call: googleapis.run.v2.projects.locations.jobs.run
-          args:
-            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + geniesimSubmitJobName}'
-            body:
-              overrides:
-                containerOverrides:
-                  - env:
-                      - name: BUCKET
-                        value: ${bucket}
-                      - name: SCENE_ID
-                        value: ${sceneId}
-                      - name: GENIESIM_PREFIX
-                        value: ${geniesimPrefix}
-                      - name: JOB_OUTPUT_PATH
-                        value: ${geniesimJobMetadataPath}
-                      - name: ROBOT_TYPE
-                        value: ${robotType}
-                      - name: EPISODES_PER_TASK
-                        value: "10"
-                      - name: NUM_VARIATIONS
-                        value: "5"
-                      - name: GENIESIM_SUBMISSION_MODE
-                        value: ${geniesimSubmissionMode}
-            timeout: '${string(geniesimSubmissionTimeoutSeconds) + "s"}'
-        result: geniesimSubmitExec
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 3
-          backoff:
-            initial_delay: 2
-            max_delay: 30
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_submission_retry_exhausted:
-                call: sys.log
-                args:
-                  data:
-                    bp_metric: "job_retry_exhausted"
-                    workflow: ${workflowName}
-                    job: ${geniesimSubmitJobName}
-                    scene_id: ${sceneId}
-                    retry_max: 3
-                    error: ${e.message}
-                  severity: "ERROR"
-            - list_geniesim_submission_outputs_for_cleanup:
-                call: googleapis.storage.v1.objects.list
-                args:
-                  bucket: ${bucket}
-                  prefix: ${geniesimPrefix + "/"}
-                  maxResults: 1000
-                result: geniesimSubmissionCleanupList
-            - delete_geniesim_submission_outputs_for_cleanup:
-                for:
-                  value: geniesimSubmissionCleanupItem
-                  in: ${default(geniesimSubmissionCleanupList.items, [])}
-                  steps:
-                    - delete_geniesim_submission_output:
-                        call: googleapis.storage.v1.objects.delete
-                        args:
-                          bucket: ${bucket}
-                          object: ${geniesimSubmissionCleanupItem.name}
-            - write_geniesim_submission_failure_marker:
-                call: googleapis.storage.v1.objects.insert
-                args:
-                  bucket: ${bucket}
-                  name: ${geniesimFailedMarker}
-                  uploadType: "media"
-                  body: ${json.encode({
-                    "scene_id": sceneId,
-                    "job_name": geniesimSubmitJobName,
-                    "status": "failed",
-                    "timestamp": time.format(sys.now()),
-                    "error": {
-                      "code": "geniesim_submission_start_failed",
-                      "message": e.message,
-                      "type": "workflow_failure",
-                      "stack_trace": null
-                    },
-                    "context": {
-                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
-                      "attempt_number": 1,
-                      "config_context": {
-                        "geniesim_prefix": geniesimPrefix
-                      }
-                    }
-                  })}
-            - log_submission_error:
-                call: sys.log
-                args:
-                  text: '${"Failed to submit Genie Sim job: " + e.message}'
-                  severity: "ERROR"
-            - raise_submission_error:
-                raise: ${e}
-        next: set_submission_execution_name
-
-    - set_submission_execution_name:
-        assign:
-          - submissionExecutionName: '${if(geniesimSubmitExec.metadata != null and geniesimSubmitExec.metadata.name != null, geniesimSubmitExec.metadata.name, geniesimSubmitExec.name)}'
-        next: wait_for_submission_job
-
-    - wait_for_submission_job:
-        call: googleapis.run.v2.projects.locations.jobs.executions.get
-        args:
-          name: ${submissionExecutionName}
-        result: submissionStatus
-        next: check_submission_status
-
-    - check_submission_status:
-        assign:
-          - submissionState: '${if(submissionStatus.state != null, submissionStatus.state, if(submissionStatus.status != null, submissionStatus.status.state, null))}'
-          - submissionFailedCount: '${if(submissionStatus.failedCount != null, submissionStatus.failedCount, if(submissionStatus.status != null, submissionStatus.status.failedCount, null))}'
-          - submissionSucceededCount: '${if(submissionStatus.succeededCount != null, submissionStatus.succeededCount, if(submissionStatus.status != null, submissionStatus.status.succeededCount, null))}'
-        next: submission_status_switch
-
-    - submission_status_switch:
-        switch:
-          - condition: '${submissionState == "FAILED" or (submissionFailedCount != null and submissionFailedCount > 0)}'
-            next: submission_failed
-          - condition: '${submissionState == "SUCCEEDED" or (submissionSucceededCount != null and submissionSucceededCount > 0)}'
-            next: log_submission_complete
-        next: wait_submission_poll
-
-    - wait_submission_poll:
-        call: sys.sleep
-        args:
-          seconds: 5
-        next: wait_for_submission_job
-
     - submission_failed:
         assign:
           - submissionEndTime: '${time.format(sys.now())}'
@@ -922,7 +768,6 @@ main:
                 assign:
                   - submittedJobId: "unknown"
                   - submittedJobStatus: "submitted"
-                  - submittedSubmissionMode: ${geniesimSubmissionMode}
                   - submittedEpisodesPrefix: null
                   - submittedFailureReason: "unknown"
                   - submittedFailureDetails: null
@@ -935,7 +780,6 @@ main:
           - submissionMetadata: ${json.decode(submissionMetadataRaw)}
           - submittedJobId: ${submissionMetadata.job_id}
           - submittedJobStatus: ${default(submissionMetadata.status, "submitted")}
-          - submittedSubmissionMode: ${default(submissionMetadata.submission_mode, "local")}
           - submittedEpisodesPrefix: ${default(map.get(map.get(submissionMetadata, "artifacts", {}), "episodes_prefix"), null)}
           - submittedFailureReason: ${default(map.get(submissionMetadata, "failure_reason"), "unknown")}
           - submittedFailureDetails: ${default(map.get(submissionMetadata, "failure_details"), null)}
@@ -988,27 +832,18 @@ main:
 
     - maybe_trigger_import:
         switch:
-          - condition: '${submittedJobStatus == "completed" and submittedSubmissionMode == "local"}'
-            next: trigger_import_workflow
           - condition: '${submittedJobStatus == "completed"}'
-            next: skip_import_trigger_deferred
+            next: trigger_import_workflow
           - condition: '${submittedJobStatus == "failed"}'
             next: handle_submission_failure
         next: write_submitted_marker
-
-    - skip_import_trigger_deferred:
-        call: sys.log
-        args:
-          text: '${"Genie Sim job " + submittedJobId + " completed; import will be triggered externally"}'
-          severity: "INFO"
-        next: write_completion_marker
 
     - trigger_import_workflow:
         call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.create
         args:
           parent: '${"projects/" + projectId + "/locations/" + region + "/workflows/genie-sim-import-pipeline"}'
           body:
-            argument: '${json.encode({"job_id": submittedJobId, "scene_id": sceneId, "status": submittedJobStatus, "submission_mode": submittedSubmissionMode, "local_episodes_prefix": submittedEpisodesPrefix, "job_metadata_path": geniesimJobMetadataPath})}'
+            argument: '${json.encode({"job_id": submittedJobId, "scene_id": sceneId, "status": submittedJobStatus, "local_episodes_prefix": submittedEpisodesPrefix, "job_metadata_path": geniesimJobMetadataPath})}'
         result: importExecution
         next: log_import_trigger
 
@@ -1071,8 +906,7 @@ main:
             "context": {
               "job_id": submittedJobId,
               "job_metadata_path": geniesimJobMetadataPath,
-              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
-              "submission_mode": submittedSubmissionMode
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")
             }
           })}
         result: submissionFailureMarkerResult
@@ -1088,7 +922,6 @@ main:
             "scene_id": sceneId,
             "status": submittedJobStatus,
             "timestamp": time.format(sys.now()),
-            "submission_mode": submittedSubmissionMode,
             "job_id": submittedJobId,
             "job_metadata_path": geniesimJobMetadataPath
           })}
@@ -1197,8 +1030,7 @@ main:
               "config_context": {
                 "robot_type": robotType,
                 "filter_commercial": filterCommercial,
-                "max_tasks": maxTasks,
-                "geniesim_submission_mode": geniesimSubmissionMode
+                "max_tasks": maxTasks
               }
             },
             "input_params": {

@@ -1550,19 +1550,6 @@ class LocalPipelineRunner:
             },
         )
 
-    @staticmethod
-    def _resolve_geniesim_submission_mode(
-        api_key: Optional[str],
-        force_local: bool,
-        mock_mode: bool,
-    ) -> str:
-        """Resolve Genie Sim submission mode with local default."""
-        if mock_mode:
-            return "mock"
-        if force_local:
-            return "local"
-        return "local"
-
     def _run_geniesim_submit(self) -> StepResult:
         """Submit Genie Sim generation (API or local framework)."""
         try:
@@ -1599,126 +1586,72 @@ class LocalPipelineRunner:
         num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
         min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
 
-        force_local = os.getenv("GENIESIM_FORCE_LOCAL", "false").lower() == "true"
-        mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
-        production_mode = self.environment == "production"
-        submission_mode = self._resolve_geniesim_submission_mode(
-            api_key=None,
-            force_local=force_local,
-            mock_mode=mock_mode,
-        )
-        if production_mode and submission_mode == "mock":
-            return StepResult(
-                step=PipelineStep.GENIESIM_SUBMIT,
-                success=False,
-                duration_seconds=0,
-                message="Mock Genie Sim submission is not allowed in production",
-            )
         job_id = None
         submission_message = None
         local_run_result = None
         preflight_report = None
+        import uuid
 
-        if submission_mode == "mock":
-            try:
-                sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
-                from geniesim_client import GenieSimClient, GenerationParams
-        except ImportError as e:
+        job_id = f"local-{uuid.uuid4()}"
+        submission_message = "Local Genie Sim execution started."
+        preflight_report = run_geniesim_preflight(
+            "genie-sim-local-runner",
+            require_server=False,
+        )
+        if not preflight_report.get("ok", False):
             return StepResult(
                 step=PipelineStep.GENIESIM_SUBMIT,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error (Genie Sim mock client not found): {self._summarize_exception(e)}",
+                message=format_geniesim_preflight_failure(
+                    "genie-sim-local-runner",
+                    preflight_report,
+                ),
+                outputs={"preflight": preflight_report},
             )
 
-            generation_params = GenerationParams(
-                episodes_per_task=episodes_per_task,
-                num_variations=num_variations,
-                robot_type=robot_type,
-                min_quality_score=min_quality_score,
-            )
-            client = GenieSimClient(mock_mode=True, validate_on_init=False)
-            try:
-                result = client.submit_generation_job(
-                    scene_graph=scene_graph,
-                    asset_index=asset_index,
-                    task_config=task_config,
-                    generation_params=generation_params,
-                    job_name=f"{self.scene_id}-geniesim-mock",
-                )
-                if not result.success or not result.job_id:
-                    raise RuntimeError(result.message or "Genie Sim mock submission failed")
-                job_id = result.job_id
-                submission_message = result.message
-            finally:
-                client.close()
+        output_dir = self.episodes_dir / f"geniesim_{job_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config_dir = output_dir / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+
+        merged_manifest_path = self.geniesim_dir / "merged_scene_manifest.json"
+        if merged_manifest_path.is_file():
+            scene_manifest = json.loads(merged_manifest_path.read_text())
         else:
-            import uuid
+            scene_manifest = {"scene_graph": scene_graph}
 
-            job_id = f"local-{uuid.uuid4()}"
-            submission_message = "Local Genie Sim execution started."
-            preflight_report = run_geniesim_preflight(
-                "genie-sim-local-runner",
-                require_server=False,
-            )
-            if not preflight_report.get("ok", False):
-                return StepResult(
-                    step=PipelineStep.GENIESIM_SUBMIT,
-                    success=False,
-                    duration_seconds=0,
-                    message=format_geniesim_preflight_failure(
-                        "genie-sim-local-runner",
-                        preflight_report,
-                    ),
-                    outputs={"preflight": preflight_report},
-                )
+        scene_manifest_path = config_dir / "scene_manifest.json"
+        task_config_local_path = config_dir / "task_config.json"
+        scene_manifest_path.write_text(json.dumps(scene_manifest, indent=2))
+        task_config_local_path.write_text(json.dumps(task_config, indent=2))
 
-            output_dir = self.episodes_dir / f"geniesim_{job_id}"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            config_dir = output_dir / "config"
-            config_dir.mkdir(parents=True, exist_ok=True)
+        local_run_result = run_local_data_collection(
+            scene_manifest_path=scene_manifest_path,
+            task_config_path=task_config_local_path,
+            output_dir=output_dir,
+            robot_type=robot_type,
+            episodes_per_task=episodes_per_task,
+            verbose=True,
+        )
+        submission_message = (
+            "Local Genie Sim execution completed."
+            if local_run_result and local_run_result.success
+            else "Local Genie Sim execution failed."
+        )
 
-            merged_manifest_path = self.geniesim_dir / "merged_scene_manifest.json"
-            if merged_manifest_path.is_file():
-                scene_manifest = json.loads(merged_manifest_path.read_text())
-            else:
-                scene_manifest = {"scene_graph": scene_graph}
-
-            scene_manifest_path = config_dir / "scene_manifest.json"
-            task_config_local_path = config_dir / "task_config.json"
-            scene_manifest_path.write_text(json.dumps(scene_manifest, indent=2))
-            task_config_local_path.write_text(json.dumps(task_config, indent=2))
-
-            local_run_result = run_local_data_collection(
-                scene_manifest_path=scene_manifest_path,
-                task_config_path=task_config_local_path,
-                output_dir=output_dir,
-                robot_type=robot_type,
-                episodes_per_task=episodes_per_task,
-                verbose=True,
-            )
-            submission_message = (
-                "Local Genie Sim execution completed."
-                if local_run_result and local_run_result.success
-                else "Local Genie Sim execution failed."
-            )
-
-        if submission_mode == "mock":
-            job_status = "completed"
-        else:
-            job_status = (
-                "completed"
-                if local_run_result and local_run_result.success
-                else ("failed" if submission_mode == "local" else "submitted")
-            )
-            if submission_mode == "local" and preflight_report and not preflight_report.get("ok", False):
-                job_status = "failed"
+        job_status = (
+            "completed"
+            if local_run_result and local_run_result.success
+            else "failed"
+        )
+        if preflight_report and not preflight_report.get("ok", False):
+            job_status = "failed"
 
         job_payload = {
             "job_id": job_id,
             "scene_id": self.scene_id,
             "status": job_status,
-            "submission_mode": submission_mode,
             "submitted_at": datetime.utcnow().isoformat() + "Z",
             "message": submission_message,
             "bundle": {
@@ -1734,20 +1667,19 @@ class LocalPipelineRunner:
             },
         }
 
-        if submission_mode == "local":
-            episodes_path = str(self.episodes_dir / f"geniesim_{job_id}")
-            job_payload["artifacts"] = {
-                "episodes_path": episodes_path,
-                "episodes_prefix": episodes_path,
-                "lerobot_path": str(Path(episodes_path) / "lerobot"),
-                "lerobot_prefix": str(Path(episodes_path) / "lerobot"),
-            }
-            job_payload["local_execution"] = {
-                "success": bool(local_run_result and local_run_result.success),
-                "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
-                "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
-                "preflight": preflight_report,
-            }
+        episodes_path = str(self.episodes_dir / f"geniesim_{job_id}")
+        job_payload["artifacts"] = {
+            "episodes_path": episodes_path,
+            "episodes_prefix": episodes_path,
+            "lerobot_path": str(Path(episodes_path) / "lerobot"),
+            "lerobot_prefix": str(Path(episodes_path) / "lerobot"),
+        }
+        job_payload["local_execution"] = {
+            "success": bool(local_run_result and local_run_result.success),
+            "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
+            "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
+            "preflight": preflight_report,
+        }
 
         job_path = self.geniesim_dir / "job.json"
         job_path.write_text(json.dumps(job_payload, indent=2))
@@ -1759,7 +1691,6 @@ class LocalPipelineRunner:
             message=submission_message or "Genie Sim submission completed",
             outputs={
                 "job_id": job_id,
-                "submission_mode": submission_mode,
                 "job_status": job_status,
                 "job_payload": str(job_path),
             },
@@ -1796,7 +1727,6 @@ class LocalPipelineRunner:
                 duration_seconds=0,
                 message="Genie Sim job metadata missing job_id",
             )
-        submission_mode = job_payload.get("submission_mode", "local")
         job_status = job_payload.get("status", "submitted")
         artifacts = job_payload.get("artifacts", {})
         local_episodes_prefix = (
@@ -1804,21 +1734,6 @@ class LocalPipelineRunner:
             or artifacts.get("episodes_path")
             or str(self.episodes_dir / f"geniesim_{job_id}")
         )
-
-        if submission_mode != "local":
-            marker_path = self.geniesim_dir / ".geniesim_import_complete"
-            self._write_marker(marker_path, status="completed")
-            return StepResult(
-                step=PipelineStep.GENIESIM_IMPORT,
-                success=True,
-                duration_seconds=0,
-                message=f"Skipping import for submission_mode={submission_mode}",
-                outputs={
-                    "job_id": job_id,
-                    "submission_mode": submission_mode,
-                    "completion_marker": str(marker_path),
-                },
-            )
 
         if job_status != "completed":
             return StepResult(
@@ -1840,7 +1755,6 @@ class LocalPipelineRunner:
             require_lerobot=os.getenv("REQUIRE_LEROBOT", "false").lower() == "true",
             wait_for_completion=True,
             poll_interval=0,
-            submission_mode="local",
             job_metadata_path=str(job_path),
             local_episodes_prefix=local_episodes_prefix,
         )
