@@ -34,6 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.config.production_mode import resolve_production_mode
+
 # Import Isaac Sim integration
 try:
     from isaac_sim_integration import (
@@ -157,7 +159,7 @@ def get_environment_capabilities() -> EnvironmentCapabilities:
     gpu_available = os.path.exists("/dev/nvidia0") or os.path.exists("/proc/driver/nvidia")
 
     # Check environment configuration
-    production_mode = os.environ.get("PRODUCTION_MODE", "false").lower() == "true"
+    production_mode = resolve_production_mode()
     allow_mock_capture = os.environ.get("ALLOW_MOCK_CAPTURE", "false").lower() == "true"
 
     return EnvironmentCapabilities(
