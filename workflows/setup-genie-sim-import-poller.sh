@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Deploys the genie-sim-import-poller workflow and schedules it via
-# Cloud Scheduler to trigger imports when webhooks are unavailable.
+# Cloud Scheduler to trigger imports when direct workflow triggers are unavailable.
 #
 # Usage:
 #   ./setup-genie-sim-import-poller.sh <project_id> [bucket] [region]

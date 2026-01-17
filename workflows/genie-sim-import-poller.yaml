@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # Scheduled workflow to discover completed Genie Sim jobs and trigger imports
-# when webhook callbacks are not available.
+# when direct triggers are not available.
 #
 # Expected schedule: every 5-10 minutes via Cloud Scheduler.
 #

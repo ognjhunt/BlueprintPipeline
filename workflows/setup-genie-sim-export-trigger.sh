@@ -14,7 +14,7 @@
 # Prerequisites:
 #   - gcloud CLI authenticated
 #   - genie-sim-export-pipeline workflow deployed
-#   - Cloud Run, Workflows, and EventArc APIs enabled
+#   - Cloud Run, Workflows, and EventArc services enabled
 #
 # =============================================================================
 
@@ -44,9 +44,9 @@ echo "Region: ${REGION}"
 echo ""
 
 # =============================================================================
-# Step 1: Enable required APIs
+# Step 1: Enable required services
 # =============================================================================
-echo -e "${BLUE}Step 1: Enabling required APIs...${NC}"
+echo -e "${BLUE}Step 1: Enabling required services...${NC}"
 
 gcloud services enable \
     eventarc.googleapis.com \
@@ -55,7 +55,7 @@ gcloud services enable \
     storage.googleapis.com \
     --project=${PROJECT_ID}
 
-echo -e "${GREEN}APIs enabled${NC}"
+echo -e "${GREEN}Services enabled${NC}"
 echo ""
 
 # =============================================================================

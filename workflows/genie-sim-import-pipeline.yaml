@@ -5,16 +5,12 @@
 # Imports generated episodes from Genie Sim 3.0 back into BlueprintPipeline.
 #
 # Trigger Methods:
-# 1. Webhook from Genie Sim (recommended):
-#    POST /webhooks/geniesim/job-complete
-#    Body: {"job_id": "...", "status": "completed"}
-#
-# 2. Manual trigger via Eventarc:
+# 1. Manual trigger via Eventarc:
 #    gcloud eventarc triggers create geniesim-import-trigger \
 #      --destination-workflow=genie-sim-import-pipeline \
 #      --event-filters="type=manual.geniesim.job.completed"
 #
-# 3. Scheduled polling (fallback):
+# 2. Scheduled polling (fallback):
 #    Cloud Scheduler → Pub/Sub → Eventarc → Workflow
 #
 # Pipeline Flow:
@@ -32,7 +28,7 @@ main:
 
     - extract_event:
         switch:
-          # Webhook payload (direct from Genie Sim)
+          # Direct workflow payload (e.g., local runner or poller)
           - condition: ${"job_id" in event}
             assign:
               - job_id: ${event.job_id}

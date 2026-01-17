@@ -12,8 +12,7 @@
 #   3. genie-sim-export-pipeline
 #   4. arena-export-pipeline (3 triggers for different sources)
 #   5. objects-pipeline
-#   6. genie-sim-import-pipeline (webhook-based)
-#   7. genie-sim-import-poller (fallback)
+#   6. genie-sim-import-poller (fallback)
 #   7. dream2flow-preparation-pipeline (manual)
 #   8. dwm-preparation-pipeline (manual)
 #
@@ -23,7 +22,7 @@
 # Prerequisites:
 #   - gcloud CLI authenticated
 #   - All workflow YAML files deployed
-#   - Cloud Run, Workflows, EventArc, and GKE APIs enabled
+#   - Cloud Run, Workflows, EventArc, and GKE services enabled
 #
 # =============================================================================
 
@@ -94,7 +93,6 @@ run_setup_script "setup-usd-assembly-trigger.sh" "USD Assembly Pipeline"
 run_setup_script "setup-genie-sim-export-trigger.sh" "Genie Sim Export Pipeline"
 run_setup_script "setup-arena-export-trigger.sh" "Arena Export Pipeline"
 run_setup_script "setup-objects-trigger.sh" "Objects Pipeline"
-run_setup_script "setup-genie-sim-import-trigger.sh" "Genie Sim Import Pipeline (Webhook)"
 run_setup_script "setup-genie-sim-import-poller.sh" "Genie Sim Import Poller (Fallback)"
 
 # =============================================================================
@@ -137,8 +135,7 @@ if [ ${fail_count} -eq 0 ]; then
     echo "  2. genie-sim-export-trigger  → Trigger on .variation_pipeline_complete"
     echo "  3. arena-export-* (3 triggers) → Trigger on .usd_complete, .geniesim_complete, .isaac_lab_complete (ignores .geniesim_submitted)"
     echo "  4. objects-trigger           → Trigger on scene_layout.json uploads"
-    echo "  5. genie-sim-import (webhook) → Receives Genie Sim callbacks"
-    echo "  6. genie-sim-import-poller → Scheduled fallback poller"
+    echo "  5. genie-sim-import-poller → Scheduled fallback poller"
     echo ""
     echo "Manual Setup Still Required:"
     echo "  • Episode Generation: Uses GKE directly (see episode-generation-job/scripts/setup_eventarc_trigger.sh)"
