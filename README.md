@@ -80,8 +80,8 @@ before merging changes that touch Python dependencies or code.
 ### Local Genie Sim Fixtures
 
 Run the local pipeline with Genie Sim enabled to generate an export bundle and submit
-local data collection. Genie Sim runs in **local-only mode by default**; no API key
-is required for the free/default workflow. This is the default backend when
+local data collection. Genie Sim runs in **local-only mode** for the default workflow.
+This is the default backend when
 `USE_GENIESIM` is unset (equivalent to `USE_GENIESIM=true`); see the prerequisites
 in the Quick Start section above before running locally.
 
