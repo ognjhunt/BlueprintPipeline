@@ -47,7 +47,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import aiohttp
 import requests
@@ -1432,23 +1432,32 @@ class GenieSimClient:
             logger.info("Extracting episodes...")
             safe_extract_tar(archive_path, output_dir)
 
-            # Load manifest
+            # Stream manifest episodes without loading full list into memory
             manifest_path = output_dir / "manifest.json"
             if manifest_path.exists():
-                with open(manifest_path) as f:
-                    manifest = json.load(f)
-
-                episodes = [
-                    GeneratedEpisodeMetadata(**ep)
-                    for ep in manifest.get("episodes", [])
-                ]
+                base_iterator: Iterable[GeneratedEpisodeMetadata] = self._stream_manifest_episodes(
+                    manifest_path
+                )
             else:
-                episodes = []
+                base_iterator = iter(())
+
+            episode_count = 0
+
+            def _counting_iterator() -> Iterable[GeneratedEpisodeMetadata]:
+                nonlocal episode_count
+                for episode in base_iterator:
+                    episode_count += 1
+                    yield episode
+
+            counting_iterator = _counting_iterator()
 
             # Validate if requested
             errors = []
             if validate:
-                errors = self._validate_downloaded_episodes(output_dir, episodes)
+                errors = self._validate_downloaded_episodes(output_dir, counting_iterator)
+            else:
+                for _ in counting_iterator:
+                    pass
 
             # Clean up archive
             archive_path.unlink()
@@ -1456,10 +1465,10 @@ class GenieSimClient:
             return DownloadResult(
                 success=len(errors) == 0,
                 output_dir=output_dir,
-                episode_count=len(episodes),
+                episode_count=episode_count,
                 total_size_bytes=total_size,
                 manifest_path=manifest_path if manifest_path.exists() else None,
-                episodes=episodes,
+                episodes=[],
                 errors=errors,
             )
 
@@ -1474,7 +1483,7 @@ class GenieSimClient:
     def _validate_downloaded_episodes(
         self,
         output_dir: Path,
-        episodes: List[GeneratedEpisodeMetadata],
+        episodes: Iterable[GeneratedEpisodeMetadata],
     ) -> List[str]:
         """Validate downloaded episodes."""
         errors = []
@@ -1495,6 +1504,27 @@ class GenieSimClient:
                 )
 
         return errors
+
+    @staticmethod
+    def _stream_manifest_episodes(
+        manifest_path: Path,
+    ) -> Iterable[GeneratedEpisodeMetadata]:
+        """Stream episode metadata from a manifest without loading all entries."""
+        try:
+            import ijson
+        except ImportError:
+            logger.warning(
+                "ijson not installed; falling back to json.load for manifest parsing."
+            )
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            for episode in manifest.get("episodes", []):
+                yield GeneratedEpisodeMetadata(**episode)
+            return
+
+        with open(manifest_path, "rb") as f:
+            for episode in ijson.items(f, "episodes.item"):
+                yield GeneratedEpisodeMetadata(**episode)
 
     # =========================================================================
     # Utility Methods
