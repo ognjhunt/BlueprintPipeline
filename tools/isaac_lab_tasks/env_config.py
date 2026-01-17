@@ -10,6 +10,18 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
+def get_omniverse_root(default_path_root: str) -> str:
+    """
+    Build base Omniverse URL from environment variables.
+
+    Args:
+        default_path_root: Default Omniverse path root when OMNIVERSE_PATH_ROOT is unset.
+    """
+    omniverse_host = os.environ.get("OMNIVERSE_HOST", "localhost")
+    path_root = os.environ.get("OMNIVERSE_PATH_ROOT", default_path_root).strip("/")
+    return f"omniverse://{omniverse_host}/{path_root}"
+
+
 def get_isaac_asset_path(robot_type: str, isaac_version: str | None = None) -> str:
     """
     Get Isaac Sim asset path with configurable version.
@@ -25,7 +37,9 @@ def get_isaac_asset_path(robot_type: str, isaac_version: str | None = None) -> s
     if isaac_version is None:
         isaac_version = os.environ.get("ISAAC_SIM_VERSION", "2023.1.1")
 
-    base_path = f"omniverse://localhost/NVIDIA/Assets/Isaac/{isaac_version}/Isaac/Robots"
+    base_path = (
+        f"{get_omniverse_root('NVIDIA/Assets/Isaac')}/{isaac_version}/Isaac/Robots"
+    )
 
     paths = {
         "franka": f"{base_path}/Franka/franka_instanceable.usd",
