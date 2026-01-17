@@ -12,6 +12,7 @@ main:
           - jobName: "retention-cleanup-job"
           - retentionDays: ${default(event.retention_days, sys.get_env("PIPELINE_RETENTION_DAYS", "30"))}
           - dryRun: ${default(event.dry_run, sys.get_env("PIPELINE_RETENTION_DRY_RUN", "false"))}
+          - cleanupTimeoutSeconds: 3600
         next: log_start
 
     - log_start:
@@ -30,23 +31,126 @@ main:
         next: run_cleanup_job
 
     - run_cleanup_job:
-        call: googleapis.run.v2.projects.locations.jobs.run
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: PIPELINE_STORAGE_ROOT
+                        value: "/mnt/gcs"
+                      - name: GCS_BUCKET
+                        value: ${bucket}
+                      - name: PIPELINE_RETENTION_DAYS
+                        value: ${retentionDays}
+                      - name: PIPELINE_RETENTION_DRY_RUN
+                        value: ${dryRun}
+            timeout: '${string(cleanupTimeoutSeconds) + "s"}'
+          result: cleanupExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_cleanup_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "retention-cleanup"
+                    job: ${jobName}
+                    bucket: ${bucket}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - log_cleanup_start_failure:
+                call: sys.log
+                args:
+                  text: '${"Failed to start retention cleanup job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_cleanup_start_error:
+                raise: ${e}
+        next: set_execution_name
+
+    - set_execution_name:
+        assign:
+          - cleanupExecutionName: '${if(cleanupExec.metadata != null and cleanupExec.metadata.name != null, cleanupExec.metadata.name, cleanupExec.name)}'
+          - cleanupPollStartTime: '${time.format(sys.now())}'
+        next: wait_for_cleanup
+
+    - wait_for_cleanup:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
         args:
-          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
-          body:
-            overrides:
-              containerOverrides:
-                - env:
-                    - name: PIPELINE_STORAGE_ROOT
-                      value: "/mnt/gcs"
-                    - name: GCS_BUCKET
-                      value: ${bucket}
-                    - name: PIPELINE_RETENTION_DAYS
-                      value: ${retentionDays}
-                    - name: PIPELINE_RETENTION_DRY_RUN
-                      value: ${dryRun}
-        result: cleanupExec
-        next: log_complete
+          name: ${cleanupExecutionName}
+        result: cleanupStatus
+        next: check_cleanup_status
+
+    - check_cleanup_status:
+        assign:
+          - cleanupState: '${if(cleanupStatus.state != null, cleanupStatus.state, if(cleanupStatus.status != null, cleanupStatus.status.state, null))}'
+          - cleanupFailedCount: '${if(cleanupStatus.failedCount != null, cleanupStatus.failedCount, if(cleanupStatus.status != null, cleanupStatus.status.failedCount, null))}'
+          - cleanupSucceededCount: '${if(cleanupStatus.succeededCount != null, cleanupStatus.succeededCount, if(cleanupStatus.status != null, cleanupStatus.status.succeededCount, null))}'
+          - cleanupErrorMessage: '${if(cleanupStatus.status != null and cleanupStatus.status.message != null, cleanupStatus.status.message, if(cleanupStatus.error != null and cleanupStatus.error.message != null, cleanupStatus.error.message, "Unknown error"))}'
+          - cleanupPollElapsedSeconds: '${time.parse(time.format(sys.now())) - time.parse(cleanupPollStartTime)}'
+          - cleanupPollTimedOut: '${cleanupPollElapsedSeconds >= cleanupTimeoutSeconds}'
+        next: cleanup_status_switch
+
+    - cleanup_status_switch:
+        switch:
+          - condition: '${cleanupPollTimedOut}'
+            next: cleanup_timeout
+          - condition: '${cleanupState == "FAILED" or (cleanupFailedCount != null and cleanupFailedCount > 0)}'
+            next: cleanup_failed
+          - condition: '${cleanupState == "SUCCEEDED" or (cleanupSucceededCount != null and cleanupSucceededCount > 0)}'
+            next: log_complete
+        next: wait_cleanup_poll
+
+    - wait_cleanup_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_cleanup
+
+    - cleanup_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "maintenance_job"
+            event: "failed"
+            workflow: "retention-cleanup"
+            job: ${jobName}
+            bucket: ${bucket}
+            execution: ${cleanupExecutionName}
+            error: ${cleanupErrorMessage}
+          severity: "ERROR"
+        next: raise_cleanup_failed
+
+    - cleanup_timeout:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "maintenance_job"
+            event: "timeout"
+            workflow: "retention-cleanup"
+            job: ${jobName}
+            bucket: ${bucket}
+            execution: ${cleanupExecutionName}
+            error: '${"Cleanup execution timed out after " + string(cleanupTimeoutSeconds) + "s"}'
+          severity: "ERROR"
+        next: raise_cleanup_timeout
+
+    - raise_cleanup_failed:
+        raise: '${"Retention cleanup execution failed: " + cleanupExecutionName + " - " + cleanupErrorMessage}'
+
+    - raise_cleanup_timeout:
+        raise: '${"Retention cleanup execution timed out: " + cleanupExecutionName}'
 
     - log_complete:
         call: sys.log
