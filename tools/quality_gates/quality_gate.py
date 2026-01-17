@@ -118,6 +118,7 @@ class ApprovalRequest:
     approved_by: Optional[str] = None
     approved_at: Optional[str] = None
     override_reason: Optional[str] = None
+    override_metadata: Optional[Dict[str, Any]] = None
     approval_notes: Optional[str] = None
 
     def __post_init__(self):
@@ -141,6 +142,7 @@ class ApprovalRequest:
             "approved_by": self.approved_by,
             "approved_at": self.approved_at,
             "override_reason": self.override_reason,
+            "override_metadata": self.override_metadata,
             "approval_notes": self.approval_notes,
         }
 
@@ -172,8 +174,15 @@ class HumanApprovalManager:
         manager.approve(request.request_id, approver="lab_admin@example.com")
 
         # Or override with reason
-        manager.override(request.request_id, reason="Known issue, safe to proceed",
-                        approver="admin@example.com")
+        manager.override(
+            request.request_id,
+            override_metadata={
+                "approver_id": "admin@example.com",
+                "ticket_id": "OPS-1234",
+                "reason": "Known issue, safe to proceed",
+                "timestamp": "2024-01-10T12:00:00Z",
+            },
+        )
     """
 
     # Storage directory for pending approvals
@@ -412,8 +421,7 @@ class HumanApprovalManager:
     def override(
         self,
         request_id: str,
-        reason: str,
-        approver: str,
+        override_metadata: Dict[str, Any],
     ) -> bool:
         """Override a pending approval request (bypass with audit).
 
@@ -421,14 +429,26 @@ class HumanApprovalManager:
 
         Args:
             request_id: The approval request ID
-            reason: Reason for override (REQUIRED for audit)
-            approver: Email or ID of the overrider
+            override_metadata: Structured metadata containing approver_id, ticket_id,
+                reason, and timestamp.
 
         Returns:
             True if successfully overridden
         """
-        if not reason or len(reason.strip()) < 10:
+        required_fields = ("approver_id", "ticket_id", "reason", "timestamp")
+        missing_fields = [field for field in required_fields if not override_metadata.get(field)]
+        if missing_fields:
+            self.log(
+                f"Override requires metadata fields: {', '.join(missing_fields)}",
+                "ERROR",
+            )
+            return False
+        reason = str(override_metadata["reason"]).strip()
+        if len(reason) < 10:
             self.log("Override requires a reason (min 10 characters)", "ERROR")
+            return False
+        if not self._validate_timestamp(str(override_metadata["timestamp"])):
+            self.log("Override requires a valid ISO-8601 timestamp", "ERROR")
             return False
 
         request = self._load_request(request_id)
@@ -437,19 +457,42 @@ class HumanApprovalManager:
             self.log(f"Approval request {request_id} not found", "ERROR")
             return False
 
+        if self.config and hasattr(self.config, "gate_overrides"):
+            if not self.config.gate_overrides.allow_manual_override:
+                self.log("Manual overrides are disabled by policy", "ERROR")
+                return False
+
+        if self._is_production_mode():
+            allowed_overriders = []
+            if self.config and hasattr(self.config, "gate_overrides"):
+                allowed_overriders = self.config.gate_overrides.allowed_overriders
+            if not allowed_overriders:
+                self.log("Overrides are not permitted in production", "ERROR")
+                return False
+            approver_id = str(override_metadata["approver_id"]).strip()
+            if approver_id not in allowed_overriders:
+                self.log("Override requires a privileged approver in production", "ERROR")
+                return False
+
         if request.status not in (ApprovalStatus.PENDING, ApprovalStatus.EXPIRED):
             self.log(f"Cannot override {request_id}: status is {request.status.value}", "WARNING")
             return False
 
         request.status = ApprovalStatus.OVERRIDDEN
-        request.approved_by = approver
+        request.approved_by = str(override_metadata["approver_id"]).strip()
         request.approved_at = datetime.utcnow().isoformat() + "Z"
         request.override_reason = reason
+        request.override_metadata = {
+            "approver_id": request.approved_by,
+            "ticket_id": str(override_metadata["ticket_id"]).strip(),
+            "reason": reason,
+            "timestamp": str(override_metadata["timestamp"]).strip(),
+        }
 
         self._save_request(request)
-        self._log_audit("OVERRIDDEN", request, approver, reason)
+        self._log_audit("OVERRIDDEN", request, request.approved_by, reason, request.override_metadata)
 
-        self.log(f"Request {request_id} overridden by {approver}: {reason}")
+        self.log(f"Request {request_id} overridden by {request.approved_by}: {reason}")
         return True
 
     def list_pending(self) -> List[ApprovalRequest]:
@@ -490,6 +533,7 @@ class HumanApprovalManager:
             approved_by=data.get("approved_by"),
             approved_at=data.get("approved_at"),
             override_reason=data.get("override_reason"),
+            override_metadata=data.get("override_metadata"),
             approval_notes=data.get("approval_notes"),
         )
 
@@ -524,6 +568,7 @@ class HumanApprovalManager:
         request: ApprovalRequest,
         actor: str,
         reason: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Log audit trail for approval actions."""
         audit_dir = self.approvals_dir / "audit"
@@ -537,11 +582,32 @@ class HumanApprovalManager:
             "scene_id": request.scene_id,
             "actor": actor,
             "reason": reason,
+            "metadata": metadata,
         }
 
         audit_path = audit_dir / f"{request.request_id}_{action.lower()}.json"
         with open(audit_path, "w") as f:
             json.dump(audit_entry, f, indent=2)
+        self._append_audit_log(audit_dir / "audit.log.jsonl", audit_entry)
+
+    def _append_audit_log(self, log_path: Path, audit_entry: Dict[str, Any]) -> None:
+        """Append audit entry to immutable log."""
+        with open(log_path, "a") as f:
+            f.write(json.dumps(audit_entry) + "\n")
+
+    def _validate_timestamp(self, value: str) -> bool:
+        """Validate ISO-8601 timestamp format."""
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return True
+
+    def _is_production_mode(self) -> bool:
+        """Return True when running in production mode."""
+        pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
+        bp_env = os.getenv("BP_ENV", "").lower()
+        return pipeline_env == "production" or bp_env == "production"
 
 
 @dataclass
