@@ -1320,29 +1320,24 @@ class QualityGateRegistry:
                     "min_episodes_required": int(os.getenv("BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED", "1")),
                 }
 
-            explicit_thresholds_configured = any(
-                key in os.environ
-                for key in (
-                    "BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN",
-                    "BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN",
-                    "BP_QUALITY_EPISODES_QUALITY_SCORE_MIN",
-                    "BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED",
-                )
-            ) or bool(ctx.get("episode_thresholds_override")) or bool(ctx.get("episode_thresholds_by_tier"))
+            env_threshold_keys = (
+                "BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN",
+                "BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN",
+                "BP_QUALITY_EPISODES_QUALITY_SCORE_MIN",
+                "BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED",
+            )
+            env_overrides_used = any(key in os.environ for key in env_threshold_keys)
+            env_overrides_used = env_overrides_used or bool(os.getenv("BP_QUALITY_EPISODES_TIER_THRESHOLDS"))
+            context_overrides_used = bool(ctx.get("episode_thresholds_override")) or bool(ctx.get("episode_thresholds_by_tier"))
+            explicit_thresholds_configured = env_overrides_used or context_overrides_used
 
             production_floor_applied = False
             production_minimums = {
-                "collision_free_rate_min": 0.85,
-                "quality_pass_rate_min": 0.6,
-                "quality_score_min": 0.9,
-                "min_episodes_required": 3,
+                "collision_free_rate_min": 0.9,
+                "quality_pass_rate_min": 0.75,
+                "quality_score_min": 0.92,
+                "min_episodes_required": 5,
             }
-            if is_production_mode() and not explicit_thresholds_configured:
-                production_floor_applied = True
-                base_thresholds = {
-                    key: max(base_thresholds[key], production_minimums[key])
-                    for key in base_thresholds
-                }
 
             tier = (
                 ctx.get("data_pack_tier")
@@ -1378,10 +1373,30 @@ class QualityGateRegistry:
             }
 
             tier_minimums = tier_thresholds.get(tier) or default_tier_minimums.get(tier, {})
+            tier_minimums_applied = any(
+                tier_minimums.get(key, base_thresholds[key]) > base_thresholds[key]
+                for key in base_thresholds
+            )
             effective_thresholds = {
                 key: max(base_thresholds[key], tier_minimums.get(key, base_thresholds[key]))
                 for key in base_thresholds
             }
+            if is_production_mode():
+                production_floor_applied = any(
+                    production_minimums[key] > effective_thresholds[key]
+                    for key in effective_thresholds
+                )
+                effective_thresholds = {
+                    key: max(effective_thresholds[key], production_minimums[key])
+                    for key in effective_thresholds
+                }
+
+            if explicit_thresholds_configured:
+                quality_thresholds_source = "overrides"
+            elif tier_minimums_applied:
+                quality_thresholds_source = "tier_minimums"
+            else:
+                quality_thresholds_source = "defaults"
 
             collision_free_min = effective_thresholds["collision_free_rate_min"]
             quality_pass_rate_min = effective_thresholds["quality_pass_rate_min"]
@@ -1414,6 +1429,7 @@ class QualityGateRegistry:
                 details={
                     **episode_stats,
                     "thresholds": effective_thresholds,
+                    "quality_thresholds_source": quality_thresholds_source,
                     "thresholds_audit": {
                         "base_thresholds": base_thresholds,
                         "tier": tier,
@@ -1422,6 +1438,8 @@ class QualityGateRegistry:
                         "production_floor_applied": production_floor_applied,
                         "production_minimums": production_minimums if production_floor_applied else {},
                         "explicit_thresholds_configured": explicit_thresholds_configured,
+                        "env_overrides_used": env_overrides_used,
+                        "context_overrides_used": context_overrides_used,
                     },
                 },
                 recommendations=[
