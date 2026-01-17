@@ -23,7 +23,7 @@ BlueprintPipeline converts scene reconstructions (from [3D-RE-GEN](https://arxiv
 
 ## Documentation
 
-- [API Reference](docs/api/README.md)
+- [Module Reference](docs/api/README.md)
 - [Tools guide](tools/README.md)
 
 ## Pipeline Architecture
@@ -43,7 +43,7 @@ image → 3D-RE-GEN → regen3d-job → simready-job → usd-assembly-job → re
 Genie Sim is the **default** episode-generation backend when `USE_GENIESIM` is
 unset (equivalent to `USE_GENIESIM=true`). The local runner will follow the
 Genie Sim job sequence, including variation asset generation and Genie Sim
-export/submit/import. The default path requires the Genie Sim prerequisites
+export/local run/import. The default path requires the Genie Sim prerequisites
 below; if you don't have them, use the lightweight path in step 2b.
 
 - Isaac Sim installed and reachable via `ISAAC_SIM_PATH` (must include `python.sh`).
@@ -79,7 +79,7 @@ before merging changes that touch Python dependencies or code.
 
 ### Local Genie Sim Fixtures
 
-Run the local pipeline with Genie Sim enabled to generate an export bundle and submit
+Run the local pipeline with Genie Sim enabled to generate an export bundle and run
 local data collection. Genie Sim runs in **local-only mode** for the default workflow.
 This is the default backend when
 `USE_GENIESIM` is unset (equivalent to `USE_GENIESIM=true`); see the prerequisites
@@ -124,11 +124,12 @@ scenes/{scene_id}/episodes/geniesim_{job_id}/
 └── import_manifest.json            # Produced by genie-sim-import-job
 ```
 
-### Staging Genie Sim E2E (Real gRPC + Isaac Sim)
+### Local Genie Sim E2E (gRPC + Isaac Sim)
 
-Use the staging test to validate **export → submit → import** against a real
+Use the local E2E test to validate **export → submit → import** against a real
 Genie Sim gRPC server and Isaac Sim runtime. This is intended for lab staging
-environments and is gated behind an explicit flag.
+environments and is gated behind an explicit flag, but it still targets a
+local-only Genie Sim deployment.
 
 Prereqs:
 - Isaac Sim installed and reachable via `ISAAC_SIM_PATH` (must include `python.sh`).
@@ -283,13 +284,13 @@ export SCENE_ID=scene_123
 
 BlueprintPipeline uses Google Secret Manager with environment variable fallbacks for development.
 In production, Secret Manager is required and env var fallbacks are rejected. Configure the
-following secret IDs for jobs that rely on external APIs:
+following secret IDs for jobs that rely on external services:
 
 | Secret ID | Env var fallback | Used by | Description |
 |-----------|------------------|---------|-------------|
-| `gemini-api-key` | `GEMINI_API_KEY` | `simready-job`, `episode-generation-job` | Gemini API access for physics estimation and task specification |
-| `openai-api-key` | `OPENAI_API_KEY` | `episode-generation-job` | OpenAI API access for task specification |
-| `anthropic-api-key` | `ANTHROPIC_API_KEY` | `episode-generation-job` | Anthropic API access for task specification |
+| `gemini-api-key` | `GEMINI_API_KEY` | `simready-job`, `episode-generation-job` | Gemini service access for physics estimation and task specification |
+| `openai-api-key` | `OPENAI_API_KEY` | `episode-generation-job` | OpenAI service access for task specification |
+| `anthropic-api-key` | `ANTHROPIC_API_KEY` | `episode-generation-job` | Anthropic service access for task specification |
 | `particulate-api-key` | `PARTICULATE_API_KEY` | `interactive-job` | Particulate articulation service access |
 
 In production, `simready-job` normally uses Gemini for physics estimation. You can opt into deterministic,
@@ -342,7 +343,7 @@ real 3D-RE-GEN reconstruction and Isaac Sim. This validates the full handoff
 from reconstruction → USD → Isaac Sim loading without relying on mocks.
 
 Staging checklist (labs pre-production):
-- Verify Particulate is reachable (`PARTICULATE_ENDPOINT`) **or** run a locally hosted Particulate
+- Verify Particulate is reachable (`PARTICULATE_ENDPOINT`) **or** run a local Particulate
   instance with `PARTICULATE_MODE=local` and an approved `PARTICULATE_LOCAL_MODEL` configured.
 
 ```bash
