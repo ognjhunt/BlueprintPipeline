@@ -44,6 +44,8 @@ import tempfile
 import threading
 import traceback
 import uuid
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
@@ -91,6 +93,146 @@ def log(msg: str, level: str = "INFO") -> None:
     level_name = level.upper()
     log_level = getattr(logging, level_name, logging.INFO)
     logger.log(log_level, "[PARTICULATE-SERVICE] [%s] %s", level_name, msg)
+
+
+# =============================================================================
+# Dependency Probes
+# =============================================================================
+
+def _http_probe(url: str, timeout_s: float) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"ok": False, "url": url}
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            status_code = response.getcode()
+            result["status_code"] = status_code
+            result["ok"] = 200 <= status_code < 300
+            if not result["ok"]:
+                result["error"] = f"non_2xx_status:{status_code}"
+    except urllib.error.HTTPError as exc:
+        result["status_code"] = exc.code
+        result["error"] = f"http_error:{exc.code}"
+    except Exception as exc:
+        result["error"] = f"request_failed:{exc}"
+    return result
+
+
+def _process_probe(pattern: str, timeout_s: float) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"ok": False, "pattern": pattern}
+    try:
+        completed = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+        result["ok"] = completed.returncode == 0
+        if not result["ok"]:
+            result["error"] = "process_not_found"
+    except FileNotFoundError:
+        result["error"] = "pgrep_not_available"
+    except Exception as exc:
+        result["error"] = f"process_probe_failed:{exc}"
+    return result
+
+
+def _gpu_probe(timeout_s: float) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"ok": False}
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+        result["stdout"] = completed.stdout.strip()
+        result["stderr"] = completed.stderr.strip()
+        result["ok"] = completed.returncode == 0
+        if not result["ok"]:
+            result["error"] = "nvidia_smi_failed"
+    except FileNotFoundError:
+        result["error"] = "nvidia_smi_not_found"
+    except Exception as exc:
+        result["error"] = f"gpu_probe_failed:{exc}"
+    return result
+
+
+def _llm_probe(timeout_s: float) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"ok": False}
+    health_url = os.getenv("LLM_HEALTH_URL")
+    if health_url:
+        probe = _http_probe(health_url, timeout_s)
+        result.update(probe)
+        return result
+
+    token_keys = [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+    ]
+    for key in token_keys:
+        if os.getenv(key):
+            result["ok"] = True
+            result["status"] = "token_present"
+            result["token_source"] = key
+            return result
+
+    result["error"] = "missing_credentials"
+    return result
+
+
+def _isaac_sim_probe(timeout_s: float) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"ok": False}
+    health_url = os.getenv("ISAAC_SIM_HEALTH_URL")
+    if health_url:
+        probe = _http_probe(health_url, timeout_s)
+        result.update(probe)
+        return result
+
+    process_pattern = os.getenv("ISAAC_SIM_PROCESS_PATTERN")
+    if process_pattern:
+        probe = _process_probe(process_pattern, timeout_s)
+        result.update(probe)
+        return result
+
+    result["ok"] = True
+    result["status"] = "skipped"
+    result["reason"] = "not_configured"
+    return result
+
+
+def _dependency_health() -> Tuple[bool, Dict[str, Any]]:
+    timeout_s = float(os.getenv("HEALTH_PROBE_TIMEOUT_S", "2.0"))
+    gpu_required = os.getenv("GPU_HEALTH_REQUIRED", "true").lower() == "true"
+    isaac_required = os.getenv("ISAAC_SIM_HEALTH_REQUIRED", "false").lower() == "true"
+    llm_required = os.getenv("LLM_HEALTH_REQUIRED", "false").lower() == "true"
+
+    dependencies: Dict[str, Any] = {
+        "gpu": _gpu_probe(timeout_s),
+        "isaac_sim": _isaac_sim_probe(timeout_s),
+        "llm": _llm_probe(timeout_s),
+    }
+    errors: List[Dict[str, Any]] = []
+
+    for name, required in [
+        ("gpu", gpu_required),
+        ("isaac_sim", isaac_required),
+        ("llm", llm_required),
+    ]:
+        details = dependencies[name]
+        details["required"] = required
+        if required and not details.get("ok", False):
+            errors.append({
+                "dependency": name,
+                "error": details.get("error", "dependency_unavailable"),
+                "details": details,
+            })
+
+    return not errors, {"dependencies": dependencies, "errors": errors}
 
 
 # =============================================================================
@@ -551,12 +693,29 @@ def healthcheck():
             "details": _warmup_details if DEBUG_MODE else None,
         }), 503
 
+    deps_ok, dep_details = _dependency_health()
+    if not deps_ok:
+        return jsonify({
+            "status": "error",
+            "message": "Dependency check failed",
+            "ready": False,
+            "dependencies": dep_details.get("dependencies"),
+            "errors": dep_details.get("errors"),
+        }), 503
+
     return jsonify({
         "status": "ok",
         "ready": True,
         "service": "particulate",
         "details": _warmup_details if DEBUG_MODE else None,
+        "dependencies": dep_details.get("dependencies"),
     }), 200
+
+
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    """Health check endpoint with dependency probes."""
+    return healthcheck()
 
 
 @app.route("/ready", methods=["GET"])
