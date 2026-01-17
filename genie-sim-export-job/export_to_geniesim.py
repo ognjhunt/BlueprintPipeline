@@ -717,6 +717,18 @@ def run_geniesim_export_job(
                 "scene_id": scene_id,
             }
             results = registry.run_checkpoint(checkpoint, context)
+            found_gate_ids = {result.gate_id for result in results}
+            missing_gates = [gate for gate in gate_names if gate not in found_gate_ids]
+            if missing_gates:
+                print(
+                    "[GENIESIM-EXPORT-JOB] ❌ Quality gate evaluation incomplete; "
+                    f"missing gates: {missing_gates}"
+                )
+                if require_quality_gates:
+                    return 1
+                print(
+                    "[GENIESIM-EXPORT-JOB] ⚠️  Continuing without full quality gate coverage\n"
+                )
             total_checks = len(results)
             checks_passed = sum(1 for result in results if result.passed)
             error_count = sum(
@@ -761,6 +773,7 @@ def run_geniesim_export_job(
             "[GENIESIM-EXPORT-JOB] ❌ Quality gates not available; "
             f"expected gates: {gate_names}."
         )
+        print(f"[GENIESIM-EXPORT-JOB] ❌ Missing gate implementations: {gate_names}")
         if require_quality_gates:
             return 1
         print("[GENIESIM-EXPORT-JOB] ⚠️  Continuing without quality gate validation\n")
