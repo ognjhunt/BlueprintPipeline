@@ -49,8 +49,8 @@ Returns service status and readiness.
 ### GET /debug - Debug Info
 
 Returns detailed service state and model validation info when debug access is explicitly enabled.
-Set `PARTICULATE_DEBUG=1` and `PARTICULATE_DEBUG_TOKEN=<shared-secret>` and send the
-token in an `Authorization: Bearer <shared-secret>` header.
+Debug is disabled by default; set `PARTICULATE_DEBUG=1` and `PARTICULATE_DEBUG_TOKEN=<shared-secret>`,
+then send the token in an `Authorization: Bearer <shared-secret>` header.
 
 ## Deployment
 
