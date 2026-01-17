@@ -65,6 +65,7 @@ main:
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - dwmPrefix: '${"scenes/" + sceneId + "/dwm"}'
+          - lockObject: '${"scenes/" + sceneId + "/locks/regen3d-prep.lock"}'
           - dwmJobName: "dwm-preparation-job"
           # Explicitly set to the Cloud Run default for consistency/metrics.
           - dwmTimeoutSeconds: 3600
@@ -77,6 +78,48 @@ main:
           - dwmLegacyFailedMarker: '${"scenes/" + sceneId + "/dwm/.dwm_failed"}'
           - dwmInferenceFailedMarker: '${"scenes/" + sceneId + "/dwm/.failed"}'
           - dwmInferenceLegacyFailedMarker: '${"scenes/" + sceneId + "/dwm/.dwm_inference_failed"}'
+        next: acquire_lock
+
+    - acquire_lock:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${lockObject}
+            ifGenerationMatch: 0
+            uploadType: "media"
+            body: ${json.encode({
+              "scene_id": sceneId,
+              "workflow": "dwm-preparation-pipeline",
+              "lock": "regen3d-prep",
+              "timestamp": time.format(sys.now()),
+              "execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")
+            })}
+        except:
+          as: e
+          steps:
+            - lock_exists_check:
+                switch:
+                  - condition: '${e.code == 409 or e.code == 412}'
+                    next: log_lock_exists
+                next: raise_lock_error
+        next: log_lock_acquired
+
+    - log_lock_exists:
+        call: sys.log
+        args:
+          text: '${"Lock already exists for scene " + sceneId + " at " + lockObject + " - skipping"}'
+          severity: "INFO"
+        next: skip_locked
+
+    - raise_lock_error:
+        raise: ${e}
+
+    - log_lock_acquired:
+        call: sys.log
+        args:
+          text: '${"Acquired lock for scene " + sceneId + " at " + lockObject}'
+          severity: "INFO"
         next: check_dwm_enabled
 
     - check_dwm_enabled:
@@ -90,7 +133,7 @@ main:
         args:
           text: '${"DWM preparation is disabled for scene " + sceneId + " (ENABLE_DWM not set)"}'
           severity: "INFO"
-        next: skip
+        next: release_lock_before_skip
 
     # Check if DWM bundles already generated (idempotence)
     - check_already_processed:
@@ -115,9 +158,16 @@ main:
         args:
           text: '${"DWM bundles already generated for scene " + sceneId + " - skipping"}'
           severity: "INFO"
-        next: skip
+        next: release_lock_before_skip
 
     - raise_check_error:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
+        next: raise_check_error_final
+
+    - raise_check_error_final:
         raise: '${e}'
 
     - log_start:
@@ -256,6 +306,11 @@ main:
                       }
                     }
                   })}
+            - release_lock_after_dwm_start_error:
+                call: googleapis.storage.v1.objects.delete
+                args:
+                  bucket: ${bucket}
+                  object: ${lockObject}
             - raise_dwm_job_error:
                 raise: ${e}
         next: set_dwm_execution_name
@@ -462,6 +517,11 @@ main:
                       }
                     }
                   })}
+            - release_lock_after_dwm_inference_start_error:
+                call: googleapis.storage.v1.objects.delete
+                args:
+                  bucket: ${bucket}
+                  object: ${lockObject}
             - raise_dwm_inference_job_error:
                 raise: ${e}
         next: set_dwm_inference_execution_name
@@ -540,7 +600,7 @@ main:
           name: ${dwmInferenceCompleteMarker}
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
-        next: done
+        next: release_lock_before_done
 
     - dwm_inference_failed:
         assign:
@@ -647,7 +707,7 @@ main:
           name: ${dwmInferenceLegacyFailedMarker}
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
-        next: done_with_failure
+        next: release_lock_before_done_with_failure
 
     - dwm_failed:
         # DWM failure is non-fatal - scene is still usable for other purposes
@@ -757,7 +817,28 @@ main:
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"failed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}'
         result: legacyFailMarkerResult
+        next: release_lock_before_done_with_failure
+
+    - release_lock_before_done:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
+        next: done
+
+    - release_lock_before_done_with_failure:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
         next: done_with_failure
+
+    - release_lock_before_skip:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
+        next: skip
 
     # =========================================================================
     # Completion
@@ -780,6 +861,12 @@ main:
           scene_id: ${sceneId}
           message: '${"DWM preparation failed for scene " + sceneId}'
           dwm_execution: ${dwmExec.name}
+
+    - skip_locked:
+        return:
+          status: "SKIPPED"
+          scene_id: ${sceneId}
+          message: '${"Lock already exists for scene " + sceneId + " at " + lockObject}'
 
     - skip:
         return:
