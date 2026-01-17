@@ -1240,17 +1240,94 @@ class QualityGateRegistry:
         def check_episodes(ctx: Dict[str, Any]) -> QualityGateResult:
             episode_stats = ctx.get("episode_stats", {})
 
+            def is_production_mode() -> bool:
+                pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
+                bp_env = os.getenv("BP_ENV", "").lower()
+                return pipeline_env == "production" or bp_env == "production"
+
             # Get thresholds from config or use defaults
             if self.config and hasattr(self.config, 'episodes'):
-                collision_free_min = self.config.episodes.collision_free_rate_min
-                quality_pass_rate_min = self.config.episodes.quality_pass_rate_min
-                quality_score_min = self.config.episodes.quality_score_min
-                min_episodes = self.config.episodes.min_episodes_required
+                base_thresholds = {
+                    "collision_free_rate_min": self.config.episodes.collision_free_rate_min,
+                    "quality_pass_rate_min": self.config.episodes.quality_pass_rate_min,
+                    "quality_score_min": self.config.episodes.quality_score_min,
+                    "min_episodes_required": self.config.episodes.min_episodes_required,
+                }
             else:
-                collision_free_min = float(os.getenv("BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN", "0.8"))
-                quality_pass_rate_min = float(os.getenv("BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN", "0.5"))
-                quality_score_min = float(os.getenv("BP_QUALITY_EPISODES_QUALITY_SCORE_MIN", "0.85"))
-                min_episodes = int(os.getenv("BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED", "1"))
+                base_thresholds = {
+                    "collision_free_rate_min": float(os.getenv("BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN", "0.8")),
+                    "quality_pass_rate_min": float(os.getenv("BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN", "0.5")),
+                    "quality_score_min": float(os.getenv("BP_QUALITY_EPISODES_QUALITY_SCORE_MIN", "0.85")),
+                    "min_episodes_required": int(os.getenv("BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED", "1")),
+                }
+
+            explicit_thresholds_configured = any(
+                key in os.environ
+                for key in (
+                    "BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN",
+                    "BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN",
+                    "BP_QUALITY_EPISODES_QUALITY_SCORE_MIN",
+                    "BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED",
+                )
+            ) or bool(ctx.get("episode_thresholds_override")) or bool(ctx.get("episode_thresholds_by_tier"))
+
+            production_floor_applied = False
+            production_minimums = {
+                "collision_free_rate_min": 0.85,
+                "quality_pass_rate_min": 0.6,
+                "quality_score_min": 0.9,
+                "min_episodes_required": 3,
+            }
+            if is_production_mode() and not explicit_thresholds_configured:
+                production_floor_applied = True
+                base_thresholds = {
+                    key: max(base_thresholds[key], production_minimums[key])
+                    for key in base_thresholds
+                }
+
+            tier = (
+                ctx.get("data_pack_tier")
+                or episode_stats.get("data_pack_tier")
+                or os.getenv("DATA_PACK_TIER", "core")
+            ).lower()
+            tier_thresholds: Dict[str, Dict[str, Any]] = {}
+            tier_thresholds_source = "defaults"
+            if ctx.get("episode_thresholds_by_tier"):
+                tier_thresholds = ctx["episode_thresholds_by_tier"]
+                tier_thresholds_source = "context"
+            elif os.getenv("BP_QUALITY_EPISODES_TIER_THRESHOLDS"):
+                tier_thresholds_source = "environment"
+                try:
+                    tier_thresholds = json.loads(os.getenv("BP_QUALITY_EPISODES_TIER_THRESHOLDS", "{}"))
+                except json.JSONDecodeError:
+                    tier_thresholds = {}
+
+            default_tier_minimums = {
+                "core": {},
+                "plus": {
+                    "collision_free_rate_min": 0.85,
+                    "quality_pass_rate_min": 0.6,
+                    "quality_score_min": 0.88,
+                    "min_episodes_required": 3,
+                },
+                "full": {
+                    "collision_free_rate_min": 0.9,
+                    "quality_pass_rate_min": 0.7,
+                    "quality_score_min": 0.92,
+                    "min_episodes_required": 5,
+                },
+            }
+
+            tier_minimums = tier_thresholds.get(tier) or default_tier_minimums.get(tier, {})
+            effective_thresholds = {
+                key: max(base_thresholds[key], tier_minimums.get(key, base_thresholds[key]))
+                for key in base_thresholds
+            }
+
+            collision_free_min = effective_thresholds["collision_free_rate_min"]
+            quality_pass_rate_min = effective_thresholds["quality_pass_rate_min"]
+            quality_score_min = effective_thresholds["quality_score_min"]
+            min_episodes = effective_thresholds["min_episodes_required"]
 
             total = episode_stats.get("total_generated", 0)
             passed_quality = episode_stats.get("passed_quality_filter", 0)
@@ -1277,11 +1354,15 @@ class QualityGateRegistry:
                 message=f"Episodes: {passed_quality}/{total} passed (avg quality: {avg_quality:.2f})",
                 details={
                     **episode_stats,
-                    "thresholds": {
-                        "collision_free_rate_min": collision_free_min,
-                        "quality_pass_rate_min": quality_pass_rate_min,
-                        "quality_score_min": quality_score_min,
-                        "min_episodes_required": min_episodes,
+                    "thresholds": effective_thresholds,
+                    "thresholds_audit": {
+                        "base_thresholds": base_thresholds,
+                        "tier": tier,
+                        "tier_minimums": tier_minimums,
+                        "tier_thresholds_source": tier_thresholds_source,
+                        "production_floor_applied": production_floor_applied,
+                        "production_minimums": production_minimums if production_floor_applied else {},
+                        "explicit_thresholds_configured": explicit_thresholds_configured,
                     },
                 },
                 recommendations=[
