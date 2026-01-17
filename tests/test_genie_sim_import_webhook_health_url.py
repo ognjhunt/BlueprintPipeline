@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 WEBHOOK_PATH = ROOT / "genie-sim-import-webhook" / "main.py"
@@ -75,3 +76,13 @@ def test_validate_health_url_enforces_allowlist(monkeypatch):
     assert error == ""
     assert blocked_ok is False
     assert blocked_error == "host_not_allowed"
+
+
+def test_is_authenticated_fails_fast_in_production_without_auth(monkeypatch):
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.delenv("WEBHOOK_HMAC_SECRET", raising=False)
+    monkeypatch.delenv("WEBHOOK_OIDC_AUDIENCE", raising=False)
+
+    with webhook_main.app.test_request_context("/webhooks/geniesim/job-complete", method="POST"):
+        with pytest.raises(RuntimeError, match="WEBHOOK_HMAC_SECRET|WEBHOOK_OIDC_AUDIENCE"):
+            webhook_main._is_authenticated(b"{}")
