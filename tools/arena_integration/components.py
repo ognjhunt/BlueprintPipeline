@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -366,6 +367,12 @@ class EmbodimentType(str, Enum):
     CUSTOM = "custom"
 
 
+def _omniverse_robot_path(relative_path: str) -> str:
+    omniverse_host = os.environ.get("OMNIVERSE_HOST", "localhost")
+    path_root = os.environ.get("OMNIVERSE_PATH_ROOT", "NVIDIA/Robots").strip("/")
+    return f"omniverse://{omniverse_host}/{path_root}/{relative_path}"
+
+
 @dataclass
 class ArenaEmbodimentConfig:
     """Configuration for an Arena Embodiment component."""
@@ -409,7 +416,7 @@ class ArenaEmbodiment:
             embodiment_type=EmbodimentType.FRANKA_PANDA,
             name="Franka Panda",
             config=ArenaEmbodimentConfig(
-                usd_path="omniverse://localhost/NVIDIA/Robots/Franka/franka.usd",
+                usd_path=_omniverse_robot_path("Franka/franka.usd"),
                 dof=7,
                 gripper_dof=2,
                 ee_frame="panda_hand",
@@ -431,7 +438,7 @@ class ArenaEmbodiment:
             embodiment_type=EmbodimentType.UR10,
             name="Universal Robots UR10",
             config=ArenaEmbodimentConfig(
-                usd_path="omniverse://localhost/NVIDIA/Robots/UR10/ur10.usd",
+                usd_path=_omniverse_robot_path("UR10/ur10.usd"),
                 dof=6,
                 gripper_dof=2,
                 ee_frame="tool0",
@@ -455,7 +462,7 @@ class ArenaEmbodiment:
             embodiment_type=EmbodimentType.GR1,
             name="Fourier GR1",
             config=ArenaEmbodimentConfig(
-                usd_path="omniverse://localhost/NVIDIA/Robots/GR1/gr1.usd",
+                usd_path=_omniverse_robot_path("GR1/gr1.usd"),
                 dof=32,
                 gripper_dof=10,  # 5 per hand
                 ee_frame="right_hand",
@@ -480,7 +487,7 @@ class ArenaEmbodiment:
             embodiment_type=EmbodimentType.G1,
             name="Unitree G1",
             config=ArenaEmbodimentConfig(
-                usd_path="omniverse://localhost/NVIDIA/Robots/G1/g1.usd",
+                usd_path=_omniverse_robot_path("G1/g1.usd"),
                 dof=29,
                 gripper_dof=6,
                 ee_frame="right_gripper",

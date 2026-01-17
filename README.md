@@ -251,6 +251,10 @@ report = run_qa_validation(scene_dir=Path("scenes/scene_123"))
 
 ## Environment Variables
 
+Sample environment variables are in `.env.example`. The pipeline reads scene data from
+Firestore/GCS using paths like `gs://blueprint-8c1ca.appspot.com/scenes/{SCENE_ID}/...`,
+so ensure your prefixes match that convention when configuring jobs.
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `BUCKET` | GCS bucket name | - |

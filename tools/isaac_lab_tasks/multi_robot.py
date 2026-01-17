@@ -17,6 +17,7 @@ This module enables scenarios like:
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -96,6 +97,16 @@ class MultiRobotConfig:
 
 
 # Extended robot configurations
+def _omniverse_robot_root(isaac_version: str | None = None) -> str:
+    if isaac_version is None:
+        isaac_version = os.environ.get("ISAAC_SIM_VERSION", "2023.1.1")
+    omniverse_host = os.environ.get("OMNIVERSE_HOST", "localhost")
+    path_root = os.environ.get("OMNIVERSE_PATH_ROOT", "NVIDIA/Assets/Isaac").strip("/")
+    return f"omniverse://{omniverse_host}/{path_root}/{isaac_version}/Isaac/Robots"
+
+
+_DEFAULT_OMNIVERSE_ROBOT_ROOT = _omniverse_robot_root()
+
 EXTENDED_ROBOT_CONFIGS = {
     "franka": {
         "num_dofs": 7,
@@ -104,7 +115,7 @@ EXTENDED_ROBOT_CONFIGS = {
         "default_joint_pos": [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
         "reach": 0.855,  # meters
         "payload": 3.0,  # kg
-        "usd_path": "omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/Franka/franka.usd",
+        "usd_path": f"{_DEFAULT_OMNIVERSE_ROBOT_ROOT}/Franka/franka.usd",
     },
     "ur10": {
         "num_dofs": 6,
@@ -113,7 +124,7 @@ EXTENDED_ROBOT_CONFIGS = {
         "default_joint_pos": [0.0, -1.571, 1.571, -1.571, -1.571, 0.0],
         "reach": 1.3,
         "payload": 10.0,
-        "usd_path": "omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/UR10/ur10.usd",
+        "usd_path": f"{_DEFAULT_OMNIVERSE_ROBOT_ROOT}/UR10/ur10.usd",
     },
     "fetch": {
         "num_dofs": 7,
@@ -124,7 +135,7 @@ EXTENDED_ROBOT_CONFIGS = {
         "payload": 2.3,
         "mobile_base": True,
         "base_dofs": 3,  # x, y, theta
-        "usd_path": "omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/Fetch/fetch.usd",
+        "usd_path": f"{_DEFAULT_OMNIVERSE_ROBOT_ROOT}/Fetch/fetch.usd",
     },
     "ur5": {
         "num_dofs": 6,
@@ -133,7 +144,7 @@ EXTENDED_ROBOT_CONFIGS = {
         "default_joint_pos": [0.0, -1.571, 1.571, -1.571, -1.571, 0.0],
         "reach": 0.85,
         "payload": 5.0,
-        "usd_path": "omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/UR5/ur5.usd",
+        "usd_path": f"{_DEFAULT_OMNIVERSE_ROBOT_ROOT}/UR5/ur5.usd",
     },
     "kuka_iiwa": {
         "num_dofs": 7,
@@ -142,7 +153,7 @@ EXTENDED_ROBOT_CONFIGS = {
         "default_joint_pos": [0.0, 0.0, 0.0, -1.571, 0.0, 1.571, 0.0],
         "reach": 0.8,
         "payload": 14.0,
-        "usd_path": "omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/Kuka/kuka_iiwa.usd",
+        "usd_path": f"{_DEFAULT_OMNIVERSE_ROBOT_ROOT}/Kuka/kuka_iiwa.usd",
     },
     "sawyer": {
         "num_dofs": 7,
@@ -151,7 +162,7 @@ EXTENDED_ROBOT_CONFIGS = {
         "default_joint_pos": [0.0, -1.18, 0.0, 2.18, 0.0, 0.57, 3.14],
         "reach": 1.26,
         "payload": 4.0,
-        "usd_path": "omniverse://localhost/NVIDIA/Assets/Isaac/2023.1.1/Isaac/Robots/Rethink/sawyer.usd",
+        "usd_path": f"{_DEFAULT_OMNIVERSE_ROBOT_ROOT}/Rethink/sawyer.usd",
     },
 }
 
