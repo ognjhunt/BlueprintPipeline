@@ -349,6 +349,19 @@ class GenieSimGRPCClient:
         if not self._have_grpc:
             logger.warning("gRPC not available - server connection will be limited")
 
+    def __enter__(self) -> "GenieSimGRPCClient":
+        if not self.is_connected():
+            self.connect()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[type],
+        exc: Optional[BaseException],
+        traceback: Optional[Any],
+    ) -> None:
+        self.disconnect()
+
     def _on_circuit_open(self, name: str, failure_count: int) -> None:
         logger.warning(
             "Genie Sim gRPC circuit breaker opened (%s) after %d failures (host=%s port=%s)",
@@ -437,18 +450,20 @@ class GenieSimGRPCClient:
             return self._check_server_socket()
 
         try:
-            # Create gRPC channel using the utility function
-            self._channel = create_channel(
-                host=self.host,
-                port=self.port,
-            )
+            if self._channel is None:
+                # Create gRPC channel using the utility function
+                self._channel = create_channel(
+                    host=self.host,
+                    port=self.port,
+                )
 
             if self._channel is None:
                 logger.error("Failed to create gRPC channel")
                 return False
 
-            # Create service stub
-            self._stub = GenieSimServiceStub(self._channel)
+            # Create service stub (reuse if already initialized)
+            if self._stub is None:
+                self._stub = GenieSimServiceStub(self._channel)
 
             # Test connection with a simple call (with timeout)
             import grpc
@@ -545,6 +560,12 @@ class GenieSimGRPCClient:
         if self._channel:
             self._channel.close()
             self._channel = None
+            self._stub = None
+            logger.info(
+                "Genie Sim gRPC channel closed (host=%s port=%s)",
+                self.host,
+                self.port,
+            )
         self._connected = False
 
     def is_connected(self) -> bool:
@@ -2173,8 +2194,8 @@ def build_geniesim_preflight_report(
 
     if require_ready:
         if status.get("server_running", False):
-            client = GenieSimGRPCClient(config.host, config.port, timeout=ping_timeout)
-            server_ready = client.ping(timeout=ping_timeout)
+            with GenieSimGRPCClient(config.host, config.port, timeout=ping_timeout) as client:
+                server_ready = client.ping(timeout=ping_timeout)
         if not server_ready:
             missing.append("Genie Sim gRPC readiness")
             remediation.append(
