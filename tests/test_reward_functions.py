@@ -2,10 +2,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from tools.isaac_lab_tasks.reward_functions import (
-    RewardFunctionGenerator,
-    RewardTemplateRegistry,
-)
+from tools.isaac_lab_tasks.reward_functions import RewardFunctionGenerator
 
 
 class DummyActionManager:
@@ -20,17 +17,9 @@ class DummyEnv:
         self.device = device
 
 
-def _load_reward_function(source: str, name: str):
-    namespace: dict[str, object] = {"torch": torch}
-    exec(source, namespace)
-    return namespace[name]
-
-
 def test_reward_action_jerk_penalty_computes_expected_penalty():
-    reward_fn = _load_reward_function(
-        RewardTemplateRegistry.REWARD_TEMPLATES["action_jerk_penalty"],
-        "reward_action_jerk_penalty",
-    )
+    generator = RewardFunctionGenerator()
+    reward_fn = generator.compile("action_jerk_penalty")
     action = torch.tensor([[1.0, -1.0], [0.5, 0.5]])
     env = DummyEnv(action=action, device=torch.device("cpu"))
     env._prev_actions = torch.zeros_like(action)
@@ -43,8 +32,7 @@ def test_reward_action_jerk_penalty_computes_expected_penalty():
 
 def test_default_reward_stub_returns_zero_tensor():
     generator = RewardFunctionGenerator()
-    source = generator.get_reward_function("custom_reward")
-    reward_fn = _load_reward_function(source, "reward_custom_reward")
+    reward_fn = generator.compile("custom_reward")
     env = DummyEnv(action=torch.zeros((3, 2)), device=torch.device("cpu"))
 
     reward = reward_fn(env)
