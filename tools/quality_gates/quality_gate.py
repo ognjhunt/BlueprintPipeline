@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -331,6 +332,7 @@ class HumanApprovalManager:
         request: ApprovalRequest,
         timeout_hours: Optional[float] = None,
         poll_interval_seconds: float = 30.0,
+        cancel_event: Optional["threading.Event"] = None,
     ) -> bool:
         """Wait for an approval request to be processed (blocking).
 
@@ -338,6 +340,7 @@ class HumanApprovalManager:
             request: The ApprovalRequest to wait for
             timeout_hours: Override timeout (default: use config)
             poll_interval_seconds: How often to check status
+            cancel_event: Optional threading.Event to cancel the wait early
 
         Returns:
             True if approved/overridden, False if rejected/expired
@@ -345,19 +348,15 @@ class HumanApprovalManager:
         timeout = timeout_hours or self.timeout_hours
         start_time = time.time()
         max_wait_seconds = timeout * 3600
+        elapsed = 0.0
 
         self.log(f"Waiting for approval of {request.request_id} (timeout: {timeout}h)")
         self.log(f"Approval can be submitted via dashboard, email, or API")
 
-        while True:
+        while elapsed < max_wait_seconds:
             elapsed = time.time() - start_time
-
-            # Check timeout
-            if elapsed >= max_wait_seconds:
-                self.log(f"Approval request {request.request_id} timed out", "WARNING")
-                current = self.check_status(request.request_id)
-                if current:
-                    return current.status in (ApprovalStatus.APPROVED, ApprovalStatus.OVERRIDDEN)
+            if cancel_event and cancel_event.is_set():
+                self.log(f"Approval request {request.request_id} canceled", "WARNING")
                 return False
 
             # Check status
@@ -385,7 +384,21 @@ class HumanApprovalManager:
                 return False
 
             # Still pending - wait and poll again
-            time.sleep(poll_interval_seconds)
+            wait_seconds = min(poll_interval_seconds, max_wait_seconds - elapsed)
+            if wait_seconds > 0:
+                if cancel_event:
+                    if cancel_event.wait(wait_seconds):
+                        self.log(f"Approval request {request.request_id} canceled", "WARNING")
+                        return False
+                else:
+                    time.sleep(wait_seconds)
+            elapsed = time.time() - start_time
+
+        self.log(f"Approval request {request.request_id} timed out", "WARNING")
+        current = self.check_status(request.request_id)
+        if current:
+            return current.status in (ApprovalStatus.APPROVED, ApprovalStatus.OVERRIDDEN)
+        return False
 
     def approve(
         self,
