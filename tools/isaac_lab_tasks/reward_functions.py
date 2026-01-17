@@ -5,7 +5,8 @@ This module generates reward function implementations for different
 policy types and task configurations.
 """
 
-from typing import Any, TYPE_CHECKING
+import ast
+from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch
@@ -697,6 +698,12 @@ class RewardFunctionGenerator:
     def __init__(self):
         pass
 
+    def compile(self, component: str) -> Callable[..., Any]:
+        """Return a vetted callable reward function for a component."""
+        source = self.get_reward_function(component)
+        function_name = f"reward_{component}"
+        return self._compile_source(source, function_name)
+
     def get_reward_function(self, component: str) -> str:
         """Get reward function code for a component."""
         return self.REWARD_TEMPLATES.get(component, self._generate_default_reward(component))
@@ -718,6 +725,82 @@ def reward_{component}(
     """Reward for {component.replace('_', ' ')}."""
     return torch.zeros(env.num_envs, device=env.device)
 '''
+
+    def _compile_source(self, source: str, function_name: str) -> Callable[..., Any]:
+        self._validate_reward_source(source, function_name)
+        import torch
+
+        namespace: dict[str, object] = {
+            "torch": torch,
+            "ManagerBasedEnv": Any,
+        }
+        compiled = compile(source, "<reward_function>", "exec")
+        exec(compiled, namespace, namespace)
+        reward_fn = namespace.get(function_name)
+        if not callable(reward_fn):
+            raise ValueError(f"Reward function '{function_name}' not found in source.")
+        return reward_fn
+
+    def _validate_reward_source(self, source: str, function_name: str) -> None:
+        module = ast.parse(source)
+        if len(module.body) != 1 or not isinstance(module.body[0], ast.FunctionDef):
+            raise ValueError("Reward source must contain a single function definition.")
+        func_def = module.body[0]
+        if func_def.name != function_name:
+            raise ValueError(f"Expected function named '{function_name}', found '{func_def.name}'.")
+
+        allowed_nodes = {
+            ast.Module,
+            ast.FunctionDef,
+            ast.arguments,
+            ast.arg,
+            ast.Expr,
+            ast.Return,
+            ast.Assign,
+            ast.AnnAssign,
+            ast.AugAssign,
+            ast.If,
+            ast.For,
+            ast.While,
+            ast.Compare,
+            ast.BoolOp,
+            ast.BinOp,
+            ast.UnaryOp,
+            ast.Call,
+            ast.Attribute,
+            ast.Name,
+            ast.Constant,
+            ast.Subscript,
+            ast.Tuple,
+            ast.List,
+            ast.Dict,
+            ast.Set,
+            ast.Slice,
+            ast.Load,
+            ast.Store,
+            ast.Del,
+            ast.keyword,
+            ast.IfExp,
+        }
+        forbidden_names = {
+            "__import__",
+            "eval",
+            "exec",
+            "compile",
+            "open",
+            "globals",
+            "locals",
+            "vars",
+            "input",
+        }
+
+        for node in ast.walk(module):
+            if type(node) not in allowed_nodes:
+                raise ValueError(f"Disallowed AST node: {type(node).__name__}")
+            if isinstance(node, ast.Name) and node.id in forbidden_names:
+                raise ValueError(f"Disallowed name: {node.id}")
+            if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+                raise ValueError(f"Disallowed attribute access: {node.attr}")
 
     def generate_reward_module(
         self,
