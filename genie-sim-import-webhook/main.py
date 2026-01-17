@@ -9,6 +9,8 @@ import urllib.request
 from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request
+from google.api_core import exceptions as google_exceptions
+from google.api_core import retry
 from google.cloud.workflows import executions_v1
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -277,6 +279,18 @@ def _log_invalid_request(reason: str) -> None:
     app.logger.warning("Rejected webhook request: %s | metadata=%s", reason, metadata)
 
 
+def _request_metadata() -> dict:
+    return {
+        "remote_addr": request.remote_addr,
+        "method": request.method,
+        "path": request.path,
+        "user_agent": request.headers.get("User-Agent"),
+        "content_type": request.content_type,
+        "content_length": request.content_length,
+        "request_id": request.headers.get("X-Request-Id") or request.headers.get("X-Correlation-Id"),
+    }
+
+
 def _verify_hmac_signature(body: bytes, secret: str) -> bool:
     signature = request.headers.get("X-Webhook-Signature", "")
     if not signature.startswith("sha256="):
@@ -351,11 +365,53 @@ def handle_job_complete():
 
     workflow_name = os.getenv("WORKFLOW_NAME", "genie-sim-import-pipeline")
     region = os.getenv("WORKFLOW_REGION", "us-central1")
+    retry_policy = retry.Retry(
+        predicate=retry.if_exception_type(
+            google_exceptions.ServiceUnavailable,
+            google_exceptions.DeadlineExceeded,
+            google_exceptions.TooManyRequests,
+            google_exceptions.InternalServerError,
+        ),
+        initial=0.5,
+        maximum=5.0,
+        multiplier=2.0,
+        deadline=15.0,
+    )
+    transient_exceptions = (
+        google_exceptions.ServiceUnavailable,
+        google_exceptions.DeadlineExceeded,
+        google_exceptions.TooManyRequests,
+        google_exceptions.InternalServerError,
+    )
 
     client = executions_v1.ExecutionsClient()
     parent = f"projects/{_get_project_id()}/locations/{region}/workflows/{workflow_name}"
     execution = executions_v1.Execution(argument=json.dumps(payload))
-    response = client.create_execution(request={"parent": parent, "execution": execution})
+    try:
+        response = client.create_execution(
+            request={"parent": parent, "execution": execution},
+            retry=retry_policy,
+        )
+    except Exception as exc:
+        error_details = {
+            "exception_type": type(exc).__name__,
+            "message": str(exc),
+            "request_metadata": _request_metadata(),
+            "workflow": {
+                "name": workflow_name,
+                "region": region,
+                "parent": parent,
+            },
+        }
+        app.logger.exception("Failed to create workflow execution | details=%s", error_details)
+        status_code = 502 if isinstance(exc, transient_exceptions) else 500
+        return jsonify({
+            "error": "execution_create_failed",
+            "details": {
+                "message": str(exc),
+                "type": type(exc).__name__,
+            },
+        }), status_code
 
     return jsonify({"status": "triggered", "execution": response.name}), 202
 
