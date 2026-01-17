@@ -199,6 +199,12 @@ python -c "from genie_sim_export_job.geniesim_client import JobStatus"
 python -c "from tools.geniesim_adapter.local_framework import GenieSimLocalFramework"
 ```
 
+## Follow-up: gRPC Servicer Audit (2026-02-05)
+
+- Re-checked `tools/geniesim_adapter/geniesim_grpc_pb2_grpc.py` for `NotImplementedError` stubs; none remain.
+- Confirmed the servicer supports delegate-based handling and added a minimal integration test that instantiates
+  the servicer with a delegate and exercises the `GetObservation` path to prevent regressions.
+
 ## Phase 2 Complete: Cleanup All Remaining References (2026-01-17)
 
 ✅ **All remaining API references cleaned up**
