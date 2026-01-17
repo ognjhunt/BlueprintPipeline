@@ -46,11 +46,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 import os
 from pathlib import Path
-import time
-from typing import Any, Callable, Optional, Protocol, Union
+from typing import Any, Callable, Optional, Protocol
 
 import numpy as np
-import requests
 
 from .components import (
     ArenaScene,
@@ -61,6 +59,7 @@ from .components import (
     TaskDifficulty,
 )
 from .affordances import AffordanceType
+from ..llm_client import LLMProvider, create_llm_client
 
 
 # =============================================================================
@@ -393,8 +392,10 @@ class CompositeTask:
 @dataclass
 class GoalDecompositionConfig:
     """Configuration for goal decomposition with an LLM."""
-    enabled: bool = False
-    provider: str = "openai"
+    enabled: bool = field(
+        default_factory=lambda: os.getenv("ARENA_LLM_DECOMPOSITION", "false").lower() == "true"
+    )
+    provider: str = "auto"
     model: str = "gpt-4o-mini"
     timeout_s: float = 20.0
     max_retries: int = 2
@@ -446,7 +447,14 @@ class KeywordGoalDecomposer:
                 {"name": "place_object", "affordance": "Placeable"},
             ]
 
+        self._apply_sequence_metadata(subtasks)
         return GoalDecompositionResult(subtasks=subtasks)
+
+    @staticmethod
+    def _apply_sequence_metadata(subtasks: list[dict[str, Any]]) -> None:
+        for idx, subtask in enumerate(subtasks, start=1):
+            subtask["ordering"] = idx
+            subtask["preconditions"] = [] if idx == 1 else [subtasks[idx - 2]["name"]]
 
 
 class LLMGoalDecomposer:
@@ -458,63 +466,21 @@ class LLMGoalDecomposer:
     def decompose(self, goal: str, scene: ArenaScene) -> GoalDecompositionResult:
         if not self.config.enabled:
             raise RuntimeError("LLM goal decomposition is disabled by config.")
-        if self.config.provider != "openai":
-            raise RuntimeError(f"Unsupported LLM provider '{self.config.provider}'.")
-
         prompt = self._build_prompt(goal, scene)
-        payload = {
-            "model": self.config.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert task planner for robotics. "
-                        "Return only JSON that matches the provided schema."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            "temperature": 0.2,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "goal_decomposition",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "subtasks": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": {"type": "string"},
-                                        "affordance": {
-                                            "type": ["string", "null"],
-                                            "description": (
-                                                "One of the known affordance types "
-                                                "or null if unknown."
-                                            ),
-                                        },
-                                    },
-                                    "required": ["name", "affordance"],
-                                    "additionalProperties": False,
-                                },
-                                "minItems": 1,
-                            },
-                        },
-                        "required": ["subtasks"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-        }
+        client = self._create_client()
+        response = client.generate(
+            prompt=prompt,
+            json_output=True,
+            temperature=0.2,
+        )
+        if response.error_message:
+            raise RuntimeError(f"LLM error: {response.error_message}")
 
-        response_data = self._post_with_retry(payload)
-        content = self._extract_content(response_data)
-        parsed = json.loads(content)
+        try:
+            parsed = response.parse_json()
+        except json.JSONDecodeError as exc:
+            raise ValueError("LLM response was not valid JSON.") from exc
+
         subtasks = parsed.get("subtasks", [])
         self._validate_subtasks(subtasks)
         return GoalDecompositionResult(subtasks=subtasks)
@@ -538,44 +504,36 @@ class LLMGoalDecomposer:
             "Return JSON with a top-level 'subtasks' array. Each item must include:\n"
             "- name: snake_case task name\n"
             "- affordance: one of the valid affordances or null\n"
+            "- ordering: integer ordering starting at 1\n"
+            "- preconditions: list of strings naming prerequisite subtasks\n"
+            "\n"
+            "Response schema:\n"
+            "{\n"
+            '  "subtasks": [\n'
+            "    {\n"
+            '      "name": "string",\n'
+            '      "affordance": "string | null",\n'
+            '      "ordering": 1,\n'
+            '      "preconditions": ["string"]\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
         )
 
-    def _post_with_retry(self, payload: dict[str, Any]) -> dict[str, Any]:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set for LLM decomposition.")
+    def _create_client(self):
+        provider = self._resolve_provider()
+        return create_llm_client(
+            provider=provider,
+            model=self.config.model,
+            max_retries=self.config.max_retries,
+            retry_delay=self.config.retry_backoff_s,
+        )
 
-        url = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        last_error: Optional[Exception] = None
-        max_attempts = self.config.max_retries + 1
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.config.timeout_s,
-                )
-                response.raise_for_status()
-                return response.json()
-            except (requests.RequestException, ValueError) as exc:
-                last_error = exc
-                if attempt < max_attempts:
-                    time.sleep(self.config.retry_backoff_s * attempt)
-                else:
-                    break
-        raise RuntimeError(f"LLM request failed after {max_attempts} attempts: {last_error}")
-
-    def _extract_content(self, response_data: dict[str, Any]) -> str:
+    def _resolve_provider(self) -> LLMProvider:
         try:
-            return response_data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError("LLM response missing expected content.") from exc
+            return LLMProvider(self.config.provider.lower())
+        except ValueError as exc:
+            raise ValueError(f"Unsupported LLM provider '{self.config.provider}'.") from exc
 
     def _validate_subtasks(self, subtasks: list[dict[str, Any]]) -> None:
         if not isinstance(subtasks, list) or not subtasks:
@@ -587,10 +545,18 @@ class LLMGoalDecomposer:
                 raise ValueError("Each subtask must be a JSON object.")
             name = subtask.get("name")
             affordance = subtask.get("affordance")
+            ordering = subtask.get("ordering")
+            preconditions = subtask.get("preconditions")
             if not isinstance(name, str) or not name.strip():
                 raise ValueError("Each subtask must have a non-empty name.")
             if affordance is not None and affordance not in valid_affordances:
                 raise ValueError(f"Invalid affordance '{affordance}' in LLM response.")
+            if not isinstance(ordering, int) or ordering < 1:
+                raise ValueError("Each subtask must include an integer ordering >= 1.")
+            if not isinstance(preconditions, list) or not all(
+                isinstance(item, str) for item in preconditions
+            ):
+                raise ValueError("Each subtask must include a list of string preconditions.")
 
 
 # =============================================================================
@@ -693,6 +659,12 @@ class CompositeTaskBuilder:
             nodes=nodes,
             name=template_name,
             description=f"Composite workflow: {template_name}",
+            metadata={
+                "goal_decomposition": {
+                    "source": "template",
+                    "template_name": template_name,
+                },
+            },
         )
 
         return CompositeTask(
@@ -722,6 +694,10 @@ class CompositeTaskBuilder:
         """
         decomposition = self._decompose_goal(goal_description, scene)
         subtasks = decomposition.subtasks
+        for idx, subtask in enumerate(subtasks, start=1):
+            subtask.setdefault("ordering", idx)
+            subtask.setdefault("preconditions", [])
+        subtasks = sorted(subtasks, key=lambda subtask: subtask["ordering"])
 
         nodes = []
         for i, subtask in enumerate(subtasks):
@@ -814,14 +790,14 @@ class CompositeTaskBuilder:
                 result = self.goal_decomposer.decompose(goal, scene)
                 result.metadata.setdefault("goal_decomposition", {})
                 result.metadata["goal_decomposition"].setdefault(
-                    "provenance",
+                    "source",
                     "custom_decomposer",
                 )
                 return result
             except Exception as exc:
                 fallback = self._keyword_decomposer.decompose(goal, scene)
                 fallback.metadata["goal_decomposition"] = {
-                    "provenance": "keyword_fallback",
+                    "source": "keyword_fallback",
                     "llm_enabled": False,
                     "fallback_reason": f"custom_decomposer_failed: {exc}",
                 }
@@ -830,7 +806,7 @@ class CompositeTaskBuilder:
         if not self.decomposition_config.enabled:
             fallback = self._keyword_decomposer.decompose(goal, scene)
             fallback.metadata["goal_decomposition"] = {
-                "provenance": "keyword_fallback",
+                "source": "keyword_fallback",
                 "llm_enabled": False,
             }
             return fallback
@@ -839,7 +815,7 @@ class CompositeTaskBuilder:
         try:
             result = llm_decomposer.decompose(goal, scene)
             result.metadata["goal_decomposition"] = {
-                "provenance": "llm",
+                "source": "llm",
                 "llm_enabled": True,
                 "llm_provider": self.decomposition_config.provider,
                 "llm_model": self.decomposition_config.model,
@@ -848,7 +824,7 @@ class CompositeTaskBuilder:
         except Exception as exc:
             fallback = self._keyword_decomposer.decompose(goal, scene)
             fallback.metadata["goal_decomposition"] = {
-                "provenance": "keyword_fallback",
+                "source": "keyword_fallback",
                 "llm_enabled": True,
                 "llm_provider": self.decomposition_config.provider,
                 "llm_model": self.decomposition_config.model,
