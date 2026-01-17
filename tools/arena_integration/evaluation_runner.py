@@ -13,6 +13,7 @@ Features:
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -356,20 +357,37 @@ if __name__ == "__main__":
         """Load policy from checkpoint."""
         # Policy loading depends on policy type
         policy_type = self.config.policy_type
+        non_gr00t_policy_load = False
 
         if policy_type == "gr00t_closedloop":
             try:
                 from gr00t.policy import GR00TPolicy
                 return GR00TPolicy.load(self.config.policy_path)
-            except ImportError:
-                pass
+            except ImportError as exc:
+                non_gr00t_policy_load = True
+                missing_module = exc.name or "gr00t.policy"
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    "GR00T policy import failed for module '%s'. "
+                    "Install the GR00T package or ensure it is on PYTHONPATH. "
+                    "Falling back to non-GR00T policy load. "
+                    "policy_type=%s policy_path=%s non_gr00t_policy_load=%s",
+                    missing_module,
+                    policy_type,
+                    self.config.policy_path,
+                    non_gr00t_policy_load,
+                )
 
         # Fallback: try to load as torch checkpoint
         try:
             import torch
             return torch.load(self.config.policy_path)
-        except Exception:
-            raise ValueError(f"Failed to load policy from {self.config.policy_path}")
+        except Exception as exc:
+            raise ValueError(
+                "Failed to load policy "
+                f"(policy_type={policy_type}, policy_path={self.config.policy_path}, "
+                f"non_gr00t_policy_load={non_gr00t_policy_load})"
+            ) from exc
 
     def _evaluate_task(
         self,
