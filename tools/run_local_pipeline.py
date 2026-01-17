@@ -67,6 +67,7 @@ from tools.cost_tracking.estimate import (
 )
 from tools.config.seed_manager import configure_pipeline_seed
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
+from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 
 # Add repository root to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -352,8 +353,14 @@ class LocalPipelineRunner:
         """Return True if Genie Sim server is required for requested steps."""
         if PipelineStep.GENIESIM_SUBMIT not in steps:
             return False
-        mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
-        if mock_mode:
+        mock_decision = resolve_geniesim_mock_mode()
+        if mock_decision.requested and mock_decision.production_mode:
+            self.log(
+                "GENIESIM_MOCK_MODE requested but production mode detected; "
+                "mock mode is ignored and a Genie Sim server is required.",
+                "WARNING",
+            )
+        if mock_decision.enabled:
             return False
         try:
             from tools.geniesim_adapter.local_framework import GenieSimConfig
