@@ -32,7 +32,7 @@ For local framework details, see tools/geniesim_adapter/local_framework.py.
 Environment Variables:
     GENIESIM_MOCK_MODE: Enable mock mode for testing (default: false)
     GENIESIM_HOST: gRPC host (default: localhost)
-    GENIESIM_PORT: gRPC port (default: 50051)
+    GENIESIM_PORT: gRPC port (default: adapter default port)
 """
 
 import asyncio
@@ -53,6 +53,7 @@ import aiohttp
 import requests
 
 from tools.error_handling import CircuitBreaker, CircuitBreakerOpen
+from tools.geniesim_adapter.config import get_geniesim_host, get_geniesim_port
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -606,8 +607,8 @@ class GenieSimClient:
         )
 
         # For local framework operation, use gRPC endpoint configuration
-        self.grpc_host = os.getenv("GENIESIM_HOST", "localhost")
-        self.grpc_port = int(os.getenv("GENIESIM_PORT", "50051"))
+        self.grpc_host = get_geniesim_host()
+        self.grpc_port = get_geniesim_port()
         self.local_endpoint = f"{self.grpc_host}:{self.grpc_port}"
 
         # For mock mode, use dummy values
