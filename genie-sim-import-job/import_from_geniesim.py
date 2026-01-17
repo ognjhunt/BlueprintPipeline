@@ -28,7 +28,6 @@ import os
 import shutil
 import sys
 import tarfile
-import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -63,14 +62,7 @@ from monitoring.alerting import send_alert
 
 # Import Genie Sim client
 sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
-from geniesim_client import (
-    GenieSimClient,
-    GenieSimAPIError,
-    JobStatus,
-    JobProgress,
-    DownloadResult,
-    GeneratedEpisodeMetadata,
-)
+from geniesim_client import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.validation.entrypoint_checks import validate_required_env_vars
@@ -427,8 +419,6 @@ class ImportConfig:
     # Error handling for partial failures
     fail_on_partial_error: bool = False  # If True, fail the job if any episodes failed
 
-    # Submission mode
-    submission_mode: str = "api"
     job_metadata_path: Optional[str] = None
     local_episodes_prefix: Optional[str] = None
 
@@ -896,592 +886,6 @@ def convert_to_lerobot(
 # =============================================================================
 
 
-def run_import_job(
-    config: ImportConfig,
-    client: GenieSimClient,
-    job_metadata: Optional[Dict[str, Any]] = None,
-) -> ImportResult:
-    """
-    Run episode import job.
-
-    Args:
-        config: Import configuration
-        client: Genie Sim client
-
-    Returns:
-        ImportResult with statistics and output paths
-    """
-    print("\n" + "=" * 80)
-    print("GENIE SIM EPISODE IMPORT JOB")
-    print("=" * 80)
-    print(f"Job ID: {config.job_id}")
-    print(f"Output: {config.output_dir}")
-    print(f"Min Quality: {config.min_quality_score}")
-    print("=" * 80 + "\n")
-
-    result = ImportResult(
-        success=False,
-        job_id=config.job_id,
-    )
-    quality_min_score = 0.0
-    quality_max_score = 0.0
-    scene_id = os.environ.get("SCENE_ID", "unknown")
-
-    try:
-        # Step 1: Check/wait for job completion
-        if config.wait_for_completion:
-            print(f"[IMPORT] Waiting for job {config.job_id} to complete...")
-
-            def progress_callback(progress: JobProgress):
-                print(
-                    f"[IMPORT] Progress: {progress.progress_percent:.1f}% - "
-                    f"{progress.episodes_generated}/{progress.total_episodes_target} episodes - "
-                    f"{progress.current_task}"
-                )
-
-            try:
-                metrics = get_metrics()
-                with metrics.track_api_call("genie-sim", "wait_for_completion", scene_id):
-                    final_progress = client.wait_for_completion(
-                        config.job_id,
-                        poll_interval=config.poll_interval,
-                        callback=progress_callback,
-                    )
-                print(f"[IMPORT] ✅ Job completed: {final_progress.episodes_generated} episodes generated\n")
-
-            except GenieSimAPIError as e:
-                result.errors.append(f"Job failed or was cancelled: {e}")
-                return result
-
-        else:
-            # Just check status
-            metrics = get_metrics()
-            with metrics.track_api_call("genie-sim", "get_job_status", scene_id):
-                progress = client.get_job_status(config.job_id)
-            if progress.status != JobStatus.COMPLETED:
-                result.errors.append(f"Job not completed (status: {progress.status.value})")
-                return result
-
-        # Step 2: Download episodes
-        print(f"[IMPORT] Downloading episodes...")
-        metrics = get_metrics()
-        with metrics.track_api_call("genie-sim", "download_episodes", scene_id):
-            download_result = client.download_episodes(
-                config.job_id,
-                config.output_dir,
-                validate=True,
-            )
-
-        if not download_result.success:
-            result.errors.extend(download_result.errors)
-
-            # Write failed episodes details for debugging
-            if download_result.errors:
-                failed_episodes_path = config.output_dir / "failed_episodes.json"
-                failed_episodes_data = {
-                    "job_id": config.job_id,
-                    "total_episodes_attempted": download_result.episode_count,
-                    "failed_count": len(download_result.errors),
-                    "errors": [
-                        {
-                            "error": str(err),
-                            "suggested_remediation": "Check Genie Sim job logs for details",
-                        }
-                        for err in download_result.errors
-                    ],
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-
-                try:
-                    config.output_dir.mkdir(parents=True, exist_ok=True)
-                    with open(failed_episodes_path, "w") as f:
-                        json.dump(failed_episodes_data, f, indent=2)
-                    print(f"[IMPORT] ⚠️  Failed episodes details written to: {failed_episodes_path}")
-                except Exception as e:
-                    print(f"[IMPORT] WARNING: Could not write failed episodes file: {e}")
-
-            return result
-
-        print(f"[IMPORT] ✅ Downloaded {download_result.episode_count} episodes")
-        print(f"[IMPORT]    Total size: {download_result.total_size_bytes / 1024 / 1024:.1f} MB\n")
-
-        # Check for partial failures (some episodes downloaded, others failed)
-        if download_result.errors:
-            print(f"[IMPORT] ⚠️  WARNING: {len(download_result.errors)} episodes had errors during download")
-            result.warnings.extend(download_result.errors)
-
-            # Write failed episodes details
-            failed_episodes_path = config.output_dir / "failed_episodes.json"
-            failed_episodes_data = {
-                "job_id": config.job_id,
-                "total_episodes_attempted": download_result.episode_count + len(download_result.errors),
-                "successful_downloads": download_result.episode_count,
-                "failed_count": len(download_result.errors),
-                "errors": [
-                    {
-                        "error": str(err),
-                        "suggested_remediation": "Check Genie Sim job logs; episodes may have been filtered by quality",
-                    }
-                    for err in download_result.errors
-                ],
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-            }
-
-            try:
-                with open(failed_episodes_path, "w") as f:
-                    json.dump(failed_episodes_data, f, indent=2)
-                print(f"[IMPORT]    Failed episodes details: {failed_episodes_path}")
-            except Exception as e:
-                print(f"[IMPORT]    WARNING: Could not write failed episodes file: {e}")
-
-            # Optionally fail on partial errors
-            if config.fail_on_partial_error:
-                result.errors.append(
-                    f"{len(download_result.errors)} episodes failed and fail_on_partial_error=True"
-                )
-                print(f"[IMPORT] ❌ Failing due to partial errors (fail_on_partial_error=True)")
-                return result
-
-        result.total_episodes_downloaded = download_result.episode_count
-        result.output_dir = download_result.output_dir
-        result.manifest_path = download_result.manifest_path
-
-        # Step 3: Validate episodes
-        if config.enable_validation:
-            print(f"[IMPORT] Validating episodes...")
-            validator = ImportedEpisodeValidator(config.min_quality_score)
-
-            validation_result = validator.validate_batch(
-                download_result.episodes,
-                config.output_dir,
-            )
-
-            print(f"[IMPORT] Validation results:")
-            print(f"[IMPORT]   Total: {validation_result['total_episodes']}")
-            print(f"[IMPORT]   Passed: {validation_result['passed_count']}")
-            print(f"[IMPORT]   Failed: {validation_result['failed_count']}")
-            print(f"[IMPORT]   Avg Quality: {validation_result['average_quality_score']:.2f}")
-            print(
-                f"[IMPORT]   Quality Range: "
-                f"[{validation_result['min_quality_score']:.2f}, {validation_result['max_quality_score']:.2f}]\n"
-            )
-
-            result.episodes_passed_validation = validation_result['passed_count']
-            result.episodes_filtered = validation_result['failed_count']
-            result.average_quality_score = validation_result['average_quality_score']
-            quality_min_score = validation_result["min_quality_score"]
-            quality_max_score = validation_result["max_quality_score"]
-
-            if validation_result["failed_count"] > 0:
-                result.errors.append(
-                    f"{validation_result['failed_count']} episodes failed validation (min_quality_score={config.min_quality_score})"
-                )
-
-            low_quality_episodes = [
-                ep.episode_id
-                for ep in download_result.episodes
-                if ep.quality_score < config.min_quality_score
-            ]
-            if low_quality_episodes:
-                result.errors.append(
-                    f"{len(low_quality_episodes)} episodes below min_quality_score={config.min_quality_score}"
-                )
-
-            # Step 4: Filter low-quality episodes
-            if config.filter_low_quality:
-                print(f"[IMPORT] Filtering low-quality episodes...")
-                filtered_count = 0
-
-                for ep_result in validation_result['episode_results']:
-                    if not ep_result['passed']:
-                        episode_id = ep_result['episode_id']
-                        episode_file = config.output_dir / f"{episode_id}.parquet"
-
-                        # Move to filtered directory
-                        filtered_dir = config.output_dir / "filtered"
-                        filtered_dir.mkdir(exist_ok=True)
-
-                        if episode_file.exists():
-                            shutil.move(str(episode_file), str(filtered_dir / episode_file.name))
-                            filtered_count += 1
-
-                            # Log reason
-                            reason_file = filtered_dir / f"{episode_id}.reason.txt"
-                            with open(reason_file, "w") as f:
-                                f.write(f"Quality Score: {ep_result['quality_score']:.2f}\n")
-                                f.write(f"Threshold: {config.min_quality_score:.2f}\n")
-                                f.write("\nErrors:\n")
-                                for error in ep_result['errors']:
-                                    f.write(f"  - {error}\n")
-                                f.write("\nWarnings:\n")
-                                for warning in ep_result['warnings']:
-                                    f.write(f"  - {warning}\n")
-
-                print(f"[IMPORT]   Filtered {filtered_count} low-quality episodes\n")
-
-        else:
-            result.episodes_passed_validation = result.total_episodes_downloaded
-            quality_scores = [ep.quality_score for ep in download_result.episodes]
-            result.average_quality_score = np.mean(quality_scores) if quality_scores else 0.0
-            quality_min_score = float(np.min(quality_scores)) if quality_scores else 0.0
-            quality_max_score = float(np.max(quality_scores)) if quality_scores else 0.0
-            low_quality_episodes = [
-                ep.episode_id
-                for ep in download_result.episodes
-                if ep.quality_score < config.min_quality_score
-            ]
-            if low_quality_episodes:
-                result.errors.append(
-                    f"{len(low_quality_episodes)} episodes below min_quality_score={config.min_quality_score}"
-                )
-
-        # Step 5: Convert episodes to LeRobot format
-        print(f"[IMPORT] Converting episodes to LeRobot format...")
-        lerobot_dir = config.output_dir / "lerobot"
-        lerobot_error = None
-        convert_result: Dict[str, Any] = {}
-        try:
-            convert_result = convert_to_lerobot(
-                episodes_dir=config.output_dir,
-                output_dir=lerobot_dir,
-                episode_metadata_list=download_result.episodes,
-                min_quality_score=config.min_quality_score,
-                job_id=config.job_id,
-                scene_id=scene_id,
-            )
-            result.lerobot_conversion_success = True
-            print(f"[IMPORT] ✅ Converted {convert_result['converted_count']} episodes to LeRobot format")
-            print(f"[IMPORT]    Output: {convert_result['output_dir']}\n")
-        except Exception as e:
-            lerobot_error = str(e)
-            result.lerobot_conversion_success = False
-            result.warnings.append(f"LeRobot conversion failed: {lerobot_error}")
-            print(f"[IMPORT] ⚠️  LeRobot conversion failed: {lerobot_error}\n")
-
-            if config.enable_validation or config.require_lerobot:
-                result.errors.append(
-                    "LeRobot conversion failed and is required "
-                    f"(enable_validation={config.enable_validation}, require_lerobot={config.require_lerobot}): "
-                    f"{lerobot_error}"
-                )
-
-        # Step 6: Update manifest with import metadata
-        if result.manifest_path and result.manifest_path.exists():
-            with open(result.manifest_path, "r") as f:
-                manifest = json.load(f)
-
-            manifest["import_metadata"] = {
-                "imported_at": datetime.utcnow().isoformat() + "Z",
-                "imported_by": "BlueprintPipeline",
-                "total_downloaded": result.total_episodes_downloaded,
-                "passed_validation": result.episodes_passed_validation,
-                "filtered": result.episodes_filtered,
-                "average_quality_score": result.average_quality_score,
-                "lerobot_converted": convert_result.get('converted_count', 0),
-                "lerobot_conversion_success": result.lerobot_conversion_success,
-                "lerobot_conversion_error": lerobot_error,
-            }
-
-            with open(result.manifest_path, "w") as f:
-                json.dump(manifest, f, indent=2)
-
-        # Step 7: Write machine-readable import manifest for workflows
-        import_manifest_path = config.output_dir / "import_manifest.json"
-        gcs_output_path = None
-        output_dir_str = str(config.output_dir)
-        if output_dir_str.startswith("/mnt/gcs/"):
-            gcs_output_path = "gs://" + output_dir_str[len("/mnt/gcs/"):]
-        bundle_root = config.output_dir.resolve()
-        output_dir_str = _relative_to_bundle(bundle_root, config.output_dir)
-
-        metrics = get_metrics()
-        metrics_summary = {
-            "backend": metrics.backend.value,
-            "stats": metrics.get_stats(),
-        }
-        episode_checksums = []
-        filtered_checksums = []
-        for episode in download_result.episodes:
-            episode_file = config.output_dir / f"{episode.episode_id}.parquet"
-            if episode_file.exists():
-                episode_checksums.append({
-                    "episode_id": episode.episode_id,
-                    "file_name": episode_file.name,
-                    "sha256": _sha256_file(episode_file),
-                })
-        filtered_dir = config.output_dir / "filtered"
-        if filtered_dir.exists():
-            for filtered_file in sorted(filtered_dir.glob("*.parquet")):
-                filtered_checksums.append({
-                    "episode_id": filtered_file.stem,
-                    "file_name": filtered_file.name,
-                    "sha256": _sha256_file(filtered_file),
-                })
-
-        lerobot_checksums = {
-            "dataset_info": None,
-            "episodes_index": None,
-            "episodes": [],
-        }
-        dataset_info_path = lerobot_dir / "dataset_info.json"
-        episodes_index_path = lerobot_dir / "episodes.jsonl"
-        if dataset_info_path.exists():
-            lerobot_checksums["dataset_info"] = _sha256_file(dataset_info_path)
-        if episodes_index_path.exists():
-            lerobot_checksums["episodes_index"] = _sha256_file(episodes_index_path)
-        if lerobot_dir.exists():
-            for lerobot_file in sorted(lerobot_dir.glob("episode_*.parquet")):
-                lerobot_checksums["episodes"].append({
-                    "file_name": lerobot_file.name,
-                    "sha256": _sha256_file(lerobot_file),
-                })
-
-        download_manifest_checksum = (
-            _sha256_file(result.manifest_path)
-            if result.manifest_path and result.manifest_path.exists()
-            else None
-        )
-        base_provenance = {
-            "source": "genie_sim",
-            "job_id": config.job_id,
-            "scene_id": scene_id or None,
-            "imported_by": "BlueprintPipeline",
-            "importer": "genie-sim-import-job",
-            "client_mode": "mock" if getattr(client, "mock_mode", False) else "api",
-        }
-        episode_ids = [episode.episode_id for episode in download_result.episodes]
-        episode_paths, missing_episode_ids = get_episode_file_paths(config.output_dir, episode_ids)
-        metadata_paths = get_lerobot_metadata_paths(config.output_dir)
-        lerobot_info_path = config.output_dir / "lerobot" / "meta" / "info.json"
-        missing_metadata_files = []
-        if not lerobot_info_path.exists():
-            missing_metadata_files.append(lerobot_info_path.relative_to(config.output_dir).as_posix())
-        readme_path = _write_lerobot_readme(config.output_dir, lerobot_dir)
-        directory_checksums = build_directory_checksums(config.output_dir, exclude_paths=[import_manifest_path])
-        episode_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in episode_paths}
-        metadata_rel_paths = {path.relative_to(config.output_dir).as_posix() for path in metadata_paths}
-        file_checksums = {
-            "episodes": {
-                rel_path: checksum
-                for rel_path, checksum in directory_checksums.items()
-                if rel_path in episode_rel_paths
-            },
-            "metadata": {
-                rel_path: checksum
-                for rel_path, checksum in directory_checksums.items()
-                if rel_path in metadata_rel_paths
-            },
-            "missing_episode_ids": missing_episode_ids,
-            "missing_metadata_files": missing_metadata_files,
-        }
-        checksums_payload = {
-            "download_manifest": download_manifest_checksum,
-            "episodes": episode_checksums,
-            "filtered_episodes": filtered_checksums,
-            "lerobot": lerobot_checksums,
-            "metadata": file_checksums["metadata"],
-            "missing_episode_ids": file_checksums["missing_episode_ids"],
-            "missing_metadata_files": file_checksums["missing_metadata_files"],
-            "episode_files": file_checksums["episodes"],
-            "bundle_files": dict(directory_checksums),
-        }
-        checksums_path = _write_checksums_file(config.output_dir, directory_checksums)
-        checksums_rel_path = checksums_path.relative_to(config.output_dir).as_posix()
-        checksums_entry = {
-            "sha256": _sha256_file(checksums_path),
-            "size_bytes": checksums_path.stat().st_size,
-        }
-        checksums_payload["metadata"][checksums_rel_path] = checksums_entry
-        checksums_payload["bundle_files"][checksums_rel_path] = checksums_entry
-        config_snapshot = {
-            "env": snapshot_env(ENV_SNAPSHOT_KEYS),
-            "config": {
-                "job_id": config.job_id,
-                "output_dir": output_dir_str,
-                "min_quality_score": config.min_quality_score,
-                "enable_validation": config.enable_validation,
-                "filter_low_quality": config.filter_low_quality,
-                "require_lerobot": config.require_lerobot,
-                "poll_interval": config.poll_interval,
-                "wait_for_completion": config.wait_for_completion,
-                "fail_on_partial_error": config.fail_on_partial_error,
-                "submission_mode": config.submission_mode,
-                "job_metadata_path": config.job_metadata_path,
-                "local_episodes_prefix": config.local_episodes_prefix,
-            },
-        }
-        provenance = collect_provenance(REPO_ROOT, config_snapshot)
-        provenance.update(base_provenance)
-        import_manifest = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
-            "schema_definition": MANIFEST_SCHEMA_DEFINITION,
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "job_id": config.job_id,
-            "output_dir": output_dir_str,
-            "gcs_output_path": gcs_output_path,
-            "readme_path": _relative_to_bundle(bundle_root, readme_path),
-            "checksums_path": _relative_to_bundle(bundle_root, checksums_path),
-            "episodes": {
-                "downloaded": result.total_episodes_downloaded,
-                "passed_validation": result.episodes_passed_validation,
-                "filtered": result.episodes_filtered,
-                "download_errors": len(download_result.errors),
-            },
-            "quality": {
-                "average_score": result.average_quality_score,
-                "min_score": quality_min_score,
-                "max_score": quality_max_score,
-                "threshold": config.min_quality_score,
-                "validation_enabled": config.enable_validation,
-            },
-            "lerobot": {
-                "conversion_success": result.lerobot_conversion_success,
-                "converted_count": convert_result.get("converted_count", 0),
-                "output_dir": _relative_to_bundle(bundle_root, lerobot_dir),
-                "error": lerobot_error,
-                "required": config.require_lerobot or config.enable_validation,
-            },
-            "verification": {
-                "checksums": {},
-            },
-            "metrics_summary": metrics_summary,
-            "checksums": checksums_payload,
-            "provenance": provenance,
-        }
-
-        with open(import_manifest_path, "w") as f:
-            json.dump(import_manifest, f, indent=2)
-
-        package_path = _create_bundle_package(
-            config.output_dir,
-            f"lerobot_bundle_{config.job_id}.tar.gz",
-            files=[import_manifest_path, readme_path, checksums_path],
-            directories=[lerobot_dir],
-        )
-        package_checksum = _sha256_file(package_path)
-        checksums_payload["bundle_files"][_relative_to_bundle(bundle_root, package_path)] = {
-            "sha256": package_checksum,
-            "size_bytes": package_path.stat().st_size,
-        }
-        file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
-        asset_provenance_path = _resolve_asset_provenance_reference(
-            bundle_root=bundle_root,
-            output_dir=config.output_dir,
-            job_metadata=job_metadata,
-        )
-        import_manifest["package"] = {
-            "path": _relative_to_bundle(bundle_root, package_path),
-            "sha256": package_checksum,
-            "size_bytes": package_path.stat().st_size,
-            "format": "tar.gz",
-            "includes": [
-                _relative_to_bundle(bundle_root, import_manifest_path),
-                _relative_to_bundle(bundle_root, readme_path),
-                _relative_to_bundle(bundle_root, checksums_path),
-                _relative_to_bundle(bundle_root, lerobot_dir),
-            ],
-        }
-        import_manifest["file_inventory"] = file_inventory
-        import_manifest["asset_provenance_path"] = asset_provenance_path
-        checksums_verification = verify_checksums_manifest(bundle_root, checksums_path)
-        import_manifest["verification"]["checksums"] = checksums_verification
-        import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
-            "sha256": compute_manifest_checksum(import_manifest),
-        }
-
-        with open(import_manifest_path, "w") as f:
-            json.dump(import_manifest, f, indent=2)
-
-        result.import_manifest_path = import_manifest_path
-
-        print("=" * 80)
-        print("CHECKSUM VERIFICATION")
-        print("=" * 80)
-        if not checksums_verification["success"]:
-            verification_errors = []
-            if checksums_verification["missing_files"]:
-                verification_errors.append(
-                    "Missing files: " + ", ".join(checksums_verification["missing_files"])
-                )
-            if checksums_verification["checksum_mismatches"]:
-                mismatch_paths = [
-                    mismatch["path"] for mismatch in checksums_verification["checksum_mismatches"]
-                ]
-                verification_errors.append(
-                    "Checksum mismatches: " + ", ".join(mismatch_paths)
-                )
-            if checksums_verification["size_mismatches"]:
-                mismatch_paths = [
-                    mismatch["path"] for mismatch in checksums_verification["size_mismatches"]
-                ]
-                verification_errors.append("Size mismatches: " + ", ".join(mismatch_paths))
-            if checksums_verification["errors"]:
-                verification_errors.extend(checksums_verification["errors"])
-            result.checksum_verification_errors.extend(verification_errors)
-            remediation = (
-                "Re-download the bundle to ensure artifacts are intact, or rerun the import "
-                "to regenerate checksums.json from the source files."
-            )
-            result.errors.append(
-                "Checksum verification failed. " + remediation
-            )
-            print("[IMPORT] ❌ " + result.errors[-1])
-        else:
-            print("[IMPORT] ✅ Checksums.json verification succeeded")
-        print("=" * 80 + "\n")
-
-        print("=" * 80)
-        print("IMPORT MANIFEST CHECKSUM VERIFICATION")
-        print("=" * 80)
-        verify_exit_code = verify_manifest(import_manifest_path)
-        if verify_exit_code != 0:
-            result.errors.append("Import manifest verification failed.")
-            result.success = False
-            print("[IMPORT] ❌ Import manifest verification failed; aborting job.")
-            print("=" * 80 + "\n")
-            return result
-        print("[IMPORT] ✅ Import manifest verification succeeded")
-        print("=" * 80 + "\n")
-
-        manifest_checksum_result = verify_import_manifest_checksum(import_manifest_path)
-        if not manifest_checksum_result["success"]:
-            result.checksum_verification_errors.extend(manifest_checksum_result["errors"])
-            result.errors.append(
-                "Import manifest checksum validation failed. "
-                "Re-run the import to regenerate a consistent manifest."
-            )
-
-        result.checksum_verification_passed = (
-            checksums_verification["success"] and manifest_checksum_result["success"]
-        )
-        if not result.checksum_verification_passed:
-            result.success = False
-            return result
-
-        # Success
-        result.success = len(result.errors) == 0
-
-        print("=" * 80)
-        print("IMPORT COMPLETE")
-        print("=" * 80)
-        print(f"{'✅' if result.success else '❌'} Successfully imported {result.episodes_passed_validation} episodes")
-        print(f"Output directory: {result.output_dir}")
-        print(f"Manifest: {result.manifest_path}")
-        print(
-            "Checksum verification: "
-            f"{'✅' if result.checksum_verification_passed else '❌'}"
-        )
-        print("=" * 80 + "\n")
-
-        return result
-
-    except Exception as e:
-        print(f"\n❌ ERROR during import: {e}")
-        traceback.print_exc()
-        result.errors.append(str(e))
-        return result
-
-
 def run_local_import_job(
     config: ImportConfig,
     job_metadata: Optional[Dict[str, Any]] = None,
@@ -1710,7 +1114,6 @@ def run_local_import_job(
             "poll_interval": config.poll_interval,
             "wait_for_completion": config.wait_for_completion,
             "fail_on_partial_error": config.fail_on_partial_error,
-            "submission_mode": config.submission_mode,
             "job_metadata_path": config.job_metadata_path,
             "local_episodes_prefix": config.local_episodes_prefix,
         },
@@ -1914,7 +1317,6 @@ def main():
     bucket = os.environ["BUCKET"]
     scene_id = os.environ["SCENE_ID"]
     output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
-    submission_mode = os.getenv("GENIESIM_SUBMISSION_MODE", "api").lower()
     job_metadata_path = os.getenv("JOB_METADATA_PATH") or None
     local_episodes_prefix = os.getenv("LOCAL_EPISODES_PREFIX") or None
 
@@ -1922,13 +1324,12 @@ def main():
     if job_metadata_path:
         try:
             job_metadata = _load_local_job_metadata(bucket, job_metadata_path)
-            submission_mode = job_metadata.get("submission_mode", submission_mode)
             artifacts = job_metadata.get("artifacts", {})
             if not local_episodes_prefix:
                 local_episodes_prefix = artifacts.get("episodes_prefix")
         except FileNotFoundError as e:
             print(f"[GENIE-SIM-IMPORT] WARNING: {e}")
-            if submission_mode == "local" and not local_episodes_prefix:
+            if not local_episodes_prefix:
                 sys.exit(1)
 
     # Quality configuration
@@ -1957,7 +1358,7 @@ def main():
         from startup_validation import validate_and_fail_fast
         validate_and_fail_fast(
             job_name="GENIE-SIM-IMPORT",
-            require_geniesim=submission_mode != "local",
+            require_geniesim=False,
             require_gemini=False,
             validate_gcs=True,
         )
@@ -1970,7 +1371,6 @@ def main():
     print(f"[GENIE-SIM-IMPORT] Configuration:")
     print(f"[GENIE-SIM-IMPORT]   Job ID: {job_id}")
     print(f"[GENIE-SIM-IMPORT]   Output Prefix: {output_prefix}")
-    print(f"[GENIE-SIM-IMPORT]   Submission Mode: {submission_mode}")
     print(f"[GENIE-SIM-IMPORT]   Min Quality: {min_quality_score}")
     print(
         "[GENIE-SIM-IMPORT]   Quality Range: "
@@ -1982,16 +1382,12 @@ def main():
     print(f"[GENIE-SIM-IMPORT]   Fail on Partial Error: {fail_on_partial_error}\n")
 
     # Setup paths
-    GCS_ROOT = Path("/mnt/gcs")
-    if submission_mode == "local":
-        output_dir = _resolve_local_output_dir(
-            bucket=bucket,
-            output_prefix=output_prefix,
-            job_id=job_id,
-            local_episodes_prefix=local_episodes_prefix,
-        )
-    else:
-        output_dir = GCS_ROOT / bucket / output_prefix / f"geniesim_{job_id}"
+    output_dir = _resolve_local_output_dir(
+        bucket=bucket,
+        output_prefix=output_prefix,
+        job_id=job_id,
+        local_episodes_prefix=local_episodes_prefix,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create configuration
@@ -2005,29 +1401,15 @@ def main():
         poll_interval=poll_interval,
         wait_for_completion=wait_for_completion,
         fail_on_partial_error=fail_on_partial_error,
-        submission_mode=submission_mode,
         job_metadata_path=job_metadata_path,
         local_episodes_prefix=local_episodes_prefix,
     )
 
     # Run import
-    client = None
     try:
         metrics = get_metrics()
         with metrics.track_job("genie-sim-import-job", scene_id):
-            if submission_mode == "local":
-                result = run_local_import_job(config, job_metadata=job_metadata)
-            else:
-                try:
-                    client = GenieSimClient(
-                        mock_mode=resolve_geniesim_mock_mode().enabled,
-                        validate_on_init=False,
-                    )
-                except Exception as e:
-                    print(f"[GENIE-SIM-IMPORT] ERROR: Failed to create Genie Sim local client: {e}")
-                    print("[GENIE-SIM-IMPORT] Make sure local Genie Sim gRPC server is running (GENIESIM_HOST:GENIESIM_PORT)")
-                    sys.exit(1)
-                result = run_import_job(config, client, job_metadata=job_metadata)
+            result = run_local_import_job(config, job_metadata=job_metadata)
 
         if result.success:
             print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")
@@ -2040,9 +1422,6 @@ def main():
                 print(f"[GENIE-SIM-IMPORT]   - {error}")
             sys.exit(1)
 
-    finally:
-        if client is not None:
-            client.close()
 
 
 if __name__ == "__main__":
