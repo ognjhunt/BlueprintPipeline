@@ -146,7 +146,7 @@ docker build -t smart-placement-engine .
 
 # Run with GCS bucket
 docker run -e GEMINI_API_KEY=$GEMINI_API_KEY \
-           -e BUCKET=my-bucket \
+           -e BUCKET=blueprint-8c1ca.appspot.com \
            -e SCENE_ID=kitchen_001 \
            --privileged \
            smart-placement-engine
@@ -160,6 +160,8 @@ docker run -e GEMINI_API_KEY=$GEMINI_API_KEY \
 | `BUCKET` | GCS bucket for scene data | No |
 | `SCENE_ID` | Scene identifier | Yes |
 | `OUTPUT_DIR` | Output directory | No |
+
+Example scene storage path: `gs://blueprint-8c1ca.appspot.com/scenes/{SCENE_ID}`.
 
 ## Output Files
 

@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
+from tools.validation.entrypoint_checks import validate_required_env_vars
 
 import numpy as np
 from tools.asset_catalog import AssetCatalogClient
@@ -1208,15 +1209,18 @@ def build_scene(
 
 def main() -> None:
     """CLI entry point."""
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    layout_prefix = os.getenv("LAYOUT_PREFIX")
-    assets_prefix = os.getenv("ASSETS_PREFIX")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "LAYOUT_PREFIX": "Path prefix for layout files (scenes/<sceneId>/layout)",
+            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+        },
+        label="[USD]",
+    )
+    layout_prefix = os.environ["LAYOUT_PREFIX"]
+    assets_prefix = os.environ["ASSETS_PREFIX"]
     usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
-
-    if not layout_prefix or not assets_prefix:
-        print("[USD] LAYOUT_PREFIX and ASSETS_PREFIX are required", file=sys.stderr)
-        sys.exit(1)
 
     root = Path("/mnt/gcs")
 

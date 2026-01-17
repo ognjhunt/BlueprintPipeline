@@ -268,6 +268,14 @@ report = run_qa_validation(scene_dir=Path("scenes/scene_123"))
 | `SIMREADY_FALLBACK_MIN_COVERAGE` | Minimum coverage ratio for deterministic fallback physics (0-1) | `0.6` |
 | `SIMREADY_NON_LLM_MIN_QUALITY` | Minimum quality ratio for non-LLM physics checks (0-1) | `0.85` |
 
+Example defaults for production runs:
+
+```bash
+export BUCKET=blueprint-8c1ca.appspot.com
+export SCENE_ID=scene_123
+# Assets land under gs://blueprint-8c1ca.appspot.com/scenes/${SCENE_ID}/
+```
+
 ## Secrets
 
 BlueprintPipeline uses Google Secret Manager with environment variable fallbacks for development.

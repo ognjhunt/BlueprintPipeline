@@ -13,12 +13,22 @@ if str(SIMREADY_DIR) not in sys.path:
     sys.path.append(str(SIMREADY_DIR))
 
 from prepare_simready_assets import prepare_simready_assets_job  # noqa: E402
+from tools.validation.entrypoint_checks import validate_required_env_vars  # noqa: E402
 
 
 def run_from_env(root: Path = DEFAULT_ROOT) -> int:
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    assets_prefix = os.getenv("ASSETS_PREFIX")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+        },
+        label="[SIMREADY]",
+    )
+
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
+    assets_prefix = os.environ["ASSETS_PREFIX"]
     allow_heuristic_fallback = os.getenv("SIMREADY_ALLOW_HEURISTIC_FALLBACK")
     production_mode = os.getenv("SIMREADY_PRODUCTION_MODE")
     return prepare_simready_assets_job(

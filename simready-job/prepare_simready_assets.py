@@ -2411,9 +2411,18 @@ def main() -> None:
 
     from blueprint_sim.simready import run_from_env
 
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    assets_prefix = _get_env_value("ASSETS_PREFIX", "") or ""
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+        },
+        label="[SIMREADY]",
+    )
+
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
+    assets_prefix = os.environ["ASSETS_PREFIX"]
     input_params = {
         "bucket": bucket,
         "scene_id": scene_id,
@@ -2442,14 +2451,6 @@ def main() -> None:
 
     validated = False
     try:
-        validate_required_env_vars(
-            {
-                "BUCKET": "GCS bucket name",
-                "SCENE_ID": "Scene identifier",
-                "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
-            },
-            label="[SIMREADY]",
-        )
         assets_root = GCS_ROOT / assets_prefix
         validate_scene_manifest(assets_root / "scene_manifest.json", label="[SIMREADY]")
         validated = True

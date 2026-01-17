@@ -92,10 +92,10 @@ def main():
         label="[MESHY]",
     )
 
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    assets_prefix = os.getenv("ASSETS_PREFIX")  # e.g. scenes/<sceneId>/assets
-    meshy_api_key = os.getenv("MESHY_API_KEY")
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
+    assets_prefix = os.environ["ASSETS_PREFIX"]  # e.g. scenes/<sceneId>/assets
+    meshy_api_key = os.environ["MESHY_API_KEY"]
 
     root = Path("/mnt/gcs")
     assets_root = root / assets_prefix
