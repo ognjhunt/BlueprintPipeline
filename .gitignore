@@ -11,6 +11,10 @@ hf-cache/
 .vscode/
 .idea/
 
-# if you later bring these in here and don’t want them
+# if you later bring these in here and don't want them
 work/
 src/
+
+# Generated demo outputs
+embodiment_demo/
+sim2real_demo/
