@@ -48,6 +48,7 @@ LeRobot Dataset Structure (v2.0):
 See: https://github.com/huggingface/lerobot
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -117,6 +118,15 @@ except ImportError:
 # =============================================================================
 # Data Models
 # =============================================================================
+
+
+def _checksum_file(path: Path, algo: str = "sha256") -> str:
+    """Compute a checksum for a file."""
+    hasher = hashlib.new(algo)
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 @dataclass
@@ -289,10 +299,20 @@ class LeRobotExporter:
             "observation.state": {"min": [], "max": [], "mean": [], "std": []},
             "action": {"min": [], "max": [], "mean": [], "std": []},
         }
+        self.checksum_algorithm = "sha256"
+        self.checksum_manifest: Dict[str, str] = {}
+        self.checksum_generated_at: Optional[str] = None
+        self.output_dir: Optional[Path] = None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
             print(f"[LEROBOT-EXPORTER] [{level}] {msg}")
+
+    def _record_checksum(self, path: Path) -> None:
+        if self.output_dir is None or not path.exists():
+            return
+        rel_path = path.resolve().relative_to(self.output_dir.resolve()).as_posix()
+        self.checksum_manifest[rel_path] = _checksum_file(path, self.checksum_algorithm)
 
     def _get_data_source_info(self) -> Dict[str, Any]:
         """
@@ -1136,6 +1156,9 @@ class LeRobotExporter:
 
         output_dir = Path(self.config.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = output_dir
+        self.checksum_generated_at = datetime.utcnow().isoformat() + "Z"
+        self.checksum_manifest = {}
 
         # Create directories
         meta_dir = output_dir / "meta"
@@ -1243,6 +1266,9 @@ class LeRobotExporter:
         self._write_tasks(meta_dir)
         self._write_episodes_meta(meta_dir)
 
+        # Step 6: Write checksums manifest
+        self._write_checksums_manifest(meta_dir)
+
         # Summary
         self.log("=" * 60)
         self.log(f"Dataset exported: {output_dir}")
@@ -1294,6 +1320,7 @@ class LeRobotExporter:
 
             if HAVE_PYARROW:
                 pq.write_table(episode_data, episode_path)
+                self._record_checksum(episode_path)
             else:
                 # Fallback: write as JSON
                 self._write_episode_json(episode, episode_path.with_suffix(".json"))
@@ -1533,6 +1560,7 @@ class LeRobotExporter:
         data = self._trajectory_to_arrow_table(episode)
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
+        self._record_checksum(path)
 
     def _calculate_stats(self) -> None:
         """Calculate statistics for normalization."""
@@ -1574,6 +1602,7 @@ class LeRobotExporter:
         stats_path = meta_dir / "stats.json"
         with open(stats_path, "w") as f:
             json.dump(self.stats, f, indent=2)
+        self._record_checksum(stats_path)
 
     def _write_info(self, meta_dir: Path) -> None:
         """Write dataset info JSON."""
@@ -1711,11 +1740,17 @@ class LeRobotExporter:
             "created_at": datetime.utcnow().isoformat() + "Z",
             "generator": "BlueprintPipeline/episode-generation-job",
             "generator_version": "2.0.0",
+            "checksums": {
+                "algorithm": self.checksum_algorithm,
+                "manifest_path": "meta/checksums.json",
+                "generated_at": self.checksum_generated_at or datetime.utcnow().isoformat() + "Z",
+            },
         }
 
         info_path = meta_dir / "info.json"
         with open(info_path, "w") as f:
             json.dump(info, f, indent=2)
+        self._record_checksum(info_path)
 
     def _write_tasks(self, meta_dir: Path) -> None:
         """Write tasks JSONL."""
@@ -1723,6 +1758,7 @@ class LeRobotExporter:
         with open(tasks_path, "w") as f:
             for task in self.tasks:
                 f.write(json.dumps(task) + "\n")
+        self._record_checksum(tasks_path)
 
     def _write_episodes_meta(self, meta_dir: Path) -> None:
         """Write episodes metadata JSONL."""
@@ -1749,6 +1785,15 @@ class LeRobotExporter:
                 if episode.camera_error_counts:
                     meta["camera_error_counts"] = episode.camera_error_counts
                 f.write(json.dumps(meta) + "\n")
+        self._record_checksum(episodes_path)
+
+    def _write_checksums_manifest(self, meta_dir: Path) -> None:
+        """Write checksums manifest for generated files."""
+        if not self.checksum_manifest:
+            return
+        manifest_path = meta_dir / "checksums.json"
+        with open(manifest_path, "w") as f:
+            json.dump(self.checksum_manifest, f, indent=2, sort_keys=True)
 
     def _write_visual_observations(self, output_dir: Path) -> None:
         """Write visual observations (images, videos) for all episodes."""
@@ -1830,6 +1875,7 @@ class LeRobotExporter:
                         writer.append_data(frame)
                 writer.close()
                 self.log(f"  Wrote video: {video_path}")
+                self._record_checksum(video_path)
             except Exception as e:
                 self.log(f"  Video write failed: {e}", "WARNING")
                 # Fallback to individual frames
@@ -1849,6 +1895,10 @@ class LeRobotExporter:
                 Image.fromarray(frame).save(frame_path)
             else:
                 np.save(frame_path.with_suffix(".npy"), frame)
+            if frame_path.exists():
+                self._record_checksum(frame_path)
+            else:
+                self._record_checksum(frame_path.with_suffix(".npy"))
 
     def _copy_video(self, src_path: Path, chunk_dir: Path, episode_index: int) -> None:
         """Copy an existing video file to the output directory."""
@@ -1859,6 +1909,7 @@ class LeRobotExporter:
         dst_path = video_dir / f"episode_{episode_index:06d}.mp4"
         try:
             shutil.copy2(src_path, dst_path)
+            self._record_checksum(dst_path)
         except Exception as e:
             self.log(f"  Failed to copy video: {e}", "WARNING")
 
@@ -1953,6 +2004,7 @@ class LeRobotExporter:
                     fps=self.config.fps,
                     unit="meters",
                 )
+                self._record_checksum(depth_path)
 
     def _write_segmentation_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """P2-5 FIX: Write segmentation masks with validation."""
@@ -2003,6 +2055,7 @@ class LeRobotExporter:
                 if hasattr(sensor_data, 'semantic_labels'):
                     data["label_mapping"] = json.dumps(sensor_data.semantic_labels)
                 np.savez_compressed(seg_path, **data)
+                self._record_checksum(seg_path)
 
     def _write_bbox_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """P2-5 FIX: Write bounding box annotations with validation."""
@@ -2044,6 +2097,7 @@ class LeRobotExporter:
         bbox_path = bbox_dir / f"episode_{episode_idx:06d}.json"
         with open(bbox_path, "w") as f:
             json.dump(bbox_data, f, indent=2, default=self._json_serializer)
+        self._record_checksum(bbox_path)
 
     def _write_object_pose_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """Write object pose data for an episode."""
@@ -2067,6 +2121,7 @@ class LeRobotExporter:
         pose_path = pose_dir / f"episode_{episode_idx:06d}.json"
         with open(pose_path, "w") as f:
             json.dump(pose_data, f, indent=2, default=self._json_serializer)
+        self._record_checksum(pose_path)
 
     def _write_contact_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """Write contact information for an episode."""
@@ -2086,6 +2141,7 @@ class LeRobotExporter:
         contact_path = contact_dir / f"episode_{episode_idx:06d}.json"
         with open(contact_path, "w") as f:
             json.dump(contact_data, f, indent=2, default=self._json_serializer)
+        self._record_checksum(contact_path)
 
     def _write_privileged_state_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """Write privileged physics state for an episode."""
@@ -2105,6 +2161,7 @@ class LeRobotExporter:
         priv_path = priv_dir / f"episode_{episode_idx:06d}.json"
         with open(priv_path, "w") as f:
             json.dump(priv_data, f, indent=2, default=self._json_serializer)
+        self._record_checksum(priv_path)
 
     def _json_serializer(self, obj: Any) -> Any:
         """Custom JSON serializer for numpy types."""
