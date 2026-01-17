@@ -339,6 +339,23 @@ main:
                     retry_max: 3
                     error: ${e.message}
                   severity: "ERROR"
+            - list_upsell_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${upsellOutputPrefix + "/"}
+                  maxResults: 1000
+                result: upsellCleanupList
+            - delete_upsell_outputs_for_cleanup:
+                for:
+                  value: upsellCleanupItem
+                  in: ${default(upsellCleanupList.items, [])}
+                  steps:
+                    - delete_upsell_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${upsellCleanupItem.name}
             - write_upsell_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:

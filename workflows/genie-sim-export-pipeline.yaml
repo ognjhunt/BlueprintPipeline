@@ -285,6 +285,48 @@ main:
                     retry_max: 5
                     error: ${e.message}
                   severity: "ERROR"
+            - list_geniesim_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${geniesimPrefix + "/"}
+                  maxResults: 1000
+                result: geniesimCleanupList
+            - delete_geniesim_outputs_for_cleanup:
+                for:
+                  value: geniesimCleanupItem
+                  in: ${default(geniesimCleanupList.items, [])}
+                  steps:
+                    - delete_geniesim_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${geniesimCleanupItem.name}
+            - write_geniesim_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${geniesimFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": geniesimJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "geniesim_export_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "geniesim_prefix": geniesimPrefix
+                      }
+                    }
+                  })}
             - log_job_error:
                 call: sys.log
                 args:
@@ -573,6 +615,48 @@ main:
                     retry_max: 3
                     error: ${e.message}
                   severity: "ERROR"
+            - list_geniesim_gpu_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${geniesimPrefix + "/"}
+                  maxResults: 1000
+                result: geniesimGpuCleanupList
+            - delete_geniesim_gpu_outputs_for_cleanup:
+                for:
+                  value: geniesimGpuCleanupItem
+                  in: ${default(geniesimGpuCleanupList.items, [])}
+                  steps:
+                    - delete_geniesim_gpu_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${geniesimGpuCleanupItem.name}
+            - write_geniesim_gpu_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${geniesimFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": geniesimGpuJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "geniesim_gpu_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "geniesim_prefix": geniesimPrefix
+                      }
+                    }
+                  })}
             - log_submission_error:
                 call: sys.log
                 args:
@@ -656,6 +740,48 @@ main:
                     retry_max: 3
                     error: ${e.message}
                   severity: "ERROR"
+            - list_geniesim_submission_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${geniesimPrefix + "/"}
+                  maxResults: 1000
+                result: geniesimSubmissionCleanupList
+            - delete_geniesim_submission_outputs_for_cleanup:
+                for:
+                  value: geniesimSubmissionCleanupItem
+                  in: ${default(geniesimSubmissionCleanupList.items, [])}
+                  steps:
+                    - delete_geniesim_submission_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${geniesimSubmissionCleanupItem.name}
+            - write_geniesim_submission_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${geniesimFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": geniesimSubmitJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "geniesim_submission_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "geniesim_prefix": geniesimPrefix
+                      }
+                    }
+                  })}
             - log_submission_error:
                 call: sys.log
                 args:

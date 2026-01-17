@@ -220,6 +220,23 @@ main:
                 args:
                   text: '${"Failed to start Dream2Flow job after retries: " + e.message}'
                   severity: "ERROR"
+            - list_dream2flow_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${dream2flowPrefix + "/"}
+                  maxResults: 1000
+                result: dream2flowCleanupList
+            - delete_dream2flow_outputs_for_cleanup:
+                for:
+                  value: dream2flowCleanupItem
+                  in: ${default(dream2flowCleanupList.items, [])}
+                  steps:
+                    - delete_dream2flow_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${dream2flowCleanupItem.name}
             - write_dream2flow_start_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:
@@ -425,6 +442,23 @@ main:
                 args:
                   text: '${"Failed to start Dream2Flow inference job after retries: " + e.message}'
                   severity: "ERROR"
+            - list_dream2flow_inference_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${dream2flowPrefix + "/"}
+                  maxResults: 1000
+                result: dream2flowInferenceCleanupList
+            - delete_dream2flow_inference_outputs_for_cleanup:
+                for:
+                  value: dream2flowInferenceCleanupItem
+                  in: ${default(dream2flowInferenceCleanupList.items, [])}
+                  steps:
+                    - delete_dream2flow_inference_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${dream2flowInferenceCleanupItem.name}
             - write_dream2flow_inference_start_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:
