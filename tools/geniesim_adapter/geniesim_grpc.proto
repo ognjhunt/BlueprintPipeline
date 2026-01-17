@@ -6,7 +6,7 @@
 //
 // Based on the Genie Sim 3.0 architecture:
 // - Repository: https://github.com/AgibotTech/genie_sim
-// - Port: 50051 (default gRPC port)
+// - Port: configured via GENIESIM_PORT (defaults to the adapter port)
 //
 // Usage:
 //   1. Generate Python stubs: python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. geniesim_grpc.proto

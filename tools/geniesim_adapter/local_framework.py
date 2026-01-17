@@ -7,7 +7,7 @@ directly within the Isaac Sim environment rather than through a non-existent hos
 
 Based on the official Genie Sim 3.0 architecture:
 - Repository: https://github.com/AgibotTech/genie_sim
-- Data Collection: Uses gRPC on port 50051 for client-server communication
+- Data Collection: Uses gRPC for client-server communication
 - Server: Runs inside Isaac Sim with PhysX and Replicator
 - Client: Controls robot, captures data, runs tasks
 
@@ -20,7 +20,8 @@ Architecture:
     │  │              GenieSimLocalFramework                   │   │
     │  │  ┌─────────────┐    ┌─────────────────────────────┐ │   │
     │  │  │ gRPC Client │◄──►│ Genie Sim Data Collection   │ │   │
-    │  │  │ (port 50051)│    │ Server (inside Isaac Sim)   │ │   │
+    │  │  │ (port from │    │ Server (inside Isaac Sim)   │ │   │
+    │  │  │ GENIESIM_) │    │                             │ │   │
     │  │  └─────────────┘    └─────────────────────────────┘ │   │
     │  └──────────────────────────────────────────────────────┘   │
     │                              ▲                              │
@@ -49,7 +50,7 @@ Usage:
 
 Environment Variables:
     GENIESIM_HOST: Genie Sim gRPC server host (default: localhost)
-    GENIESIM_PORT: Genie Sim gRPC server port (default: 50051)
+    GENIESIM_PORT: Genie Sim gRPC server port (default: adapter default port)
     GENIESIM_TIMEOUT: Connection timeout in seconds (default: 30)
     GENIESIM_ROOT: Path to Genie Sim installation (default: /opt/geniesim)
     ISAAC_SIM_PATH: Path to Isaac Sim installation (default: /isaac-sim)
@@ -83,6 +84,12 @@ if str(ADAPTER_ROOT) not in sys.path:
     sys.path.insert(0, str(ADAPTER_ROOT))
 
 from tools.logging_config import init_logging
+from tools.geniesim_adapter.config import (
+    DEFAULT_GENIESIM_HOST,
+    DEFAULT_GENIESIM_PORT,
+    get_geniesim_host,
+    get_geniesim_port,
+)
 
 # Configure logging
 init_logging()
@@ -204,8 +211,8 @@ class GenieSimConfig:
     """Configuration for Genie Sim local framework."""
 
     # Connection settings
-    host: str = "localhost"
-    port: int = 50051
+    host: str = DEFAULT_GENIESIM_HOST
+    port: int = DEFAULT_GENIESIM_PORT
     timeout: float = 30.0
     max_retries: int = 3
 
@@ -234,8 +241,8 @@ class GenieSimConfig:
         environment = os.getenv("GENIESIM_ENV", os.getenv("BP_ENV", "development")).lower()
         allow_linear_fallback = os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK", "0") == "1"
         return cls(
-            host=os.getenv("GENIESIM_HOST", "localhost"),
-            port=int(os.getenv("GENIESIM_PORT", "50051")),
+            host=get_geniesim_host(),
+            port=get_geniesim_port(),
             timeout=float(os.getenv("GENIESIM_TIMEOUT", "30")),
             geniesim_root=Path(os.getenv("GENIESIM_ROOT", "/opt/geniesim")),
             isaac_sim_path=Path(os.getenv("ISAAC_SIM_PATH", "/isaac-sim")),
@@ -287,13 +294,18 @@ class GenieSimGRPCClient:
     back to a subprocess-based approach.
     """
 
-    def __init__(self, host: str = "localhost", port: int = 50051, timeout: float = 30.0):
+    def __init__(
+        self,
+        host: str = DEFAULT_GENIESIM_HOST,
+        port: int = DEFAULT_GENIESIM_PORT,
+        timeout: float = 30.0,
+    ):
         """
         Initialize gRPC client.
 
         Args:
             host: Server hostname
-            port: Server port (default 50051)
+            port: Server port (defaults to GENIESIM_PORT)
             timeout: Request timeout in seconds
         """
         self.host = host
