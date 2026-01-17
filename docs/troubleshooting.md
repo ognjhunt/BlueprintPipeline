@@ -137,7 +137,7 @@ docker run --rm usd-assembly-job:smoke python -c "from pxr import Usd, UsdGeom, 
   curl -s -H "Authorization: Bearer <shared-secret>" http://<host>:<port>/debug | jq .
   ```
   **Expected response**: `HTTP/1.1 200` with JSON fields `models_ready`, `warmup_error`, `warmup_details`, and `installation_validation` when
-  `PARTICULATE_DEBUG=1` and `PARTICULATE_DEBUG_TOKEN=<shared-secret>` are set; otherwise `HTTP/1.1 403`.
+  debug is explicitly enabled via `PARTICULATE_DEBUG=1` and `PARTICULATE_DEBUG_TOKEN=<shared-secret>`; otherwise `HTTP/1.1 403`.
 
 **Expected behavior**
 - `GET /` returns `200` once model warmup completes; `503` during warmup or if warmup fails.

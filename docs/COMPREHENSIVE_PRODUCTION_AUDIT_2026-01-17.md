@@ -59,7 +59,7 @@ This comprehensive audit identified **~400+ issues** across 13 categories. Since
 | Issue | File | Line | Severity |
 |-------|------|------|----------|
 | **exec() on dynamic code** | `tools/isaac_lab_tasks/reward_functions.py` | 738 | HIGH - Code injection risk even with AST validation |
-| **Debug endpoint enabled by default** | `particulate-service/particulate_service.py` | 69-70 | HIGH - `PARTICULATE_DEBUG` defaults to `"1"` |
+| **Debug endpoint requires explicit enablement** | `particulate-service/particulate_service.py` | 69-70 | HIGH - `PARTICULATE_DEBUG` defaults to `"0"` and requires a token |
 | **Hardcoded mock API key** | `genie-sim-export-job/geniesim_client.py` | 561 | HIGH - `"mock-api-key"` in production code |
 | **No size limit on base64 decode** | `particulate_service.py` | 829-838 | HIGH - DoS via massive payload |
 | **SSRF in health check URLs** | `genie-sim-import-webhook/main.py` | 17-21 | MEDIUM - User-controllable URLs |
