@@ -198,3 +198,41 @@ python -c "from genie_sim_export_job.geniesim_client import JobStatus"
 # Should work without warnings (correct way)
 python -c "from tools.geniesim_adapter.local_framework import GenieSimLocalFramework"
 ```
+
+## Phase 2 Complete: Cleanup All Remaining References (2026-01-17)
+
+✅ **All remaining API references cleaned up**
+
+### Additional Changes:
+
+1. **`tools/secrets/secret_manager.py`** - Updated docstring examples
+   - Replaced `"genie-sim-api-key"` → `"gemini-api-key"` in all examples
+   - Lines: 35, 46, 50, 136, 140, 205, 212
+
+2. **`genie-sim-import-job/requirements.txt:8`** - Fixed comment
+   - Changed: `# HTTP clients for Genie Sim API` → `# HTTP clients for general use`
+
+3. **`genie-sim-import-job/import_from_geniesim.py:891`** - Fixed docstring
+   - Changed: `client: Genie Sim API client` → `client: Genie Sim client`
+
+4. **`genie-sim-submit-job/submit_to_geniesim.py`** - Renamed variable and error messages
+   - `EXPECTED_GENIESIM_API_VERSION` → `EXPECTED_GENIESIM_SERVER_VERSION` (6 occurrences)
+   - Error messages: "Genie Sim API version" → "Genie Sim server version"
+
+5. **`monitoring/dashboard_config.json`** - Renamed metric
+   - Metric: `geniesim_api_latency_seconds` → `geniesim_server_latency_seconds`
+   - Title: "Genie Sim API Availability" → "Genie Sim Server Availability"
+
+6. **`monitoring/README.md`** - Updated all references (3 locations)
+   - Metric name: `geniesim_api_latency_seconds` → `geniesim_server_latency_seconds`
+   - Alert name: `GenieSimAPIUnavailable` → `GenieSimServerUnavailable`
+   - Alert summary: "Genie Sim API unavailable" → "Genie Sim server unavailable"
+   - Section title: "Genie Sim API Unavailable" → "Genie Sim Server Unavailable"
+
+### Summary
+
+**Total changes across both phases:**
+- **Phase 1:** Removed ~1850 lines of REST API code
+- **Phase 2:** Updated 15+ references across 6 files
+
+All references to a non-existent "Genie Sim API" have been removed or corrected. The codebase now correctly reflects that Genie Sim 3.0 is a **local-only framework using gRPC**, not a hosted REST API.

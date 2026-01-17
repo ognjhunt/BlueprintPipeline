@@ -888,7 +888,7 @@ def run_import_job(
 
     Args:
         config: Import configuration
-        client: Genie Sim API client
+        client: Genie Sim client
 
     Returns:
         ImportResult with statistics and output paths

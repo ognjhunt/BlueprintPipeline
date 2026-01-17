@@ -42,7 +42,7 @@ from tools.metrics.pipeline_metrics import get_metrics
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
-EXPECTED_GENIESIM_API_VERSION = "3.0.0"
+EXPECTED_GENIESIM_SERVER_VERSION = "3.0.0"
 REQUIRED_GENIESIM_CAPABILITIES = {
     "data_collection",
     "recording",
@@ -160,10 +160,10 @@ def _validate_export_marker(marker: Dict[str, Any]) -> None:
 
     if not geniesim_schema:
         raise RuntimeError("Missing geniesim_schema_version in _GENIESIM_EXPORT_COMPLETE.")
-    if _parse_version(geniesim_schema)[0] != _parse_version(EXPECTED_GENIESIM_API_VERSION)[0]:
+    if _parse_version(geniesim_schema)[0] != _parse_version(EXPECTED_GENIESIM_SERVER_VERSION)[0]:
         raise RuntimeError(
-            "Genie Sim API version incompatibility: "
-            f"expected major {EXPECTED_GENIESIM_API_VERSION}, found {geniesim_schema}."
+            "Genie Sim server version incompatibility: "
+            f"expected major {EXPECTED_GENIESIM_SERVER_VERSION}, found {geniesim_schema}."
         )
 
     min_version = compatibility.get("min_geniesim_version")
@@ -172,10 +172,10 @@ def _validate_export_marker(marker: Dict[str, Any]) -> None:
         raise RuntimeError(
             "Missing schema_compatibility ranges in _GENIESIM_EXPORT_COMPLETE."
         )
-    if not _is_version_compatible(EXPECTED_GENIESIM_API_VERSION, min_version, max_version):
+    if not _is_version_compatible(EXPECTED_GENIESIM_SERVER_VERSION, min_version, max_version):
         raise RuntimeError(
-            "Genie Sim API version incompatibility: expected "
-            f"{EXPECTED_GENIESIM_API_VERSION} to be within [{min_version}, {max_version}]."
+            "Genie Sim server version incompatibility: expected "
+            f"{EXPECTED_GENIESIM_SERVER_VERSION} to be within [{min_version}, {max_version}]."
         )
 
 
@@ -378,7 +378,7 @@ def main() -> int:
         robot_type=robot_type,
         episodes_per_task=episodes_per_task,
         verbose=True,
-        expected_server_version=EXPECTED_GENIESIM_API_VERSION,
+        expected_server_version=EXPECTED_GENIESIM_SERVER_VERSION,
         required_capabilities=sorted(REQUIRED_GENIESIM_CAPABILITIES),
     )
     local_run_end = datetime.utcnow()
