@@ -14,7 +14,18 @@ if str(REPO_ROOT) not in sys.path:
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
 def load_da3_geom(geom_path: Path):
-    data = np.load(str(geom_path), allow_pickle=True)
+    # Pickle loading intentionally disabled for security.
+    try:
+        data = np.load(str(geom_path), allow_pickle=False)
+    except Exception as exc:
+        raise ValueError(f"Failed to load DA3 geom file as .npz: {geom_path}") from exc
+    if not isinstance(data, np.lib.npyio.NpzFile):
+        raise ValueError(f"DA3 geom file must be a .npz archive: {geom_path}")
+    required_keys = {"depth", "conf", "extrinsics", "intrinsics", "image_paths"}
+    missing_keys = required_keys.difference(data.files)
+    if missing_keys:
+        missing = ", ".join(sorted(missing_keys))
+        raise ValueError(f"DA3 geom file missing required keys: {missing}")
     depth = np.asarray(data["depth"])        # [N, H, W]
     conf = np.asarray(data["conf"])         # [N, H, W]
     extrinsics = np.asarray(data["extrinsics"])  # [N, 3, 4] (w2c)
