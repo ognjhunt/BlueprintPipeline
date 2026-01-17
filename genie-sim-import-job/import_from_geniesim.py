@@ -291,8 +291,11 @@ def _validate_schema_payload(
 
 
 def _load_json_file(path: Path) -> Any:
-    with open(path, "r") as handle:
-        return json.load(handle)
+    try:
+        with open(path, "r") as handle:
+            return json.load(handle)
+    except (FileNotFoundError, PermissionError, json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"Failed to load JSON file {path}: {exc}") from exc
 
 
 def _create_bundle_package(
