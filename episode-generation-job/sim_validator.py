@@ -178,7 +178,7 @@ class QualityMetrics:
     max_joint_violation: float = 0.0
     max_joint_velocity: float = 0.0
     max_joint_acceleration: float = 0.0
-    torque_limit_violations: int = 0  # P1-6 FIX: Count of torque violations
+    torque_limit_violations: int = 0  # Count of torque violations
 
     # Stability metrics
     gripper_slip_events: int = 0
@@ -209,7 +209,7 @@ class QualityMetrics:
             "max_joint_violation": self.max_joint_violation,
             "max_joint_velocity": self.max_joint_velocity,
             "max_joint_acceleration": self.max_joint_acceleration,
-            "torque_limit_violations": self.torque_limit_violations,  # P1-6 FIX
+            "torque_limit_violations": self.torque_limit_violations,
             "gripper_slip_events": self.gripper_slip_events,
             "object_dropped": self.object_dropped,
             "object_stable_at_end": self.object_stable_at_end,
@@ -280,7 +280,7 @@ class ValidationResult:
     # Timing
     validation_time_seconds: float = 0.0
 
-    # P1-4 FIX: Physics backend used for validation
+    # Physics backend used for validation
     physics_backend: str = "unknown"  # "isaac_sim", "heuristic", or "unknown"
     dev_only_fallback: bool = False  # Explicitly mark dev-only heuristic fallback
 
@@ -297,7 +297,7 @@ class ValidationResult:
             "can_retry": self.can_retry,
             "retry_suggestion": self.retry_suggestion,
             "validation_time_seconds": self.validation_time_seconds,
-            "physics_backend": self.physics_backend,  # P1-4 FIX
+            "physics_backend": self.physics_backend,
             "dev_only_fallback": self.dev_only_fallback,
         }
 
@@ -576,7 +576,7 @@ class SimulationValidator:
             )
         else:
             # Fall back to heuristic validation
-            result.physics_backend = "heuristic"  # P1-4 FIX: Set physics backend
+            result.physics_backend = "heuristic"  # Set physics backend
             result = self._validate_heuristic(
                 trajectory, motion_plan, scene_objects, result, task_success_checker
             )
@@ -662,7 +662,7 @@ class SimulationValidator:
         # Also run kinematic checks
         self._check_joint_limits(trajectory, result)
         self._check_velocities(trajectory, result)
-        self._check_torques(trajectory, result)  # P1-6 FIX: Check torque limits
+        self._check_torques(trajectory, result)  # Check torque limits
         self._check_trajectory_smoothness(trajectory, result)
 
         # Task success check
@@ -784,7 +784,7 @@ class SimulationValidator:
         if unexpected_collisions > self.config.max_unexpected_collisions:
             result.failure_reasons.append(FailureReason.COLLISION)
 
-        # P1-5 FIX: Track grasp stability metrics
+        # Track grasp stability metrics
         gripper_slip_count = 0
         object_dropped = False
         object_stable_at_end = True
@@ -843,7 +843,7 @@ class SimulationValidator:
                 # Object stable at end if velocity is low
                 object_stable_at_end = final_velocity < self.config.stability_threshold
 
-        # P1-5 FIX: Set grasp stability metrics
+        # Set grasp stability metrics
         result.metrics.gripper_slip_events = gripper_slip_count
         result.metrics.object_dropped = object_dropped
         result.metrics.object_stable_at_end = object_stable_at_end
@@ -900,12 +900,12 @@ class SimulationValidator:
         self.log("  DEV-ONLY fallback enabled (heuristic validation)", "WARNING")
         self._check_joint_limits(trajectory, result)
         self._check_velocities(trajectory, result)
-        self._check_torques(trajectory, result)  # P1-6 FIX: Check torque limits
+        self._check_torques(trajectory, result)  # Check torque limits
         self._check_collisions(trajectory, motion_plan, scene_objects, result)
         self._check_trajectory_smoothness(trajectory, result)
         self._check_task_success(trajectory, motion_plan, scene_objects, result, task_success_checker)
 
-        # P1-5 FIX: Heuristic grasp stability estimation
+        # Heuristic grasp stability estimation
         # Without physics, we can't detect actual slips, but we can estimate based on gripper motion
         gripper_positions = trajectory.get_gripper_positions()
         if len(gripper_positions) > 1:
@@ -1057,7 +1057,7 @@ class SimulationValidator:
         result: ValidationResult,
     ) -> None:
         """
-        P1-6 FIX: Check for torque limit violations using inverse dynamics.
+        Check for torque limit violations using inverse dynamics.
 
         Estimates required joint torques using simplified dynamics model:
         τ = I·α + C·v + G
@@ -1120,7 +1120,7 @@ class SimulationValidator:
                             "WARNING"
                         )
 
-        # P1-6 FIX: Store torque violations in metrics
+        # Store torque violations in metrics
         result.metrics.torque_limit_violations = torque_violations
         if torque_violations > 0:
             self.log(f"  Total torque limit violations: {torque_violations}", "WARNING")

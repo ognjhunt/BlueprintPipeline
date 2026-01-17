@@ -39,7 +39,7 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
-# LABS P1 FIX: Import premium feature modules with robust fallbacks
+# Import premium feature modules with robust fallbacks
 # These modules are in the same directory as post_processor.py
 try:
     from language_annotator import LanguageAnnotator
@@ -338,7 +338,7 @@ class UpsellPostProcessor:
     def _apply_language_annotations(self) -> None:
         """Add language annotations to episodes.
 
-        LABS P1 FIX: Uses pre-imported module with availability check.
+        Uses pre-imported module with availability check.
         """
         self.log("Applying language annotations...")
 
@@ -453,7 +453,7 @@ class UpsellPostProcessor:
     def _generate_vla_packages(self) -> None:
         """Generate VLA fine-tuning packages.
 
-        LABS P1 FIX: Uses pre-imported module with availability check.
+        Uses pre-imported module with availability check.
         """
         self.log("Generating VLA fine-tuning packages...")
 
@@ -521,7 +521,7 @@ class UpsellPostProcessor:
     def _run_sim2real_validation(self) -> None:
         """Run sim2real validation.
 
-        LABS P1 FIX: Uses pre-imported module with availability check.
+        Uses pre-imported module with availability check.
         """
         self.log(f"Running sim2real validation ({self.features.sim2real_tier})...")
 

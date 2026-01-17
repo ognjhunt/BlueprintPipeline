@@ -451,7 +451,7 @@ def check_service_health(endpoint: str, timeout: int = 30) -> Tuple[bool, str, O
             data = json.loads(body)
             return False, data.get("message", f"HTTP {e.code}"), data
         except (json.JSONDecodeError, UnicodeDecodeError, IOError) as parse_err:
-            # LABS P1 FIX: Replace bare except with specific exceptions
+            # Replace bare except with specific exceptions
             log(f"Failed to parse error response: {parse_err}", "WARNING")
             return False, f"HTTP {e.code}", None
     except urllib.error.URLError as e:
@@ -564,7 +564,7 @@ def call_particulate_service(
             try:
                 error_body = e.read().decode("utf-8", errors="replace")[:1000]
             except (UnicodeDecodeError, IOError, OSError) as read_err:
-                # LABS P1 FIX: Replace bare except with specific exceptions
+                # Replace bare except with specific exceptions
                 error_body = f"[Failed to read error body: {read_err}]"
 
             log(f"HTTP {e.code}: {error_body}", level="ERROR", obj_id=obj_id)
