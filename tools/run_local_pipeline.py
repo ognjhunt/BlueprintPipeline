@@ -48,6 +48,7 @@ References:
 
 import argparse
 import json
+import re
 import os
 import subprocess
 import sys
@@ -166,6 +167,7 @@ class LocalPipelineRunner:
             self.enable_inventory_enrichment = enable_inventory_enrichment
         self.disable_articulated_assets = disable_articulated_assets
         self.environment = os.getenv("BP_ENV", "development").lower()
+        self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
 
         # Derive scene ID from directory name
         self.scene_id = self.scene_dir.name
@@ -186,11 +188,28 @@ class LocalPipelineRunner:
         self.results: List[StepResult] = []
         self._geniesim_preflight_report: Optional[Dict[str, Any]] = None
         self._pending_articulation_preflight = False
+        self._path_redaction_regex = re.compile(r"(?:[A-Za-z]:\\\\|/)[^\\s]+")
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
         if self.verbose:
             print(f"[LOCAL-PIPELINE] [{level}] {msg}")
+
+    def _sanitize_error_message(self, message: str) -> str:
+        if not message:
+            return message
+        return self._path_redaction_regex.sub("<redacted-path>", message)
+
+    def _summarize_exception(self, exc: Exception) -> str:
+        sanitized_message = self._sanitize_error_message(str(exc))
+        if sanitized_message:
+            return f"{type(exc).__name__}: {sanitized_message}"
+        return type(exc).__name__
+
+    def _log_exception_traceback(self, context: str, exc: Exception) -> None:
+        self.log(f"{context}: {self._summarize_exception(exc)}", "ERROR")
+        if self.debug:
+            self.log(traceback.format_exc(), "DEBUG")
 
     def _write_marker(self, marker_path: Path, status: str) -> None:
         """Write a simple JSON marker file."""
@@ -599,11 +618,12 @@ class LocalPipelineRunner:
                     message=f"Unknown step: {step.value}",
                 )
         except Exception as e:
+            self._log_exception_traceback(f"Step {step.value} failed", e)
             result = StepResult(
                 step=step,
                 success=False,
                 duration_seconds=time.time() - start_time,
-                message=f"Exception: {e}\n{traceback.format_exc()}",
+                message=f"Exception: {self._summarize_exception(e)}",
             )
 
         result.duration_seconds = time.time() - start_time
@@ -1461,14 +1481,15 @@ class LocalPipelineRunner:
                 step=PipelineStep.ISAAC_LAB,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error: {e}",
+                message=f"Import error: {self._summarize_exception(e)}",
             )
         except Exception as e:
+            self._log_exception_traceback("Isaac Lab task generation failed", e)
             return StepResult(
                 step=PipelineStep.ISAAC_LAB,
                 success=False,
                 duration_seconds=0,
-                message=f"Error: {e}\n{traceback.format_exc()}",
+                message=f"Error: {self._summarize_exception(e)}",
             )
 
     def _run_geniesim_export(self) -> StepResult:
@@ -1481,7 +1502,7 @@ class LocalPipelineRunner:
                 step=PipelineStep.GENIESIM_EXPORT,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error (Genie Sim export job not found): {e}",
+                message=f"Import error (Genie Sim export job not found): {self._summarize_exception(e)}",
             )
 
         root = self.scene_dir.parent
@@ -1548,7 +1569,7 @@ class LocalPipelineRunner:
                 step=PipelineStep.GENIESIM_SUBMIT,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error (Genie Sim submit dependencies not found): {e}",
+                message=f"Import error (Genie Sim submit dependencies not found): {self._summarize_exception(e)}",
             )
 
         scene_graph_path = self.geniesim_dir / "scene_graph.json"
@@ -1595,13 +1616,13 @@ class LocalPipelineRunner:
             try:
                 sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
                 from geniesim_client import GenieSimClient, GenerationParams
-            except ImportError as e:
-                return StepResult(
-                    step=PipelineStep.GENIESIM_SUBMIT,
-                    success=False,
-                    duration_seconds=0,
-                    message=f"Import error (Genie Sim mock client not found): {e}",
-                )
+        except ImportError as e:
+            return StepResult(
+                step=PipelineStep.GENIESIM_SUBMIT,
+                success=False,
+                duration_seconds=0,
+                message=f"Import error (Genie Sim mock client not found): {self._summarize_exception(e)}",
+            )
 
             generation_params = GenerationParams(
                 episodes_per_task=episodes_per_task,
@@ -1747,7 +1768,7 @@ class LocalPipelineRunner:
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error (Genie Sim import job not found): {e}",
+                message=f"Import error (Genie Sim import job not found): {self._summarize_exception(e)}",
             )
 
         job_path = self.geniesim_dir / "job.json"
@@ -1902,14 +1923,15 @@ class LocalPipelineRunner:
                 step=PipelineStep.DWM,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error (DWM job not found): {e}",
+                message=f"Import error (DWM job not found): {self._summarize_exception(e)}",
             )
         except Exception as e:
+            self._log_exception_traceback("DWM preparation failed", e)
             return StepResult(
                 step=PipelineStep.DWM,
                 success=False,
                 duration_seconds=0,
-                message=f"Error: {e}\n{traceback.format_exc()}",
+                message=f"Error: {self._summarize_exception(e)}",
             )
 
     def _run_dwm_inference(self) -> StepResult:
@@ -1962,14 +1984,15 @@ class LocalPipelineRunner:
                 step=PipelineStep.DWM_INFERENCE,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error (DWM inference job not found): {e}",
+                message=f"Import error (DWM inference job not found): {self._summarize_exception(e)}",
             )
         except Exception as e:
+            self._log_exception_traceback("DWM inference failed", e)
             return StepResult(
                 step=PipelineStep.DWM_INFERENCE,
                 success=False,
                 duration_seconds=0,
-                message=f"Error: {e}\n{traceback.format_exc()}",
+                message=f"Error: {self._summarize_exception(e)}",
             )
 
     def _run_dream2flow(self) -> StepResult:
@@ -2037,14 +2060,15 @@ class LocalPipelineRunner:
                 step=PipelineStep.DREAM2FLOW,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error (Dream2Flow job not found): {e}",
+                message=f"Import error (Dream2Flow job not found): {self._summarize_exception(e)}",
             )
         except Exception as e:
+            self._log_exception_traceback("Dream2Flow preparation failed", e)
             return StepResult(
                 step=PipelineStep.DREAM2FLOW,
                 success=False,
                 duration_seconds=0,
-                message=f"Error: {e}\n{traceback.format_exc()}",
+                message=f"Error: {self._summarize_exception(e)}",
             )
 
     def _run_dream2flow_inference(self) -> StepResult:
@@ -2097,14 +2121,15 @@ class LocalPipelineRunner:
                 step=PipelineStep.DREAM2FLOW_INFERENCE,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error (Dream2Flow inference job not found): {e}",
+                message=f"Import error (Dream2Flow inference job not found): {self._summarize_exception(e)}",
             )
         except Exception as e:
+            self._log_exception_traceback("Dream2Flow inference failed", e)
             return StepResult(
                 step=PipelineStep.DREAM2FLOW_INFERENCE,
                 success=False,
                 duration_seconds=0,
-                message=f"Error: {e}\n{traceback.format_exc()}",
+                message=f"Error: {self._summarize_exception(e)}",
             )
 
     def _run_validation(self) -> StepResult:
@@ -2142,7 +2167,7 @@ class LocalPipelineRunner:
                 step=PipelineStep.VALIDATE,
                 success=False,
                 duration_seconds=0,
-                message=f"Import error: {e}",
+                message=f"Import error: {self._summarize_exception(e)}",
             )
 
     def _expected_output_paths(self, step: PipelineStep) -> List[Path]:
