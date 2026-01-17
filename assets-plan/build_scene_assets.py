@@ -1,6 +1,7 @@
 import os, json, sys
 from pathlib import Path
 
+from tools.validation.entrypoint_checks import validate_required_env_vars
 INTERACTIVE_KEYWORDS = {
     "door", "drawer", "cabinet", "fridge", "refrigerator", "oven", "freezer", "handle", "knob",
     "faucet", "tap", "switch", "lever", "hinge"
@@ -99,11 +100,21 @@ def infer_objects_from_multiview(multiview_root: Path, multiview_prefix: str):
     return inferred_objects
 
 def main():
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "MULTIVIEW_PREFIX": "Path prefix for multiview inputs (scenes/<sceneId>/multiview)",
+            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+        },
+        label="[ASSETS]",
+    )
+
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
     layout_prefix = os.getenv("LAYOUT_PREFIX")       # scenes/<sceneId>/layout
-    multiview_prefix = os.getenv("MULTIVIEW_PREFIX") # scenes/<sceneId>/multiview
-    assets_prefix = os.getenv("ASSETS_PREFIX")       # scenes/<sceneId>/assets
+    multiview_prefix = os.environ["MULTIVIEW_PREFIX"] # scenes/<sceneId>/multiview
+    assets_prefix = os.environ["ASSETS_PREFIX"]       # scenes/<sceneId>/assets
     seg_prefix = os.getenv("SEG_PREFIX")             # scenes/<sceneId>/seg (optional, for Gemini pipeline)
     layout_file = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
     interactive_ids_env = os.getenv("INTERACTIVE_OBJECT_IDS", "")

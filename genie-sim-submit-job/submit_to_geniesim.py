@@ -39,6 +39,7 @@ from geniesim_adapter.local_framework import (
     run_local_data_collection,
 )
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.validation.entrypoint_checks import validate_required_env_vars
 
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
 EXPECTED_GENIESIM_API_VERSION = "3.0.0"
@@ -270,10 +271,15 @@ def _validate_bundle_schemas(payloads: Dict[str, Any]) -> None:
 
 
 def main() -> int:
-    bucket = os.getenv("BUCKET")
-    scene_id = os.getenv("SCENE_ID")
-    if not bucket or not scene_id:
-        raise RuntimeError("BUCKET and SCENE_ID must be set")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+        },
+        label="[GENIESIM-SUBMIT]",
+    )
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
 
     preflight_report = run_geniesim_preflight_or_exit(
         "genie-sim-submit-job",
@@ -493,6 +499,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     metrics = get_metrics()
-    scene_id = os.getenv("SCENE_ID", "")
+    scene_id = os.environ.get("SCENE_ID", "unknown")
     with metrics.track_job("genie-sim-submit-job", scene_id):
         raise SystemExit(main())

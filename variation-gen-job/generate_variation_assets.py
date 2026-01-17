@@ -753,8 +753,8 @@ def main():
     )
 
     # Get configuration from environment
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
     replicator_prefix = os.getenv("REPLICATOR_PREFIX", f"scenes/{scene_id}/replicator")
     variation_assets_prefix = os.getenv("VARIATION_ASSETS_PREFIX", f"scenes/{scene_id}/variation_assets")
 
@@ -766,10 +766,6 @@ def main():
     priority_filter = priority_filter if priority_filter else None
 
     dry_run = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"}
-
-    if not scene_id:
-        logger.error("[VARIATION-GEN] SCENE_ID environment variable is required")
-        sys.exit(1)
 
     logger.info("[VARIATION-GEN] Starting variation asset generation")
     logger.info("[VARIATION-GEN] Scene ID: %s", scene_id)

@@ -3182,12 +3182,8 @@ def _run_main():
         logger.warning("[EPISODE-GEN-JOB] ========================================")
 
     # Get configuration from environment
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-
-    if not scene_id:
-        logger.error("[EPISODE-GEN-JOB] SCENE_ID is required")
-        sys.exit(1)
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
 
     # Prefixes with defaults
     assets_prefix = os.getenv("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
@@ -3338,15 +3334,22 @@ def _run_main():
 
 
 def main() -> None:
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+        },
+        label="[EPISODE-GEN-JOB]",
+    )
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
     assets_prefix = os.getenv(
         "ASSETS_PREFIX",
-        f"scenes/{scene_id}/assets" if scene_id else "",
+        f"scenes/{scene_id}/assets",
     )
     episodes_prefix = os.getenv(
         "EPISODES_PREFIX",
-        f"scenes/{scene_id}/episodes" if scene_id else "",
+        f"scenes/{scene_id}/episodes",
     )
     input_params = {
         "bucket": bucket,
@@ -3390,15 +3393,6 @@ def main() -> None:
 
     validated = False
     try:
-        validate_required_env_vars(
-            {
-                "BUCKET": "GCS bucket name",
-                "SCENE_ID": "Scene identifier",
-            },
-            label="[EPISODE-GEN-JOB]",
-        )
-        if not scene_id:
-            raise ValueError("SCENE_ID is required")
         assets_root = Path("/mnt/gcs") / assets_prefix
         validate_scene_manifest(assets_root / "scene_manifest.json", label="[EPISODE-GEN-JOB]")
         validated = True

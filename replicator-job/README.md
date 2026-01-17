@@ -124,6 +124,14 @@ Edit `configs/<policy_id>.json` to customize:
 | `GEMINI_API_KEY` | Yes | Gemini API key for scene analysis |
 | `REQUESTED_POLICIES` | No | Comma-separated list of specific policies to generate |
 
+Example:
+
+```bash
+export BUCKET=blueprint-8c1ca.appspot.com
+export SCENE_ID=scene_123
+# Replicator outputs land under gs://blueprint-8c1ca.appspot.com/scenes/${SCENE_ID}/replicator
+```
+
 ## Deployment
 
 ### Build Docker Image

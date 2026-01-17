@@ -69,6 +69,7 @@ from geniesim_client import (
     GeneratedEpisodeMetadata,
 )
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.validation.entrypoint_checks import validate_required_env_vars
 from quality_config import (
     DEFAULT_MIN_QUALITY_SCORE,
     QUALITY_CONFIG,
@@ -905,7 +906,7 @@ def run_import_job(
     )
     quality_min_score = 0.0
     quality_max_score = 0.0
-    scene_id = os.getenv("SCENE_ID", "")
+    scene_id = os.environ.get("SCENE_ID", "unknown")
 
     try:
         # Step 1: Check/wait for job completion
@@ -1403,7 +1404,7 @@ def run_local_import_job(
         job_id=config.job_id,
     )
     result.output_dir = config.output_dir
-    scene_id = os.getenv("SCENE_ID", "")
+    scene_id = os.environ.get("SCENE_ID", "unknown")
 
     recordings_dir = config.output_dir / "recordings"
     if not recordings_dir.exists():
@@ -1715,8 +1716,15 @@ def main():
         sys.exit(1)
 
     # Output configuration
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "unknown")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+        },
+        label="[GENIE-SIM-IMPORT]",
+    )
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
     output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
     submission_mode = os.getenv("GENIESIM_SUBMISSION_MODE", "api").lower()
     job_metadata_path = os.getenv("JOB_METADATA_PATH") or None
