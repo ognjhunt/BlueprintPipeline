@@ -40,7 +40,8 @@ omit =
 # Reporting options
 precision = 2
 show_missing = True
-skip_covered = False
+skip_covered = True
+skip_empty = True
 sort = Cover
 
 # Exclude lines from coverage
