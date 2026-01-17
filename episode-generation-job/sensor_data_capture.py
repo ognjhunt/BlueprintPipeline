@@ -71,7 +71,7 @@ except ImportError:
 # =============================================================================
 # Data Pack Configuration (imported from data_pack_config)
 # =============================================================================
-# P2-11 FIX: Import DataPackTier from primary definition to avoid duplication
+# Import DataPackTier from primary definition to avoid duplication
 from data_pack_config import DataPackTier
 from usd_scene_scan import discover_camera_prim_specs, get_usd_stage, resolve_robot_prim_paths
 
@@ -474,7 +474,7 @@ class SensorDataConfig:
 @dataclass
 class ContactData:
     """
-    P2-10 FIX: Formal ContactData schema.
+    Formal ContactData schema.
 
     Represents a single contact event from physics simulation.
     Includes all information needed for contact-aware learning.
@@ -530,7 +530,7 @@ class ContactData:
 @dataclass
 class FrameSensorData:
     """
-    P2-10 FIX: Formal FrameSensorData schema with proper type hints.
+    Formal FrameSensorData schema with proper type hints.
 
     Sensor data captured for a single frame during trajectory execution.
     Includes visual observations, ground-truth annotations, and physics state.
@@ -721,7 +721,7 @@ class EpisodeSensorData:
 
     def validate_all_frames(self) -> List[str]:
         """
-        P2-10 FIX: Validate all frames in episode.
+        Validate all frames in episode.
 
         Calls validation methods on each frame and collects errors.
 
@@ -1276,7 +1276,7 @@ class IsaacSimSensorCapture:
             "scene_state": {},
             "contacts": [],
             "data_source": "simulation" if self._omni is not None else "input_fallback",
-            "is_mock": self.is_mock(),  # P0-5 FIX: Explicit flag for mock data
+            "is_mock": self.is_mock(),  # Explicit flag for mock data
         }
 
         # Capture contacts first

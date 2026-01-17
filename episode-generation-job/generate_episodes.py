@@ -577,7 +577,7 @@ class ManipulationTaskGenerator:
         """Create minimal task specification without LLM."""
         from task_specifier import SkillSegment
 
-        # P2-1 FIX: Get default position from task, or compute from robot workspace
+        # Get default position from task, or compute from robot workspace
         goal_position = task.get("place_position")
         if goal_position is None:
             # Compute sensible default from robot workspace and task context
@@ -697,7 +697,7 @@ class ManipulationTaskGenerator:
         """Convert TaskPlannerOutput to task definitions."""
         tasks = []
 
-        # P2-1 FIX: Get workspace defaults from manifest or robot config
+        # Get workspace defaults from manifest or robot config
         robot_config = manifest.get("robot_config", {})
         workspace_center = robot_config.get("workspace_center", [0.5, 0.0, 0.85])
 
@@ -727,11 +727,11 @@ class ManipulationTaskGenerator:
         return tasks
 
     def _generate_simplified_tasks(self, manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """P2-1 FIX: Generate tasks from object categories (fallback)."""
+        """Generate tasks from object categories (fallback)."""
         tasks = []
         objects = manifest.get("objects", [])
 
-        # P2-1 FIX: Get workspace defaults from manifest or robot config
+        # Get workspace defaults from manifest or robot config
         robot_config = manifest.get("robot_config", {})
         workspace_center = robot_config.get("workspace_center", [0.5, 0.0, 0.85])
 
@@ -969,7 +969,7 @@ class ManipulationTaskGenerator:
         robot_type: str,
     ) -> List[float]:
         """
-        P2-1 FIX: Compute sensible default goal position from task context and robot workspace.
+        Compute sensible default goal position from task context and robot workspace.
 
         Strategy:
         1. If task has explicit goal_position in manifest, use it
@@ -1011,7 +1011,7 @@ class ManipulationTaskGenerator:
         manifest: Dict[str, Any],
     ) -> List[float]:
         """
-        P2-1 FIX: Calculate a sensible place position for an object.
+        Calculate a sensible place position for an object.
 
         Now uses workspace-aware computation instead of hardcoded defaults.
         """
@@ -1582,7 +1582,7 @@ class EpisodeGenerator:
                 "dimensions": task["target_dimensions"],
             }
 
-            # P1-7 FIX: Make articulation info configurable from task specification
+            # Make articulation info configurable from task specification
             articulation_info = None
             if task.get("is_articulated"):
                 # Try to get articulation info from task, otherwise use defaults
@@ -2012,10 +2012,10 @@ class EpisodeGenerator:
         manifest: Dict[str, Any],
         num_variations: int,
     ) -> List[GeneratedEpisode]:
-        """P2-1 FIX: Simple variation without CP-Gen (fallback)."""
+        """Simple variation without CP-Gen (fallback)."""
         all_episodes = list(seed_episodes)
 
-        # P2-1 FIX: Get workspace defaults from manifest or robot config
+        # Get workspace defaults from manifest or robot config
         robot_config = manifest.get("robot_config", {})
         workspace_center = robot_config.get("workspace_center", [0.5, 0.0, 0.85])
 
@@ -2048,7 +2048,7 @@ class EpisodeGenerator:
                         offset[2] = 0
                         obj["position"] = [p + o for p, o in zip(pos, offset)]
 
-            # P2-1 FIX: Regenerate episode for this variation
+            # Regenerate episode for this variation
             target_object = {
                 "id": seed.motion_plan.target_object_id if seed.motion_plan else "target",
                 "position": seed.motion_plan.target_object_position.tolist() if seed.motion_plan and seed.motion_plan.target_object_position is not None else workspace_center,
@@ -2954,7 +2954,7 @@ def _run_main():
     # PHASE 1: Isaac Sim Enforcement + Environment Check
     # =========================================================================
 
-    # P0-4 FIX: Explicit Isaac Sim availability check at startup
+    # Explicit Isaac Sim availability check at startup
     isaac_sim_available = False
     allow_mock_capture = False
 
@@ -2964,7 +2964,7 @@ def _run_main():
             # Get environment capabilities
             capabilities = get_environment_capabilities()
 
-            # P0-4 FIX: Extract Isaac Sim availability from capabilities
+            # Extract Isaac Sim availability from capabilities
             isaac_sim_available = capabilities.get("isaac_sim_available", False) if isinstance(capabilities, dict) else False
 
             # Print detailed environment report
@@ -2986,7 +2986,7 @@ def _run_main():
             else:
                 allow_mock_capture = allow_mock_capture_env
 
-            # P0-4 FIX: Confirm Isaac Sim is available after enforcement
+            # Confirm Isaac Sim is available after enforcement
             if not isaac_sim_available:
                 print("[EPISODE-GEN-JOB] ⚠️  WARNING: Isaac Sim not confirmed available")
 
@@ -3000,7 +3000,7 @@ def _run_main():
         # Fallback to legacy enforcement (quality system unavailable)
         print("[EPISODE-GEN-JOB] Using legacy Isaac Sim check (quality system unavailable)\n")
 
-        # P0-4 FIX: Add explicit check for sensor capture environment
+        # Add explicit check for sensor capture environment
         replicator_available = False
         if check_sensor_capture_environment is not None:
             status = check_sensor_capture_environment()
@@ -3056,7 +3056,7 @@ def _run_main():
             # Development mode: allow override for testing
             allow_mock_data = os.getenv("ALLOW_MOCK_DATA", "false").lower() == "true"
 
-        # P0-4 FIX: Log configuration BEFORE checking Isaac Sim
+        # Log configuration BEFORE checking Isaac Sim
         print(f"[EPISODE-GEN-JOB] Production mode: {is_production}")
         print(f"[EPISODE-GEN-JOB] Require real physics: {require_real_physics}")
         print(f"[EPISODE-GEN-JOB] Allow mock data: {allow_mock_data}")

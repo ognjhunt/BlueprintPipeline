@@ -337,9 +337,7 @@ class Regen3DAdapter:
         environment_type: str = "generic",
         scale_factor: float = 1.0,
     ) -> Dict[str, Any]:
-        """Create a canonical scene_manifest.json from 3D-RE-GEN output.
-
-        (P1-23) Now applies scale_factor consistently with create_layout().
+        """Create a canonical scene_manifest.json from 3D-RE-GEN output. Now applies scale_factor consistently with create_layout().
 
         Args:
             regen3d_output: Parsed 3D-RE-GEN output
@@ -406,9 +404,7 @@ class Regen3DAdapter:
         scale_factor: float = 1.0,
         is_background: bool = False,
     ) -> Dict[str, Any]:
-        """Convert a Regen3DObject to manifest object format.
-
-        (P1-23) Now applies scale_factor to translation and scale components.
+        """Convert a Regen3DObject to manifest object format. Now applies scale_factor to translation and scale components.
         """
         # Extract transform components from matrix
         transform = self._decompose_transform(obj.pose.transform_matrix)
@@ -544,9 +540,7 @@ class Regen3DAdapter:
         return [float(w), float(x), float(y), float(z)]
 
     def _compute_room_bounds(self, regen3d_output: Regen3DOutput, scale_factor: float = 1.0) -> Dict[str, Any]:
-        """Compute room bounds from all objects.
-
-        (P1-23) Now applies scale_factor to bounds.
+        """Compute room bounds from all objects. Now applies scale_factor to bounds.
         """
         all_bounds = []
 
@@ -652,9 +646,7 @@ class Regen3DAdapter:
         scale_factor: float,
         is_background: bool = False,
     ) -> Dict[str, Any]:
-        """Convert Regen3DObject to layout object format with OBB data.
-
-        (P2-13) OBB (Oriented Bounding Box) format used by downstream jobs:
+        """Convert Regen3DObject to layout object format with OBB data. OBB (Oriented Bounding Box) format used by downstream jobs:
         - center: 3D position [x, y, z] in world coordinates
         - extents: Half-sizes of the bounding box [hx, hy, hz]
         - R: 3x3 rotation matrix [row0, row1, row2]

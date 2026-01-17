@@ -3,7 +3,7 @@
 Defines quality gates at key pipeline checkpoints with severity levels
 and human-in-the-loop validation support.
 
-LABS P1 FIX: This module now supports:
+This module now supports:
 - Configurable thresholds via quality_config.json
 - Human approval workflow for blocked gates
 - Manual override with audit logging
@@ -89,7 +89,7 @@ class QualityGateResult:
 
 
 # =============================================================================
-# LABS P1 FIX: Human Approval Workflow
+# Human Approval Workflow
 # =============================================================================
 
 
@@ -149,7 +149,7 @@ class ApprovalRequest:
 
 class HumanApprovalManager:
     """
-    LABS P1 FIX: Manager for human-in-the-loop approval workflow.
+    Manager for human-in-the-loop approval workflow.
 
     Handles:
     - Creating approval requests for failed gates
@@ -468,7 +468,7 @@ class HumanApprovalManager:
     ) -> bool:
         """Override a pending approval request (bypass with audit).
 
-        LABS P1 FIX: Allows labs to proceed past failed gates with documented reason.
+        Allows labs to proceed past failed gates with documented reason.
 
         Args:
             request_id: The approval request ID
@@ -692,7 +692,7 @@ class QualityGate:
 class QualityGateRegistry:
     """Registry and executor for quality gates.
 
-    LABS P1 FIX: Now supports configurable thresholds via quality_config.json
+    Now supports configurable thresholds via quality_config.json
     and integrates with HumanApprovalManager for blocked gates.
 
     Usage:
@@ -814,7 +814,7 @@ class QualityGateRegistry:
         approval_timeout_hours: Optional[float] = None,
     ) -> Tuple[List[QualityGateResult], bool]:
         """
-        LABS P1 FIX: Run checkpoint with human approval workflow for failures.
+        Run checkpoint with human approval workflow for failures.
 
         This method runs all gates for a checkpoint and handles approval
         workflow for any gates that require human approval.
@@ -1003,7 +1003,7 @@ class QualityGateRegistry:
         ))
 
         # QG-2: Physics Plausibility
-        # LABS P1 FIX: Use configurable thresholds
+        # Use configurable thresholds
         def check_physics(ctx: Dict[str, Any]) -> QualityGateResult:
             physics_data = ctx.get("physics_properties", {})
             objects = physics_data.get("objects", [])
@@ -1236,7 +1236,7 @@ class QualityGateRegistry:
         ))
 
         # QG-6: Episode Quality
-        # LABS P1 FIX: Use configurable thresholds
+        # Use configurable thresholds
         def check_episodes(ctx: Dict[str, Any]) -> QualityGateResult:
             episode_stats = ctx.get("episode_stats", {})
 
@@ -1547,7 +1547,7 @@ class QualityGateRegistry:
             require_human_approval=True,
         ))
 
-        # LABS P1 FIX: QG-6b - Sim2Real Transfer Validation
+        # QG-6b - Sim2Real Transfer Validation
         # This gate validates that generated episodes will transfer well to real robots
         def check_sim2real(ctx: Dict[str, Any]) -> QualityGateResult:
             sim2real_metrics = ctx.get("sim2real_metrics", {})
@@ -1642,7 +1642,7 @@ class QualityGateRegistry:
             name="Sim2Real Transfer Validation",
             checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
             severity=QualityGateSeverity.WARNING,
-            description="LABS P1 FIX: Validates sim-to-real transfer fidelity for production deployment",
+            description="Validates sim-to-real transfer fidelity for production deployment",
             check_fn=check_sim2real,
             notify_on_fail=True,
         ))

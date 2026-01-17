@@ -164,7 +164,7 @@ class LeRobotEpisode:
     success: bool = True
     total_reward: float = 0.0  # Computed by RewardComputer
     quality_score: float = 1.0
-    is_mock: bool = False  # P0-5 FIX: Flag for mock sensor data
+    is_mock: bool = False  # Flag for mock sensor data
 
     # Reward breakdown (for interpretability)
     reward_components: Dict[str, float] = field(default_factory=dict)
@@ -667,7 +667,7 @@ class LeRobotExporter:
 
         episode_index = len(self.episodes)
 
-        # P2-3 FIX: Compute reward with comprehensive error handling and logging
+        # Compute reward with comprehensive error handling and logging
         total_reward = 0.0
         reward_components = {}
         reward_computation_status = "not_attempted"
@@ -696,7 +696,7 @@ class LeRobotExporter:
                     self.log(traceback.format_exc(), "DEBUG")
                 self.log(f"  Using heuristic fallback for reward computation", "WARNING")
 
-                # P2-3 FIX: Fallback based on quality_score and success (more nuanced than hardcoded 0.7)
+                # Fallback based on quality_score and success (more nuanced than hardcoded 0.7)
                 # Success = quality_score (e.g., 0.85 quality → 0.85 reward)
                 # Failure = quality_score * 0.3 (e.g., 0.85 quality → 0.255 reward)
                 total_reward = quality_score if success else (quality_score * 0.3)
@@ -709,7 +709,7 @@ class LeRobotExporter:
                 }
                 reward_computation_status = "failed_with_fallback"
         else:
-            # P2-3 FIX: Improved fallback with logging of reason
+            # Improved fallback with logging of reason
             if not HAVE_REWARD_COMPUTATION:
                 reason = "reward_computer_not_available"
                 self.log(f"  Reward computation module not available for episode {episode_index}", "DEBUG")
@@ -729,7 +729,7 @@ class LeRobotExporter:
             }
             reward_computation_status = "fallback"
 
-        # P0-5 FIX: Extract is_mock flag from sensor_data
+        # Extract is_mock flag from sensor_data
         is_mock = False
         if sensor_data is not None:
             # Check if sensor_data has frames with is_mock flag
@@ -788,7 +788,7 @@ class LeRobotExporter:
 
     def _validate_episode_completeness(self) -> List[Tuple[int, List[str]]]:
         """
-        P1-13 FIX: Validate episode completeness before export.
+        Validate episode completeness before export.
 
         Checks for each episode:
         1. Trajectory is not None and has frames
@@ -842,7 +842,7 @@ class LeRobotExporter:
 
     def _validate_data_pack_tier_compliance(self) -> List[Tuple[int, List[str]]]:
         """
-        P1-14 FIX: Validate data pack tier compliance.
+        Validate data pack tier compliance.
 
         Checks that all episodes have the data required for advertised tier:
         - Core: RGB + state + actions + metadata
@@ -920,7 +920,7 @@ class LeRobotExporter:
 
     def _validate_camera_calibration(self) -> List[Tuple[int, List[str]]]:
         """
-        P1-15 FIX: Validate camera calibration matrices.
+        Validate camera calibration matrices.
 
         For episodes with sensor data, checks:
         1. Intrinsic matrices are 3x3 and upper triangular
@@ -1016,7 +1016,7 @@ class LeRobotExporter:
 
     def _validate_trajectory_sensor_alignment(self) -> List[Dict[str, Any]]:
         """
-        P2-4 FIX: Validate that trajectory frames and sensor data frames are aligned.
+        Validate that trajectory frames and sensor data frames are aligned.
 
         Checks for each episode:
         1. If sensor_data exists, validate frame counts match
@@ -1103,7 +1103,7 @@ class LeRobotExporter:
         frame_idx: int
     ) -> List[str]:
         """
-        P2-5 FIX: Validate RGB image frame.
+        Validate RGB image frame.
 
         Checks:
         - Shape is (H, W, 3)
@@ -1148,7 +1148,7 @@ class LeRobotExporter:
         frame_idx: int
     ) -> List[str]:
         """
-        P2-5 FIX: Validate depth map frame.
+        Validate depth map frame.
 
         Checks:
         - Shape is (H, W)
@@ -1201,7 +1201,7 @@ class LeRobotExporter:
         frame_idx: int
     ) -> List[str]:
         """
-        P2-5 FIX: Validate segmentation mask frame.
+        Validate segmentation mask frame.
 
         Checks:
         - Shape is (H, W)
@@ -1238,7 +1238,7 @@ class LeRobotExporter:
         frame_idx: int
     ) -> List[str]:
         """
-        P2-5 FIX: Validate bounding box annotations (COCO format).
+        Validate bounding box annotations (COCO format).
 
         Checks:
         - COCO format compliance: [x, y, width, height]
@@ -1291,7 +1291,7 @@ class LeRobotExporter:
 
     def _verify_parquet_exports(self, data_dir: Path) -> List[Tuple[Path, List[str]]]:
         """
-        P2-9 FIX: Verify Parquet files after export.
+        Verify Parquet files after export.
 
         Checks:
         1. File exists and is readable
@@ -1357,7 +1357,7 @@ class LeRobotExporter:
 
     def finalize(self) -> Path:
         """
-        P1-13, P1-14, P1-15, P2-9 FIX: Write the complete dataset to disk with comprehensive validation.
+        Write the complete dataset to disk with comprehensive validation.
 
         Validates:
         - Episode completeness (all required fields present)
@@ -1393,7 +1393,7 @@ class LeRobotExporter:
         data_dir.mkdir(exist_ok=True)
 
         try:
-            # P1-13 FIX: Validate episode completeness before export
+            # Validate episode completeness before export
             self.log("Validating episode completeness...")
             incomplete = self._validate_episode_completeness()
             if incomplete:
@@ -1429,7 +1429,7 @@ class LeRobotExporter:
             else:
                 self.log("  All episodes are complete")
 
-            # P1-14 FIX: Validate data pack tier compliance
+            # Validate data pack tier compliance
             self.log("Validating data pack tier compliance...")
             non_compliant = self._validate_data_pack_tier_compliance()
             if non_compliant:
@@ -1485,7 +1485,7 @@ class LeRobotExporter:
                     "action": "none",
                 }
 
-            # P1-15 FIX: Validate camera calibration matrices
+            # Validate camera calibration matrices
             self.log("Validating camera calibration matrices...")
             bad_calibrations = self._validate_camera_calibration()
             if bad_calibrations:
@@ -1499,7 +1499,7 @@ class LeRobotExporter:
             else:
                 self.log("  All calibration matrices are valid")
 
-            # P2-4 FIX: Validate trajectory-sensor frame alignment
+            # Validate trajectory-sensor frame alignment
             self.log("Validating trajectory-sensor frame alignment...")
             alignment_errors = self._validate_trajectory_sensor_alignment()
             if alignment_errors:
@@ -1534,7 +1534,7 @@ class LeRobotExporter:
             self.log("Writing episode data...")
             self._write_episodes(data_dir)
 
-            # P2-9 FIX: Verify Parquet exports after writing
+            # Verify Parquet exports after writing
             self.log("Verifying Parquet file exports...")
             parquet_errors = self._verify_parquet_exports(data_dir)
             if parquet_errors:
@@ -1664,9 +1664,9 @@ class LeRobotExporter:
         - observation.state dimensions match robot DOF
         - action dimensions match robot DOF + gripper
         - timestamps are monotonically increasing
-        - P1-2 FIX: Action continuity (no large jumps)
-        - P1-2 FIX: Joint velocity/acceleration limits
-        - P1-2 FIX: Gripper position range (0.0-1.0)
+        - Action continuity (no large jumps)
+        - Joint velocity/acceleration limits
+        - Gripper position range (0.0-1.0)
 
         Raises:
             ValueError: If validation fails
@@ -1703,7 +1703,7 @@ class LeRobotExporter:
                 f"Episode {episode_index}: negative timestamps detected"
             )
 
-        # P1-2 FIX: Validate gripper position range (0.0-1.0)
+        # Validate gripper position range (0.0-1.0)
         for i, action in enumerate(action_data):
             gripper_pos = action[-1]  # Last element is gripper
             if not (0.0 <= gripper_pos <= 1.0):
@@ -1711,7 +1711,7 @@ class LeRobotExporter:
                     f"Episode {episode_index}, frame {i}: gripper position {gripper_pos:.3f} out of range [0.0, 1.0]"
                 )
 
-        # P1-2 FIX: Validate action continuity (detect large jumps between frames)
+        # Validate action continuity (detect large jumps between frames)
         # Max joint displacement per frame (radians or meters depending on joint type)
         # This is a heuristic - actual limits depend on robot and control frequency
         max_joint_delta = 0.5  # radians per timestep (conservative for 30Hz control)
@@ -1749,7 +1749,7 @@ class LeRobotExporter:
                         "WARNING"
                     )
 
-        # P1-2 FIX: Validate joint velocity limits (heuristic based on robot type)
+        # Validate joint velocity limits (heuristic based on robot type)
         # Standard industrial robot velocity limits (conservative)
         max_joint_velocity = 2.0  # rad/s (conservative for 7-DOF arms)
 
@@ -1770,7 +1770,7 @@ class LeRobotExporter:
                         f"This trajectory may not be executable on real hardware."
                     )
 
-        # P1-2 FIX: Validate joint acceleration limits (heuristic)
+        # Validate joint acceleration limits (heuristic)
         max_joint_acceleration = 5.0  # rad/s² (conservative)
 
         for i in range(2, len(state_data)):
@@ -1829,7 +1829,7 @@ class LeRobotExporter:
             episode_index=episode.episode_index,
         )
 
-        # P1-1 FIX: Validate ee_position is not None (cannot use [0,0,0] as it's a valid position)
+        # Validate ee_position is not None (cannot use [0,0,0] as it's a valid position)
         for i, s in enumerate(states):
             if s.ee_position is None:
                 raise ValueError(
@@ -2125,7 +2125,7 @@ class LeRobotExporter:
                         "variation_index": episode.variation_index,
                         "success": episode.success,
                         "quality_score": episode.quality_score,
-                        "is_mock": episode.is_mock,  # P0-5 FIX: Explicit flag for mock data
+                        "is_mock": episode.is_mock,  # Explicit flag for mock data
                     }
                     # Add sensor data info if available
                     if episode.sensor_data is not None:
@@ -2177,7 +2177,7 @@ class LeRobotExporter:
                 self._copy_video(episode.camera_video_path, chunk_dir, episode.episode_index)
 
     def _write_episode_videos(self, episode: LeRobotEpisode, chunk_dir: Path) -> None:
-        """P2-5 FIX: Write video files with per-frame validation."""
+        """Write video files with per-frame validation."""
         sensor_data = episode.sensor_data
         if sensor_data is None or not hasattr(sensor_data, 'frames'):
             return
@@ -2189,7 +2189,7 @@ class LeRobotExporter:
 
             video_path = video_dir / f"episode_{episode.episode_index:06d}.mp4"
 
-            # P2-5 FIX: Collect RGB frames with validation
+            # Collect RGB frames with validation
             frames = []
             validation_errors = []
             expected_frames = 0
@@ -2201,7 +2201,7 @@ class LeRobotExporter:
                     expected_frames += 1
                     rgb_frame = frame.rgb_images[camera_id]
 
-                    # P2-5 FIX: Validate RGB frame
+                    # Validate RGB frame
                     frame_errors = self._validate_rgb_frame(
                         rgb_frame, episode.episode_index, camera_id, frame_idx
                     )
@@ -2345,7 +2345,7 @@ class LeRobotExporter:
             self._write_privileged_state_data(sensor_data, chunk_dir, episode_idx)
 
     def _write_depth_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
-        """P2-5 FIX: Write depth maps with validation."""
+        """Write depth maps with validation."""
         for camera_id in sensor_data.camera_ids if hasattr(sensor_data, 'camera_ids') else []:
             depth_dir = chunk_dir / "depth" / camera_id
             depth_dir.mkdir(parents=True, exist_ok=True)
@@ -2357,7 +2357,7 @@ class LeRobotExporter:
                 if hasattr(frame, 'depth_maps') and camera_id in frame.depth_maps:
                     depth_frame = frame.depth_maps[camera_id]
 
-                    # P2-5 FIX: Validate depth frame
+                    # Validate depth frame
                     frame_errors = self._validate_depth_frame(
                         depth_frame, episode_idx, camera_id, frame_idx
                     )
@@ -2385,7 +2385,7 @@ class LeRobotExporter:
                 )
 
     def _write_segmentation_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
-        """P2-5 FIX: Write segmentation masks with validation."""
+        """Write segmentation masks with validation."""
         for camera_id in sensor_data.camera_ids if hasattr(sensor_data, 'camera_ids') else []:
             seg_dir = chunk_dir / "segmentation" / camera_id
             seg_dir.mkdir(parents=True, exist_ok=True)
@@ -2438,7 +2438,7 @@ class LeRobotExporter:
                 )
 
     def _write_bbox_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
-        """P2-5 FIX: Write bounding box annotations with validation."""
+        """Write bounding box annotations with validation."""
         bbox_dir = chunk_dir / "bboxes"
         bbox_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2458,7 +2458,7 @@ class LeRobotExporter:
             if hasattr(frame, 'bboxes_3d'):
                 frame_bboxes["bboxes_3d"] = frame.bboxes_3d
 
-            # P2-5 FIX: Validate bounding boxes
+            # Validate bounding boxes
             if frame_bboxes["bboxes_2d"] or frame_bboxes["bboxes_3d"]:
                 frame_errors = self._validate_bbox_frame(
                     frame_bboxes, episode_idx, "global", frame_idx

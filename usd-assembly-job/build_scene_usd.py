@@ -84,9 +84,7 @@ def safe_path_join(root: Path, rel: str) -> Path:
 
 
 def matrix_from_obb(obb: Dict) -> Optional[np.ndarray]:
-    """Build a 4x4 transform matrix from an OBB (Oriented Bounding Box) record.
-
-    (P2-13) OBB to Transform Conversion
+    """Build a 4x4 transform matrix from an OBB (Oriented Bounding Box) record. OBB to Transform Conversion
     ===================================
 
     Input OBB format (from regen3d_adapter/adapter.py):
