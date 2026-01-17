@@ -210,10 +210,33 @@ class HumanApprovalManager:
         # Get settings from config
         if self.config and hasattr(self.config, 'human_approval'):
             self.timeout_hours = self.config.human_approval.timeout_hours
-            self.auto_approve_on_timeout = self.config.human_approval.auto_approve_on_timeout
+            auto_approve_on_timeout = self.config.human_approval.auto_approve_on_timeout
+            allow_auto_approve_non_prod = (
+                self.config.human_approval.allow_auto_approve_on_timeout_non_production
+            )
         else:
             self.timeout_hours = float(os.getenv("APPROVAL_TIMEOUT_HOURS", "24"))
-            self.auto_approve_on_timeout = os.getenv("AUTO_APPROVE_ON_TIMEOUT", "false").lower() == "true"
+            auto_approve_on_timeout = os.getenv("AUTO_APPROVE_ON_TIMEOUT", "false").lower() == "true"
+            allow_auto_approve_non_prod = (
+                os.getenv("ALLOW_AUTO_APPROVE_ON_TIMEOUT_NON_PROD", "false").lower() == "true"
+            )
+
+        if self._is_production_mode():
+            if auto_approve_on_timeout:
+                self.log(
+                    "Auto-approve on timeout requested but disabled in production; "
+                    "requests will expire instead.",
+                    "WARNING",
+                )
+            self.auto_approve_on_timeout = False
+        else:
+            if auto_approve_on_timeout and not allow_auto_approve_non_prod:
+                self.log(
+                    "Auto-approve on timeout requested but not permitted; "
+                    "set allow_auto_approve_on_timeout_non_production to enable.",
+                    "WARNING",
+                )
+            self.auto_approve_on_timeout = auto_approve_on_timeout and allow_auto_approve_non_prod
 
         # Ensure approvals directory exists
         self.approvals_dir = self.APPROVALS_DIR / scene_id
@@ -277,9 +300,29 @@ class HumanApprovalManager:
                         request.approved_by = "SYSTEM:auto_timeout"
                         request.approved_at = datetime.utcnow().isoformat() + "Z"
                         request.approval_notes = f"Auto-approved after {self.timeout_hours}h timeout"
-                    else:
-                        request.status = ApprovalStatus.EXPIRED
+                        self._save_request(request)
+                        self._log_audit(
+                            "AUTO_APPROVED_TIMEOUT",
+                            request,
+                            request.approved_by,
+                            reason=request.approval_notes,
+                        )
+                        self.log(
+                            f"Request {request.request_id} auto-approved after timeout",
+                            "WARNING",
+                        )
+                        return request
+
+                    request.status = ApprovalStatus.EXPIRED
+                    request.approval_notes = f"Expired after {self.timeout_hours}h timeout"
                     self._save_request(request)
+                    self._log_audit(
+                        "EXPIRED",
+                        request,
+                        "SYSTEM:timeout",
+                        reason=request.approval_notes,
+                    )
+                    self.log(f"Request {request.request_id} expired after timeout", "WARNING")
 
         return request
 
