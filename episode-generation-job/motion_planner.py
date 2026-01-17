@@ -17,6 +17,7 @@ import json
 import math
 import os
 import sys
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -266,11 +267,12 @@ class PlannerResult:
     planned_waypoints: Optional[List[Waypoint]] = None
 
 
-class PlannerBackend:
+class PlannerBackend(ABC):
     """Planner backend interface."""
 
     name = "base"
 
+    @abstractmethod
     def plan(
         self,
         waypoints: List[Waypoint],

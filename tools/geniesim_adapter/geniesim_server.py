@@ -236,6 +236,14 @@ def _add_health_service(server: grpc.Server) -> None:
     LOGGER.info("Health service registered")
 
 
+def _ensure_concrete_servicer(servicer: GenieSimServiceServicer) -> None:
+    if type(servicer) is GenieSimServiceServicer:
+        raise TypeError(
+            "GenieSimServiceServicer is a base class; "
+            "register a concrete implementation such as GenieSimLocalServicer."
+        )
+
+
 def run_health_check(host: str, port: int, timeout: float = 5.0) -> bool:
     target = f"{host}:{port}"
     channel = grpc.insecure_channel(target)
@@ -253,6 +261,7 @@ def serve(args: argparse.Namespace) -> None:
     _configure_logging(args.log_level)
     server = grpc.server(thread_pool=ThreadPoolExecutor(max_workers=args.max_workers))
     servicer = GenieSimLocalServicer(joint_count=args.joint_count)
+    _ensure_concrete_servicer(servicer)
     add_GenieSimServiceServicer_to_server(servicer, server)
     _add_health_service(server)
     server.add_insecure_port(f"{args.host}:{args.port}")
