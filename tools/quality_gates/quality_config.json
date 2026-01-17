@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Quality Gate Configuration",
   "description": "Configurable thresholds and settings for quality gates. Labs can customize these values for their specific use cases.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "thresholds": {
     "physics": {
       "mass_min_kg": 0.01,
@@ -13,16 +13,16 @@
       "description": "Physics property validation thresholds"
     },
     "episodes": {
-      "collision_free_rate_min": 0.80,
-      "quality_score_min": 0.85,
-      "quality_pass_rate_min": 0.50,
-      "min_episodes_required": 1,
+      "collision_free_rate_min": 0.90,
+      "quality_score_min": 0.90,
+      "quality_pass_rate_min": 0.70,
+      "min_episodes_required": 3,
       "description": "Episode generation quality thresholds"
     },
     "data_quality": {
-      "min_average_quality_score": 0.85,
-      "min_sensor_capture_rate": 0.90,
-      "min_physics_validation_rate": 0.90,
+      "min_average_quality_score": 0.90,
+      "min_sensor_capture_rate": 0.95,
+      "min_physics_validation_rate": 0.95,
       "allowed_sensor_sources": [
         "isaac_sim_replicator",
         "simulation"
@@ -34,8 +34,8 @@
       "description": "SLI thresholds for sensor capture + physics validation"
     },
     "simulation": {
-      "min_stable_steps": 10,
-      "max_penetration_depth_m": 0.01,
+      "min_stable_steps": 20,
+      "max_penetration_depth_m": 0.005,
       "physics_stability_timeout_s": 30.0,
       "description": "Simulation stability thresholds"
     },
@@ -79,6 +79,13 @@
     "override_requires_reason": true,
     "override_log_retention_days": 90,
     "allowed_overriders": [],
+    "override_reason_schema": {
+      "required_fields": ["category", "ticket", "justification"],
+      "categories": ["data_gap", "tooling_failure", "known_issue", "customer_exception", "other"],
+      "ticket_pattern": "^(https?://|[A-Za-z][A-Za-z0-9._-]*-\\d+)$",
+      "justification_min_length": 50,
+      "description": "Structured override reason schema (category + ticket + justification)"
+    },
     "description": "Settings for manual gate override functionality"
   },
   "severity_handling": {
