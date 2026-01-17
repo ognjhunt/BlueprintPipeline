@@ -10,6 +10,7 @@ within scenes. It uses Gemini to:
 
 import base64
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -30,7 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from tools.config import load_pipeline_config
+    from tools.config import PIPELINE_CONFIG_PATH, load_pipeline_config
     HAVE_CONFIG = True
 except ImportError:
     HAVE_CONFIG = False
@@ -101,8 +102,16 @@ class IntelligentRegionDetector:
                 model_config = config.models.get_model("intelligent_region_detector")
                 if model_config:
                     return model_config.default_model
-            except Exception:
-                pass
+            except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+                logging.warning(
+                    "Failed to load pipeline config from %s; using default model. Error: %s",
+                    PIPELINE_CONFIG_PATH,
+                    exc,
+                )
+                strict_env = os.getenv("SIMREADY_PRODUCTION_MODE", "").lower()
+                pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
+                if strict_env in {"1", "true", "yes"} or pipeline_env in {"prod", "production"}:
+                    raise
         return "gemini-3-pro-preview"
 
     def __init__(

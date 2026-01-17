@@ -15,6 +15,7 @@ which orchestrates the full pipeline.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -39,6 +40,8 @@ except ImportError:
 # -----------------------------------------------------------------------------
 # Utility Functions
 # -----------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
 
 
 def load_json(path: Path) -> dict:
@@ -1006,15 +1009,23 @@ def build_scene(
     if same_prefix_fallback != layout_path and same_prefix_fallback.is_file():
         try:
             fallback_layouts.append((same_prefix_fallback, load_json(same_prefix_fallback)))
-        except Exception:
-            pass
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "[USD] Skipping fallback layout %s due to load error: %s",
+                same_prefix_fallback,
+                exc,
+            )
 
     da3_layout_path = layout_path.parent.parent / "layout" / "scene_layout.json"
     if da3_layout_path not in {layout_path, same_prefix_fallback} and da3_layout_path.is_file():
         try:
             fallback_layouts.append((da3_layout_path, load_json(da3_layout_path)))
-        except Exception:
-            pass
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "[USD] Skipping fallback layout %s due to load error: %s",
+                da3_layout_path,
+                exc,
+            )
 
     layout_used_path = layout_path
     if not _has_spatial_data(layout):
