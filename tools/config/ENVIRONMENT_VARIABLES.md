@@ -254,8 +254,20 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_ALLOW_LINEAR_FALLBACK` | bool | unset | Allow linear interpolation fallback when cuRobo is unavailable (`1` to enable, `0` to disable). In non-production, the local framework auto-enables this fallback if cuRobo is missing and this variable is unset; in production, cuRobo is required and the framework fails fast. |
 | `ISAAC_SIM_ENDPOINT` | url | `http://localhost:8011` | Isaac Sim endpoint |
 | `ISAAC_SIM_PATH` | path | `/isaac-sim` | Isaac Sim installation path (local framework) |
+| `OMNIVERSE_HOST` | str | `localhost` | Omniverse host used to resolve USD asset paths |
+| `OMNIVERSE_PATH_ROOT` | path | (contextual) | Omniverse path root for USD assets (e.g., `NVIDIA/Assets/Isaac` or `NVIDIA/Robots`) |
+| `PARTICULATE_HEALTHCHECK_HOST` | str | `localhost` | Hostname used for the particulate service health check |
 | `PARTICULATE_SERVICE_PORT` | int | 5000 | Particulate service port |
 | `INVENTORY_ENRICHMENT_ENDPOINT` | url | unset | Inventory enrichment service endpoint |
+
+**Example**:
+```bash
+export GENIESIM_HOST=geniesim.internal
+export GENIESIM_PORT=50051
+export OMNIVERSE_HOST=omniverse.internal
+export OMNIVERSE_PATH_ROOT=NVIDIA/Assets/Isaac
+export PARTICULATE_HEALTHCHECK_HOST=particulate.internal
+```
 
 ---
 
