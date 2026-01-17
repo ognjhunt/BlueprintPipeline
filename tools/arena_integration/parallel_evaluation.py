@@ -45,6 +45,10 @@ from typing import Any, Callable, Optional, Protocol
 import numpy as np
 
 from .components import ArenaEnvironmentSpec, ArenaEmbodiment, ArenaTask
+from .benchmark_validation import (
+    resolve_isaac_lab_arena_version,
+    validate_arena_benchmark_results,
+)
 
 
 # =============================================================================
@@ -122,6 +126,7 @@ class ParallelEvalResult:
     env_spec_id: str
     policy_id: str
     embodiment: str
+    isaac_lab_arena_version: Optional[str] = None
     mock_evaluation: bool
 
     # Timing
@@ -195,15 +200,27 @@ class ParallelEvalResult:
             },
             "errors": self.errors,
         }
+        if self.isaac_lab_arena_version:
+            data["isaac_lab_arena_version"] = self.isaac_lab_arena_version
         if self.mock_evaluation:
             data["mock_tag"] = "mock"
         return data
 
     def save(self, path: Path) -> None:
         """Save results to JSON file."""
+        data = self.to_dict()
+        arena_version = self.isaac_lab_arena_version or resolve_isaac_lab_arena_version()
+        if arena_version:
+            data["isaac_lab_arena_version"] = arena_version
+        validate_arena_benchmark_results(
+            data,
+            scene_id=self.env_spec_id,
+            task_ids=list(self.task_metrics.keys()),
+            arena_version=arena_version,
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+            json.dump(data, f, indent=2)
 
 
 # =============================================================================
@@ -303,12 +320,14 @@ class ParallelEvaluator:
         success_rate = np.mean(successes) if successes else 0.0
         success_ci = self._bootstrap_ci(successes, self.config.confidence_level)
 
+        arena_version = resolve_isaac_lab_arena_version()
         return ParallelEvalResult(
             success=len(errors) == 0,
             config=self.config,
             env_spec_id=env_spec.scene.scene_id,
             policy_id=policy.policy_id,
             embodiment=env_spec.embodiment.embodiment_type.value,
+            isaac_lab_arena_version=arena_version,
             mock_evaluation=result.get("mock_evaluation", False),
             start_time=start_time.isoformat(),
             end_time=end_time.isoformat(),
