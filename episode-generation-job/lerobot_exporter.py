@@ -51,6 +51,7 @@ See: https://github.com/huggingface/lerobot
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import uuid
@@ -306,6 +307,8 @@ class LeRobotExporter:
         self.config = config
         self.verbose = verbose
         self.robot_config = ROBOT_CONFIGS.get(config.robot_type, ROBOT_CONFIGS["franka"])
+        self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+        self._path_redaction_regex = re.compile(r"(?:[A-Za-z]:\\\\|/)[^\\s]+")
 
         # Episode storage
         self.episodes: List[LeRobotEpisode] = []
@@ -330,6 +333,11 @@ class LeRobotExporter:
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
             print(f"[LEROBOT-EXPORTER] [{level}] {msg}")
+
+    def _sanitize_error_message(self, message: str) -> str:
+        if not message:
+            return message
+        return self._path_redaction_regex.sub("<redacted-path>", message)
 
     def _record_checksum(self, path: Path) -> None:
         if self.output_dir is None or not path.exists():
@@ -679,10 +687,13 @@ class LeRobotExporter:
                 import traceback
                 error_details = {
                     "error_type": type(e).__name__,
-                    "error_message": str(e),
-                    "traceback": traceback.format_exc(),
+                    "error_message": self._sanitize_error_message(str(e)),
                 }
+                if self.debug:
+                    error_details["traceback"] = traceback.format_exc()
                 self.log(f"Reward computation failed for episode {episode_index}: {type(e).__name__}: {e}", "WARNING")
+                if self.debug:
+                    self.log(traceback.format_exc(), "DEBUG")
                 self.log(f"  Using heuristic fallback for reward computation", "WARNING")
 
                 # P2-3 FIX: Fallback based on quality_score and success (more nuanced than hardcoded 0.7)
