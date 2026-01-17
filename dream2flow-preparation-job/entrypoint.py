@@ -48,6 +48,7 @@ if str(REPO_ROOT) not in sys.path:
 # Add current directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from monitoring.alerting import send_alert
 from prepare_dream2flow_bundle import Dream2FlowJobConfig, Dream2FlowPreparationJob
 from models import TaskType, RobotEmbodiment
 from tools.validation.entrypoint_checks import (
@@ -307,6 +308,16 @@ def main():
         except Exception as e:
             print(f"[D2F-ENTRYPOINT] ERROR: {e}")
             traceback.print_exc()
+            send_alert(
+                event_type="dream2flow_job_fatal_exception",
+                summary="Dream2Flow preparation job failed with an unhandled exception",
+                details={
+                    "job": "dream2flow-preparation-job",
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                },
+                severity=os.getenv("ALERT_JOB_EXCEPTION_SEVERITY", "critical"),
+            )
             sys.exit(1)
 
 
