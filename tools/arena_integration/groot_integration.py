@@ -150,6 +150,9 @@ class GR00TEvaluationResult:
     # Detailed results
     episode_results: list[dict[str, Any]]
 
+    # Mock/fallback indicator
+    mock_used: bool = False
+
     # Errors
     errors: list[str] = field(default_factory=list)
 
@@ -163,6 +166,7 @@ class GR00TEvaluationResult:
             },
             "task_id": self.task_id,
             "language_instructions": self.language_instructions,
+            "mock_used": self.mock_used,
             "metrics": {
                 "overall_success_rate": self.overall_success_rate,
                 "per_instruction_success": self.per_instruction_success,
@@ -197,6 +201,7 @@ class GR00TPolicy:
         self._device = config.device
         self._action_buffer: list[np.ndarray] = []
         self._current_instruction: str = config.default_instruction
+        self._mock_used = False
 
     @classmethod
     def from_pretrained(
@@ -245,17 +250,24 @@ class GR00TPolicy:
             self._processor = GR00TProcessor.from_pretrained(
                 self.config.model_path
             )
+            self._mock_used = False
 
         except ImportError:
             # GR00T SDK not available - use mock for development
             print("Warning: GR00T SDK not available, using mock model")
             self._model = _MockGR00TModel(self.config)
             self._processor = _MockGR00TProcessor(self.config)
+            self._mock_used = True
 
     @property
     def policy_id(self) -> str:
         """Unique policy identifier."""
         return f"groot_{self.config.model_type.value}"
+
+    @property
+    def mock_used(self) -> bool:
+        """Whether the policy is using a mock/fallback implementation."""
+        return self._mock_used
 
     def reset(self) -> None:
         """Reset policy state."""
@@ -399,15 +411,25 @@ class _MockGR00TModel:
     def generate(self, **kwargs) -> dict[str, Any]:
         """Generate mock outputs."""
         chunk_size = kwargs.get("action_chunk_size", 16)
-
-        # Generate smooth random actions
-        actions = np.random.randn(chunk_size, 7) * 0.1
+        action_dim = self._resolve_action_dim()
+        actions = np.zeros((chunk_size, action_dim), dtype=np.float32)
 
         return {
             "actions": actions,
             "confidence": 0.8,
-            "language_output": None,
+            "language_output": "[MOCK] no-op action sequence",
+            "mock_used": True,
         }
+
+    def _resolve_action_dim(self) -> int:
+        mapping = self.config.action_space_mapping or {}
+        dim_map = mapping.get("dim_map")
+        if dim_map:
+            return len(dim_map)
+        scale = mapping.get("scale")
+        if scale:
+            return len(scale)
+        return 7
 
 
 class _MockGR00TProcessor:
@@ -532,6 +554,7 @@ class GR00TEvaluator:
             avg_inference_time_ms=float(np.mean(inference_times)) if inference_times else 0.0,
             total_wall_time_s=total_time,
             episode_results=episode_results,
+            mock_used=policy.mock_used,
             errors=errors,
         )
 
