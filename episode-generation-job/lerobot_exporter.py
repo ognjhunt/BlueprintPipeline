@@ -50,6 +50,7 @@ See: https://github.com/huggingface/lerobot
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -62,6 +63,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -332,7 +334,14 @@ class LeRobotExporter:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[LEROBOT-EXPORTER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[LEROBOT-EXPORTER] [%s] %s", level, msg)
 
     def _sanitize_error_message(self, message: str) -> str:
         if not message:
@@ -2610,8 +2619,8 @@ if __name__ == "__main__":
     from motion_planner import AIMotionPlanner
     from trajectory_solver import TrajectorySolver
 
-    print("Testing LeRobot Export Pipeline")
-    print("=" * 60)
+    logger.info("Testing LeRobot Export Pipeline")
+    logger.info("%s", "=" * 60)
 
     # Generate some test episodes
     planner = AIMotionPlanner(robot_type="franka", use_llm=False, verbose=False)
@@ -2647,7 +2656,7 @@ if __name__ == "__main__":
     dataset_path = exporter.finalize()
 
     # Verify output
-    print("\nVerifying output...")
+    logger.info("Verifying output...")
     for path in sorted(dataset_path.rglob("*")):
         if path.is_file():
-            print(f"  {path.relative_to(dataset_path)}")
+            logger.info("  %s", path.relative_to(dataset_path))

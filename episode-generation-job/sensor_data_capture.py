@@ -37,6 +37,7 @@ Compatible with:
 """
 
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -45,6 +46,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -793,7 +796,14 @@ class IsaacSimSensorCapture:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[SENSOR-CAPTURE] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[SENSOR-CAPTURE] [%s] %s", level, msg)
 
     def initialize(self, scene_path: Optional[str] = None) -> bool:
         """
@@ -1567,7 +1577,7 @@ class MockSensorCapture(IsaacSimSensorCapture):
 ║    docker run --gpus all nvcr.io/nvidia/isaac-sim:4.2.0 python.sh script.py  ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
-        print(warning)
+        logger.warning("%s", warning)
 
     def capture_frame(
         self,
@@ -1691,7 +1701,14 @@ class SensorDataExporter:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[SENSOR-EXPORTER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[SENSOR-EXPORTER] [%s] %s", level, msg)
 
     def export_episode(
         self,
@@ -1995,7 +2012,7 @@ def get_capture_mode_from_env() -> SensorDataCaptureMode:
     mode_str = os.getenv("SENSOR_CAPTURE_MODE", "fail_closed").lower()
 
     if _is_production_run() and mode_str == SensorDataCaptureMode.MOCK_DEV.value:
-        print(
+        logger.warning(
             "[WARNING] Production run detected - mock capture not allowed. "
             "Forcing SENSOR_CAPTURE_MODE=fail_closed."
         )
@@ -2004,7 +2021,10 @@ def get_capture_mode_from_env() -> SensorDataCaptureMode:
     try:
         return SensorDataCaptureMode(mode_str)
     except ValueError:
-        print(f"[WARNING] Invalid SENSOR_CAPTURE_MODE='{mode_str}', defaulting to fail_closed")
+        logger.warning(
+            "[WARNING] Invalid SENSOR_CAPTURE_MODE='%s', defaulting to fail_closed",
+            mode_str,
+        )
         return SensorDataCaptureMode.FAIL_CLOSED
 
 
@@ -2151,7 +2171,9 @@ def create_sensor_capture(
                 "Ensure Isaac Sim is running with Replicator extension."
             )
         if verbose:
-            print("[SENSOR-CAPTURE] ✅ [PRODUCTION] Using IsaacSimSensorCapture (production quality)")
+            logger.info(
+                "[SENSOR-CAPTURE] ✅ [PRODUCTION] Using IsaacSimSensorCapture (production quality)"
+            )
         return capture
 
     elif capture_mode == SensorDataCaptureMode.MOCK_DEV:
@@ -2162,27 +2184,27 @@ def create_sensor_capture(
                 "Set allow_mock_capture=True (development only) or use ISAAC_SIM for production."
             )
         if not isaac_available:
-            print("\n" + "=" * 80)
-            print("⚠️  WARNING: MOCK DATA MODE (Development Only)")
-            print("=" * 80)
-            print("Isaac Sim is not available. Using mock sensor data.")
-            print("Mock data includes:")
-            print("  - Random noise RGB images (NOT real sensor data)")
-            print("  - Placeholder depth maps")
-            print("  - No real physics validation")
-            print("")
-            print("This data is NOT suitable for:")
-            print("  - Training production ML models")
-            print("  - Selling as training data")
-            print("  - Real-world robot deployment")
-            print("")
-            print("To use real Isaac Sim:")
-            print("  /isaac-sim/python.sh your_script.py")
-            print("=" * 80 + "\n")
+            logger.warning("%s", "=" * 80)
+            logger.warning("⚠️  WARNING: MOCK DATA MODE (Development Only)")
+            logger.warning("%s", "=" * 80)
+            logger.warning("Isaac Sim is not available. Using mock sensor data.")
+            logger.warning("Mock data includes:")
+            logger.warning("  - Random noise RGB images (NOT real sensor data)")
+            logger.warning("  - Placeholder depth maps")
+            logger.warning("  - No real physics validation")
+            logger.warning("This data is NOT suitable for:")
+            logger.warning("  - Training production ML models")
+            logger.warning("  - Selling as training data")
+            logger.warning("  - Real-world robot deployment")
+            logger.warning("To use real Isaac Sim:")
+            logger.warning("  /isaac-sim/python.sh your_script.py")
+            logger.warning("%s", "=" * 80)
         capture = MockSensorCapture(config, verbose=verbose)
         capture.initialize()
         if verbose:
-            print("[SENSOR-CAPTURE] ⚠️  [TEST] Using MockSensorCapture (development only)")
+            logger.warning(
+                "[SENSOR-CAPTURE] ⚠️  [TEST] Using MockSensorCapture (development only)"
+            )
         return capture
 
     elif capture_mode == SensorDataCaptureMode.FAIL_CLOSED:
@@ -2225,7 +2247,9 @@ def create_sensor_capture(
                 "Ensure Isaac Sim is running with Replicator extension."
             )
         if verbose:
-            print("[SENSOR-CAPTURE] ✅ [PRODUCTION] Using IsaacSimSensorCapture (fail-closed mode)")
+            logger.info(
+                "[SENSOR-CAPTURE] ✅ [PRODUCTION] Using IsaacSimSensorCapture (fail-closed mode)"
+            )
         return capture
 
     else:
@@ -2264,8 +2288,13 @@ def require_isaac_sim_or_fail() -> None:
         # Check if user explicitly allows mock data
         import os
         if os.environ.get("ALLOW_MOCK_DATA", "").lower() in ("true", "1", "yes"):
-            print(error_msg.replace("❌  ISAAC SIM REQUIRED  ❌", "⚠️  MOCK DATA MODE  ⚠️"))
-            print("[WARNING] ALLOW_MOCK_DATA=true - Proceeding with mock data")
+            logger.warning(
+                "%s",
+                error_msg.replace(
+                    "❌  ISAAC SIM REQUIRED  ❌", "⚠️  MOCK DATA MODE  ⚠️"
+                ),
+            )
+            logger.warning("[WARNING] ALLOW_MOCK_DATA=true - Proceeding with mock data")
             return
 
         raise RuntimeError(error_msg)
@@ -2306,12 +2335,12 @@ def check_sensor_capture_environment() -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    print("Testing Sensor Data Capture")
-    print("=" * 60)
+    logger.info("Testing Sensor Data Capture")
+    logger.info("%s", "=" * 60)
 
     # Test each data pack tier
     for tier in [DataPackTier.CORE, DataPackTier.PLUS, DataPackTier.FULL]:
-        print(f"\n--- Data Pack: {tier.value} ---")
+        logger.info("--- Data Pack: %s ---", tier.value)
 
         capture = create_sensor_capture(
             data_pack=tier,
@@ -2339,18 +2368,18 @@ if __name__ == "__main__":
             scene_objects=mock_objects,
         )
 
-        print(f"  Captured {episode_data.num_frames} frames")
-        print(f"  Cameras: {episode_data.camera_ids}")
-        print(f"  Has RGB: {episode_data.has_rgb}")
-        print(f"  Has depth: {episode_data.has_depth}")
-        print(f"  Has segmentation: {episode_data.has_segmentation}")
+        logger.info("  Captured %s frames", episode_data.num_frames)
+        logger.info("  Cameras: %s", episode_data.camera_ids)
+        logger.info("  Has RGB: %s", episode_data.has_rgb)
+        logger.info("  Has depth: %s", episode_data.has_depth)
+        logger.info("  Has segmentation: %s", episode_data.has_segmentation)
 
         # Test export
         exporter = SensorDataExporter(Path("/tmp/sensor_test"), verbose=True)
         output_paths = exporter.export_episode(episode_data, episode_index=0)
-        print(f"  Exported files: {list(output_paths.keys())}")
+        logger.info("  Exported files: %s", list(output_paths.keys()))
 
         capture.cleanup()
 
-    print("\n" + "=" * 60)
-    print("Sensor data capture test complete!")
+    logger.info("%s", "=" * 60)
+    logger.info("Sensor data capture test complete!")

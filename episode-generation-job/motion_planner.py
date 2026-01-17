@@ -14,6 +14,7 @@ Key Features:
 
 import importlib
 import json
+import logging
 import math
 import os
 import sys
@@ -26,6 +27,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from policy_config_loader import load_motion_planner_timing
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -481,7 +484,14 @@ class AIMotionPlanner:
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
         if self.verbose:
-            print(f"[MOTION-PLANNER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[MOTION-PLANNER] [%s] %s", level, msg)
 
     def _get_client(self):
         """Get or create LLM client."""
@@ -1537,6 +1547,16 @@ if __name__ == "__main__":
         place_position=[0.3, -0.2, 0.9],
     )
 
-    print(f"\nGenerated plan: {plan.num_waypoints} waypoints, {plan.total_duration:.2f}s")
+    logger.info(
+        "Generated plan: %s waypoints, %.2fs",
+        plan.num_waypoints,
+        plan.total_duration,
+    )
     for i, w in enumerate(plan.waypoints):
-        print(f"  {i}: {w.phase.value} @ {w.timestamp:.2f}s, gripper={w.gripper_aperture}")
+        logger.info(
+            "  %s: %s @ %.2fs, gripper=%s",
+            i,
+            w.phase.value,
+            w.timestamp,
+            w.gripper_aperture,
+        )

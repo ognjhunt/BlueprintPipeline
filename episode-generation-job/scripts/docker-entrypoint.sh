@@ -165,43 +165,48 @@ init_isaac_sim() {
     log_info "Checking Isaac Sim Python environment..."
 
     ${ISAAC_SIM_PATH}/python.sh -c "
+import logging
 import sys
-print(f'Python: {sys.version}')
+
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger('isaac-sim-preflight')
+
+logger.info(f'Python: {sys.version}')
 
 # Check core imports
 try:
     import omni
-    print('- omni: OK')
+    logger.info('- omni: OK')
 except ImportError as e:
-    print(f'- omni: FAILED ({e})')
+    logger.error(f'- omni: FAILED ({e})')
     sys.exit(1)
 
 try:
     import omni.isaac.core
-    print('- omni.isaac.core: OK')
+    logger.info('- omni.isaac.core: OK')
 except ImportError as e:
-    print(f'- omni.isaac.core: FAILED ({e})')
+    logger.error(f'- omni.isaac.core: FAILED ({e})')
     sys.exit(1)
 
 try:
     import omni.physx
-    print('- omni.physx: OK')
+    logger.info('- omni.physx: OK')
 except ImportError as e:
-    print(f'- omni.physx: FAILED ({e})')
+    logger.error(f'- omni.physx: FAILED ({e})')
 
 try:
     import omni.replicator.core
-    print('- omni.replicator.core: OK')
+    logger.info('- omni.replicator.core: OK')
 except ImportError as e:
-    print(f'- omni.replicator.core: FAILED ({e})')
+    logger.error(f'- omni.replicator.core: FAILED ({e})')
 
 try:
     from pxr import Usd, UsdGeom
-    print('- pxr (USD): OK')
+    logger.info('- pxr (USD): OK')
 except ImportError as e:
-    print(f'- pxr: FAILED ({e})')
+    logger.error(f'- pxr: FAILED ({e})')
 
-print('Isaac Sim environment check complete')
+logger.info('Isaac Sim environment check complete')
 "
 
     if [ $? -eq 0 ]; then
@@ -225,10 +230,14 @@ preflight_isaac_sim() {
     log_info "Running Isaac Sim + Replicator preflight..."
 
     ${ISAAC_SIM_PATH}/python.sh - <<'PY'
+import logging
 import sys
 
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger('isaac-sim-preflight')
+
 def fail(message: str) -> None:
-    print(message)
+    logger.error(message)
     sys.exit(1)
 
 try:
@@ -252,7 +261,7 @@ except ImportError as exc:
         "Enable the Replicator extension in Isaac Sim before running."
     )
 
-print("✅ Isaac Sim preflight passed (omni + replicator available)")
+logger.info("✅ Isaac Sim preflight passed (omni + replicator available)")
 PY
 
     if [ $? -eq 0 ]; then

@@ -28,12 +28,15 @@ Reference: LeRobot v0.4.0 data loading patterns.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Import PyTorch if available
 try:
@@ -163,7 +166,11 @@ class BlueprintEpisodeDataset(Dataset):
         self._load_normalization_stats()
 
         if self.verbose:
-            print(f"[DATALOADER] Loaded {len(self)} samples from {len(self.episodes)} episodes")
+            logger.info(
+                "[DATALOADER] Loaded %s samples from %s episodes",
+                len(self),
+                len(self.episodes),
+            )
 
     def _load_metadata(self) -> None:
         """Load dataset metadata."""
@@ -736,12 +743,12 @@ def count_episodes(dataset_path: Union[str, Path]) -> int:
 
 
 if __name__ == "__main__":
-    print("BlueprintPipeline PyTorch DataLoaders")
-    print("=" * 50)
+    logger.info("BlueprintPipeline PyTorch DataLoaders")
+    logger.info("%s", "=" * 50)
 
     # Example usage
-    print("\nExample Usage:")
-    print("""
+    logger.info("Example Usage:")
+    logger.info("""
     from pytorch_dataloaders import create_blueprint_dataloader, DataLoadingConfig
 
     # Quick start with defaults

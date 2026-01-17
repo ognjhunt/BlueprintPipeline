@@ -13,6 +13,7 @@ Key Features:
 """
 
 import json
+import logging
 import math
 import os
 import sys
@@ -22,6 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import interpolate
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -681,7 +684,14 @@ class IKSolver:
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log helper for IK solver."""
         if self.verbose:
-            print(f"[IK-SOLVER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[IK-SOLVER] [%s] %s", level, msg)
 
     def solve(
         self,
@@ -1313,7 +1323,14 @@ class TrajectorySolver:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[TRAJECTORY-SOLVER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[TRAJECTORY-SOLVER] [%s] %s", level, msg)
 
     def _is_production_mode(self) -> bool:
         """Detect production mode for fail-closed behavior."""
@@ -1593,8 +1610,8 @@ if __name__ == "__main__":
     from motion_planner import AIMotionPlanner
 
     # Test the full pipeline
-    print("Testing Motion Planner + Trajectory Solver")
-    print("=" * 60)
+    logger.info("Testing Motion Planner + Trajectory Solver")
+    logger.info("%s", "=" * 60)
 
     # Generate motion plan
     planner = AIMotionPlanner(robot_type="franka", use_llm=False, verbose=True)
@@ -1613,17 +1630,22 @@ if __name__ == "__main__":
     solver = TrajectorySolver(robot_type="franka", fps=30.0, verbose=True)
     trajectory = solver.solve(plan)
 
-    print("\n" + "=" * 60)
-    print("TRAJECTORY SUMMARY")
-    print("=" * 60)
-    print(f"Frames: {trajectory.num_frames}")
-    print(f"Duration: {trajectory.total_duration:.2f}s")
-    print(f"FPS: {trajectory.fps}")
-    print(f"Joint names: {trajectory.robot_config.joint_names}")
+    logger.info("%s", "=" * 60)
+    logger.info("TRAJECTORY SUMMARY")
+    logger.info("%s", "=" * 60)
+    logger.info("Frames: %s", trajectory.num_frames)
+    logger.info("Duration: %.2fs", trajectory.total_duration)
+    logger.info("FPS: %s", trajectory.fps)
+    logger.info("Joint names: %s", trajectory.robot_config.joint_names)
 
     # Sample output
-    print("\nSample states:")
+    logger.info("Sample states:")
     for i in [0, len(trajectory.states)//2, -1]:
         s = trajectory.states[i]
-        print(f"  Frame {s.frame_idx}: t={s.timestamp:.2f}s, phase={s.phase.value}, "
-              f"gripper={s.gripper_position:.3f}m")
+        logger.info(
+            "  Frame %s: t=%.2fs, phase=%s, gripper=%.3fm",
+            s.frame_idx,
+            s.timestamp,
+            s.phase.value,
+            s.gripper_position,
+        )
