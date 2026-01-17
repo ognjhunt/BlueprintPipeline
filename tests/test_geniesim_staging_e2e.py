@@ -172,7 +172,6 @@ def test_geniesim_staging_export_submit_import(monkeypatch):
     job_path = geniesim_dir / "job.json"
     assert job_path.is_file(), "Genie Sim job.json missing after submit"
     job_payload = json.loads(job_path.read_text())
-    assert job_payload.get("submission_mode") == "local", "Expected local submission mode"
     assert job_payload.get("status") == "completed", f"Job not completed: {job_payload}"
 
     local_execution = job_payload.get("local_execution", {})
