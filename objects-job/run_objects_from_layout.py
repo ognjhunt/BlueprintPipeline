@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import List, Optional
 
@@ -13,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.validation.entrypoint_checks import validate_required_env_vars
+from monitoring.alerting import send_alert
 
 logger = logging.getLogger(__name__)
 
@@ -347,4 +349,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        send_alert(
+            event_type="objects_job_fatal_exception",
+            summary="Objects job failed with an unhandled exception",
+            details={
+                "job": "objects-job",
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+            severity=os.getenv("ALERT_JOB_EXCEPTION_SEVERITY", "critical"),
+        )
+        raise
