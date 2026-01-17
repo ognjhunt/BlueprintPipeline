@@ -13,6 +13,24 @@ The pipeline uses environment variables for:
 
 Environment variables take precedence over JSON config files, allowing runtime customization without redeployment.
 
+## Job-Level Documentation
+
+Job-specific READMEs should link back to this centralized environment variable list for shared configuration details.
+Relevant job-level documentation includes:
+
+- [`dream2flow-preparation-job/README.md`](../../dream2flow-preparation-job/README.md)
+- [`dwm-preparation-job/README.md`](../../dwm-preparation-job/README.md)
+- [`episode-generation-job/README.md`](../../episode-generation-job/README.md)
+- [`genie-sim-export-job/README.md`](../../genie-sim-export-job/README.md)
+- [`genie-sim-gpu-job/README.md`](../../genie-sim-gpu-job/README.md)
+- [`genie-sim-import-job/README.md`](../../genie-sim-import-job/README.md)
+- [`genie-sim-local-job/README.md`](../../genie-sim-local-job/README.md)
+- [`replicator-job/README.md`](../../replicator-job/README.md)
+- [`scene-generation-job/README.md`](../../scene-generation-job/README.md)
+- [`simready-job/README.md`](../../simready-job/README.md)
+- [`smart-placement-engine-job/README.md`](../../smart-placement-engine-job/README.md)
+- [`variation-asset-pipeline-job/README.md`](../../variation-asset-pipeline-job/README.md)
+
 ## Configuration Overrides (BP_ Prefix)
 
 ### BP_SPLIT_* - Dataset Split Configuration
@@ -218,6 +236,18 @@ export SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1
 | `GOOGLE_CLOUD_PROJECT` | str | Yes (alt: GOOGLE_CLOUD_PROJECT_ID) | GCP project ID |
 | `GOOGLE_CLOUD_PROJECT_ID` | str | Yes (alt: GOOGLE_CLOUD_PROJECT) | GCP project ID |
 | `GOOGLE_APPLICATION_CREDENTIALS` | path | Yes | Path to service account JSON key |
+
+### Firebase / Firestore
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `FIRESTORE_PROJECT` | str | `blueprint-8c1ca` | Firestore project ID for pipeline configuration and metadata |
+| `BUCKET` | str | `blueprint-8c1ca.appspot.com` | Firebase Storage bucket used for scene assets and pipeline artifacts |
+
+Scene asset input path example (GCS):
+```
+gs://blueprint-8c1ca.appspot.com/scenes/{SCENE_ID}/images/room.png
+```
 
 **Example**:
 ```bash
