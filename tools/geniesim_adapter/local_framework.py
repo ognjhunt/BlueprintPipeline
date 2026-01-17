@@ -489,7 +489,8 @@ class GenieSimGRPCClient:
         Returns:
             True if the server responds successfully.
         """
-        effective_timeout = min(self.timeout, timeout) if timeout else self.timeout
+        # Use the larger bound to avoid unintentionally shortening the default timeout.
+        effective_timeout = max(self.timeout, timeout) if timeout else self.timeout
 
         if not self._have_grpc or self._stub is None:
             return self._check_server_socket()
@@ -525,7 +526,8 @@ class GenieSimGRPCClient:
         """
         if not self._connected:
             raise RuntimeError("Not connected to Genie Sim server")
-        effective_timeout = min(self.timeout, timeout) if timeout else self.timeout
+        # Keep timeouts from being clipped below the configured default.
+        effective_timeout = max(self.timeout, timeout) if timeout else self.timeout
         response = self.send_command(CommandType.GET_CHECKER_STATUS, {})
         if not response.get("success"):
             error = response.get("error_message") or response.get("error") or "unknown error"
