@@ -158,6 +158,101 @@ def compute_manifest_checksum(manifest: Dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _extract_expected_checksum(entry: Any) -> Tuple[Optional[str], Optional[int]]:
+    if isinstance(entry, dict):
+        return entry.get("sha256"), entry.get("size_bytes")
+    if isinstance(entry, str):
+        return entry, None
+    return None, None
+
+
+def verify_checksums_manifest(bundle_root: Path, checksums_path: Path) -> Dict[str, Any]:
+    result = {
+        "success": False,
+        "errors": [],
+        "missing_files": [],
+        "checksum_mismatches": [],
+        "size_mismatches": [],
+    }
+    try:
+        payload = json.loads(checksums_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        result["errors"].append(f"Failed to load checksums manifest {checksums_path}: {exc}")
+        return result
+
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        result["errors"].append("checksums.json missing 'files' mapping for verification")
+        return result
+
+    for rel_path, entry in files.items():
+        file_path = bundle_root / rel_path
+        if not file_path.exists():
+            result["missing_files"].append(rel_path)
+            continue
+        expected_sha, expected_size = _extract_expected_checksum(entry)
+        actual_sha = compute_sha256(file_path)
+        if expected_sha and actual_sha != expected_sha:
+            result["checksum_mismatches"].append(
+                {
+                    "path": rel_path,
+                    "expected": expected_sha,
+                    "actual": actual_sha,
+                }
+            )
+        if expected_size is not None:
+            actual_size = file_path.stat().st_size
+            if actual_size != expected_size:
+                result["size_mismatches"].append(
+                    {
+                        "path": rel_path,
+                        "expected": expected_size,
+                        "actual": actual_size,
+                    }
+                )
+
+    success = (
+        not result["errors"]
+        and not result["missing_files"]
+        and not result["checksum_mismatches"]
+        and not result["size_mismatches"]
+    )
+    result["success"] = success
+    return result
+
+
+def verify_import_manifest_checksum(import_manifest_path: Path) -> Dict[str, Any]:
+    result = {"success": False, "errors": []}
+    try:
+        payload = json.loads(import_manifest_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        result["errors"].append(
+            f"Failed to load import manifest for checksum verification: {exc}"
+        )
+        return result
+
+    expected = (
+        payload.get("checksums", {})
+        .get("metadata", {})
+        .get("import_manifest.json", {})
+        .get("sha256")
+    )
+    if not expected:
+        result["errors"].append("Import manifest checksum is missing from checksums.metadata")
+        return result
+
+    actual = compute_manifest_checksum(payload)
+    if actual != expected:
+        result["errors"].append(
+            "Import manifest checksum mismatch: "
+            f"expected {expected}, computed {actual}"
+        )
+        return result
+
+    result["success"] = True
+    return result
+
+
 def snapshot_env(keys: Iterable[str]) -> Dict[str, Optional[str]]:
     return {key: os.getenv(key) for key in keys}
 

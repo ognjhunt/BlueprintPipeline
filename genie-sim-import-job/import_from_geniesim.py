@@ -49,6 +49,8 @@ from import_manifest_utils import (
     get_episode_file_paths,
     get_lerobot_metadata_paths,
     snapshot_env,
+    verify_checksums_manifest,
+    verify_import_manifest_checksum,
 )
 from verify_import_manifest import verify_manifest
 
@@ -452,6 +454,8 @@ class ImportResult:
     manifest_path: Optional[Path] = None
     import_manifest_path: Optional[Path] = None
     lerobot_conversion_success: bool = True
+    checksum_verification_passed: bool = True
+    checksum_verification_errors: List[str] = field(default_factory=list)
 
     # Errors
     errors: List[str] = field(default_factory=list)
@@ -1337,6 +1341,9 @@ def run_import_job(
                 "error": lerobot_error,
                 "required": config.require_lerobot or config.enable_validation,
             },
+            "verification": {
+                "checksums": {},
+            },
             "metrics_summary": metrics_summary,
             "checksums": checksums_payload,
             "provenance": provenance,
@@ -1376,6 +1383,8 @@ def run_import_job(
         }
         import_manifest["file_inventory"] = file_inventory
         import_manifest["asset_provenance_path"] = asset_provenance_path
+        checksums_verification = verify_checksums_manifest(bundle_root, checksums_path)
+        import_manifest["verification"]["checksums"] = checksums_verification
         import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
             "sha256": compute_manifest_checksum(import_manifest),
         }
@@ -1384,6 +1393,42 @@ def run_import_job(
             json.dump(import_manifest, f, indent=2)
 
         result.import_manifest_path = import_manifest_path
+
+        print("=" * 80)
+        print("CHECKSUM VERIFICATION")
+        print("=" * 80)
+        if not checksums_verification["success"]:
+            verification_errors = []
+            if checksums_verification["missing_files"]:
+                verification_errors.append(
+                    "Missing files: " + ", ".join(checksums_verification["missing_files"])
+                )
+            if checksums_verification["checksum_mismatches"]:
+                mismatch_paths = [
+                    mismatch["path"] for mismatch in checksums_verification["checksum_mismatches"]
+                ]
+                verification_errors.append(
+                    "Checksum mismatches: " + ", ".join(mismatch_paths)
+                )
+            if checksums_verification["size_mismatches"]:
+                mismatch_paths = [
+                    mismatch["path"] for mismatch in checksums_verification["size_mismatches"]
+                ]
+                verification_errors.append("Size mismatches: " + ", ".join(mismatch_paths))
+            if checksums_verification["errors"]:
+                verification_errors.extend(checksums_verification["errors"])
+            result.checksum_verification_errors.extend(verification_errors)
+            remediation = (
+                "Re-download the bundle to ensure artifacts are intact, or rerun the import "
+                "to regenerate checksums.json from the source files."
+            )
+            result.errors.append(
+                "Checksum verification failed. " + remediation
+            )
+            print("[IMPORT] ❌ " + result.errors[-1])
+        else:
+            print("[IMPORT] ✅ Checksums.json verification succeeded")
+        print("=" * 80 + "\n")
 
         print("=" * 80)
         print("IMPORT MANIFEST CHECKSUM VERIFICATION")
@@ -1398,6 +1443,21 @@ def run_import_job(
         print("[IMPORT] ✅ Import manifest verification succeeded")
         print("=" * 80 + "\n")
 
+        manifest_checksum_result = verify_import_manifest_checksum(import_manifest_path)
+        if not manifest_checksum_result["success"]:
+            result.checksum_verification_errors.extend(manifest_checksum_result["errors"])
+            result.errors.append(
+                "Import manifest checksum validation failed. "
+                "Re-run the import to regenerate a consistent manifest."
+            )
+
+        result.checksum_verification_passed = (
+            checksums_verification["success"] and manifest_checksum_result["success"]
+        )
+        if not result.checksum_verification_passed:
+            result.success = False
+            return result
+
         # Success
         result.success = len(result.errors) == 0
 
@@ -1407,6 +1467,10 @@ def run_import_job(
         print(f"{'✅' if result.success else '❌'} Successfully imported {result.episodes_passed_validation} episodes")
         print(f"Output directory: {result.output_dir}")
         print(f"Manifest: {result.manifest_path}")
+        print(
+            "Checksum verification: "
+            f"{'✅' if result.checksum_verification_passed else '❌'}"
+        )
         print("=" * 80 + "\n")
 
         return result
@@ -1692,6 +1756,9 @@ def run_local_import_job(
             "error": lerobot_error,
             "required": False,
         },
+        "verification": {
+            "checksums": {},
+        },
         "metrics_summary": metrics_summary,
         "checksums": checksums_payload,
         "provenance": provenance,
@@ -1731,6 +1798,8 @@ def run_local_import_job(
     }
     import_manifest["file_inventory"] = file_inventory
     import_manifest["asset_provenance_path"] = asset_provenance_path
+    checksums_verification = verify_checksums_manifest(bundle_root, checksums_path)
+    import_manifest["verification"]["checksums"] = checksums_verification
     import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
         "sha256": compute_manifest_checksum(import_manifest),
     }
@@ -1753,6 +1822,55 @@ def run_local_import_job(
     print("[IMPORT] ✅ Import manifest verification succeeded")
     print("=" * 80 + "\n")
 
+    print("=" * 80)
+    print("CHECKSUM VERIFICATION")
+    print("=" * 80)
+    if not checksums_verification["success"]:
+        verification_errors = []
+        if checksums_verification["missing_files"]:
+            verification_errors.append(
+                "Missing files: " + ", ".join(checksums_verification["missing_files"])
+            )
+        if checksums_verification["checksum_mismatches"]:
+            mismatch_paths = [
+                mismatch["path"] for mismatch in checksums_verification["checksum_mismatches"]
+            ]
+            verification_errors.append("Checksum mismatches: " + ", ".join(mismatch_paths))
+        if checksums_verification["size_mismatches"]:
+            mismatch_paths = [
+                mismatch["path"] for mismatch in checksums_verification["size_mismatches"]
+            ]
+            verification_errors.append("Size mismatches: " + ", ".join(mismatch_paths))
+        if checksums_verification["errors"]:
+            verification_errors.extend(checksums_verification["errors"])
+        result.checksum_verification_errors.extend(verification_errors)
+        remediation = (
+            "Re-download the bundle to ensure artifacts are intact, or rerun the import "
+            "to regenerate checksums.json from the source files."
+        )
+        result.errors.append(
+            "Checksum verification failed. " + remediation
+        )
+        print("[IMPORT] ❌ " + result.errors[-1])
+    else:
+        print("[IMPORT] ✅ Checksums.json verification succeeded")
+    print("=" * 80 + "\n")
+
+    manifest_checksum_result = verify_import_manifest_checksum(import_manifest_path)
+    if not manifest_checksum_result["success"]:
+        result.checksum_verification_errors.extend(manifest_checksum_result["errors"])
+        result.errors.append(
+            "Import manifest checksum validation failed. "
+            "Re-run the import to regenerate a consistent manifest."
+        )
+
+    result.checksum_verification_passed = (
+        checksums_verification["success"] and manifest_checksum_result["success"]
+    )
+    if not result.checksum_verification_passed:
+        result.success = False
+        return result
+
     result.success = len(result.errors) == 0
 
     print("=" * 80)
@@ -1761,6 +1879,10 @@ def run_local_import_job(
     print(f"{'✅' if result.success else '❌'} Imported {result.episodes_passed_validation} local episodes")
     print(f"Output directory: {result.output_dir}")
     print(f"Manifest: {result.import_manifest_path}")
+    print(
+        "Checksum verification: "
+        f"{'✅' if result.checksum_verification_passed else '❌'}"
+    )
     print("=" * 80 + "\n")
 
     return result
