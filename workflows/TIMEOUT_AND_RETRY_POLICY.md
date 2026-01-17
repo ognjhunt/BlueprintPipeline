@@ -148,6 +148,58 @@ For GCS read/write operations (markers, configs):
 - **No explicit timeout:** Uses Google API client library defaults (typically 60s per operation)
 - **Implicit Retries:** HTTP client libraries automatically retry transient failures
 
+## Rollback/Cleanup Pattern for Output Prefixes
+
+Workflows that write outputs to a prefix **must** wrap critical job launches in `try`/`except` blocks and perform cleanup in the `except` path. The standard rollback pattern is:
+
+1. **List outputs for the step prefix** (for example, `scenes/<scene_id>/episodes/`).
+2. **Delete or quarantine partial outputs** using `googleapis.storage.v1.objects.delete` for each object under that prefix.
+3. **Write a `.failed` marker** under the same output prefix (for example, `scenes/<scene_id>/episodes/.failed`) so downstream systems stop or alert.
+
+Example pattern:
+
+```yaml
+- run_step_job:
+    try:
+      call: googleapis.run.v2.projects.locations.jobs.run
+      args:
+        name: ${jobName}
+      result: jobExec
+    except:
+      as: e
+      steps:
+        - list_outputs_for_cleanup:
+            call: googleapis.storage.v1.objects.list
+            args:
+              bucket: ${bucket}
+              prefix: ${outputPrefix + "/"}
+              maxResults: 1000
+            result: cleanupList
+        - delete_outputs_for_cleanup:
+            for:
+              value: cleanupItem
+              in: ${default(cleanupList.items, [])}
+              steps:
+                - delete_output:
+                    call: googleapis.storage.v1.objects.delete
+                    args:
+                      bucket: ${bucket}
+                      object: ${cleanupItem.name}
+        - write_failed_marker:
+            call: googleapis.storage.v1.objects.insert
+            args:
+              bucket: ${bucket}
+              name: ${outputPrefix + "/.failed"}
+              uploadType: "media"
+              body: ${json.encode({
+                "status": "failed",
+                "timestamp": time.format(sys.now()),
+                "error": {"message": e.message}
+              })}
+        - raise_step_error:
+            raise: ${e}
+```
+
 ## Workflow Status Polling
 
 When waiting for Cloud Run job completion:

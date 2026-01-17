@@ -62,6 +62,7 @@ main:
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - arenaPrefix: '${"scenes/" + sceneId + "/arena"}'
+          - arenaFailedMarker: '${"scenes/" + sceneId + "/arena/.failed"}'
           - geniesimPrefix: ""
           - arenaJobName: "arena-export-job"
           - triggerSource: "isaac_lab"
@@ -76,6 +77,7 @@ main:
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - arenaPrefix: '${"scenes/" + sceneId + "/arena"}'
+          - arenaFailedMarker: '${"scenes/" + sceneId + "/arena/.failed"}'
           - geniesimPrefix: '${"scenes/" + sceneId + "/geniesim"}'
           - arenaJobName: "arena-export-job"
           - triggerSource: "geniesim"
@@ -88,6 +90,7 @@ main:
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - arenaPrefix: '${"scenes/" + sceneId + "/arena"}'
+          - arenaFailedMarker: '${"scenes/" + sceneId + "/arena/.failed"}'
           - geniesimPrefix: ""
           - arenaJobName: "arena-export-job"
           - triggerSource: "usd"
@@ -187,6 +190,48 @@ main:
                 args:
                   text: '${"Failed to start Arena export job after retries: " + e.message}'
                   severity: "ERROR"
+            - list_arena_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${arenaPrefix + "/"}
+                  maxResults: 1000
+                result: arenaCleanupList
+            - delete_arena_outputs_for_cleanup:
+                for:
+                  value: arenaCleanupItem
+                  in: ${default(arenaCleanupList.items, [])}
+                  steps:
+                    - delete_arena_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${arenaCleanupItem.name}
+            - write_arena_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${arenaFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": arenaJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "arena_export_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "arena_prefix": arenaPrefix
+                      }
+                    }
+                  })}
             - raise_arena_error:
                 raise: ${e}
         next: set_arena_execution_name

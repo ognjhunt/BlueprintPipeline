@@ -44,6 +44,8 @@ main:
           - sceneId: ${parts[1]}
           - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
           - variationAssetsPrefix: '${"scenes/" + sceneId + "/variation_assets"}'
+          - variationAssetsFailedMarker: '${"scenes/" + sceneId + "/variation_assets/.failed"}'
+          - variationSimreadyFailedMarker: '${"scenes/" + sceneId + "/variation_assets/simready/.failed"}'
           - variationGenJobName: "variation-gen-job"
           - variationGenTimeoutSeconds: 1800
           - simreadyJobName: "simready-job"
@@ -133,6 +135,48 @@ main:
                 args:
                   text: '${"Failed to start variation-gen job after retries: " + e.message}'
                   severity: "ERROR"
+            - list_variation_gen_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${variationAssetsPrefix + "/"}
+                  maxResults: 1000
+                result: variationGenCleanupList
+            - delete_variation_gen_outputs_for_cleanup:
+                for:
+                  value: variationGenCleanupItem
+                  in: ${default(variationGenCleanupList.items, [])}
+                  steps:
+                    - delete_variation_gen_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${variationGenCleanupItem.name}
+            - write_variation_gen_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${variationAssetsFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": variationGenJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "variation_gen_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "variation_assets_prefix": variationAssetsPrefix
+                      }
+                    }
+                  })}
             - raise_variation_gen_job_error:
                 raise: ${e}
         next: set_variation_gen_execution_name
@@ -336,6 +380,48 @@ main:
                 args:
                   text: '${"Failed to start simready job after retries: " + e.message}'
                   severity: "ERROR"
+            - list_variation_simready_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${variationAssetsPrefix + "/"}
+                  maxResults: 1000
+                result: variationSimreadyCleanupList
+            - delete_variation_simready_outputs_for_cleanup:
+                for:
+                  value: variationSimreadyCleanupItem
+                  in: ${default(variationSimreadyCleanupList.items, [])}
+                  steps:
+                    - delete_variation_simready_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${variationSimreadyCleanupItem.name}
+            - write_variation_simready_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${variationSimreadyFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": simreadyJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "variation_simready_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "variation_assets_prefix": variationAssetsPrefix
+                      }
+                    }
+                  })}
             - raise_simready_job_error:
                 raise: ${e}
         next: set_simready_execution_name

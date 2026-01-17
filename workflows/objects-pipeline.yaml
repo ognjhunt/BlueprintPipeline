@@ -30,6 +30,7 @@ main:
           - da3Prefix: ${"scenes/" + sceneId + "/da3"}
           - segDatasetPrefix: ${"scenes/" + sceneId + "/seg/dataset"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
+          - objectsPrefix: ${"scenes/" + sceneId + "/objects"}
           - jobName: "objects-job"
           # Explicitly set to the Cloud Run default for consistency/metrics.
           - objectsTimeoutSeconds: 3600
@@ -158,6 +159,23 @@ main:
                 args:
                   text: ${"ERROR: Failed to start objects-job after retries: " + e.message}
                   severity: "ERROR"
+            - list_objects_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${objectsPrefix + "/"}
+                  maxResults: 1000
+                result: objectsCleanupList
+            - delete_objects_outputs_for_cleanup:
+                for:
+                  value: objectsCleanupItem
+                  in: ${default(objectsCleanupList.items, [])}
+                  steps:
+                    - delete_objects_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${objectsCleanupItem.name}
             - write_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:

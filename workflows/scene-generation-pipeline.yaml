@@ -33,6 +33,7 @@ main:
           # Explicitly set to the Cloud Run default for consistency/metrics.
           - jobTimeoutSeconds: 3600
           - failedMarkerPath: "scene-generation/.failed"
+          - generationOutputPrefix: "scene-generation"
           - startTime: '${time.format(sys.now())}'
         next: log_start
 
@@ -115,6 +116,23 @@ main:
                     retry_max: 3
                     error: ${e.message}
                   severity: "ERROR"
+            - list_generation_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${generationOutputPrefix + "/"}
+                  maxResults: 1000
+                result: generationCleanupList
+            - delete_generation_outputs_for_cleanup:
+                for:
+                  value: generationCleanupItem
+                  in: ${default(generationCleanupList.items, [])}
+                  steps:
+                    - delete_generation_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${generationCleanupItem.name}
             - write_generation_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:
