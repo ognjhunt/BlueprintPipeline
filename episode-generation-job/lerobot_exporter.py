@@ -2606,6 +2606,8 @@ class LeRobotExporter:
                 "generated_at": self.checksum_generated_at or datetime.utcnow().isoformat() + "Z",
                 "manifest_count": len(self.checksum_manifest),
                 "manifest_hash": self._checksum_manifest_hash(),
+                "format": "relative path -> sha256",
+                "coverage": "all files under dataset root excluding meta/checksums.json",
             },
         }
 

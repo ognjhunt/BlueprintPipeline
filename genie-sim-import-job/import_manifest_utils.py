@@ -23,7 +23,7 @@ MANIFEST_SCHEMA_DEFINITION = {
         "lerobot": "LeRobot conversion status and outputs.",
         "metrics_summary": "Pipeline metrics snapshot.",
         "file_inventory": "List of all output files (path + size).",
-        "checksums": "SHA256 checksums for episodes and key metadata files.",
+        "checksums": "SHA256 checksums for episodes, metadata, and full bundle files.",
         "provenance": "Source control, pipeline version, config snapshot, and tool versions.",
     },
     "notes": [
@@ -141,6 +141,7 @@ def get_lerobot_metadata_paths(output_dir: Path) -> List[Path]:
     candidates = [
         output_dir / "lerobot" / "meta" / "info.json",
         output_dir / "lerobot" / "dataset_info.json",
+        output_dir / "lerobot" / "episodes.jsonl",
     ]
     return [path for path in candidates if path.exists()]
 
