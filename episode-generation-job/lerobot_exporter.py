@@ -203,6 +203,7 @@ class LeRobotDatasetConfig:
     include_object_poses: bool = False
     include_contacts: bool = False
     include_privileged_state: bool = False
+    strict_alignment: bool = True
 
     # Output paths
     output_dir: Path = Path("./lerobot_dataset")
@@ -217,6 +218,7 @@ class LeRobotDatasetConfig:
         resolution: Tuple[int, int] = (640, 480),
         fps: float = 30.0,
         output_dir: Path = Path("./lerobot_dataset"),
+        strict_alignment: Optional[bool] = None,
     ) -> "LeRobotDatasetConfig":
         """Create config from data pack tier."""
         camera_types = ["wrist"]
@@ -235,6 +237,7 @@ class LeRobotDatasetConfig:
             camera_types=camera_types[:num_cameras],
             data_pack_tier=data_pack_tier,
             output_dir=output_dir,
+            strict_alignment=strict_alignment if strict_alignment is not None else True,
         )
 
         # Configure based on tier
@@ -797,7 +800,7 @@ class LeRobotExporter:
 
         return invalid_calibrations
 
-    def _validate_trajectory_sensor_alignment(self) -> List[str]:
+    def _validate_trajectory_sensor_alignment(self) -> List[Dict[str, Any]]:
         """
         P2-4 FIX: Validate that trajectory frames and sensor data frames are aligned.
 
@@ -807,13 +810,14 @@ class LeRobotExporter:
         3. Detect missing or extra sensor frames
 
         Returns:
-            List of error messages (empty if all aligned)
+            List of per-episode error entries (empty if all aligned)
         """
-        errors = []
+        errors: List[Dict[str, Any]] = []
 
         for episode in self.episodes:
             episode_id = episode.episode_index
             trajectory_frames = episode.trajectory.num_frames if episode.trajectory else 0
+            episode_errors: List[str] = []
 
             # Skip if no sensor data (not an error)
             if episode.sensor_data is None:
@@ -828,10 +832,10 @@ class LeRobotExporter:
 
             # Validate frame count alignment
             if trajectory_frames != sensor_frames:
-                errors.append(
-                    f"Episode {episode_id}: Frame count mismatch. "
-                    f"Trajectory: {trajectory_frames} frames, Sensor: {sensor_frames} frames"
+                episode_errors.append(
+                    f"Frame count mismatch. Trajectory: {trajectory_frames} frames, Sensor: {sensor_frames} frames"
                 )
+                errors.append({"episode_index": episode_id, "errors": episode_errors})
                 continue
 
             # Validate timestamp alignment (if both have timestamps)
@@ -855,9 +859,8 @@ class LeRobotExporter:
                             f"frame {i} (traj: {trajectory_timestamps[i]:.3f}s, sensor: {sensor_timestamps[i]:.3f}s)"
                             for i in sample_frames
                         ])
-                        errors.append(
-                            f"Episode {episode_id}: {len(misaligned_frames)} misaligned timestamps. "
-                            f"Examples: {frame_info}"
+                        episode_errors.append(
+                            f"{len(misaligned_frames)} misaligned timestamps. Examples: {frame_info}"
                         )
 
             # Validate camera consistency (all frames should have same cameras)
@@ -868,10 +871,13 @@ class LeRobotExporter:
                         frame_cameras = set(frame.rgb_images.keys())
                         missing_cameras = expected_cameras - frame_cameras
                         if missing_cameras:
-                            errors.append(
-                                f"Episode {episode_id}, frame {i}: Missing camera data for {missing_cameras}"
+                            episode_errors.append(
+                                f"Missing camera data for {missing_cameras} at frame {i}"
                             )
                             break  # Don't spam errors for every frame
+
+            if episode_errors:
+                errors.append({"episode_index": episode_id, "errors": episode_errors})
 
         return errors
 
@@ -1212,12 +1218,30 @@ class LeRobotExporter:
         self.log("Validating trajectory-sensor frame alignment...")
         alignment_errors = self._validate_trajectory_sensor_alignment()
         if alignment_errors:
-            self.log(f"  Found {len(alignment_errors)} alignment issues:", "WARNING")
-            for error in alignment_errors[:5]:  # Show first 5 errors
-                self.log(f"    - {error}", "WARNING")
+            self.log(f"  Found {len(alignment_errors)} episodes with alignment issues:", "WARNING")
+            for entry in alignment_errors[:5]:  # Show first 5 episodes
+                self.log(f"    Episode {entry['episode_index']}:", "WARNING")
+                for error in entry["errors"][:3]:
+                    self.log(f"      - {error}", "WARNING")
             if len(alignment_errors) > 5:
                 self.log(f"    ... and {len(alignment_errors) - 5} more", "WARNING")
-            # Don't fail - just warn (some episodes may not have sensor data)
+
+            if self.config.strict_alignment:
+                raise ValueError(
+                    "Trajectory-sensor alignment validation failed for "
+                    f"{len(alignment_errors)} episodes. Set strict_alignment=False to drop them."
+                )
+
+            dropped_episode_ids = {entry["episode_index"] for entry in alignment_errors}
+            self.log(
+                f"  Dropping {len(dropped_episode_ids)} episodes due to alignment errors.",
+                "WARNING",
+            )
+            self._write_invalid_episodes(meta_dir, alignment_errors)
+            self.episodes = [
+                episode for episode in self.episodes
+                if episode.episode_index not in dropped_episode_ids
+            ]
         else:
             self.log("  All episodes have aligned trajectory-sensor frames")
 
@@ -1603,6 +1627,18 @@ class LeRobotExporter:
         with open(stats_path, "w") as f:
             json.dump(self.stats, f, indent=2)
         self._record_checksum(stats_path)
+
+    def _write_invalid_episodes(self, meta_dir: Path, invalid_entries: List[Dict[str, Any]]) -> None:
+        """Write invalid episode details to meta directory."""
+        invalid_path = meta_dir / "invalid_episodes.json"
+        payload = {
+            "reason": "trajectory_sensor_alignment",
+            "total_dropped": len(invalid_entries),
+            "episodes": invalid_entries,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        with open(invalid_path, "w") as f:
+            json.dump(payload, f, indent=2)
 
     def _write_info(self, meta_dir: Path) -> None:
         """Write dataset info JSON."""

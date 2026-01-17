@@ -1434,6 +1434,7 @@ class EpisodeGenerator:
             resolution=self.config.image_resolution,
             fps=self.config.fps,
             output_dir=self.config.output_dir / "lerobot",
+            strict_alignment=self._is_production_quality_level(),
         )
         exporter = LeRobotExporter(lerobot_config, verbose=False)
 
