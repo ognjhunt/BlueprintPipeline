@@ -43,6 +43,12 @@ from tools.validation.entrypoint_checks import validate_required_env_vars
 
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
 EXPECTED_GENIESIM_API_VERSION = "3.0.0"
+REQUIRED_GENIESIM_CAPABILITIES = {
+    "data_collection",
+    "recording",
+    "observation",
+    "environment_reset",
+}
 CONTRACT_SCHEMAS = {
     "scene_graph": "scene_graph.schema.json",
     "asset_index": "asset_index.schema.json",
@@ -372,8 +378,17 @@ def main() -> int:
         robot_type=robot_type,
         episodes_per_task=episodes_per_task,
         verbose=True,
+        expected_server_version=EXPECTED_GENIESIM_API_VERSION,
+        required_capabilities=sorted(REQUIRED_GENIESIM_CAPABILITIES),
     )
     local_run_end = datetime.utcnow()
+    server_info = getattr(local_run_result, "server_info", {})
+    if server_info:
+        print(
+            "[GENIESIM-SUBMIT-JOB] Genie Sim server info: "
+            f"version={server_info.get('version')}, "
+            f"capabilities={server_info.get('capabilities')}"
+        )
     if local_run_result and local_run_result.success:
         submission_message = "Local Genie Sim execution completed."
     else:
@@ -475,6 +490,7 @@ def main() -> int:
             "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
             "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
             "preflight": preflight_report,
+            "server_info": server_info if server_info else None,
         }
 
     _write_json_blob(storage_client, bucket, job_output_path, job_payload)
