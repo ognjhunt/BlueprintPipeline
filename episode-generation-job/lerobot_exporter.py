@@ -185,6 +185,8 @@ class LeRobotEpisode:
     rgb_frames_expected_total: int = 0
     rgb_frames_written_total: int = 0
     dropped_frames_total: int = 0
+    parquet_row_count: Optional[int] = None
+    parquet_path: Optional[str] = None
 
 
 @dataclass
@@ -444,12 +446,15 @@ class LeRobotExporter:
         writer: Callable[[Path], None],
         *,
         record_checksum: bool = True,
+        fsync_target: bool = False,
     ) -> None:
         tmp_path = target.with_name(f"{target.name}.tmp")
         if tmp_path.exists():
             tmp_path.unlink()
         writer(tmp_path)
         os.replace(tmp_path, target)
+        if fsync_target:
+            self._fsync_file_and_dir(target)
         if record_checksum:
             self._record_checksum(target)
 
@@ -459,14 +464,46 @@ class LeRobotExporter:
         writer: Callable[[Path], None],
         *,
         record_checksum: bool = True,
+        fsync_target: bool = False,
     ) -> None:
         tmp_path = target.with_name(f"{target.stem}.tmp{target.suffix}")
         if tmp_path.exists():
             tmp_path.unlink()
         writer(tmp_path)
         os.replace(tmp_path, target)
+        if fsync_target:
+            self._fsync_file_and_dir(target)
         if record_checksum:
             self._record_checksum(target)
+
+    def _fsync_file_and_dir(self, target: Path) -> None:
+        try:
+            with open(target, "rb") as handle:
+                os.fsync(handle.fileno())
+        except Exception as exc:
+            self.log(
+                f"Failed to fsync file {target.name}: {self._sanitize_error_message(str(exc))}",
+                "WARNING",
+            )
+            return
+
+        try:
+            dir_fd = os.open(str(target.parent), os.O_RDONLY)
+        except Exception as exc:
+            self.log(
+                f"Failed to open directory for fsync {target.parent}: {self._sanitize_error_message(str(exc))}",
+                "WARNING",
+            )
+            return
+        try:
+            os.fsync(dir_fd)
+        except Exception as exc:
+            self.log(
+                f"Failed to fsync directory {target.parent}: {self._sanitize_error_message(str(exc))}",
+                "WARNING",
+            )
+        finally:
+            os.close(dir_fd)
 
     def _get_data_source_info(self) -> Dict[str, Any]:
         """
@@ -1477,6 +1514,7 @@ class LeRobotExporter:
         3. Contains expected columns (state, action, etc.)
         4. No missing data (NaN/None values)
         5. Row counts match expected length
+        6. Checksum matches manifest
 
         Returns:
             List of (file_path, errors) tuples for problematic files
@@ -1488,6 +1526,15 @@ class LeRobotExporter:
         verification_errors = []
 
         try:
+            expected_lengths = {
+                episode.episode_index: episode.trajectory.num_frames
+                for episode in self.episodes
+            }
+            expected_row_counts = {
+                episode.episode_index: episode.parquet_row_count
+                for episode in self.episodes
+                if episode.parquet_row_count is not None
+            }
             # Find all Parquet files
             parquet_files = list(data_dir.rglob("*.parquet"))
             if not parquet_files:
@@ -1521,6 +1568,47 @@ class LeRobotExporter:
                     num_rows = table.num_rows
                     if num_rows == 0:
                         errors.append("Table is empty (0 rows)")
+                    episode_match = re.search(r"episode_(\d+)\.parquet$", parquet_path.name)
+                    if episode_match:
+                        episode_index = int(episode_match.group(1))
+                        expected_length = expected_lengths.get(episode_index)
+                        if expected_length is None:
+                            errors.append(
+                                f"No episode metadata found for index {episode_index}"
+                            )
+                        elif num_rows != expected_length:
+                            errors.append(
+                                f"Row count {num_rows} does not match expected "
+                                f"{expected_length} frames for episode {episode_index}"
+                            )
+
+                        expected_row_count = expected_row_counts.get(episode_index)
+                        if expected_row_count is not None and num_rows != expected_row_count:
+                            errors.append(
+                                f"Row count {num_rows} does not match recorded metadata "
+                                f"{expected_row_count} for episode {episode_index}"
+                            )
+                    else:
+                        errors.append(
+                            f"Unable to determine episode index from filename {parquet_path.name}"
+                        )
+
+                    checksum = _checksum_file(parquet_path, self.checksum_algorithm)
+                    if self.output_dir is None:
+                        errors.append("Checksum manifest unavailable (output_dir unset)")
+                    else:
+                        rel_path = parquet_path.resolve().relative_to(
+                            self.output_dir.resolve()
+                        ).as_posix()
+                        manifest_checksum = self.checksum_manifest.get(rel_path)
+                        if manifest_checksum is None:
+                            errors.append(
+                                f"Checksum manifest missing entry for {rel_path}"
+                            )
+                        elif checksum != manifest_checksum:
+                            errors.append(
+                                f"Checksum mismatch for {rel_path}: expected {manifest_checksum}, got {checksum}"
+                            )
 
                 except Exception as e:
                     errors.append(f"Failed to read Parquet file: {type(e).__name__}: {str(e)}")
@@ -1751,6 +1839,10 @@ class LeRobotExporter:
                         self.log(f"      - {error}", "WARNING")
                 if len(parquet_errors) > 3:
                     self.log(f"    ... and {len(parquet_errors) - 3} more files with issues", "WARNING")
+                if self._is_production_mode():
+                    raise ValueError(
+                        f"Production export blocked due to {len(parquet_errors)} Parquet verification errors."
+                    )
             else:
                 self.log("  Parquet files verified successfully")
 
@@ -1891,7 +1983,16 @@ class LeRobotExporter:
                 episode_path = chunk_dir / f"episode_{episode.episode_index:06d}.parquet"
 
                 if HAVE_PYARROW:
-                    self._atomic_write(episode_path, lambda tmp_path: pq.write_table(episode_data, tmp_path))
+                    self._atomic_write(
+                        episode_path,
+                        lambda tmp_path: pq.write_table(episode_data, tmp_path),
+                        fsync_target=True,
+                    )
+                    episode.parquet_row_count = episode_data.num_rows
+                    if self.output_dir:
+                        episode.parquet_path = episode_path.resolve().relative_to(
+                            self.output_dir.resolve()
+                        ).as_posix()
                 else:
                     # Fallback: write as JSON
                     self._write_episode_json(episode, episode_path.with_suffix(".json"))
@@ -2529,6 +2630,10 @@ class LeRobotExporter:
                     meta["rgb_frames_expected_total"] = episode.rgb_frames_expected_total
                     meta["rgb_frames_written_total"] = episode.rgb_frames_written_total
                     meta["dropped_frames_total"] = episode.dropped_frames_total
+                    if episode.parquet_row_count is not None:
+                        meta["parquet_row_count"] = episode.parquet_row_count
+                    if episode.parquet_path is not None:
+                        meta["parquet_path"] = episode.parquet_path
                     meta["lineage_ref"] = "meta/info.json#/lineage"
                     f.write(json.dumps(meta) + "\n")
 
