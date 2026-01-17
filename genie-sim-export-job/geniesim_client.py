@@ -435,6 +435,52 @@ def safe_extract_tar(archive_path: Path, output_dir: Path) -> None:
                 tar.extract(member, output_dir)
 
 
+class GenieSimRestClient:
+    """HTTP REST helper for Genie Sim API calls."""
+
+    def __init__(self, api_key: Optional[str]) -> None:
+        self.api_key = api_key
+        self._session: Optional[requests.Session] = None
+        self._async_session: Optional[aiohttp.ClientSession] = None
+
+    def _build_headers(self) -> Dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "BlueprintPipeline/1.0",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    @property
+    def session(self) -> requests.Session:
+        """Get or create synchronous session."""
+        if self._session is None:
+            self._session = requests.Session()
+            self._session.headers.update(self._build_headers())
+        return self._session
+
+    async def get_async_session(self) -> aiohttp.ClientSession:
+        """Get or create asynchronous session."""
+        if self._async_session is None or self._async_session.closed:
+            self._async_session = aiohttp.ClientSession(
+                headers=self._build_headers()
+            )
+        return self._async_session
+
+    def close(self) -> None:
+        """Close synchronous session."""
+        if self._session:
+            self._session.close()
+            self._session = None
+
+    async def close_async(self) -> None:
+        """Close asynchronous session."""
+        if self._async_session and not self._async_session.closed:
+            await self._async_session.close()
+            self._async_session = None
+
+
 class GenieSimClient:
     """
     Client for Genie Sim 3.0 API.
@@ -558,7 +604,7 @@ class GenieSimClient:
 
         # For mock mode, use dummy values
         if self.mock_mode:
-            self.api_key = "mock-api-key"
+            self.api_key = None
             self.endpoint = "mock://geniesim"
         else:
             # Local framework uses gRPC, not HTTP REST API
@@ -568,8 +614,7 @@ class GenieSimClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-        self._session: Optional[requests.Session] = None
-        self._async_session: Optional[aiohttp.ClientSession] = None
+        self._rest_client = GenieSimRestClient(api_key=self.api_key)
 
         # GAP-EH-002 FIX: Add circuit breaker to prevent cascading failures
         self._circuit_breaker = None
@@ -582,38 +627,19 @@ class GenieSimClient:
     @property
     def session(self) -> requests.Session:
         """Get or create synchronous session."""
-        if self._session is None:
-            self._session = requests.Session()
-            self._session.headers.update({
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "User-Agent": "BlueprintPipeline/1.0",
-            })
-        return self._session
+        return self._rest_client.session
 
     async def _get_async_session(self) -> aiohttp.ClientSession:
         """Get or create asynchronous session."""
-        if self._async_session is None or self._async_session.closed:
-            self._async_session = aiohttp.ClientSession(
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "BlueprintPipeline/1.0",
-                }
-            )
-        return self._async_session
+        return await self._rest_client.get_async_session()
 
     def close(self):
         """Close synchronous session."""
-        if self._session:
-            self._session.close()
-            self._session = None
+        self._rest_client.close()
 
     async def close_async(self):
         """Close asynchronous session."""
-        if self._async_session and not self._async_session.closed:
-            await self._async_session.close()
-            self._async_session = None
+        await self._rest_client.close_async()
 
     def __enter__(self):
         return self
