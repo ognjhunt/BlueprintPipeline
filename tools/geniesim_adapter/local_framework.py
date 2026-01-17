@@ -86,8 +86,6 @@ if str(ADAPTER_ROOT) not in sys.path:
 from tools.logging_config import init_logging
 from tools.error_handling import CircuitBreaker
 from tools.geniesim_adapter.config import (
-    DEFAULT_GENIESIM_HOST,
-    DEFAULT_GENIESIM_PORT,
     get_geniesim_host,
     get_geniesim_port,
 )
@@ -213,8 +211,8 @@ class GenieSimConfig:
     """Configuration for Genie Sim local framework."""
 
     # Connection settings
-    host: str = DEFAULT_GENIESIM_HOST
-    port: int = DEFAULT_GENIESIM_PORT
+    host: str = field(default_factory=get_geniesim_host)
+    port: int = field(default_factory=get_geniesim_port)
     timeout: float = 30.0
     max_retries: int = 3
 
@@ -318,20 +316,20 @@ class GenieSimGRPCClient:
 
     def __init__(
         self,
-        host: str = DEFAULT_GENIESIM_HOST,
-        port: int = DEFAULT_GENIESIM_PORT,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
         timeout: float = 30.0,
     ):
         """
         Initialize gRPC client.
 
         Args:
-            host: Server hostname
+            host: Server hostname (defaults to GENIESIM_HOST)
             port: Server port (defaults to GENIESIM_PORT)
             timeout: Request timeout in seconds
         """
-        self.host = host
-        self.port = port
+        self.host = host or get_geniesim_host()
+        self.port = port if port is not None else get_geniesim_port()
         self.timeout = timeout
         self._channel = None
         self._stub = None
