@@ -23,11 +23,12 @@ Environment Variables:
     (None specific to model selection; always uses Gemini 3.0 Pro Image.)
 """
 
+import datetime
 import json
+import logging
 import os
 import sys
 import time
-import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -45,8 +46,12 @@ try:
     from google import genai
     from google.genai import types
 except ImportError:
-    print("[VARIATION-GEN] ERROR: google-genai package not installed", file=sys.stderr)
+    logging.getLogger(__name__).error(
+        "[VARIATION-GEN] google-genai package not installed"
+    )
     sys.exit(1)
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -275,7 +280,7 @@ def generate_asset_image(
     image_path = asset_dir / "reference.png"
 
     if dry_run:
-        print(f"[VARIATION-GEN] [DRY-RUN] Would generate: {asset.name}")
+        logger.info("[VARIATION-GEN] [DRY-RUN] Would generate: %s", asset.name)
         return GenerationResult(
             asset_name=asset.name,
             success=True,
@@ -286,10 +291,10 @@ def generate_asset_image(
     # Build prompt
     prompt = build_asset_generation_prompt(asset, policy_context)
 
-    print(f"[VARIATION-GEN] Generating image for: {asset.name}")
-    print(f"[VARIATION-GEN]   Category: {asset.category}")
-    print(f"[VARIATION-GEN]   Description: {asset.description[:80]}...")
-    print(f"[VARIATION-GEN]   Model: {GEMINI_IMAGE_MODEL_NAME}")
+    logger.info("[VARIATION-GEN] Generating image for: %s", asset.name)
+    logger.info("[VARIATION-GEN]   Category: %s", asset.category)
+    logger.info("[VARIATION-GEN]   Description: %s...", asset.description[:80])
+    logger.info("[VARIATION-GEN]   Model: %s", GEMINI_IMAGE_MODEL_NAME)
 
     # Retry loop for robustness
     last_error = None
@@ -322,7 +327,11 @@ def generate_asset_image(
                             img.save(str(image_path), format='PNG')
 
                             elapsed = time.time() - start_time
-                            print(f"[VARIATION-GEN] Generated: {asset.name} ({elapsed:.1f}s)")
+                            logger.info(
+                                "[VARIATION-GEN] Generated: %s (%.1fs)",
+                                asset.name,
+                                elapsed,
+                            )
 
                             return GenerationResult(
                                 asset_name=asset.name,
@@ -335,7 +344,13 @@ def generate_asset_image(
 
         except Exception as e:
             last_error = str(e)
-            print(f"[VARIATION-GEN] Attempt {attempt + 1}/{MAX_RETRIES} failed for {asset.name}: {e}")
+            logger.warning(
+                "[VARIATION-GEN] Attempt %s/%s failed for %s: %s",
+                attempt + 1,
+                MAX_RETRIES,
+                asset.name,
+                e,
+            )
 
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))  # Exponential backoff
@@ -382,14 +397,18 @@ def generate_all_assets(
     if max_assets is not None:
         assets_to_generate = assets_to_generate[:max_assets]
 
-    print(
-        f"[VARIATION-GEN] Generating {len(assets_to_generate)} assets using {GEMINI_IMAGE_MODEL_NAME}..."
+    logger.info(
+        "[VARIATION-GEN] Generating %s assets using %s...",
+        len(assets_to_generate),
+        GEMINI_IMAGE_MODEL_NAME,
     )
 
     results: List[GenerationResult] = []
 
     for i, asset in enumerate(assets_to_generate):
-        print(f"[VARIATION-GEN] Progress: {i + 1}/{len(assets_to_generate)}")
+        logger.debug(
+            "[VARIATION-GEN] Progress: %s/%s", i + 1, len(assets_to_generate)
+        )
 
         result = generate_asset_image(
             client=client,
@@ -462,9 +481,14 @@ def load_manifest(manifest_path: Path) -> Tuple[Dict[str, Any], List[VariationAs
         )
         assets.append(asset)
 
-    print(f"[VARIATION-GEN] Loaded manifest with {len(assets)} assets")
-    print(f"[VARIATION-GEN] Scene type: {manifest.get('scene_type', 'unknown')}")
-    print(f"[VARIATION-GEN] Environment: {manifest.get('environment_type', 'unknown')}")
+    logger.info("[VARIATION-GEN] Loaded manifest with %s assets", len(assets))
+    logger.info(
+        "[VARIATION-GEN] Scene type: %s", manifest.get("scene_type", "unknown")
+    )
+    logger.info(
+        "[VARIATION-GEN] Environment: %s",
+        manifest.get("environment_type", "unknown"),
+    )
 
     return manifest, assets
 
@@ -525,7 +549,9 @@ def create_hunyuan_assets_json(
     with output_path.open("w") as f:
         json.dump(assets_json, f, indent=2)
 
-    print(f"[VARIATION-GEN] Created downstream-compatible assets file: {output_path}")
+    logger.info(
+        "[VARIATION-GEN] Created downstream-compatible assets file: %s", output_path
+    )
     return output_path
 
 
@@ -562,7 +588,7 @@ def update_manifest_with_results(
     with output_path.open("w") as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"[VARIATION-GEN] Updated manifest: {output_path}")
+    logger.info("[VARIATION-GEN] Updated manifest: %s", output_path)
 
 
 # ============================================================================
@@ -593,7 +619,7 @@ def process_variation_assets(
     Returns:
         True if successful, False otherwise
     """
-    print(f"[VARIATION-GEN] Processing variation assets for scene: {scene_id}")
+    logger.info("[VARIATION-GEN] Processing variation assets for scene: %s", scene_id)
 
     # Load manifest
     manifest_path = root / replicator_prefix / "variation_assets" / "manifest.json"
@@ -601,15 +627,17 @@ def process_variation_assets(
     try:
         manifest, assets = load_manifest(manifest_path)
     except FileNotFoundError as e:
-        print(f"[VARIATION-GEN] ERROR: {e}", file=sys.stderr)
+        logger.error("[VARIATION-GEN] %s", e)
         return False
 
-    print(f"[VARIATION-GEN] Loaded manifest with {len(assets)} assets")
+    logger.info("[VARIATION-GEN] Loaded manifest with %s assets", len(assets))
 
     # Filter by priority if specified
     if priority_filter:
         assets = [a for a in assets if a.priority == priority_filter]
-        print(f"[VARIATION-GEN] Filtered to {len(assets)} {priority_filter} assets")
+        logger.info(
+            "[VARIATION-GEN] Filtered to %s %s assets", len(assets), priority_filter
+        )
 
     # Filter to only assets that need generation
     assets_to_generate = [
@@ -617,10 +645,12 @@ def process_variation_assets(
         if a.source_hint == "generate" or a.source_hint is None
     ]
 
-    print(f"[VARIATION-GEN] {len(assets_to_generate)} assets need generation")
+    logger.info(
+        "[VARIATION-GEN] %s assets need generation", len(assets_to_generate)
+    )
 
     if not assets_to_generate:
-        print("[VARIATION-GEN] No assets need generation; exiting.")
+        logger.info("[VARIATION-GEN] No assets need generation; exiting.")
         # Still write completion marker
         output_dir = root / variation_assets_prefix
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -641,7 +671,7 @@ def process_variation_assets(
         try:
             client = create_gemini_client()
         except ValueError as e:
-            print(f"[VARIATION-GEN] ERROR: {e}", file=sys.stderr)
+            logger.error("[VARIATION-GEN] %s", e)
             return False
     else:
         client = None
@@ -656,10 +686,13 @@ def process_variation_assets(
         dry_run=dry_run,
     )
 
-    print(f"[VARIATION-GEN] Generation complete:")
-    print(f"[VARIATION-GEN]   Successful: {summary['successful']}")
-    print(f"[VARIATION-GEN]   Failed: {summary['failed']}")
-    print(f"[VARIATION-GEN]   Total time: {summary['total_generation_time_seconds']:.1f}s")
+    logger.info("[VARIATION-GEN] Generation complete:")
+    logger.info("[VARIATION-GEN]   Successful: %s", summary["successful"])
+    logger.info("[VARIATION-GEN]   Failed: %s", summary["failed"])
+    logger.info(
+        "[VARIATION-GEN]   Total time: %.1fs",
+        summary["total_generation_time_seconds"],
+    )
 
     # Create hunyuan-compatible assets file
     if summary['successful'] > 0:
@@ -698,7 +731,7 @@ def process_variation_assets(
         f"successful: {summary['successful']}\n"
         f"failed: {summary['failed']}\n"
     )
-    print(f"[VARIATION-GEN] Wrote completion marker: {marker_path}")
+    logger.info("[VARIATION-GEN] Wrote completion marker: %s", marker_path)
 
     return summary['failed'] == 0 or summary['successful'] > 0
 
@@ -735,21 +768,21 @@ def main():
     dry_run = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"}
 
     if not scene_id:
-        print("[VARIATION-GEN] ERROR: SCENE_ID environment variable is required", file=sys.stderr)
+        logger.error("[VARIATION-GEN] SCENE_ID environment variable is required")
         sys.exit(1)
 
-    print(f"[VARIATION-GEN] Starting variation asset generation")
-    print(f"[VARIATION-GEN] Scene ID: {scene_id}")
-    print(f"[VARIATION-GEN] Bucket: {bucket}")
-    print(f"[VARIATION-GEN] Replicator prefix: {replicator_prefix}")
-    print(f"[VARIATION-GEN] Output prefix: {variation_assets_prefix}")
-    print(f"[VARIATION-GEN] Image model: {GEMINI_IMAGE_MODEL_NAME}")
+    logger.info("[VARIATION-GEN] Starting variation asset generation")
+    logger.info("[VARIATION-GEN] Scene ID: %s", scene_id)
+    logger.info("[VARIATION-GEN] Bucket: %s", bucket)
+    logger.info("[VARIATION-GEN] Replicator prefix: %s", replicator_prefix)
+    logger.info("[VARIATION-GEN] Output prefix: %s", variation_assets_prefix)
+    logger.info("[VARIATION-GEN] Image model: %s", GEMINI_IMAGE_MODEL_NAME)
     if max_assets:
-        print(f"[VARIATION-GEN] Max assets: {max_assets}")
+        logger.info("[VARIATION-GEN] Max assets: %s", max_assets)
     if priority_filter:
-        print(f"[VARIATION-GEN] Priority filter: {priority_filter}")
+        logger.info("[VARIATION-GEN] Priority filter: %s", priority_filter)
     if dry_run:
-        print(f"[VARIATION-GEN] DRY RUN MODE - no actual generation")
+        logger.info("[VARIATION-GEN] DRY RUN MODE - no actual generation")
 
     try:
         success = process_variation_assets(
@@ -763,16 +796,16 @@ def main():
         )
 
         if success:
-            print("[VARIATION-GEN] SUCCESS: Variation asset generation complete")
+            logger.info("[VARIATION-GEN] SUCCESS: Variation asset generation complete")
             sys.exit(0)
         else:
-            print("[VARIATION-GEN] PARTIAL SUCCESS: Some assets failed to generate")
+            logger.warning(
+                "[VARIATION-GEN] PARTIAL SUCCESS: Some assets failed to generate"
+            )
             sys.exit(0)  # Don't fail the job for partial success
 
     except Exception as e:
-        print(f"[VARIATION-GEN] ERROR: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+        logger.exception("[VARIATION-GEN] ERROR: %s", e)
         sys.exit(1)
 
 

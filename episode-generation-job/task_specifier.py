@@ -23,6 +23,7 @@ Reference:
 """
 
 import json
+import logging
 import os
 import sys
 import time
@@ -39,6 +40,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.metrics.pipeline_metrics import get_metrics
+
+logger = logging.getLogger(__name__)
 
 try:
     from tools.llm_client import create_llm_client, LLMResponse
@@ -65,10 +68,11 @@ def _load_secret_value(secret_id: str, env_var: str) -> Optional[str]:
         try:
             return get_secret_or_env(secret_id, env_var=env_var)
         except Exception as exc:
-            print(
-                f"[TASK-SPECIFIER] [WARN] Failed to fetch secret '{secret_id}', "
-                f"falling back to env var '{env_var}': {exc}",
-                file=sys.stderr,
+            logger.warning(
+                "[TASK-SPECIFIER] [WARN] Failed to fetch secret '%s', falling back to env var '%s': %s",
+                secret_id,
+                env_var,
+                exc,
             )
             return os.environ.get(env_var)
     return os.environ.get(env_var)
@@ -327,7 +331,14 @@ class TaskSpecifier:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[TASK-SPECIFIER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[TASK-SPECIFIER] [%s] %s", level, msg)
 
     def _ensure_llm_credentials(self) -> None:
         providers = [
@@ -1187,8 +1198,8 @@ def specify_task(
 
 if __name__ == "__main__":
     # Test the task specifier
-    print("Testing Task Specifier")
-    print("=" * 60)
+    logger.info("Testing Task Specifier")
+    logger.info("%s", "=" * 60)
 
     specifier = TaskSpecifier(verbose=True)
 
@@ -1216,13 +1227,19 @@ if __name__ == "__main__":
         place_position=[0.3, 0.2, 0.9],
     )
 
-    print("\n" + "=" * 60)
-    print("TASK SPECIFICATION")
-    print("=" * 60)
-    print(f"Task: {spec.task_name}")
-    print(f"Segments: {len(spec.segments)}")
+    logger.info("%s", "=" * 60)
+    logger.info("TASK SPECIFICATION")
+    logger.info("%s", "=" * 60)
+    logger.info("Task: %s", spec.task_name)
+    logger.info("Segments: %s", len(spec.segments))
     for seg in spec.segments:
-        print(f"  - {seg.skill_name} ({seg.segment_type.value}): {seg.start_time:.1f}-{seg.end_time:.1f}s")
-    print(f"Keypoints: {len(spec.keypoints)}")
-    print(f"Constraints: {len(spec.constraints)}")
-    print(f"Confidence: {spec.confidence}")
+        logger.info(
+            "  - %s (%s): %.1f-%.1fs",
+            seg.skill_name,
+            seg.segment_type.value,
+            seg.start_time,
+            seg.end_time,
+        )
+    logger.info("Keypoints: %s", len(spec.keypoints))
+    logger.info("Constraints: %s", len(spec.constraints))
+    logger.info("Confidence: %s", spec.confidence)

@@ -28,6 +28,7 @@ Reference:
 """
 
 import json
+import logging
 import os
 import sys
 import time
@@ -37,6 +38,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -381,9 +384,9 @@ class SimulationValidator:
 
         # Check what mode we're in
         if validator.is_using_real_physics():
-            print("Using Isaac Sim PhysX for validation")
+            logger.info("Using Isaac Sim PhysX for validation")
         else:
-            print("Using heuristic validation (less accurate)")
+            logger.info("Using heuristic validation (less accurate)")
 
         # Validate
         result = validator.validate(trajectory, motion_plan, scene_objects)
@@ -513,7 +516,14 @@ class SimulationValidator:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[SIM-VALIDATOR] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[SIM-VALIDATOR] [%s] %s", level, msg)
 
     def _resolve_robot_prim_paths(self) -> List[str]:
         """Resolve robot prim paths from config or USD auto-discovery."""
@@ -1507,8 +1517,8 @@ if __name__ == "__main__":
     from motion_planner import AIMotionPlanner
     from trajectory_solver import TrajectorySolver
 
-    print("Testing Simulation Validator")
-    print("=" * 60)
+    logger.info("Testing Simulation Validator")
+    logger.info("%s", "=" * 60)
 
     # Create test episode
     planner = AIMotionPlanner(robot_type="franka", use_llm=False, verbose=False)
@@ -1545,15 +1555,15 @@ if __name__ == "__main__":
     validator = SimulationValidator(robot_type="franka", verbose=True)
     result = validator.validate(trajectory, motion_plan, scene_objects)
 
-    print("\n" + "=" * 60)
-    print("VALIDATION RESULT")
-    print("=" * 60)
-    print(f"Status: {result.status.value}")
-    print(f"Overall Score: {result.metrics.overall_score:.2f}")
-    print(f"Task Success: {result.metrics.task_success}")
-    print(f"Grasp Success: {result.metrics.grasp_success}")
-    print(f"Collisions: {result.metrics.total_collisions}")
-    print(f"Joint Violations: {result.metrics.joint_limit_violations}")
-    print(f"Velocity Smoothness: {result.metrics.velocity_smoothness:.2f}")
+    logger.info("%s", "=" * 60)
+    logger.info("VALIDATION RESULT")
+    logger.info("%s", "=" * 60)
+    logger.info("Status: %s", result.status.value)
+    logger.info("Overall Score: %.2f", result.metrics.overall_score)
+    logger.info("Task Success: %s", result.metrics.task_success)
+    logger.info("Grasp Success: %s", result.metrics.grasp_success)
+    logger.info("Collisions: %s", result.metrics.total_collisions)
+    logger.info("Joint Violations: %s", result.metrics.joint_limit_violations)
+    logger.info("Velocity Smoothness: %.2f", result.metrics.velocity_smoothness)
     if result.failure_reasons:
-        print(f"Failure Reasons: {[r.value for r in result.failure_reasons]}")
+        logger.info("Failure Reasons: %s", [r.value for r in result.failure_reasons])

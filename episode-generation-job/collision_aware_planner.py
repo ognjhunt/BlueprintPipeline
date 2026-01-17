@@ -34,6 +34,7 @@ Reference:
 """
 
 import importlib
+import logging
 import math
 import sys
 import time
@@ -52,6 +53,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from motion_planner import MotionPlan, Waypoint, MotionPhase
 from trajectory_solver import JointTrajectory, ROBOT_CONFIGS, RobotConfig, IKSolver
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # cuRobo Integration
@@ -161,7 +164,14 @@ class SceneCollisionChecker:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[COLLISION-CHECKER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[COLLISION-CHECKER] [%s] %s", level, msg)
 
     def load_robot_urdf(self, urdf_path: str) -> bool:
         """Load robot collision geometry from URDF."""
@@ -566,7 +576,14 @@ class RRTPlanner:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[RRT-PLANNER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[RRT-PLANNER] [%s] %s", level, msg)
 
     def set_workspace_bounds(self, min_pt: np.ndarray, max_pt: np.ndarray) -> None:
         """Set workspace bounds for sampling."""
@@ -765,7 +782,14 @@ class CollisionAwarePlanner:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[COLLISION-PLANNER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[COLLISION-PLANNER] [%s] %s", level, msg)
 
     def _init_curobo(self) -> None:
         """Initialize cuRobo motion generator."""
@@ -1013,8 +1037,8 @@ def enhance_motion_plan_with_collision_avoidance(
 
 
 if __name__ == "__main__":
-    print("Testing Collision-Aware Motion Planner")
-    print("=" * 60)
+    logger.info("Testing Collision-Aware Motion Planner")
+    logger.info("=" * 60)
 
     # Create some test obstacles
     scene_objects = [
@@ -1033,22 +1057,22 @@ if __name__ == "__main__":
     start = np.array([0.3, 0, 0.6])
     goal = np.array([0.7, 0.3, 0.8])
 
-    print(f"\nPlanning from {start} to {goal}")
+    logger.info("Planning from %s to %s", start, goal)
     path = planner.plan_cartesian_path(start, goal)
 
     if path:
-        print(f"Found path with {len(path)} waypoints:")
+        logger.info("Found path with %s waypoints:", len(path))
         for i, wp in enumerate(path):
-            print(f"  {i}: {wp}")
+            logger.info("  %s: %s", i, wp)
     else:
-        print("No path found!")
+        logger.warning("No path found!")
 
     # Test with motion plan
     from motion_planner import AIMotionPlanner
 
-    print("\n" + "=" * 60)
-    print("Testing with full motion plan")
-    print("=" * 60)
+    logger.info("%s", "=" * 60)
+    logger.info("Testing with full motion plan")
+    logger.info("=" * 60)
 
     mp = AIMotionPlanner(robot_type="franka", use_llm=False, verbose=True)
     plan = mp.plan_motion(
@@ -1064,5 +1088,5 @@ if __name__ == "__main__":
         robot_type="franka",
     )
 
-    print(f"\nOriginal: {plan.num_waypoints} waypoints")
-    print(f"Enhanced: {enhanced.num_waypoints} waypoints")
+    logger.info("Original: %s waypoints", plan.num_waypoints)
+    logger.info("Enhanced: %s waypoints", enhanced.num_waypoints)
