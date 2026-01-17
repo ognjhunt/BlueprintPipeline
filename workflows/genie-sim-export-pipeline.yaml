@@ -78,7 +78,7 @@ main:
           - robotType: '${default(map.get(event, "robot_type"), "franka")}'
           # Max tasks to generate hints for
           - maxTasks: '${default(map.get(event, "max_tasks"), "50")}'
-          # Submission mode: api or local (API requires explicit opt-in)
+          # Submission mode: local-only (other values are unsupported)
           - geniesimSubmissionMode: '${default(map.get(event, "geniesim_submission_mode"), "local")}'
           - gkeCluster: '${default(map.get(event, "gke_cluster"), "blueprint-cluster")}'
           - gkeZone: '${default(map.get(event, "gke_zone"), "us-central1-a")}'
@@ -408,7 +408,7 @@ main:
         switch:
           - condition: '${geniesimSubmissionMode == "local"}'
             next: init_local_submission_metrics
-        next: init_api_submission_metrics
+        next: init_submit_job_metrics
 
     - init_local_submission_metrics:
         assign:
@@ -416,7 +416,7 @@ main:
           - submissionJobName: ${geniesimGpuJobName}
         next: emit_submission_metrics_start
 
-    - init_api_submission_metrics:
+    - init_submit_job_metrics:
         assign:
           - submissionStartTime: '${time.format(sys.now())}'
           - submissionJobName: ${geniesimSubmitJobName}
@@ -530,6 +530,8 @@ main:
                                     value: "5"
                                   - name: OUTPUT_PREFIX
                                     value: ${"scenes/" + sceneId + "/episodes"}
+                                  - name: GENIESIM_SUBMISSION_MODE
+                                    value: ${geniesimSubmissionMode}
                                   - name: GENIESIM_FORCE_LOCAL
                                     value: "true"
                                   - name: GENIESIM_HOST
@@ -693,7 +695,7 @@ main:
           seconds: 30
         next: wait_for_gke_submission_job
 
-    # Submit the Genie Sim generation job (local or API-backed)
+    # Submit the Genie Sim generation job via Cloud Run
     - run_geniesim_submission_job:
         try:
           call: googleapis.run.v2.projects.locations.jobs.run
@@ -717,6 +719,8 @@ main:
                         value: "10"
                       - name: NUM_VARIATIONS
                         value: "5"
+                      - name: GENIESIM_SUBMISSION_MODE
+                        value: ${geniesimSubmissionMode}
             timeout: '${string(geniesimSubmissionTimeoutSeconds) + "s"}'
         result: geniesimSubmitExec
         retry:
@@ -931,7 +935,7 @@ main:
           - submissionMetadata: ${json.decode(submissionMetadataRaw)}
           - submittedJobId: ${submissionMetadata.job_id}
           - submittedJobStatus: ${default(submissionMetadata.status, "submitted")}
-          - submittedSubmissionMode: ${default(submissionMetadata.submission_mode, "api")}
+          - submittedSubmissionMode: ${default(submissionMetadata.submission_mode, "local")}
           - submittedEpisodesPrefix: ${default(map.get(map.get(submissionMetadata, "artifacts", {}), "episodes_prefix"), null)}
           - submittedFailureReason: ${default(map.get(submissionMetadata, "failure_reason"), "unknown")}
           - submittedFailureDetails: ${default(map.get(submissionMetadata, "failure_details"), null)}
@@ -987,15 +991,15 @@ main:
           - condition: '${submittedJobStatus == "completed" and submittedSubmissionMode == "local"}'
             next: trigger_import_workflow
           - condition: '${submittedJobStatus == "completed"}'
-            next: skip_import_trigger_api
+            next: skip_import_trigger_deferred
           - condition: '${submittedJobStatus == "failed"}'
             next: handle_submission_failure
         next: write_submitted_marker
 
-    - skip_import_trigger_api:
+    - skip_import_trigger_deferred:
         call: sys.log
         args:
-          text: '${"Genie Sim job " + submittedJobId + " completed in API mode; webhook/Eventarc will trigger import"}'
+          text: '${"Genie Sim job " + submittedJobId + " completed; import will be triggered externally"}'
           severity: "INFO"
         next: write_completion_marker
 
