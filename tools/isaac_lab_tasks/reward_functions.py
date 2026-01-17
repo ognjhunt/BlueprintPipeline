@@ -6,6 +6,7 @@ policy types and task configurations.
 """
 
 import ast
+import types
 from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -13,7 +14,12 @@ if TYPE_CHECKING:
 
 
 class RewardTemplateRegistry:
-    """Registry for concrete reward templates."""
+    """Registry for concrete reward templates.
+
+    Trust model: known components are compiled into vetted callables once and
+    retrieved from this registry. Dynamic code execution via exec() is not
+    permitted; only a whitelist-validated AST-to-function path is allowed.
+    """
 
     REWARD_TEMPLATES = {
         "grasp_success": '''
@@ -666,6 +672,17 @@ def reward_rotation_accuracy(
     return torch.where(error < tolerance, torch.ones_like(error), 1.0 - torch.tanh(error))
 ''',
     }
+    _CALLABLES: dict[str, Callable[..., Any]] = {}
+    _SAFE_BUILTINS: dict[str, object] = {
+        "getattr": getattr,
+        "hasattr": hasattr,
+        "min": min,
+        "max": max,
+        "sum": sum,
+        "abs": abs,
+        "range": range,
+        "len": len,
+    }
 
     @classmethod
     def get_missing_components(cls, components: list[str]) -> list[str]:
@@ -684,64 +701,72 @@ def reward_rotation_accuracy(
                 f"{missing_str}"
             )
 
-
-class RewardFunctionGenerator:
-    """
-    Generates reward function code for Isaac Lab tasks.
-
-    Reward functions are designed to be compatible with Isaac Lab's
-    RewardTermCfg and can be used with the manager-based architecture.
-    """
-
-    REWARD_TEMPLATES = RewardTemplateRegistry.REWARD_TEMPLATES
-
-    def __init__(self):
-        pass
-
-    def compile(self, component: str) -> Callable[..., Any]:
+    @classmethod
+    def get_callable(cls, component: str) -> Callable[..., Any]:
         """Return a vetted callable reward function for a component."""
-        source = self.get_reward_function(component)
-        function_name = f"reward_{component}"
-        return self._compile_source(source, function_name)
+        if component in cls.REWARD_TEMPLATES:
+            cls._ensure_callables()
+            return cls._CALLABLES[component]
+        return cls._default_reward(component)
 
-    def get_reward_function(self, component: str) -> str:
-        """Get reward function code for a component."""
-        return self.REWARD_TEMPLATES.get(component, self._generate_default_reward(component))
+    @classmethod
+    def _ensure_callables(cls) -> None:
+        if cls._CALLABLES:
+            return
+        for component, source in cls.REWARD_TEMPLATES.items():
+            function_name = f"reward_{component}"
+            cls._CALLABLES[component] = cls._compile_source(source, function_name)
 
-    def validate_components(self, components: list[str]) -> None:
-        """Ensure reward components map to concrete implementations."""
-        RewardTemplateRegistry.validate_components(components)
-
-    def get_missing_components(self, components: list[str]) -> list[str]:
-        """Return reward components that would fall back to the default stub."""
-        return RewardTemplateRegistry.get_missing_components(components)
-
-    def _generate_default_reward(self, component: str) -> str:
-        """Generate a default reward function stub."""
-        return f'''
-def reward_{component}(
-    env: ManagerBasedEnv,
-) -> torch.Tensor:
-    """Reward for {component.replace('_', ' ')}."""
-    return torch.zeros(env.num_envs, device=env.device)
-'''
-
-    def _compile_source(self, source: str, function_name: str) -> Callable[..., Any]:
-        self._validate_reward_source(source, function_name)
+    @classmethod
+    def _default_reward(cls, component: str) -> Callable[..., Any]:
         import torch
 
-        namespace: dict[str, object] = {
+        def reward_stub(env: Any) -> torch.Tensor:
+            """Default reward stub that returns zeros."""
+            return torch.zeros(env.num_envs, device=env.device)
+
+        reward_stub.__name__ = f"reward_{component}"
+        return reward_stub
+
+    @classmethod
+    def _compile_source(cls, source: str, function_name: str) -> Callable[..., Any]:
+        func_def = cls._validate_reward_source(source, function_name)
+        import torch
+
+        module = ast.Module(body=[func_def], type_ignores=[])
+        compiled = compile(module, "<reward_function>", "exec")
+        func_code = next(
+            (
+                const
+                for const in compiled.co_consts
+                if isinstance(const, types.CodeType) and const.co_name == function_name
+            ),
+            None,
+        )
+        if func_code is None:
+            raise ValueError(f"Reward function '{function_name}' not found in source.")
+
+        safe_globals: dict[str, object] = {
             "torch": torch,
             "ManagerBasedEnv": Any,
+            "__builtins__": dict(cls._SAFE_BUILTINS),
         }
-        compiled = compile(source, "<reward_function>", "exec")
-        exec(compiled, namespace, namespace)
-        reward_fn = namespace.get(function_name)
-        if not callable(reward_fn):
-            raise ValueError(f"Reward function '{function_name}' not found in source.")
+        reward_fn = types.FunctionType(func_code, safe_globals, function_name)
+
+        defaults = tuple(ast.literal_eval(value) for value in func_def.args.defaults)
+        if defaults:
+            reward_fn.__defaults__ = defaults
+        kw_defaults = {
+            arg.arg: ast.literal_eval(default)
+            for arg, default in zip(func_def.args.kwonlyargs, func_def.args.kw_defaults)
+            if default is not None
+        }
+        if kw_defaults:
+            reward_fn.__kwdefaults__ = kw_defaults
         return reward_fn
 
-    def _validate_reward_source(self, source: str, function_name: str) -> None:
+    @classmethod
+    def _validate_reward_source(cls, source: str, function_name: str) -> ast.FunctionDef:
         module = ast.parse(source)
         if len(module.body) != 1 or not isinstance(module.body[0], ast.FunctionDef):
             raise ValueError("Reward source must contain a single function definition.")
@@ -781,6 +806,29 @@ def reward_{component}(
             ast.Del,
             ast.keyword,
             ast.IfExp,
+            ast.And,
+            ast.Or,
+            ast.Not,
+            ast.Add,
+            ast.Sub,
+            ast.Mult,
+            ast.Div,
+            ast.Mod,
+            ast.Pow,
+            ast.BitAnd,
+            ast.BitOr,
+            ast.USub,
+            ast.UAdd,
+            ast.Eq,
+            ast.NotEq,
+            ast.Lt,
+            ast.LtE,
+            ast.Gt,
+            ast.GtE,
+            ast.Is,
+            ast.IsNot,
+            ast.In,
+            ast.NotIn,
         }
         forbidden_names = {
             "__import__",
@@ -801,6 +849,49 @@ def reward_{component}(
                 raise ValueError(f"Disallowed name: {node.id}")
             if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
                 raise ValueError(f"Disallowed attribute access: {node.attr}")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden_names:
+                raise ValueError(f"Disallowed call: {node.func.id}")
+        return func_def
+
+
+class RewardFunctionGenerator:
+    """
+    Generates reward function code for Isaac Lab tasks.
+
+    Reward functions are designed to be compatible with Isaac Lab's
+    RewardTermCfg and can be used with the manager-based architecture.
+    """
+
+    REWARD_TEMPLATES = RewardTemplateRegistry.REWARD_TEMPLATES
+
+    def __init__(self):
+        pass
+
+    def compile(self, component: str) -> Callable[..., Any]:
+        """Return a vetted callable reward function for a component."""
+        return RewardTemplateRegistry.get_callable(component)
+
+    def get_reward_function(self, component: str) -> str:
+        """Get reward function code for a component."""
+        return self.REWARD_TEMPLATES.get(component, self._generate_default_reward(component))
+
+    def validate_components(self, components: list[str]) -> None:
+        """Ensure reward components map to concrete implementations."""
+        RewardTemplateRegistry.validate_components(components)
+
+    def get_missing_components(self, components: list[str]) -> list[str]:
+        """Return reward components that would fall back to the default stub."""
+        return RewardTemplateRegistry.get_missing_components(components)
+
+    def _generate_default_reward(self, component: str) -> str:
+        """Generate a default reward function stub."""
+        return f'''
+def reward_{component}(
+    env: ManagerBasedEnv,
+) -> torch.Tensor:
+    """Reward for {component.replace('_', ' ')}."""
+    return torch.zeros(env.num_envs, device=env.device)
+'''
 
     def generate_reward_module(
         self,
