@@ -17,6 +17,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import threading
 import time
@@ -24,14 +25,21 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from .geniesim_grpc_pb2 import (
+    AddCameraRequest, AddCameraResponse,
+    AttachObjectRequest, AttachObjectResponse,
     CameraObservation,
     CommandRequest, CommandResponse,
     CommandType,
+    DetachObjectRequest, DetachObjectResponse,
     GetEEPoseRequest, GetEEPoseResponse,
+    GetGripperStateRequest, GetGripperStateResponse,
+    GetIKStatusRequest, GetIKStatusResponse,
     GetJointPositionRequest, GetJointPositionResponse,
     GetObjectPoseRequest, GetObjectPoseResponse,
     GetObservationRequest, GetObservationResponse,
+    InitRobotRequest, InitRobotResponse,
     JointState,
+    LinearMoveRequest, LinearMoveResponse,
     Pose,
     Quaternion,
     ResetRequest, ResetResponse,
@@ -43,6 +51,7 @@ from .geniesim_grpc_pb2 import (
     SetTrajectoryRequest, SetTrajectoryResponse,
     StartRecordingRequest, StartRecordingResponse,
     StopRecordingRequest, StopRecordingResponse,
+    TaskStatusRequest, TaskStatusResponse,
     TrajectoryPoint,
     Vector3,
 )
@@ -55,6 +64,8 @@ try:
 except ImportError:
     GRPC_AVAILABLE = False
     grpc = None
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -72,6 +83,7 @@ class _MethodDescriptor:
         response_type: type,
         request_serializer: Callable,
         response_deserializer: Callable,
+        response_streaming: bool = False,
     ):
         self.name = name
         self.full_name = f"/geniesim.GenieSimService/{name}"
@@ -79,6 +91,7 @@ class _MethodDescriptor:
         self.response_type = response_type
         self.request_serializer = request_serializer
         self.response_deserializer = response_deserializer
+        self.response_streaming = response_streaming
 
 
 # Define service methods
@@ -111,6 +124,34 @@ _SERVICE_METHODS = {
         lambda req: req.SerializeToString(),
         GetEEPoseResponse.FromString,
     ),
+    "GetGripperState": _MethodDescriptor(
+        "GetGripperState",
+        GetGripperStateRequest,
+        GetGripperStateResponse,
+        lambda req: req.SerializeToString(),
+        GetGripperStateResponse.FromString,
+    ),
+    "GetIKStatus": _MethodDescriptor(
+        "GetIKStatus",
+        GetIKStatusRequest,
+        GetIKStatusResponse,
+        lambda req: req.SerializeToString(),
+        GetIKStatusResponse.FromString,
+    ),
+    "GetTaskStatus": _MethodDescriptor(
+        "GetTaskStatus",
+        TaskStatusRequest,
+        TaskStatusResponse,
+        lambda req: req.SerializeToString(),
+        TaskStatusResponse.FromString,
+    ),
+    "LinearMove": _MethodDescriptor(
+        "LinearMove",
+        LinearMoveRequest,
+        LinearMoveResponse,
+        lambda req: req.SerializeToString(),
+        LinearMoveResponse.FromString,
+    ),
     "SetGripperState": _MethodDescriptor(
         "SetGripperState",
         SetGripperStateRequest,
@@ -131,6 +172,27 @@ _SERVICE_METHODS = {
         SetObjectPoseResponse,
         lambda req: req.SerializeToString(),
         SetObjectPoseResponse.FromString,
+    ),
+    "InitRobot": _MethodDescriptor(
+        "InitRobot",
+        InitRobotRequest,
+        InitRobotResponse,
+        lambda req: req.SerializeToString(),
+        InitRobotResponse.FromString,
+    ),
+    "AttachObject": _MethodDescriptor(
+        "AttachObject",
+        AttachObjectRequest,
+        AttachObjectResponse,
+        lambda req: req.SerializeToString(),
+        AttachObjectResponse.FromString,
+    ),
+    "DetachObject": _MethodDescriptor(
+        "DetachObject",
+        DetachObjectRequest,
+        DetachObjectResponse,
+        lambda req: req.SerializeToString(),
+        DetachObjectResponse.FromString,
     ),
     "SetTrajectory": _MethodDescriptor(
         "SetTrajectory",
@@ -160,12 +222,27 @@ _SERVICE_METHODS = {
         lambda req: req.SerializeToString(),
         ResetResponse.FromString,
     ),
+    "AddCamera": _MethodDescriptor(
+        "AddCamera",
+        AddCameraRequest,
+        AddCameraResponse,
+        lambda req: req.SerializeToString(),
+        AddCameraResponse.FromString,
+    ),
     "SendCommand": _MethodDescriptor(
         "SendCommand",
         CommandRequest,
         CommandResponse,
         lambda req: req.SerializeToString(),
         CommandResponse.FromString,
+    ),
+    "StreamObservations": _MethodDescriptor(
+        "StreamObservations",
+        GetObservationRequest,
+        GetObservationResponse,
+        lambda req: req.SerializeToString(),
+        GetObservationResponse.FromString,
+        response_streaming=True,
     ),
 }
 
@@ -207,10 +284,11 @@ class GenieSimServiceStub:
         if GRPC_AVAILABLE and channel is not None:
             # Create method stubs
             for method_name, descriptor in _SERVICE_METHODS.items():
+                handler_factory = channel.unary_stream if descriptor.response_streaming else channel.unary_unary
                 setattr(
                     self,
                     f"_{method_name}_stub",
-                    channel.unary_unary(
+                    handler_factory(
                         descriptor.full_name,
                         request_serializer=descriptor.request_serializer,
                         response_deserializer=descriptor.response_deserializer,
@@ -261,6 +339,39 @@ class GenieSimServiceStub:
             raise RuntimeError("gRPC not available or channel not connected")
         return self._GetEEPose_stub(request, timeout=timeout, metadata=metadata)
 
+    def GetGripperState(
+        self,
+        request: GetGripperStateRequest,
+        timeout: Optional[float] = None,
+        metadata: Optional[tuple] = None,
+    ) -> GetGripperStateResponse:
+        """Get gripper state."""
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        return self._GetGripperState_stub(request, timeout=timeout, metadata=metadata)
+
+    def GetIKStatus(
+        self,
+        request: GetIKStatusRequest,
+        timeout: Optional[float] = None,
+        metadata: Optional[tuple] = None,
+    ) -> GetIKStatusResponse:
+        """Get IK solver status."""
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        return self._GetIKStatus_stub(request, timeout=timeout, metadata=metadata)
+
+    def GetTaskStatus(
+        self,
+        request: TaskStatusRequest,
+        timeout: Optional[float] = None,
+        metadata: Optional[tuple] = None,
+    ) -> TaskStatusResponse:
+        """Get task status."""
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        return self._GetTaskStatus_stub(request, timeout=timeout, metadata=metadata)
+
     def SetGripperState(
         self,
         request: SetGripperStateRequest,
@@ -271,6 +382,17 @@ class GenieSimServiceStub:
         if not GRPC_AVAILABLE or self._channel is None:
             raise RuntimeError("gRPC not available or channel not connected")
         return self._SetGripperState_stub(request, timeout=timeout, metadata=metadata)
+
+    def LinearMove(
+        self,
+        request: LinearMoveRequest,
+        timeout: Optional[float] = None,
+        metadata: Optional[tuple] = None,
+    ) -> LinearMoveResponse:
+        """Execute a linear move."""
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        return self._LinearMove_stub(request, timeout=timeout, metadata=metadata)
 
     def GetObjectPose(
         self,
@@ -283,6 +405,17 @@ class GenieSimServiceStub:
             raise RuntimeError("gRPC not available or channel not connected")
         return self._GetObjectPose_stub(request, timeout=timeout, metadata=metadata)
 
+    def InitRobot(
+        self,
+        request: InitRobotRequest,
+        timeout: Optional[float] = None,
+        metadata: Optional[tuple] = None,
+    ) -> InitRobotResponse:
+        """Initialize robot."""
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        return self._InitRobot_stub(request, timeout=timeout, metadata=metadata)
+
     def SetObjectPose(
         self,
         request: SetObjectPoseRequest,
@@ -293,6 +426,28 @@ class GenieSimServiceStub:
         if not GRPC_AVAILABLE or self._channel is None:
             raise RuntimeError("gRPC not available or channel not connected")
         return self._SetObjectPose_stub(request, timeout=timeout, metadata=metadata)
+
+    def AttachObject(
+        self,
+        request: AttachObjectRequest,
+        timeout: Optional[float] = None,
+        metadata: Optional[tuple] = None,
+    ) -> AttachObjectResponse:
+        """Attach an object to a robot link."""
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        return self._AttachObject_stub(request, timeout=timeout, metadata=metadata)
+
+    def DetachObject(
+        self,
+        request: DetachObjectRequest,
+        timeout: Optional[float] = None,
+        metadata: Optional[tuple] = None,
+    ) -> DetachObjectResponse:
+        """Detach an object from a robot link."""
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        return self._DetachObject_stub(request, timeout=timeout, metadata=metadata)
 
     def SetTrajectory(
         self,
@@ -338,6 +493,17 @@ class GenieSimServiceStub:
             raise RuntimeError("gRPC not available or channel not connected")
         return self._Reset_stub(request, timeout=timeout, metadata=metadata)
 
+    def AddCamera(
+        self,
+        request: AddCameraRequest,
+        timeout: Optional[float] = None,
+        metadata: Optional[tuple] = None,
+    ) -> AddCameraResponse:
+        """Add a camera to the simulation."""
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        return self._AddCamera_stub(request, timeout=timeout, metadata=metadata)
+
     def SendCommand(
         self,
         request: CommandRequest,
@@ -349,6 +515,16 @@ class GenieSimServiceStub:
             raise RuntimeError("gRPC not available or channel not connected")
         return self._SendCommand_stub(request, timeout=timeout, metadata=metadata)
 
+    def StreamObservations(
+        self,
+        request: GetObservationRequest,
+        timeout: Optional[float] = None,
+        metadata: Optional[tuple] = None,
+    ) -> Iterator[GetObservationResponse]:
+        """Stream observations from simulation."""
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        return self._StreamObservations_stub(request, timeout=timeout, metadata=metadata)
 
 # =============================================================================
 # Service Servicer (Server - for reference/testing)
@@ -372,6 +548,8 @@ class GenieSimServiceServicer:
         self._joint_efforts = [0.0] * joint_count
         self._joint_names = [f"joint_{idx}" for idx in range(joint_count)]
         self._object_poses = {}
+        self._attached_objects = {}
+        self._cameras = {}
         self._ee_pose = self._default_pose()
         self._gripper_width = 0.0
         self._gripper_force = 0.0
@@ -453,6 +631,51 @@ class GenieSimServiceServicer:
             pose = self._ee_pose
         return GetEEPoseResponse(success=True, pose=pose)
 
+    def GetGripperState(
+        self,
+        request: GetGripperStateRequest,
+        context,
+    ) -> GetGripperStateResponse:
+        """Get gripper state."""
+        delegate = self._resolve_delegate("GetGripperState")
+        if delegate:
+            return self._call_delegate(delegate, request, context, GetGripperStateResponse(success=False))
+        with self._state_lock:
+            width = self._gripper_width
+            force = self._gripper_force
+            is_grasping = self._gripper_is_grasping
+        return GetGripperStateResponse(success=True, width=width, is_grasping=is_grasping, force=force)
+
+    def GetIKStatus(
+        self,
+        request: GetIKStatusRequest,
+        context,
+    ) -> GetIKStatusResponse:
+        """Get IK status."""
+        delegate = self._resolve_delegate("GetIKStatus")
+        if delegate:
+            return self._call_delegate(delegate, request, context, GetIKStatusResponse(success=False))
+        return self._unsupported_method(
+            "GetIKStatus",
+            context,
+            GetIKStatusResponse(success=False, ik_solvable=False, error_message="IK solver not available"),
+        )
+
+    def GetTaskStatus(
+        self,
+        request: TaskStatusRequest,
+        context,
+    ) -> TaskStatusResponse:
+        """Get task status."""
+        delegate = self._resolve_delegate("GetTaskStatus")
+        if delegate:
+            return self._call_delegate(delegate, request, context, TaskStatusResponse(success=False))
+        return self._unsupported_method(
+            "GetTaskStatus",
+            context,
+            TaskStatusResponse(success=False, status="unknown", progress=0.0, error_message="Task status unavailable"),
+        )
+
     def SetGripperState(
         self,
         request: SetGripperStateRequest,
@@ -470,6 +693,31 @@ class GenieSimServiceServicer:
             success=True,
             current_width=self._gripper_width,
             is_grasping=self._gripper_is_grasping,
+        )
+
+    def LinearMove(
+        self,
+        request: LinearMoveRequest,
+        context,
+    ) -> LinearMoveResponse:
+        """Move the end-effector linearly to a target pose."""
+        delegate = self._resolve_delegate("LinearMove")
+        if delegate:
+            return self._call_delegate(delegate, request, context, LinearMoveResponse(success=False))
+        if request.target_pose is None:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "target_pose is required")
+            return LinearMoveResponse(
+                success=False,
+                error_message="target_pose is required",
+                planning_success=False,
+                execution_success=False,
+            )
+        with self._state_lock:
+            self._ee_pose = request.target_pose
+        return LinearMoveResponse(
+            success=True,
+            planning_success=True,
+            execution_success=True,
         )
 
     def GetObjectPose(
@@ -509,6 +757,65 @@ class GenieSimServiceServicer:
         with self._state_lock:
             self._object_poses[request.object_id] = request.pose
         return SetObjectPoseResponse(success=True)
+
+    def InitRobot(
+        self,
+        request: InitRobotRequest,
+        context,
+    ) -> InitRobotResponse:
+        """Initialize the robot model."""
+        delegate = self._resolve_delegate("InitRobot")
+        if delegate:
+            return self._call_delegate(delegate, request, context, InitRobotResponse(success=False))
+        with self._state_lock:
+            if request.initial_joint_positions:
+                joint_count = len(request.initial_joint_positions)
+                self._joint_positions = list(request.initial_joint_positions)
+                self._joint_velocities = [0.0] * joint_count
+                self._joint_efforts = [0.0] * joint_count
+                self._joint_names = [f"joint_{idx}" for idx in range(joint_count)]
+            num_joints = len(self._joint_positions)
+            joint_names = list(self._joint_names)
+        return InitRobotResponse(
+            success=True,
+            num_joints=num_joints,
+            joint_names=joint_names,
+        )
+
+    def AttachObject(
+        self,
+        request: AttachObjectRequest,
+        context,
+    ) -> AttachObjectResponse:
+        """Attach an object to a robot link."""
+        delegate = self._resolve_delegate("AttachObject")
+        if delegate:
+            return self._call_delegate(delegate, request, context, AttachObjectResponse(success=False))
+        if not request.object_id or not request.link_name:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "object_id and link_name required")
+            return AttachObjectResponse(success=False, error_message="object_id and link_name required")
+        with self._state_lock:
+            self._attached_objects[request.object_id] = request.link_name
+        return AttachObjectResponse(success=True)
+
+    def DetachObject(
+        self,
+        request: DetachObjectRequest,
+        context,
+    ) -> DetachObjectResponse:
+        """Detach an object from a robot link."""
+        delegate = self._resolve_delegate("DetachObject")
+        if delegate:
+            return self._call_delegate(delegate, request, context, DetachObjectResponse(success=False))
+        if not request.object_id:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "object_id required")
+            return DetachObjectResponse(success=False, error_message="object_id required")
+        with self._state_lock:
+            if request.object_id not in self._attached_objects:
+                self._set_context_status(context, self._grpc_status("NOT_FOUND"), "object not attached")
+                return DetachObjectResponse(success=False, error_message="object not attached")
+            self._attached_objects.pop(request.object_id, None)
+        return DetachObjectResponse(success=True)
 
     def SetTrajectory(
         self,
@@ -602,8 +909,26 @@ class GenieSimServiceServicer:
             self._gripper_force = 0.0
             self._gripper_is_grasping = False
             self._object_poses.clear()
+            self._attached_objects.clear()
+            self._cameras.clear()
             self._recording = None
         return ResetResponse(success=True)
+
+    def AddCamera(
+        self,
+        request: AddCameraRequest,
+        context,
+    ) -> AddCameraResponse:
+        """Add a camera to the scene."""
+        delegate = self._resolve_delegate("AddCamera")
+        if delegate:
+            return self._call_delegate(delegate, request, context, AddCameraResponse(success=False))
+        if not request.camera_id:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "camera_id is required")
+            return AddCameraResponse(success=False, error_message="camera_id is required")
+        with self._state_lock:
+            self._cameras[request.camera_id] = request
+        return AddCameraResponse(success=True)
 
     def SendCommand(
         self,
@@ -667,6 +992,12 @@ class GenieSimServiceServicer:
                     success=response.success,
                     payload=json.dumps(self._payload_for_pose(response.pose)).encode(),
                 )
+            if command_type == CommandType.GET_GRIPPER_STATE:
+                response = self.GetGripperState(GetGripperStateRequest(), context)
+                return CommandResponse(
+                    success=response.success,
+                    payload=json.dumps(self._payload_for_gripper_state(response)).encode(),
+                )
             if command_type == CommandType.SET_GRIPPER_STATE:
                 response = self.SetGripperState(
                     SetGripperStateRequest(
@@ -680,6 +1011,22 @@ class GenieSimServiceServicer:
                     success=response.success,
                     error_message=response.error_message,
                     payload=json.dumps(self._payload_for_gripper(response)).encode(),
+                )
+            if command_type == CommandType.LINEAR_MOVE:
+                target_pose_payload = payload_data.get("target_pose")
+                response = self.LinearMove(
+                    LinearMoveRequest(
+                        target_pose=self._pose_from_payload(target_pose_payload) if target_pose_payload else None,
+                        velocity=payload_data.get("velocity", 0.0),
+                        acceleration=payload_data.get("acceleration", 0.0),
+                        wait_for_completion=payload_data.get("wait_for_completion", False),
+                    ),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_linear_move(response)).encode(),
                 )
             if command_type == CommandType.GET_OBJECT_POSE:
                 response = self.GetObjectPose(
@@ -704,6 +1051,86 @@ class GenieSimServiceServicer:
                     error_message=response.error_message,
                     payload=json.dumps(self._payload_for_simple(response.success, response.error_message)).encode(),
                 )
+            if command_type == CommandType.ATTACH_OBJ:
+                response = self.AttachObject(
+                    AttachObjectRequest(
+                        object_id=payload_data.get("object_id", ""),
+                        link_name=payload_data.get("link_name", ""),
+                    ),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_simple(response.success, response.error_message)).encode(),
+                )
+            if command_type == CommandType.DETACH_OBJ:
+                response = self.DetachObject(
+                    DetachObjectRequest(object_id=payload_data.get("object_id", "")),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_simple(response.success, response.error_message)).encode(),
+                )
+            if command_type == CommandType.GET_IK_STATUS:
+                response = self.GetIKStatus(
+                    GetIKStatusRequest(
+                        target_pose=self._pose_from_payload(payload_data.get("target_pose")),
+                        seed_positions=payload_data.get("seed_positions", []),
+                    ),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_ik_status(response)).encode(),
+                )
+            if command_type == CommandType.TASK_STATUS:
+                response = self.GetTaskStatus(
+                    TaskStatusRequest(task_id=payload_data.get("task_id", "")),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_task_status(response)).encode(),
+                )
+            if command_type == CommandType.INIT_ROBOT:
+                response = self.InitRobot(
+                    InitRobotRequest(
+                        robot_type=payload_data.get("robot_type", ""),
+                        urdf_path=payload_data.get("urdf_path", ""),
+                        base_pose=self._pose_from_payload(payload_data.get("base_pose")),
+                        initial_joint_positions=payload_data.get("initial_joint_positions", []),
+                    ),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_init_robot(response)).encode(),
+                )
+            if command_type == CommandType.ADD_CAMERA:
+                response = self.AddCamera(
+                    AddCameraRequest(
+                        camera_id=payload_data.get("camera_id", ""),
+                        pose=self._pose_from_payload(payload_data.get("pose")),
+                        parent_link=payload_data.get("parent_link", ""),
+                        width=payload_data.get("width", 0),
+                        height=payload_data.get("height", 0),
+                        fov=payload_data.get("fov", 0.0),
+                        near_clip=payload_data.get("near_clip", 0.0),
+                        far_clip=payload_data.get("far_clip", 0.0),
+                    ),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_simple(response.success, response.error_message)).encode(),
+                )
             if command_type == CommandType.RESET:
                 response = self.Reset(ResetRequest(), context)
                 return CommandResponse(
@@ -716,6 +1143,19 @@ class GenieSimServiceServicer:
             return CommandResponse(success=False, error_message=str(exc))
         self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "Unsupported command type")
         return CommandResponse(success=False, error_message="Unsupported command type")
+
+    def StreamObservations(
+        self,
+        request: GetObservationRequest,
+        context,
+    ) -> Iterator[GetObservationResponse]:
+        """Stream observations from simulation."""
+        delegate = self._resolve_delegate("StreamObservations")
+        if delegate:
+            return self._call_delegate(delegate, request, context, iter(()))
+        logger.warning("StreamObservations is not implemented in the test servicer.")
+        self._set_context_status(context, self._grpc_status("UNIMPLEMENTED"), "StreamObservations not implemented")
+        return iter(())
 
     def _resolve_delegate(self, method_name: str) -> Optional[Callable]:
         if self._delegate is None:
@@ -736,6 +1176,13 @@ class GenieSimServiceServicer:
             if hasattr(fallback_response, "error_message"):
                 fallback_response.error_message = str(exc)
             return fallback_response
+
+    def _unsupported_method(self, method_name: str, context: Any, fallback_response: Any) -> Any:
+        logger.warning("%s is not implemented in the test servicer.", method_name)
+        self._set_context_status(context, self._grpc_status("UNIMPLEMENTED"), f"{method_name} not implemented")
+        if hasattr(fallback_response, "error_message") and not fallback_response.error_message:
+            fallback_response.error_message = f"{method_name} not implemented"
+        return fallback_response
 
     @staticmethod
     def _set_context_status(context: Any, code: Any, details: str) -> None:
@@ -789,11 +1236,56 @@ class GenieSimServiceServicer:
         }
 
     @staticmethod
+    def _payload_for_gripper_state(response: GetGripperStateResponse) -> dict:
+        return {
+            "success": response.success,
+            "width": response.width,
+            "is_grasping": response.is_grasping,
+            "force": response.force,
+        }
+
+    @staticmethod
     def _payload_for_object_pose(response: GetObjectPoseResponse) -> dict:
         return {
             "success": response.success,
             "error_message": response.error_message,
             "pose": response.pose.to_dict() if response.pose else {},
+        }
+
+    @staticmethod
+    def _payload_for_linear_move(response: LinearMoveResponse) -> dict:
+        return {
+            "success": response.success,
+            "error_message": response.error_message,
+            "planning_success": response.planning_success,
+            "execution_success": response.execution_success,
+        }
+
+    @staticmethod
+    def _payload_for_ik_status(response: GetIKStatusResponse) -> dict:
+        return {
+            "success": response.success,
+            "ik_solvable": response.ik_solvable,
+            "solution": response.solution,
+            "error_message": response.error_message,
+        }
+
+    @staticmethod
+    def _payload_for_task_status(response: TaskStatusResponse) -> dict:
+        return {
+            "success": response.success,
+            "status": response.status,
+            "progress": response.progress,
+            "error_message": response.error_message,
+        }
+
+    @staticmethod
+    def _payload_for_init_robot(response: InitRobotResponse) -> dict:
+        return {
+            "success": response.success,
+            "error_message": response.error_message,
+            "num_joints": response.num_joints,
+            "joint_names": response.joint_names,
         }
 
     @staticmethod
@@ -857,11 +1349,19 @@ def add_GenieSimServiceServicer_to_server(servicer: GenieSimServiceServicer, ser
 
     for method_name, descriptor in _SERVICE_METHODS.items():
         handler_fn = getattr(servicer, method_name)
-        rpc_method_handlers[method_name] = grpc.unary_unary_rpc_method_handler(
-            handler_fn,
-            request_deserializer=lambda data, t=descriptor.request_type: t.FromString(data) if hasattr(t, 'FromString') else t(),
-            response_serializer=descriptor.request_serializer,
-        )
+        deserializer = lambda data, t=descriptor.request_type: t.FromString(data) if hasattr(t, "FromString") else t()
+        if descriptor.response_streaming:
+            rpc_method_handlers[method_name] = grpc.unary_stream_rpc_method_handler(
+                handler_fn,
+                request_deserializer=deserializer,
+                response_serializer=descriptor.request_serializer,
+            )
+        else:
+            rpc_method_handlers[method_name] = grpc.unary_unary_rpc_method_handler(
+                handler_fn,
+                request_deserializer=deserializer,
+                response_serializer=descriptor.request_serializer,
+            )
 
     generic_handler = grpc.method_handlers_generic_handler(
         "geniesim.GenieSimService",
