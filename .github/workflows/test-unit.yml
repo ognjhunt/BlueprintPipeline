@@ -242,6 +242,13 @@ jobs:
         run: |
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
 
+      - name: Block silent exception swallowing
+        run: |
+          if rg -n -U "except Exception:\\s*pass" --glob '!docs/**' --glob '!tests/**'; then
+            echo "::error::Found 'except Exception: pass' without logging. Add context-aware logging instead."
+            exit 1
+          fi
+
       - name: Type checking (mypy) on tools/
         run: |
           mypy tools/ --ignore-missing-imports --no-strict-optional

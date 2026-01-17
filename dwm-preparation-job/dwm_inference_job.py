@@ -10,6 +10,7 @@ into each bundle directory.
 import argparse
 import base64
 import json
+import logging
 import os
 import sys
 import traceback
@@ -24,6 +25,8 @@ from PIL import Image, ImageDraw, ImageFont
 import imageio.v2 as imageio
 
 from models import DWMConditioningBundle
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -219,7 +222,12 @@ class DWMModelClient:
                     frame = _blend_frames(frame, hand_frame)
                     hand_reader.close()
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Failed to overlay hand mesh video frame (video=%s, frame_index=%s).",
+                        bundle.hand_mesh_video_path,
+                        idx,
+                        exc_info=True,
+                    )
 
             if overlay_prompt:
                 frame = self._overlay_prompt(frame, bundle.text_prompt, idx)

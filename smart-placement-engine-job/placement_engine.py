@@ -8,6 +8,7 @@ This module provides intelligent placement of assets in scenes with:
 """
 
 import json
+import logging
 import math
 import os
 import random
@@ -45,6 +46,8 @@ from .compatibility_matrix import (
     SceneArchetype,
     get_compatibility_matrix,
 )
+
+logger = logging.getLogger(__name__)
 from .intelligent_region_detector import (
     DetectedRegion,
     IntelligentRegionDetector,
@@ -189,7 +192,10 @@ class SmartPlacementEngine:
                 if model_config:
                     return model_config.default_model
             except Exception:
-                pass
+                logger.warning(
+                    "[PLACEMENT-ENGINE] Failed to load pipeline config for default model; using fallback.",
+                    exc_info=True,
+                )
         return "gemini-3-pro-preview"
 
     def __init__(

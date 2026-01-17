@@ -129,6 +129,11 @@ def _compute_collision_free_rate(
         collision_free = sum(1 for ep in episodes if not ep.get("collision_events"))
         return collision_free / len(episodes)
     except Exception:
+        logger.warning(
+            "[EPISODE-GEN-JOB] Failed to compute collision-free rate from %s; using fallback.",
+            validation_report_path,
+            exc_info=True,
+        )
         return fallback_rate
 
 # Core imports
@@ -2896,6 +2901,10 @@ def _run_main():
             try:
                 return get_data_quality_level().value == "production" or env_flags
             except Exception:
+                logger.warning(
+                    "[EPISODE-GEN-JOB] Failed to read data quality level; falling back to env flags.",
+                    exc_info=True,
+                )
                 return env_flags
         return env_flags
 
@@ -2921,7 +2930,10 @@ def _run_main():
                 )
                 return capabilities
             except Exception:
-                pass
+                logger.warning(
+                    "[EPISODE-GEN-JOB] Failed to collect environment capabilities from quality system.",
+                    exc_info=True,
+                )
         if check_sensor_capture_environment is not None:
             try:
                 status = check_sensor_capture_environment()
@@ -2932,7 +2944,10 @@ def _run_main():
                     }
                 )
             except Exception:
-                pass
+                logger.warning(
+                    "[EPISODE-GEN-JOB] Failed to collect environment capabilities from capture check.",
+                    exc_info=True,
+                )
         return capabilities
 
     def _emit_preflight_failure(capabilities: Dict[str, Any]) -> None:

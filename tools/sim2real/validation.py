@@ -12,6 +12,7 @@ The goal is to answer: "Does training on BlueprintPipeline data transfer to real
 from __future__ import annotations
 
 import json
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -541,7 +542,7 @@ class Sim2RealValidator:
                 exp = self._load_experiment(path.stem)
                 experiments.append(exp)
             except Exception:
-                pass
+                self.log(f"Failed to load experiment {path}: {traceback.format_exc()}", "WARNING")
         return experiments
 
     def get_aggregate_stats(self) -> Dict[str, Any]:

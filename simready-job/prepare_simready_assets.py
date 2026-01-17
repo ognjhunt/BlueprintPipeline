@@ -1201,6 +1201,10 @@ def call_gemini_for_dimensions(
         try:
             config = types.GenerateContentConfig(**cfg_kwargs)
         except Exception:
+            logger.warning(
+                "[SIMREADY] Failed to build Gemini config for dimension estimation; using defaults.",
+                exc_info=True,
+            )
             config = types.GenerateContentConfig(
                 response_mime_type="application/json",
             )
@@ -1299,6 +1303,11 @@ def call_gemini_for_object(
         try:
             config = types.GenerateContentConfig(**cfg_kwargs)
         except Exception:
+            logger.warning(
+                "[SIMREADY] obj_%s: Failed to build Gemini config; using defaults.",
+                oid,
+                exc_info=True,
+            )
             config = types.GenerateContentConfig(
                 response_mime_type="application/json",
             )
@@ -1326,7 +1335,13 @@ def call_gemini_for_object(
                     try:
                         return float(data[k])
                     except Exception:
-                        pass
+                        logger.warning(
+                            "[SIMREADY] obj_%s: Failed to parse float for key '%s' (value=%s).",
+                            oid,
+                            k,
+                            data.get(k),
+                            exc_info=True,
+                        )
             return float(default)
 
         def _get_bool(keys: List[str], default: bool) -> bool:
@@ -1370,7 +1385,12 @@ def call_gemini_for_object(
                 static_f = f * 1.1
                 dynamic_f = f * 0.9
             except Exception:
-                pass
+                logger.warning(
+                    "[SIMREADY] obj_%s: Failed to parse friction value (value=%s).",
+                    oid,
+                    data.get("friction"),
+                    exc_info=True,
+                )
 
         # GAP-PHYSICS-002 FIX: Physics-consistent friction validation
         static_f = _clamp(static_f, 0.0, 2.0)
@@ -1475,7 +1495,13 @@ def call_gemini_for_object(
                         try:
                             return [float(x) for x in val]
                         except Exception:
-                            pass
+                            logger.warning(
+                                "[SIMREADY] obj_%s: Failed to parse float list for key '%s' (value=%s).",
+                                oid,
+                                k,
+                                val,
+                                exc_info=True,
+                            )
             return list(default)
 
         com_offset = _get_float_list(
@@ -1500,7 +1526,7 @@ def call_gemini_for_object(
         grasp_regions_raw = data.get("grasp_regions") or data.get("graspRegions") or []
         grasp_regions: List[Dict[str, Any]] = []
         if isinstance(grasp_regions_raw, list):
-            for gr in grasp_regions_raw[:5]:  # limit to 5 grasp regions
+            for idx, gr in enumerate(grasp_regions_raw[:5]):  # limit to 5 grasp regions
                 if isinstance(gr, dict):
                     pos = gr.get("position") or gr.get("pos") or [0.0, 0.0, 0.0]
                     gtype = str(gr.get("type", "power")).lower()
@@ -1515,7 +1541,13 @@ def call_gemini_for_object(
                                 "width_m": _clamp(width, 0.005, 0.30),
                             })
                         except Exception:
-                            pass
+                            logger.warning(
+                                "[SIMREADY] obj_%s: Failed to parse grasp region (index=%s, value=%s).",
+                                oid,
+                                idx,
+                                gr,
+                                exc_info=True,
+                            )
         merged["grasp_regions"] = grasp_regions if grasp_regions else merged.get("grasp_regions", [])
 
         # Surface roughness
