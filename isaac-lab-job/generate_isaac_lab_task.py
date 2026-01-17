@@ -28,6 +28,7 @@ Environment Variables:
     POLICY_ID: Specific policy to generate (optional, auto-selects based on env)
     ROBOT_TYPE: Robot type (franka, ur10, fetch) - default: franka
     NUM_ENVS: Number of parallel environments (default: 1024)
+    STRICT_CONFIG_LOADING: Fail fast if policy config or replicator metadata is missing/invalid
 """
 
 import ast
@@ -428,6 +429,7 @@ def run_isaac_lab_job(
     num_envs: int = 1024,
     run_runtime_validation: bool = True,
     skip_sanity_rollout: bool = False,
+    strict_config_loading: bool = False,
 ) -> int:
     """Run the Isaac Lab task generation job.
 
@@ -477,10 +479,25 @@ def run_isaac_lab_job(
     # Load policy config
     policy_config_path = REPO_ROOT / "policy_configs" / "environment_policies.json"
     if policy_config_path.is_file():
-        policy_config = json.loads(policy_config_path.read_text())
-        print("[ISAAC-LAB-JOB] Loaded policy configuration")
+        try:
+            policy_config = json.loads(policy_config_path.read_text())
+            print("[ISAAC-LAB-JOB] Loaded policy configuration")
+        except (OSError, json.JSONDecodeError) as e:
+            message = f"[ISAAC-LAB-JOB] WARNING: Failed to load policy config: {e}"
+            if strict_config_loading:
+                print(message.replace("WARNING", "ERROR"))
+                return 1
+            print(message)
+            policy_config = {"policies": {}, "environments": {}}
     else:
-        print("[ISAAC-LAB-JOB] WARNING: Policy config not found, using defaults")
+        message = (
+            "[ISAAC-LAB-JOB] WARNING: Policy config not found at "
+            f"{policy_config_path}, using defaults"
+        )
+        if strict_config_loading:
+            print(message.replace("WARNING", "ERROR"))
+            return 1
+        print(message)
         policy_config = {"policies": {}, "environments": {}}
 
     # Load replicator metadata if available
@@ -489,9 +506,22 @@ def run_isaac_lab_job(
         try:
             replicator_metadata = json.loads(replicator_metadata_path.read_text())
             print("[ISAAC-LAB-JOB] Loaded replicator metadata")
-        except Exception:
+        except (OSError, json.JSONDecodeError) as e:
+            message = f"[ISAAC-LAB-JOB] WARNING: Failed to load replicator metadata: {e}"
+            if strict_config_loading:
+                print(message.replace("WARNING", "ERROR"))
+                return 1
+            print(message)
             replicator_metadata = {}
     else:
+        message = (
+            "[ISAAC-LAB-JOB] WARNING: Replicator metadata not found at "
+            f"{replicator_metadata_path}, using defaults"
+        )
+        if strict_config_loading:
+            print(message.replace("WARNING", "ERROR"))
+            return 1
+        print(message)
         replicator_metadata = {}
 
     # Build recipe from manifest + replicator data
@@ -654,12 +684,14 @@ def main():
     # Set SKIP_SANITY_ROLLOUT=true to skip environment steps (faster, less thorough)
     run_runtime_validation = os.getenv("RUN_RUNTIME_VALIDATION", "true").lower() == "true"
     skip_sanity_rollout = os.getenv("SKIP_SANITY_ROLLOUT", "false").lower() == "true"
+    strict_config_loading = os.getenv("STRICT_CONFIG_LOADING", "false").lower() == "true"
 
     print(f"[ISAAC-LAB-JOB] Configuration:")
     print(f"[ISAAC-LAB-JOB]   Bucket: {bucket}")
     print(f"[ISAAC-LAB-JOB]   Scene ID: {scene_id}")
     print(f"[ISAAC-LAB-JOB]   Runtime validation: {run_runtime_validation}")
     print(f"[ISAAC-LAB-JOB]   Skip sanity rollout: {skip_sanity_rollout}")
+    print(f"[ISAAC-LAB-JOB]   Strict config loading: {strict_config_loading}")
 
     exit_code = run_isaac_lab_job(
         root=GCS_ROOT,
@@ -674,6 +706,7 @@ def main():
         num_envs=num_envs,
         run_runtime_validation=run_runtime_validation,
         skip_sanity_rollout=skip_sanity_rollout,
+        strict_config_loading=strict_config_loading,
     )
 
     sys.exit(exit_code)
