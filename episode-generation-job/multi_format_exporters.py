@@ -21,6 +21,7 @@ Reference datasets using these formats:
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import struct
@@ -45,6 +46,14 @@ if str(REPO_ROOT) not in sys.path:
 # =============================================================================
 # RLDS Exporter (TensorFlow Datasets format)
 # =============================================================================
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 @dataclass
@@ -157,6 +166,7 @@ class RLDSExporter:
 
         # Write dataset info
         self._write_dataset_info(features, splits, robot_type)
+        self._write_checksums_manifest()
 
         self.log(f"RLDS export complete: {self.output_dir}")
         return self.output_dir
@@ -388,6 +398,11 @@ class RLDSExporter:
             "created_at": datetime.now().isoformat(),
             "format": "rlds",
             "compatible_with": ["tensorflow_datasets", "jax", "open_x_embodiment"],
+            "checksums": {
+                "algorithm": "sha256",
+                "manifest_path": "checksums.json",
+                "format": "relative path -> {sha256, size_bytes}",
+            },
         }
 
         write_json_atomic(self.output_dir / "dataset_info.json", dataset_info, indent=2)
@@ -396,6 +411,28 @@ class RLDSExporter:
         write_json_atomic(self.output_dir / "features.json", features, indent=2)
 
         self.log("Wrote dataset_info.json and features.json")
+
+    def _write_checksums_manifest(self) -> None:
+        """Write checksum manifest for RLDS outputs."""
+        files = [
+            path
+            for path in self.output_dir.rglob("*")
+            if path.is_file() and path.name != "checksums.json"
+        ]
+        checksums: Dict[str, Dict[str, Union[str, int]]] = {}
+        for path in sorted(files, key=lambda p: p.as_posix()):
+            rel_path = path.relative_to(self.output_dir).as_posix()
+            checksums[rel_path] = {
+                "sha256": _sha256_file(path),
+                "size_bytes": path.stat().st_size,
+            }
+        payload = {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "root": ".",
+            "algorithm": "sha256",
+            "files": checksums,
+        }
+        write_json_atomic(self.output_dir / "checksums.json", payload, indent=2)
 
 
 # =============================================================================
