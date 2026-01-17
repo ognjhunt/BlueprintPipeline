@@ -49,8 +49,10 @@ Returns service status and readiness.
 ### GET /debug - Debug Info
 
 Returns detailed service state and model validation info when debug access is explicitly enabled.
-Debug is disabled by default; set `PARTICULATE_DEBUG=1` and `PARTICULATE_DEBUG_TOKEN=<shared-secret>`,
-then send the token in an `Authorization: Bearer <shared-secret>` header.
+Debug is disabled by default and always blocked when `ENV=production`. For non-production
+environments, set `DEBUG_MODE=1` and `DEBUG_TOKEN=<shared-secret>`, then send the token in an
+`Authorization: Bearer <shared-secret>` header. Legacy `PARTICULATE_DEBUG` and
+`PARTICULATE_DEBUG_TOKEN` variables are still honored.
 
 ## Deployment
 
