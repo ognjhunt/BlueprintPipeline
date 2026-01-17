@@ -1215,13 +1215,35 @@ class LeRobotExporter:
             self.log("Validating episode completeness...")
             incomplete = self._validate_episode_completeness()
             if incomplete:
-                self.log(f"  WARNING: Found {len(incomplete)} incomplete episodes:", "WARNING")
-                for ep_idx, errors in incomplete[:3]:  # Show first 3
-                    self.log(f"    Episode {ep_idx}:", "WARNING")
-                    for error in errors[:3]:  # Show first 3 errors per episode
-                        self.log(f"      - {error}", "WARNING")
-                if len(incomplete) > 3:
-                    self.log(f"    ... and {len(incomplete) - 3} more episodes with issues", "WARNING")
+                sample_limit = 5
+                self.log(
+                    "  ERROR: Incomplete episodes detected "
+                    f"(showing first {min(len(incomplete), sample_limit)} of {len(incomplete)}).",
+                    "ERROR",
+                )
+                for ep_idx, errors in incomplete[:sample_limit]:
+                    self.log(f"    Episode {ep_idx}:", "ERROR")
+                    for error in errors:
+                        self.log(f"      - {error}", "ERROR")
+                if len(incomplete) > sample_limit:
+                    self.log(
+                        f"    ... and {len(incomplete) - sample_limit} more incomplete episodes",
+                        "ERROR",
+                    )
+
+                dropped_episode_ids = {ep_idx for ep_idx, _ in incomplete}
+                self.log(
+                    f"  Dropping {len(dropped_episode_ids)} incomplete episodes before export.",
+                    "ERROR",
+                )
+                self.episodes = [
+                    episode for episode in self.episodes
+                    if episode.episode_index not in dropped_episode_ids
+                ]
+                if not self.episodes:
+                    raise ValueError(
+                        "All episodes were incomplete; aborting export after validation."
+                    )
             else:
                 self.log("  All episodes are complete")
 
