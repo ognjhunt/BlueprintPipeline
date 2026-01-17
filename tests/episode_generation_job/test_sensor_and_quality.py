@@ -99,3 +99,29 @@ def test_quality_certificate_generation(load_job_module, tmp_path: Path) -> None
     saved = json.loads(output_path.read_text())
     assert saved["episode_id"] == "ep_001"
     assert saved["frame_count"] == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("env_var", "env_value"),
+    [
+        ("DATA_QUALITY_LEVEL", "production"),
+        ("LABS_STAGING", "1"),
+    ],
+)
+def test_mock_capture_blocked_in_production_envs(
+    monkeypatch,
+    load_job_module,
+    env_var: str,
+    env_value: str,
+) -> None:
+    sensor_module = load_job_module("episode_generation", "sensor_data_capture.py")
+    monkeypatch.setenv(env_var, env_value)
+    monkeypatch.setenv("ALLOW_MOCK_CAPTURE", "true")
+
+    with pytest.raises(RuntimeError, match="Mock sensor capture is not permitted"):
+        sensor_module.create_sensor_capture(
+            capture_mode=sensor_module.SensorDataCaptureMode.MOCK_DEV,
+            allow_mock_capture=True,
+            use_mock=True,
+        )
