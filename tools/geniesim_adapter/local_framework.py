@@ -84,6 +84,7 @@ if str(ADAPTER_ROOT) not in sys.path:
     sys.path.insert(0, str(ADAPTER_ROOT))
 
 from tools.logging_config import init_logging
+from tools.error_handling import CircuitBreaker
 from tools.geniesim_adapter.config import (
     DEFAULT_GENIESIM_HOST,
     DEFAULT_GENIESIM_PORT,
@@ -102,6 +103,7 @@ try:
         GetObservationRequest, GetObservationResponse,
         GetJointPositionRequest, GetJointPositionResponse,
         SetJointPositionRequest, SetJointPositionResponse,
+        CommandRequest, SendCommandResponse,
         SetTrajectoryRequest, SetTrajectoryResponse, TrajectoryPoint,
         StartRecordingRequest, StartRecordingResponse,
         StopRecordingRequest, StopRecordingResponse,
@@ -334,11 +336,96 @@ class GenieSimGRPCClient:
         self._channel = None
         self._stub = None
         self._connected = False
+        self._circuit_breaker = CircuitBreaker(
+            f"geniesim-grpc-{self.host}:{self.port}",
+            failure_threshold=3,
+            success_threshold=2,
+            recovery_timeout=30.0,
+            on_open=self._on_circuit_open,
+            on_half_open=self._on_circuit_half_open,
+            on_close=self._on_circuit_closed,
+        )
 
         # Check if gRPC stubs are available
         self._have_grpc = GRPC_STUBS_AVAILABLE and is_grpc_available()
         if not self._have_grpc:
             logger.warning("gRPC not available - server connection will be limited")
+
+    def _on_circuit_open(self, name: str, failure_count: int) -> None:
+        logger.warning(
+            "Genie Sim gRPC circuit breaker opened (%s) after %d failures (host=%s port=%s)",
+            name,
+            failure_count,
+            self.host,
+            self.port,
+        )
+
+    def _on_circuit_half_open(self, name: str) -> None:
+        logger.info(
+            "Genie Sim gRPC circuit breaker half-open (%s) - probing recovery (host=%s port=%s)",
+            name,
+            self.host,
+            self.port,
+        )
+
+    def _on_circuit_closed(self, name: str) -> None:
+        logger.info(
+            "Genie Sim gRPC circuit breaker closed (%s) - traffic resumed (host=%s port=%s)",
+            name,
+            self.host,
+            self.port,
+        )
+
+    def _call_grpc(
+        self,
+        action: str,
+        func: Callable[[], Any],
+        fallback: Any,
+        success_checker: Optional[Callable[[Any], bool]] = None,
+    ) -> Any:
+        if self._circuit_breaker and not self._circuit_breaker.allow_request():
+            time_until_retry = self._circuit_breaker.get_time_until_retry()
+            logger.warning(
+                "Genie Sim gRPC circuit breaker open; skipping %s (retry in %.1fs)",
+                action,
+                time_until_retry,
+            )
+            return fallback
+
+        try:
+            result = func()
+        except Exception as exc:
+            if self._circuit_breaker:
+                self._circuit_breaker.record_failure(exc)
+            logger.error("Genie Sim gRPC %s failed: %s", action, exc)
+            return fallback
+
+        if self._circuit_breaker:
+            if success_checker is None:
+                self._circuit_breaker.record_success()
+            else:
+                try:
+                    is_success = success_checker(result)
+                except Exception as exc:
+                    logger.warning(
+                        "Genie Sim gRPC success check failed for %s: %s",
+                        action,
+                        exc,
+                    )
+                    self._circuit_breaker.record_failure(exc)
+                else:
+                    if is_success:
+                        self._circuit_breaker.record_success()
+                    else:
+                        self._circuit_breaker.record_failure(
+                            RuntimeError(f"{action} returned unsuccessful response")
+                        )
+                        logger.warning(
+                            "Genie Sim gRPC %s returned unsuccessful response",
+                            action,
+                        )
+
+        return result
 
     def connect(self) -> bool:
         """
@@ -394,21 +481,27 @@ class GenieSimGRPCClient:
         if not self._have_grpc or self._stub is None:
             return self._check_server_socket()
 
-        try:
+        def _request() -> GetObservationResponse:
             request = GetObservationRequest(
                 include_images=False,
                 include_depth=False,
                 include_semantic=False,
             )
-            response = self._stub.GetObservation(request, timeout=effective_timeout)
-            if response.success:
-                logger.info("✅ Genie Sim gRPC ping succeeded")
-                return True
-            logger.warning("Genie Sim gRPC ping returned unsuccessful response")
+            return self._stub.GetObservation(request, timeout=effective_timeout)
+
+        response = self._call_grpc(
+            "GetObservation(ping)",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        if response is None:
             return False
-        except Exception as exc:
-            logger.error(f"Genie Sim gRPC ping failed: {exc}")
-            return False
+        if response.success:
+            logger.info("✅ Genie Sim gRPC ping succeeded")
+            return True
+        logger.warning("Genie Sim gRPC ping returned unsuccessful response")
+        return False
 
     def get_server_info(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         """
@@ -485,7 +578,7 @@ class GenieSimGRPCClient:
             return {"success": False, "error": "gRPC not available"}
 
         # Real gRPC implementation
-        try:
+        def _request() -> SendCommandResponse:
             # Convert to gRPC command type
             grpc_command = GrpcCommandType(command.value)
 
@@ -496,27 +589,32 @@ class GenieSimGRPCClient:
             )
 
             # Send via gRPC
-            response = self._stub.SendCommand(request, timeout=self.timeout)
+            return self._stub.SendCommand(request, timeout=self.timeout)
 
-            # Parse response
-            result = {
-                "success": response.success,
-                "error_message": response.error_message,
-            }
+        response = self._call_grpc(
+            f"SendCommand({command.name})",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        if response is None:
+            return {"success": False, "error": "gRPC call failed"}
 
-            # Decode payload if present
-            if response.payload:
-                try:
-                    payload_data = json.loads(response.payload.decode())
-                    result.update(payload_data)
-                except json.JSONDecodeError:
-                    logger.warning("Failed to decode response payload")
+        # Parse response
+        result = {
+            "success": response.success,
+            "error_message": response.error_message,
+        }
 
-            return result
+        # Decode payload if present
+        if response.payload:
+            try:
+                payload_data = json.loads(response.payload.decode())
+                result.update(payload_data)
+            except json.JSONDecodeError:
+                logger.warning("Failed to decode response payload")
 
-        except Exception as e:
-            logger.error(f"gRPC command {command.name} failed: {e}")
-            return {"success": False, "error": str(e)}
+        return result
 
     def get_observation(self) -> Dict[str, Any]:
         """
@@ -530,28 +628,31 @@ class GenieSimGRPCClient:
         if not self._have_grpc or self._stub is None:
             return {"success": False, "error": "gRPC not available"}
 
-        try:
+        def _request() -> GetObservationResponse:
             request = GetObservationRequest(
                 include_images=True,
                 include_depth=True,
                 include_semantic=False,
             )
+            return self._stub.GetObservation(request, timeout=self.timeout)
 
-            response = self._stub.GetObservation(request, timeout=self.timeout)
+        response = self._call_grpc(
+            "GetObservation",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        if response is None:
+            return {"success": False, "error": "gRPC call failed"}
+        if not response.success:
+            return {"success": False}
 
-            if not response.success:
-                return {"success": False}
-
-            return {
-                "success": True,
-                "robot_state": response.robot_state.to_dict() if response.robot_state else {},
-                "scene_state": response.scene_state.to_dict() if response.scene_state else {},
-                "timestamp": response.timestamp,
-            }
-
-        except Exception as e:
-            logger.error(f"GetObservation failed: {e}")
-            return {"success": False, "error": str(e)}
+        return {
+            "success": True,
+            "robot_state": response.robot_state.to_dict() if response.robot_state else {},
+            "scene_state": response.scene_state.to_dict() if response.scene_state else {},
+            "timestamp": response.timestamp,
+        }
 
     def set_joint_position(self, positions: List[float]) -> bool:
         """
@@ -568,18 +669,20 @@ class GenieSimGRPCClient:
         if not self._have_grpc or self._stub is None:
             return False
 
-        try:
+        def _request() -> SetJointPositionResponse:
             request = SetJointPositionRequest(
                 positions=positions,
                 wait_for_completion=True,
             )
+            return self._stub.SetJointPosition(request, timeout=self.timeout)
 
-            response = self._stub.SetJointPosition(request, timeout=self.timeout)
-            return response.success
-
-        except Exception as e:
-            logger.error(f"SetJointPosition failed: {e}")
-            return False
+        response = self._call_grpc(
+            "SetJointPosition",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
 
     def get_joint_position(self) -> Optional[List[float]]:
         """
@@ -593,18 +696,20 @@ class GenieSimGRPCClient:
         if not self._have_grpc or self._stub is None:
             return None
 
-        try:
+        def _request() -> GetJointPositionResponse:
             request = GetJointPositionRequest()
-            response = self._stub.GetJointPosition(request, timeout=self.timeout)
+            return self._stub.GetJointPosition(request, timeout=self.timeout)
 
-            if response.success and response.joint_state:
-                return response.joint_state.positions
+        response = self._call_grpc(
+            "GetJointPosition",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        if response and response.success and response.joint_state:
+            return response.joint_state.positions
 
-            return None
-
-        except Exception as e:
-            logger.error(f"GetJointPosition failed: {e}")
-            return None
+        return None
 
     def get_camera_data(self, camera_id: str = "wrist") -> Optional[np.ndarray]:
         """
@@ -641,7 +746,7 @@ class GenieSimGRPCClient:
         if not self._have_grpc or self._stub is None:
             return False
 
-        try:
+        def _request() -> SetTrajectoryResponse:
             # Convert trajectory to gRPC format
             trajectory_points = []
             for waypoint in trajectory:
@@ -659,12 +764,15 @@ class GenieSimGRPCClient:
                 wait_for_completion=True,
             )
 
-            response = self._stub.SetTrajectory(request, timeout=self.timeout * 5)  # Longer timeout for execution
-            return response.success
+            return self._stub.SetTrajectory(request, timeout=self.timeout * 5)
 
-        except Exception as e:
-            logger.error(f"SetTrajectory failed: {e}")
-            return False
+        response = self._call_grpc(
+            "SetTrajectory",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
 
     def start_recording(self, episode_id: str, output_dir: str = "/tmp/recordings") -> bool:
         """
@@ -682,7 +790,7 @@ class GenieSimGRPCClient:
         if not self._have_grpc or self._stub is None:
             return False
 
-        try:
+        def _request() -> StartRecordingResponse:
             request = StartRecordingRequest(
                 episode_id=episode_id,
                 output_directory=output_dir,
@@ -690,13 +798,15 @@ class GenieSimGRPCClient:
                 include_depth=True,
                 include_semantic=False,
             )
+            return self._stub.StartRecording(request, timeout=self.timeout)
 
-            response = self._stub.StartRecording(request, timeout=self.timeout)
-            return response.success
-
-        except Exception as e:
-            logger.error(f"StartRecording failed: {e}")
-            return False
+        response = self._call_grpc(
+            "StartRecording",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
 
     def stop_recording(self) -> bool:
         """
@@ -710,14 +820,17 @@ class GenieSimGRPCClient:
         if not self._have_grpc or self._stub is None:
             return False
 
-        try:
+        def _request() -> StopRecordingResponse:
             request = StopRecordingRequest(save_metadata=True)
-            response = self._stub.StopRecording(request, timeout=self.timeout)
-            return response.success
+            return self._stub.StopRecording(request, timeout=self.timeout)
 
-        except Exception as e:
-            logger.error(f"StopRecording failed: {e}")
-            return False
+        response = self._call_grpc(
+            "StopRecording",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
 
     def reset_environment(self) -> bool:
         """
@@ -731,18 +844,20 @@ class GenieSimGRPCClient:
         if not self._have_grpc or self._stub is None:
             return False
 
-        try:
+        def _request() -> ResetResponse:
             request = ResetRequest(
                 reset_robot=True,
                 reset_objects=True,
             )
+            return self._stub.Reset(request, timeout=self.timeout)
 
-            response = self._stub.Reset(request, timeout=self.timeout)
-            return response.success
-
-        except Exception as e:
-            logger.error(f"Reset failed: {e}")
-            return False
+        response = self._call_grpc(
+            "Reset",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
 
 
 # =============================================================================
