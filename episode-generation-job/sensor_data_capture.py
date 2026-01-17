@@ -113,6 +113,29 @@ def _mock_capture_disallowed() -> bool:
     )
 
 
+def _log_mock_capture_blocked(
+    reason: str,
+    capture_mode: Optional[SensorDataCaptureMode],
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Emit a structured log entry when mock capture is blocked in production."""
+    payload: Dict[str, Any] = {
+        "event": "mock_capture_blocked",
+        "reason": reason,
+        "capture_mode": capture_mode.value if capture_mode else None,
+        "use_mock": os.getenv("USE_MOCK_CAPTURE", "").lower() == "true",
+        "allow_mock_capture": os.getenv("ALLOW_MOCK_CAPTURE", "").lower() == "true",
+        "allow_mock_data": os.getenv("ALLOW_MOCK_DATA", "").lower() == "true",
+        "sensor_capture_mode": os.getenv("SENSOR_CAPTURE_MODE", ""),
+        "data_quality_level": os.getenv("DATA_QUALITY_LEVEL", ""),
+        "labs_staging": os.getenv("LABS_STAGING", ""),
+        "isaac_sim_required": os.getenv("ISAAC_SIM_REQUIRED", ""),
+    }
+    if details:
+        payload.update(details)
+    logger.error("%s", json.dumps(payload))
+
+
 @dataclass
 class CameraCalibration:
     """
@@ -1529,6 +1552,7 @@ class MockSensorCapture(IsaacSimSensorCapture):
 
     def __init__(self, config: SensorDataConfig, verbose: bool = True):
         if _mock_capture_disallowed():
+            _log_mock_capture_blocked("MockSensorCapture initialization", None)
             raise RuntimeError(
                 "MockSensorCapture is not allowed when DATA_QUALITY_LEVEL=production, "
                 "LABS_STAGING is enabled, or ISAAC_SIM_REQUIRED=true. "
@@ -2011,13 +2035,6 @@ def get_capture_mode_from_env() -> SensorDataCaptureMode:
     """
     mode_str = os.getenv("SENSOR_CAPTURE_MODE", "fail_closed").lower()
 
-    if _is_production_run() and mode_str == SensorDataCaptureMode.MOCK_DEV.value:
-        logger.warning(
-            "[WARNING] Production run detected - mock capture not allowed. "
-            "Forcing SENSOR_CAPTURE_MODE=fail_closed."
-        )
-        return SensorDataCaptureMode.FAIL_CLOSED
-
     try:
         return SensorDataCaptureMode(mode_str)
     except ValueError:
@@ -2102,15 +2119,30 @@ def create_sensor_capture(
     )
 
     if _is_production_run():
+        mock_request_reasons = []
         if allow_mock_env:
-            raise RuntimeError(
-                "ALLOW_MOCK_DATA/ALLOW_MOCK_CAPTURE is not permitted in production or labs-staging mode. "
-                "Unset DATA_QUALITY_LEVEL=production/LABS_STAGING=1 for development runs."
+            mock_request_reasons.append("ALLOW_MOCK_DATA/ALLOW_MOCK_CAPTURE set")
+        if use_mock:
+            mock_request_reasons.append("use_mock=True")
+        if allow_mock_capture:
+            mock_request_reasons.append("allow_mock_capture=True")
+        if capture_mode == SensorDataCaptureMode.MOCK_DEV:
+            mock_request_reasons.append("capture_mode=MOCK_DEV")
+
+        if mock_request_reasons:
+            _log_mock_capture_blocked(
+                "; ".join(mock_request_reasons),
+                capture_mode,
+                details={
+                    "use_mock_param": use_mock,
+                    "allow_mock_capture_param": allow_mock_capture,
+                },
             )
-        if capture_mode == SensorDataCaptureMode.MOCK_DEV or use_mock or allow_mock_capture:
             raise RuntimeError(
-                "Mock sensor capture requested in production or labs-staging mode. "
-                "Run with Isaac Sim available or switch to a non-production configuration."
+                "Mock sensor capture is not permitted in production or labs-staging mode. "
+                "Remove mock flags (ALLOW_MOCK_DATA/ALLOW_MOCK_CAPTURE, use_mock, "
+                "capture_mode=MOCK_DEV) and run with Isaac Sim available "
+                "(capture_mode=ISAAC_SIM or FAIL_CLOSED)."
             )
     elif capture_mode == SensorDataCaptureMode.MOCK_DEV and not (allow_mock_capture and allow_mock_env):
         raise RuntimeError(
