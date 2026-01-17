@@ -86,6 +86,39 @@ Run the deployment script to create dashboards, alert policies, and log-based me
 
 ## Alerts
 
+### Application Alerting (Webhook)
+
+BlueprintPipeline includes a lightweight alerting helper that can post JSON payloads to a webhook
+endpoint when health checks fail or jobs crash.
+
+**Environment variables**
+- `ALERT_BACKEND`: Alert backend selector (`webhook` or `none`, default: `none`).
+- `ALERT_WEBHOOK_URL`: Destination webhook URL for alert payloads.
+- `ALERT_MIN_SEVERITY`: Minimum severity to emit (`info`, `warning`, `error`, `critical`; default: `warning`).
+- `ALERT_SOURCE`: Identifier included in the payload (default: `blueprint_pipeline`).
+- `ALERT_HEALTHCHECK_ENABLED`: Enable health check alerts (`true`/`false`, default: `true`).
+- `ALERT_HEALTHCHECK_FAILURE_THRESHOLD`: Minimum failing dependency count before alerting (default: `1`).
+- `ALERT_HEALTHCHECK_SEVERITY`: Severity for health check alerts (default: `critical`).
+- `ALERT_JOB_EXCEPTION_SEVERITY`: Severity for fatal job exception alerts (default: `critical`).
+
+**Sample webhook payload**
+```json
+{
+  "event_type": "particulate_healthcheck_dependency_check_failed",
+  "summary": "Particulate health check failed",
+  "details": {
+    "service": "particulate",
+    "failure_count": 1,
+    "details": {
+      "errors": []
+    }
+  },
+  "severity": "critical",
+  "source": "blueprint_pipeline",
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+```
+
 ### Critical Alerts
 
 1. **Pipeline Failure Rate > 5%**:

@@ -53,6 +53,8 @@ from xml.dom import minidom
 
 from flask import Flask, jsonify, request
 
+from monitoring.alerting import send_alert
+
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
 
@@ -686,6 +688,13 @@ def healthcheck():
         }), 503
 
     if _warmup_error:
+        _alert_healthcheck_failure(
+            "warmup_failed",
+            {
+                "error": _warmup_error,
+                "details": _warmup_details,
+            },
+        )
         return jsonify({
             "status": "error",
             "message": f"Warmup failed: {_warmup_error}",
@@ -695,6 +704,7 @@ def healthcheck():
 
     deps_ok, dep_details = _dependency_health()
     if not deps_ok:
+        _alert_healthcheck_failure("dependency_check_failed", dep_details)
         return jsonify({
             "status": "error",
             "message": "Dependency check failed",
@@ -716,6 +726,29 @@ def healthcheck():
 def healthz():
     """Health check endpoint with dependency probes."""
     return healthcheck()
+
+
+def _alert_healthcheck_failure(event_type: str, details: Dict[str, Any]) -> None:
+    if os.getenv("ALERT_HEALTHCHECK_ENABLED", "true").lower() != "true":
+        return
+
+    threshold = int(os.getenv("ALERT_HEALTHCHECK_FAILURE_THRESHOLD", "1"))
+    errors = details.get("errors") if isinstance(details, dict) else None
+    failure_count = len(errors) if isinstance(errors, list) else 1
+
+    if failure_count < threshold:
+        return
+
+    send_alert(
+        event_type=f"particulate_healthcheck_{event_type}",
+        summary="Particulate health check failed",
+        details={
+            "service": "particulate",
+            "failure_count": failure_count,
+            "details": details,
+        },
+        severity=os.getenv("ALERT_HEALTHCHECK_SEVERITY", "critical"),
+    )
 
 
 @app.route("/ready", methods=["GET"])

@@ -62,6 +62,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from monitoring.alerting import send_alert
 from tools.geniesim_adapter import (
     GenieSimExporter,
     GenieSimExportConfig,
@@ -1212,4 +1213,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        send_alert(
+            event_type="geniesim_export_job_fatal_exception",
+            summary="Genie Sim export job failed with an unhandled exception",
+            details={
+                "job": "genie-sim-export-job",
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+            severity=os.getenv("ALERT_JOB_EXCEPTION_SEVERITY", "critical"),
+        )
+        raise

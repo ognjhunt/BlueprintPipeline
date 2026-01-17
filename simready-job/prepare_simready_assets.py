@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import traceback
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
+from monitoring.alerting import send_alert
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
@@ -2464,4 +2466,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        send_alert(
+            event_type="simready_job_fatal_exception",
+            summary="SimReady job failed with an unhandled exception",
+            details={
+                "job": "simready-job",
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+            severity=os.getenv("ALERT_JOB_EXCEPTION_SEVERITY", "critical"),
+        )
+        raise

@@ -82,6 +82,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from monitoring.alerting import send_alert
 from tools.config.seed_manager import set_global_seed
 from tools.metrics.pipeline_metrics import get_metrics
 
@@ -3413,4 +3414,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        send_alert(
+            event_type="episode_generation_job_fatal_exception",
+            summary="Episode generation job failed with an unhandled exception",
+            details={
+                "job": "episode-generation-job",
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+            severity=os.getenv("ALERT_JOB_EXCEPTION_SEVERITY", "critical"),
+        )
+        raise
