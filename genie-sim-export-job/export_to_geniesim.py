@@ -75,6 +75,7 @@ from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
 )
+from tools.config.production_mode import resolve_production_mode
 
 # Import quality gates for validation before export
 try:
@@ -263,6 +264,27 @@ def run_geniesim_export_job(
     Returns:
         0 on success, 1 on failure
     """
+    production_mode = resolve_production_mode()
+    require_quality_gates_env = os.getenv("REQUIRE_QUALITY_GATES")
+    env_override = (
+        parse_bool(require_quality_gates_env, True)
+        if require_quality_gates_env is not None
+        else None
+    )
+    if production_mode:
+        if require_quality_gates is False or env_override is False:
+            print(
+                "[GENIESIM-EXPORT-JOB] Production mode enabled; "
+                "REQUIRE_QUALITY_GATES override rejected and quality gates enforced."
+            )
+        require_quality_gates = True
+    else:
+        if require_quality_gates is False or env_override is False:
+            print(
+                "[GENIESIM-EXPORT-JOB] Non-production mode; "
+                "REQUIRE_QUALITY_GATES override honored."
+            )
+
     print(f"[GENIESIM-EXPORT-JOB] Starting Genie Sim export for scene: {scene_id}")
     print(f"[GENIESIM-EXPORT-JOB] Assets prefix: {assets_prefix}")
     print(f"[GENIESIM-EXPORT-JOB] Output prefix: {geniesim_prefix}")
@@ -1108,6 +1130,9 @@ def main():
     enable_rich_annotations = os.getenv("ENABLE_RICH_ANNOTATIONS", "true").lower() == "true"
     enable_premium_analytics = os.getenv("ENABLE_PREMIUM_ANALYTICS", "true").lower() == "true"
     require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
+    production_mode = resolve_production_mode()
+    if production_mode and not require_quality_gates:
+        require_quality_gates = True
 
     input_params = {
         "bucket": bucket,
