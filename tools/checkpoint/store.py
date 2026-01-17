@@ -1,4 +1,9 @@
-"""Checkpoint storage helpers for local pipeline runs."""
+"""Checkpoint storage helpers for local pipeline runs.
+
+Audit note: this module only writes local filesystem checkpoints today, so there
+is no GCS-backed checkpoint store in this repository to apply optimistic
+locking against.
+"""
 
 from __future__ import annotations
 
