@@ -45,6 +45,7 @@ Reference:
 """
 
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -68,6 +69,8 @@ from tools.scale_authority.authority import REFERENCE_DIMENSIONS
 from tools.scene_manifest.validate_manifest import validate_manifest
 from tools.workflow.failure_markers import FailureMarkerWriter
 from tools.metrics.pipeline_metrics import get_metrics
+
+logger = logging.getLogger(__name__)
 
 # Optional: Gemini for semantic inventory
 try:
@@ -252,15 +255,15 @@ def enrich_inventory_with_gemini(
     Returns the enriched inventory with updated object metadata.
     """
     if not HAVE_GEMINI or not os.getenv("GEMINI_API_KEY"):
-        print("[REGEN3D-JOB] Gemini not available, skipping enrichment")
+        logger.info("[REGEN3D-JOB] Gemini not available, skipping enrichment")
         return inventory
 
     # Only enrich if we have a source image
     if not source_image_path or not Path(source_image_path).is_file():
-        print("[REGEN3D-JOB] No source image for enrichment")
+        logger.info("[REGEN3D-JOB] No source image for enrichment")
         return inventory
 
-    print(f"[REGEN3D-JOB] Enriching inventory with Gemini vision...")
+    logger.info("[REGEN3D-JOB] Enriching inventory with Gemini vision...")
 
     try:
         # Import LLM client
@@ -283,7 +286,7 @@ def enrich_inventory_with_gemini(
             })
 
         if not objects_for_prompt:
-            print("[REGEN3D-JOB] No objects to enrich")
+            logger.info("[REGEN3D-JOB] No objects to enrich")
             return inventory
 
         # Build the enrichment prompt
@@ -347,14 +350,18 @@ def enrich_inventory_with_gemini(
         inventory["metadata"]["gemini_enriched_count"] = enriched_count
         inventory["metadata"]["gemini_model"] = response.model
 
-        print(f"[REGEN3D-JOB] Enriched {enriched_count}/{len(objects_for_prompt)} objects with Gemini")
+        logger.info(
+            "[REGEN3D-JOB] Enriched %s/%s objects with Gemini",
+            enriched_count,
+            len(objects_for_prompt),
+        )
         return inventory
 
     except ImportError as e:
-        print(f"[REGEN3D-JOB] LLM client not available: {e}")
+        logger.warning("[REGEN3D-JOB] LLM client not available: %s", e)
         return inventory
     except Exception as e:
-        print(f"[REGEN3D-JOB] Gemini enrichment failed: {e}")
+        logger.error("[REGEN3D-JOB] Gemini enrichment failed: %s", e)
         # Return original inventory on failure (non-fatal)
         return inventory
 
@@ -514,12 +521,14 @@ def run_regen3d_adapter_job(
     Returns:
         0 on success, 1 on failure
     """
-    print(f"[REGEN3D-JOB] Starting 3D-RE-GEN adapter for scene: {scene_id}")
-    print(f"[REGEN3D-JOB] 3D-RE-GEN prefix: {regen3d_prefix}")
-    print(f"[REGEN3D-JOB] Assets prefix: {assets_prefix}")
-    print(f"[REGEN3D-JOB] Layout prefix: {layout_prefix}")
-    print(f"[REGEN3D-JOB] Environment type: {environment_type}")
-    print(f"[REGEN3D-JOB] Scale factor (env/default): {scale_factor}")
+    logger.info(
+        "[REGEN3D-JOB] Starting 3D-RE-GEN adapter for scene: %s", scene_id
+    )
+    logger.info("[REGEN3D-JOB] 3D-RE-GEN prefix: %s", regen3d_prefix)
+    logger.info("[REGEN3D-JOB] Assets prefix: %s", assets_prefix)
+    logger.info("[REGEN3D-JOB] Layout prefix: %s", layout_prefix)
+    logger.info("[REGEN3D-JOB] Environment type: %s", environment_type)
+    logger.info("[REGEN3D-JOB] Scale factor (env/default): %s", scale_factor)
 
     regen3d_dir = root / regen3d_prefix
     assets_dir = root / assets_prefix
@@ -527,7 +536,9 @@ def run_regen3d_adapter_job(
 
     # Check 3D-RE-GEN outputs exist
     if not regen3d_dir.is_dir():
-        print(f"[REGEN3D-JOB] ERROR: 3D-RE-GEN output not found at {regen3d_dir}")
+        logger.error(
+            "[REGEN3D-JOB] 3D-RE-GEN output not found at %s", regen3d_dir
+        )
         return 1
 
     # Initialize adapter
@@ -536,29 +547,32 @@ def run_regen3d_adapter_job(
     # Load 3D-RE-GEN outputs
     try:
         regen3d_output = adapter.load_regen3d_output(regen3d_dir)
-        print(f"[REGEN3D-JOB] Loaded {len(regen3d_output.objects)} objects from 3D-RE-GEN")
+        logger.info(
+            "[REGEN3D-JOB] Loaded %s objects from 3D-RE-GEN",
+            len(regen3d_output.objects),
+        )
     except Exception as e:
-        print(f"[REGEN3D-JOB] ERROR: Failed to load 3D-RE-GEN outputs: {e}")
+        logger.error("[REGEN3D-JOB] Failed to load 3D-RE-GEN outputs: %s", e)
         return 1
 
     if not regen3d_output.objects:
-        print("[REGEN3D-JOB] WARNING: No objects found in 3D-RE-GEN output")
+        logger.warning("[REGEN3D-JOB] No objects found in 3D-RE-GEN output")
     else:
         try:
             calibration = _auto_calibrate_scale(regen3d_output)
         except Exception as e:
             calibration = None
-            print(f"[REGEN3D-JOB] WARNING: Auto scale calibration failed: {e}")
+            logger.warning("[REGEN3D-JOB] Auto scale calibration failed: %s", e)
 
         if calibration:
             scale_factor = calibration.scale_factor
-            print(
+            logger.info(
                 "[REGEN3D-JOB] Auto scale calibration selected "
                 f"scale={scale_factor:.4f} using {calibration.method} "
                 f"(refs={calibration.reference_types}, objects={calibration.reference_objects})"
             )
         else:
-            print(
+            logger.info(
                 "[REGEN3D-JOB] Auto scale calibration unavailable; "
                 f"falling back to SCALE_FACTOR={scale_factor}"
             )
@@ -568,20 +582,20 @@ def run_regen3d_adapter_job(
     layout_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Copy assets to expected structure
-    print("[REGEN3D-JOB] Copying assets...")
+    logger.info("[REGEN3D-JOB] Copying assets...")
     try:
         asset_paths = adapter.copy_assets(
             regen3d_output,
             root / assets_prefix.rsplit("/", 1)[0],  # Parent of assets dir
             assets_prefix.rsplit("/", 1)[-1],  # Just "assets" part
         )
-        print(f"[REGEN3D-JOB] Copied {len(asset_paths)} assets")
+        logger.info("[REGEN3D-JOB] Copied %s assets", len(asset_paths))
     except Exception as e:
-        print(f"[REGEN3D-JOB] ERROR: Failed to copy assets: {e}")
+        logger.error("[REGEN3D-JOB] Failed to copy assets: %s", e)
         return 1
 
     # 2. Generate canonical manifest
-    print("[REGEN3D-JOB] Generating scene manifest...")
+    logger.info("[REGEN3D-JOB] Generating scene manifest...")
     try:
         manifest = adapter.create_manifest(
             regen3d_output,
@@ -591,36 +605,38 @@ def run_regen3d_adapter_job(
         )
 
         # Validate manifest against schema
-        print("[REGEN3D-JOB] Validating manifest against schema...")
+        logger.info("[REGEN3D-JOB] Validating manifest against schema...")
         try:
             validate_manifest(manifest)
-            print("[REGEN3D-JOB] Manifest validation passed")
+            logger.info("[REGEN3D-JOB] Manifest validation passed")
         except Exception as validation_error:
-            print(f"[REGEN3D-JOB] ERROR: Manifest validation failed: {validation_error}")
+            logger.error(
+                "[REGEN3D-JOB] Manifest validation failed: %s", validation_error
+            )
             return 1
 
         manifest_path = assets_dir / "scene_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
-        print(f"[REGEN3D-JOB] Wrote manifest: {manifest_path}")
+        logger.info("[REGEN3D-JOB] Wrote manifest: %s", manifest_path)
     except Exception as e:
-        print(f"[REGEN3D-JOB] ERROR: Failed to generate manifest: {e}")
+        logger.error("[REGEN3D-JOB] Failed to generate manifest: %s", e)
         return 1
 
     # 3. Generate layout
-    print("[REGEN3D-JOB] Generating scene layout...")
+    logger.info("[REGEN3D-JOB] Generating scene layout...")
     try:
         layout = adapter.create_layout(regen3d_output, scale_factor)
         layout_path = layout_dir / "scene_layout_scaled.json"
         layout_path.write_text(json.dumps(layout, indent=2))
-        print(f"[REGEN3D-JOB] Wrote layout: {layout_path}")
+        logger.info("[REGEN3D-JOB] Wrote layout: %s", layout_path)
     except Exception as e:
-        print(f"[REGEN3D-JOB] ERROR: Failed to generate layout: {e}")
+        logger.error("[REGEN3D-JOB] Failed to generate layout: %s", e)
         return 1
 
     # 4. Generate semantic inventory (for replicator/policy targeting)
     # Make inventory generation failures fatal - required for downstream jobs
     if not skip_inventory:
-        print("[REGEN3D-JOB] Generating semantic inventory...")
+        logger.info("[REGEN3D-JOB] Generating semantic inventory...")
         try:
             seg_dir = root / f"scenes/{scene_id}/seg"
             seg_dir.mkdir(parents=True, exist_ok=True)
@@ -640,16 +656,19 @@ def run_regen3d_adapter_job(
 
             inventory_path = seg_dir / "inventory.json"
             inventory_path.write_text(json.dumps(inventory, indent=2))
-            print(f"[REGEN3D-JOB] Wrote inventory: {inventory_path}")
+            logger.info("[REGEN3D-JOB] Wrote inventory: %s", inventory_path)
         except Exception as e:
-            print(f"[REGEN3D-JOB] ERROR: Failed to generate inventory (required for downstream jobs): {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(
+                "[REGEN3D-JOB] Failed to generate inventory (required for downstream jobs): %s",
+                e,
+            )
             return 1  # Fail the job - inventory is critical for replicator/policy targeting
 
     # 5. Run quality gates before writing completion marker
     if _should_bypass_quality_gates():
-        print("[REGEN3D-JOB] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates")
+        logger.warning(
+            "[REGEN3D-JOB] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates"
+        )
     else:
         quality_gates = QualityGateRegistry(verbose=True)
         quality_gates.run_checkpoint(
@@ -660,7 +679,7 @@ def run_regen3d_adapter_job(
         quality_gates.save_report(scene_id, report_path)
 
         if not quality_gates.can_proceed():
-            print("[REGEN3D-JOB] ❌ Quality gates blocked downstream pipeline")
+            logger.error("[REGEN3D-JOB] ❌ Quality gates blocked downstream pipeline")
             FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
                 exception=RuntimeError("Quality gates blocked: manifest validation failed"),
                 failed_step="quality_gates",
@@ -707,13 +726,16 @@ def run_regen3d_adapter_job(
     #   - isaac-lab-pipeline
     primary_marker_path = assets_dir / ".regen3d_complete"
     primary_marker_path.write_text(json.dumps(marker_content, indent=2))
-    print(f"[REGEN3D-JOB] Wrote completion marker: {primary_marker_path}")
+    logger.info("[REGEN3D-JOB] Wrote completion marker: %s", primary_marker_path)
 
-    print("[REGEN3D-JOB] 3D-RE-GEN adapter completed successfully")
-    print(f"[REGEN3D-JOB]   Objects: {len(regen3d_output.objects)}")
-    print(f"[REGEN3D-JOB]   Background: {'yes' if regen3d_output.background else 'no'}")
-    print(f"[REGEN3D-JOB]   Manifest: {manifest_path}")
-    print(f"[REGEN3D-JOB]   Layout: {layout_path}")
+    logger.info("[REGEN3D-JOB] 3D-RE-GEN adapter completed successfully")
+    logger.info("[REGEN3D-JOB]   Objects: %s", len(regen3d_output.objects))
+    logger.info(
+        "[REGEN3D-JOB]   Background: %s",
+        "yes" if regen3d_output.background else "no",
+    )
+    logger.info("[REGEN3D-JOB]   Manifest: %s", manifest_path)
+    logger.info("[REGEN3D-JOB]   Layout: %s", layout_path)
 
     return 0
 
@@ -725,7 +747,7 @@ def main() -> int:
     scene_id = os.getenv("SCENE_ID", "")
 
     if not scene_id:
-        print("[REGEN3D-JOB] ERROR: SCENE_ID is required")
+        logger.error("[REGEN3D-JOB] SCENE_ID is required")
         return 1
 
     # Prefixes with defaults
@@ -738,9 +760,9 @@ def main() -> int:
     scale_factor = float(os.getenv("SCALE_FACTOR", "1.0"))
     skip_inventory = os.getenv("SKIP_INVENTORY", "").lower() in ("true", "1", "yes")
 
-    print(f"[REGEN3D-JOB] Configuration:")
-    print(f"[REGEN3D-JOB]   Bucket: {bucket}")
-    print(f"[REGEN3D-JOB]   Scene ID: {scene_id}")
+    logger.info("[REGEN3D-JOB] Configuration:")
+    logger.info("[REGEN3D-JOB]   Bucket: %s", bucket)
+    logger.info("[REGEN3D-JOB]   Scene ID: %s", scene_id)
 
     exit_code = run_regen3d_adapter_job(
         root=GCS_ROOT,

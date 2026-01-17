@@ -21,6 +21,7 @@ Reference datasets using these formats:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import struct
 import sys
@@ -30,6 +31,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -107,11 +110,11 @@ class RLDSExporter:
             self._tf_available = True
         except ImportError:
             if self.verbose:
-                print("[RLDS] TensorFlow not available, using fallback export")
+                logger.warning("[RLDS] TensorFlow not available, using fallback export")
 
     def log(self, msg: str) -> None:
         if self.verbose:
-            print(f"[RLDS-EXPORT] {msg}")
+            logger.info("[RLDS-EXPORT] %s", msg)
 
     def export_episodes(
         self,
@@ -446,11 +449,11 @@ class HDF5Exporter:
             self._h5py_available = True
         except ImportError:
             if self.verbose:
-                print("[HDF5] h5py not available")
+                logger.warning("[HDF5] h5py not available")
 
     def log(self, msg: str) -> None:
         if self.verbose:
-            print(f"[HDF5-EXPORT] {msg}")
+            logger.info("[HDF5-EXPORT] %s", msg)
 
     def export_episodes(
         self,
@@ -633,11 +636,11 @@ class ROSBagExporter:
             self._rosbag_available = True
         except ImportError:
             if self.verbose:
-                print("[ROSBAG] rosbag not available, using JSON fallback")
+                logger.warning("[ROSBAG] rosbag not available, using JSON fallback")
 
     def log(self, msg: str) -> None:
         if self.verbose:
-            print(f"[ROSBAG-EXPORT] {msg}")
+            logger.info("[ROSBAG-EXPORT] %s", msg)
 
     def export_episodes(
         self,
@@ -838,7 +841,7 @@ class PointCloudGenerator:
 
     def log(self, msg: str) -> None:
         if self.verbose:
-            print(f"[POINTCLOUD] {msg}")
+            logger.info("[POINTCLOUD] %s", msg)
 
     def depth_to_pointcloud(
         self,
@@ -994,7 +997,7 @@ class MultiFormatExporter:
 
     def log(self, msg: str) -> None:
         if self.verbose:
-            print(f"[MULTI-FORMAT] {msg}")
+            logger.info("[MULTI-FORMAT] %s", msg)
 
     def export(
         self,
@@ -1073,7 +1076,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.demo:
-        print("Running demo export...")
+        logger.info("Running demo export...")
 
         # Create sample episodes
         sample_episodes = []
@@ -1125,4 +1128,4 @@ if __name__ == "__main__":
             dataset_name="demo_dataset",
         )
 
-        print(f"\nExported to: {outputs}")
+        logger.info("Exported to: %s", outputs)

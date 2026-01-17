@@ -19,10 +19,13 @@ Market Positioning:
 See: Episode Pricing Strategy and Competitive Analysis documentation.
 """
 
+import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class DataPackTier(Enum):
@@ -1474,45 +1477,45 @@ def get_leorbot_feature_config(pack_config: DataPackConfig) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    print("Data Pack Configuration System")
-    print("=" * 60)
+    logger.info("Data Pack Configuration System")
+    logger.info("%s", "=" * 60)
 
     # Show tier comparison
     comparison = get_tier_comparison()
 
     for tier_key, info in comparison.items():
-        print(f"\n{'=' * 40}")
-        print(f"{info['name'].upper()}")
-        print("=" * 40)
+        logger.info("%s", "=" * 40)
+        logger.info("%s", info["name"].upper())
+        logger.info("%s", "=" * 40)
 
-        print("\nIncludes:")
+        logger.info("Includes:")
         for item in info["includes"]:
-            print(f"  - {item}")
+            logger.info("  - %s", item)
 
-        print("\nUse Cases:")
+        logger.info("Use Cases:")
         for case in info["use_cases"]:
-            print(f"  - {case}")
+            logger.info("  - %s", case)
 
-        print("\nTarget Customers:")
+        logger.info("Target Customers:")
         for customer in info["target_customers"]:
-            print(f"  - {customer}")
+            logger.info("  - %s", customer)
 
         if info.get("best_value"):
-            print("\n  *** BEST VALUE FOR MOST LABS ***")
+            logger.info("  *** BEST VALUE FOR MOST LABS ***")
 
     # Show example configurations
-    print("\n" + "=" * 60)
-    print("Example Configurations")
-    print("=" * 60)
+    logger.info("%s", "=" * 60)
+    logger.info("Example Configurations")
+    logger.info("%s", "=" * 60)
 
     for tier in [DataPackTier.CORE, DataPackTier.PLUS, DataPackTier.FULL]:
         config = get_data_pack_config(tier, num_cameras=2)
-        print(f"\n{config.name}:")
-        print(f"  Streams: {len(config.streams)}")
-        print(f"  Cameras: {config.camera_types}")
-        print(f"  Has RGB: {config.has_rgb}")
-        print(f"  Has Depth: {config.has_depth}")
-        print(f"  Has Segmentation: {config.has_segmentation}")
-        print(f"  Has BBoxes: {config.has_bboxes}")
-        print(f"  Has Object Poses: {config.has_object_poses}")
-        print(f"  Has Contacts: {config.has_contacts}")
+        logger.info("%s:", config.name)
+        logger.info("  Streams: %s", len(config.streams))
+        logger.info("  Cameras: %s", config.camera_types)
+        logger.info("  Has RGB: %s", config.has_rgb)
+        logger.info("  Has Depth: %s", config.has_depth)
+        logger.info("  Has Segmentation: %s", config.has_segmentation)
+        logger.info("  Has BBoxes: %s", config.has_bboxes)
+        logger.info("  Has Object Poses: %s", config.has_object_poses)
+        logger.info("  Has Contacts: %s", config.has_contacts)

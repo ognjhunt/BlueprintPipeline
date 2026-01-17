@@ -33,6 +33,7 @@ Environment Variables:
 
 import ast
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -49,6 +50,8 @@ from tools.isaac_lab_tasks.runtime_validator import (
     IsaacLabRuntimeValidator,
     RuntimeValidationResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -436,14 +439,14 @@ def run_isaac_lab_job(
     Returns:
         0 on success, 1 on failure
     """
-    print(f"[ISAAC-LAB-JOB] Starting task generation for scene: {scene_id}")
-    print(f"[ISAAC-LAB-JOB] Assets prefix: {assets_prefix}")
-    print(f"[ISAAC-LAB-JOB] USD prefix: {usd_prefix}")
-    print(f"[ISAAC-LAB-JOB] Replicator prefix: {replicator_prefix}")
-    print(f"[ISAAC-LAB-JOB] Output prefix: {isaac_lab_prefix}")
-    print(f"[ISAAC-LAB-JOB] Environment type: {environment_type}")
-    print(f"[ISAAC-LAB-JOB] Robot type: {robot_type}")
-    print(f"[ISAAC-LAB-JOB] Num envs: {num_envs}")
+    logger.info("[ISAAC-LAB-JOB] Starting task generation for scene: %s", scene_id)
+    logger.info("[ISAAC-LAB-JOB] Assets prefix: %s", assets_prefix)
+    logger.info("[ISAAC-LAB-JOB] USD prefix: %s", usd_prefix)
+    logger.info("[ISAAC-LAB-JOB] Replicator prefix: %s", replicator_prefix)
+    logger.info("[ISAAC-LAB-JOB] Output prefix: %s", isaac_lab_prefix)
+    logger.info("[ISAAC-LAB-JOB] Environment type: %s", environment_type)
+    logger.info("[ISAAC-LAB-JOB] Robot type: %s", robot_type)
+    logger.info("[ISAAC-LAB-JOB] Num envs: %s", num_envs)
 
     assets_dir = root / assets_prefix
     usd_dir = root / usd_prefix
@@ -453,41 +456,44 @@ def run_isaac_lab_job(
     # Load manifest
     manifest_path = assets_dir / "scene_manifest.json"
     if not manifest_path.is_file():
-        print(f"[ISAAC-LAB-JOB] ERROR: Manifest not found at {manifest_path}")
+        logger.error("[ISAAC-LAB-JOB] Manifest not found at %s", manifest_path)
         return 1
 
     try:
         manifest = json.loads(manifest_path.read_text())
-        print(f"[ISAAC-LAB-JOB] Loaded manifest with {len(manifest.get('objects', []))} objects")
+        logger.info(
+            "[ISAAC-LAB-JOB] Loaded manifest with %s objects",
+            len(manifest.get("objects", [])),
+        )
     except Exception as e:
-        print(f"[ISAAC-LAB-JOB] ERROR: Failed to load manifest: {e}")
+        logger.error("[ISAAC-LAB-JOB] Failed to load manifest: %s", e)
         return 1
 
     # Check USD scene exists
     scene_usda = usd_dir / "scene.usda"
     if not scene_usda.is_file():
-        print(f"[ISAAC-LAB-JOB] WARNING: scene.usda not found at {scene_usda}")
+        logger.warning("[ISAAC-LAB-JOB] scene.usda not found at %s", scene_usda)
         # Continue anyway, USD path will be used as reference
 
     # Select policy if not specified
     if not policy_id:
         policy_id = select_policy(environment_type, manifest)
-        print(f"[ISAAC-LAB-JOB] Auto-selected policy: {policy_id}")
+        logger.info("[ISAAC-LAB-JOB] Auto-selected policy: %s", policy_id)
     else:
-        print(f"[ISAAC-LAB-JOB] Using specified policy: {policy_id}")
+        logger.info("[ISAAC-LAB-JOB] Using specified policy: %s", policy_id)
 
     # Load policy config
     policy_config_path = REPO_ROOT / "policy_configs" / "environment_policies.json"
     if policy_config_path.is_file():
         try:
             policy_config = json.loads(policy_config_path.read_text())
-            print("[ISAAC-LAB-JOB] Loaded policy configuration")
+            logger.info("[ISAAC-LAB-JOB] Loaded policy configuration")
         except (OSError, json.JSONDecodeError) as e:
             message = f"[ISAAC-LAB-JOB] WARNING: Failed to load policy config: {e}"
             if strict_config_loading:
-                print(message.replace("WARNING", "ERROR"))
+                logger.error(message.replace("WARNING", "ERROR"))
                 return 1
-            print(message)
+            logger.warning(message)
             policy_config = {"policies": {}, "environments": {}}
     else:
         message = (
@@ -495,9 +501,9 @@ def run_isaac_lab_job(
             f"{policy_config_path}, using defaults"
         )
         if strict_config_loading:
-            print(message.replace("WARNING", "ERROR"))
+            logger.error(message.replace("WARNING", "ERROR"))
             return 1
-        print(message)
+        logger.warning(message)
         policy_config = {"policies": {}, "environments": {}}
 
     # Load replicator metadata if available
@@ -505,13 +511,13 @@ def run_isaac_lab_job(
     if replicator_metadata_path.is_file():
         try:
             replicator_metadata = json.loads(replicator_metadata_path.read_text())
-            print("[ISAAC-LAB-JOB] Loaded replicator metadata")
+            logger.info("[ISAAC-LAB-JOB] Loaded replicator metadata")
         except (OSError, json.JSONDecodeError) as e:
             message = f"[ISAAC-LAB-JOB] WARNING: Failed to load replicator metadata: {e}"
             if strict_config_loading:
-                print(message.replace("WARNING", "ERROR"))
+                logger.error(message.replace("WARNING", "ERROR"))
                 return 1
-            print(message)
+            logger.warning(message)
             replicator_metadata = {}
     else:
         message = (
@@ -519,9 +525,9 @@ def run_isaac_lab_job(
             f"{replicator_metadata_path}, using defaults"
         )
         if strict_config_loading:
-            print(message.replace("WARNING", "ERROR"))
+            logger.error(message.replace("WARNING", "ERROR"))
             return 1
-        print(message)
+        logger.warning(message)
         replicator_metadata = {}
 
     # Build recipe from manifest + replicator data
@@ -549,39 +555,42 @@ def run_isaac_lab_job(
             robot_type=robot_type,
             num_envs=num_envs,
         )
-        print(f"[ISAAC-LAB-JOB] Generated task: {task.task_name}")
+        logger.info("[ISAAC-LAB-JOB] Generated task: %s", task.task_name)
     except Exception as e:
-        print(f"[ISAAC-LAB-JOB] ERROR: Task generation failed: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("[ISAAC-LAB-JOB] Task generation failed: %s", e)
         return 1
 
     # Validate generated code BEFORE writing files
-    print("[ISAAC-LAB-JOB] Validating generated code...")
+    logger.info("[ISAAC-LAB-JOB] Validating generated code...")
     validation_result = validate_generated_isaac_lab_code(task.files)
 
     if validation_result.warnings:
-        print(f"[ISAAC-LAB-JOB] Validation warnings ({len(validation_result.warnings)}):")
+        logger.warning(
+            "[ISAAC-LAB-JOB] Validation warnings (%s):", len(validation_result.warnings)
+        )
         for warning in validation_result.warnings:
-            print(f"[ISAAC-LAB-JOB]   WARNING: {warning}")
+            logger.warning("[ISAAC-LAB-JOB]   WARNING: %s", warning)
 
     if not validation_result.is_valid:
-        print(f"[ISAAC-LAB-JOB] ERROR: Code validation failed ({len(validation_result.errors)} errors):")
+        logger.error(
+            "[ISAAC-LAB-JOB] Code validation failed (%s errors):",
+            len(validation_result.errors),
+        )
         for error in validation_result.errors:
-            print(f"[ISAAC-LAB-JOB]   ERROR: {error}")
-        print("[ISAAC-LAB-JOB] Files NOT written due to validation errors")
+            logger.error("[ISAAC-LAB-JOB]   ERROR: %s", error)
+        logger.error("[ISAAC-LAB-JOB] Files NOT written due to validation errors")
         return 1
 
-    print("[ISAAC-LAB-JOB] Code validation passed")
+    logger.info("[ISAAC-LAB-JOB] Code validation passed")
 
     # Save task files (only after validation passes)
     try:
         saved_files = generator.save(task, str(isaac_lab_dir))
-        print(f"[ISAAC-LAB-JOB] Saved {len(saved_files)} files:")
+        logger.info("[ISAAC-LAB-JOB] Saved %s files:", len(saved_files))
         for filename in saved_files:
-            print(f"[ISAAC-LAB-JOB]   - {filename}")
+            logger.info("[ISAAC-LAB-JOB]   - %s", filename)
     except Exception as e:
-        print(f"[ISAAC-LAB-JOB] ERROR: Failed to save task files: {e}")
+        logger.error("[ISAAC-LAB-JOB] Failed to save task files: %s", e)
         return 1
 
     # ==========================================================================
@@ -590,7 +599,7 @@ def run_isaac_lab_job(
     runtime_result: Optional[RuntimeValidationResult] = None
 
     if run_runtime_validation:
-        print("[ISAAC-LAB-JOB] Running runtime validation...")
+        logger.info("[ISAAC-LAB-JOB] Running runtime validation...")
         runtime_validator = IsaacLabRuntimeValidator(verbose=True)
 
         runtime_result = runtime_validator.validate(
@@ -601,23 +610,30 @@ def run_isaac_lab_job(
         )
 
         if not runtime_result.is_valid:
-            print(f"[ISAAC-LAB-JOB] ERROR: Runtime validation failed!")
+            logger.error("[ISAAC-LAB-JOB] Runtime validation failed!")
             for error in runtime_result.errors:
-                print(f"[ISAAC-LAB-JOB]   ERROR: {error}")
+                logger.error("[ISAAC-LAB-JOB]   ERROR: %s", error)
             for warning in runtime_result.warnings:
-                print(f"[ISAAC-LAB-JOB]   WARNING: {warning}")
+                logger.warning("[ISAAC-LAB-JOB]   WARNING: %s", warning)
             # Don't fail the job - mark it as partial success
             # Generated code is syntactically valid but may not run
-            print("[ISAAC-LAB-JOB] WARNING: Code generated but runtime validation failed")
-            print("[ISAAC-LAB-JOB] The generated code may need manual adjustments")
+            logger.warning("[ISAAC-LAB-JOB] Code generated but runtime validation failed")
+            logger.warning("[ISAAC-LAB-JOB] The generated code may need manual adjustments")
         else:
-            print("[ISAAC-LAB-JOB] ✓ Runtime validation passed!")
+            logger.info("[ISAAC-LAB-JOB] ✓ Runtime validation passed!")
             if runtime_result.rollout_fps > 0:
-                print(f"[ISAAC-LAB-JOB]   Rollout FPS: {runtime_result.rollout_fps:.1f}")
+                logger.info(
+                    "[ISAAC-LAB-JOB]   Rollout FPS: %.1f", runtime_result.rollout_fps
+                )
             if runtime_result.observation_shapes:
-                print(f"[ISAAC-LAB-JOB]   Observation shapes: {runtime_result.observation_shapes}")
+                logger.info(
+                    "[ISAAC-LAB-JOB]   Observation shapes: %s",
+                    runtime_result.observation_shapes,
+                )
             if runtime_result.action_shape:
-                print(f"[ISAAC-LAB-JOB]   Action shape: {runtime_result.action_shape}")
+                logger.info(
+                    "[ISAAC-LAB-JOB]   Action shape: %s", runtime_result.action_shape
+                )
 
     # Write metadata
     metadata = {
@@ -634,7 +650,7 @@ def run_isaac_lab_job(
     }
     metadata_path = isaac_lab_dir / "generation_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2))
-    print(f"[ISAAC-LAB-JOB] Wrote metadata: {metadata_path}")
+    logger.info("[ISAAC-LAB-JOB] Wrote metadata: %s", metadata_path)
 
     # Write completion marker
     marker_path = isaac_lab_dir / ".isaac_lab_complete"
@@ -648,11 +664,11 @@ def run_isaac_lab_job(
     }
     marker_path.write_text(json.dumps(marker_content, indent=2))
 
-    print("[ISAAC-LAB-JOB] ✓ Isaac Lab task generation completed successfully")
-    print(f"[ISAAC-LAB-JOB]   Task: {task.task_name}")
-    print(f"[ISAAC-LAB-JOB]   Policy: {policy_id}")
-    print(f"[ISAAC-LAB-JOB]   Files: {len(saved_files)}")
-    print(f"[ISAAC-LAB-JOB]   Output: {isaac_lab_dir}")
+    logger.info("[ISAAC-LAB-JOB] ✓ Isaac Lab task generation completed successfully")
+    logger.info("[ISAAC-LAB-JOB]   Task: %s", task.task_name)
+    logger.info("[ISAAC-LAB-JOB]   Policy: %s", policy_id)
+    logger.info("[ISAAC-LAB-JOB]   Files: %s", len(saved_files))
+    logger.info("[ISAAC-LAB-JOB]   Output: %s", isaac_lab_dir)
 
     return 0
 
@@ -664,7 +680,7 @@ def main():
     scene_id = os.getenv("SCENE_ID", "")
 
     if not scene_id:
-        print("[ISAAC-LAB-JOB] ERROR: SCENE_ID is required")
+        logger.error("[ISAAC-LAB-JOB] SCENE_ID is required")
         sys.exit(1)
 
     # Prefixes with defaults
@@ -686,12 +702,12 @@ def main():
     skip_sanity_rollout = os.getenv("SKIP_SANITY_ROLLOUT", "false").lower() == "true"
     strict_config_loading = os.getenv("STRICT_CONFIG_LOADING", "false").lower() == "true"
 
-    print(f"[ISAAC-LAB-JOB] Configuration:")
-    print(f"[ISAAC-LAB-JOB]   Bucket: {bucket}")
-    print(f"[ISAAC-LAB-JOB]   Scene ID: {scene_id}")
-    print(f"[ISAAC-LAB-JOB]   Runtime validation: {run_runtime_validation}")
-    print(f"[ISAAC-LAB-JOB]   Skip sanity rollout: {skip_sanity_rollout}")
-    print(f"[ISAAC-LAB-JOB]   Strict config loading: {strict_config_loading}")
+    logger.info("[ISAAC-LAB-JOB] Configuration:")
+    logger.info("[ISAAC-LAB-JOB]   Bucket: %s", bucket)
+    logger.info("[ISAAC-LAB-JOB]   Scene ID: %s", scene_id)
+    logger.info("[ISAAC-LAB-JOB]   Runtime validation: %s", run_runtime_validation)
+    logger.info("[ISAAC-LAB-JOB]   Skip sanity rollout: %s", skip_sanity_rollout)
+    logger.info("[ISAAC-LAB-JOB]   Strict config loading: %s", strict_config_loading)
 
     exit_code = run_isaac_lab_job(
         root=GCS_ROOT,

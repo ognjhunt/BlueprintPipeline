@@ -23,6 +23,7 @@ Environment Variables:
     CUROBO_MAX_ITERATIONS: Maximum optimization iterations (default: 1000)
 """
 
+import logging
 import os
 import sys
 import time
@@ -32,6 +33,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +68,7 @@ except ImportError:
     MotionGenConfig = Any
     MotionGenPlanConfig = Any
     CudaRobotModel = Any
-    print("[CUROBO] WARNING: cuRobo not available - falling back to CPU planning")
+    logger.warning("[CUROBO] cuRobo not available - falling back to CPU planning")
 
 # Import local modules
 from motion_planner import Waypoint, MotionPlan, MotionPhase
@@ -207,8 +210,12 @@ class CuRoboMotionPlanner:
                     "cuRobo is required for production/labs staging runs. "
                     "Install cuRobo with CUDA + PyTorch support before continuing."
                 )
-            print("[CUROBO] WARNING: cuRobo not available - using simple fallback planner")
-            print("[CUROBO] For production quality, install cuRobo: pip install nvidia-curobo")
+            logger.warning(
+                "[CUROBO] cuRobo not available - using simple fallback planner"
+            )
+            logger.warning(
+                "[CUROBO] For production quality, install cuRobo: pip install nvidia-curobo"
+            )
             self.use_fallback = True
             self.motion_gen = None
         else:
@@ -241,9 +248,11 @@ class CuRoboMotionPlanner:
         # Initialize motion generator
         self.motion_gen = MotionGen(motion_gen_config)
 
-        print(f"[CUROBO] ✅ Initialized for {self.robot_type} on {self.device}")
-        print(f"[CUROBO]    DOF: {self.robot_config['dof']}")
-        print(f"[CUROBO]    Interpolation dt: {self.interpolation_dt}s")
+        logger.info(
+            "[CUROBO] ✅ Initialized for %s on %s", self.robot_type, self.device
+        )
+        logger.info("[CUROBO]    DOF: %s", self.robot_config["dof"])
+        logger.info("[CUROBO]    Interpolation dt: %ss", self.interpolation_dt)
 
     def update_world(self, obstacles: List[CollisionObject]):
         """
@@ -279,7 +288,11 @@ class CuRoboMotionPlanner:
         # Update world
         self.motion_gen.update_world(world_cfg)
 
-        print(f"[CUROBO] Updated world: {len(cuboids)} cuboids, {len(meshes)} meshes")
+        logger.info(
+            "[CUROBO] Updated world: %s cuboids, %s meshes",
+            len(cuboids),
+            len(meshes),
+        )
 
     def _fallback_plan_to_joint_config(
         self, request: CuRoboPlanRequest, start_time: float
@@ -679,7 +692,10 @@ class CuRoboMotionPlanner:
 
             except Exception as e:
                 # Fallback: process group sequentially on error
-                print(f"[CUROBO] Batch planning failed, falling back to sequential: {e}")
+                logger.warning(
+                    "[CUROBO] Batch planning failed, falling back to sequential: %s",
+                    e,
+                )
                 for idx, req in zip(indices, reqs):
                     try:
                         result = self.plan_to_pose(req)
@@ -815,20 +831,20 @@ def create_curobo_planner(
     try:
         return CuRoboMotionPlanner(robot_type, device)
     except Exception as e:
-        print(f"[CUROBO] Failed to create planner: {e}")
+        logger.error("[CUROBO] Failed to create planner: %s", e)
         return None
 
 
 if __name__ == "__main__":
     # Test cuRobo availability
     if is_curobo_available():
-        print("✅ cuRobo is available")
+        logger.info("✅ cuRobo is available")
 
         # Create planner
         planner = create_curobo_planner("franka")
 
         if planner:
-            print(f"✅ Created cuRobo planner for Franka")
+            logger.info("✅ Created cuRobo planner for Franka")
 
             # Test planning
             request = CuRoboPlanRequest(
@@ -840,12 +856,20 @@ if __name__ == "__main__":
             result = planner.plan_to_pose(request)
 
             if result.success:
-                print(f"✅ Planning succeeded in {result.planning_time_ms:.1f}ms")
-                print(f"   Trajectory: {len(result.joint_trajectory)} waypoints")
-                print(f"   Duration: {result.trajectory_duration_s:.2f}s")
-                print(f"   Smoothness: {result.smoothness_score:.2f}")
+                logger.info(
+                    "✅ Planning succeeded in %.1fms", result.planning_time_ms
+                )
+                logger.info(
+                    "   Trajectory: %s waypoints", len(result.joint_trajectory)
+                )
+                logger.info(
+                    "   Duration: %.2fs", result.trajectory_duration_s
+                )
+                logger.info(
+                    "   Smoothness: %.2f", result.smoothness_score
+                )
             else:
-                print(f"❌ Planning failed: {result.error_message}")
+                logger.error("❌ Planning failed: %s", result.error_message)
     else:
-        print("❌ cuRobo not available")
-        print("Install with: pip install nvidia-curobo")
+        logger.error("❌ cuRobo not available")
+        logger.error("Install with: pip install nvidia-curobo")

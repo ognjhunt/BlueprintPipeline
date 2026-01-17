@@ -33,6 +33,7 @@ ENHANCED FEATURES (v2.0):
 - Better skill segment detection from motion phases
 """
 
+import logging
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -41,6 +42,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 from scipy.spatial.transform import Rotation
 
 # Add parent to path
@@ -310,7 +313,7 @@ class ConstraintSolver:
 
     def log(self, msg: str) -> None:
         if self.verbose:
-            print(f"[CONSTRAINT-SOLVER] {msg}")
+            logger.info("[CONSTRAINT-SOLVER] %s", msg)
 
     def solve_waypoint(
         self,
@@ -791,7 +794,7 @@ class FreeSpaceMotionPlanner:
 
     def log(self, msg: str) -> None:
         if self.verbose:
-            print(f"[MOTION-PLANNER] {msg}")
+            logger.info("[MOTION-PLANNER] %s", msg)
 
     def plan_path(
         self,
@@ -1112,7 +1115,14 @@ class ConstraintPreservingAugmenter:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[CPGEN-AUGMENTER] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[CPGEN-AUGMENTER] [%s] %s", level, msg)
 
     def create_seed_episode(
         self,
@@ -1552,8 +1562,8 @@ if __name__ == "__main__":
     from task_specifier import TaskSpecifier
     from motion_planner import AIMotionPlanner
 
-    print("Testing CP-Gen Style Augmentation")
-    print("=" * 60)
+    logger.info("Testing CP-Gen Style Augmentation")
+    logger.info("%s", "=" * 60)
 
     # Create task specification
     specifier = TaskSpecifier(verbose=True)
@@ -1594,9 +1604,9 @@ if __name__ == "__main__":
     )
 
     # Generate augmented episodes
-    print("\n" + "=" * 60)
-    print("GENERATING AUGMENTED EPISODES")
-    print("=" * 60)
+    logger.info("%s", "=" * 60)
+    logger.info("GENERATING AUGMENTED EPISODES")
+    logger.info("%s", "=" * 60)
 
     augmented = augment_episode(
         task_spec=spec,
@@ -1605,9 +1615,12 @@ if __name__ == "__main__":
         num_variations=5,
     )
 
-    print(f"\nGenerated {len(augmented)} augmented episodes")
+    logger.info("Generated %s augmented episodes", len(augmented))
     for ep in augmented:
-        print(f"  - {ep.episode_id}: "
-              f"waypoints={ep.motion_plan.num_waypoints}, "
-              f"constraint_sat={ep.constraint_satisfaction:.2f}, "
-              f"collision_free={ep.collision_free}")
+        logger.info(
+            "  - %s: waypoints=%s, constraint_sat=%.2f, collision_free=%s",
+            ep.episode_id,
+            ep.motion_plan.num_waypoints,
+            ep.constraint_satisfaction,
+            ep.collision_free,
+        )
