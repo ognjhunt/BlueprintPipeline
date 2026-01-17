@@ -2,9 +2,11 @@ import json
 import os
 import hmac
 import hashlib
+import ipaddress
 import subprocess
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request
 from google.cloud.workflows import executions_v1
@@ -12,6 +14,55 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
 app = Flask(__name__)
+
+_BLOCKED_HEALTHCHECK_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("169.254.169.254/32"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+
+def _parse_allowed_health_hosts() -> set[str]:
+    raw_hosts = os.getenv("HEALTHCHECK_ALLOWED_HOSTS", "")
+    if not raw_hosts:
+        return set()
+    return {item.strip().lower() for item in raw_hosts.split(",") if item.strip()}
+
+
+def _validate_health_url(url: str) -> tuple[bool, str]:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False, "invalid_url"
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme != "https":
+        return False, "invalid_scheme"
+
+    hostname = parsed.hostname
+    if not hostname:
+        return False, "missing_hostname"
+
+    hostname = hostname.lower()
+    if hostname == "localhost":
+        return False, "localhost_not_allowed"
+
+    allowed_hosts = _parse_allowed_health_hosts()
+    if allowed_hosts and hostname not in allowed_hosts:
+        return False, "host_not_allowed"
+
+    try:
+        host_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return True, ""
+
+    for blocked_network in _BLOCKED_HEALTHCHECK_NETWORKS:
+        if host_ip in blocked_network:
+            return False, "blocked_ip_range"
+
+    return True, ""
 
 
 def _http_probe(url: str, timeout_s: float) -> dict:
@@ -78,6 +129,12 @@ def _llm_probe(timeout_s: float) -> dict:
     result = {"ok": False}
     health_url = os.getenv("LLM_HEALTH_URL")
     if health_url:
+        is_valid, error = _validate_health_url(health_url)
+        if not is_valid:
+            result["url"] = health_url
+            result["error"] = "invalid_health_url"
+            result["details"] = {"reason": error}
+            return result
         probe = _http_probe(health_url, timeout_s)
         result.update(probe)
         return result
@@ -104,6 +161,12 @@ def _isaac_sim_probe(timeout_s: float) -> dict:
     result = {"ok": False}
     health_url = os.getenv("ISAAC_SIM_HEALTH_URL")
     if health_url:
+        is_valid, error = _validate_health_url(health_url)
+        if not is_valid:
+            result["url"] = health_url
+            result["error"] = "invalid_health_url"
+            result["details"] = {"reason": error}
+            return result
         probe = _http_probe(health_url, timeout_s)
         result.update(probe)
         return result
