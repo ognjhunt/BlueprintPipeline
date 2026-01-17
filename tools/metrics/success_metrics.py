@@ -10,6 +10,7 @@ Tracks:
 from __future__ import annotations
 
 import json
+import logging
 import statistics
 import uuid
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class DeliveryStatus(str, Enum):
@@ -569,7 +572,11 @@ class SuccessMetricsTracker:
                     delivery = self._delivery_from_dict(data)
                     self.deliveries[delivery.delivery_id] = delivery
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Failed to load delivery data from %s.",
+                        path,
+                        exc_info=True,
+                    )
 
         customers_dir = self.data_dir / "customers"
         if customers_dir.exists():
@@ -579,7 +586,11 @@ class SuccessMetricsTracker:
                     customer = self._customer_from_dict(data)
                     self.customers[customer.customer_id] = customer
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Failed to load customer data from %s.",
+                        path,
+                        exc_info=True,
+                    )
 
     def _save_delivery(self, delivery: SceneDelivery) -> None:
         """Save delivery to disk."""

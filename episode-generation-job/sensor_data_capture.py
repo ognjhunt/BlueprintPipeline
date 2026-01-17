@@ -1175,8 +1175,11 @@ class IsaacSimSensorCapture:
                                             linear_velocity = [float(v) for v in vel]
                                         if ang_vel is not None:
                                             angular_velocity = [float(v) for v in ang_vel]
-                                    except Exception:
-                                        pass  # Velocities not critical
+                                    except Exception as exc:
+                                        self.log(
+                                            f"Failed to read velocities for {obj_id} ({prim_path}): {exc}",
+                                            "DEBUG",
+                                        )
 
                                 poses[obj_id] = {
                                     "position": position,

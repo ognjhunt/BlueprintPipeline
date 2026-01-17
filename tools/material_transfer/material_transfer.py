@@ -14,6 +14,7 @@ This module bridges the gap between 3D-RE-GEN outputs and simulation-ready USD.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,6 +22,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class MaterialType(str, Enum):
@@ -403,7 +406,12 @@ def _extract_materials_trimesh(glb_path: Path, output_dir: Path) -> List[PBRMate
                                     is_embedded=True,
                                 )
                             except Exception:
-                                pass
+                                logger.warning(
+                                    "Failed to save texture for material %s to %s.",
+                                    name,
+                                    tex_path,
+                                    exc_info=True,
+                                )
 
                 # Infer material type
                 pbr_mat.material_type = infer_material_type(mat_name, pbr_mat.base_color)

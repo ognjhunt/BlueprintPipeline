@@ -6,10 +6,13 @@ Wires interactive-job outputs (URDF/USD articulated assets) into the final scene
 from __future__ import annotations
 
 import json
+import logging
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 import os
 import sys
 
@@ -562,7 +565,11 @@ def _load_articulated_asset_from_dir(
         try:
             manifest_data = json.loads(manifest_path.read_text())
         except Exception:
-            pass
+            logger.warning(
+                "Failed to parse interactive manifest %s.",
+                manifest_path,
+                exc_info=True,
+            )
 
     # Parse URDF for joint info
     joints: List[JointInfo] = []

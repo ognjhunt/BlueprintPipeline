@@ -462,7 +462,7 @@ class IsaacLabRuntimeValidator:
                     try:
                         env.close()
                     except Exception:
-                        pass
+                        result.add_warning("Failed to close Isaac Lab environment cleanly.")
 
         except Exception as e:
             result.add_error(f"Sanity rollout setup failed: {e}")
