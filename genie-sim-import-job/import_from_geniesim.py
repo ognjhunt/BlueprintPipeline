@@ -60,9 +60,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from monitoring.alerting import send_alert
 
-# Import Genie Sim client
-sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
-from geniesim_client import GeneratedEpisodeMetadata
+from tools.geniesim_adapter.local_framework import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.validation.entrypoint_checks import validate_required_env_vars
