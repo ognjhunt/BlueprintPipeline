@@ -64,7 +64,7 @@ gcloud run deploy particulate-service \
   --max-instances 4 \
   --port 8080 \
   --no-cpu-throttling \
-  --set-env-vars "PARTICULATE_DEBUG=1" \
+  --set-env-vars "PARTICULATE_DEBUG=1,PARTICULATE_DEBUG_TOKEN=<shared-secret>" \
   --allow-unauthenticated
 ```
 
@@ -81,8 +81,9 @@ gcloud run deploy particulate-service \
 # Health check
 curl https://particulate-service-744608654760.us-central1.run.app/
 
-# Debug info
-curl https://particulate-service-744608654760.us-central1.run.app/debug
+# Debug info (requires explicit debug token)
+curl -H "Authorization: Bearer <shared-secret>" \
+  https://particulate-service-744608654760.us-central1.run.app/debug
 
 # Test with a mesh
 python test_particulate_service.py
@@ -127,7 +128,10 @@ python test_particulate_service.py
 
 ### GET /debug - Debug Info
 
-Returns detailed service state including model validation.
+Returns detailed service state including model validation when debug access is enabled.
+Set `PARTICULATE_DEBUG=1` and `PARTICULATE_DEBUG_TOKEN=<shared-secret>` and send the
+token in an `Authorization: Bearer <shared-secret>` header to receive a `200` response.
+Missing or invalid credentials return `403`.
 
 ## Integration with Interactive Job
 
