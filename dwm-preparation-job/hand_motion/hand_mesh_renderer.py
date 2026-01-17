@@ -576,7 +576,12 @@ def create_hand_mesh(
     """
     if hand_model == HandModel.MANO:
         try:
-            return MANOHandMesh(model_path=model_path, is_right_hand=is_right_hand)
+            mesh = MANOHandMesh(model_path=model_path, is_right_hand=is_right_hand)
+            logger.info(
+                "Hand model resolved to MANO (%s hand).",
+                "right" if is_right_hand else "left",
+            )
+            return mesh
         except MANOUnavailableError as exc:
             message = f"MANO requested but unavailable: {exc}"
             if require_mano:
@@ -585,14 +590,20 @@ def create_hand_mesh(
                 "%s. Falling back to SimpleHandMesh (set require_mano=True to enforce).",
                 message,
             )
+            logger.info("Hand model resolved to SIMPLE (fallback from MANO request).")
             return SimpleHandMesh()
 
     elif hand_model == HandModel.SIMPLE:
+        logger.info("Hand model resolved to SIMPLE.")
         return SimpleHandMesh()
 
     else:
         # For robot hands (FRANKA_GRIPPER, SHADOW_HAND), use simple mesh as placeholder
-        logger.info(f"Hand model {hand_model} not yet implemented, using SimpleHandMesh")
+        logger.info(
+            "Hand model %s not yet implemented, using SimpleHandMesh.",
+            hand_model,
+        )
+        logger.info("Hand model resolved to SIMPLE (placeholder).")
         return SimpleHandMesh()
 
 
@@ -620,6 +631,7 @@ class HandMeshRenderer:
         unless config.require_mano is True.
         """
         self.config = config or HandRenderConfig()
+        self.requested_hand_model = self.config.hand_model
 
         # Create hand mesh using factory (handles MANO fallback)
         self.hand_mesh = create_hand_mesh(
@@ -629,11 +641,17 @@ class HandMeshRenderer:
             require_mano=self.config.require_mano,
         )
 
-        # Log which model is being used
+        self.selected_hand_model = self._resolve_selected_model()
+        logger.info(
+            "HandMeshRenderer using %s hand model (requested: %s).",
+            self.selected_hand_model.value,
+            self.requested_hand_model.value,
+        )
+
+    def _resolve_selected_model(self) -> HandModel:
         if isinstance(self.hand_mesh, MANOHandMesh) and self.hand_mesh.is_loaded:
-            logger.info("HandMeshRenderer using MANO hand model")
-        else:
-            logger.info("HandMeshRenderer using SimpleHandMesh (geometric placeholder)")
+            return HandModel.MANO
+        return HandModel.SIMPLE
 
     def render_frame(
         self,
