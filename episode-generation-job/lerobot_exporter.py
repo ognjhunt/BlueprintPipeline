@@ -116,6 +116,13 @@ except ImportError:
     EpisodeSensorData = None
     DataPackConfig = None
 
+try:
+    from sim_validator import ValidationConfig
+    HAVE_VALIDATION_CONFIG = True
+except ImportError:
+    HAVE_VALIDATION_CONFIG = False
+    ValidationConfig = None
+
 
 # =============================================================================
 # Data Models
@@ -456,6 +463,159 @@ class LeRobotExporter:
             "physx_available": physx_available,
             "warnings": warnings,
             "production_mode": is_production,
+        }
+
+    def _parse_bool_env(self, key: str) -> Optional[bool]:
+        value = os.getenv(key)
+        if value is None:
+            return None
+        return value.lower() in {"1", "true", "yes", "y"}
+
+    def _resolve_quality_gate_report_path(self) -> Optional[Path]:
+        env_path = os.getenv("QUALITY_GATE_REPORT_PATH")
+        if env_path:
+            return Path(env_path)
+        scene_id = os.getenv("SCENE_ID")
+        if not scene_id:
+            return None
+        root = Path(os.getenv("PIPELINE_STORAGE_ROOT", "/mnt/gcs"))
+        return root / f"scenes/{scene_id}/episode-generation-job/quality_gate_report.json"
+
+    def _get_sim_backend_lineage(self, data_source_info: Dict[str, Any]) -> Dict[str, Any]:
+        backend_name = "unknown"
+        if self.episodes:
+            sample_episode = self.episodes[0]
+            if sample_episode.validation_result and hasattr(sample_episode.validation_result, "physics_backend"):
+                backend_name = sample_episode.validation_result.physics_backend
+        if backend_name == "unknown" and data_source_info.get("isaac_sim_used"):
+            backend_name = "isaac_sim"
+
+        backend_version = os.getenv("ISAAC_SIM_VERSION") or os.getenv("ISAAC_LAB_VERSION")
+        backend_container = os.getenv("ISAAC_SIM_DOCKER_IMAGE") or os.getenv("ISAAC_SIM_CONTAINER")
+
+        return {
+            "name": backend_name,
+            "version": backend_version,
+            "container_image": backend_container,
+            "source": {
+                "name": "episode.validation_result.physics_backend",
+                "version": "env:ISAAC_SIM_VERSION|ISAAC_LAB_VERSION",
+                "container_image": "env:ISAAC_SIM_DOCKER_IMAGE|ISAAC_SIM_CONTAINER",
+            },
+        }
+
+    def _get_physics_parameters_lineage(self) -> Dict[str, Any]:
+        validation_thresholds = None
+        if HAVE_VALIDATION_CONFIG and ValidationConfig is not None:
+            try:
+                config = ValidationConfig.from_policy_config()
+                validation_thresholds = {
+                    "max_unexpected_collisions": config.max_unexpected_collisions,
+                    "max_joint_violations": config.max_joint_violations,
+                    "max_collision_force": config.max_collision_force,
+                    "max_joint_velocity": config.max_joint_velocity,
+                    "max_joint_acceleration": config.max_joint_acceleration,
+                    "require_task_success": config.require_task_success,
+                    "require_grasp_success": config.require_grasp_success,
+                    "require_placement_success": config.require_placement_success,
+                    "require_object_stable": config.require_object_stable,
+                    "stability_threshold": config.stability_threshold,
+                    "min_quality_score": config.min_quality_score,
+                    "max_retries": config.max_retries,
+                    "retry_on_collision": config.retry_on_collision,
+                    "retry_on_joint_limit": config.retry_on_joint_limit,
+                }
+            except Exception:
+                validation_thresholds = None
+
+        post_rollout_seconds = float(os.getenv("SIM_VALIDATOR_POST_ROLLOUT_SECONDS", "0.5"))
+        load_scene = os.getenv("SIM_VALIDATOR_LOAD_SCENE", "true").lower() == "true"
+        require_real_physics = self._parse_bool_env("REQUIRE_REAL_PHYSICS")
+
+        return {
+            "validation_thresholds": validation_thresholds,
+            "sim_validator": {
+                "post_rollout_seconds": post_rollout_seconds,
+                "load_scene": load_scene,
+                "require_real_physics": require_real_physics,
+            },
+            "source": {
+                "validation_thresholds": "sim_validator.ValidationConfig.from_policy_config",
+                "sim_validator.post_rollout_seconds": "env:SIM_VALIDATOR_POST_ROLLOUT_SECONDS (default 0.5)",
+                "sim_validator.load_scene": "env:SIM_VALIDATOR_LOAD_SCENE (default true)",
+                "sim_validator.require_real_physics": "env:REQUIRE_REAL_PHYSICS",
+            },
+        }
+
+    def _get_quality_gate_lineage(self) -> Dict[str, Any]:
+        report_path = self._resolve_quality_gate_report_path()
+        summary = None
+        report_timestamp = None
+        report_path_str = None
+        if report_path is not None:
+            report_path_str = report_path.as_posix()
+            if report_path.is_file():
+                try:
+                    report = json.loads(report_path.read_text())
+                    summary = report.get("summary")
+                    report_timestamp = report.get("timestamp")
+                except Exception:
+                    summary = None
+
+        config_version = None
+        config_path = REPO_ROOT / "tools" / "quality_gates" / "quality_config.json"
+        if config_path.is_file():
+            try:
+                config_payload = json.loads(config_path.read_text())
+                config_version = config_payload.get("version")
+            except Exception:
+                config_version = None
+
+        return {
+            "summary": summary,
+            "report_timestamp": report_timestamp,
+            "report_path": report_path_str,
+            "config_version": config_version,
+            "bypass_enabled": self._parse_bool_env("BYPASS_QUALITY_GATES"),
+            "source": {
+                "summary": "quality_gate_report.json",
+                "report_timestamp": "quality_gate_report.json",
+                "report_path": "env:QUALITY_GATE_REPORT_PATH|SCENE_ID",
+                "config_version": "tools/quality_gates/quality_config.json",
+                "bypass_enabled": "env:BYPASS_QUALITY_GATES",
+            },
+        }
+
+    def _get_pipeline_lineage(self) -> Dict[str, Any]:
+        return {
+            "scene_id": os.getenv("SCENE_ID"),
+            "bucket": os.getenv("BUCKET"),
+            "assets_prefix": os.getenv("ASSETS_PREFIX"),
+            "episodes_prefix": os.getenv("EPISODES_PREFIX"),
+            "job_name": os.getenv("JOB_NAME", "episode-generation-job"),
+            "job_id": os.getenv("JOB_ID"),
+            "run_id": os.getenv("RUN_ID"),
+            "pipeline_env": os.getenv("PIPELINE_ENV"),
+            "pipeline_version": os.getenv("PIPELINE_VERSION"),
+            "source": {
+                "scene_id": "env:SCENE_ID",
+                "bucket": "env:BUCKET",
+                "assets_prefix": "env:ASSETS_PREFIX",
+                "episodes_prefix": "env:EPISODES_PREFIX",
+                "job_name": "env:JOB_NAME (default episode-generation-job)",
+                "job_id": "env:JOB_ID",
+                "run_id": "env:RUN_ID",
+                "pipeline_env": "env:PIPELINE_ENV",
+                "pipeline_version": "env:PIPELINE_VERSION",
+            },
+        }
+
+    def _get_lineage_info(self, data_source_info: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "sim_backend": self._get_sim_backend_lineage(data_source_info),
+            "physics_parameters": self._get_physics_parameters_lineage(),
+            "quality_gates": self._get_quality_gate_lineage(),
+            "pipeline": self._get_pipeline_lineage(),
         }
 
     def add_episode(
@@ -1859,6 +2019,7 @@ class LeRobotExporter:
         # Check data source for validation
         # This determines if the data was generated with real physics or mock
         data_source_info = self._get_data_source_info()
+        lineage = self._get_lineage_info(data_source_info)
 
         info = {
             "codebase_version": "v2.0",
@@ -1908,6 +2069,7 @@ class LeRobotExporter:
                     else None
                 ),
             },
+            "lineage": lineage,
             "splits": {
                 "train": f"0:{len(self.episodes)}",
             },
