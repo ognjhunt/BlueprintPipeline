@@ -62,6 +62,7 @@ Environment Variables:
 
 import gc
 import json
+import logging
 import os
 import sys
 import time
@@ -73,6 +74,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Add paths
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -218,7 +221,7 @@ try:
     HAVE_QUALITY_SYSTEM = True
 except ImportError:
     HAVE_QUALITY_SYSTEM = False
-    print("[EPISODE-GEN-JOB] WARNING: Quality certificate system not available")
+    logger.warning("[EPISODE-GEN-JOB] Quality certificate system not available")
 
 # Pipeline imports
 try:
@@ -337,7 +340,7 @@ def _load_scene_config(scene_dir: Path) -> Dict[str, Any]:
         with open(config_path) as file:
             return json.load(file)
     except Exception as exc:
-        print(f"[EPISODE-GEN-JOB] WARNING: Failed to read scene config: {exc}")
+        logger.warning("[EPISODE-GEN-JOB] Failed to read scene config: %s", exc)
         return {}
 
 
@@ -364,7 +367,7 @@ def _load_camera_specs(scene_config: Dict[str, Any]) -> Optional[List[Dict[str, 
     if not raw_specs:
         return None
     if not isinstance(raw_specs, list):
-        print("[EPISODE-GEN-JOB] WARNING: scene config cameras entry is not a list.")
+        logger.warning("[EPISODE-GEN-JOB] scene config cameras entry is not a list.")
         return None
 
     normalized: List[Dict[str, str]] = []
@@ -385,7 +388,7 @@ def _load_camera_specs(scene_config: Dict[str, Any]) -> Optional[List[Dict[str, 
         )
 
     if not normalized:
-        print("[EPISODE-GEN-JOB] WARNING: scene config cameras list is empty.")
+        logger.warning("[EPISODE-GEN-JOB] scene config cameras list is empty.")
         return None
 
     return normalized
@@ -499,7 +502,14 @@ class ManipulationTaskGenerator:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[TASK-GENERATOR] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[TASK-GENERATOR] [%s] %s", level, msg)
 
     def generate_tasks_with_specs(
         self,
@@ -1147,7 +1157,14 @@ class EpisodeGenerator:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[EPISODE-GENERATOR] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[EPISODE-GENERATOR] [%s] %s", level, msg)
 
     def _process_with_partial_failures(
         self,
@@ -2649,19 +2666,21 @@ def run_episode_generation_job(
     Returns:
         0 on success, 1 on failure
     """
-    print(f"[EPISODE-GEN-JOB] Starting SOTA episode generation for scene: {scene_id}")
-    print(f"[EPISODE-GEN-JOB] Bundle tier: {bundle_tier}")
-    print(f"[EPISODE-GEN-JOB] Assets prefix: {assets_prefix}")
-    print(f"[EPISODE-GEN-JOB] Episodes prefix: {episodes_prefix}")
-    print(f"[EPISODE-GEN-JOB] Robot type: {robot_type}")
-    print(f"[EPISODE-GEN-JOB] Episodes per variation: {episodes_per_variation}")
-    print(f"[EPISODE-GEN-JOB] CP-Gen augmentation: {use_cpgen}")
-    print(f"[EPISODE-GEN-JOB] Min quality score: {min_quality_score}")
-    print(f"[EPISODE-GEN-JOB] Min success rate: {min_success_rate:.1%}")
-    print(f"[EPISODE-GEN-JOB] Data pack: {data_pack_tier}")
-    print(f"[EPISODE-GEN-JOB] Cameras: {num_cameras}")
-    print(f"[EPISODE-GEN-JOB] Resolution: {image_resolution}")
-    print(f"[EPISODE-GEN-JOB] Sensor capture: {capture_sensor_data}")
+    logger.info(
+        "[EPISODE-GEN-JOB] Starting SOTA episode generation for scene: %s", scene_id
+    )
+    logger.info("[EPISODE-GEN-JOB] Bundle tier: %s", bundle_tier)
+    logger.info("[EPISODE-GEN-JOB] Assets prefix: %s", assets_prefix)
+    logger.info("[EPISODE-GEN-JOB] Episodes prefix: %s", episodes_prefix)
+    logger.info("[EPISODE-GEN-JOB] Robot type: %s", robot_type)
+    logger.info("[EPISODE-GEN-JOB] Episodes per variation: %s", episodes_per_variation)
+    logger.info("[EPISODE-GEN-JOB] CP-Gen augmentation: %s", use_cpgen)
+    logger.info("[EPISODE-GEN-JOB] Min quality score: %s", min_quality_score)
+    logger.info("[EPISODE-GEN-JOB] Min success rate: %.1f%%", min_success_rate * 100)
+    logger.info("[EPISODE-GEN-JOB] Data pack: %s", data_pack_tier)
+    logger.info("[EPISODE-GEN-JOB] Cameras: %s", num_cameras)
+    logger.info("[EPISODE-GEN-JOB] Resolution: %s", image_resolution)
+    logger.info("[EPISODE-GEN-JOB] Sensor capture: %s", capture_sensor_data)
 
     assets_dir = root / assets_prefix
     output_dir = root / episodes_prefix
@@ -2669,15 +2688,18 @@ def run_episode_generation_job(
     # Load manifest
     manifest_path = assets_dir / "scene_manifest.json"
     if not manifest_path.is_file():
-        print(f"[EPISODE-GEN-JOB] ERROR: Manifest not found: {manifest_path}")
+        logger.error("[EPISODE-GEN-JOB] Manifest not found: %s", manifest_path)
         return 1
 
     try:
         with open(manifest_path) as f:
             manifest = json.load(f)
-        print(f"[EPISODE-GEN-JOB] Loaded manifest: {len(manifest.get('objects', []))} objects")
+        logger.info(
+            "[EPISODE-GEN-JOB] Loaded manifest: %s objects",
+            len(manifest.get("objects", [])),
+        )
     except Exception as e:
-        print(f"[EPISODE-GEN-JOB] ERROR: Failed to load manifest: {e}")
+        logger.error("[EPISODE-GEN-JOB] Failed to load manifest: %s", e)
         return 1
 
     scene_dir = root / f"scenes/{scene_id}"
@@ -2685,7 +2707,10 @@ def run_episode_generation_job(
     env_scene_usd_path = os.getenv("SCENE_USD_PATH") or os.getenv("USD_SCENE_PATH")
     scene_usd_path = env_scene_usd_path or _resolve_scene_usd_path(scene_dir)
     if env_scene_usd_path:
-        print(f"[EPISODE-GEN-JOB] Using USD scene path from environment: {env_scene_usd_path}")
+        logger.info(
+            "[EPISODE-GEN-JOB] Using USD scene path from environment: %s",
+            env_scene_usd_path,
+        )
     production_requested = (
         os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
         or os.getenv("PRODUCTION_MODE", "").lower() == "true"
@@ -2693,7 +2718,7 @@ def run_episode_generation_job(
         or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
     )
     if production_requested and not scene_usd_path:
-        print(
+        logger.error(
             "[EPISODE-GEN-JOB] ERROR: Production runs require a USD scene path for PhysX validation. "
             "Set SCENE_USD_PATH or ensure scenes/<scene_id>/usd contains a USD file."
         )
@@ -2739,18 +2764,26 @@ def run_episode_generation_job(
         output = generator.generate(manifest)
 
         if output.success:
-            print("[EPISODE-GEN-JOB] Episode generation completed successfully")
-            print(f"[EPISODE-GEN-JOB]   Total episodes: {output.total_episodes}")
-            print(f"[EPISODE-GEN-JOB]   Valid episodes: {output.valid_episodes}")
-            print(f"[EPISODE-GEN-JOB]   Pass rate: {output.pass_rate:.1%}")
-            print(f"[EPISODE-GEN-JOB]   Avg quality: {output.average_quality_score:.2f}")
-            print(f"[EPISODE-GEN-JOB]   Total frames: {output.total_frames}")
-            print(f"[EPISODE-GEN-JOB]   Duration: {output.total_duration_seconds:.1f}s")
-            print(f"[EPISODE-GEN-JOB]   Output: {output.output_dir}")
+            logger.info("[EPISODE-GEN-JOB] Episode generation completed successfully")
+            logger.info("[EPISODE-GEN-JOB]   Total episodes: %s", output.total_episodes)
+            logger.info("[EPISODE-GEN-JOB]   Valid episodes: %s", output.valid_episodes)
+            logger.info("[EPISODE-GEN-JOB]   Pass rate: %.1f%%", output.pass_rate * 100)
+            logger.info(
+                "[EPISODE-GEN-JOB]   Avg quality: %.2f", output.average_quality_score
+            )
+            logger.info("[EPISODE-GEN-JOB]   Total frames: %s", output.total_frames)
+            logger.info(
+                "[EPISODE-GEN-JOB]   Duration: %.1fs",
+                output.total_duration_seconds,
+            )
+            logger.info("[EPISODE-GEN-JOB]   Output: %s", output.output_dir)
 
             # Run upsell post-processing if bundle tier is not standard
             if bundle_tier != "standard":
-                print(f"\n[EPISODE-GEN-JOB] Running upsell post-processing ({bundle_tier} tier)...")
+                logger.info(
+                    "[EPISODE-GEN-JOB] Running upsell post-processing (%s tier)...",
+                    bundle_tier,
+                )
                 try:
                     # Import upsell post-processor
                     upsell_module_path = REPO_ROOT / "upsell-features-job"
@@ -2769,23 +2802,36 @@ def run_episode_generation_job(
                     )
 
                     if upsell_result.get("success"):
-                        print("[EPISODE-GEN-JOB] Upsell post-processing completed successfully")
+                        logger.info(
+                            "[EPISODE-GEN-JOB] Upsell post-processing completed successfully"
+                        )
                         features = upsell_result.get("features_applied", [])
                         if features:
-                            print(f"[EPISODE-GEN-JOB]   Features applied: {', '.join(features)}")
+                            logger.info(
+                                "[EPISODE-GEN-JOB]   Features applied: %s",
+                                ", ".join(features),
+                            )
                     else:
-                        print("[EPISODE-GEN-JOB] WARNING: Upsell post-processing had errors")
+                        logger.warning(
+                            "[EPISODE-GEN-JOB] Upsell post-processing had errors"
+                        )
                         for err in upsell_result.get("errors", []):
-                            print(f"[EPISODE-GEN-JOB]     - {err}")
+                            logger.warning("[EPISODE-GEN-JOB]     - %s", err)
 
                 except ImportError as e:
-                    print(f"[EPISODE-GEN-JOB] WARNING: Upsell module not available: {e}")
+                    logger.warning(
+                        "[EPISODE-GEN-JOB] Upsell module not available: %s", e
+                    )
                 except Exception as e:
-                    print(f"[EPISODE-GEN-JOB] WARNING: Upsell post-processing failed: {e}")
+                    logger.warning(
+                        "[EPISODE-GEN-JOB] Upsell post-processing failed: %s", e
+                    )
                     # Don't fail the job for upsell errors
 
             if _should_bypass_quality_gates():
-                print("[EPISODE-GEN-JOB] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates")
+                logger.warning(
+                    "[EPISODE-GEN-JOB] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates"
+                )
                 return 0
 
             collision_free_rate = _compute_collision_free_rate(
@@ -2808,7 +2854,9 @@ def run_episode_generation_job(
             quality_gates.save_report(scene_id, report_path)
 
             if not quality_gates.can_proceed():
-                print("[EPISODE-GEN-JOB] ❌ Quality gates blocked downstream pipeline")
+                logger.error(
+                    "[EPISODE-GEN-JOB] ❌ Quality gates blocked downstream pipeline"
+                )
                 FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
                     exception=RuntimeError("Quality gates blocked: episode validation failed"),
                     failed_step="quality_gates",
@@ -2826,22 +2874,24 @@ def run_episode_generation_job(
 
             return 0
         else:
-            print(f"[EPISODE-GEN-JOB] ERROR: Generation failed with {len(output.errors)} errors")
+            logger.error(
+                "[EPISODE-GEN-JOB] Generation failed with %s errors",
+                len(output.errors),
+            )
             for err in output.errors:
-                print(f"[EPISODE-GEN-JOB]   - {err}")
+                logger.error("[EPISODE-GEN-JOB]   - %s", err)
             return 1
 
     except Exception as e:
-        print(f"[EPISODE-GEN-JOB] ERROR: {e}")
-        traceback.print_exc()
+        logger.exception("[EPISODE-GEN-JOB] ERROR: %s", e)
         return 1
 
 
 def _run_main():
     """Main entry point."""
-    print("\n[EPISODE-GEN-JOB] ================================")
-    print("[EPISODE-GEN-JOB] Episode Generation Job (SOTA)")
-    print("[EPISODE-GEN-JOB] ================================\n")
+    logger.info("[EPISODE-GEN-JOB] ================================")
+    logger.info("[EPISODE-GEN-JOB] Episode Generation Job (SOTA)")
+    logger.info("[EPISODE-GEN-JOB] ================================")
 
     def _production_env_flags() -> bool:
         return (
@@ -2939,7 +2989,7 @@ def _run_main():
                 "See docs/ISAAC_SIM_SETUP.md for setup steps.",
             ],
         }
-        print(json.dumps(payload))
+        logger.error(json.dumps(payload))
         sys.exit(1)
 
     if _is_production_preflight():
@@ -2972,33 +3022,41 @@ def _run_main():
 
             # Enforce Isaac Sim for production
             required_quality = get_data_quality_level()
-            print(f"[EPISODE-GEN-JOB] Required quality level: {required_quality.value}\n")
+            logger.info(
+                "[EPISODE-GEN-JOB] Required quality level: %s", required_quality.value
+            )
 
             capabilities = enforce_isaac_sim_for_production(required_quality)
 
-            print("[EPISODE-GEN-JOB] ✅ Environment check passed\n")
+            logger.info("[EPISODE-GEN-JOB] ✅ Environment check passed")
 
             allow_mock_capture_env = os.getenv("ALLOW_MOCK_CAPTURE", os.getenv("ALLOW_MOCK_DATA", "false")).lower() == "true"
             if required_quality.value == "production" or _production_env_flags():
                 allow_mock_capture = False
                 if allow_mock_capture_env:
-                    print("[EPISODE-GEN-JOB] ⚠️  ALLOW_MOCK_CAPTURE ignored in production quality mode")
+                    logger.warning(
+                        "[EPISODE-GEN-JOB] ⚠️  ALLOW_MOCK_CAPTURE ignored in production quality mode"
+                    )
             else:
                 allow_mock_capture = allow_mock_capture_env
 
             # Confirm Isaac Sim is available after enforcement
             if not isaac_sim_available:
-                print("[EPISODE-GEN-JOB] ⚠️  WARNING: Isaac Sim not confirmed available")
+                logger.warning(
+                    "[EPISODE-GEN-JOB] ⚠️  WARNING: Isaac Sim not confirmed available"
+                )
 
         except IsaacSimRequirementError as e:
-            print(f"\n❌ ISAAC SIM REQUIREMENT ERROR:\n{e}\n")
+            logger.error("❌ ISAAC SIM REQUIREMENT ERROR:\n%s", e)
             sys.exit(1)
         except ProductionDataQualityError as e:
-            print(f"\n❌ PRODUCTION DATA QUALITY ERROR:\n{e}\n")
+            logger.error("❌ PRODUCTION DATA QUALITY ERROR:\n%s", e)
             sys.exit(1)
     else:
         # Fallback to legacy enforcement (quality system unavailable)
-        print("[EPISODE-GEN-JOB] Using legacy Isaac Sim check (quality system unavailable)\n")
+        logger.warning(
+            "[EPISODE-GEN-JOB] Using legacy Isaac Sim check (quality system unavailable)"
+        )
 
         # Add explicit check for sensor capture environment
         replicator_available = False
@@ -3006,10 +3064,14 @@ def _run_main():
             status = check_sensor_capture_environment()
             isaac_sim_available = status.get("isaac_sim_available", False)
             replicator_available = status.get("replicator_available", False)
-            print(f"[EPISODE-GEN-JOB] Isaac Sim available: {isaac_sim_available}\n")
+            logger.info(
+                "[EPISODE-GEN-JOB] Isaac Sim available: %s", isaac_sim_available
+            )
         else:
             isaac_sim_available = False
-            print("[EPISODE-GEN-JOB] ⚠️  WARNING: Cannot verify Isaac Sim availability\n")
+            logger.warning(
+                "[EPISODE-GEN-JOB] ⚠️  WARNING: Cannot verify Isaac Sim availability"
+            )
 
         # Detect if running in production environment
         # Production indicators: running in container, K8s, or Cloud Run
@@ -3039,83 +3101,91 @@ def _run_main():
         if is_production:
             allow_mock_data = False  # NEVER allow mock data in production
             if os.getenv("ALLOW_MOCK_DATA", "").lower() == "true":
-                print("\n" + "=" * 80)
-                print("❌ FATAL ERROR: ALLOW_MOCK_DATA not permitted in production")
-                print("=" * 80)
-                print("")
-                print("ALLOW_MOCK_DATA=true is IGNORED in production environments.")
-                print("Production training data MUST use real Isaac Sim physics.")
-                print("")
-                print("This protection prevents:")
-                print("  - Training models on random noise images")
-                print("  - Wasting GPU hours on useless data")
-                print("  - Shipping low-quality data to labs/customers")
-                print("")
-                print("=" * 80 + "\n")
+                logger.error("%s", "=" * 80)
+                logger.error(
+                    "❌ FATAL ERROR: ALLOW_MOCK_DATA not permitted in production"
+                )
+                logger.error("%s", "=" * 80)
+                logger.error("ALLOW_MOCK_DATA=true is IGNORED in production environments.")
+                logger.error("Production training data MUST use real Isaac Sim physics.")
+                logger.error("This protection prevents:")
+                logger.error("  - Training models on random noise images")
+                logger.error("  - Wasting GPU hours on useless data")
+                logger.error("  - Shipping low-quality data to labs/customers")
+                logger.error("%s", "=" * 80)
         else:
             # Development mode: allow override for testing
             allow_mock_data = os.getenv("ALLOW_MOCK_DATA", "false").lower() == "true"
 
         # Log configuration BEFORE checking Isaac Sim
-        print(f"[EPISODE-GEN-JOB] Production mode: {is_production}")
-        print(f"[EPISODE-GEN-JOB] Require real physics: {require_real_physics}")
-        print(f"[EPISODE-GEN-JOB] Allow mock data: {allow_mock_data}")
+        logger.info("[EPISODE-GEN-JOB] Production mode: %s", is_production)
+        logger.info("[EPISODE-GEN-JOB] Require real physics: %s", require_real_physics)
+        logger.info("[EPISODE-GEN-JOB] Allow mock data: %s", allow_mock_data)
         allow_mock_capture = allow_mock_data
 
         # LABS-BLOCKER-001 FIX: Fail hard in production if Isaac Sim/Replicator not available
         if require_real_physics and (not isaac_sim_available or not replicator_available):
             # In production, this is ALWAYS a fatal error (allow_mock_data is always False)
-            print("\n" + "=" * 80)
+            logger.error("%s", "=" * 80)
             if not isaac_sim_available:
-                print("❌ FATAL ERROR: Isaac Sim not available in production mode")
+                logger.error("❌ FATAL ERROR: Isaac Sim not available in production mode")
             else:
-                print("❌ FATAL ERROR: Replicator extension not available in production mode")
-            print("=" * 80)
-            print("")
-            print("Episode generation requires NVIDIA Isaac Sim for:")
-            print("  ✓ Real physics simulation (PhysX)")
-            print("  ✓ Actual sensor data capture (Replicator)")
-            print("  ✓ Physics-validated trajectories")
-            print("  ✓ Collision detection with real geometry")
-            print("")
-            print("Without Isaac Sim, the pipeline would generate:")
-            print("  ✗ Random noise RGB images (NOT real sensor data)")
-            print("  ✗ Heuristic-based validation (NOT physics-verified)")
-            print("  ✗ Mock contact/collision data (NOT accurate)")
-            print("")
-            print("This data is USELESS for:")
-            print("  • Training production ML models")
-            print("  • Real-world robot deployment")
-            print("  • Lab testing and evaluation")
-            print("")
-            print("To fix this:")
-            print("  1. Install Isaac Sim: https://developer.nvidia.com/isaac-sim")
-            print("  2. Run with Isaac Sim Python: /isaac-sim/python.sh generate_episodes.py")
-            print("  3. Or use the Isaac Sim container: see docs/ISAAC_SIM_SETUP.md")
-            print("")
+                logger.error(
+                    "❌ FATAL ERROR: Replicator extension not available in production mode"
+                )
+            logger.error("%s", "=" * 80)
+            logger.error("Episode generation requires NVIDIA Isaac Sim for:")
+            logger.error("  ✓ Real physics simulation (PhysX)")
+            logger.error("  ✓ Actual sensor data capture (Replicator)")
+            logger.error("  ✓ Physics-validated trajectories")
+            logger.error("  ✓ Collision detection with real geometry")
+            logger.error("Without Isaac Sim, the pipeline would generate:")
+            logger.error("  ✗ Random noise RGB images (NOT real sensor data)")
+            logger.error("  ✗ Heuristic-based validation (NOT physics-verified)")
+            logger.error("  ✗ Mock contact/collision data (NOT accurate)")
+            logger.error("This data is USELESS for:")
+            logger.error("  • Training production ML models")
+            logger.error("  • Real-world robot deployment")
+            logger.error("  • Lab testing and evaluation")
+            logger.error("To fix this:")
+            logger.error(
+                "  1. Install Isaac Sim: https://developer.nvidia.com/isaac-sim"
+            )
+            logger.error(
+                "  2. Run with Isaac Sim Python: /isaac-sim/python.sh generate_episodes.py"
+            )
+            logger.error(
+                "  3. Or use the Isaac Sim container: see docs/ISAAC_SIM_SETUP.md"
+            )
             if is_production:
-                print("NOTE: ALLOW_MOCK_DATA override is DISABLED in production.")
-                print("      There is no way to bypass this check in production mode.")
+                logger.error(
+                    "NOTE: ALLOW_MOCK_DATA override is DISABLED in production."
+                )
+                logger.error(
+                    "      There is no way to bypass this check in production mode."
+                )
             else:
-                print("To bypass in development (NOT for production data):")
-                print("  export REQUIRE_REAL_PHYSICS=false")
-            print("=" * 80 + "\n")
+                logger.error("To bypass in development (NOT for production data):")
+                logger.error("  export REQUIRE_REAL_PHYSICS=false")
+            logger.error("%s", "=" * 80)
             sys.exit(1)
 
     # Development mode warning
     if not isaac_sim_available and not require_real_physics:
-        print("\n[EPISODE-GEN-JOB] ========================================")
-        print("[EPISODE-GEN-JOB] WARNING: Isaac Sim not available")
-        print("[EPISODE-GEN-JOB] Running with MOCK DATA (random noise)")
-        print("[EPISODE-GEN-JOB] For real data: /isaac-sim/python.sh")
-        print("[EPISODE-GEN-JOB] ========================================\n")
+        logger.warning("[EPISODE-GEN-JOB] ========================================")
+        logger.warning("[EPISODE-GEN-JOB] WARNING: Isaac Sim not available")
+        logger.warning(
+            "[EPISODE-GEN-JOB] Running with MOCK DATA (random noise)"
+        )
+        logger.warning("[EPISODE-GEN-JOB] For real data: /isaac-sim/python.sh")
+        logger.warning("[EPISODE-GEN-JOB] ========================================")
 
     # Get configuration from environment
     bucket = os.getenv("BUCKET", "")
     scene_id = os.getenv("SCENE_ID", "")
 
     if not scene_id:
-        print("[EPISODE-GEN-JOB] ERROR: SCENE_ID is required")
+        logger.error("[EPISODE-GEN-JOB] SCENE_ID is required")
         sys.exit(1)
 
     # Prefixes with defaults
@@ -3130,7 +3200,7 @@ def _run_main():
         if episodes_per_variation <= 0:
             raise ValueError("EPISODES_PER_VARIATION must be positive")
     except ValueError as e:
-        print(f"[EPISODE-GEN-JOB] ERROR: Invalid EPISODES_PER_VARIATION: {e}")
+        logger.error("[EPISODE-GEN-JOB] Invalid EPISODES_PER_VARIATION: %s", e)
         sys.exit(1)
 
     max_variations = os.getenv("MAX_VARIATIONS")
@@ -3140,7 +3210,7 @@ def _run_main():
             if max_variations <= 0:
                 raise ValueError("MAX_VARIATIONS must be positive")
         except ValueError as e:
-            print(f"[EPISODE-GEN-JOB] ERROR: Invalid MAX_VARIATIONS: {e}")
+            logger.error("[EPISODE-GEN-JOB] Invalid MAX_VARIATIONS: %s", e)
             sys.exit(1)
     else:
         max_variations = None
@@ -3150,7 +3220,7 @@ def _run_main():
         if fps <= 0 or fps > 240:
             raise ValueError("FPS must be between 0 and 240")
     except ValueError as e:
-        print(f"[EPISODE-GEN-JOB] ERROR: Invalid FPS: {e}")
+        logger.error("[EPISODE-GEN-JOB] Invalid FPS: %s", e)
         sys.exit(1)
 
     use_llm = os.getenv("USE_LLM", "true").lower() == "true"
@@ -3162,7 +3232,7 @@ def _run_main():
         if not (0.0 <= min_quality_score <= 1.0):
             raise ValueError("MIN_QUALITY_SCORE must be between 0.0 and 1.0")
     except ValueError as e:
-        print(f"[EPISODE-GEN-JOB] ERROR: Invalid MIN_QUALITY_SCORE: {e}")
+        logger.error("[EPISODE-GEN-JOB] Invalid MIN_QUALITY_SCORE: %s", e)
         sys.exit(1)
 
     try:
@@ -3170,7 +3240,7 @@ def _run_main():
         if not (0.0 <= min_success_rate <= 1.0):
             raise ValueError("MIN_SUCCESS_RATE must be between 0.0 and 1.0")
     except ValueError as e:
-        print(f"[EPISODE-GEN-JOB] ERROR: Invalid MIN_SUCCESS_RATE: {e}")
+        logger.error("[EPISODE-GEN-JOB] Invalid MIN_SUCCESS_RATE: %s", e)
         sys.exit(1)
 
     # Data pack configuration (Core/Plus/Full)
@@ -3181,7 +3251,7 @@ def _run_main():
         if num_cameras < 1 or num_cameras > 8:
             raise ValueError("NUM_CAMERAS must be between 1 and 8")
     except ValueError as e:
-        print(f"[EPISODE-GEN-JOB] ERROR: Invalid NUM_CAMERAS: {e}")
+        logger.error("[EPISODE-GEN-JOB] Invalid NUM_CAMERAS: %s", e)
         sys.exit(1)
 
     resolution_str = os.getenv("IMAGE_RESOLUTION", "640,480")
@@ -3193,7 +3263,7 @@ def _run_main():
         if image_resolution[0] <= 0 or image_resolution[1] <= 0:
             raise ValueError("IMAGE_RESOLUTION dimensions must be positive")
     except (ValueError, TypeError) as e:
-        print(f"[EPISODE-GEN-JOB] ERROR: Invalid IMAGE_RESOLUTION: {e}")
+        logger.error("[EPISODE-GEN-JOB] Invalid IMAGE_RESOLUTION: %s", e)
         sys.exit(1)
 
     capture_sensor_data = os.getenv("CAPTURE_SENSOR_DATA", "true").lower() == "true"
@@ -3202,16 +3272,18 @@ def _run_main():
     # Bundle tier for upsell features (standard, pro, enterprise, foundation)
     bundle_tier = os.getenv("BUNDLE_TIER", "standard")
 
-    print(f"[EPISODE-GEN-JOB] Configuration:")
-    print(f"[EPISODE-GEN-JOB]   Bucket: {bucket}")
-    print(f"[EPISODE-GEN-JOB]   Scene ID: {scene_id}")
-    print(f"[EPISODE-GEN-JOB]   Pipeline: SOTA (CP-Gen + Validation)")
-    print(f"[EPISODE-GEN-JOB]   Data Pack: {data_pack_tier}")
-    print(f"[EPISODE-GEN-JOB]   Bundle Tier: {bundle_tier}")
-    print(f"[EPISODE-GEN-JOB]   Cameras: {num_cameras}")
-    print(f"[EPISODE-GEN-JOB]   Resolution: {image_resolution}")
-    print(f"[EPISODE-GEN-JOB]   Min success rate: {min_success_rate:.1%}")
-    print(f"[EPISODE-GEN-JOB]   Allow mock capture: {allow_mock_capture}")
+    logger.info("[EPISODE-GEN-JOB] Configuration:")
+    logger.info("[EPISODE-GEN-JOB]   Bucket: %s", bucket)
+    logger.info("[EPISODE-GEN-JOB]   Scene ID: %s", scene_id)
+    logger.info("[EPISODE-GEN-JOB]   Pipeline: SOTA (CP-Gen + Validation)")
+    logger.info("[EPISODE-GEN-JOB]   Data Pack: %s", data_pack_tier)
+    logger.info("[EPISODE-GEN-JOB]   Bundle Tier: %s", bundle_tier)
+    logger.info("[EPISODE-GEN-JOB]   Cameras: %s", num_cameras)
+    logger.info("[EPISODE-GEN-JOB]   Resolution: %s", image_resolution)
+    logger.info(
+        "[EPISODE-GEN-JOB]   Min success rate: %.1f%%", min_success_rate * 100
+    )
+    logger.info("[EPISODE-GEN-JOB]   Allow mock capture: %s", allow_mock_capture)
 
     GCS_ROOT = Path("/mnt/gcs")
 
@@ -3304,8 +3376,8 @@ def main() -> None:
 
     def _write_failure_marker(exc: Exception, failed_step: str) -> None:
         if not bucket or not scene_id:
-            print(
-                "[EPISODE-GEN-JOB] WARNING: Skipping failure marker; BUCKET/SCENE_ID missing.",
+            logger.warning(
+                "[EPISODE-GEN-JOB] WARNING: Skipping failure marker; BUCKET/SCENE_ID missing."
             )
             return
         FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(

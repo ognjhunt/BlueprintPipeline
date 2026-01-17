@@ -209,20 +209,20 @@ def get_availability_status() -> Dict[str, bool]:
 
 def print_availability_report() -> None:
     """Print a human-readable availability report."""
-    print("\n" + "=" * 60)
-    print("ISAAC SIM INTEGRATION - AVAILABILITY REPORT")
-    print("=" * 60)
+    logger.info("%s", "=" * 60)
+    logger.info("ISAAC SIM INTEGRATION - AVAILABILITY REPORT")
+    logger.info("%s", "=" * 60)
 
     for feature, available in _AVAILABILITY_STATUS.items():
         status = "✅ AVAILABLE" if available else "❌ NOT AVAILABLE"
-        print(f"  {feature:20s}: {status}")
+        logger.info("  %-20s: %s", feature, status)
 
     if not _ISAAC_SIM_AVAILABLE:
-        print("\n⚠️  WARNING: Not running inside Isaac Sim!")
-        print("   Features requiring Isaac Sim will use mock implementations.")
-        print("   To run with full features, use: /isaac-sim/python.sh your_script.py")
+        logger.warning("⚠️  WARNING: Not running inside Isaac Sim!")
+        logger.warning("   Features requiring Isaac Sim will use mock implementations.")
+        logger.warning("   To run with full features, use: /isaac-sim/python.sh your_script.py")
 
-    print("=" * 60 + "\n")
+    logger.info("%s", "=" * 60)
 
 
 # =============================================================================
@@ -333,7 +333,14 @@ class PhysicsSimulator:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[PHYSICS-SIM] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[PHYSICS-SIM] [%s] %s", level, msg)
 
     def load_scene(self, scene_path: str) -> bool:
         """
@@ -973,7 +980,14 @@ class IsaacSimSession:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[ISAAC-SESSION] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[ISAAC-SESSION] [%s] %s", level, msg)
 
     def load_scene(self, scene_path: str) -> bool:
         """Load a USD scene."""
@@ -1014,14 +1028,19 @@ if __name__ == "__main__":
     print_availability_report()
 
     # Test physics simulator
-    print("\nTesting Physics Simulator...")
+    logger.info("Testing Physics Simulator...")
     sim = PhysicsSimulator(verbose=True)
     sim.add_tracked_object("test_object", "/World/Objects/test")
     sim.start()
 
     for i in range(5):
         result = sim.step()
-        print(f"  Step {i}: success={result.success}, contacts={result.collision_count}")
+        logger.info(
+            "  Step %s: success=%s, contacts=%s",
+            i,
+            result.success,
+            result.collision_count,
+        )
 
     sim.stop()
-    print("Done!")
+    logger.info("Done!")

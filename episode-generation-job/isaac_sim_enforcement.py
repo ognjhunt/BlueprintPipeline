@@ -19,12 +19,15 @@ Environment Variables:
     DATA_QUALITY_LEVEL: Expected quality level (production|development|test)
 """
 
+import logging
 import os
 import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -220,9 +223,10 @@ def enforce_isaac_sim_for_production(
     if required_quality == DataQualityLevel.PRODUCTION:
         if not capabilities.can_generate_production_data:
             if capabilities.allow_mock_capture:
-                print("⚠️  WARNING: Production quality requested but using mock data")
-                print("⚠️  This data is NOT suitable for training!")
-                print()
+                logger.warning(
+                    "⚠️  WARNING: Production quality requested but using mock data"
+                )
+                logger.warning("⚠️  This data is NOT suitable for training!")
             else:
                 raise ProductionDataQualityError(
                     f"Production quality data requires Isaac Sim.\n"
@@ -237,39 +241,59 @@ def enforce_isaac_sim_for_production(
 
 def print_environment_report(capabilities: EnvironmentCapabilities):
     """Print detailed environment capabilities report."""
-    print("=" * 80)
-    print("ISAAC SIM ENVIRONMENT REPORT")
-    print("=" * 80)
-    print()
-    print("Runtime Capabilities:")
-    print(f"  • Isaac Sim Available:    {'✅ YES' if capabilities.isaac_sim_available else '❌ NO'}")
-    print(f"  • PhysX Available:        {'✅ YES' if capabilities.physx_available else '❌ NO'}")
-    print(f"  • Replicator Available:   {'✅ YES' if capabilities.replicator_available else '❌ NO'}")
-    print(f"  • GPU Available:          {'✅ YES' if capabilities.gpu_available else '❌ NO'}")
-    print()
-    print("Configuration:")
-    print(f"  • Production Mode:        {'✅ ENABLED' if capabilities.production_mode else '⚠️  DISABLED'}")
-    print(f"  • Allow Mock Capture:     {'⚠️  YES' if capabilities.allow_mock_capture else '✅ NO'}")
-    print()
-    print("Data Quality:")
-    print(f"  • Can Generate Production: {'✅ YES' if capabilities.can_generate_production_data else '❌ NO'}")
-    print(f"  • Sensor Source:          {capabilities.sensor_source.value}")
-    print(f"  • Physics Backend:        {capabilities.physics_backend.value}")
-    print(f"  • Training Suitability:   {capabilities.training_suitability}")
-    print()
+    logger.info("%s", "=" * 80)
+    logger.info("ISAAC SIM ENVIRONMENT REPORT")
+    logger.info("%s", "=" * 80)
+    logger.info("Runtime Capabilities:")
+    logger.info(
+        "  • Isaac Sim Available:    %s",
+        "✅ YES" if capabilities.isaac_sim_available else "❌ NO",
+    )
+    logger.info(
+        "  • PhysX Available:        %s",
+        "✅ YES" if capabilities.physx_available else "❌ NO",
+    )
+    logger.info(
+        "  • Replicator Available:   %s",
+        "✅ YES" if capabilities.replicator_available else "❌ NO",
+    )
+    logger.info(
+        "  • GPU Available:          %s",
+        "✅ YES" if capabilities.gpu_available else "❌ NO",
+    )
+    logger.info("Configuration:")
+    logger.info(
+        "  • Production Mode:        %s",
+        "✅ ENABLED" if capabilities.production_mode else "⚠️  DISABLED",
+    )
+    logger.info(
+        "  • Allow Mock Capture:     %s",
+        "⚠️  YES" if capabilities.allow_mock_capture else "✅ NO",
+    )
+    logger.info("Data Quality:")
+    logger.info(
+        "  • Can Generate Production: %s",
+        "✅ YES" if capabilities.can_generate_production_data else "❌ NO",
+    )
+    logger.info("  • Sensor Source:          %s", capabilities.sensor_source.value)
+    logger.info("  • Physics Backend:        %s", capabilities.physics_backend.value)
+    logger.info("  • Training Suitability:   %s", capabilities.training_suitability)
 
     if not capabilities.can_generate_production_data:
-        print("⚠️  WARNING: Current environment CANNOT generate production-quality data!")
-        print("Generated episodes will use mock sensor data and heuristic physics.")
-        print("This data is NOT suitable for training robots.")
-        print()
+        logger.warning(
+            "⚠️  WARNING: Current environment CANNOT generate production-quality data!"
+        )
+        logger.warning(
+            "Generated episodes will use mock sensor data and heuristic physics."
+        )
+        logger.warning("This data is NOT suitable for training robots.")
 
     if capabilities.production_mode and not capabilities.can_generate_production_data:
-        print("❌ ERROR: Production mode is enabled but Isaac Sim is not available!")
-        print()
+        logger.error(
+            "❌ ERROR: Production mode is enabled but Isaac Sim is not available!"
+        )
 
-    print("=" * 80)
-    print()
+    logger.info("%s", "=" * 80)
 
 
 # =============================================================================
@@ -308,10 +332,11 @@ if __name__ == "__main__":
     # Test enforcement
     try:
         required_quality = get_data_quality_level()
-        print(f"Testing enforcement for quality level: {required_quality.value}")
-        print()
+        logger.info(
+            "Testing enforcement for quality level: %s", required_quality.value
+        )
         enforce_isaac_sim_for_production(required_quality)
-        print("✅ Enforcement check passed!")
+        logger.info("✅ Enforcement check passed!")
     except (IsaacSimRequirementError, ProductionDataQualityError) as e:
-        print(f"❌ Enforcement check failed: {e}")
+        logger.error("❌ Enforcement check failed: %s", e)
         sys.exit(1)

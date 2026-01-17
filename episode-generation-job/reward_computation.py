@@ -29,6 +29,7 @@ References:
 - AnyTask: Task-conditioned rewards
 """
 
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -164,42 +167,54 @@ class RewardConfig:
                 if 0.0 < threshold <= 1.0:
                     config.placement_accuracy_threshold = threshold
                 else:
-                    print(f"[REWARD] Warning: REWARD_PLACEMENT_THRESHOLD must be between 0 and 1, using default")
+                    logger.warning(
+                        "[REWARD] Warning: REWARD_PLACEMENT_THRESHOLD must be between 0 and 1, using default"
+                    )
 
             if val := os.getenv("REWARD_TIME_BONUS_THRESHOLD"):
                 threshold = float(val)
                 if 0.0 < threshold <= 2.0:
                     config.time_bonus_threshold = threshold
                 else:
-                    print(f"[REWARD] Warning: REWARD_TIME_BONUS_THRESHOLD must be between 0 and 2, using default")
+                    logger.warning(
+                        "[REWARD] Warning: REWARD_TIME_BONUS_THRESHOLD must be between 0 and 2, using default"
+                    )
 
             if val := os.getenv("REWARD_COLLISION_TOLERANCE"):
                 tolerance = int(val)
                 if 0 <= tolerance <= 10:
                     config.collision_tolerance = tolerance
                 else:
-                    print(f"[REWARD] Warning: REWARD_COLLISION_TOLERANCE must be between 0 and 10, using default")
+                    logger.warning(
+                        "[REWARD] Warning: REWARD_COLLISION_TOLERANCE must be between 0 and 10, using default"
+                    )
 
             if val := os.getenv("REWARD_GRIPPER_THRESHOLD"):
                 threshold = float(val)
                 if 0.0 < threshold <= 0.1:
                     config.gripper_close_threshold = threshold
                 else:
-                    print(f"[REWARD] Warning: REWARD_GRIPPER_THRESHOLD must be between 0 and 0.1, using default")
+                    logger.warning(
+                        "[REWARD] Warning: REWARD_GRIPPER_THRESHOLD must be between 0 and 0.1, using default"
+                    )
 
             if val := os.getenv("REWARD_MAX_JERK"):
                 max_jerk = float(val)
                 if max_jerk > 0:
                     config.max_expected_jerk = max_jerk
                 else:
-                    print(f"[REWARD] Warning: REWARD_MAX_JERK must be positive, using default")
+                    logger.warning(
+                        "[REWARD] Warning: REWARD_MAX_JERK must be positive, using default"
+                    )
 
             if val := os.getenv("REWARD_COLLISION_PENALTY"):
                 penalty = float(val)
                 if 0.0 <= penalty <= 1.0:
                     config.collision_penalty_per_event = penalty
                 else:
-                    print(f"[REWARD] Warning: REWARD_COLLISION_PENALTY must be between 0 and 1, using default")
+                    logger.warning(
+                        "[REWARD] Warning: REWARD_COLLISION_PENALTY must be between 0 and 1, using default"
+                    )
 
             if val := os.getenv("REWARD_NORMALIZE"):
                 config.normalize_rewards = val.lower() == "true"
@@ -209,10 +224,15 @@ class RewardConfig:
                 if scale > 0:
                     config.reward_scale = scale
                 else:
-                    print(f"[REWARD] Warning: REWARD_SCALE must be positive, using default")
+                    logger.warning(
+                        "[REWARD] Warning: REWARD_SCALE must be positive, using default"
+                    )
 
         except (ValueError, TypeError) as e:
-            print(f"[REWARD] Warning: Error parsing environment variables: {e}, using defaults")
+            logger.warning(
+                "[REWARD] Warning: Error parsing environment variables: %s, using defaults",
+                e,
+            )
 
         return config
 
@@ -251,7 +271,14 @@ class RewardComputer:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
-            print(f"[REWARD] [{level}] {msg}")
+            level_map = {
+                "DEBUG": logger.debug,
+                "INFO": logger.info,
+                "WARNING": logger.warning,
+                "ERROR": logger.error,
+            }
+            log_fn = level_map.get(level.upper(), logger.info)
+            log_fn("[REWARD] [%s] %s", level, msg)
 
     def compute_episode_reward(
         self,
@@ -771,8 +798,8 @@ if __name__ == "__main__":
     from motion_planner import AIMotionPlanner
     from trajectory_solver import TrajectorySolver
 
-    print("Testing Reward Computation")
-    print("=" * 60)
+    logger.info("Testing Reward Computation")
+    logger.info("%s", "=" * 60)
 
     # Create test episode
     planner = AIMotionPlanner(robot_type="franka", use_llm=False, verbose=False)
@@ -794,20 +821,20 @@ if __name__ == "__main__":
     # Test reward computation
     computer = RewardComputer(verbose=True)
 
-    print("\n--- Shaped Reward ---")
+    logger.info("--- Shaped Reward ---")
     reward, components = computer.compute_episode_reward(
         trajectory=trajectory,
         motion_plan=motion_plan,
     )
-    print(f"Total reward: {reward:.3f}")
-    print(f"Components: {components.to_dict()}")
+    logger.info("Total reward: %.3f", reward)
+    logger.info("Components: %s", components.to_dict())
 
-    print("\n--- Sparse Reward ---")
+    logger.info("--- Sparse Reward ---")
     sparse = computer.compute_sparse_reward(trajectory, motion_plan)
-    print(f"Sparse reward: {sparse:.1f}")
+    logger.info("Sparse reward: %.1f", sparse)
 
-    print("\n--- Dense Rewards ---")
+    logger.info("--- Dense Rewards ---")
     dense = computer.compute_dense_rewards(trajectory, motion_plan)
-    print(f"Dense rewards: {len(dense)} steps, mean={np.mean(dense):.3f}")
-    print(f"  First 5: {dense[:5]}")
-    print(f"  Last 5: {dense[-5:]}")
+    logger.info("Dense rewards: %s steps, mean=%.3f", len(dense), np.mean(dense))
+    logger.info("  First 5: %s", dense[:5])
+    logger.info("  Last 5: %s", dense[-5:])

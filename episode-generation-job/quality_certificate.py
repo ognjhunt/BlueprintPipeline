@@ -21,6 +21,7 @@ This enables customers to:
 
 import hashlib
 import json
+import logging
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -29,6 +30,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -616,4 +619,4 @@ if __name__ == "__main__":
         camera_count=3,
     )
 
-    print(cert.to_json())
+    logger.info(cert.to_json())
