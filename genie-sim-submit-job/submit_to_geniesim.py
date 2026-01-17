@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -30,9 +31,6 @@ from google.cloud import storage
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-
-sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
-from geniesim_client import GenerationParams, GenieSimClient, JobStatus
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 from geniesim_adapter.local_framework import (
@@ -55,6 +53,71 @@ CONTRACT_SCHEMAS = {
     "asset_index": "asset_index.schema.json",
     "task_config": "task_config.schema.json",
 }
+
+
+@dataclass(frozen=True)
+class LocalGenerationParams:
+    episodes_per_task: int
+    num_variations: int
+    robot_type: str
+    min_quality_score: float
+
+
+@dataclass(frozen=True)
+class LocalJobMetricsBuilder:
+    generation_params: LocalGenerationParams
+    task_config: Dict[str, Any]
+
+    def _total_episodes(self) -> int:
+        task_count = len(self.task_config.get("tasks", [])) or 1
+        return max(1, self.generation_params.episodes_per_task * task_count)
+
+    @staticmethod
+    def _duration_seconds(created_at: Optional[str], completed_at: Optional[str]) -> Optional[float]:
+        if not created_at or not completed_at:
+            return None
+        try:
+            created_dt = datetime.fromisoformat(created_at.replace("Z", ""))
+            completed_dt = datetime.fromisoformat(completed_at.replace("Z", ""))
+        except ValueError:
+            return None
+        return max(0.0, (completed_dt - created_dt).total_seconds())
+
+    @staticmethod
+    def _quality_pass_rate(
+        episodes_collected: Optional[int],
+        episodes_passed: Optional[int],
+    ) -> Optional[float]:
+        if episodes_collected and episodes_collected > 0 and episodes_passed is not None:
+            return episodes_passed / episodes_collected
+        return None
+
+    def build(
+        self,
+        *,
+        job_id: str,
+        created_at: str,
+        completed_at: Optional[str],
+        status: str,
+        episodes_collected: Optional[int],
+        episodes_passed: Optional[int],
+        failure_reason: Optional[str],
+        failure_details: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        total_episodes = self._total_episodes()
+        return {
+            "job_id": job_id,
+            "status": status,
+            "created_at": created_at,
+            "completed_at": completed_at,
+            "duration_seconds": self._duration_seconds(created_at, completed_at),
+            "total_episodes": total_episodes,
+            "episodes_collected": episodes_collected,
+            "episodes_passed": episodes_passed,
+            "quality_pass_rate": self._quality_pass_rate(episodes_collected, episodes_passed),
+            "failure_reason": failure_reason,
+            "failure_details": failure_details,
+        }
 
 
 def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -320,7 +383,7 @@ def main() -> int:
     )
     _validate_export_marker(export_marker)
 
-    generation_params = GenerationParams(
+    generation_params = LocalGenerationParams(
         episodes_per_task=episodes_per_task,
         num_variations=num_variations,
         robot_type=robot_type,
@@ -471,25 +534,27 @@ def main() -> int:
             "preflight": preflight_report,
         },
     }
-    metrics_client = GenieSimClient(mock_mode=True, validate_on_init=False)
-    metrics_client.register_mock_job_metrics(
-        job_id=job_id,
-        generation_params=generation_params,
-        task_config=task_config,
-        created_at=submitted_at,
-        completed_at=(local_run_end.isoformat() + "Z") if local_run_end else None,
-        status=JobStatus.COMPLETED if job_status == "completed" else JobStatus.FAILED,
-        episodes_collected=(
-            getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0
-        ),
-        episodes_passed=(
-            getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0
-        ),
-        failure_reason=failure_reason,
-        failure_details=failure_details if failure_details else None,
-    )
     try:
-        job_payload["job_metrics"] = metrics_client.get_job_metrics(job_id)
+        metrics_builder = LocalJobMetricsBuilder(
+            generation_params=generation_params,
+            task_config=task_config,
+        )
+        job_payload["job_metrics"] = metrics_builder.build(
+            job_id=job_id,
+            created_at=submitted_at,
+            completed_at=(local_run_end.isoformat() + "Z") if local_run_end else None,
+            status="completed" if job_status == "completed" else "failed",
+            episodes_collected=(
+                getattr(local_run_result, "episodes_collected", 0)
+                if local_run_result
+                else 0
+            ),
+            episodes_passed=(
+                getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0
+            ),
+            failure_reason=failure_reason,
+            failure_details=failure_details if failure_details else None,
+        )
     except Exception as exc:
         job_payload["job_metrics_error"] = str(exc)
     if job_status == "failed":
