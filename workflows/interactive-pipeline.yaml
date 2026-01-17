@@ -29,6 +29,7 @@ main:
           - sceneId: ${parts[1]}
           - multiviewPrefix: ${"scenes/" + sceneId + "/multiview"}
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
+          - interactiveOutputPrefix: ${"scenes/" + sceneId + "/assets/interactive"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           # NOTE: Set PARTICULATE_ENDPOINT environment variable for articulation detection.
           # Falls back to heuristic detection if not available.
@@ -149,6 +150,23 @@ main:
                 args:
                   text: ${"ERROR: Interactive job failed: " + e.message}
                   severity: "ERROR"
+            - list_interactive_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${interactiveOutputPrefix + "/"}
+                  maxResults: 1000
+                result: interactiveCleanupList
+            - delete_interactive_outputs_for_cleanup:
+                for:
+                  value: interactiveCleanupItem
+                  in: ${default(interactiveCleanupList.items, [])}
+                  steps:
+                    - delete_interactive_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${interactiveCleanupItem.name}
             - write_interactive_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:

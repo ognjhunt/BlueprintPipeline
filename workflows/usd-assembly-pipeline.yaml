@@ -52,6 +52,12 @@ main:
           - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
+          - isaacLabPrefix: '${"scenes/" + sceneId + "/isaac_lab"}'
+          - simreadyOutputPrefix: '${"scenes/" + sceneId + "/simready"}'
+          - usdFailedMarker: '${"scenes/" + sceneId + "/usd/.failed"}'
+          - simreadyFailedMarker: '${"scenes/" + sceneId + "/simready/.failed"}'
+          - replicatorFailedMarker: '${"scenes/" + sceneId + "/replicator/.failed"}'
+          - isaacLabFailedMarker: '${"scenes/" + sceneId + "/isaac_lab/.failed"}'
           - lockObject: '${"scenes/" + sceneId + "/locks/regen3d-prep.lock"}'
           - usdJobName: "usd-assembly-job"
           - convertTimeoutSeconds: 1800
@@ -178,6 +184,48 @@ main:
                     retry_max: 5
                     error: ${e.message}
                   severity: "ERROR"
+            - list_convert_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${usdPrefix + "/"}
+                  maxResults: 1000
+                result: convertCleanupList
+            - delete_convert_outputs_for_cleanup:
+                for:
+                  value: convertCleanupItem
+                  in: ${default(convertCleanupList.items, [])}
+                  steps:
+                    - delete_convert_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${convertCleanupItem.name}
+            - write_convert_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${usdFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": usdJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "usd_convert_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "usd_prefix": usdPrefix
+                      }
+                    }
+                  })}
             - log_convert_error:
                 call: sys.log
                 args:
@@ -368,6 +416,48 @@ main:
                     retry_max: 3
                     error: ${e.message}
                   severity: "ERROR"
+            - list_simready_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${simreadyOutputPrefix + "/"}
+                  maxResults: 1000
+                result: simreadyCleanupList
+            - delete_simready_outputs_for_cleanup:
+                for:
+                  value: simreadyCleanupItem
+                  in: ${default(simreadyCleanupList.items, [])}
+                  steps:
+                    - delete_simready_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${simreadyCleanupItem.name}
+            - write_simready_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${simreadyFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": "simready-job",
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "simready_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "simready_prefix": simreadyOutputPrefix
+                      }
+                    }
+                  })}
             - log_simready_error:
                 call: sys.log
                 args:
@@ -563,6 +653,48 @@ main:
                     retry_max: 3
                     error: ${e.message}
                   severity: "ERROR"
+            - list_usd_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${usdPrefix + "/"}
+                  maxResults: 1000
+                result: usdCleanupList
+            - delete_usd_outputs_for_cleanup:
+                for:
+                  value: usdCleanupItem
+                  in: ${default(usdCleanupList.items, [])}
+                  steps:
+                    - delete_usd_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${usdCleanupItem.name}
+            - write_usd_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${usdFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": usdJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "usd_assembly_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "usd_prefix": usdPrefix
+                      }
+                    }
+                  })}
             - log_usd_error:
                 call: sys.log
                 args:
@@ -761,6 +893,48 @@ main:
                     retry_max: 3
                     error: ${e.message}
                   severity: "ERROR"
+            - list_replicator_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${replicatorPrefix + "/"}
+                  maxResults: 1000
+                result: replicatorCleanupList
+            - delete_replicator_outputs_for_cleanup:
+                for:
+                  value: replicatorCleanupItem
+                  in: ${default(replicatorCleanupList.items, [])}
+                  steps:
+                    - delete_replicator_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${replicatorCleanupItem.name}
+            - write_replicator_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${replicatorFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": replicatorJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "replicator_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "replicator_prefix": replicatorPrefix
+                      }
+                    }
+                  })}
             - log_replicator_error:
                 call: sys.log
                 args:
@@ -924,7 +1098,7 @@ main:
                       - name: REPLICATOR_PREFIX
                         value: ${replicatorPrefix}
                       - name: ISAAC_LAB_PREFIX
-                        value: '${"scenes/" + sceneId + "/isaac_lab"}'
+                        value: ${isaacLabPrefix}
               timeout: "1800s"  # 30 minutes max for Isaac Lab task generation
           result: isaacLabExec
         retry:
@@ -948,6 +1122,48 @@ main:
                     retry_max: 3
                     error: ${e.message}
                   severity: "ERROR"
+            - list_isaac_lab_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${isaacLabPrefix + "/"}
+                  maxResults: 1000
+                result: isaacLabCleanupList
+            - delete_isaac_lab_outputs_for_cleanup:
+                for:
+                  value: isaacLabCleanupItem
+                  in: ${default(isaacLabCleanupList.items, [])}
+                  steps:
+                    - delete_isaac_lab_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${isaacLabCleanupItem.name}
+            - write_isaac_lab_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${isaacLabFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": "isaac-lab-job",
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "isaac_lab_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "isaac_lab_prefix": isaacLabPrefix
+                      }
+                    }
+                  })}
             - log_isaac_lab_error:
                 call: sys.log
                 args:
