@@ -1,0 +1,190 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LeRobot Dataset Info",
+  "type": "object",
+  "required": [
+    "codebase_version",
+    "robot_type",
+    "fps",
+    "total_episodes",
+    "total_frames",
+    "total_tasks",
+    "total_chunks",
+    "chunks_size",
+    "data_path",
+    "features",
+    "data_pack",
+    "tier_compliance",
+    "data_quality",
+    "splits",
+    "created_at",
+    "generator",
+    "generator_version",
+    "checksums",
+    "lineage"
+  ],
+  "properties": {
+    "codebase_version": {"type": "string"},
+    "robot_type": {"type": "string"},
+    "fps": {"type": "number"},
+    "total_episodes": {"type": "integer"},
+    "total_frames": {"type": "integer"},
+    "total_tasks": {"type": "integer"},
+    "total_chunks": {"type": "integer"},
+    "chunks_size": {"type": "integer"},
+    "data_path": {"type": "string"},
+    "features": {"type": "object"},
+    "data_pack": {"type": "object"},
+    "tier_compliance": {"type": "object"},
+    "data_quality": {"type": "object"},
+    "splits": {"type": "object"},
+    "created_at": {"type": "string"},
+    "generator": {"type": "string"},
+    "generator_version": {"type": "string"},
+    "checksums": {"type": "object"},
+    "lineage": {
+      "type": "object",
+      "description": "Lineage metadata covering sim backend, physics parameters, quality gates, and pipeline identifiers.",
+      "required": ["sim_backend", "physics_parameters", "quality_gates", "pipeline"],
+      "properties": {
+        "sim_backend": {
+          "type": "object",
+          "description": "Simulation backend name/version sourced from per-episode validation metadata and environment variables.",
+          "required": ["name", "version", "container_image", "source"],
+          "properties": {
+            "name": {"type": "string"},
+            "version": {"type": ["string", "null"]},
+            "container_image": {"type": ["string", "null"]},
+            "source": {
+              "type": "object",
+              "properties": {
+                "name": {"type": "string"},
+                "version": {"type": "string"},
+                "container_image": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "physics_parameters": {
+          "type": "object",
+          "description": "Physics validation thresholds and simulator parameters sourced from ValidationConfig and env overrides.",
+          "required": ["validation_thresholds", "sim_validator", "source"],
+          "properties": {
+            "validation_thresholds": {
+              "type": ["object", "null"],
+              "properties": {
+                "max_unexpected_collisions": {"type": "number"},
+                "max_joint_violations": {"type": "number"},
+                "max_collision_force": {"type": "number"},
+                "max_joint_velocity": {"type": "number"},
+                "max_joint_acceleration": {"type": "number"},
+                "require_task_success": {"type": "boolean"},
+                "require_grasp_success": {"type": "boolean"},
+                "require_placement_success": {"type": "boolean"},
+                "require_object_stable": {"type": "boolean"},
+                "stability_threshold": {"type": "number"},
+                "min_quality_score": {"type": "number"},
+                "max_retries": {"type": "number"},
+                "retry_on_collision": {"type": "boolean"},
+                "retry_on_joint_limit": {"type": "boolean"}
+              },
+              "additionalProperties": false
+            },
+            "sim_validator": {
+              "type": "object",
+              "required": ["post_rollout_seconds", "load_scene", "require_real_physics"],
+              "properties": {
+                "post_rollout_seconds": {"type": "number"},
+                "load_scene": {"type": "boolean"},
+                "require_real_physics": {"type": ["boolean", "null"]}
+              },
+              "additionalProperties": false
+            },
+            "source": {
+              "type": "object",
+              "properties": {
+                "validation_thresholds": {"type": "string"},
+                "sim_validator.post_rollout_seconds": {"type": "string"},
+                "sim_validator.load_scene": {"type": "string"},
+                "sim_validator.require_real_physics": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "quality_gates": {
+          "type": "object",
+          "description": "Quality gate results and configuration version sourced from report artifacts and config file.",
+          "required": ["summary", "report_timestamp", "report_path", "config_version", "bypass_enabled", "source"],
+          "properties": {
+            "summary": {"type": ["object", "null"]},
+            "report_timestamp": {"type": ["string", "null"]},
+            "report_path": {"type": ["string", "null"]},
+            "config_version": {"type": ["string", "null"]},
+            "bypass_enabled": {"type": ["boolean", "null"]},
+            "source": {
+              "type": "object",
+              "properties": {
+                "summary": {"type": "string"},
+                "report_timestamp": {"type": "string"},
+                "report_path": {"type": "string"},
+                "config_version": {"type": "string"},
+                "bypass_enabled": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "pipeline": {
+          "type": "object",
+          "description": "Pipeline/job identifiers sourced from environment variables.",
+          "required": [
+            "scene_id",
+            "bucket",
+            "assets_prefix",
+            "episodes_prefix",
+            "job_name",
+            "job_id",
+            "run_id",
+            "pipeline_env",
+            "pipeline_version",
+            "source"
+          ],
+          "properties": {
+            "scene_id": {"type": ["string", "null"]},
+            "bucket": {"type": ["string", "null"]},
+            "assets_prefix": {"type": ["string", "null"]},
+            "episodes_prefix": {"type": ["string", "null"]},
+            "job_name": {"type": "string"},
+            "job_id": {"type": ["string", "null"]},
+            "run_id": {"type": ["string", "null"]},
+            "pipeline_env": {"type": ["string", "null"]},
+            "pipeline_version": {"type": ["string", "null"]},
+            "source": {
+              "type": "object",
+              "properties": {
+                "scene_id": {"type": "string"},
+                "bucket": {"type": "string"},
+                "assets_prefix": {"type": "string"},
+                "episodes_prefix": {"type": "string"},
+                "job_name": {"type": "string"},
+                "job_id": {"type": "string"},
+                "run_id": {"type": "string"},
+                "pipeline_env": {"type": "string"},
+                "pipeline_version": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}
