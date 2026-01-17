@@ -220,6 +220,30 @@ def _get_project_id() -> str:
     return project_id
 
 
+def _is_production_mode() -> bool:
+    return os.getenv("ENV", "").lower() == "production"
+
+
+def _validate_startup_auth_configuration() -> None:
+    secret = os.getenv("WEBHOOK_HMAC_SECRET")
+    audience = os.getenv("WEBHOOK_OIDC_AUDIENCE")
+    if secret or audience:
+        return
+    message = (
+        "Webhook authentication is not configured. Set WEBHOOK_HMAC_SECRET for HMAC "
+        "verification or WEBHOOK_OIDC_AUDIENCE for OIDC token validation to secure requests."
+    )
+    if _is_production_mode():
+        raise RuntimeError(
+            "Missing webhook authentication configuration for production. "
+            "Set WEBHOOK_HMAC_SECRET or WEBHOOK_OIDC_AUDIENCE."
+        )
+    app.logger.warning(message)
+
+
+_validate_startup_auth_configuration()
+
+
 @app.get("/healthz")
 def health_check():
     deps_ok, dep_details = _dependency_health()
@@ -274,6 +298,11 @@ def _is_authenticated(body: bytes) -> bool:
     secret = os.getenv("WEBHOOK_HMAC_SECRET")
     audience = os.getenv("WEBHOOK_OIDC_AUDIENCE")
     if not secret and not audience:
+        if _is_production_mode():
+            raise RuntimeError(
+                "Missing webhook authentication configuration for production. "
+                "Set WEBHOOK_HMAC_SECRET or WEBHOOK_OIDC_AUDIENCE."
+            )
         _log_invalid_request("authentication not configured")
         return False
 
