@@ -254,6 +254,19 @@ class GenieSimConfig:
 
 
 @dataclass
+class GeneratedEpisodeMetadata:
+    """Metadata for a generated episode."""
+
+    episode_id: str
+    task_name: str
+    quality_score: float
+    frame_count: int
+    duration_seconds: float
+    validation_passed: bool
+    file_size_bytes: int
+
+
+@dataclass
 class DataCollectionResult:
     """Result of a data collection run."""
 
