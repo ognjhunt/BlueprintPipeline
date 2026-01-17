@@ -178,6 +178,14 @@ Default scaffolding still provides:
 | VIDEO_API_ENDPOINT | No | - | Remote video generation API |
 | DREAM2FLOW_REQUIRE_REAL_BACKENDS | No | false | Fail if placeholders would be used |
 
+Example storage target:
+
+```bash
+export BUCKET=blueprint-8c1ca.appspot.com
+export SCENE_ID=scene_123
+# Outputs land under gs://blueprint-8c1ca.appspot.com/scenes/${SCENE_ID}/dream2flow
+```
+
 ## References
 
 - [Dream2Flow Paper (arXiv:2512.24766)](https://arxiv.org/abs/2512.24766)

@@ -262,9 +262,9 @@ def main() -> None:
         label="[SCALE]",
     )
 
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    layout_prefix = os.getenv("LAYOUT_PREFIX")  # e.g. scenes/<sceneId>/layout
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
+    layout_prefix = os.environ["LAYOUT_PREFIX"]  # e.g. scenes/<sceneId>/layout
 
     root = Path("/mnt/gcs")
     layout_dir = root / layout_prefix

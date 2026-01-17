@@ -63,7 +63,7 @@ SCENES_PER_RUN=3 python generate_scene_images.py
 gcloud run jobs create scene-generation-job \
   --image=gcr.io/PROJECT_ID/scene-generation-job:latest \
   --region=us-central1 \
-  --set-env-vars=GEMINI_API_KEY=your-key,BUCKET=your-bucket \
+  --set-env-vars=GEMINI_API_KEY=your-key,BUCKET=blueprint-8c1ca.appspot.com \
   --memory=4Gi \
   --timeout=3600
 
@@ -97,6 +97,8 @@ gcloud scheduler jobs resume scene-generation-daily \
 | `ARCHETYPES` | No | - | Comma-separated list of specific archetypes |
 | `DRY_RUN` | No | false | Skip actual generation |
 | `FIRESTORE_PROJECT` | No | default | GCP project for Firestore |
+
+Scenes are stored under `gs://blueprint-8c1ca.appspot.com/scenes/{SCENE_ID}` when `BUCKET` is set.
 
 ## Architecture
 

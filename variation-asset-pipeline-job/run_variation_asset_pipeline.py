@@ -58,6 +58,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict, field
 from enum import Enum
+
+from tools.validation.entrypoint_checks import validate_required_env_vars
 import io
 import base64
 import filecmp
@@ -1717,12 +1719,16 @@ def main():
     """Main entry point."""
 
     # Parse configuration from environment
-    scene_id = os.getenv("SCENE_ID", "")
-    bucket = os.getenv("BUCKET", "")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+        },
+        label="[VAR-PIPELINE]",
+    )
 
-    if not scene_id:
-        print("[VAR-PIPELINE] ERROR: SCENE_ID is required", file=sys.stderr)
-        sys.exit(1)
+    scene_id = os.environ["SCENE_ID"]
+    bucket = os.environ["BUCKET"]
 
     dry_run = getenv_bool("DRY_RUN", "0")
     register_assets = getenv_bool("REGISTER_ASSETS", "1") and not dry_run
