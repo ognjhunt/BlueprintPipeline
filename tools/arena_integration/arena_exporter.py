@@ -17,6 +17,7 @@ Output Structure:
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -34,6 +35,22 @@ from .task_mapping import (
     TaskAffordanceMapper,
     AFFORDANCE_TO_TASKS,
 )
+
+LOGGER = logging.getLogger(__name__)
+FALLBACK_AFFORDANCE_VERSION = "0.1.0"
+FALLBACK_AFFORDANCES = [
+    "Openable",
+    "Turnable",
+    "Pressable",
+    "Graspable",
+    "Insertable",
+    "Stackable",
+    "Pourable",
+    "Fillable",
+    "Containable",
+    "Foldable",
+    "Hangable",
+]
 
 
 @dataclass
@@ -113,25 +130,37 @@ class ArenaSceneExporter:
             manifest_format = self.affordance_detector.to_manifest_format(affordances)
             obj.setdefault("semantics", {}).update(manifest_format)
 
-        # Step 2: Generate Arena manifest
-        arena_manifest = self._generate_arena_manifest(manifest, object_affordances)
+        # Step 2: Validate affordances against Arena enum (or fallback)
+        validation = self._validate_affordances(all_affordances)
+        if validation["status"] == "error":
+            LOGGER.error(validation["message"])
+            errors.append(validation["message"])
+        elif validation["status"] == "warning":
+            LOGGER.warning(validation["message"])
+
+        # Step 3: Generate Arena manifest
+        arena_manifest = self._generate_arena_manifest(
+            manifest,
+            object_affordances,
+            validation["metadata"],
+        )
         manifest_path = arena_dir / "arena_manifest.json"
         manifest_path.write_text(json.dumps(arena_manifest, indent=2))
         generated_files.append(str(manifest_path))
 
-        # Step 3: Generate asset registry
+        # Step 4: Generate asset registry
         asset_registry = self._generate_asset_registry(manifest, object_affordances)
         registry_path = arena_dir / "asset_registry.json"
         registry_path.write_text(json.dumps(asset_registry, indent=2))
         generated_files.append(str(registry_path))
 
-        # Step 4: Generate Scene class module
+        # Step 5: Generate Scene class module
         scene_module = self._generate_scene_module(manifest, object_affordances)
         scene_path = arena_dir / "scene_module.py"
         scene_path.write_text(scene_module)
         generated_files.append(str(scene_path))
 
-        # Step 5: Generate task definitions
+        # Step 6: Generate task definitions
         task_count = 0
         for obj in objects:
             obj_id = obj.get("id")
@@ -150,13 +179,13 @@ class ArenaSceneExporter:
                     except Exception as e:
                         errors.append(f"Failed to generate task {task_spec.task_type} for {obj_id}: {e}")
 
-        # Step 6: Generate tasks __init__.py
+        # Step 7: Generate tasks __init__.py
         init_code = self._generate_tasks_init(tasks_dir)
         init_path = tasks_dir / "__init__.py"
         init_path.write_text(init_code)
         generated_files.append(str(init_path))
 
-        # Step 7: Generate hub config if requested
+        # Step 8: Generate hub config if requested
         if self.config.generate_hub_config:
             hub_config = self._generate_hub_config(manifest, task_count)
             hub_path = arena_dir / "hub_config.yaml"
@@ -176,7 +205,8 @@ class ArenaSceneExporter:
     def _generate_arena_manifest(
         self,
         manifest: dict[str, Any],
-        object_affordances: dict[str, list[AffordanceParams]]
+        object_affordances: dict[str, list[AffordanceParams]],
+        affordance_metadata: dict[str, Any],
     ) -> dict[str, Any]:
         """Generate Arena-specific manifest."""
         scene_meta = manifest.get("scene", {})
@@ -215,11 +245,76 @@ class ArenaSceneExporter:
                 "usd_path": self.config.scene_path,
                 "coordinate_frame": scene_meta.get("coordinate_frame", "z_up"),
                 "meters_per_unit": scene_meta.get("meters_per_unit", 1.0),
+                "metadata": affordance_metadata,
             },
             "objects": arena_objects,
             "supported_embodiments": self.config.supported_embodiments,
             "task_count": sum(len(affs) for affs in object_affordances.values()),
         }
+
+    def _validate_affordances(self, affordances: list[AffordanceParams]) -> dict[str, Any]:
+        """Validate detected affordances against Arena's official enum or fallback list."""
+        official_affordances, reference = self._get_official_affordances()
+        used_fallback = reference["source"] == "fallback"
+
+        if used_fallback:
+            LOGGER.info(
+                "Arena not installed; using fallback affordance list version %s.",
+                FALLBACK_AFFORDANCE_VERSION,
+            )
+
+        seen_affordances = {aff.affordance_type.value for aff in affordances}
+        unknown_affordances = sorted(seen_affordances - official_affordances)
+
+        metadata = {
+            "affordance_reference": reference,
+            "unknown_affordances": unknown_affordances,
+            "known_affordance_count": len(official_affordances),
+            "used_fallback": used_fallback,
+        }
+
+        if unknown_affordances:
+            message = (
+                "Unknown affordances detected in scene manifest: "
+                f"{unknown_affordances}. "
+                f"Reference source: {reference['source']}."
+            )
+            status = "warning" if used_fallback else "error"
+            return {"status": status, "message": message, "metadata": metadata}
+
+        return {
+            "status": "ok",
+            "message": "All affordances validated against reference.",
+            "metadata": metadata,
+        }
+
+    def _get_official_affordances(self) -> tuple[set[str], dict[str, Any]]:
+        """Fetch the official affordance list from Isaac Lab-Arena, with fallback."""
+        try:
+            from enum import Enum
+            from isaaclab_arena.core import AffordanceType as ArenaAffordanceType
+
+            if isinstance(ArenaAffordanceType, type) and issubclass(ArenaAffordanceType, Enum):
+                values = {member.value for member in ArenaAffordanceType}
+            else:
+                values = {
+                    value for name in dir(ArenaAffordanceType)
+                    if not name.startswith("_")
+                    for value in [getattr(ArenaAffordanceType, name)]
+                    if isinstance(value, str)
+                }
+
+            return values, {
+                "source": "isaaclab_arena.core.AffordanceType",
+                "version": getattr(ArenaAffordanceType, "__version__", None),
+                "values": sorted(values),
+            }
+        except ImportError:
+            return set(FALLBACK_AFFORDANCES), {
+                "source": "fallback",
+                "version": FALLBACK_AFFORDANCE_VERSION,
+                "values": FALLBACK_AFFORDANCES,
+            }
 
     def _generate_asset_registry(
         self,
