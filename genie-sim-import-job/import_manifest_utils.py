@@ -221,7 +221,12 @@ def verify_checksums_manifest(bundle_root: Path, checksums_path: Path) -> Dict[s
 
 
 def verify_import_manifest_checksum(import_manifest_path: Path) -> Dict[str, Any]:
-    result = {"success": False, "errors": []}
+    result: Dict[str, Any] = {
+        "success": False,
+        "errors": [],
+        "expected": None,
+        "actual": None,
+    }
     try:
         payload = json.loads(import_manifest_path.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
@@ -236,11 +241,13 @@ def verify_import_manifest_checksum(import_manifest_path: Path) -> Dict[str, Any
         .get("import_manifest.json", {})
         .get("sha256")
     )
+    result["expected"] = expected
     if not expected:
         result["errors"].append("Import manifest checksum is missing from checksums.metadata")
         return result
 
     actual = compute_manifest_checksum(payload)
+    result["actual"] = actual
     if actual != expected:
         result["errors"].append(
             "Import manifest checksum mismatch: "
