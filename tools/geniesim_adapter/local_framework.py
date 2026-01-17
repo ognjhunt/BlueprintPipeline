@@ -70,7 +70,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -275,6 +275,13 @@ class DataCollectionResult:
     # Errors
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    server_info: Dict[str, Any] = field(default_factory=dict)
+
+
+def _parse_version(version: str) -> tuple:
+    parts = version.split(".")
+    padded = (parts + ["0", "0", "0"])[:3]
+    return tuple(int(part) if part.isdigit() else 0 for part in padded)
 
 
 # =============================================================================
@@ -389,6 +396,32 @@ class GenieSimGRPCClient:
         except Exception as exc:
             logger.error(f"Genie Sim gRPC ping failed: {exc}")
             return False
+
+    def get_server_info(self, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Fetch server version and capabilities via gRPC.
+
+        Returns:
+            Dict with server version and capabilities.
+        """
+        if not self._connected:
+            raise RuntimeError("Not connected to Genie Sim server")
+        effective_timeout = min(self.timeout, timeout) if timeout else self.timeout
+        response = self.send_command(CommandType.GET_CHECKER_STATUS, {})
+        if not response.get("success"):
+            error = response.get("error_message") or response.get("error") or "unknown error"
+            raise RuntimeError(f"Genie Sim server info request failed: {error}")
+        version = response.get("version")
+        capabilities = response.get("capabilities")
+        if not version:
+            raise RuntimeError("Genie Sim server info missing version")
+        if not isinstance(capabilities, list):
+            raise RuntimeError("Genie Sim server info missing capabilities list")
+        return {
+            "version": version,
+            "capabilities": capabilities,
+            "timeout_s": effective_timeout,
+        }
 
     def _check_server_socket(self) -> bool:
         """Check if server is running via socket connection."""
@@ -1037,6 +1070,8 @@ class GenieSimLocalFramework:
         scene_config: Optional[Dict[str, Any]] = None,
         episodes_per_task: Optional[int] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        expected_server_version: Optional[str] = None,
+        required_capabilities: Optional[Sequence[str]] = None,
     ) -> DataCollectionResult:
         """
         Run data collection for specified tasks.
@@ -1086,6 +1121,18 @@ class GenieSimLocalFramework:
         if not self._client.ping(timeout=10.0):
             result.errors.append("Genie Sim server ping failed")
             return result
+        if expected_server_version or required_capabilities:
+            try:
+                server_info = self.verify_server_capabilities(
+                    expected_server_version=expected_server_version,
+                    required_capabilities=required_capabilities,
+                )
+                result.server_info = server_info
+            except RuntimeError as exc:
+                error_message = f"Genie Sim server capability check failed: {exc}"
+                self.log(error_message, "ERROR")
+                result.errors.append(error_message)
+                return result
 
         episodes_target = episodes_per_task or self.config.episodes_per_task
         tasks = task_config.get("suggested_tasks", [task_config])
@@ -1167,6 +1214,39 @@ class GenieSimLocalFramework:
         self.log(f"Output: {run_dir}")
 
         return result
+
+    def verify_server_capabilities(
+        self,
+        *,
+        expected_server_version: Optional[str] = None,
+        required_capabilities: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """Fetch and verify server capabilities before running a job."""
+        server_info = self._client.get_server_info(timeout=5.0)
+        version = server_info.get("version", "")
+        capabilities = server_info.get("capabilities", [])
+        normalized_caps = {str(cap).strip() for cap in capabilities}
+        self.log(
+            "Genie Sim server capabilities negotiated: "
+            f"version={version}, capabilities={sorted(normalized_caps)}"
+        )
+        if expected_server_version:
+            expected_major = _parse_version(expected_server_version)[0]
+            server_major = _parse_version(version)[0]
+            if expected_major != server_major:
+                raise RuntimeError(
+                    "Genie Sim server version mismatch: "
+                    f"expected major {expected_server_version}, got {version}."
+                )
+        if required_capabilities:
+            required_set = {cap.strip() for cap in required_capabilities}
+            missing = sorted(required_set - normalized_caps)
+            if missing:
+                raise RuntimeError(
+                    "Genie Sim server missing required capabilities: "
+                    f"{', '.join(missing)}"
+                )
+        return server_info
 
     def _configure_task(
         self,
@@ -1776,6 +1856,8 @@ def run_local_data_collection(
     robot_type: str = "franka",
     episodes_per_task: int = 100,
     verbose: bool = True,
+    expected_server_version: Optional[str] = None,
+    required_capabilities: Optional[Sequence[str]] = None,
 ) -> DataCollectionResult:
     """
     Convenience function to run local Genie Sim data collection.
@@ -1787,6 +1869,8 @@ def run_local_data_collection(
         robot_type: Robot type
         episodes_per_task: Episodes per task
         verbose: Print progress
+        expected_server_version: Expected Genie Sim API version
+        required_capabilities: Required server capabilities
 
     Returns:
         DataCollectionResult
@@ -1816,13 +1900,23 @@ def run_local_data_collection(
     if framework.is_server_running():
         # Connect to existing server
         framework.connect()
-        result = framework.run_data_collection(task_config, scene_manifest)
+        result = framework.run_data_collection(
+            task_config,
+            scene_manifest,
+            expected_server_version=expected_server_version,
+            required_capabilities=required_capabilities,
+        )
         framework.disconnect()
     else:
         # Start server and run
         scene_usd = scene_manifest.get("usd_path")
         with framework.server_context(Path(scene_usd) if scene_usd else None) as fw:
-            result = fw.run_data_collection(task_config, scene_manifest)
+            result = fw.run_data_collection(
+                task_config,
+                scene_manifest,
+                expected_server_version=expected_server_version,
+                required_capabilities=required_capabilities,
+            )
 
     # Export to LeRobot
     if result.success and result.recording_dir:

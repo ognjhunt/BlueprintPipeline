@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -18,6 +20,8 @@ import grpc
 
 from geniesim_grpc_pb2 import (
     CameraObservation,
+    CommandResponse,
+    CommandType,
     GetJointPositionRequest,
     GetJointPositionResponse,
     GetObservationRequest,
@@ -47,6 +51,15 @@ from tools.geniesim_adapter.config import DEFAULT_GENIESIM_PORT, GENIESIM_PORT_E
 
 LOGGER = logging.getLogger("geniesim.server")
 
+DEFAULT_SERVER_VERSION = os.getenv("GENIESIM_SERVER_VERSION", "3.0.0")
+DEFAULT_SERVER_CAPABILITIES = [
+    "data_collection",
+    "recording",
+    "observation",
+    "environment_reset",
+    "object_manipulation",
+]
+
 
 @dataclass
 class RecordingSession:
@@ -72,6 +85,8 @@ class GenieSimLocalServicer(GenieSimServiceServicer):
         self._joint_efforts = [0.0] * joint_count
         self._joint_names = [f"joint_{idx}" for idx in range(joint_count)]
         self._recording: Optional[RecordingSession] = None
+        self._server_version = DEFAULT_SERVER_VERSION
+        self._capabilities = list(DEFAULT_SERVER_CAPABILITIES)
 
     def GetObservation(
         self,
@@ -197,6 +212,21 @@ class GenieSimLocalServicer(GenieSimServiceServicer):
             self._joint_efforts = [0.0] * len(self._joint_positions)
             self._recording = None
         return ResetResponse(success=True)
+
+    def SendCommand(
+        self,
+        request,
+        context,
+    ) -> CommandResponse:
+        if request.command_type == CommandType.GET_CHECKER_STATUS:
+            payload = json.dumps(
+                {
+                    "version": self._server_version,
+                    "capabilities": self._capabilities,
+                }
+            ).encode()
+            return CommandResponse(success=True, payload=payload)
+        return super().SendCommand(request, context)
 
     def _build_joint_state(self) -> JointState:
         return JointState(
