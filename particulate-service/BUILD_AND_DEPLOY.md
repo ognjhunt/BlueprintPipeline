@@ -64,6 +64,7 @@ gcloud run deploy particulate-service \
   --max-instances 4 \
   --port 8080 \
   --no-cpu-throttling \
+  # Optional: enable debug info (disabled by default)
   --set-env-vars "PARTICULATE_DEBUG=1,PARTICULATE_DEBUG_TOKEN=<shared-secret>" \
   --allow-unauthenticated
 ```
@@ -129,8 +130,8 @@ python test_particulate_service.py
 ### GET /debug - Debug Info
 
 Returns detailed service state including model validation when debug access is enabled.
-Set `PARTICULATE_DEBUG=1` and `PARTICULATE_DEBUG_TOKEN=<shared-secret>` and send the
-token in an `Authorization: Bearer <shared-secret>` header to receive a `200` response.
+Debug is disabled by default; set `PARTICULATE_DEBUG=1` and `PARTICULATE_DEBUG_TOKEN=<shared-secret>`
+and send the token in an `Authorization: Bearer <shared-secret>` header to receive a `200` response.
 Missing or invalid credentials return `403`.
 
 ## Integration with Interactive Job

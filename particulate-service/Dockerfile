@@ -165,7 +165,7 @@ RUN mkdir -p /tmp/particulate && chmod 777 /tmp/particulate
 # ---------------------------------------------------------
 ENV PORT=8080
 ENV PARTICULATE_ROOT=/opt/particulate
-ENV PARTICULATE_DEBUG=1
+ENV PARTICULATE_DEBUG=0
 ENV PARTICULATE_HEALTHCHECK_HOST=localhost
 ENV PYTHONUNBUFFERED=1
 

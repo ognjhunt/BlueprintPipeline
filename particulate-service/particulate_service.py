@@ -18,8 +18,8 @@ The service:
 
 Environment Variables:
     PARTICULATE_ROOT: Path to Particulate installation (default: /opt/particulate)
-    PARTICULATE_DEBUG: Enable verbose logging (default: 1)
-    PARTICULATE_DEBUG_TOKEN: Shared secret for /debug access (default: unset)
+    PARTICULATE_DEBUG: Enable verbose logging (default: 0)
+    PARTICULATE_DEBUG_TOKEN: Shared secret required for /debug access (default: unset)
     PORT: Service port (default: 8080)
 
 Cloud Run Settings (REQUIRED):
@@ -66,7 +66,7 @@ PARTICULATE_ROOT = Path(os.environ.get("PARTICULATE_ROOT", "/opt/particulate"))
 PARTICULATE_INFER = PARTICULATE_ROOT / "infer.py"
 TMP_ROOT = Path("/tmp/particulate")
 
-DEBUG_MODE = os.environ.get("PARTICULATE_DEBUG", "1") == "1"
+DEBUG_MODE = os.environ.get("PARTICULATE_DEBUG", "0") == "1"
 DEBUG_TOKEN = os.environ.get("PARTICULATE_DEBUG_TOKEN")
 
 # GPU lock for serialization
@@ -699,7 +699,7 @@ def healthcheck():
             "status": "error",
             "message": f"Warmup failed: {_warmup_error}",
             "ready": False,
-            "details": _warmup_details if DEBUG_MODE else None,
+            "details": _warmup_details if _debug_authorized() else None,
         }), 503
 
     deps_ok, dep_details = _dependency_health()
@@ -717,7 +717,7 @@ def healthcheck():
         "status": "ok",
         "ready": True,
         "service": "particulate",
-        "details": _warmup_details if DEBUG_MODE else None,
+        "details": _warmup_details if _debug_authorized() else None,
         "dependencies": dep_details.get("dependencies"),
     }), 200
 
