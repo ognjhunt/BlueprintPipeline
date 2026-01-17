@@ -2,6 +2,8 @@
 
 A production-ready pipeline for converting scene images into simulation-ready USD scenes with Isaac Lab RL training packages.
 
+For a summary of recent changes, see [CHANGELOG.md](CHANGELOG.md).
+
 ## Overview
 
 BlueprintPipeline converts scene reconstructions (from [3D-RE-GEN](https://arxiv.org/abs/2512.17459)) into:
