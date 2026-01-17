@@ -33,8 +33,10 @@ if str(REPO_ROOT) not in sys.path:
 
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 from geniesim_adapter.local_framework import (
+    DataCollectionResult,
+    GenieSimConfig,
+    GenieSimLocalFramework,
     run_geniesim_preflight_or_exit,
-    run_local_data_collection,
 )
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.validation.entrypoint_checks import validate_required_env_vars
@@ -339,6 +341,115 @@ def _validate_bundle_schemas(payloads: Dict[str, Any]) -> None:
         )
 
 
+def _handshake_geniesim_server(
+    framework: GenieSimLocalFramework,
+    *,
+    expected_server_version: str,
+    required_capabilities: set[str],
+    connection_hint: str,
+    startup_hint: str,
+) -> Dict[str, Any]:
+    try:
+        server_info = framework.verify_server_capabilities(
+            expected_server_version=expected_server_version,
+            required_capabilities=sorted(required_capabilities),
+        )
+    except RuntimeError as exc:
+        required_list = ", ".join(sorted(required_capabilities))
+        raise RuntimeError(
+            "Genie Sim server capability handshake failed. "
+            f"Required capabilities: {required_list}. "
+            "Ensure the server exposes the GET_CHECKER_STATUS endpoint and "
+            f"supports Genie Sim API {expected_server_version}. "
+            f"Connection: {connection_hint}. "
+            f"Start the server with: {startup_hint}. "
+            f"Details: {exc}"
+        ) from exc
+    return server_info
+
+
+def _run_local_data_collection_with_handshake(
+    *,
+    scene_manifest: Dict[str, Any],
+    task_config: Dict[str, Any],
+    output_dir: Path,
+    robot_type: str,
+    episodes_per_task: int,
+    expected_server_version: str,
+    required_capabilities: set[str],
+    verbose: bool = True,
+) -> DataCollectionResult:
+    config = GenieSimConfig.from_env()
+    config.robot_type = robot_type
+    config.episodes_per_task = episodes_per_task
+    config.recording_dir = output_dir / "recordings"
+    framework = GenieSimLocalFramework(config, verbose=verbose)
+    connection_hint = f"{config.host}:{config.port}"
+    startup_hint = (
+        f"{config.isaac_sim_path}/python.sh "
+        f"{config.geniesim_root}/source/data_collection/scripts/data_collector_server.py "
+        f"--headless --port {config.port}"
+    )
+    scene_usd = scene_manifest.get("usd_path")
+    server_info: Dict[str, Any] = {}
+
+    def _handshake_failure(message: str) -> DataCollectionResult:
+        result = DataCollectionResult(
+            success=False,
+            task_name=task_config.get("name", "unknown"),
+        )
+        result.errors.append(message)
+        return result
+
+    if framework.is_server_running():
+        if not framework.connect():
+            return _handshake_failure(
+                "Unable to connect to the Genie Sim server. "
+                f"Verify the server is reachable at {connection_hint}."
+            )
+        try:
+            server_info = _handshake_geniesim_server(
+                framework,
+                expected_server_version=expected_server_version,
+                required_capabilities=required_capabilities,
+                connection_hint=connection_hint,
+                startup_hint=startup_hint,
+            )
+            result = framework.run_data_collection(
+                task_config,
+                scene_manifest,
+            )
+        except RuntimeError as exc:
+            result = _handshake_failure(str(exc))
+        finally:
+            framework.disconnect()
+    else:
+        try:
+            with framework.server_context(Path(scene_usd) if scene_usd else None) as fw:
+                server_info = _handshake_geniesim_server(
+                    fw,
+                    expected_server_version=expected_server_version,
+                    required_capabilities=required_capabilities,
+                    connection_hint=connection_hint,
+                    startup_hint=startup_hint,
+                )
+                result = fw.run_data_collection(
+                    task_config,
+                    scene_manifest,
+                )
+        except RuntimeError as exc:
+            result = _handshake_failure(str(exc))
+
+    if not result.server_info and server_info:
+        result.server_info = server_info
+
+    if result.success and result.recording_dir:
+        lerobot_dir = output_dir / "lerobot"
+        framework.export_to_lerobot(result.recording_dir, lerobot_dir)
+
+    return result
+
+
 def main() -> int:
     validate_required_env_vars(
         {
@@ -437,15 +548,15 @@ def main() -> int:
     _write_local_json(scene_manifest_path, scene_manifest)
     _write_local_json(task_config_path, task_config_local)
 
-    local_run_result = run_local_data_collection(
-        scene_manifest_path=scene_manifest_path,
-        task_config_path=task_config_path,
+    local_run_result = _run_local_data_collection_with_handshake(
+        scene_manifest=scene_manifest,
+        task_config=task_config_local,
         output_dir=output_dir,
         robot_type=robot_type,
         episodes_per_task=episodes_per_task,
         verbose=True,
         expected_server_version=EXPECTED_GENIESIM_SERVER_VERSION,
-        required_capabilities=sorted(REQUIRED_GENIESIM_CAPABILITIES),
+        required_capabilities=REQUIRED_GENIESIM_CAPABILITIES,
     )
     local_run_end = datetime.utcnow()
     server_info = getattr(local_run_result, "server_info", {})
@@ -468,6 +579,7 @@ def main() -> int:
             "episodes_passed": getattr(local_run_result, "episodes_passed", 0)
             if local_run_result
             else 0,
+            "errors": getattr(local_run_result, "errors", []) if local_run_result else [],
         }
         job_status = "failed"
 
