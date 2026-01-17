@@ -26,12 +26,12 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 
-# P2-3 FIX: Implement actual trajectory analysis logic
+# Implement actual trajectory analysis logic
 class TrajectoryOptimalityAnalyzer:
     """
     Analyzes trajectory quality for robot manipulation tasks.
 
-    P2-3 FIX: This class provides actual implementation, not just config generation.
+    This class provides actual implementation, not just config generation.
     """
 
     def __init__(self, jerk_threshold_excellent: float = 100.0, jerk_threshold_good: float = 300.0):
@@ -227,7 +227,7 @@ def create_default_trajectory_optimality_exporter(
     """
     Create trajectory optimality analysis config and utilities (DEFAULT).
 
-    P2-3 FIX: Now generates actual runtime utilities, not just config.
+    Now generates actual runtime utilities, not just config.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -259,7 +259,7 @@ def create_default_trajectory_optimality_exporter(
             "value": "Previously $10,000-$25,000 upsell - NOW FREE BY DEFAULT",
         }, f, indent=2)
 
-    # P2-3 FIX: Write runtime analysis utilities
+    # Write runtime analysis utilities
     utils_path = output_dir / "trajectory_analysis_utils.py"
     with open(utils_path, "w") as f:
         f.write("""# Auto-generated trajectory analysis utilities

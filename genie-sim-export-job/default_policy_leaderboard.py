@@ -25,12 +25,12 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 
-# P2-3 FIX: Implement actual policy leaderboard logic
+# Implement actual policy leaderboard logic
 class PolicyLeaderboardAnalyzer:
     """
     Analyzes and compares policy performance with statistical rigor.
 
-    P2-3 FIX: This class provides actual implementation, not just config generation.
+    This class provides actual implementation, not just config generation.
     """
 
     def __init__(self, confidence_level: float = 0.95, significance_alpha: float = 0.05):
@@ -251,7 +251,7 @@ def create_default_policy_leaderboard_exporter(
     """
     Create policy leaderboard config and utilities (DEFAULT).
 
-    P2-3 FIX: Now generates actual runtime utilities, not just config.
+    Now generates actual runtime utilities, not just config.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -293,7 +293,7 @@ def create_default_policy_leaderboard_exporter(
             "value": "Previously $20,000-$40,000 upsell - NOW FREE BY DEFAULT",
         }, f, indent=2)
 
-    # P2-3 FIX: Write runtime analysis utilities
+    # Write runtime analysis utilities
     utils_path = output_dir / "policy_leaderboard_utils.py"
     with open(utils_path, "w") as f:
         f.write("""# Auto-generated policy leaderboard utilities

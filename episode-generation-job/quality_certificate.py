@@ -154,7 +154,7 @@ class Sim2RealMetrics:
 @dataclass
 class QualityWeights:
     """
-    P2-2 FIX: Configurable weights for quality score computation.
+    Configurable weights for quality score computation.
 
     Allows tuning quality scoring for different use cases:
     - Production training (prioritize safety and task success)
@@ -268,7 +268,7 @@ class QualityCertificate:
     diversity_metrics: DiversityMetrics = field(default_factory=DiversityMetrics)
     sim2real_metrics: Sim2RealMetrics = field(default_factory=Sim2RealMetrics)
 
-    # P2-2 FIX: Configurable quality weights
+    # Configurable quality weights
     quality_weights: QualityWeights = field(default_factory=QualityWeights)
 
     # Overall scores
@@ -287,7 +287,7 @@ class QualityCertificate:
 
     def compute_overall_quality_score(self) -> float:
         """
-        P2-2 FIX: Compute overall quality score using configurable weights.
+        Compute overall quality score using configurable weights.
 
         Uses the quality_weights field to determine relative importance of
         different quality aspects. Allows tuning for different use cases.
@@ -313,7 +313,7 @@ class QualityCertificate:
         return overall
 
     def _compute_trajectory_score(self) -> float:
-        """P2-2 FIX: Compute trajectory quality score using configurable weights."""
+        """Compute trajectory quality score using configurable weights."""
         tm = self.trajectory_metrics
         w = self.quality_weights
 
@@ -333,7 +333,7 @@ class QualityCertificate:
         return w.smoothness * smoothness + w.safety * safety + w.feasibility * feasibility
 
     def _compute_task_score(self) -> float:
-        """P2-2 FIX: Compute task quality score using configurable weights."""
+        """Compute task quality score using configurable weights."""
         tm = self.task_metrics
         w = self.quality_weights
 
@@ -344,7 +344,7 @@ class QualityCertificate:
         return w.goal_achievement * goal + w.skill_correctness * skill + w.constraint_satisfaction * constraints
 
     def _compute_visual_score(self) -> float:
-        """P2-2 FIX: Compute visual quality score using configurable weights."""
+        """Compute visual quality score using configurable weights."""
         vm = self.visual_metrics
         w = self.quality_weights
 
@@ -360,13 +360,13 @@ class QualityCertificate:
         return w.target_visibility * visibility + w.image_sharpness * sharpness + w.viewpoint_diversity * diversity
 
     def _compute_sim2real_score(self) -> float:
-        """P2-2 FIX: Compute sim-to-real quality score using configurable weights."""
+        """Compute sim-to-real quality score using configurable weights."""
         s2r = self.sim2real_metrics
         w = self.quality_weights
         return w.physics_plausibility * s2r.physics_plausibility_score + w.timing_realism * s2r.timing_realism_score
 
     def _compute_diversity_score(self) -> float:
-        """P2-2 FIX: Compute diversity score using configurable weights."""
+        """Compute diversity score using configurable weights."""
         dm = self.diversity_metrics
         w = self.quality_weights
         return w.trajectory_novelty * dm.trajectory_novelty + w.state_space_coverage * dm.state_space_coverage

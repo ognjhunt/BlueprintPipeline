@@ -408,7 +408,7 @@ class GenieSimGRPCClient:
         """
         Send command to Genie Sim server.
 
-        P0-3 FIX: Now uses real gRPC calls instead of mock responses.
+        Now uses real gRPC calls instead of mock responses.
 
         Args:
             command: Command type
@@ -424,7 +424,7 @@ class GenieSimGRPCClient:
             logger.warning(f"gRPC not available - cannot send command: {command.name}")
             return {"success": False, "error": "gRPC not available"}
 
-        # P0-3 FIX: Real gRPC implementation
+        # Real gRPC implementation
         try:
             # Convert to gRPC command type
             grpc_command = GrpcCommandType(command.value)
@@ -462,7 +462,7 @@ class GenieSimGRPCClient:
         """
         Get current observation from simulation.
 
-        P0-3 FIX: Uses real gRPC GetObservation call.
+        Uses real gRPC GetObservation call.
 
         Returns:
             Dictionary with robot_state, scene_state, timestamp
@@ -497,7 +497,7 @@ class GenieSimGRPCClient:
         """
         Set robot joint positions.
 
-        P0-3 FIX: Uses real gRPC SetJointPosition call.
+        Uses real gRPC SetJointPosition call.
 
         Args:
             positions: Target joint positions
@@ -525,7 +525,7 @@ class GenieSimGRPCClient:
         """
         Get current joint positions.
 
-        P0-3 FIX: Uses real gRPC GetJointPosition call.
+        Uses real gRPC GetJointPosition call.
 
         Returns:
             List of joint positions or None
@@ -550,7 +550,7 @@ class GenieSimGRPCClient:
         """
         Get camera image.
 
-        P0-3 FIX: Integrated with GetObservation for camera data.
+        Integrated with GetObservation for camera data.
 
         Args:
             camera_id: Camera identifier
@@ -570,7 +570,7 @@ class GenieSimGRPCClient:
         """
         Execute a trajectory on the robot.
 
-        P0-3 FIX: Uses real gRPC SetTrajectory call with cuRobo-planned trajectory.
+        Uses real gRPC SetTrajectory call with cuRobo-planned trajectory.
 
         Args:
             trajectory: List of waypoints with positions, velocities, timestamps
@@ -610,7 +610,7 @@ class GenieSimGRPCClient:
         """
         Start recording an episode.
 
-        P0-3 FIX: Uses real gRPC StartRecording call.
+        Uses real gRPC StartRecording call.
 
         Args:
             episode_id: Unique episode identifier
@@ -642,7 +642,7 @@ class GenieSimGRPCClient:
         """
         Stop recording current episode.
 
-        P0-3 FIX: Uses real gRPC StopRecording call.
+        Uses real gRPC StopRecording call.
 
         Returns:
             True if recording stopped
@@ -663,7 +663,7 @@ class GenieSimGRPCClient:
         """
         Reset the simulation environment.
 
-        P0-3 FIX: Uses real gRPC Reset call.
+        Uses real gRPC Reset call.
 
         Returns:
             True if reset successful
@@ -1284,7 +1284,7 @@ class GenieSimLocalFramework:
         """
         Generate trajectory using cuRobo motion planning.
 
-        P0-4 FIX: Now uses actual cuRobo GPU-accelerated motion planning
+        Now uses actual cuRobo GPU-accelerated motion planning
         for collision-free trajectories instead of linear interpolation.
 
         Args:
@@ -1308,7 +1308,7 @@ class GenieSimLocalFramework:
         obstacles = self._get_scene_obstacles(task, initial_obs)
 
         # =====================================================================
-        # P0-4 FIX: Use cuRobo for real motion planning
+        # Use cuRobo for real motion planning
         # =====================================================================
         if production_mode and not (CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo):
             raise RuntimeError(
@@ -1418,7 +1418,7 @@ class GenieSimLocalFramework:
         """
         Generate collision-free trajectory using cuRobo.
 
-        P0-4 FIX: Real cuRobo GPU-accelerated motion planning.
+        Real cuRobo GPU-accelerated motion planning.
 
         This implements multi-phase planning:
         1. Approach phase: Move to pre-grasp position

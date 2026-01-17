@@ -2,7 +2,7 @@
 """
 Startup validation utilities for pipeline jobs.
 
-P0-7 FIX: Centralized credential and environment validation to fail fast
+Centralized credential and environment validation to fail fast
 before jobs start executing.
 """
 
@@ -53,7 +53,7 @@ def validate_gcs_credentials() -> Dict[str, any]:
     """
     Validate GCS credentials and bucket access.
 
-    P0-7 FIX: Verify GCS credentials work by testing bucket access.
+    Verify GCS credentials work by testing bucket access.
 
     Returns:
         Dict with validation results
@@ -97,7 +97,7 @@ def validate_gemini_credentials(required: bool = False) -> Dict[str, any]:
     """
     Validate Gemini API credentials.
 
-    P0-7 FIX: Verify GEMINI_API_KEY is set if LLM features enabled.
+    Verify GEMINI_API_KEY is set if LLM features enabled.
 
     Args:
         required: If True, raise ValidationError if credentials missing
@@ -143,7 +143,7 @@ def validate_all_credentials(
     """
     Validate all credentials at job startup.
 
-    P0-7 FIX: Comprehensive credential validation before job execution.
+    Comprehensive credential validation before job execution.
 
     Args:
         require_geniesim: Raise error if Genie Sim credentials missing
@@ -220,7 +220,7 @@ def validate_and_fail_fast(
     """
     Validate credentials and exit if validation fails.
 
-    P0-7 FIX: Fail fast helper for job entry points.
+    Fail fast helper for job entry points.
 
     Args:
         job_name: Name of the job for logging

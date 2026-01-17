@@ -100,7 +100,7 @@ class GenerationBackend(str, Enum):
     HYBRID = "hybrid"  # Both Isaac Sim + cuRobo
 
 
-# P2-4 FIX: Define supported robot types for validation
+# Define supported robot types for validation
 class SupportedRobotType(str, Enum):
     """Supported robot types for Genie Sim 3.0."""
 
@@ -137,7 +137,7 @@ class SupportedRobotType(str, Enum):
     CUSTOM = "custom"  # User-provided URDF
 
 
-# P2-4 FIX: Helper function to validate robot type
+# Helper function to validate robot type
 def validate_robot_type(robot_type: str) -> None:
     """
     Validate that robot_type is a supported value.
@@ -175,12 +175,12 @@ class GenerationParams:
     enable_validation: bool = True
     filter_failed_episodes: bool = True
 
-    # Robot configuration - P2-4 FIX: Validated robot type
+    # Robot configuration - Validated robot type
     robot_type: str = "franka"  # franka, ur10, fetch, etc.
     control_frequency_hz: float = 30.0
 
     def __post_init__(self):
-        """P2-4 FIX: Validate robot_type after initialization."""
+        """Validate robot_type after initialization."""
         validate_robot_type(self.robot_type)
 
     # Visual observations
@@ -575,7 +575,7 @@ class GenieSimClient:
         self._circuit_breaker = None
         self._rate_limiter = None
 
-        # P0-1 FIX: Validate endpoint is reachable on initialization
+        # Validate endpoint is reachable on initialization
         if validate_on_init and not self.mock_mode:
             self._validate_local_endpoint()
 
@@ -936,7 +936,7 @@ class GenieSimClient:
                                 data = await response.json()
                                 error_msg = data.get("error", f"HTTP {response.status}")
                             except (json.JSONDecodeError, aiohttp.ContentTypeError, KeyError) as parse_err:
-                                # LABS P1 FIX: Replace bare except with specific exceptions
+                                # Replace bare except with specific exceptions
                                 logger.debug(f"Could not parse error response: {parse_err}")
                                 error_msg = f"HTTP {response.status}"
 
@@ -1213,7 +1213,7 @@ class GenieSimClient:
         """
         Wait for job to complete (blocking).
 
-        P0-2 FIX: Added timeout and exponential backoff to prevent infinite polling.
+        Added timeout and exponential backoff to prevent infinite polling.
 
         Args:
             job_id: Job identifier
@@ -1233,7 +1233,7 @@ class GenieSimClient:
             if callback:
                 callback(progress)
             return progress
-        # P0-2 FIX: Set default timeout to 4 hours
+        # Set default timeout to 4 hours
         if max_wait_time is None:
             max_wait_time = 14400.0  # 4 hours for large jobs
 
@@ -1247,7 +1247,7 @@ class GenieSimClient:
         max_poll_interval = 300  # Cap at 5 minutes
 
         while True:
-            # P0-2 FIX: Check if we've exceeded max wait time
+            # Check if we've exceeded max wait time
             elapsed_time = time.time() - start_time
             if elapsed_time > max_wait_time:
                 error_msg = (
@@ -1279,7 +1279,7 @@ class GenieSimClient:
             elif progress.status == JobStatus.CANCELLED:
                 raise GenieSimAPIError(f"Job {job_id} was cancelled")
 
-            # P0-2 FIX: Use exponential backoff for polling interval
+            # Use exponential backoff for polling interval
             if use_exponential_backoff:
                 # Gradually increase polling interval to reduce API load
                 current_poll_interval = min(current_poll_interval * 1.2, max_poll_interval)
@@ -1400,7 +1400,7 @@ class GenieSimClient:
                     error_data = response.json()
                     error_msg = error_data.get("error", f"HTTP {response.status_code}")
                 except (json.JSONDecodeError, requests.exceptions.JSONDecodeError, KeyError) as parse_err:
-                    # LABS P1 FIX: Replace bare except with specific exceptions
+                    # Replace bare except with specific exceptions
                     logger.debug(f"Could not parse error response: {parse_err}")
                     error_msg = f"HTTP {response.status_code}"
                 raise GenieSimAPIError(f"Failed to download episodes: {error_msg}")
@@ -1892,7 +1892,7 @@ class GenieSimClient:
                     error_data = response.json()
                     error_msg = error_data.get("error", f"HTTP {response.status_code}")
                 except (json.JSONDecodeError, requests.exceptions.JSONDecodeError, KeyError) as parse_err:
-                    # LABS P1 FIX: Replace bare except with specific exceptions
+                    # Replace bare except with specific exceptions
                     logger.debug(f"Could not parse error response: {parse_err}")
                     error_msg = f"HTTP {response.status_code}"
                 raise GenieSimAPIError(f"Batch submission failed: {error_msg}")
