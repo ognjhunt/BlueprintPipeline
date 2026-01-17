@@ -39,6 +39,7 @@ if str(REPO_ROOT) not in sys.path:
 # Add current directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from monitoring.alerting import send_alert
 from prepare_dwm_bundle import DWMJobConfig, DWMPreparationJob
 from models import TrajectoryType, HandActionType
 from tools.validation.entrypoint_checks import (
@@ -287,6 +288,16 @@ def main():
         except Exception as e:
             print(f"[DWM-ENTRYPOINT] ERROR: {e}")
             traceback.print_exc()
+            send_alert(
+                event_type="dwm_job_fatal_exception",
+                summary="DWM preparation job failed with an unhandled exception",
+                details={
+                    "job": "dwm-preparation-job",
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                },
+                severity=os.getenv("ALERT_JOB_EXCEPTION_SEVERITY", "critical"),
+            )
             sys.exit(1)
 
 
