@@ -1198,7 +1198,10 @@ def run_ultrashape_reconstruction(
                     import shutil
                     shutil.rmtree(coarse_dir)
             except Exception:
-                pass  # Ignore cleanup errors
+                print(
+                    f"[VAR-PIPELINE] WARNING: Failed to clean up coarse directory {coarse_dir}",
+                    file=sys.stderr,
+                )
 
             print(f"[VAR-PIPELINE] UltraShape complete: {asset_name} -> {refined_glb_path}")
             return True, refined_glb_path, None
