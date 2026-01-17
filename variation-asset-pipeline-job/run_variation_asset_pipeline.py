@@ -79,6 +79,9 @@ except ImportError:
 
 GCS_ROOT = Path("/mnt/gcs")
 
+# usd_from_gltf timeout (seconds)
+USD_FROM_GLTF_TIMEOUT_S = float(os.getenv("USD_FROM_GLTF_TIMEOUT_S", "300"))
+
 # Gemini model for image generation (Nano Banana Pro / Gemini 3.0 Pro Image Preview)
 GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
 
@@ -1222,16 +1225,36 @@ def convert_glb_to_usdz(glb_path: Path, usdz_path: Path) -> bool:
         return False
 
     usdz_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [usd_from_gltf, str(glb_path), "-o", str(usdz_path)]
     try:
-        result = subprocess.run(
-            [usd_from_gltf, str(glb_path), "-o", str(usdz_path)],
+        subprocess.run(
+            command,
             check=True,
             capture_output=True,
-            text=True
+            text=True,
+            timeout=USD_FROM_GLTF_TIMEOUT_S,
         )
         return True
+    except subprocess.TimeoutExpired:
+        command_str = " ".join(command)
+        print(
+            "[VAR-PIPELINE] ERROR: usd_from_gltf timed out after "
+            f"{USD_FROM_GLTF_TIMEOUT_S}s: {command_str}",
+            file=sys.stderr,
+        )
+        return False
     except subprocess.CalledProcessError as e:
-        print(f"[VAR-PIPELINE] usd_from_gltf failed: {e.stderr}", file=sys.stderr)
+        details = []
+        if e.stderr:
+            details.append(f"stderr: {e.stderr.strip()}")
+        if e.stdout:
+            details.append(f"stdout: {e.stdout.strip()}")
+        detail_str = f" ({'; '.join(details)})" if details else ""
+        print(
+            f"[VAR-PIPELINE] usd_from_gltf failed with exit code {e.returncode}"
+            f"{detail_str}",
+            file=sys.stderr,
+        )
         return False
 
 
