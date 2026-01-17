@@ -52,6 +52,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import aiohttp
 import requests
 
+from tools.error_handling import CircuitBreaker, CircuitBreakerOpen
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -368,6 +370,12 @@ class GenieSimAuthenticationError(GenieSimAPIError):
     pass
 
 
+class GenieSimClientError(GenieSimAPIError):
+    """Client-side request error (4xx)."""
+
+    pass
+
+
 class GenieSimConfigurationError(GenieSimAPIError):
     """Hosted API usage disabled or misconfigured."""
 
@@ -617,7 +625,49 @@ class GenieSimClient:
         self._rest_client = GenieSimRestClient(api_key=self.api_key)
 
         # GAP-EH-002 FIX: Add circuit breaker to prevent cascading failures
-        self._circuit_breaker = None
+        breaker_enabled = os.getenv("GENIESIM_CIRCUIT_BREAKER_ENABLED", "true").lower() == "true"
+        if not self.mock_mode and breaker_enabled:
+            failure_threshold = int(os.getenv("GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"))
+            success_threshold = int(os.getenv("GENIESIM_CIRCUIT_BREAKER_SUCCESS_THRESHOLD", "2"))
+            recovery_timeout = float(os.getenv("GENIESIM_CIRCUIT_BREAKER_RECOVERY_TIMEOUT", "30"))
+            failure_window = float(os.getenv("GENIESIM_CIRCUIT_BREAKER_FAILURE_WINDOW", "60"))
+
+            breaker_name = f"geniesim:{self.local_endpoint}"
+
+            def _log_breaker_open(name: str, failure_count: int) -> None:
+                logger.warning(
+                    "Genie Sim circuit breaker '%s' opened after %d failures (endpoint: %s)",
+                    name,
+                    failure_count,
+                    self.local_endpoint,
+                )
+
+            def _log_breaker_half_open(name: str) -> None:
+                logger.info(
+                    "Genie Sim circuit breaker '%s' is half-open (endpoint: %s)",
+                    name,
+                    self.local_endpoint,
+                )
+
+            def _log_breaker_closed(name: str) -> None:
+                logger.info(
+                    "Genie Sim circuit breaker '%s' closed (endpoint: %s)",
+                    name,
+                    self.local_endpoint,
+                )
+
+            self._circuit_breaker = CircuitBreaker(
+                breaker_name,
+                failure_threshold=failure_threshold,
+                success_threshold=success_threshold,
+                recovery_timeout=recovery_timeout,
+                failure_window=failure_window,
+                on_open=_log_breaker_open,
+                on_half_open=_log_breaker_half_open,
+                on_close=_log_breaker_closed,
+            )
+        else:
+            self._circuit_breaker = None
         self._rate_limiter = None
 
         # Validate endpoint is reachable on initialization
@@ -926,6 +976,7 @@ class GenieSimClient:
         # GAP-ASYNC-002 FIX: Wrap in circuit breaker if available
         async def _make_async_request():
             for attempt in range(self.max_retries):
+                self._check_circuit_breaker()
                 try:
                     session = await self._get_async_session()
                     async with session.post(
@@ -1002,21 +1053,25 @@ class GenieSimClient:
         try:
             # Use async request with circuit breaker protection
             # Circuit breaker doesn't support async directly, so we check state before proceeding
-            if self._circuit_breaker and self._circuit_breaker.is_open():
-                raise GenieSimAPIError("Circuit breaker is open - service temporarily unavailable")
+            self._check_circuit_breaker()
 
             result = await _make_async_request()
 
             # Mark circuit breaker as healthy on success
             if self._circuit_breaker and result.success:
-                self._circuit_breaker.mark_success()
+                self._record_circuit_breaker_success()
 
             return result
 
+        except CircuitBreakerOpen as e:
+            logger.error(f"Async job submission blocked: {e}")
+            return JobSubmissionResult(
+                success=False,
+                message=str(e),
+            )
         except GenieSimAPIError as e:
             # Mark circuit breaker failure
-            if self._circuit_breaker:
-                self._circuit_breaker.mark_failure()
+            self._record_circuit_breaker_failure(e)
             logger.error(f"Async job submission failed: {e}")
             return JobSubmissionResult(
                 success=False,
@@ -1024,8 +1079,7 @@ class GenieSimClient:
             )
         except Exception as e:
             # Mark circuit breaker failure for unexpected errors
-            if self._circuit_breaker:
-                self._circuit_breaker.mark_failure()
+            self._record_circuit_breaker_failure(e)
             logger.error(f"Async job submission failed: {e}")
             return JobSubmissionResult(
                 success=False,
@@ -1144,6 +1198,7 @@ class GenieSimClient:
 
         async def _make_async_request():
             for attempt in range(self.max_retries):
+                self._check_circuit_breaker()
                 try:
                     session = await self._get_async_session()
                     async with session.get(
@@ -1163,13 +1218,15 @@ class GenieSimClient:
                             continue
                         elif response.status != 200:
                             if attempt == self.max_retries - 1:
-                                raise GenieSimAPIError(f"HTTP {response.status}")
+                                if response.status >= 500:
+                                    raise GenieSimAPIError(f"HTTP {response.status}")
+                                raise GenieSimClientError(f"HTTP {response.status}")
                             if response.status >= 500:
                                 base_wait = 2 ** attempt
                                 await asyncio.sleep(min(base_wait, 30.0))
                                 continue
                             else:
-                                raise GenieSimAPIError(f"HTTP {response.status}")
+                                raise GenieSimClientError(f"HTTP {response.status}")
 
                         # Validate JSON response
                         try:
@@ -1201,30 +1258,29 @@ class GenieSimClient:
 
         try:
             # Check circuit breaker before making async request
-            if self._circuit_breaker and self._circuit_breaker.is_open():
-                raise GenieSimAPIError("Circuit breaker is open - service temporarily unavailable")
+            self._check_circuit_breaker()
 
             result = await _make_async_request()
 
             # Mark circuit breaker as healthy on success
-            if self._circuit_breaker:
-                self._circuit_breaker.mark_success()
+            self._record_circuit_breaker_success()
 
             return result
 
         except (GenieSimJobNotFoundError, GenieSimAuthenticationError) as e:
             # Don't mark circuit breaker for client errors
             raise
+        except CircuitBreakerOpen as e:
+            logger.error(f"Async status check blocked: {e}")
+            raise GenieSimAPIError(str(e)) from e
         except GenieSimAPIError as e:
             # Mark circuit breaker failure
-            if self._circuit_breaker:
-                self._circuit_breaker.mark_failure()
+            self._record_circuit_breaker_failure(e)
             logger.error(f"Failed to get job status (async): {e}")
             raise
         except Exception as e:
             # Mark circuit breaker failure for unexpected errors
-            if self._circuit_breaker:
-                self._circuit_breaker.mark_failure()
+            self._record_circuit_breaker_failure(e)
             logger.error(f"Failed to get job status (async): {e}")
             raise GenieSimAPIError(f"Status check failed: {e}")
 
@@ -1573,39 +1629,89 @@ class GenieSimClient:
         if self._rate_limiter:
             self._rate_limiter.acquire()
 
-        # Define the actual request function
-        def make_request():
-            for attempt in range(self.max_retries):
-                try:
-                    response = self.session.request(
-                        method,
-                        url,
-                        timeout=self.timeout,
-                        **kwargs,
-                    )
-                    response.raise_for_status()
-                    return response
+        last_exception: Optional[Exception] = None
+        for attempt in range(self.max_retries):
+            self._check_circuit_breaker()
+            try:
+                response = self.session.request(
+                    method,
+                    url,
+                    timeout=self.timeout,
+                    **kwargs,
+                )
+                response.raise_for_status()
+                self._record_circuit_breaker_success()
+                return response
 
-                except requests.exceptions.RequestException as e:
-                    if attempt == self.max_retries - 1:
-                        raise GenieSimAPIError(f"Request failed after {self.max_retries} retries: {e}")
+            except requests.exceptions.HTTPError as e:
+                last_exception = e
+                status_code = e.response.status_code if e.response else None
+                if status_code is not None and 400 <= status_code < 500:
+                    raise GenieSimClientError(
+                        f"HTTP {status_code}: {e}"
+                    ) from e
+            except requests.exceptions.RequestException as e:
+                last_exception = e
 
-                    # Enhanced exponential backoff with jitter
-                    base_wait = 2 ** attempt
-                    jitter = base_wait * 0.1 * (2 * time.time() % 1 - 0.5)  # ±5% jitter
-                    wait_time = min(base_wait + jitter, 60.0)  # Cap at 60s
+            if attempt == self.max_retries - 1:
+                if last_exception is None:
+                    last_exception = GenieSimAPIError("Request failed without exception context.")
+                self._record_circuit_breaker_failure(last_exception)
+                raise GenieSimAPIError(
+                    f"Request failed after {self.max_retries} retries: {last_exception}"
+                ) from last_exception
 
-                    logger.warning(
-                        f"Request failed (attempt {attempt + 1}/{self.max_retries}), "
-                        f"retrying in {wait_time:.1f}s... Error: {e}"
-                    )
-                    time.sleep(wait_time)
+            # Enhanced exponential backoff with jitter
+            base_wait = 2 ** attempt
+            jitter = base_wait * 0.1 * (2 * time.time() % 1 - 0.5)  # ±5% jitter
+            wait_time = min(base_wait + jitter, 60.0)  # Cap at 60s
 
-        # Use circuit breaker if available
+            logger.warning(
+                f"Request failed (attempt {attempt + 1}/{self.max_retries}), "
+                f"retrying in {wait_time:.1f}s... Error: {last_exception}"
+            )
+            time.sleep(wait_time)
+
+        if last_exception is None:
+            last_exception = GenieSimAPIError("Request failed without exception context.")
+        self._record_circuit_breaker_failure(last_exception)
+        raise GenieSimAPIError(
+            f"Request failed after {self.max_retries} retries: {last_exception}"
+        ) from last_exception
+
+    def _check_circuit_breaker(self) -> None:
+        if not self._circuit_breaker:
+            return
+        if not self._circuit_breaker.allow_request():
+            time_until_retry = self._circuit_breaker.get_time_until_retry()
+            logger.warning(
+                "Circuit breaker '%s' open for Genie Sim endpoint %s; retry in %.1fs",
+                self._circuit_breaker.name,
+                self.local_endpoint,
+                time_until_retry,
+            )
+            raise CircuitBreakerOpen(self._circuit_breaker.name, time_until_retry)
+
+    def _record_circuit_breaker_success(self) -> None:
         if self._circuit_breaker:
-            return self._circuit_breaker.call(make_request)
-        else:
-            return make_request()
+            self._circuit_breaker.record_success()
+
+    def _record_circuit_breaker_failure(self, exc: Exception) -> None:
+        if self._circuit_breaker and self._should_record_failure(exc):
+            self._circuit_breaker.record_failure(exc)
+
+    def _should_record_failure(self, exc: Exception) -> bool:
+        if isinstance(exc, (CircuitBreakerOpen, GenieSimAuthenticationError, GenieSimJobNotFoundError, GenieSimClientError)):
+            return False
+        cause = exc.__cause__ or exc
+        if isinstance(cause, requests.exceptions.HTTPError):
+            response = cause.response
+            if response is not None and 400 <= response.status_code < 500:
+                return False
+        if isinstance(cause, aiohttp.ClientResponseError):
+            if 400 <= cause.status < 500:
+                return False
+        return True
 
     def cancel_job(self, job_id: str) -> bool:
         """
