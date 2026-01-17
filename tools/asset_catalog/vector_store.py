@@ -202,6 +202,7 @@ class PgVectorStore(BaseVectorStore):
     def upsert(self, records: Iterable[VectorRecord], namespace: Optional[str] = None) -> None:
         """Upsert records into pgvector."""
         import json as json_module
+        from psycopg2.extras import execute_values
 
         conn = self._get_connection()
         records_list = list(records)
@@ -209,19 +210,23 @@ class PgVectorStore(BaseVectorStore):
             return
 
         with conn.cursor() as cur:
+            rows = []
             for record in records_list:
                 embedding_str = "[" + ",".join(str(x) for x in record.embedding.tolist()) + "]"
                 metadata_json = json_module.dumps(record.metadata)
-                cur.execute(
-                    f"""
-                    INSERT INTO {self.collection} (id, embedding, metadata)
-                    VALUES (%s, %s::vector, %s::jsonb)
-                    ON CONFLICT (id) DO UPDATE SET
-                        embedding = EXCLUDED.embedding,
-                        metadata = EXCLUDED.metadata
-                    """,
-                    (record.id, embedding_str, metadata_json),
-                )
+                rows.append((record.id, embedding_str, metadata_json))
+            execute_values(
+                cur,
+                f"""
+                INSERT INTO {self.collection} (id, embedding, metadata)
+                VALUES %s
+                ON CONFLICT (id) DO UPDATE SET
+                    embedding = EXCLUDED.embedding,
+                    metadata = EXCLUDED.metadata
+                """,
+                rows,
+                template="(%s, %s::vector, %s::jsonb)",
+            )
             conn.commit()
 
     def query(
