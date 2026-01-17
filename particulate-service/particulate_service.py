@@ -20,6 +20,7 @@ Environment Variables:
     PARTICULATE_ROOT: Path to Particulate installation (default: /opt/particulate)
     PARTICULATE_DEBUG: Enable verbose logging (default: 0)
     PARTICULATE_DEBUG_TOKEN: Shared secret required for /debug access (default: unset)
+    PARTICULATE_MAX_GLB_BYTES: Max decoded GLB size (default: 52428800)
     PORT: Service port (default: 8080)
 
 Cloud Run Settings (REQUIRED):
@@ -32,6 +33,7 @@ Cloud Run Settings (REQUIRED):
 """
 
 import base64
+import binascii
 import hmac
 import io
 import json
@@ -68,6 +70,8 @@ TMP_ROOT = Path("/tmp/particulate")
 
 DEBUG_MODE = os.environ.get("PARTICULATE_DEBUG", "0") == "1"
 DEBUG_TOKEN = os.environ.get("PARTICULATE_DEBUG_TOKEN")
+PARTICULATE_MAX_GLB_BYTES = int(os.environ.get("PARTICULATE_MAX_GLB_BYTES", "52428800"))
+PARTICULATE_MAX_GLB_B64_CHARS = ((PARTICULATE_MAX_GLB_BYTES + 2) // 3) * 4
 
 # GPU lock for serialization
 _gpu_lock = threading.Semaphore(1)
@@ -95,6 +99,16 @@ def log(msg: str, level: str = "INFO") -> None:
     level_name = level.upper()
     log_level = getattr(logging, level_name, logging.INFO)
     logger.log(log_level, "[PARTICULATE-SERVICE] [%s] %s", level_name, msg)
+
+
+def _estimate_base64_decoded_size(encoded: str) -> int:
+    """Estimate decoded byte size from base64 string length."""
+    padding = 0
+    if encoded.endswith("=="):
+        padding = 2
+    elif encoded.endswith("="):
+        padding = 1
+    return (len(encoded) * 3) // 4 - padding
 
 
 # =============================================================================
@@ -829,12 +843,35 @@ def handle_request():
     glb_b64 = data.get("glb_base64")
     if not glb_b64:
         return jsonify({"error": "glb_base64 is required"}), 400
+    if not isinstance(glb_b64, str):
+        return jsonify({"error": "glb_base64 must be a base64 string"}), 400
+
+    b64_len = len(glb_b64)
+    estimated_bytes = _estimate_base64_decoded_size(glb_b64)
+    if b64_len > PARTICULATE_MAX_GLB_B64_CHARS or estimated_bytes > PARTICULATE_MAX_GLB_BYTES:
+        log(
+            (
+                f"[{request_id}] Rejected payload: b64_len={b64_len} "
+                f"estimated_bytes={estimated_bytes} limit_bytes={PARTICULATE_MAX_GLB_BYTES}"
+            ),
+            "WARNING",
+        )
+        return jsonify({"error": "Payload too large"}), 413
 
     # Decode GLB
     try:
-        glb_bytes = base64.b64decode(glb_b64)
+        glb_bytes = base64.b64decode(glb_b64, validate=True)
+        if len(glb_bytes) > PARTICULATE_MAX_GLB_BYTES:
+            log(
+                (
+                    f"[{request_id}] Rejected payload: decoded_bytes={len(glb_bytes)} "
+                    f"limit_bytes={PARTICULATE_MAX_GLB_BYTES}"
+                ),
+                "WARNING",
+            )
+            return jsonify({"error": "Payload too large"}), 413
         log(f"[{request_id}] GLB input: {len(glb_bytes)} bytes")
-    except Exception:
+    except binascii.Error:
         return jsonify({"error": "Invalid glb_base64"}), 400
 
     # Acquire GPU lock
