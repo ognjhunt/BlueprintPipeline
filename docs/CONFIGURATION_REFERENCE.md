@@ -2,6 +2,8 @@
 
 This document indexes configuration files and environment variables used across the BlueprintPipeline. It summarizes purpose, schema/fields, defaults, and validation expectations, and cross-references runtime-impacting docs.
 
+Genie Sim configuration is local-only: workflow settings and environment variables assume a local gRPC server running alongside the pipeline jobs.
+
 ## Configuration precedence & validation entrypoints
 
 - **Environment variables override JSON/YAML defaults** and are the primary runtime override mechanism; see the centralized list in `tools/config/ENVIRONMENT_VARIABLES.md` for defaults and supported values.【F:tools/config/ENVIRONMENT_VARIABLES.md†L1-L18】

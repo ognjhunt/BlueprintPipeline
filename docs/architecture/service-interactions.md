@@ -26,7 +26,7 @@ flowchart TB
 
     %% External systems
     gcs["GCS / Artifact Bucket"]
-    geniesimgrpc["Genie Sim gRPC Server"]
+    geniesimgrpc["Genie Sim gRPC Server\n(local-only)"]
     isaacsim["Isaac Sim Runtime"]
     llm["LLM Providers\n(Gemini/OpenAI)"]
     regen3dext["3D-RE-GEN\n(external capture)"]
@@ -59,5 +59,5 @@ flowchart TB
 
 Notes:
 - `interactive-job` depends on `particulate-service` for articulation detection.
-- `genie-sim-submit-job` talks to the Genie Sim gRPC server; the ports and health checks are tracked in `docs/GENIESIM_INTEGRATION.md`.
+- `genie-sim-submit-job` talks to the local Genie Sim gRPC server; the ports and health checks are tracked in `docs/GENIESIM_INTEGRATION.md`.
 - GCS (or the configured artifact bucket) is the shared persistence layer across stages, which underpins the marker-driven workflow checks described in `docs/PRODUCTION_E2E_VALIDATION.md`.
