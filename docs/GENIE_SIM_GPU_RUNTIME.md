@@ -28,7 +28,7 @@ These variables map to the same defaults referenced in
 - `ISAAC_SIM_PATH`: Path to Isaac Sim (default: `/isaac-sim`).
 - `GENIESIM_ROOT`: Path to the Genie Sim repository checkout (default: `/opt/geniesim`).
 - `GENIESIM_HOST`: gRPC host for the Genie Sim server (default: `localhost`).
-- `GENIESIM_PORT`: gRPC port for the Genie Sim server (default: `50051`).
+- `GENIESIM_PORT`: gRPC port for the Genie Sim server (defaults to the adapter port; set for non-local deployments).
 
 ## Optional Runtime Inputs
 

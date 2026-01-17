@@ -889,8 +889,8 @@ def create_channel(
     Create a gRPC channel.
 
     Args:
-        host: Server hostname (defaults to GENIESIM_HOST or "localhost")
-        port: Server port (defaults to GENIESIM_PORT or 50051)
+        host: Server hostname (defaults to GENIESIM_HOST or adapter default)
+        port: Server port (defaults to GENIESIM_PORT or adapter default)
         options: Optional channel options
 
     Returns:
@@ -899,10 +899,13 @@ def create_channel(
     if not GRPC_AVAILABLE:
         return None
 
+    if host is None or port is None:
+        from tools.geniesim_adapter.config import get_geniesim_host, get_geniesim_port
+
     if host is None:
-        host = os.getenv("GENIESIM_HOST", "localhost")
+        host = get_geniesim_host()
     if port is None:
-        port = int(os.getenv("GENIESIM_PORT", "50051"))
+        port = get_geniesim_port()
 
     if options is None:
         options = [
