@@ -50,7 +50,9 @@ See: https://github.com/huggingface/lerobot
 
 import json
 import os
+import shutil
 import sys
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -1135,148 +1137,189 @@ class LeRobotExporter:
         self.log("=" * 60)
 
         output_dir = Path(self.config.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_parent = output_dir.parent
+        output_parent.mkdir(parents=True, exist_ok=True)
+        temp_dir = output_parent / f".tmp_export_{output_dir.name}_{uuid.uuid4().hex}"
 
-        # Create directories
-        meta_dir = output_dir / "meta"
-        data_dir = output_dir / "data"
-        meta_dir.mkdir(exist_ok=True)
-        data_dir.mkdir(exist_ok=True)
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=False)
 
-        # P1-13 FIX: Validate episode completeness before export
-        self.log("Validating episode completeness...")
-        incomplete = self._validate_episode_completeness()
-        if incomplete:
-            self.log(f"  WARNING: Found {len(incomplete)} incomplete episodes:", "WARNING")
-            for ep_idx, errors in incomplete[:3]:  # Show first 3
-                self.log(f"    Episode {ep_idx}:", "WARNING")
-                for error in errors[:3]:  # Show first 3 errors per episode
-                    self.log(f"      - {error}", "WARNING")
-            if len(incomplete) > 3:
-                self.log(f"    ... and {len(incomplete) - 3} more episodes with issues", "WARNING")
-        else:
-            self.log("  All episodes are complete")
+            # Create directories
+            meta_dir = temp_dir / "meta"
+            data_dir = temp_dir / "data"
+            meta_dir.mkdir(exist_ok=True)
+            data_dir.mkdir(exist_ok=True)
 
-        # P1-14 FIX: Validate data pack tier compliance
-        self.log("Validating data pack tier compliance...")
-        non_compliant = self._validate_data_pack_tier_compliance()
-        if non_compliant:
-            self.log(f"  WARNING: Found {len(non_compliant)} tier-non-compliant episodes:", "WARNING")
-            for ep_idx, errors in non_compliant[:3]:  # Show first 3
-                self.log(f"    Episode {ep_idx}:", "WARNING")
-                for error in errors[:2]:  # Show first 2 errors per episode
-                    self.log(f"      - {error}", "WARNING")
-            if len(non_compliant) > 3:
-                self.log(f"    ... and {len(non_compliant) - 3} more episodes", "WARNING")
-        else:
-            self.log(f"  All episodes comply with '{self.config.data_pack_tier}' tier requirements")
+            # P1-13 FIX: Validate episode completeness before export
+            self.log("Validating episode completeness...")
+            incomplete = self._validate_episode_completeness()
+            if incomplete:
+                self.log(f"  WARNING: Found {len(incomplete)} incomplete episodes:", "WARNING")
+                for ep_idx, errors in incomplete[:3]:  # Show first 3
+                    self.log(f"    Episode {ep_idx}:", "WARNING")
+                    for error in errors[:3]:  # Show first 3 errors per episode
+                        self.log(f"      - {error}", "WARNING")
+                if len(incomplete) > 3:
+                    self.log(f"    ... and {len(incomplete) - 3} more episodes with issues", "WARNING")
+            else:
+                self.log("  All episodes are complete")
 
-        # P1-15 FIX: Validate camera calibration matrices
-        self.log("Validating camera calibration matrices...")
-        bad_calibrations = self._validate_camera_calibration()
-        if bad_calibrations:
-            self.log(f"  WARNING: Found {len(bad_calibrations)} episodes with invalid calibrations:", "WARNING")
-            for ep_idx, errors in bad_calibrations[:3]:  # Show first 3
-                self.log(f"    Episode {ep_idx}:", "WARNING")
-                for error in errors[:2]:  # Show first 2 errors per episode
-                    self.log(f"      - {error}", "WARNING")
-            if len(bad_calibrations) > 3:
-                self.log(f"    ... and {len(bad_calibrations) - 3} more episodes", "WARNING")
-        else:
-            self.log("  All calibration matrices are valid")
+            # P1-14 FIX: Validate data pack tier compliance
+            self.log("Validating data pack tier compliance...")
+            non_compliant = self._validate_data_pack_tier_compliance()
+            if non_compliant:
+                self.log(f"  WARNING: Found {len(non_compliant)} tier-non-compliant episodes:", "WARNING")
+                for ep_idx, errors in non_compliant[:3]:  # Show first 3
+                    self.log(f"    Episode {ep_idx}:", "WARNING")
+                    for error in errors[:2]:  # Show first 2 errors per episode
+                        self.log(f"      - {error}", "WARNING")
+                if len(non_compliant) > 3:
+                    self.log(f"    ... and {len(non_compliant) - 3} more episodes", "WARNING")
+            else:
+                self.log(f"  All episodes comply with '{self.config.data_pack_tier}' tier requirements")
 
-        # P2-4 FIX: Validate trajectory-sensor frame alignment
-        self.log("Validating trajectory-sensor frame alignment...")
-        alignment_errors = self._validate_trajectory_sensor_alignment()
-        if alignment_errors:
-            self.log(f"  Found {len(alignment_errors)} alignment issues:", "WARNING")
-            for error in alignment_errors[:5]:  # Show first 5 errors
-                self.log(f"    - {error}", "WARNING")
-            if len(alignment_errors) > 5:
-                self.log(f"    ... and {len(alignment_errors) - 5} more", "WARNING")
-            # Don't fail - just warn (some episodes may not have sensor data)
-        else:
-            self.log("  All episodes have aligned trajectory-sensor frames")
+            # P1-15 FIX: Validate camera calibration matrices
+            self.log("Validating camera calibration matrices...")
+            bad_calibrations = self._validate_camera_calibration()
+            if bad_calibrations:
+                self.log(f"  WARNING: Found {len(bad_calibrations)} episodes with invalid calibrations:", "WARNING")
+                for ep_idx, errors in bad_calibrations[:3]:  # Show first 3
+                    self.log(f"    Episode {ep_idx}:", "WARNING")
+                    for error in errors[:2]:  # Show first 2 errors per episode
+                        self.log(f"      - {error}", "WARNING")
+                if len(bad_calibrations) > 3:
+                    self.log(f"    ... and {len(bad_calibrations) - 3} more episodes", "WARNING")
+            else:
+                self.log("  All calibration matrices are valid")
 
-        # Step 1: Write episode data (joint-space trajectories)
-        self.log("Writing episode data...")
-        self._write_episodes(data_dir)
+            # P2-4 FIX: Validate trajectory-sensor frame alignment
+            self.log("Validating trajectory-sensor frame alignment...")
+            alignment_errors = self._validate_trajectory_sensor_alignment()
+            if alignment_errors:
+                self.log(f"  Found {len(alignment_errors)} alignment issues:", "WARNING")
+                for error in alignment_errors[:5]:  # Show first 5 errors
+                    self.log(f"    - {error}", "WARNING")
+                if len(alignment_errors) > 5:
+                    self.log(f"    ... and {len(alignment_errors) - 5} more", "WARNING")
+                # Don't fail - just warn (some episodes may not have sensor data)
+            else:
+                self.log("  All episodes have aligned trajectory-sensor frames")
 
-        # P2-9 FIX: Verify Parquet exports after writing
-        self.log("Verifying Parquet file exports...")
-        parquet_errors = self._verify_parquet_exports(data_dir)
-        if parquet_errors:
-            self.log(f"  WARNING: Found {len(parquet_errors)} Parquet verification issues:", "WARNING")
-            for file_path, errors in parquet_errors[:3]:  # Show first 3 files
-                self.log(f"    {file_path.name}:", "WARNING")
-                for error in errors[:2]:  # Show first 2 errors per file
-                    self.log(f"      - {error}", "WARNING")
-            if len(parquet_errors) > 3:
-                self.log(f"    ... and {len(parquet_errors) - 3} more files with issues", "WARNING")
-        else:
-            self.log("  Parquet files verified successfully")
+            # Step 1: Write episode data (joint-space trajectories)
+            self.log("Writing episode data...")
+            self._write_episodes(data_dir)
 
-        # Step 2: Write visual observations (RGB videos per camera)
-        if self.config.include_images:
-            self.log("Writing visual observations...")
-            self._write_visual_observations(output_dir)
+            # P2-9 FIX: Verify Parquet exports after writing
+            self.log("Verifying Parquet file exports...")
+            parquet_errors = self._verify_parquet_exports(data_dir)
+            if parquet_errors:
+                self.log(f"  WARNING: Found {len(parquet_errors)} Parquet verification issues:", "WARNING")
+                for file_path, errors in parquet_errors[:3]:  # Show first 3 files
+                    self.log(f"    {file_path.name}:", "WARNING")
+                    for error in errors[:2]:  # Show first 2 errors per file
+                        self.log(f"      - {error}", "WARNING")
+                if len(parquet_errors) > 3:
+                    self.log(f"    ... and {len(parquet_errors) - 3} more files with issues", "WARNING")
+            else:
+                self.log("  Parquet files verified successfully")
 
-        # Step 3: Write ground-truth labels (Plus/Full packs)
-        if any([
-            self.config.include_depth,
-            self.config.include_segmentation,
-            self.config.include_bboxes,
-            self.config.include_object_poses,
-            self.config.include_contacts,
-        ]):
-            self.log("Writing ground-truth labels...")
-            self._write_ground_truth(output_dir)
+            # Step 2: Write visual observations (RGB videos per camera)
+            if self.config.include_images:
+                self.log("Writing visual observations...")
+                self._write_visual_observations(temp_dir)
 
-        # Step 4: Calculate and write statistics
-        self.log("Calculating statistics...")
-        self._calculate_stats()
-        self._write_stats(meta_dir)
+            # Step 3: Write ground-truth labels (Plus/Full packs)
+            if any([
+                self.config.include_depth,
+                self.config.include_segmentation,
+                self.config.include_bboxes,
+                self.config.include_object_poses,
+                self.config.include_contacts,
+            ]):
+                self.log("Writing ground-truth labels...")
+                self._write_ground_truth(temp_dir)
 
-        # Step 5: Write metadata
-        self.log("Writing metadata...")
-        self._write_info(meta_dir)
-        self._write_tasks(meta_dir)
-        self._write_episodes_meta(meta_dir)
+            # Step 4: Calculate and write statistics
+            self.log("Calculating statistics...")
+            self._calculate_stats()
+            self._write_stats(meta_dir)
 
-        # Summary
-        self.log("=" * 60)
-        self.log(f"Dataset exported: {output_dir}")
-        self.log(f"  Data Pack: {self.config.data_pack_tier}")
-        self.log(f"  Episodes: {len(self.episodes)}")
-        self.log(f"  Tasks: {len(self.tasks)}")
+            # Step 5: Write metadata
+            self.log("Writing metadata...")
+            self._write_info(meta_dir)
+            self._write_tasks(meta_dir)
+            self._write_episodes_meta(meta_dir)
 
-        # Count episodes with visual data
-        visual_episodes = sum(1 for e in self.episodes if e.sensor_data is not None)
-        if visual_episodes > 0:
-            self.log(f"  Episodes with visual obs: {visual_episodes}")
-            self.log(f"  Cameras: {self.config.camera_types}")
+            # Summary
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+            os.replace(temp_dir, output_dir)
 
-        # Report ground-truth streams
-        gt_streams = []
-        if self.config.include_depth:
-            gt_streams.append("depth")
-        if self.config.include_segmentation:
-            gt_streams.append("segmentation")
-        if self.config.include_bboxes:
-            gt_streams.append("bboxes")
-        if self.config.include_object_poses:
-            gt_streams.append("object_poses")
-        if self.config.include_contacts:
-            gt_streams.append("contacts")
-        if self.config.include_privileged_state:
-            gt_streams.append("privileged_state")
+            self.log("=" * 60)
+            self.log(f"Dataset exported: {output_dir}")
+            self.log(f"  Data Pack: {self.config.data_pack_tier}")
+            self.log(f"  Episodes: {len(self.episodes)}")
+            self.log(f"  Tasks: {len(self.tasks)}")
 
-        if gt_streams:
-            self.log(f"  Ground-truth streams: {', '.join(gt_streams)}")
+            # Count episodes with visual data
+            visual_episodes = sum(1 for e in self.episodes if e.sensor_data is not None)
+            if visual_episodes > 0:
+                self.log(f"  Episodes with visual obs: {visual_episodes}")
+                self.log(f"  Cameras: {self.config.camera_types}")
 
-        self.log("=" * 60)
+            # Report ground-truth streams
+            gt_streams = []
+            if self.config.include_depth:
+                gt_streams.append("depth")
+            if self.config.include_segmentation:
+                gt_streams.append("segmentation")
+            if self.config.include_bboxes:
+                gt_streams.append("bboxes")
+            if self.config.include_object_poses:
+                gt_streams.append("object_poses")
+            if self.config.include_contacts:
+                gt_streams.append("contacts")
+            if self.config.include_privileged_state:
+                gt_streams.append("privileged_state")
 
-        return output_dir
+            if gt_streams:
+                self.log(f"  Ground-truth streams: {', '.join(gt_streams)}")
+
+            self.log("=" * 60)
+
+            return output_dir
+        except Exception:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
+    def _atomic_write_file(self, path: Path, write_func) -> None:
+        """Write file atomically using a temporary file and replace."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".tmp_{path.name}")
+        try:
+            write_func(temp_path)
+            os.replace(temp_path, path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+    def _atomic_write_json(self, path: Path, data: Any, **kwargs: Any) -> None:
+        """Write JSON atomically."""
+        def _write(tmp_path: Path) -> None:
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, **kwargs)
+
+        self._atomic_write_file(path, _write)
+
+    def _atomic_write_json_lines(self, path: Path, lines: List[str]) -> None:
+        """Write JSONL atomically."""
+        def _write(tmp_path: Path) -> None:
+            with open(tmp_path, "w") as f:
+                for line in lines:
+                    f.write(line)
+
+        self._atomic_write_file(path, _write)
 
     def _write_episodes(self, data_dir: Path) -> None:
         """Write episode data to Parquet files."""
@@ -1293,7 +1336,10 @@ class LeRobotExporter:
             episode_path = chunk_dir / f"episode_{episode.episode_index:06d}.parquet"
 
             if HAVE_PYARROW:
-                pq.write_table(episode_data, episode_path)
+                self._atomic_write_file(
+                    episode_path,
+                    lambda tmp_path: pq.write_table(episode_data, tmp_path),
+                )
             else:
                 # Fallback: write as JSON
                 self._write_episode_json(episode, episode_path.with_suffix(".json"))
@@ -1531,8 +1577,7 @@ class LeRobotExporter:
     def _write_episode_json(self, episode: LeRobotEpisode, path: Path) -> None:
         """Fallback: write episode as JSON."""
         data = self._trajectory_to_arrow_table(episode)
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        self._atomic_write_json(path, data, indent=2)
 
     def _calculate_stats(self) -> None:
         """Calculate statistics for normalization."""
@@ -1572,8 +1617,7 @@ class LeRobotExporter:
     def _write_stats(self, meta_dir: Path) -> None:
         """Write statistics JSON."""
         stats_path = meta_dir / "stats.json"
-        with open(stats_path, "w") as f:
-            json.dump(self.stats, f, indent=2)
+        self._atomic_write_json(stats_path, self.stats, indent=2)
 
     def _write_info(self, meta_dir: Path) -> None:
         """Write dataset info JSON."""
@@ -1714,41 +1758,40 @@ class LeRobotExporter:
         }
 
         info_path = meta_dir / "info.json"
-        with open(info_path, "w") as f:
-            json.dump(info, f, indent=2)
+        self._atomic_write_json(info_path, info, indent=2)
 
     def _write_tasks(self, meta_dir: Path) -> None:
         """Write tasks JSONL."""
         tasks_path = meta_dir / "tasks.jsonl"
-        with open(tasks_path, "w") as f:
-            for task in self.tasks:
-                f.write(json.dumps(task) + "\n")
+        lines = [json.dumps(task) + "\n" for task in self.tasks]
+        self._atomic_write_json_lines(tasks_path, lines)
 
     def _write_episodes_meta(self, meta_dir: Path) -> None:
         """Write episodes metadata JSONL."""
         episodes_path = meta_dir / "episodes.jsonl"
-        with open(episodes_path, "w") as f:
-            for episode in self.episodes:
-                meta = {
-                    "episode_index": episode.episode_index,
-                    "task_index": episode.task_index,
-                    "task": episode.task_description,
-                    "length": episode.trajectory.num_frames,
-                    "scene_id": episode.scene_id,
-                    "variation_index": episode.variation_index,
-                    "success": episode.success,
-                    "quality_score": episode.quality_score,
-                    "is_mock": episode.is_mock,  # P0-5 FIX: Explicit flag for mock data
-                }
-                # Add sensor data info if available
-                if episode.sensor_data is not None:
-                    meta["has_visual_obs"] = True
-                    meta["cameras"] = list(episode.sensor_data.camera_ids) if hasattr(episode.sensor_data, 'camera_ids') else []
-                if episode.camera_capture_warnings:
-                    meta["camera_capture_warnings"] = episode.camera_capture_warnings
-                if episode.camera_error_counts:
-                    meta["camera_error_counts"] = episode.camera_error_counts
-                f.write(json.dumps(meta) + "\n")
+        lines = []
+        for episode in self.episodes:
+            meta = {
+                "episode_index": episode.episode_index,
+                "task_index": episode.task_index,
+                "task": episode.task_description,
+                "length": episode.trajectory.num_frames,
+                "scene_id": episode.scene_id,
+                "variation_index": episode.variation_index,
+                "success": episode.success,
+                "quality_score": episode.quality_score,
+                "is_mock": episode.is_mock,  # P0-5 FIX: Explicit flag for mock data
+            }
+            # Add sensor data info if available
+            if episode.sensor_data is not None:
+                meta["has_visual_obs"] = True
+                meta["cameras"] = list(episode.sensor_data.camera_ids) if hasattr(episode.sensor_data, 'camera_ids') else []
+            if episode.camera_capture_warnings:
+                meta["camera_capture_warnings"] = episode.camera_capture_warnings
+            if episode.camera_error_counts:
+                meta["camera_error_counts"] = episode.camera_error_counts
+            lines.append(json.dumps(meta) + "\n")
+        self._atomic_write_json_lines(episodes_path, lines)
 
     def _write_visual_observations(self, output_dir: Path) -> None:
         """Write visual observations (images, videos) for all episodes."""
@@ -1818,17 +1861,20 @@ class LeRobotExporter:
 
         if HAVE_IMAGEIO:
             try:
-                writer = imageio.get_writer(
-                    str(video_path),
-                    fps=fps,
-                    codec="libx264",
-                    quality=8,
-                )
-                for frame in frames:
-                    # Ensure RGB format (H, W, 3)
-                    if frame.ndim == 3 and frame.shape[-1] == 3:
-                        writer.append_data(frame)
-                writer.close()
+                def _write(tmp_path: Path) -> None:
+                    writer = imageio.get_writer(
+                        str(tmp_path),
+                        fps=fps,
+                        codec="libx264",
+                        quality=8,
+                    )
+                    for frame in frames:
+                        # Ensure RGB format (H, W, 3)
+                        if frame.ndim == 3 and frame.shape[-1] == 3:
+                            writer.append_data(frame)
+                    writer.close()
+
+                self._atomic_write_file(video_path, _write)
                 self.log(f"  Wrote video: {video_path}")
             except Exception as e:
                 self.log(f"  Video write failed: {e}", "WARNING")
@@ -1846,19 +1892,25 @@ class LeRobotExporter:
         for i, frame in enumerate(frames):
             frame_path = frames_dir / f"frame_{i:06d}.png"
             if HAVE_PIL:
-                Image.fromarray(frame).save(frame_path)
+                self._atomic_write_file(
+                    frame_path,
+                    lambda tmp_path: Image.fromarray(frame).save(tmp_path),
+                )
             else:
-                np.save(frame_path.with_suffix(".npy"), frame)
+                npy_path = frame_path.with_suffix(".npy")
+                def _write(tmp_path: Path) -> None:
+                    with open(tmp_path, "wb") as f:
+                        np.save(f, frame)
+
+                self._atomic_write_file(npy_path, _write)
 
     def _copy_video(self, src_path: Path, chunk_dir: Path, episode_index: int) -> None:
         """Copy an existing video file to the output directory."""
-        import shutil
-
         video_dir = chunk_dir / "observation.images.camera"
         video_dir.mkdir(parents=True, exist_ok=True)
         dst_path = video_dir / f"episode_{episode_index:06d}.mp4"
         try:
-            shutil.copy2(src_path, dst_path)
+            self._atomic_write_file(dst_path, lambda tmp_path: shutil.copy2(src_path, tmp_path))
         except Exception as e:
             self.log(f"  Failed to copy video: {e}", "WARNING")
 
@@ -1947,11 +1999,14 @@ class LeRobotExporter:
 
             if depth_frames:
                 depth_path = depth_dir / f"episode_{episode_idx:06d}.npz"
-                np.savez_compressed(
+                self._atomic_write_file(
                     depth_path,
-                    depth=np.stack(depth_frames),
-                    fps=self.config.fps,
-                    unit="meters",
+                    lambda tmp_path: np.savez_compressed(
+                        tmp_path,
+                        depth=np.stack(depth_frames),
+                        fps=self.config.fps,
+                        unit="meters",
+                    ),
                 )
 
     def _write_segmentation_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
@@ -2002,7 +2057,7 @@ class LeRobotExporter:
                     data["instance"] = np.stack(instance_frames)
                 if hasattr(sensor_data, 'semantic_labels'):
                     data["label_mapping"] = json.dumps(sensor_data.semantic_labels)
-                np.savez_compressed(seg_path, **data)
+                self._atomic_write_file(seg_path, lambda tmp_path: np.savez_compressed(tmp_path, **data))
 
     def _write_bbox_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """P2-5 FIX: Write bounding box annotations with validation."""
@@ -2042,8 +2097,7 @@ class LeRobotExporter:
                 self.log(f"    - {error}", "WARNING")
 
         bbox_path = bbox_dir / f"episode_{episode_idx:06d}.json"
-        with open(bbox_path, "w") as f:
-            json.dump(bbox_data, f, indent=2, default=self._json_serializer)
+        self._atomic_write_json(bbox_path, bbox_data, indent=2, default=self._json_serializer)
 
     def _write_object_pose_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """Write object pose data for an episode."""
@@ -2065,8 +2119,7 @@ class LeRobotExporter:
             pose_data["frames"].append(frame_poses)
 
         pose_path = pose_dir / f"episode_{episode_idx:06d}.json"
-        with open(pose_path, "w") as f:
-            json.dump(pose_data, f, indent=2, default=self._json_serializer)
+        self._atomic_write_json(pose_path, pose_data, indent=2, default=self._json_serializer)
 
     def _write_contact_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """Write contact information for an episode."""
@@ -2084,8 +2137,7 @@ class LeRobotExporter:
             contact_data["frames"].append(frame_contacts)
 
         contact_path = contact_dir / f"episode_{episode_idx:06d}.json"
-        with open(contact_path, "w") as f:
-            json.dump(contact_data, f, indent=2, default=self._json_serializer)
+        self._atomic_write_json(contact_path, contact_data, indent=2, default=self._json_serializer)
 
     def _write_privileged_state_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """Write privileged physics state for an episode."""
@@ -2103,8 +2155,7 @@ class LeRobotExporter:
             priv_data["frames"].append(frame_state)
 
         priv_path = priv_dir / f"episode_{episode_idx:06d}.json"
-        with open(priv_path, "w") as f:
-            json.dump(priv_data, f, indent=2, default=self._json_serializer)
+        self._atomic_write_json(priv_path, priv_data, indent=2, default=self._json_serializer)
 
     def _json_serializer(self, obj: Any) -> Any:
         """Custom JSON serializer for numpy types."""
