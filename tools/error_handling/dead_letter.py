@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -247,19 +248,55 @@ class GCSDeadLetterQueue(DeadLetterQueue):
             from_path = self._get_blob_path(message_id, from_status)
             to_path = self._get_blob_path(message_id, to_status)
 
-            source_blob = self._bucket.blob(from_path)
-            if not source_blob.exists():
-                logger.warning(f"Message not found: {from_path}")
-                return False
+            from google.api_core.exceptions import Conflict, PreconditionFailed
 
-            # Copy to new location
-            self._bucket.copy_blob(source_blob, self._bucket, to_path)
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                source_blob = self._bucket.blob(from_path)
+                if not source_blob.exists():
+                    logger.warning(f"Message not found: {from_path}")
+                    return False
 
-            # Delete from old location
-            source_blob.delete()
+                source_blob.reload()
+                generation = source_blob.generation
 
-            logger.info(f"Moved DLQ message {message_id}: {from_status} -> {to_status}")
-            return True
+                try:
+                    # Copy to new location with optimistic locking
+                    self._bucket.copy_blob(
+                        source_blob,
+                        self._bucket,
+                        to_path,
+                        if_generation_match=0,
+                        if_source_generation_match=generation,
+                    )
+
+                    # Delete from old location with generation precondition
+                    source_blob.delete(if_generation_match=generation)
+
+                    logger.info(
+                        f"Moved DLQ message {message_id}: {from_status} -> {to_status}"
+                    )
+                    return True
+                except (PreconditionFailed, Conflict) as e:
+                    if attempt < max_attempts:
+                        backoff = min(0.5 * (2 ** (attempt - 1)), 4.0)
+                        logger.warning(
+                            "Precondition failed moving DLQ message %s "
+                            "(attempt %s/%s): %s. Retrying in %.2fs",
+                            message_id,
+                            attempt,
+                            max_attempts,
+                            e,
+                            backoff,
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logger.error(
+                        "Failed to move DLQ message %s due to concurrent update: %s",
+                        message_id,
+                        e,
+                    )
+                    return False
 
         except Exception as e:
             logger.error(f"Failed to move DLQ message {message_id}: {e}")
@@ -276,32 +313,65 @@ class GCSDeadLetterQueue(DeadLetterQueue):
             return False
 
         try:
+            from google.api_core.exceptions import Conflict, PreconditionFailed
+
             # Find the message in any status folder
             for current_status in ["pending", "retrying", "resolved", "abandoned"]:
                 blob_path = self._get_blob_path(message_id, current_status)
                 blob = self._bucket.blob(blob_path)
 
                 if blob.exists():
-                    content = blob.download_as_string()
-                    data = json.loads(content)
+                    max_attempts = 3
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            blob.reload()
+                            generation = blob.generation
+                            content = blob.download_as_string(
+                                if_generation_match=generation
+                            )
+                            data = json.loads(content)
 
-                    # Update
-                    data["status"] = status
-                    data["last_failure_time"] = datetime.utcnow().isoformat() + "Z"
-                    if metadata:
-                        data["metadata"].update(metadata)
+                            # Update
+                            data["status"] = status
+                            data["last_failure_time"] = (
+                                datetime.utcnow().isoformat() + "Z"
+                            )
+                            if metadata:
+                                data.setdefault("metadata", {}).update(metadata)
 
-                    # Write back
-                    blob.upload_from_string(
-                        json.dumps(data, indent=2),
-                        content_type="application/json",
-                    )
+                            # Write back with optimistic locking
+                            blob.upload_from_string(
+                                json.dumps(data, indent=2),
+                                content_type="application/json",
+                                if_generation_match=generation,
+                            )
 
-                    # Move if status changed
-                    if current_status != status:
-                        self._move_message(message_id, current_status, status)
+                            # Move if status changed
+                            if current_status != status:
+                                self._move_message(message_id, current_status, status)
 
-                    return True
+                            return True
+                        except (PreconditionFailed, Conflict) as e:
+                            if attempt < max_attempts:
+                                backoff = min(0.5 * (2 ** (attempt - 1)), 4.0)
+                                logger.warning(
+                                    "Precondition failed updating DLQ message %s "
+                                    "(attempt %s/%s): %s. Retrying in %.2fs",
+                                    message_id,
+                                    attempt,
+                                    max_attempts,
+                                    e,
+                                    backoff,
+                                )
+                                time.sleep(backoff)
+                                continue
+                            logger.error(
+                                "Failed to update DLQ message %s due to "
+                                "concurrent modification: %s",
+                                message_id,
+                                e,
+                            )
+                            return False
 
             logger.warning(f"Message not found for update: {message_id}")
             return False
