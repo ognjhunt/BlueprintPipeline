@@ -57,25 +57,21 @@ Environment Variables:
 """
 
 import json
+import logging
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-import logging
-import threading
 
 import numpy as np
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Add parent paths for imports
 ADAPTER_ROOT = Path(__file__).resolve().parent
@@ -85,6 +81,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 if str(ADAPTER_ROOT) not in sys.path:
     sys.path.insert(0, str(ADAPTER_ROOT))
+
+from tools.logging_config import init_logging
+
+# Configure logging
+init_logging()
+logger = logging.getLogger(__name__)
 
 # Import gRPC protobuf stubs
 try:
