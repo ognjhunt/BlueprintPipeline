@@ -64,6 +64,7 @@ class GenieSimLocalServicer(GenieSimServiceServicer):
     """Concrete servicer implementation for local testing."""
 
     def __init__(self, joint_count: int = 7) -> None:
+        super().__init__(joint_count=joint_count)
         self._lock = threading.Lock()
         self._joint_positions = [0.0] * joint_count
         self._joint_velocities = [0.0] * joint_count
