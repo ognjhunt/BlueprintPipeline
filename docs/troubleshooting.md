@@ -132,16 +132,17 @@ docker run --rm usd-assembly-job:smoke python -c "from pxr import Usd, UsdGeom, 
   ```
   **Expected response (healthy)**: `HTTP/1.1 200` with body `ready`.
   **Expected response (loading/error)**: `HTTP/1.1 503` with body `not ready: <reason>`.
-- **Debug metadata**:
+- **Debug metadata** (requires debug token):
   ```bash
-  curl -s http://<host>:<port>/debug | jq .
+  curl -s -H "Authorization: Bearer <shared-secret>" http://<host>:<port>/debug | jq .
   ```
-  **Expected response**: `HTTP/1.1 200` with JSON fields `models_ready`, `warmup_error`, `warmup_details`, and `installation_validation`.
+  **Expected response**: `HTTP/1.1 200` with JSON fields `models_ready`, `warmup_error`, `warmup_details`, and `installation_validation` when
+  `PARTICULATE_DEBUG=1` and `PARTICULATE_DEBUG_TOKEN=<shared-secret>` are set; otherwise `HTTP/1.1 403`.
 
 **Expected behavior**
 - `GET /` returns `200` once model warmup completes; `503` during warmup or if warmup fails.
 - `GET /ready` returns `200` when warmup is complete; `503` while loading or on warmup failure.
-- `GET /debug` returns `200` with detailed warmup/validation metadata for diagnosing failures.
+- `GET /debug` returns `200` with detailed warmup/validation metadata when debug access is explicitly enabled and authorized.
 
 **Likely causes**
 - Model warmup still running (first deploy or cold start).
@@ -150,7 +151,7 @@ docker run --rm usd-assembly-job:smoke python -c "from pxr import Usd, UsdGeom, 
 
 **Fixes**
 - Wait for warmup to finish and re-check `GET /` or `GET /ready`.
-- Use `GET /debug` to confirm installation validation and CUDA checks, then fix missing files or GPU config.
+- Use `GET /debug` (with the configured `Authorization` header) to confirm installation validation and CUDA checks, then fix missing files or GPU config.
 
 ## replicator-job
 
