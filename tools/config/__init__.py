@@ -73,6 +73,7 @@ class HumanApprovalConfig:
     """Human approval workflow configuration."""
     enabled: bool = True
     timeout_hours: float = 24.0
+    # Auto-approve is only honored outside production and requires explicit non-prod allowance.
     auto_approve_on_timeout: bool = False
     allow_auto_approve_on_timeout_non_production: bool = False
     approval_methods: List[str] = field(default_factory=lambda: ["dashboard", "email", "api"])
