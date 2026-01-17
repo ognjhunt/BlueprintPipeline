@@ -166,11 +166,12 @@ RUN mkdir -p /tmp/particulate && chmod 777 /tmp/particulate
 ENV PORT=8080
 ENV PARTICULATE_ROOT=/opt/particulate
 ENV PARTICULATE_DEBUG=1
+ENV PARTICULATE_HEALTHCHECK_HOST=localhost
 ENV PYTHONUNBUFFERED=1
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/ || exit 1
+    CMD curl -f http://${PARTICULATE_HEALTHCHECK_HOST}:${PORT}/ || exit 1
 
 # Use gunicorn for production
 CMD ["gunicorn", \
