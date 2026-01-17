@@ -11,6 +11,12 @@ import sys
 from typing import Dict, List, Optional
 from pathlib import Path
 
+from tools.geniesim_adapter.config import (
+    DEFAULT_GENIESIM_PORT,
+    get_geniesim_host,
+    get_geniesim_port,
+)
+
 
 class ValidationError(Exception):
     """Raised when startup validation fails."""
@@ -32,12 +38,21 @@ def validate_genie_sim_credentials(required: bool = False) -> Dict[str, any]:
     warnings = []
 
     # Check for gRPC host/port configuration
-    grpc_host = os.getenv("GENIESIM_HOST", "localhost")
-    grpc_port = os.getenv("GENIESIM_PORT", "50051")
+    grpc_host = get_geniesim_host()
+    grpc_port = get_geniesim_port()
     geniesim_root = os.getenv("GENIESIM_ROOT", "/opt/geniesim")
+    environment = os.getenv("GENIESIM_ENV", os.getenv("BP_ENV", "development")).lower()
 
     if grpc_host != "localhost":
         warnings.append(f"GENIESIM_HOST set to {grpc_host} (typical: localhost)")
+    if (
+        grpc_port == DEFAULT_GENIESIM_PORT
+        and environment not in {"development", "dev", "local"}
+    ):
+        warnings.append(
+            "GENIESIM_PORT is using the adapter default while running outside local/dev; "
+            "set GENIESIM_PORT to the gRPC port exposed by your deployment."
+        )
 
     return {
         "valid": True,

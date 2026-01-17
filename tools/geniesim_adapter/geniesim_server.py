@@ -43,6 +43,7 @@ from geniesim_grpc_pb2_grpc import (
     GenieSimServiceServicer,
     add_GenieSimServiceServicer_to_server,
 )
+from tools.geniesim_adapter.config import DEFAULT_GENIESIM_PORT, GENIESIM_PORT_ENV
 
 LOGGER = logging.getLogger("geniesim.server")
 
@@ -278,7 +279,12 @@ def serve(args: argparse.Namespace) -> None:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local GenieSim gRPC server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
-    parser.add_argument("--port", type=int, default=50051, help="gRPC port")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_GENIESIM_PORT,
+        help=f"gRPC port (defaults to ${GENIESIM_PORT_ENV} or adapter default)",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument("--max-workers", type=int, default=10, help="gRPC worker threads")
     parser.add_argument("--joint-count", type=int, default=7, help="Number of mock joints")
