@@ -354,6 +354,58 @@ class LeRobotExporter:
         rel_path = path.resolve().relative_to(self.output_dir.resolve()).as_posix()
         self.checksum_manifest[rel_path] = _checksum_file(path, self.checksum_algorithm)
 
+    def _render_checksum_manifest(self) -> str:
+        return json.dumps(self.checksum_manifest, indent=2, sort_keys=True)
+
+    def _checksum_manifest_hash(self) -> Optional[str]:
+        if self.output_dir is None:
+            return None
+        payload = self._render_checksum_manifest().encode("utf-8")
+        hasher = hashlib.new(self.checksum_algorithm)
+        hasher.update(payload)
+        return hasher.hexdigest()
+
+    def _verify_checksum_manifest_consistency(self, root_dir: Path) -> None:
+        if self.output_dir is None:
+            return
+
+        root_dir = root_dir.resolve()
+        disk_files = {
+            path.resolve().relative_to(root_dir).as_posix()
+            for path in root_dir.rglob("*")
+            if path.is_file()
+        }
+        disk_files.discard("meta/checksums.json")
+
+        manifest_files = set(self.checksum_manifest.keys())
+        missing_in_manifest = sorted(disk_files - manifest_files)
+        missing_on_disk = sorted(manifest_files - disk_files)
+
+        if missing_in_manifest or missing_on_disk:
+            if missing_in_manifest:
+                self.log(
+                    "  Checksum manifest missing entries for files: "
+                    + ", ".join(missing_in_manifest[:5]),
+                    "ERROR",
+                )
+                if len(missing_in_manifest) > 5:
+                    self.log(
+                        f"  ... and {len(missing_in_manifest) - 5} more missing manifest entries",
+                        "ERROR",
+                    )
+            if missing_on_disk:
+                self.log(
+                    "  Checksum manifest references missing files: "
+                    + ", ".join(missing_on_disk[:5]),
+                    "ERROR",
+                )
+                if len(missing_on_disk) > 5:
+                    self.log(
+                        f"  ... and {len(missing_on_disk) - 5} more missing files on disk",
+                        "ERROR",
+                    )
+            raise ValueError("Checksum manifest consistency check failed.")
+
     def _atomic_write(
         self,
         target: Path,
@@ -1585,6 +1637,8 @@ class LeRobotExporter:
             self._write_episodes_meta(meta_dir)
 
             # Step 6: Write checksums manifest
+            self.log("Validating checksum manifest consistency...")
+            self._verify_checksum_manifest_consistency(temp_dir)
             self._write_checksums_manifest(meta_dir)
 
             # Finalize export atomically
@@ -1946,7 +2000,7 @@ class LeRobotExporter:
         self._atomic_write(
             invalid_path,
             lambda tmp_path: tmp_path.write_text(json.dumps(payload, indent=2)),
-            record_checksum=False,
+            record_checksum=True,
         )
 
     def _write_info(self, meta_dir: Path) -> None:
@@ -2100,6 +2154,8 @@ class LeRobotExporter:
                 "algorithm": self.checksum_algorithm,
                 "manifest_path": "meta/checksums.json",
                 "generated_at": self.checksum_generated_at or datetime.utcnow().isoformat() + "Z",
+                "manifest_count": len(self.checksum_manifest),
+                "manifest_hash": self._checksum_manifest_hash(),
             },
         }
 
@@ -2157,9 +2213,7 @@ class LeRobotExporter:
         manifest_path = meta_dir / "checksums.json"
         self._atomic_write(
             manifest_path,
-            lambda tmp_path: tmp_path.write_text(
-                json.dumps(self.checksum_manifest, indent=2, sort_keys=True)
-            ),
+            lambda tmp_path: tmp_path.write_text(self._render_checksum_manifest()),
             record_checksum=False,
         )
 
