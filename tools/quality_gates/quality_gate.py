@@ -12,8 +12,10 @@ This module now supports:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -495,12 +497,12 @@ class HumanApprovalManager:
         Args:
             request_id: The approval request ID
             override_metadata: Structured metadata containing approver_id, ticket_id,
-                reason, and timestamp.
+                reason, justification, and timestamp.
 
         Returns:
             True if successfully overridden
         """
-        required_fields = ("approver_id", "ticket_id", "reason", "timestamp")
+        required_fields = ("approver_id", "ticket_id", "reason", "timestamp", "justification")
         missing_fields = [field for field in required_fields if not override_metadata.get(field)]
         if missing_fields:
             self.log(
@@ -509,8 +511,16 @@ class HumanApprovalManager:
             )
             return False
         reason = str(override_metadata["reason"]).strip()
-        if len(reason) < 10:
-            self.log("Override requires a reason (min 10 characters)", "ERROR")
+        if len(reason) <= 50:
+            self.log("Override requires a reason (more than 50 characters)", "ERROR")
+            return False
+        ticket_id = str(override_metadata["ticket_id"]).strip()
+        if not self._validate_ticket_reference(ticket_id):
+            self.log("Override requires a valid ticket URL or ID", "ERROR")
+            return False
+        justification = override_metadata.get("justification")
+        if not self._validate_justification(justification):
+            self.log("Override requires structured justification details", "ERROR")
             return False
         if not self._validate_timestamp(str(override_metadata["timestamp"])):
             self.log("Override requires a valid ISO-8601 timestamp", "ERROR")
@@ -530,6 +540,9 @@ class HumanApprovalManager:
         if self._is_production_mode():
             allowed_overriders = []
             if self.config and hasattr(self.config, "gate_overrides"):
+                if not self.config.gate_overrides.allow_override_in_production:
+                    self.log("Overrides are disabled in production by policy", "ERROR")
+                    return False
                 allowed_overriders = self.config.gate_overrides.allowed_overriders
             if not allowed_overriders:
                 self.log("Overrides are not permitted in production", "ERROR")
@@ -549,9 +562,10 @@ class HumanApprovalManager:
         request.override_reason = reason
         request.override_metadata = {
             "approver_id": request.approved_by,
-            "ticket_id": str(override_metadata["ticket_id"]).strip(),
+            "ticket_id": ticket_id,
             "reason": reason,
             "timestamp": str(override_metadata["timestamp"]).strip(),
+            "justification": justification,
         }
 
         self._save_request(request)
@@ -649,6 +663,8 @@ class HumanApprovalManager:
             "reason": reason,
             "metadata": metadata,
         }
+        if action == "OVERRIDDEN" and metadata:
+            audit_entry["override_metadata_hash"] = self._hash_override_metadata(metadata)
 
         audit_path = audit_dir / f"{request.request_id}_{action.lower()}.json"
         with open(audit_path, "w") as f:
@@ -659,6 +675,27 @@ class HumanApprovalManager:
         """Append audit entry to immutable log."""
         with open(log_path, "a") as f:
             f.write(json.dumps(audit_entry) + "\n")
+
+    def _hash_override_metadata(self, metadata: Dict[str, Any]) -> str:
+        """Return a deterministic hash of override metadata."""
+        payload = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _validate_ticket_reference(self, ticket_id: str) -> bool:
+        """Validate that a ticket reference looks like an ID or URL."""
+        if not ticket_id:
+            return False
+        if ticket_id.startswith(("http://", "https://")):
+            return True
+        return re.match(r"^[A-Za-z][A-Za-z0-9._-]*-\d+$", ticket_id) is not None
+
+    def _validate_justification(self, justification: Any) -> bool:
+        """Validate structured justification details."""
+        if not isinstance(justification, dict):
+            return False
+        if not justification:
+            return False
+        return any(str(value).strip() for value in justification.values())
 
     def _validate_timestamp(self, value: str) -> bool:
         """Validate ISO-8601 timestamp format."""

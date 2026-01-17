@@ -75,6 +75,7 @@
   },
   "gate_overrides": {
     "allow_manual_override": true,
+    "allow_override_in_production": false,
     "override_requires_reason": true,
     "override_log_retention_days": 90,
     "allowed_overriders": [],
