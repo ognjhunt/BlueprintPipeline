@@ -19,6 +19,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from .benchmark_validation import (
+    resolve_isaac_lab_arena_version,
+    validate_arena_benchmark_results,
+)
 
 @dataclass
 class HubConfig:
@@ -122,6 +126,28 @@ class LeRobotHubRegistrar:
                 files_uploaded=[],
                 errors=["HF_TOKEN not set. Get a token from https://huggingface.co/settings/tokens"],
             )
+
+        if evaluation_results:
+            arena_version = resolve_isaac_lab_arena_version(arena_dir)
+            validated_results = dict(evaluation_results)
+            if arena_version and "isaac_lab_arena_version" not in validated_results:
+                validated_results["isaac_lab_arena_version"] = arena_version
+            tasks_dir = arena_dir / "tasks"
+            task_ids = None
+            if tasks_dir.exists():
+                task_ids = [
+                    task_file.stem
+                    for task_file in tasks_dir.glob("*.py")
+                    if task_file.stem != "__init__"
+                ]
+            validate_arena_benchmark_results(
+                validated_results,
+                scene_id=self.config.scene_id,
+                task_ids=task_ids,
+                arena_dir=arena_dir,
+                arena_version=arena_version,
+            )
+            evaluation_results = validated_results
 
         try:
             from huggingface_hub import HfApi, create_repo, upload_folder
