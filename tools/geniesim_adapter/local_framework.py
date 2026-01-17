@@ -1329,7 +1329,14 @@ class GenieSimLocalFramework:
                         if img is not None:
                             obs[f"image_{camera_id}"] = img
                     except Exception:
-                        pass
+                        logger.warning(
+                            "Camera capture failed (camera_id=%s, episode_id=%s, task_name=%s, task_id=%s).",
+                            camera_id,
+                            episode_id,
+                            task.get("task_name"),
+                            task.get("task_id"),
+                            exc_info=True,
+                        )
 
                 frames.append({
                     "step": step_idx,

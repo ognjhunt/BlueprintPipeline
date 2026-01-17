@@ -693,7 +693,7 @@ def main():
         print(f"  Delivery Rate: {summary.get('delivery_rate', 0):.1%}")
         print(f"  QA First Pass: {summary.get('qa_first_pass_rate', 0):.1%}")
     except Exception:
-        pass
+        print("[RUN-FIRST-10] WARNING: Failed to load success metrics.", file=sys.stderr)
 
     # Exit code
     successful = sum(1 for r in results if r.success)
