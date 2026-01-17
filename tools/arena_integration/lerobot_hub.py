@@ -46,6 +46,10 @@ from .components import (
     ArenaEnvironmentSpec,
     ArenaObject,
 )
+from .benchmark_validation import (
+    resolve_isaac_lab_arena_version,
+    validate_arena_benchmark_results,
+)
 
 
 # =============================================================================
@@ -527,9 +531,24 @@ class LeRobotHubPublisher:
 
                 # Add evaluation results if provided
                 if evaluation_results:
+                    arena_version = resolve_isaac_lab_arena_version(arena_export_dir)
+                    validated_results = dict(evaluation_results)
+                    if arena_version and "isaac_lab_arena_version" not in validated_results:
+                        validated_results["isaac_lab_arena_version"] = arena_version
+                    task_ids = [
+                        task.get("task_id")
+                        for task in hub_spec.tasks
+                        if task.get("task_id")
+                    ]
+                    validate_arena_benchmark_results(
+                        validated_results,
+                        task_ids=task_ids or None,
+                        arena_dir=arena_export_dir,
+                        arena_version=arena_version,
+                    )
                     results_path = tmpdir / "baseline_results.json"
                     with open(results_path, "w") as f:
-                        json.dump(evaluation_results, f, indent=2)
+                        json.dump(validated_results, f, indent=2)
                     files_uploaded.append("baseline_results.json")
 
                 # Add evaluation code if configured

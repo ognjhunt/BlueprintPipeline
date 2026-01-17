@@ -21,6 +21,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from .benchmark_validation import (
+    resolve_isaac_lab_arena_version,
+    validate_arena_benchmark_results,
+)
 
 @dataclass
 class EvaluationConfig:
@@ -494,9 +498,11 @@ if __name__ == "__main__":
     def export_results(
         self,
         result: EvaluationResult,
-        output_path: Path
+        output_path: Path,
+        arena_dir: Optional[Path] = None,
     ) -> None:
         """Export evaluation results to JSON."""
+        arena_version = resolve_isaac_lab_arena_version(arena_dir)
         data = {
             "success": result.success,
             "scene_id": result.scene_id,
@@ -523,6 +529,17 @@ if __name__ == "__main__":
             "summary": result.summary,
             "errors": result.errors,
         }
+
+        if arena_version:
+            data["isaac_lab_arena_version"] = arena_version
+
+        validate_arena_benchmark_results(
+            data,
+            scene_id=result.scene_id,
+            task_ids=list(result.task_metrics.keys()),
+            arena_dir=arena_dir,
+            arena_version=arena_version,
+        )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
