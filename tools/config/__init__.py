@@ -87,6 +87,7 @@ class HumanApprovalConfig:
 class GateOverrideConfig:
     """Gate override configuration."""
     allow_manual_override: bool = True
+    allow_override_in_production: bool = False
     override_requires_reason: bool = True
     override_log_retention_days: int = 90
     allowed_overriders: List[str] = field(default_factory=list)
@@ -546,6 +547,10 @@ class ConfigLoader:
             ),
             gate_overrides=GateOverrideConfig(
                 allow_manual_override=config.get("gate_overrides", {}).get("allow_manual_override", True),
+                allow_override_in_production=config.get(
+                    "gate_overrides",
+                    {},
+                ).get("allow_override_in_production", False),
                 override_requires_reason=config.get("gate_overrides", {}).get("override_requires_reason", True),
             ),
         )
