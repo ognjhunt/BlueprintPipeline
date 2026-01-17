@@ -45,6 +45,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
+from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.workflow import FailureMarkerWriter
 from tools.metrics.pipeline_metrics import get_metrics
 
@@ -541,7 +542,7 @@ def call_particulate_service(
             )
 
             metrics = get_metrics()
-            scene_id = os.getenv("SCENE_ID", "")
+            scene_id = os.environ.get("SCENE_ID", "unknown")
             start = time.time()
             resp_status = None
             with metrics.track_api_call("particulate", "articulation", scene_id):
@@ -1543,8 +1544,16 @@ def main() -> None:
     """Main entry point for interactive asset processing using Particulate."""
 
     # Configuration from environment
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+        },
+        label="[INTERACTIVE]",
+    )
+
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
     assets_prefix = os.getenv("ASSETS_PREFIX", "")
     multiview_prefix = os.getenv("MULTIVIEW_PREFIX", "")
     regen3d_prefix = os.getenv("REGEN3D_PREFIX", "")  # 3D-RE-GEN output path

@@ -1066,8 +1066,16 @@ def main():
     except ImportError as e:
         print(f"[GENIESIM-EXPORT-JOB] WARNING: Startup validation unavailable: {e}")
 
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+        },
+        label="[GENIESIM-EXPORT-JOB]",
+    )
+
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
 
     # Prefixes with defaults
     assets_prefix = os.getenv(
@@ -1143,16 +1151,6 @@ def main():
 
     validated = False
     try:
-        validate_required_env_vars(
-            {
-                "BUCKET": "GCS bucket name",
-                "SCENE_ID": "Scene identifier",
-            },
-            label="[GENIESIM-EXPORT-JOB]",
-        )
-        if not scene_id:
-            raise ValueError("SCENE_ID is required")
-
         assets_root = Path("/mnt/gcs") / assets_prefix
         validate_scene_manifest(assets_root / "scene_manifest.json", label="[GENIESIM-EXPORT-JOB]")
         validated = True

@@ -424,16 +424,24 @@ def assemble_scene(
 def assemble_from_env() -> int:
     import os
 
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    layout_prefix = os.getenv("LAYOUT_PREFIX")
-    assets_prefix = os.getenv("ASSETS_PREFIX")
+    from tools.validation.entrypoint_checks import validate_required_env_vars
+
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "LAYOUT_PREFIX": "Path prefix for layout files (scenes/<sceneId>/layout)",
+            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+        },
+        label="[ASSEMBLY]",
+    )
+
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
+    layout_prefix = os.environ["LAYOUT_PREFIX"]
+    assets_prefix = os.environ["ASSETS_PREFIX"]
     usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
     convert_only = os.getenv("CONVERT_ONLY", "false").lower() in {"1", "true", "yes"}
-
-    if not layout_prefix or not assets_prefix:
-        print("[ERROR] LAYOUT_PREFIX and ASSETS_PREFIX are required", file=sys.stderr)
-        return 1
 
     return assemble_scene(
         layout_prefix=layout_prefix,

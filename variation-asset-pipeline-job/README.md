@@ -64,6 +64,14 @@ Use this job when you need to generate variation assets for a scene that has alr
 | `REGISTER_ASSETS` | `1` | Toggle registry ingestion (automatically disabled when `DRY_RUN=1`) |
 | `DRY_RUN` | `0` | Skip actual generation (for testing) |
 
+Example storage location:
+
+```bash
+export BUCKET=blueprint-8c1ca.appspot.com
+export SCENE_ID=scene_123
+# Outputs land under gs://blueprint-8c1ca.appspot.com/scenes/${SCENE_ID}/variation_assets
+```
+
 ### Quality Presets
 
 | Mode | 3D Backend | Image Size | Use Case |

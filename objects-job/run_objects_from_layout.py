@@ -176,11 +176,11 @@ def main() -> None:
         label="[OBJECTS]",
     )
 
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    da3_prefix = os.getenv("DA3_PREFIX")          # e.g. scenes/<sceneId>/da3
-    seg_dataset_prefix = os.getenv("SEG_DATASET_PREFIX")  # e.g. scenes/<sceneId>/seg/dataset
-    layout_prefix = os.getenv("LAYOUT_PREFIX")    # e.g. scenes/<sceneId>/layout
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
+    da3_prefix = os.environ["DA3_PREFIX"]          # e.g. scenes/<sceneId>/da3
+    seg_dataset_prefix = os.environ["SEG_DATASET_PREFIX"]  # e.g. scenes/<sceneId>/seg/dataset
+    layout_prefix = os.environ["LAYOUT_PREFIX"]    # e.g. scenes/<sceneId>/layout
 
     root = Path("/mnt/gcs")
     da3_dir = root / da3_prefix

@@ -51,6 +51,7 @@ from tools.arena_integration import (
     HubConfig,
 )
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
+from tools.validation.entrypoint_checks import validate_required_env_vars
 
 # Import default premium analytics (DEFAULT: ENABLED)
 try:
@@ -452,18 +453,23 @@ def run_from_env(root: Path = GCS_ROOT) -> int:
         ENABLE_HUB_REGISTRATION: Enable Hub registration (default: false)
         HUB_NAMESPACE: Hugging Face namespace (default: blueprint-robotics)
     """
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-    assets_prefix = os.getenv("ASSETS_PREFIX", "")
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+            "ASSETS_PREFIX": "Path prefix for assets (scenes/<sceneId>/assets)",
+        },
+        label="[ARENA]",
+    )
+
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
+    assets_prefix = os.environ["ASSETS_PREFIX"]
 
     use_llm = os.getenv("USE_LLM_AFFORDANCES", "true").lower() in ("true", "1", "yes")
     enable_hub = os.getenv("ENABLE_HUB_REGISTRATION", "false").lower() in ("true", "1", "yes")
     hub_namespace = os.getenv("HUB_NAMESPACE", "blueprint-robotics")
     enable_premium_analytics = os.getenv("ENABLE_PREMIUM_ANALYTICS", "true").lower() in ("true", "1", "yes")
-
-    if not assets_prefix:
-        print("[ARENA] ERROR: ASSETS_PREFIX is required", file=sys.stderr)
-        return 1
 
     scene_dir = root / assets_prefix.rstrip("/assets")
     if not scene_dir.exists():

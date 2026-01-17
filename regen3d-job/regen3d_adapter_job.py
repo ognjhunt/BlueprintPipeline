@@ -69,6 +69,7 @@ from tools.scale_authority.authority import REFERENCE_DIMENSIONS
 from tools.scene_manifest.validate_manifest import validate_manifest
 from tools.workflow.failure_markers import FailureMarkerWriter
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.validation.entrypoint_checks import validate_required_env_vars
 
 logger = logging.getLogger(__name__)
 
@@ -743,12 +744,15 @@ def run_regen3d_adapter_job(
 def main() -> int:
     """Main entry point."""
     # Get configuration from environment
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-
-    if not scene_id:
-        logger.error("[REGEN3D-JOB] SCENE_ID is required")
-        return 1
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+        },
+        label="[REGEN3D-JOB]",
+    )
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
 
     # Prefixes with defaults
     regen3d_prefix = os.getenv("REGEN3D_PREFIX", f"scenes/{scene_id}/regen3d")
@@ -795,8 +799,8 @@ if __name__ == "__main__":
     from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
 
     input_params = {
-        "bucket": os.getenv("BUCKET", ""),
-        "scene_id": os.getenv("SCENE_ID", ""),
+        "bucket": os.getenv("BUCKET"),
+        "scene_id": os.getenv("SCENE_ID"),
         "regen3d_prefix": os.getenv("REGEN3D_PREFIX"),
         "assets_prefix": os.getenv("ASSETS_PREFIX"),
         "layout_prefix": os.getenv("LAYOUT_PREFIX"),
@@ -806,7 +810,7 @@ if __name__ == "__main__":
     }
     exit_code = run_job_with_dead_letter_queue(
         main,
-        scene_id=os.getenv("SCENE_ID", ""),
+        scene_id=os.getenv("SCENE_ID"),
         job_type="regen3d_adapter",
         step="regen3d_adapter",
         input_params=input_params,

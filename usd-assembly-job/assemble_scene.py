@@ -63,7 +63,7 @@ def main() -> None:
         },
         label="[USD-ASSEMBLY]",
     )
-    assets_prefix = os.getenv("ASSETS_PREFIX", "")
+    assets_prefix = os.environ["ASSETS_PREFIX"]
     assets_root = GCS_ROOT / assets_prefix
     validate_scene_manifest(assets_root / "scene_manifest.json", label="[USD-ASSEMBLY]")
     exit_code = assemble_from_env()
@@ -76,8 +76,8 @@ def main() -> None:
         sys.exit(exit_code)
 
     usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
-    scene_id = os.getenv("SCENE_ID", "")
-    bucket = os.getenv("BUCKET", "")
+    scene_id = os.environ["SCENE_ID"]
+    bucket = os.environ["BUCKET"]
     usd_path = GCS_ROOT / usd_prefix / "scene.usda"
 
     quality_gates = QualityGateRegistry(verbose=True)
@@ -105,7 +105,6 @@ def main() -> None:
             ],
         )
         sys.exit(1)
-    scene_id = os.getenv("SCENE_ID", "")
     metrics = get_metrics()
     with metrics.track_job("usd-assembly-job", scene_id):
         exit_code = assemble_from_env()

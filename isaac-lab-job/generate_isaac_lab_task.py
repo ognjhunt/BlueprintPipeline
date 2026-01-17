@@ -50,6 +50,7 @@ from tools.isaac_lab_tasks.runtime_validator import (
     IsaacLabRuntimeValidator,
     RuntimeValidationResult,
 )
+from tools.validation.entrypoint_checks import validate_required_env_vars
 
 logger = logging.getLogger(__name__)
 
@@ -676,12 +677,15 @@ def run_isaac_lab_job(
 def main():
     """Main entry point."""
     # Get configuration from environment
-    bucket = os.getenv("BUCKET", "")
-    scene_id = os.getenv("SCENE_ID", "")
-
-    if not scene_id:
-        logger.error("[ISAAC-LAB-JOB] SCENE_ID is required")
-        sys.exit(1)
+    validate_required_env_vars(
+        {
+            "BUCKET": "GCS bucket name",
+            "SCENE_ID": "Scene identifier",
+        },
+        label="[ISAAC-LAB-JOB]",
+    )
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
 
     # Prefixes with defaults
     assets_prefix = os.getenv("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
