@@ -540,11 +540,7 @@ class LeRobotExporter:
                 warnings.append("No validation performed on episodes")
 
         # Check environment indicators
-        is_production = (
-            os.getenv("KUBERNETES_SERVICE_HOST") is not None or
-            os.getenv("K_SERVICE") is not None or
-            os.path.exists("/.dockerenv")
-        )
+        is_production = self._is_production_mode()
 
         if not isaac_sim_available and is_production:
             warnings.append("Running in production without Isaac Sim")
@@ -567,6 +563,13 @@ class LeRobotExporter:
         if value is None:
             return None
         return value.lower() in {"1", "true", "yes", "y"}
+
+    def _is_production_mode(self) -> bool:
+        return (
+            os.getenv("KUBERNETES_SERVICE_HOST") is not None
+            or os.getenv("K_SERVICE") is not None
+            or os.path.exists("/.dockerenv")
+        )
 
     def _resolve_quality_gate_report_path(self) -> Optional[Path]:
         env_path = os.getenv("QUALITY_GATE_REPORT_PATH")
@@ -1121,6 +1124,7 @@ class LeRobotExporter:
             episode_id = episode.episode_index
             trajectory_frames = episode.trajectory.num_frames if episode.trajectory else 0
             episode_errors: List[str] = []
+            mismatch_counts = {"frame_count": 0, "timestamp": 0, "missing_camera": 0}
 
             # Skip if no sensor data (not an error)
             if episode.sensor_data is None:
@@ -1135,10 +1139,17 @@ class LeRobotExporter:
 
             # Validate frame count alignment
             if trajectory_frames != sensor_frames:
+                mismatch_counts["frame_count"] = abs(trajectory_frames - sensor_frames)
                 episode_errors.append(
                     f"Frame count mismatch. Trajectory: {trajectory_frames} frames, Sensor: {sensor_frames} frames"
                 )
-                errors.append({"episode_index": episode_id, "errors": episode_errors})
+                errors.append({
+                    "episode_index": episode_id,
+                    "errors": episode_errors,
+                    "mismatch_counts": mismatch_counts,
+                    "trajectory_frames": trajectory_frames,
+                    "sensor_frames": sensor_frames,
+                })
                 continue
 
             # Validate timestamp alignment (if both have timestamps)
@@ -1156,6 +1167,7 @@ class LeRobotExporter:
                             misaligned_frames.append(i)
 
                     if misaligned_frames:
+                        mismatch_counts["timestamp"] = len(misaligned_frames)
                         # Report first few misaligned frames
                         sample_frames = misaligned_frames[:3]
                         frame_info = ", ".join([
@@ -1174,13 +1186,20 @@ class LeRobotExporter:
                         frame_cameras = set(frame.rgb_images.keys())
                         missing_cameras = expected_cameras - frame_cameras
                         if missing_cameras:
+                            mismatch_counts["missing_camera"] = len(missing_cameras)
                             episode_errors.append(
                                 f"Missing camera data for {missing_cameras} at frame {i}"
                             )
                             break  # Don't spam errors for every frame
 
             if episode_errors:
-                errors.append({"episode_index": episode_id, "errors": episode_errors})
+                errors.append({
+                    "episode_index": episode_id,
+                    "errors": episode_errors,
+                    "mismatch_counts": mismatch_counts,
+                    "trajectory_frames": trajectory_frames,
+                    "sensor_frames": sensor_frames,
+                })
 
         return errors
 
@@ -1603,10 +1622,23 @@ class LeRobotExporter:
                 if len(alignment_errors) > 5:
                     self.log(f"    ... and {len(alignment_errors) - 5} more", "WARNING")
 
-                if self.config.strict_alignment:
+                is_production = self._is_production_mode()
+                self._write_invalid_episodes(
+                    meta_dir,
+                    alignment_errors,
+                    export_blocked=is_production or self.config.strict_alignment,
+                )
+
+                if is_production or self.config.strict_alignment:
+                    mismatch_message = self._format_alignment_mismatch_exception(alignment_errors)
+                    if is_production:
+                        raise ValueError(
+                            "Production export blocked due to trajectory-sensor frame mismatches. "
+                            f"{mismatch_message}"
+                        )
                     raise ValueError(
-                        "Trajectory-sensor alignment validation failed for "
-                        f"{len(alignment_errors)} episodes. Set strict_alignment=False to drop them."
+                        "Trajectory-sensor alignment validation failed. "
+                        f"{mismatch_message} Set strict_alignment=False to drop them."
                     )
 
                 dropped_episode_ids = {entry["episode_index"] for entry in alignment_errors}
@@ -1614,7 +1646,6 @@ class LeRobotExporter:
                     f"  Dropping {len(dropped_episode_ids)} episodes due to alignment errors.",
                     "WARNING",
                 )
-                self._write_invalid_episodes(meta_dir, alignment_errors)
                 self.episodes = [
                     episode for episode in self.episodes
                     if episode.episode_index not in dropped_episode_ids
@@ -2074,14 +2105,63 @@ class LeRobotExporter:
             lambda tmp_path: tmp_path.write_text(json.dumps(self.stats, indent=2)),
         )
 
-    def _write_invalid_episodes(self, meta_dir: Path, invalid_entries: List[Dict[str, Any]]) -> None:
+    def _summarize_alignment_mismatches(
+        self,
+        invalid_entries: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        mismatch_totals = {"frame_count": 0, "timestamp": 0, "missing_camera": 0}
+        for entry in invalid_entries:
+            mismatch_counts = entry.get("mismatch_counts", {})
+            for key in mismatch_totals:
+                mismatch_totals[key] += int(mismatch_counts.get(key, 0) or 0)
+        total_mismatches = sum(mismatch_totals.values())
+        return {
+            "total_mismatches": total_mismatches,
+            "by_type": mismatch_totals,
+        }
+
+    def _format_alignment_mismatch_exception(self, alignment_errors: List[Dict[str, Any]]) -> str:
+        summary = []
+        for entry in alignment_errors:
+            mismatch_counts = entry.get("mismatch_counts", {})
+            mismatch_total = sum(int(v or 0) for v in mismatch_counts.values())
+            summary.append(f"{entry.get('episode_index')} (mismatches={mismatch_total})")
+        mismatch_summary = "; ".join(summary) if summary else "none"
+        totals = self._summarize_alignment_mismatches(alignment_errors)
+        totals_by_type = ", ".join(
+            f"{key}={value}" for key, value in totals["by_type"].items()
+        )
+        return (
+            "Trajectory-sensor alignment mismatches detected for episodes: "
+            f"{mismatch_summary}. Total mismatches: {totals['total_mismatches']} "
+            f"({totals_by_type})."
+        )
+
+    def _write_invalid_episodes(
+        self,
+        meta_dir: Path,
+        invalid_entries: List[Dict[str, Any]],
+        *,
+        export_blocked: bool = False,
+    ) -> None:
         """Write invalid episode details to meta directory."""
         invalid_path = meta_dir / "invalid_episodes.json"
+        mismatch_summary = self._summarize_alignment_mismatches(invalid_entries)
         payload = {
             "reason": "trajectory_sensor_alignment",
             "total_dropped": len(invalid_entries),
             "episodes": invalid_entries,
             "generated_at": datetime.utcnow().isoformat() + "Z",
+            "summary": {
+                "export_blocked": export_blocked,
+                "blocked_reason": "frame_mismatch" if export_blocked else None,
+                "message": (
+                    "Export blocked due to frame mismatches."
+                    if export_blocked
+                    else "Episodes dropped due to frame mismatches."
+                ),
+                "mismatch_summary": mismatch_summary,
+            },
         }
         self._atomic_write(
             invalid_path,
