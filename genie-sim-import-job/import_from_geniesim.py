@@ -71,6 +71,7 @@ from geniesim_client import (
 )
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.validation.entrypoint_checks import validate_required_env_vars
+from tools.utils.atomic_write import write_json_atomic, write_text_atomic
 from quality_config import (
     DEFAULT_MIN_QUALITY_SCORE,
     QUALITY_CONFIG,
@@ -729,13 +730,14 @@ def convert_to_lerobot(
             dataset_info["max_quality_score"] = float(np.max(quality_scores))
 
         metadata_file = output_dir / "dataset_info.json"
-        with open(metadata_file, "w") as f:
-            json.dump(dataset_info, f, indent=2)
+        write_json_atomic(metadata_file, dataset_info, indent=2)
 
         episodes_file = output_dir / "episodes.jsonl"
-        with open(episodes_file, "w") as f:
-            for ep_info in dataset_info["episodes"]:
-                f.write(json.dumps(ep_info) + "\n")
+        episode_lines = [json.dumps(ep_info) for ep_info in dataset_info["episodes"]]
+        episodes_payload = "\n".join(episode_lines)
+        if episodes_payload:
+            episodes_payload += "\n"
+        write_text_atomic(episodes_file, episodes_payload)
 
         return {
             "success": True,
@@ -854,14 +856,15 @@ def convert_to_lerobot(
 
     # Write dataset metadata
     metadata_file = output_dir / "dataset_info.json"
-    with open(metadata_file, "w") as f:
-        json.dump(dataset_info, f, indent=2)
+    write_json_atomic(metadata_file, dataset_info, indent=2)
 
     # Write episode index
     episodes_file = output_dir / "episodes.jsonl"
-    with open(episodes_file, "w") as f:
-        for ep_info in dataset_info["episodes"]:
-            f.write(json.dumps(ep_info) + "\n")
+    episode_lines = [json.dumps(ep_info) for ep_info in dataset_info["episodes"]]
+    episodes_payload = "\n".join(episode_lines)
+    if episodes_payload:
+        episodes_payload += "\n"
+    write_text_atomic(episodes_file, episodes_payload)
 
     return {
         "success": True,

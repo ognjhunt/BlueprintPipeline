@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
+from tools.utils.atomic_write import write_json_atomic
+
 logger = logging.getLogger(__name__)
 
 # Add parent to path
@@ -362,8 +364,7 @@ class RLDSExporter:
 
                 rlds_episode["steps"].append(step)
 
-            with open(output_path, "w") as f:
-                json.dump(rlds_episode, f, indent=2, default=str)
+            write_json_atomic(output_path, rlds_episode, indent=2, default=str)
 
             self.log(f"  Wrote {output_path.name} (JSON fallback)")
 
@@ -389,12 +390,10 @@ class RLDSExporter:
             "compatible_with": ["tensorflow_datasets", "jax", "open_x_embodiment"],
         }
 
-        with open(self.output_dir / "dataset_info.json", "w") as f:
-            json.dump(dataset_info, f, indent=2)
+        write_json_atomic(self.output_dir / "dataset_info.json", dataset_info, indent=2)
 
         # Features spec
-        with open(self.output_dir / "features.json", "w") as f:
-            json.dump(features, f, indent=2)
+        write_json_atomic(self.output_dir / "features.json", features, indent=2)
 
         self.log("Wrote dataset_info.json and features.json")
 
