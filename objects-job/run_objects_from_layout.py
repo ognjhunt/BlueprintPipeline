@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.validation.entrypoint_checks import validate_required_env_vars
+
+logger = logging.getLogger(__name__)
 
 def load_da3_geom(geom_path: Path):
     # Pickle loading intentionally disabled for security.
@@ -151,7 +154,11 @@ def load_class_names(data_yaml_path: Path) -> Optional[List[str]]:
         if isinstance(names, list):
             return [str(n) for n in names]
     except Exception as e:
-        print(f"[OBJECTS] WARNING: failed to read class names from {data_yaml_path}: {e}", file=sys.stderr)
+        logger.warning(
+            "[OBJECTS] Failed to read class names from %s: %s",
+            data_yaml_path,
+            e,
+        )
     return None
 
 
@@ -178,17 +185,17 @@ def main() -> None:
     seg_dataset_dir = root / seg_dataset_prefix
     layout_dir = root / layout_prefix
 
-    print(f"[OBJECTS] Bucket: {bucket}")
-    print(f"[OBJECTS] Scene ID: {scene_id}")
-    print(f"[OBJECTS] DA3 dir: {da3_dir}")
-    print(f"[OBJECTS] Seg dataset dir: {seg_dataset_dir}")
-    print(f"[OBJECTS] Layout dir: {layout_dir}")
+    logger.info("[OBJECTS] Bucket: %s", bucket)
+    logger.info("[OBJECTS] Scene ID: %s", scene_id)
+    logger.info("[OBJECTS] DA3 dir: %s", da3_dir)
+    logger.info("[OBJECTS] Seg dataset dir: %s", seg_dataset_dir)
+    logger.info("[OBJECTS] Layout dir: %s", layout_dir)
 
     layout_path = layout_dir / "scene_layout.json"
     expected_outputs = [layout_path]
-    print("[OBJECTS] Expected outputs:")
+    logger.info("[OBJECTS] Expected outputs:")
     for p in expected_outputs:
-        print(f"  - {p}")
+        logger.info("[OBJECTS]   - %s", p)
 
     existing_outputs = []
     if layout_path.is_file():
@@ -201,15 +208,16 @@ def main() -> None:
                     f"{layout_path} (objects already present: {len(objs)})"
                 )
         except Exception as e:
-            print(
-                f"[OBJECTS] WARNING: failed to inspect existing layout at {layout_path}: {e}",
-                file=sys.stderr,
+            logger.warning(
+                "[OBJECTS] Failed to inspect existing layout at %s: %s",
+                layout_path,
+                e,
             )
 
     if len(existing_outputs) == len(expected_outputs):
-        print("[OBJECTS] All expected outputs already exist; skipping objects step.")
+        logger.info("[OBJECTS] All expected outputs already exist; skipping objects step.")
         for entry in existing_outputs:
-            print(f"[OBJECTS]   • {entry}")
+            logger.info("[OBJECTS]   • %s", entry)
         return
 
     geom_path = da3_dir / "da3_geom.npz"
@@ -219,15 +227,15 @@ def main() -> None:
     room_label_path = valid_labels_dir / "room.txt"
 
     if not geom_path.is_file():
-        print(f"[OBJECTS] ERROR: da3_geom.npz not found at {geom_path}", file=sys.stderr)
+        logger.error("[OBJECTS] da3_geom.npz not found at %s", geom_path)
         sys.exit(1)
 
     if not layout_path.is_file():
-        print(f"[OBJECTS] ERROR: scene_layout.json not found at {layout_path}", file=sys.stderr)
+        logger.error("[OBJECTS] scene_layout.json not found at %s", layout_path)
         sys.exit(1)
 
     if not room_label_path.is_file():
-        print(f"[OBJECTS] WARNING: room labels not found at {room_label_path}", file=sys.stderr)
+        logger.warning("[OBJECTS] Room labels not found at %s", room_label_path)
 
     layout_dir.mkdir(parents=True, exist_ok=True)
 
@@ -238,9 +246,9 @@ def main() -> None:
     # ---- Load DA3 geometry ----
     depth_all, conf_all, extr_all, intr_all, image_paths = load_da3_geom(geom_path)
     if depth_all.shape[0] != 1:
-        print(
-            f"[OBJECTS] WARNING: multiple frames in da3_geom ({depth_all.shape[0]}). Using first.",
-            file=sys.stderr,
+        logger.warning(
+            "[OBJECTS] Multiple frames in da3_geom (%s). Using first.",
+            depth_all.shape[0],
         )
 
     depth = depth_all[0]
@@ -248,18 +256,18 @@ def main() -> None:
     w2c = extr_all[0]
     K = intr_all[0]
     H, W = depth.shape
-    print(f"[OBJECTS] Depth shape: {depth.shape}")
+    logger.info("[OBJECTS] Depth shape: %s", depth.shape)
 
     # ---- Load class names and YOLO segmentation labels ----
     class_names = load_class_names(data_yaml_path)
     objects = parse_yolo_labels(room_label_path, class_names=class_names)
-    print(f"[OBJECTS] Parsed {len(objects)} YOLO objects")
+    logger.info("[OBJECTS] Parsed %s YOLO objects", len(objects))
 
     if not objects:
         layout["objects"] = []
         with layout_path.open("w") as f:
             json.dump(layout, f, indent=2)
-        print("[OBJECTS] No objects found; wrote layout with empty objects[]")
+        logger.info("[OBJECTS] No objects found; wrote layout with empty objects[]")
         return
 
     # ---- For each object, build a per-object point cloud + proxy ----
@@ -296,7 +304,7 @@ def main() -> None:
         )
 
         if pts_obj.shape[0] == 0:
-            print(f"[OBJECTS] Object {name} has no valid depth points")
+            logger.info("[OBJECTS] Object %s has no valid depth points", name)
             center3d = None
             obb = None
         else:
@@ -334,8 +342,8 @@ def main() -> None:
     with layout_path.open("w") as f:
         json.dump(layout, f, indent=2)
 
-    print(f"[OBJECTS] Wrote {len(proxies)} objects to {layout_path}")
-    print("[OBJECTS] Done.")
+    logger.info("[OBJECTS] Wrote %s objects to %s", len(proxies), layout_path)
+    logger.info("[OBJECTS] Done.")
 
 
 if __name__ == "__main__":

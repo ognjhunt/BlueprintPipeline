@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -11,6 +12,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.validation.entrypoint_checks import validate_required_env_vars
+
+logger = logging.getLogger(__name__)
 
 # Class priors (approximate object heights in meters)
 CLASS_PRIORS: Dict[str, float] = {
@@ -46,7 +49,11 @@ def load_metric_metadata(layout_dir: Path) -> Tuple[dict, Optional[Path]]:
             data = json.load(f)
         return data if isinstance(data, dict) else {}, candidate
     except Exception as e:
-        print(f"[SCALE] WARNING: failed to read metric metadata at {candidate}: {e}", file=sys.stderr)
+        logger.warning(
+            "[SCALE] Failed to read metric metadata at %s: %s",
+            candidate,
+            e,
+        )
         return {}, candidate
 
 
@@ -261,16 +268,16 @@ def main() -> None:
     layout_dir = root / layout_prefix
     layout_path = layout_dir / "scene_layout.json"
 
-    print(f"[SCALE] Bucket: {bucket}")
-    print(f"[SCALE] Scene ID: {scene_id}")
-    print(f"[SCALE] Layout dir: {layout_dir}")
+    logger.info("[SCALE] Bucket: %s", bucket)
+    logger.info("[SCALE] Scene ID: %s", scene_id)
+    logger.info("[SCALE] Layout dir: %s", layout_dir)
 
     scaled_path = layout_dir / "scene_layout_scaled.json"
     done_marker_path = layout_dir / "scene_layout_scaled.done"
     expected_outputs = [scaled_path, done_marker_path]
-    print("[SCALE] Expected outputs:")
+    logger.info("[SCALE] Expected outputs:")
     for p in expected_outputs:
-        print(f"  - {p}")
+        logger.info("[SCALE]   - %s", p)
 
     existing_outputs = []
     if scaled_path.is_file():
@@ -283,22 +290,23 @@ def main() -> None:
             else:
                 existing_outputs.append(str(scaled_path))
         except Exception as e:
-            print(
-                f"[SCALE] WARNING: failed to inspect existing scaled layout at {scaled_path}: {e}",
-                file=sys.stderr,
+            logger.warning(
+                "[SCALE] Failed to inspect existing scaled layout at %s: %s",
+                scaled_path,
+                e,
             )
 
     if done_marker_path.is_file():
         existing_outputs.append(str(done_marker_path))
 
     if len(existing_outputs) == len(expected_outputs):
-        print("[SCALE] All expected outputs already exist; skipping scale step.")
+        logger.info("[SCALE] All expected outputs already exist; skipping scale step.")
         for entry in existing_outputs:
-            print(f"[SCALE]   • {entry}")
+            logger.info("[SCALE]   • %s", entry)
         return
 
     if not layout_path.is_file():
-        print(f"[SCALE] ERROR: scene_layout.json not found at {layout_path}", file=sys.stderr)
+        logger.error("[SCALE] scene_layout.json not found at %s", layout_path)
         sys.exit(1)
 
     with layout_path.open("r") as f:
@@ -308,13 +316,13 @@ def main() -> None:
     objects: List[dict] = layout.get("objects", [])
 
     if room_box is None:
-        print("[SCALE] WARNING: room_box missing; cannot scale room extents", file=sys.stderr)
+        logger.warning("[SCALE] room_box missing; cannot scale room extents")
 
-    print(f"[SCALE] Found {len(objects)} objects in layout")
+    logger.info("[SCALE] Found %s objects in layout", len(objects))
 
     metric_metadata, metadata_path = load_metric_metadata(layout_dir)
     if metadata_path:
-        print(f"[SCALE] Found metric metadata at {metadata_path}")
+        logger.info("[SCALE] Found metric metadata at %s", metadata_path)
 
     # Collect scale samples from explicit references then scene metrics and class priors
     scales: List[float] = []
@@ -379,9 +387,13 @@ def main() -> None:
         try:
             done_marker_path.write_text("ok\n")
         except Exception as e:
-            print(f"[SCALE] WARNING: failed to write done marker at {done_marker_path}: {e}", file=sys.stderr)
+            logger.warning(
+                "[SCALE] Failed to write done marker at %s: %s",
+                done_marker_path,
+                e,
+            )
 
-        print("[SCALE] No scale cues available; wrote scene_layout_scaled.json with factor=1.0")
+        logger.info("[SCALE] No scale cues available; wrote scene_layout_scaled.json with factor=1.0")
         return
 
     # Compute global scale factor as median for robustness
@@ -402,7 +414,12 @@ def main() -> None:
     else:
         source_label = "class_priors"
 
-    print(f"[SCALE] Using global scale factor S={S:.4f} from {len(scales)} samples (source={source_label})")
+    logger.info(
+        "[SCALE] Using global scale factor S=%.4f from %s samples (source=%s)",
+        S,
+        len(scales),
+        source_label,
+    )
 
     # Scale room_box
     if room_box is not None:
@@ -469,10 +486,14 @@ def main() -> None:
     try:
         done_marker_path.write_text("ok\n")
     except Exception as e:
-        print(f"[SCALE] WARNING: failed to write done marker at {done_marker_path}: {e}", file=sys.stderr)
+        logger.warning(
+            "[SCALE] Failed to write done marker at %s: %s",
+            done_marker_path,
+            e,
+        )
 
-    print(f"[SCALE] Wrote scaled layout to {scaled_path}")
-    print("[SCALE] Done.")
+    logger.info("[SCALE] Wrote scaled layout to %s", scaled_path)
+    logger.info("[SCALE] Done.")
 
 
 if __name__ == "__main__":
