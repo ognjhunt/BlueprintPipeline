@@ -69,6 +69,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+
+def _parse_bool_env_with_default(key: str, default: bool) -> bool:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
 from trajectory_solver import JointTrajectory, JointState, RobotConfig, ROBOT_CONFIGS
 
 # Import reward computation
@@ -228,6 +235,14 @@ class LeRobotDatasetConfig:
 
     # Tier compliance enforcement
     tier_compliance_action: str = "fail"  # "fail" or "drop"
+
+    # Episode completeness enforcement
+    require_complete_episodes: bool = field(
+        default_factory=lambda: _parse_bool_env_with_default(
+            "REQUIRE_COMPLETE_EPISODES",
+            False,
+        )
+    )
 
     @classmethod
     def from_data_pack(
@@ -1682,6 +1697,12 @@ class LeRobotExporter:
                         "ERROR",
                     )
 
+                if self.config.require_complete_episodes:
+                    raise ValueError(
+                        "Incomplete episodes detected; "
+                        "REQUIRE_COMPLETE_EPISODES is enabled so export cannot continue."
+                    )
+
                 dropped_episode_ids = {ep_idx for ep_idx, _ in incomplete}
                 self.log(
                     f"  Dropping {len(dropped_episode_ids)} incomplete episodes before export.",
@@ -2546,6 +2567,10 @@ class LeRobotExporter:
                 "includes_privileged_state": self.config.include_privileged_state,
             },
             "tier_compliance": dict(self.tier_compliance_summary),
+            "export_controls": {
+                "require_complete_episodes": self.config.require_complete_episodes,
+                "require_complete_episodes_source": "env:REQUIRE_COMPLETE_EPISODES",
+            },
             # Data quality and source information
             "data_quality": {
                 "physics_validated": data_source_info["physics_validated"],
