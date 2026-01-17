@@ -159,6 +159,8 @@ main:
           - qualityGateReportObject: ${"scenes/" + scene_id + "/episode-generation-job/quality_gate_report.json"}
           - qualityGateReportPath: ${"gs://" + bucket + "/" + qualityGateReportObject}
           - qualityGateFailedMarker: ${"scenes/" + scene_id + "/geniesim/.failed"}
+          - importOutputPrefix: ${default(local_episodes_prefix, "scenes/" + scene_id + "/episodes")}
+          - importFailedMarker: ${default(local_episodes_prefix, "scenes/" + scene_id + "/episodes") + "/.failed"}
           - qualityCertPrefix: ${"scenes/" + scene_id + "/episodes/"}
           - qualityCertObject: null
           - qualityCertPageToken: null
@@ -411,6 +413,48 @@ main:
                 args:
                   text: ${"Failed to start genie-sim-import job after retries: " + e.message}
                   severity: "ERROR"
+            - list_import_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${importOutputPrefix + "/"}
+                  maxResults: 1000
+                result: importCleanupList
+            - delete_import_outputs_for_cleanup:
+                for:
+                  value: importCleanupItem
+                  in: ${default(importCleanupList.items, [])}
+                  steps:
+                    - delete_import_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${importCleanupItem.name}
+            - write_import_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${importFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": scene_id,
+                    "job_name": "genie-sim-import-job",
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "genie_sim_import_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "output_prefix": importOutputPrefix
+                      }
+                    }
+                  })}
             - raise_import_job_error:
                 raise: ${e}
 

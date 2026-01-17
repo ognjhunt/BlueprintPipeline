@@ -148,6 +148,23 @@ main:
                 args:
                   text: ${"ERROR: Failed to start scale-job after retries: " + e.message}
                   severity: "ERROR"
+            - list_scale_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${layoutPrefix + "/"}
+                  maxResults: 1000
+                result: scaleCleanupList
+            - delete_scale_outputs_for_cleanup:
+                for:
+                  value: scaleCleanupItem
+                  in: ${default(scaleCleanupList.items, [])}
+                  steps:
+                    - delete_scale_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${scaleCleanupItem.name}
             - write_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:

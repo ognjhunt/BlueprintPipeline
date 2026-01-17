@@ -323,6 +323,23 @@ main:
                     retry_max: 3
                     error: ${e.message}
                   severity: "ERROR"
+            - list_training_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${output_path + "/"}
+                  maxResults: 1000
+                result: trainingCleanupList
+            - delete_training_outputs_for_cleanup:
+                for:
+                  value: trainingCleanupItem
+                  in: ${default(trainingCleanupList.items, [])}
+                  steps:
+                    - delete_training_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${trainingCleanupItem.name}
             - capture_training_failure_metrics:
                 assign:
                   - trainingEndTime: '${time.format(sys.now())}'

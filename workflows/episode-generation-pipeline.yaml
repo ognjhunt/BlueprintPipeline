@@ -265,165 +265,217 @@ main:
 
     # Alternative: Run episode generation via Cloud Build (which can access GKE)
     - run_episode_job_via_cloudbuild:
-        call: googleapis.cloudbuild.v1.projects.builds.create
-        args:
-          projectId: ${projectId}
-          body:
-            steps:
-              - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-                entrypoint: 'bash'
-                args:
-                  - '-c'
-                  - |
-                    set -e
+        try:
+          call: googleapis.cloudbuild.v1.projects.builds.create
+          args:
+            projectId: ${projectId}
+            body:
+              steps:
+                - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+                  entrypoint: 'bash'
+                  args:
+                    - '-c'
+                    - |
+                      set -e
 
-                    # Get GKE credentials
-                    gcloud container clusters get-credentials ${gkeCluster} \
-                      --zone=${gkeZone} \
-                      --project=${projectId}
+                      # Get GKE credentials
+                      gcloud container clusters get-credentials ${gkeCluster} \
+                        --zone=${gkeZone} \
+                        --project=${projectId}
 
-                    # Preflight guard: ensure GPU nodes are present before scheduling
-                    GPU_NODE_COUNT=$(kubectl get nodes \
-                      -l cloud.google.com/gke-accelerator=nvidia-tesla-t4 \
-                      -o name | wc -l | tr -d ' ')
-                    if [ "${GPU_NODE_COUNT}" -eq 0 ]; then
-                      echo "ERROR: No GPU nodes found with accelerator label nvidia-tesla-t4."
-                      echo "Episode generation requires Isaac Sim runtime on GPU nodes."
-                      exit 1
-                    fi
-
-                    GPU_CAPACITY=$(kubectl get nodes \
-                      -l cloud.google.com/gke-accelerator=nvidia-tesla-t4 \
-                      -o jsonpath='{range .items[*]}{.status.capacity.nvidia\.com/gpu}{"\n"}{end}' \
-                      | awk 'BEGIN{sum=0} {if ($1 ~ /^[0-9]+$/) sum+=$1} END{print sum}')
-                    if [ "${GPU_CAPACITY:-0}" -le 0 ]; then
-                      echo "ERROR: GPU capacity is not reported on GPU nodes."
-                      echo "Verify NVIDIA drivers and device plugin are installed."
-                      exit 1
-                    fi
-
-                    # Create unique job name
-                    JOB_NAME="episode-gen-${sceneId}-$(date +%s)"
-
-                    # Create the Kubernetes Job
-                    cat <<EOFK8S | kubectl apply -f -
-                    apiVersion: batch/v1
-                    kind: Job
-                    metadata:
-                      name: ${JOB_NAME}
-                      namespace: ${namespace}
-                      labels:
-                        app: episode-generation
-                        scene-id: ${sceneId}
-                        triggered-by: workflow
-                    spec:
-                      backoffLimit: 2
-                      activeDeadlineSeconds: 21600  # 6 hours max
-                      template:
-                        metadata:
-                          labels:
-                            app: episode-generation
-                        spec:
-                          restartPolicy: Never
-                          serviceAccountName: blueprint-pipeline-sa
-                          nodeSelector:
-                            cloud.google.com/gke-accelerator: nvidia-tesla-t4
-                          tolerations:
-                          - key: nvidia.com/gpu
-                            operator: Equal
-                            value: present
-                            effect: NoSchedule
-                          containers:
-                          - name: episode-generation
-                            image: ${region}-docker.pkg.dev/${projectId}/blueprint-jobs/episode-gen-job:latest
-                            env:
-                            - name: BUCKET
-                              value: ${bucket}
-                            - name: SCENE_ID
-                              value: ${sceneId}
-                            - name: ASSETS_PREFIX
-                              value: ${assetsPrefix}
-                            - name: USD_PREFIX
-                              value: ${usdPrefix}
-                            - name: EPISODES_PREFIX
-                              value: ${episodesPrefix}
-                            - name: HEADLESS
-                              value: "1"
-                            - name: DATA_PACK_TIER
-                              value: ${dataPackTier}
-                            - name: EPISODES_PER_VARIATION
-                              value: ${episodesPerVariation}
-                            - name: REQUIRE_REAL_PHYSICS
-                              value: "true"
-                            - name: DATA_QUALITY_LEVEL
-                              value: "production"
-                            - name: ISAAC_SIM_REQUIRED
-                              value: "true"
-                            - name: SENSOR_CAPTURE_MODE
-                              value: "isaac_sim"
-                            - name: USE_MOCK_CAPTURE
-                              value: "false"
-                            - name: ALLOW_MOCK_DATA
-                              value: "false"
-                            - name: ALLOW_MOCK_CAPTURE
-                              value: "false"
-                            - name: BUNDLE_TIER
-                              value: ${bundleTier}
-                            - name: AUDIO_NARRATION_ENABLED
-                              value: '${if(audioNarrationEnabled, "true", "false")}'
-                            - name: SUBTITLE_GENERATION_ENABLED
-                              value: '${if(subtitleGenerationEnabled, "true", "false")}'
-                            - name: GOOGLE_APPLICATION_CREDENTIALS
-                              value: /secrets/gcs/key.json
-                            resources:
-                              requests:
-                                cpu: "4"
-                                memory: 16Gi
-                                nvidia.com/gpu: "1"
-                              limits:
-                                cpu: "8"
-                                memory: 32Gi
-                                nvidia.com/gpu: "1"
-                            volumeMounts:
-                            - name: gcs-credentials
-                              mountPath: /secrets/gcs
-                              readOnly: true
-                            - name: dshm
-                              mountPath: /dev/shm
-                          volumes:
-                          - name: gcs-credentials
-                            secret:
-                              secretName: gcs-service-account
-                          - name: dshm
-                            emptyDir:
-                              medium: Memory
-                              sizeLimit: 16Gi
-                    EOFK8S
-
-                    echo "Created Kubernetes Job: ${JOB_NAME}"
-
-                    # Wait for job to complete (poll every 30 seconds)
-                    echo "Waiting for job completion..."
-                    while true; do
-                      STATUS=$(kubectl get job ${JOB_NAME} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
-                      FAILED=$(kubectl get job ${JOB_NAME} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
-
-                      if [ "$STATUS" == "True" ]; then
-                        echo "Job completed successfully!"
-                        exit 0
-                      elif [ "$FAILED" == "True" ]; then
-                        echo "Job failed!"
-                        kubectl logs job/${JOB_NAME} -n ${namespace} --tail=100 || true
+                      # Preflight guard: ensure GPU nodes are present before scheduling
+                      GPU_NODE_COUNT=$(kubectl get nodes \
+                        -l cloud.google.com/gke-accelerator=nvidia-tesla-t4 \
+                        -o name | wc -l | tr -d ' ')
+                      if [ "${GPU_NODE_COUNT}" -eq 0 ]; then
+                        echo "ERROR: No GPU nodes found with accelerator label nvidia-tesla-t4."
+                        echo "Episode generation requires Isaac Sim runtime on GPU nodes."
                         exit 1
                       fi
 
-                      echo "Job still running... ($(date))"
-                      sleep 30
-                    done
-            timeout: '21600s'  # 6 hours
-            options:
-              logging: CLOUD_LOGGING_ONLY
-        result: buildResult
+                      GPU_CAPACITY=$(kubectl get nodes \
+                        -l cloud.google.com/gke-accelerator=nvidia-tesla-t4 \
+                        -o jsonpath='{range .items[*]}{.status.capacity.nvidia\.com/gpu}{"\n"}{end}' \
+                        | awk 'BEGIN{sum=0} {if ($1 ~ /^[0-9]+$/) sum+=$1} END{print sum}')
+                      if [ "${GPU_CAPACITY:-0}" -le 0 ]; then
+                        echo "ERROR: GPU capacity is not reported on GPU nodes."
+                        echo "Verify NVIDIA drivers and device plugin are installed."
+                        exit 1
+                      fi
+
+                      # Create unique job name
+                      JOB_NAME="episode-gen-${sceneId}-$(date +%s)"
+
+                      # Create the Kubernetes Job
+                      cat <<EOFK8S | kubectl apply -f -
+                      apiVersion: batch/v1
+                      kind: Job
+                      metadata:
+                        name: ${JOB_NAME}
+                        namespace: ${namespace}
+                        labels:
+                          app: episode-generation
+                          scene-id: ${sceneId}
+                          triggered-by: workflow
+                      spec:
+                        backoffLimit: 2
+                        activeDeadlineSeconds: 21600  # 6 hours max
+                        template:
+                          metadata:
+                            labels:
+                              app: episode-generation
+                          spec:
+                            restartPolicy: Never
+                            serviceAccountName: blueprint-pipeline-sa
+                            nodeSelector:
+                              cloud.google.com/gke-accelerator: nvidia-tesla-t4
+                            tolerations:
+                            - key: nvidia.com/gpu
+                              operator: Equal
+                              value: present
+                              effect: NoSchedule
+                            containers:
+                            - name: episode-generation
+                              image: ${region}-docker.pkg.dev/${projectId}/blueprint-jobs/episode-gen-job:latest
+                              env:
+                              - name: BUCKET
+                                value: ${bucket}
+                              - name: SCENE_ID
+                                value: ${sceneId}
+                              - name: ASSETS_PREFIX
+                                value: ${assetsPrefix}
+                              - name: USD_PREFIX
+                                value: ${usdPrefix}
+                              - name: EPISODES_PREFIX
+                                value: ${episodesPrefix}
+                              - name: HEADLESS
+                                value: "1"
+                              - name: DATA_PACK_TIER
+                                value: ${dataPackTier}
+                              - name: EPISODES_PER_VARIATION
+                                value: ${episodesPerVariation}
+                              - name: REQUIRE_REAL_PHYSICS
+                                value: "true"
+                              - name: DATA_QUALITY_LEVEL
+                                value: "production"
+                              - name: ISAAC_SIM_REQUIRED
+                                value: "true"
+                              - name: SENSOR_CAPTURE_MODE
+                                value: "isaac_sim"
+                              - name: USE_MOCK_CAPTURE
+                                value: "false"
+                              - name: ALLOW_MOCK_DATA
+                                value: "false"
+                              - name: ALLOW_MOCK_CAPTURE
+                                value: "false"
+                              - name: BUNDLE_TIER
+                                value: ${bundleTier}
+                              - name: AUDIO_NARRATION_ENABLED
+                                value: '${if(audioNarrationEnabled, "true", "false")}'
+                              - name: SUBTITLE_GENERATION_ENABLED
+                                value: '${if(subtitleGenerationEnabled, "true", "false")}'
+                              - name: GOOGLE_APPLICATION_CREDENTIALS
+                                value: /secrets/gcs/key.json
+                              resources:
+                                requests:
+                                  cpu: "4"
+                                  memory: 16Gi
+                                  nvidia.com/gpu: "1"
+                                limits:
+                                  cpu: "8"
+                                  memory: 32Gi
+                                  nvidia.com/gpu: "1"
+                              volumeMounts:
+                              - name: gcs-credentials
+                                mountPath: /secrets/gcs
+                                readOnly: true
+                              - name: dshm
+                                mountPath: /dev/shm
+                            volumes:
+                            - name: gcs-credentials
+                              secret:
+                                secretName: gcs-service-account
+                            - name: dshm
+                              emptyDir:
+                                medium: Memory
+                                sizeLimit: 16Gi
+                      EOFK8S
+
+                      echo "Created Kubernetes Job: ${JOB_NAME}"
+
+                      # Wait for job to complete (poll every 30 seconds)
+                      echo "Waiting for job completion..."
+                      while true; do
+                        STATUS=$(kubectl get job ${JOB_NAME} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
+                        FAILED=$(kubectl get job ${JOB_NAME} -n ${namespace} -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
+
+                        if [ "$STATUS" == "True" ]; then
+                          echo "Job completed successfully!"
+                          exit 0
+                        elif [ "$FAILED" == "True" ]; then
+                          echo "Job failed!"
+                          kubectl logs job/${JOB_NAME} -n ${namespace} --tail=100 || true
+                          exit 1
+                        fi
+
+                        echo "Job still running... ($(date))"
+                        sleep 30
+                      done
+              timeout: '21600s'  # 6 hours
+              options:
+                logging: CLOUD_LOGGING_ONLY
+          result: buildResult
+        except:
+          as: e
+          steps:
+            - list_episode_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${episodesPrefix + "/"}
+                  maxResults: 1000
+                result: episodeCleanupList
+            - delete_episode_outputs_for_cleanup:
+                for:
+                  value: episodeCleanupItem
+                  in: ${default(episodeCleanupList.items, [])}
+                  steps:
+                    - delete_episode_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${episodeCleanupItem.name}
+            - write_episode_start_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${episodesFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": episodeJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "episode_generation_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "episodes_prefix": episodesPrefix
+                      }
+                    },
+                    "input_params": {
+                      "scene_id": sceneId,
+                      "bucket": bucket
+                    }
+                  })}
+            - raise_episode_start_error:
+                raise: ${e}
         next: wait_for_build
 
     - wait_for_build:

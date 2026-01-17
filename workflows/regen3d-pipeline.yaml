@@ -191,6 +191,23 @@ main:
                     start_time: ${regen3dStartTime}
                     end_time: ${regen3dEndTime}
                   severity: "ERROR"
+            - list_regen3d_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${assetsPrefix + "/"}
+                  maxResults: 1000
+                result: regen3dCleanupList
+            - delete_regen3d_outputs_for_cleanup:
+                for:
+                  value: regen3dCleanupItem
+                  in: ${default(regen3dCleanupList.items, [])}
+                  steps:
+                    - delete_regen3d_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${regen3dCleanupItem.name}
             - write_regen3d_start_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:

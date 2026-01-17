@@ -281,6 +281,23 @@ main:
                 args:
                   text: '${"Failed to start DWM job after retries: " + e.message}'
                   severity: "ERROR"
+            - list_dwm_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${dwmPrefix + "/"}
+                  maxResults: 1000
+                result: dwmCleanupList
+            - delete_dwm_outputs_for_cleanup:
+                for:
+                  value: dwmCleanupItem
+                  in: ${default(dwmCleanupList.items, [])}
+                  steps:
+                    - delete_dwm_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${dwmCleanupItem.name}
             - write_dwm_start_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:
@@ -492,6 +509,23 @@ main:
                 args:
                   text: '${"Failed to start DWM inference job after retries: " + e.message}'
                   severity: "ERROR"
+            - list_dwm_inference_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${dwmPrefix + "/"}
+                  maxResults: 1000
+                result: dwmInferenceCleanupList
+            - delete_dwm_inference_outputs_for_cleanup:
+                for:
+                  value: dwmInferenceCleanupItem
+                  in: ${default(dwmInferenceCleanupList.items, [])}
+                  steps:
+                    - delete_dwm_inference_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${dwmInferenceCleanupItem.name}
             - write_dwm_inference_start_failure_marker:
                 call: googleapis.storage.v1.objects.insert
                 args:
