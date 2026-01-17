@@ -1253,6 +1253,12 @@ def run_local_import_job(
             "Checksum verification failed. " + remediation
         )
         print("[IMPORT] ❌ " + result.errors[-1])
+        print("[IMPORT] ❌ Checksum verification details:")
+        for error in verification_errors:
+            print(f"[IMPORT]   - {error}")
+        result.success = False
+        print("=" * 80 + "\n")
+        return result
     else:
         print("[IMPORT] ✅ Checksums.json verification succeeded")
     print("=" * 80 + "\n")
@@ -1264,6 +1270,13 @@ def run_local_import_job(
             "Import manifest checksum validation failed. "
             "Re-run the import to regenerate a consistent manifest."
         )
+        print("[IMPORT] ❌ " + result.errors[-1])
+        print("[IMPORT] ❌ Import manifest checksum verification details:")
+        for error in manifest_checksum_result["errors"]:
+            print(f"[IMPORT]   - {error}")
+        result.success = False
+        print("=" * 80 + "\n")
+        return result
 
     result.checksum_verification_passed = (
         checksums_verification["success"] and manifest_checksum_result["success"]
