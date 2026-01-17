@@ -51,14 +51,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Add repo root to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from tools.logging_config import init_logging
+
+# Configure logging
+init_logging()
+logger = logging.getLogger(__name__)
 
 # Import timeout utilities
 try:
