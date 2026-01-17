@@ -21,6 +21,7 @@ Paper: arXiv:2512.11798
 
 import argparse
 import json
+import logging
 import math
 import os
 import sys
@@ -35,6 +36,7 @@ import trimesh
 from huggingface_hub import hf_hub_download
 from omegaconf import OmegaConf
 
+logger = logging.getLogger(__name__)
 
 # Add parent directory to path for imports
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -44,7 +46,9 @@ if str(SCRIPT_DIR) not in sys.path:
 
 def log(msg: str, level: str = "INFO") -> None:
     """Log with prefix."""
-    print(f"[PARTICULATE] [{level}] {msg}", flush=True)
+    level_name = level.upper()
+    log_level = getattr(logging, level_name, logging.INFO)
+    logger.log(log_level, "[PARTICULATE] [%s] %s", level_name, msg)
 
 
 # =============================================================================
