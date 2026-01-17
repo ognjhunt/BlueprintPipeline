@@ -50,6 +50,7 @@ from import_manifest_utils import (
     get_lerobot_metadata_paths,
     snapshot_env,
 )
+from verify_import_manifest import verify_manifest
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1358,6 +1359,19 @@ def run_import_job(
 
         result.import_manifest_path = import_manifest_path
 
+        print("=" * 80)
+        print("IMPORT MANIFEST CHECKSUM VERIFICATION")
+        print("=" * 80)
+        verify_exit_code = verify_manifest(import_manifest_path)
+        if verify_exit_code != 0:
+            result.errors.append("Import manifest verification failed.")
+            result.success = False
+            print("[IMPORT] ❌ Import manifest verification failed; aborting job.")
+            print("=" * 80 + "\n")
+            return result
+        print("[IMPORT] ✅ Import manifest verification succeeded")
+        print("=" * 80 + "\n")
+
         # Success
         result.success = len(result.errors) == 0
 
@@ -1687,6 +1701,20 @@ def run_local_import_job(
         json.dump(import_manifest, f, indent=2)
 
     result.import_manifest_path = import_manifest_path
+
+    print("=" * 80)
+    print("IMPORT MANIFEST CHECKSUM VERIFICATION")
+    print("=" * 80)
+    verify_exit_code = verify_manifest(import_manifest_path)
+    if verify_exit_code != 0:
+        result.errors.append("Import manifest verification failed.")
+        result.success = False
+        print("[IMPORT] ❌ Import manifest verification failed; aborting job.")
+        print("=" * 80 + "\n")
+        return result
+    print("[IMPORT] ✅ Import manifest verification succeeded")
+    print("=" * 80 + "\n")
+
     result.success = len(result.errors) == 0
 
     print("=" * 80)
