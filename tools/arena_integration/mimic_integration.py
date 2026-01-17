@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -153,12 +154,13 @@ class AugmentationResult:
 # AUGMENTATION TRANSFORMS
 # =============================================================================
 
-class AugmentationTransform:
+class AugmentationTransform(ABC):
     """Base class for augmentation transforms."""
 
     def __init__(self, config: MimicConfig):
         self.config = config
 
+    @abstractmethod
     def apply(
         self,
         demo: Demonstration,
