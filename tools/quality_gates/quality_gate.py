@@ -181,8 +181,9 @@ class HumanApprovalManager:
             request.request_id,
             override_metadata={
                 "approver_id": "admin@example.com",
-                "ticket_id": "OPS-1234",
-                "reason": "Known issue, safe to proceed",
+                "category": "known_issue",
+                "ticket": "OPS-1234",
+                "justification": "Known issue; verified acceptable for this delivery and documented mitigation steps.",
                 "timestamp": "2024-01-10T12:00:00Z",
             },
         )
@@ -323,7 +324,8 @@ class HumanApprovalManager:
                     request.status = ApprovalStatus.EXPIRED
                     if self._is_production_mode():
                         request.approval_notes = (
-                            f"Expired after {self.timeout_hours}h timeout (auto-approve disabled in production)"
+                            f"Expired after {self.timeout_hours}h timeout; "
+                            "explicit human approval required to proceed"
                         )
                     else:
                         request.approval_notes = f"Expired after {self.timeout_hours}h timeout"
@@ -496,34 +498,13 @@ class HumanApprovalManager:
 
         Args:
             request_id: The approval request ID
-            override_metadata: Structured metadata containing approver_id, ticket_id,
-                reason, justification, and timestamp.
+            override_metadata: Structured metadata containing approver_id, category,
+                ticket, justification, and timestamp.
 
         Returns:
             True if successfully overridden
         """
-        required_fields = ("approver_id", "ticket_id", "reason", "timestamp", "justification")
-        missing_fields = [field for field in required_fields if not override_metadata.get(field)]
-        if missing_fields:
-            self.log(
-                f"Override requires metadata fields: {', '.join(missing_fields)}",
-                "ERROR",
-            )
-            return False
-        reason = str(override_metadata["reason"]).strip()
-        if len(reason) <= 50:
-            self.log("Override requires a reason (more than 50 characters)", "ERROR")
-            return False
-        ticket_id = str(override_metadata["ticket_id"]).strip()
-        if not self._validate_ticket_reference(ticket_id):
-            self.log("Override requires a valid ticket URL or ID", "ERROR")
-            return False
-        justification = override_metadata.get("justification")
-        if not self._validate_justification(justification):
-            self.log("Override requires structured justification details", "ERROR")
-            return False
-        if not self._validate_timestamp(str(override_metadata["timestamp"])):
-            self.log("Override requires a valid ISO-8601 timestamp", "ERROR")
+        if not self._validate_override_metadata(override_metadata):
             return False
 
         request = self._load_request(request_id)
@@ -556,22 +537,32 @@ class HumanApprovalManager:
             self.log(f"Cannot override {request_id}: status is {request.status.value}", "WARNING")
             return False
 
+        category = str(override_metadata["category"]).strip()
+        ticket = str(override_metadata["ticket"]).strip()
+        justification = str(override_metadata["justification"]).strip()
+
         request.status = ApprovalStatus.OVERRIDDEN
         request.approved_by = str(override_metadata["approver_id"]).strip()
         request.approved_at = datetime.utcnow().isoformat() + "Z"
-        request.override_reason = reason
+        request.override_reason = f"{category}: {justification}"
         request.override_metadata = {
             "approver_id": request.approved_by,
-            "ticket_id": ticket_id,
-            "reason": reason,
-            "timestamp": str(override_metadata["timestamp"]).strip(),
+            "category": category,
+            "ticket": ticket,
             "justification": justification,
+            "timestamp": str(override_metadata["timestamp"]).strip(),
         }
 
         self._save_request(request)
-        self._log_audit("OVERRIDDEN", request, request.approved_by, reason, request.override_metadata)
+        self._log_audit(
+            "OVERRIDDEN",
+            request,
+            request.approved_by,
+            request.override_reason,
+            request.override_metadata,
+        )
 
-        self.log(f"Request {request_id} overridden by {request.approved_by}: {reason}")
+        self.log(f"Request {request_id} overridden by {request.approved_by}: {request.override_reason}")
         return True
 
     def list_pending(self) -> List[ApprovalRequest]:
@@ -689,13 +680,55 @@ class HumanApprovalManager:
             return True
         return re.match(r"^[A-Za-z][A-Za-z0-9._-]*-\d+$", ticket_id) is not None
 
-    def _validate_justification(self, justification: Any) -> bool:
-        """Validate structured justification details."""
-        if not isinstance(justification, dict):
+    def _validate_override_metadata(self, override_metadata: Dict[str, Any]) -> bool:
+        schema = None
+        if self.config and hasattr(self.config, "gate_overrides"):
+            schema = self.config.gate_overrides.override_reason_schema
+
+        required_fields = ["approver_id", "category", "ticket", "justification", "timestamp"]
+        if schema and schema.required_fields:
+            required_fields = list(dict.fromkeys(list(schema.required_fields) + ["approver_id", "timestamp"]))
+
+        missing_fields = [field for field in required_fields if not override_metadata.get(field)]
+        if missing_fields:
+            self.log(
+                f"Override requires metadata fields: {', '.join(missing_fields)}",
+                "ERROR",
+            )
             return False
-        if not justification:
+
+        category = str(override_metadata["category"]).strip()
+        if schema and schema.categories and category not in schema.categories:
+            self.log(
+                f"Override category must be one of: {', '.join(schema.categories)}",
+                "ERROR",
+            )
             return False
-        return any(str(value).strip() for value in justification.values())
+
+        ticket = str(override_metadata["ticket"]).strip()
+        ticket_pattern = schema.ticket_pattern if schema else None
+        if ticket_pattern:
+            if not re.match(ticket_pattern, ticket):
+                self.log("Override requires a ticket that matches policy", "ERROR")
+                return False
+        elif not self._validate_ticket_reference(ticket):
+            self.log("Override requires a valid ticket URL or ID", "ERROR")
+            return False
+
+        justification = str(override_metadata["justification"]).strip()
+        min_length = schema.justification_min_length if schema else 50
+        if len(justification) < min_length:
+            self.log(
+                f"Override justification must be at least {min_length} characters",
+                "ERROR",
+            )
+            return False
+
+        if not self._validate_timestamp(str(override_metadata["timestamp"])):
+            self.log("Override requires a valid ISO-8601 timestamp", "ERROR")
+            return False
+
+        return True
 
     def _validate_timestamp(self, value: str) -> bool:
         """Validate ISO-8601 timestamp format."""
