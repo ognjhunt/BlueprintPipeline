@@ -71,6 +71,17 @@ def _is_truthy(value: str | None) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _parse_optional_bool(value: str | None) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+    return None
+
+
 def _is_production_level(level: str | None) -> bool:
     if level is None:
         return False
@@ -123,6 +134,7 @@ class DWMJobConfig:
     skip_dwm: bool = False
     data_quality_level: Optional[str] = None
     allow_mock_rendering: Optional[bool] = None
+    require_mano: Optional[bool] = None
 
     def __post_init__(self):
         if self.trajectory_types is None:
@@ -142,6 +154,8 @@ class DWMJobConfig:
             self.data_quality_level = os.environ.get("DATA_QUALITY_LEVEL")
         if self.allow_mock_rendering is None:
             self.allow_mock_rendering = _is_truthy(os.environ.get("ALLOW_MOCK_RENDERING"))
+        if self.require_mano is None:
+            self.require_mano = _parse_optional_bool(os.environ.get("REQUIRE_MANO"))
 
 
 class DWMPreparationJob:
@@ -189,11 +203,12 @@ class DWMPreparationJob:
             config=render_config,
         )
 
+        mano_required = self._resolve_mano_requirement()
         hand_render_config = HandRenderConfig(
             width=config.resolution[0],
             height=config.resolution[1],
             hand_model=HandModel.MANO,
-            require_mano=self.production_mode,
+            require_mano=mano_required,
         )
         self.hand_renderer = HandMeshRenderer(config=hand_render_config)
 
@@ -210,6 +225,11 @@ class DWMPreparationJob:
                 raise ValueError(
                     "Mock rendering is not allowed in production. Remove ALLOW_MOCK_RENDERING."
                 )
+            if self.config.require_mano is False:
+                raise ValueError(
+                    "Production requires MANO assets. Remove REQUIRE_MANO=false or "
+                    "set DATA_QUALITY_LEVEL to a non-production value."
+                )
             if self.config.render_backend and self.config.render_backend != RenderBackend.ISAAC_SIM:
                 raise ValueError(
                     "Production requires RenderBackend.ISAAC_SIM for rendering."
@@ -223,6 +243,11 @@ class DWMPreparationJob:
                 )
             if self.config.render_backend is None and not self.config.allow_mock_rendering:
                 self.config.render_backend = RenderBackend.ISAAC_SIM
+
+    def _resolve_mano_requirement(self) -> bool:
+        if self.config.require_mano is None:
+            return self.production_mode
+        return self.config.require_mano
 
     @staticmethod
     def _vector_from_value(value: Any) -> Optional[np.ndarray]:
@@ -653,6 +678,8 @@ class DWMPreparationJob:
                 "frames_dir": frames_dir,
                 "video_path": video_path,
                 "num_frames": len(frame_paths),
+                "hand_model": self.hand_renderer.selected_hand_model.value,
+                "hand_model_requested": self.hand_renderer.requested_hand_model.value,
             }
 
         self.log(f"Rendered {len(outputs)} hand mesh videos")
@@ -758,6 +785,8 @@ class DWMPreparationJob:
                     "action_type": hand_traj.action_type.value,
                     "trajectory_type": cam_traj.trajectory_type.value,
                     "generated_at": datetime.utcnow().isoformat() + "Z",
+                    "hand_model": self.hand_renderer.selected_hand_model.value,
+                    "hand_model_requested": self.hand_renderer.requested_hand_model.value,
                     "robot_retargeting": {
                         "enabled": self.config.enable_robot_retargeting,
                         "robot_model": self.config.robot_config_name,
@@ -804,6 +833,10 @@ class DWMPreparationJob:
         self.log(f"Trajectories: {self.config.num_trajectories}")
         self.log(f"Resolution: {self.config.resolution}")
         self.log(f"Frames: {self.config.num_frames} @ {self.config.fps}fps")
+        self.log(
+            f"Hand model: {self.hand_renderer.selected_hand_model.value} "
+            f"(requested: {self.hand_renderer.requested_hand_model.value})"
+        )
         self.log("=" * 60)
 
         # Setup output directory
@@ -1232,6 +1265,17 @@ Examples:
         action="store_true",
         help="Allow mock/PyRender rendering (CI smoke tests only)",
     )
+    mano_group = parser.add_mutually_exclusive_group()
+    mano_group.add_argument(
+        "--require-mano",
+        action="store_true",
+        help="Require MANO assets (fail if MANO is unavailable).",
+    )
+    mano_group.add_argument(
+        "--allow-mano-fallback",
+        action="store_true",
+        help="Allow fallback to SimpleHandMesh if MANO is unavailable.",
+    )
 
     # Episode-based mode (enhanced)
     parser.add_argument(
@@ -1347,6 +1391,11 @@ Examples:
 
     if args.no_render and not args.allow_mock_rendering:
         parser.error("--no-render requires --allow-mock-rendering for CI smoke tests.")
+    require_mano = None
+    if args.require_mano:
+        require_mano = True
+    elif args.allow_mano_fallback:
+        require_mano = False
 
     # Determine manifest path
     if args.scene_dir:
@@ -1431,6 +1480,7 @@ Examples:
         use_physics_ground_truth=args.use_physics_ground_truth,
         data_quality_level=args.data_quality_level,
         allow_mock_rendering=args.allow_mock_rendering,
+        require_mano=require_mano,
     )
 
     # Run job

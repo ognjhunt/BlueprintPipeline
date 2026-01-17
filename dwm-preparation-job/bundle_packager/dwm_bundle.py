@@ -57,6 +57,8 @@ class BundleManifest:
     action_type: str
     target_object_id: Optional[str]
     text_prompt: str
+    hand_model: Optional[str] = None
+    hand_model_requested: Optional[str] = None
 
     # File paths (relative to bundle root)
     static_scene_video: Optional[str] = None
@@ -169,6 +171,9 @@ def create_bundle_manifest(
         ),
         text_prompt=bundle.text_prompt,
     )
+    if bundle.metadata:
+        manifest.hand_model = bundle.metadata.get("hand_model")
+        manifest.hand_model_requested = bundle.metadata.get("hand_model_requested")
 
     # Set file paths if they exist
     if bundle.static_scene_video_path:
@@ -326,6 +331,8 @@ class DWMBundlePackager:
                 "action_type": manifest.action_type,
                 "target_object_id": manifest.target_object_id,
                 "text_prompt": manifest.text_prompt,
+                "hand_model": manifest.hand_model,
+                "hand_model_requested": manifest.hand_model_requested,
                 "static_scene_video": manifest.static_scene_video,
                 "hand_mesh_video": manifest.hand_mesh_video,
                 "interaction_video": manifest.interaction_video,
@@ -503,6 +510,8 @@ class DWMBundlePackager:
                         if b.camera_trajectory else None
                     ),
                     "text_prompt": b.text_prompt,
+                    "hand_model": (b.metadata or {}).get("hand_model"),
+                    "hand_model_requested": (b.metadata or {}).get("hand_model_requested"),
                     "physics_rollout_file": "metadata/physics_rollout.jsonl"
                     if b.physics_log_path else None,
                     "interaction_video": (

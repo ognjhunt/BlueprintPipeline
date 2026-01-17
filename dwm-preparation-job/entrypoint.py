@@ -20,6 +20,7 @@ Environment Variables:
         NUM_FRAMES: Frames per video (default: 49)
         FPS: Frames per second (default: 24)
         MANO_MODEL_PATH: Path to MANO model files (optional)
+        REQUIRE_MANO: Require MANO assets (true/false, optional)
 """
 
 import json
@@ -29,6 +30,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
+from typing import Optional
 
 from google.cloud import storage
 
@@ -136,6 +138,17 @@ def _is_truthy(value: str | None) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _parse_optional_bool(value: str | None) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+    return None
+
+
 def _is_production_level(level: str | None) -> bool:
     if level is None:
         return False
@@ -172,6 +185,7 @@ def main():
     skip_dwm = os.environ.get("SKIP_DWM", "").strip().lower() in {"1", "true", "yes"}
     data_quality_level = os.environ.get("DATA_QUALITY_LEVEL")
     allow_mock_rendering = _is_truthy(os.environ.get("ALLOW_MOCK_RENDERING"))
+    require_mano = _parse_optional_bool(os.environ.get("REQUIRE_MANO"))
 
     print(f"[DWM-ENTRYPOINT] Configuration:")
     print(f"  BUCKET: {bucket_name}")
@@ -186,6 +200,8 @@ def main():
     if data_quality_level:
         print(f"  DATA_QUALITY_LEVEL: {data_quality_level}")
     print(f"  ALLOW_MOCK_RENDERING: {allow_mock_rendering}")
+    if require_mano is not None:
+        print(f"  REQUIRE_MANO: {require_mano}")
     if mano_model_path:
         print(f"  MANO_MODEL_PATH: {mano_model_path}")
 
@@ -249,6 +265,7 @@ def main():
                 ],
                 data_quality_level=data_quality_level,
                 allow_mock_rendering=allow_mock_rendering,
+                require_mano=require_mano,
                 verbose=True,
             )
 
