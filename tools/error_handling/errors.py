@@ -8,6 +8,8 @@ enabling appropriate error handling and recovery strategies.
 from __future__ import annotations
 
 import json
+import os
+import re
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -84,19 +86,29 @@ class PipelineError(Exception):
         self.retryable = retryable
         self.context = context or ErrorContext()
         self.cause = cause
-        self.traceback_str = traceback.format_exc() if cause else None
+        self._debug_enabled = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+        self._path_redaction_regex = re.compile(r"(?:[A-Za-z]:\\\\|/)[^\\s]+")
+        self.traceback_str = traceback.format_exc() if cause and self._debug_enabled else None
+
+    def _sanitize_message(self, message: str) -> str:
+        if not message:
+            return message
+        if self._debug_enabled:
+            return message
+        return self._path_redaction_regex.sub("<redacted-path>", message)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize error for logging/storage."""
+        debug_enabled = self._debug_enabled
         return {
             "error_type": self.__class__.__name__,
-            "message": self.message,
+            "message": self._sanitize_message(self.message),
             "category": self.category.value,
             "severity": self.severity.value,
             "retryable": self.retryable,
             "context": self.context.to_dict(),
-            "cause": str(self.cause) if self.cause else None,
-            "traceback": self.traceback_str,
+            "cause": self._sanitize_message(str(self.cause)) if self.cause else None,
+            "traceback": self.traceback_str if debug_enabled else None,
         }
 
     def to_json(self) -> str:
