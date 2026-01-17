@@ -17,7 +17,7 @@ Environment Variables:
     GENIE_SIM_JOB_ID: Job ID to import (if monitoring specific job)
     GENIE_SIM_POLL_INTERVAL: Polling interval in seconds (default: 30)
     OUTPUT_PREFIX: Output path for imported episodes (default: scenes/{scene_id}/episodes)
-    MIN_QUALITY_SCORE: Minimum quality score for import (default: 0.7)
+    MIN_QUALITY_SCORE: Minimum quality score for import (default: from quality_config.json)
     ENABLE_VALIDATION: Enable quality validation (default: true)
     REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: false)
 """
@@ -67,6 +67,11 @@ from geniesim_client import (
     GeneratedEpisodeMetadata,
 )
 from tools.metrics.pipeline_metrics import get_metrics
+from quality_config import (
+    DEFAULT_MIN_QUALITY_SCORE,
+    QUALITY_CONFIG,
+    resolve_min_quality_score,
+)
 
 # Import quality validation
 try:
@@ -393,8 +398,8 @@ class ImportConfig:
     # Output
     output_dir: Path
 
-    # Quality filtering - LABS-BLOCKER-002 FIX: Raised from 0.7 to 0.85
-    min_quality_score: float = 0.85
+    # Quality filtering
+    min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE
     enable_validation: bool = True
     filter_low_quality: bool = True
     require_lerobot: bool = False
@@ -447,7 +452,7 @@ class ImportResult:
 class ImportedEpisodeValidator:
     """Validates imported episodes from Genie Sim."""
 
-    def __init__(self, min_quality_score: float = 0.85):  # LABS-BLOCKER-002 FIX
+    def __init__(self, min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE):
         """
         Initialize validator.
 
@@ -647,7 +652,7 @@ def convert_to_lerobot(
     episodes_dir: Path,
     output_dir: Path,
     episode_metadata_list: List[GeneratedEpisodeMetadata],
-    min_quality_score: float = 0.85,  # LABS-BLOCKER-002 FIX
+    min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE,
     job_id: str = "unknown",
     scene_id: str = "unknown",
 ) -> Dict[str, Any]:
@@ -1726,8 +1731,14 @@ def main():
                 sys.exit(1)
 
     # Quality configuration
-    # LABS-BLOCKER-002 FIX: Default raised from 0.7 to 0.85
-    min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
+    try:
+        min_quality_score = resolve_min_quality_score(
+            os.getenv("MIN_QUALITY_SCORE"),
+            QUALITY_CONFIG,
+        )
+    except ValueError as exc:
+        print(f"[GENIE-SIM-IMPORT] ERROR: {exc}")
+        sys.exit(1)
     enable_validation = os.getenv("ENABLE_VALIDATION", "true").lower() == "true"
     filter_low_quality = os.getenv("FILTER_LOW_QUALITY", "true").lower() == "true"
     require_lerobot = os.getenv("REQUIRE_LEROBOT", "false").lower() == "true"
@@ -1760,6 +1771,10 @@ def main():
     print(f"[GENIE-SIM-IMPORT]   Output Prefix: {output_prefix}")
     print(f"[GENIE-SIM-IMPORT]   Submission Mode: {submission_mode}")
     print(f"[GENIE-SIM-IMPORT]   Min Quality: {min_quality_score}")
+    print(
+        "[GENIE-SIM-IMPORT]   Quality Range: "
+        f"{QUALITY_CONFIG.min_allowed} - {QUALITY_CONFIG.max_allowed}"
+    )
     print(f"[GENIE-SIM-IMPORT]   Enable Validation: {enable_validation}")
     print(f"[GENIE-SIM-IMPORT]   Require LeRobot: {require_lerobot}")
     print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}")
