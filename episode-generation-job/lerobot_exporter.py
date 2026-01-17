@@ -589,15 +589,33 @@ class LeRobotExporter:
 
         backend_version = os.getenv("ISAAC_SIM_VERSION") or os.getenv("ISAAC_LAB_VERSION")
         backend_container = os.getenv("ISAAC_SIM_DOCKER_IMAGE") or os.getenv("ISAAC_SIM_CONTAINER")
+        backend_build_id = (
+            os.getenv("ISAAC_SIM_BUILD_ID")
+            or os.getenv("ISAAC_LAB_BUILD_ID")
+            or os.getenv("ISAAC_SIM_BUILD")
+            or os.getenv("ISAAC_LAB_BUILD")
+        )
+        backend_container_digest = (
+            os.getenv("ISAAC_SIM_CONTAINER_DIGEST")
+            or os.getenv("ISAAC_SIM_IMAGE_DIGEST")
+            or os.getenv("ISAAC_SIM_DIGEST")
+            or os.getenv("ISAAC_LAB_CONTAINER_DIGEST")
+        )
 
         return {
             "name": backend_name,
             "version": backend_version,
             "container_image": backend_container,
+            "build_id": backend_build_id,
+            "container_digest": backend_container_digest,
             "source": {
                 "name": "episode.validation_result.physics_backend",
                 "version": "env:ISAAC_SIM_VERSION|ISAAC_LAB_VERSION",
                 "container_image": "env:ISAAC_SIM_DOCKER_IMAGE|ISAAC_SIM_CONTAINER",
+                "build_id": "env:ISAAC_SIM_BUILD_ID|ISAAC_LAB_BUILD_ID|ISAAC_SIM_BUILD|ISAAC_LAB_BUILD",
+                "container_digest": (
+                    "env:ISAAC_SIM_CONTAINER_DIGEST|ISAAC_SIM_IMAGE_DIGEST|ISAAC_SIM_DIGEST|ISAAC_LAB_CONTAINER_DIGEST"
+                ),
             },
         }
 
@@ -625,12 +643,28 @@ class LeRobotExporter:
             except Exception:
                 validation_thresholds = None
 
+        env_overrides: Dict[str, Any] = {}
+        min_quality_score_override = os.getenv("MIN_QUALITY_SCORE")
+        if min_quality_score_override is not None:
+            try:
+                env_overrides["min_quality_score"] = float(min_quality_score_override)
+            except ValueError:
+                env_overrides["min_quality_score"] = min_quality_score_override
+
+        resolved_thresholds = None
+        if validation_thresholds is not None:
+            resolved_thresholds = dict(validation_thresholds)
+            for key, value in env_overrides.items():
+                resolved_thresholds[key] = value
+
         post_rollout_seconds = float(os.getenv("SIM_VALIDATOR_POST_ROLLOUT_SECONDS", "0.5"))
         load_scene = os.getenv("SIM_VALIDATOR_LOAD_SCENE", "true").lower() == "true"
         require_real_physics = self._parse_bool_env("REQUIRE_REAL_PHYSICS")
 
         return {
             "validation_thresholds": validation_thresholds,
+            "validation_overrides": env_overrides or None,
+            "resolved_thresholds": resolved_thresholds,
             "sim_validator": {
                 "post_rollout_seconds": post_rollout_seconds,
                 "load_scene": load_scene,
@@ -638,6 +672,8 @@ class LeRobotExporter:
             },
             "source": {
                 "validation_thresholds": "sim_validator.ValidationConfig.from_policy_config",
+                "validation_overrides": "env:MIN_QUALITY_SCORE",
+                "resolved_thresholds": "validation_thresholds + env overrides",
                 "sim_validator.post_rollout_seconds": "env:SIM_VALIDATOR_POST_ROLLOUT_SECONDS (default 0.5)",
                 "sim_validator.load_scene": "env:SIM_VALIDATOR_LOAD_SCENE (default true)",
                 "sim_validator.require_real_physics": "env:REQUIRE_REAL_PHYSICS",
@@ -649,6 +685,7 @@ class LeRobotExporter:
         summary = None
         report_timestamp = None
         report_path_str = None
+        report_hash = None
         if report_path is not None:
             report_path_str = report_path.as_posix()
             if report_path.is_file():
@@ -656,15 +693,18 @@ class LeRobotExporter:
                     report = json.loads(report_path.read_text())
                     summary = report.get("summary")
                     report_timestamp = report.get("timestamp")
+                    report_hash = _checksum_file(report_path)
                 except Exception:
                     summary = None
 
         config_version = None
+        config_hash = None
         config_path = REPO_ROOT / "tools" / "quality_gates" / "quality_config.json"
         if config_path.is_file():
             try:
                 config_payload = json.loads(config_path.read_text())
                 config_version = config_payload.get("version")
+                config_hash = _checksum_file(config_path)
             except Exception:
                 config_version = None
 
@@ -672,16 +712,42 @@ class LeRobotExporter:
             "summary": summary,
             "report_timestamp": report_timestamp,
             "report_path": report_path_str,
+            "report_hash": report_hash,
             "config_version": config_version,
+            "config_hash": config_hash,
             "bypass_enabled": self._parse_bool_env("BYPASS_QUALITY_GATES"),
             "source": {
                 "summary": "quality_gate_report.json",
                 "report_timestamp": "quality_gate_report.json",
                 "report_path": "env:QUALITY_GATE_REPORT_PATH|SCENE_ID",
+                "report_hash": "quality_gate_report.json (sha256)",
                 "config_version": "tools/quality_gates/quality_config.json",
+                "config_hash": "tools/quality_gates/quality_config.json (sha256)",
                 "bypass_enabled": "env:BYPASS_QUALITY_GATES",
             },
         }
+
+    def _validate_lineage_requirements(self, lineage: Dict[str, Any], production_mode: bool) -> None:
+        if not production_mode:
+            return
+
+        missing_fields = []
+        required_paths = {
+            "sim_backend.build_id": lineage.get("sim_backend", {}).get("build_id"),
+            "sim_backend.container_digest": lineage.get("sim_backend", {}).get("container_digest"),
+            "quality_gates.report_hash": lineage.get("quality_gates", {}).get("report_hash"),
+            "quality_gates.config_hash": lineage.get("quality_gates", {}).get("config_hash"),
+            "physics_parameters.resolved_thresholds": lineage.get("physics_parameters", {}).get("resolved_thresholds"),
+        }
+
+        for path, value in required_paths.items():
+            if value in (None, "", {}, []):
+                missing_fields.append(path)
+
+        if missing_fields:
+            raise RuntimeError(
+                "Missing required lineage fields in production: " + ", ".join(missing_fields)
+            )
 
     def _get_pipeline_lineage(self) -> Dict[str, Any]:
         return {
@@ -2180,6 +2246,7 @@ class LeRobotExporter:
         # This determines if the data was generated with real physics or mock
         data_source_info = self._get_data_source_info()
         lineage = self._get_lineage_info(data_source_info)
+        self._validate_lineage_requirements(lineage, data_source_info.get("production_mode", False))
 
         info = {
             "codebase_version": "v2.0",
@@ -2288,6 +2355,7 @@ class LeRobotExporter:
                         meta["camera_error_counts"] = episode.camera_error_counts
                     if episode.camera_frame_counts:
                         meta["camera_frame_counts"] = episode.camera_frame_counts
+                    meta["lineage_ref"] = "meta/info.json#/lineage"
                     f.write(json.dumps(meta) + "\n")
 
         self._atomic_write(episodes_path, write_episodes)
