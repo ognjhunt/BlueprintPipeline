@@ -192,6 +192,10 @@ This bundle includes a LeRobot-compatible dataset generated from Genie Sim episo
 - `{lerobot_rel}/episodes.jsonl`: episode index
 - `{lerobot_rel}/episode_*.parquet`: per-episode data
 
+## Checksums
+To verify bundle integrity, use the checksum manifest at `checksums.json`.
+It contains SHA-256 checksums keyed by relative file path within the bundle root.
+
 ## Load with LeRobot
 Install LeRobot and load the dataset directory:
 
@@ -220,6 +224,7 @@ def _write_checksums_file(output_dir: Path, checksums: Dict[str, Any]) -> Path:
     payload = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "root": ".",
+        "algorithm": "sha256",
         "files": checksums,
     }
     with open(checksums_path, "w") as handle:
@@ -1268,8 +1273,16 @@ def run_import_job(
             "missing_episode_ids": file_checksums["missing_episode_ids"],
             "missing_metadata_files": file_checksums["missing_metadata_files"],
             "episode_files": file_checksums["episodes"],
+            "bundle_files": dict(directory_checksums),
         }
         checksums_path = _write_checksums_file(config.output_dir, directory_checksums)
+        checksums_rel_path = checksums_path.relative_to(config.output_dir).as_posix()
+        checksums_entry = {
+            "sha256": _sha256_file(checksums_path),
+            "size_bytes": checksums_path.stat().st_size,
+        }
+        checksums_payload["metadata"][checksums_rel_path] = checksums_entry
+        checksums_payload["bundle_files"][checksums_rel_path] = checksums_entry
         config_snapshot = {
             "env": snapshot_env(ENV_SNAPSHOT_KEYS),
             "config": {
@@ -1333,6 +1346,10 @@ def run_import_job(
             directories=[lerobot_dir],
         )
         package_checksum = _sha256_file(package_path)
+        checksums_payload["bundle_files"][_relative_to_bundle(bundle_root, package_path)] = {
+            "sha256": package_checksum,
+            "size_bytes": package_path.stat().st_size,
+        }
         file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
         asset_provenance_path = _resolve_asset_provenance_reference(
             bundle_root=bundle_root,
@@ -1601,8 +1618,16 @@ def run_local_import_job(
         "missing_episode_ids": file_checksums["missing_episode_ids"],
         "missing_metadata_files": file_checksums["missing_metadata_files"],
         "episode_files": file_checksums["episodes"],
+        "bundle_files": dict(directory_checksums),
     }
     checksums_path = _write_checksums_file(config.output_dir, directory_checksums)
+    checksums_rel_path = checksums_path.relative_to(config.output_dir).as_posix()
+    checksums_entry = {
+        "sha256": _sha256_file(checksums_path),
+        "size_bytes": checksums_path.stat().st_size,
+    }
+    checksums_payload["metadata"][checksums_rel_path] = checksums_entry
+    checksums_payload["bundle_files"][checksums_rel_path] = checksums_entry
     config_snapshot = {
         "env": snapshot_env(ENV_SNAPSHOT_KEYS),
         "config": {
@@ -1676,6 +1701,10 @@ def run_local_import_job(
         directories=[lerobot_dir],
     )
     package_checksum = _sha256_file(package_path)
+    checksums_payload["bundle_files"][_relative_to_bundle(bundle_root, package_path)] = {
+        "sha256": package_checksum,
+        "size_bytes": package_path.stat().st_size,
+    }
     file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
     asset_provenance_path = _resolve_asset_provenance_reference(
         bundle_root=bundle_root,
