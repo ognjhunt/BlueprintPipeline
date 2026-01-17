@@ -125,6 +125,7 @@ class LLMResponse:
     provider: LLMProvider
     model: str
     raw_response: Any = None
+    error_message: Optional[str] = None
 
     # Parsed data (if JSON was requested)
     data: Optional[Dict[str, Any]] = None
@@ -190,6 +191,10 @@ class LLMClient(ABC):
     def model(self) -> str:
         return self._model or self.default_model
 
+    @property
+    def supports_image_generation(self) -> bool:
+        return False
+
     @abstractmethod
     def generate(
         self,
@@ -205,7 +210,6 @@ class LLMClient(ABC):
         """Generate content from the LLM."""
         pass
 
-    @abstractmethod
     def generate_image(
         self,
         prompt: str,
@@ -213,7 +217,30 @@ class LLMClient(ABC):
         **kwargs
     ) -> LLMResponse:
         """Generate an image from the LLM (if supported)."""
+        if not self.supports_image_generation:
+            return self._unsupported_image_response()
+        return self._generate_image(prompt=prompt, size=size, **kwargs)
+
+    @abstractmethod
+    def _generate_image(
+        self,
+        prompt: str,
+        size: str = "1024x1024",
+        **kwargs
+    ) -> LLMResponse:
+        """Provider-specific image generation implementation."""
         pass
+
+    def _unsupported_image_response(self) -> LLMResponse:
+        return LLMResponse(
+            text="",
+            provider=self.provider,
+            model=self.model,
+            error_message=(
+                f"{self.provider.value} does not support image generation. "
+                "Use a provider that supports image outputs."
+            ),
+        )
 
     def _encode_image(self, image: Any) -> str:
         """Encode image to base64."""
@@ -288,6 +315,10 @@ class GeminiClient(LLMClient):
     @property
     def default_image_model(self) -> str:
         return os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview")
+
+    @property
+    def supports_image_generation(self) -> bool:
+        return True
 
     def generate(
         self,
@@ -389,7 +420,7 @@ class GeminiClient(LLMClient):
 
         raise RuntimeError(f"Gemini generation failed after {self.max_retries} attempts: {last_error}")
 
-    def generate_image(
+    def _generate_image(
         self,
         prompt: str,
         size: str = "1024x1024",
@@ -504,6 +535,10 @@ class OpenAIClient(LLMClient):
     @property
     def default_image_model(self) -> str:
         return os.getenv("OPENAI_IMAGE_MODEL", "dall-e-3")
+
+    @property
+    def supports_image_generation(self) -> bool:
+        return True
 
     def generate(
         self,
@@ -631,7 +666,7 @@ class OpenAIClient(LLMClient):
 
         raise RuntimeError(f"OpenAI generation failed after {self.max_retries} attempts: {last_error}")
 
-    def generate_image(
+    def _generate_image(
         self,
         prompt: str,
         size: str = "1024x1024",
@@ -736,6 +771,10 @@ class AnthropicClient(LLMClient):
     def default_model(self) -> str:
         # Claude Sonnet 4.5 with specific version for production stability
         return os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+
+    @property
+    def supports_image_generation(self) -> bool:
+        return False
 
     def generate(
         self,
@@ -859,17 +898,14 @@ class AnthropicClient(LLMClient):
 
         raise RuntimeError(f"Anthropic generation failed after {self.max_retries} attempts: {last_error}")
 
-    def generate_image(
+    def _generate_image(
         self,
         prompt: str,
         size: str = "1024x1024",
         **kwargs
     ) -> LLMResponse:
         """Claude doesn't support image generation natively."""
-        raise NotImplementedError(
-            "Anthropic Claude does not support image generation. "
-            "Use Gemini or OpenAI for image generation tasks."
-        )
+        return self._unsupported_image_response()
 
 
 # =============================================================================

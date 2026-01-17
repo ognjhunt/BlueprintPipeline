@@ -8,6 +8,7 @@ while providing the same API shape that cloud backends use.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import os
 import sqlite3
@@ -55,12 +56,14 @@ class VectorRecord:
     score: Optional[float] = None
 
 
-class BaseVectorStore:
+class BaseVectorStore(ABC):
     """Abstract interface for all vector store providers."""
 
+    @abstractmethod
     def upsert(self, records: Iterable[VectorRecord], namespace: Optional[str] = None) -> None:
         raise NotImplementedError
 
+    @abstractmethod
     def query(
         self,
         embedding: np.ndarray,
@@ -70,9 +73,11 @@ class BaseVectorStore:
     ) -> List[VectorRecord]:
         raise NotImplementedError
 
+    @abstractmethod
     def fetch(self, ids: Iterable[str], namespace: Optional[str] = None) -> List[VectorRecord]:
         raise NotImplementedError
 
+    @abstractmethod
     def list(
         self, namespace: Optional[str] = None, filter_metadata: Optional[dict[str, Any]] = None
     ) -> List[VectorRecord]:
