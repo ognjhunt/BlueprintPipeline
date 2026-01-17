@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
 
+from tools.utils.atomic_write import write_json_atomic
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -191,10 +193,7 @@ def process_with_partial_failure(
 def _save_progress(progress_file: Path, result: PartialFailureResult) -> None:
     """Save progress to file."""
     try:
-        progress_file.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(progress_file, 'w') as f:
-            json.dump(result.to_dict(), f, indent=2)
+        write_json_atomic(progress_file, result.to_dict(), indent=2)
 
     except Exception as e:
         logger.warning(f"Failed to save progress: {e}")
