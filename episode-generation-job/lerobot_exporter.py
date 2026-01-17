@@ -210,6 +210,9 @@ class LeRobotDatasetConfig:
     # Output paths
     output_dir: Path = Path("./lerobot_dataset")
 
+    # Tier compliance enforcement
+    tier_compliance_action: str = "fail"  # "fail" or "drop"
+
     @classmethod
     def from_data_pack(
         cls,
@@ -221,6 +224,7 @@ class LeRobotDatasetConfig:
         fps: float = 30.0,
         output_dir: Path = Path("./lerobot_dataset"),
         strict_alignment: Optional[bool] = None,
+        tier_compliance_action: str = "fail",
     ) -> "LeRobotDatasetConfig":
         """Create config from data pack tier."""
         camera_types = ["wrist"]
@@ -240,6 +244,7 @@ class LeRobotDatasetConfig:
             data_pack_tier=data_pack_tier,
             output_dir=output_dir,
             strict_alignment=strict_alignment if strict_alignment is not None else True,
+            tier_compliance_action=tier_compliance_action,
         )
 
         # Configure based on tier
@@ -303,6 +308,11 @@ class LeRobotExporter:
         self.stats = {
             "observation.state": {"min": [], "max": [], "mean": [], "std": []},
             "action": {"min": [], "max": [], "mean": [], "std": []},
+        }
+        self.tier_compliance_summary = {
+            "non_compliant_episodes": 0,
+            "dropped_episodes": 0,
+            "action": "none",
         }
         self.checksum_algorithm = "sha256"
         self.checksum_manifest: Dict[str, str] = {}
@@ -1251,15 +1261,57 @@ class LeRobotExporter:
             self.log("Validating data pack tier compliance...")
             non_compliant = self._validate_data_pack_tier_compliance()
             if non_compliant:
-                self.log(f"  WARNING: Found {len(non_compliant)} tier-non-compliant episodes:", "WARNING")
+                self.log(
+                    f"  Found {len(non_compliant)} tier-non-compliant episodes:",
+                    "WARNING",
+                )
                 for ep_idx, errors in non_compliant[:3]:  # Show first 3
                     self.log(f"    Episode {ep_idx}:", "WARNING")
                     for error in errors[:2]:  # Show first 2 errors per episode
                         self.log(f"      - {error}", "WARNING")
                 if len(non_compliant) > 3:
                     self.log(f"    ... and {len(non_compliant) - 3} more episodes", "WARNING")
+
+                tier_action = self.config.tier_compliance_action.lower().strip()
+                if tier_action not in {"fail", "drop"}:
+                    raise ValueError(
+                        "Invalid tier_compliance_action "
+                        f"'{self.config.tier_compliance_action}'. Use 'fail' or 'drop'."
+                    )
+
+                self.tier_compliance_summary = {
+                    "non_compliant_episodes": len(non_compliant),
+                    "dropped_episodes": 0,
+                    "action": tier_action,
+                }
+
+                if tier_action == "fail":
+                    raise ValueError(
+                        "Data pack tier compliance failed for "
+                        f"{len(non_compliant)} episodes."
+                    )
+
+                dropped_episode_ids = {ep_idx for ep_idx, _ in non_compliant}
+                self.log(
+                    f"  Dropping {len(dropped_episode_ids)} tier-non-compliant episodes before export.",
+                    "WARNING",
+                )
+                self.episodes = [
+                    episode for episode in self.episodes
+                    if episode.episode_index not in dropped_episode_ids
+                ]
+                self.tier_compliance_summary["dropped_episodes"] = len(dropped_episode_ids)
+                if not self.episodes:
+                    raise ValueError(
+                        "All episodes failed tier compliance; aborting export."
+                    )
             else:
                 self.log(f"  All episodes comply with '{self.config.data_pack_tier}' tier requirements")
+                self.tier_compliance_summary = {
+                    "non_compliant_episodes": 0,
+                    "dropped_episodes": 0,
+                    "action": "none",
+                }
 
             # P1-15 FIX: Validate camera calibration matrices
             self.log("Validating camera calibration matrices...")
@@ -1838,6 +1890,7 @@ class LeRobotExporter:
                 "includes_contacts": self.config.include_contacts,
                 "includes_privileged_state": self.config.include_privileged_state,
             },
+            "tier_compliance": dict(self.tier_compliance_summary),
             # Data quality and source information
             "data_quality": {
                 "physics_validated": data_source_info["physics_validated"],
