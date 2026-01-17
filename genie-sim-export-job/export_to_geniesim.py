@@ -159,6 +159,7 @@ except ImportError:
     AUDIO_NARRATION_AVAILABLE = False
 
 JOB_NAME = "genie-sim-export-job"
+COMMERCIAL_LICENSE_ALLOWLIST = {"CC0", "CC-BY", "MIT", "Apache-2.0"}
 
 
 def parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -278,6 +279,11 @@ def run_geniesim_export_job(
                 "REQUIRE_QUALITY_GATES override rejected and quality gates enforced."
             )
         require_quality_gates = True
+        if not filter_commercial:
+            print(
+                "[GENIESIM-EXPORT-JOB] Production mode enabled; "
+                "commercial licensing checks enforced even though FILTER_COMMERCIAL=false."
+            )
     else:
         if require_quality_gates is False or env_override is False:
             print(
@@ -305,6 +311,7 @@ def run_geniesim_export_job(
     assets_dir = root / assets_prefix
     output_dir = root / geniesim_prefix
     service_mode = _is_service_mode()
+    commercial_checks_required = filter_commercial or service_mode or production_mode
 
     # Validate upstream job completion before starting export
     print("\n[GENIESIM-EXPORT-JOB] Validating upstream job completion...")
@@ -369,7 +376,7 @@ def run_geniesim_export_job(
     variation_assets_dir = None
     variation_objects = []
     if not variation_assets_prefix or not variation_assets_prefix.strip():
-        if filter_commercial or service_mode:
+        if commercial_checks_required:
             return _fail_variation_assets_requirement(
                 bucket=bucket,
                 scene_id=scene_id,
@@ -391,7 +398,7 @@ def run_geniesim_export_job(
                 raw_variation_objects = variation_data.get("objects", [])
                 print(f"[GENIESIM-EXPORT-JOB] Found {len(raw_variation_objects)} variation assets")
                 if not raw_variation_objects:
-                    if filter_commercial or service_mode:
+                    if commercial_checks_required:
                         return _fail_variation_assets_requirement(
                             bucket=bucket,
                             scene_id=scene_id,
@@ -412,24 +419,54 @@ def run_geniesim_export_job(
                     obj["is_variation_asset"] = True
 
                 # Apply commercial filtering to variation assets BEFORE merging
-                if filter_commercial:
+                if commercial_checks_required:
                     filtered_variation_objects = []
                     non_commercial_count = 0
+                    non_commercial_assets = []
                     for obj in raw_variation_objects:
-                        is_commercial = obj.get("asset", {}).get("commercial_ok", False)
                         license_type = obj.get("asset", {}).get("license", "unknown")
+                        license_is_commercial = license_type in COMMERCIAL_LICENSE_ALLOWLIST
+                        if production_mode:
+                            is_commercial = license_is_commercial
+                        else:
+                            is_commercial = obj.get("asset", {}).get("commercial_ok", False)
 
                         # Only include assets with commercial_ok=True or permissive licenses
-                        if is_commercial or license_type in ["CC0", "CC-BY", "MIT", "Apache-2.0"]:
+                        if is_commercial or license_is_commercial:
                             filtered_variation_objects.append(obj)
                         else:
                             non_commercial_count += 1
+                            asset_label = (
+                                obj.get("asset", {}).get("path")
+                                or obj.get("name")
+                                or obj.get("id")
+                                or "unknown"
+                            )
+                            non_commercial_assets.append(f"{asset_label} (license={license_type})")
 
                     variation_objects = filtered_variation_objects
                     if non_commercial_count > 0:
-                        print(f"[GENIESIM-EXPORT-JOB] ✓ Filtered out {non_commercial_count} NC-licensed variation assets")
-                        print(f"[GENIESIM-EXPORT-JOB] ✓ Retained {len(variation_objects)} commercial-safe variation assets")
-                    if not variation_objects and (filter_commercial or service_mode):
+                        if production_mode:
+                            print(
+                                "[GENIESIM-EXPORT-JOB] ❌ ERROR: Production mode ignores asset.commercial_ok. "
+                                "Non-permissive or missing licenses detected in variation assets."
+                            )
+                            print(
+                                "[GENIESIM-EXPORT-JOB] ❌ ERROR: Update asset.license to one of "
+                                f"{sorted(COMMERCIAL_LICENSE_ALLOWLIST)}, remove the asset, or rerun "
+                                "variation-gen-job with commercial-safe assets."
+                            )
+                            print(
+                                "[GENIESIM-EXPORT-JOB] ❌ ERROR: Example non-compliant assets: "
+                                f"{non_commercial_assets[:5]}"
+                            )
+                        print(
+                            f"[GENIESIM-EXPORT-JOB] ✓ Filtered out {non_commercial_count} NC-licensed variation assets"
+                        )
+                        print(
+                            f"[GENIESIM-EXPORT-JOB] ✓ Retained {len(variation_objects)} commercial-safe variation assets"
+                        )
+                    if not variation_objects and commercial_checks_required:
                         return _fail_variation_assets_requirement(
                             bucket=bucket,
                             scene_id=scene_id,
@@ -440,10 +477,13 @@ def run_geniesim_export_job(
                         )
                 else:
                     variation_objects = raw_variation_objects
-                    print("[GENIESIM-EXPORT-JOB] WARNING: Commercial filtering disabled - NC-licensed assets may be included")
+                    print(
+                        "[GENIESIM-EXPORT-JOB] WARNING: Commercial filtering disabled - "
+                        "NC-licensed assets may be included"
+                    )
 
             except Exception as e:
-                if filter_commercial or service_mode:
+                if commercial_checks_required:
                     return _fail_variation_assets_requirement(
                         bucket=bucket,
                         scene_id=scene_id,
@@ -455,7 +495,7 @@ def run_geniesim_export_job(
                 print(f"[GENIESIM-EXPORT-JOB] WARNING: Failed to load variation assets: {e}")
                 variation_objects = []
         else:
-            if filter_commercial or service_mode:
+            if commercial_checks_required:
                 return _fail_variation_assets_requirement(
                     bucket=bucket,
                     scene_id=scene_id,
