@@ -195,11 +195,11 @@
         "width": 6,
         "height": 4,
         "widget": {
-          "title": "Genie Sim API Availability",
+          "title": "Genie Sim Server Availability",
           "scorecard": {
             "timeSeriesQuery": {
               "timeSeriesFilter": {
-                "filter": "metric.type=\"custom.googleapis.com/blueprint_pipeline/geniesim_api_latency_seconds\"",
+                "filter": "metric.type=\"custom.googleapis.com/blueprint_pipeline/geniesim_server_latency_seconds\"",
                 "aggregation": {
                   "alignmentPeriod": "60s",
                   "perSeriesAligner": "ALIGN_COUNT_TRUE"

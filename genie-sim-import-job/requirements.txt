@@ -5,7 +5,7 @@ numpy==1.26.4
 pandas==2.2.2
 pyarrow==14.0.2
 
-# HTTP clients for Genie Sim API
+# HTTP clients for general use
 requests==2.32.3
 aiohttp==3.9.5
 

@@ -32,7 +32,7 @@ def get_secret(
     repeated API calls.
 
     Args:
-        secret_id: Secret identifier (e.g., "genie-sim-api-key")
+        secret_id: Secret identifier (e.g., "gemini-api-key")
         project_id: GCP project ID (defaults to current project)
         version: Secret version (default: "latest")
 
@@ -43,11 +43,11 @@ def get_secret(
         SecretManagerError: If secret cannot be accessed
 
     Example:
-        api_key = get_secret("genie-sim-api-key")
+        api_key = get_secret("gemini-api-key")
 
         # Or with explicit project
         api_key = get_secret(
-            secret_id="genie-sim-api-key",
+            secret_id="gemini-api-key",
             project_id="my-project-123",
         )
     """
@@ -133,11 +133,11 @@ class SecretCache:
 
     Example:
         secrets = SecretCache()
-        secrets.load("genie-sim-api-key")
         secrets.load("gemini-api-key")
+        secrets.load("openai-api-key")
 
         # Access secrets
-        api_key = secrets.get("genie-sim-api-key")
+        api_key = secrets.get("gemini-api-key")
     """
 
     def __init__(self, project_id: Optional[str] = None):
@@ -202,14 +202,14 @@ def get_global_secret_cache(project_id: Optional[str] = None) -> SecretCache:
         # Initialize once at app startup
         cache = get_global_secret_cache(project_id="my-project")
         cache.load_all([
-            "genie-sim-api-key",
             "gemini-api-key",
             "openai-api-key",
+            "anthropic-api-key",
         ])
 
         # Use anywhere in the application
         cache = get_global_secret_cache()
-        api_key = cache.get("genie-sim-api-key")
+        api_key = cache.get("gemini-api-key")
     """
     global _global_secret_cache
 
