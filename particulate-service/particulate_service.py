@@ -19,6 +19,7 @@ The service:
 Environment Variables:
     PARTICULATE_ROOT: Path to Particulate installation (default: /opt/particulate)
     PARTICULATE_DEBUG: Enable verbose logging (default: 1)
+    PARTICULATE_DEBUG_TOKEN: Shared secret for /debug access (default: unset)
     PORT: Service port (default: 8080)
 
 Cloud Run Settings (REQUIRED):
@@ -31,6 +32,7 @@ Cloud Run Settings (REQUIRED):
 """
 
 import base64
+import hmac
 import io
 import json
 import os
@@ -59,6 +61,7 @@ PARTICULATE_INFER = PARTICULATE_ROOT / "infer.py"
 TMP_ROOT = Path("/tmp/particulate")
 
 DEBUG_MODE = os.environ.get("PARTICULATE_DEBUG", "1") == "1"
+DEBUG_TOKEN = os.environ.get("PARTICULATE_DEBUG_TOKEN")
 
 # GPU lock for serialization
 _gpu_lock = threading.Semaphore(1)
@@ -560,9 +563,27 @@ def readiness():
     return f"not ready: {_warmup_error or 'loading'}", 503
 
 
+def _debug_authorized() -> bool:
+    if not DEBUG_MODE or not DEBUG_TOKEN:
+        return False
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header:
+        return False
+
+    token = auth_header
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+
+    return hmac.compare_digest(token, DEBUG_TOKEN)
+
+
 @app.route("/debug", methods=["GET"])
 def debug_info():
     """Debug endpoint with service state."""
+    if not _debug_authorized():
+        return jsonify({"error": "debug access forbidden"}), 403
+
     is_valid, msg, details = validate_particulate_model()
 
     return jsonify({
