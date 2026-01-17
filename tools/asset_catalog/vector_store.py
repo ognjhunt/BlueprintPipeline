@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import heapq
 import os
 import sqlite3
 from typing import Any, Dict, Iterable, List, Optional
@@ -434,44 +435,59 @@ class SqliteVectorStore(BaseVectorStore):
         namespace: Optional[str] = None,
         filter_metadata: Optional[dict[str, Any]] = None,
     ) -> List[VectorRecord]:
+        """Query similar vectors with a bounded scan of SQLite rows.
+
+        Note: set SQLITE_VECTOR_STORE_MAX_SCAN to control the scan cap (default 10000).
+        Results are approximate when the scan cap is hit because SQLite does not
+        natively filter JSON metadata in this implementation.
+        """
         import json as json_module
 
         conn = self._get_connection()
         cursor = conn.execute(f"SELECT id, embedding, metadata FROM {self.collection}")
-        rows = cursor.fetchall()
 
-        records: list[VectorRecord] = []
-        for record_id, emb_data, metadata in rows:
-            emb_values = json_module.loads(emb_data)
-            meta_obj = json_module.loads(metadata)
-            records.append(
-                VectorRecord(
-                    id=record_id,
-                    embedding=np.array(emb_values),
-                    metadata=meta_obj,
-                )
-            )
+        max_scan_env = _optional_int(os.getenv("SQLITE_VECTOR_STORE_MAX_SCAN"))
+        max_scan = max_scan_env if max_scan_env is not None else 10000
+        batch_size = 256
+        rows_scanned = 0
+        heap: list[tuple[float, VectorRecord]] = []
 
         def _matches_filter(record: VectorRecord) -> bool:
             if not filter_metadata:
                 return True
             return all(record.metadata.get(k) == v for k, v in filter_metadata.items())
 
-        filtered = [rec for rec in records if _matches_filter(rec)]
-        if not filtered:
-            return []
-
         emb_norm = np.linalg.norm(embedding) + 1e-8
-        scored: list[VectorRecord] = []
-        for rec in filtered:
-            denom = (np.linalg.norm(rec.embedding) * emb_norm) + 1e-8
-            score = float(np.dot(rec.embedding, embedding) / denom)
-            scored.append(
-                VectorRecord(id=rec.id, embedding=rec.embedding, metadata=rec.metadata, score=score)
-            )
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
+            for record_id, emb_data, metadata in rows:
+                rows_scanned += 1
+                if rows_scanned > max_scan:
+                    break
+                emb_values = json_module.loads(emb_data)
+                meta_obj = json_module.loads(metadata)
+                record = VectorRecord(
+                    id=record_id,
+                    embedding=np.array(emb_values),
+                    metadata=meta_obj,
+                )
+                if not _matches_filter(record):
+                    continue
+                denom = (np.linalg.norm(record.embedding) * emb_norm) + 1e-8
+                score = float(np.dot(record.embedding, embedding) / denom)
+                record.score = score
+                if len(heap) < top_k:
+                    heapq.heappush(heap, (score, record))
+                elif score > heap[0][0]:
+                    heapq.heapreplace(heap, (score, record))
+            if rows_scanned >= max_scan:
+                break
 
-        scored.sort(key=lambda r: r.score or 0.0, reverse=True)
-        return scored[:top_k]
+        results = [record for _, record in heap]
+        results.sort(key=lambda r: r.score or 0.0, reverse=True)
+        return results
 
     def fetch(self, ids: Iterable[str], namespace: Optional[str] = None) -> List[VectorRecord]:
         import json as json_module
