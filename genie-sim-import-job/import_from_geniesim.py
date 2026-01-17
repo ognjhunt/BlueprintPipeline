@@ -70,6 +70,7 @@ from geniesim_client import (
     GeneratedEpisodeMetadata,
 )
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.utils.atomic_write import write_json_atomic, write_text_atomic
 from quality_config import (
@@ -685,8 +686,13 @@ def convert_to_lerobot(
     Returns:
         Dict with conversion statistics
     """
-    mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
-    if mock_mode:
+    mock_decision = resolve_geniesim_mock_mode()
+    if mock_decision.requested and mock_decision.production_mode:
+        print(
+            "[GENIE-SIM-IMPORT] Mock mode requested but production mode detected; "
+            "mock conversion is ignored."
+        )
+    if mock_decision.enabled:
         output_dir.mkdir(parents=True, exist_ok=True)
         converted_count = 0
         skipped_count = 0
@@ -1892,7 +1898,7 @@ def main():
             else:
                 try:
                     client = GenieSimClient(
-                        mock_mode=os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true",
+                        mock_mode=resolve_geniesim_mock_mode().enabled,
                         validate_on_init=False,
                     )
                 except Exception as e:
