@@ -19,6 +19,11 @@ BlueprintPipeline converts scene reconstructions (from [3D-RE-GEN](https://arxiv
 - Project: https://3dregen.jdihlmann.com/
 - GitHub: https://github.com/cgtuebingen/3D-RE-GEN (code pending release)
 
+## Documentation
+
+- [API Reference](docs/api/README.md)
+- [Tools guide](tools/README.md)
+
 ## Pipeline Architecture
 
 ```
