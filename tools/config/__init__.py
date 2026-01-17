@@ -74,6 +74,7 @@ class HumanApprovalConfig:
     enabled: bool = True
     timeout_hours: float = 24.0
     auto_approve_on_timeout: bool = False
+    allow_auto_approve_on_timeout_non_production: bool = False
     approval_methods: List[str] = field(default_factory=lambda: ["dashboard", "email", "api"])
     default_approvers: List[str] = field(default_factory=list)
     escalation_after_hours: float = 12.0
@@ -535,6 +536,10 @@ class ConfigLoader:
                 enabled=config.get("human_approval", {}).get("enabled", True),
                 timeout_hours=config.get("human_approval", {}).get("timeout_hours", 24.0),
                 auto_approve_on_timeout=config.get("human_approval", {}).get("auto_approve_on_timeout", False),
+                allow_auto_approve_on_timeout_non_production=config.get("human_approval", {}).get(
+                    "allow_auto_approve_on_timeout_non_production",
+                    False,
+                ),
                 approval_methods=config.get("human_approval", {}).get("approval_methods", ["dashboard", "email", "api"]),
                 notification_channels=config.get("human_approval", {}).get("notification_channels", ["email", "console"]),
             ),

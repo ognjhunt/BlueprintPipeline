@@ -56,6 +56,7 @@
     "enabled": true,
     "timeout_hours": 24,
     "auto_approve_on_timeout": false,
+    "allow_auto_approve_on_timeout_non_production": false,
     "approval_methods": ["dashboard", "email", "api"],
     "default_approvers": [],
     "escalation_after_hours": 12,
