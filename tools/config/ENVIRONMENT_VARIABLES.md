@@ -6,7 +6,7 @@ Complete reference for all environment variables used in the BlueprintPipeline.
 
 The pipeline uses environment variables for:
 - Configuration overrides (BP_ prefix)
-- API credentials (API keys, OAuth tokens)
+- Service credentials (keys, OAuth tokens)
 - Feature flags (ENABLE_ prefix)
 - Service endpoints (URL_ prefix)
 - Debugging and logging
@@ -255,14 +255,14 @@ export GOOGLE_CLOUD_PROJECT=my-blueprint-project
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
 ```
 
-### API Keys
+### Service Keys
 
 | Variable | Type | Required | Description |
 |----------|------|----------|-------------|
-| `GEMINI_API_KEY` | str | No | Google Gemini API key for LLM features (dev fallback only; production requires Secret Manager) |
-| `HF_TOKEN` | str | No | HuggingFace API token for model downloads |
-| `MESHY_API_KEY` | str | No | Meshy API key for 3D generation |
-| `INVENTORY_ENRICHMENT_API_KEY` | str | No | Inventory enrichment API key (dev fallback; Secret Manager preferred) |
+| `GEMINI_API_KEY` | str | No | Google Gemini key for LLM features (dev fallback only; production requires Secret Manager) |
+| `HF_TOKEN` | str | No | HuggingFace token for model downloads |
+| `MESHY_API_KEY` | str | No | Meshy key for 3D generation |
+| `INVENTORY_ENRICHMENT_API_KEY` | str | No | Inventory enrichment key (dev fallback; Secret Manager preferred) |
 
 ---
 
@@ -308,7 +308,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 |----------|------|---------|-------------|
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
-| `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework); set this to the exposed port in non-local deployments. |
+| `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework). |
 | `GENIESIM_ROOT` | path | `/opt/geniesim` | Genie Sim repository root (local framework) |
 | `GENIESIM_MOCK_MODE` | bool | false | Enable mock mode for Genie Sim clients in non-production runs (requires `ALLOW_GENIESIM_MOCK=1` or an explicit code flag; ignored in production). |
 | `ALLOW_GENIESIM_MOCK` | bool | 0 | Allow Genie Sim mock mode in non-production environments (`1` to enable; production always disables mock mode). |
@@ -323,11 +323,11 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 
 **Example**:
 ```bash
-export GENIESIM_HOST=geniesim.internal
+export GENIESIM_HOST=localhost
 export GENIESIM_PORT=50051
-export OMNIVERSE_HOST=omniverse.internal
+export OMNIVERSE_HOST=localhost
 export OMNIVERSE_PATH_ROOT=NVIDIA/Assets/Isaac
-export PARTICULATE_HEALTHCHECK_HOST=particulate.internal
+export PARTICULATE_HEALTHCHECK_HOST=localhost
 ```
 
 ---
@@ -508,7 +508,7 @@ export BP_SPLIT_SEED=42
 3. **Use feature flags wisely**: Don't enable experimental features in production
 4. **Validate startup**: Check logs for `[CONFIG]` messages showing loaded values
 5. **Use audit trail**: Enable `BP_ENABLE_CONFIG_AUDIT` when debugging config issues
-6. **Secure credentials**: Never commit API keys; use GCP Secret Manager
+6. **Secure credentials**: Never commit service keys; use GCP Secret Manager
 7. **Monitor changes**: Track config changes in version control when possible
 
 ---
