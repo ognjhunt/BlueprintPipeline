@@ -127,6 +127,7 @@ class ParallelEvalResult:
     policy_id: str
     embodiment: str
     isaac_lab_arena_version: Optional[str] = None
+    mock_evaluation: bool
 
     # Timing
     start_time: str
@@ -163,6 +164,7 @@ class ParallelEvalResult:
                 "num_episodes": self.config.num_episodes,
                 "device": self.config.device,
             },
+            "mock_evaluation": self.mock_evaluation,
             "env_spec_id": self.env_spec_id,
             "policy_id": self.policy_id,
             "embodiment": self.embodiment,
@@ -200,6 +202,8 @@ class ParallelEvalResult:
         }
         if self.isaac_lab_arena_version:
             data["isaac_lab_arena_version"] = self.isaac_lab_arena_version
+        if self.mock_evaluation:
+            data["mock_tag"] = "mock"
         return data
 
     def save(self, path: Path) -> None:
@@ -324,6 +328,7 @@ class ParallelEvaluator:
             policy_id=policy.policy_id,
             embodiment=env_spec.embodiment.embodiment_type.value,
             isaac_lab_arena_version=arena_version,
+            mock_evaluation=result.get("mock_evaluation", False),
             start_time=start_time.isoformat(),
             end_time=end_time.isoformat(),
             total_wall_time_s=total_time,
@@ -439,6 +444,7 @@ class ParallelEvaluator:
         return {
             "episode_metrics": episode_metrics,
             "errors": errors,
+            "mock_evaluation": False,
         }
 
     def _run_mock_evaluation(
@@ -515,6 +521,8 @@ class ParallelEvaluator:
         return {
             "episode_metrics": episode_metrics,
             "errors": [],
+            "mock_evaluation": True,
+            "mock_tag": "mock",
         }
 
     def _create_env_cfg(
