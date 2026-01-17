@@ -71,7 +71,6 @@ main:
     - set_training_markers:
         assign:
           - trainingFailedMarker: ${output_path + "/.failed"}
-        next: log_start
         next: init_quality_gate_preflight
 
     # Preflight quality gate check (downstream guardrail)
