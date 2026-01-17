@@ -408,7 +408,7 @@ class ImportConfig:
     poll_interval: int = 30
     wait_for_completion: bool = True
 
-    # P0-8 FIX: Error handling for partial failures
+    # Error handling for partial failures
     fail_on_partial_error: bool = False  # If True, fail the job if any episodes failed
 
     # Submission mode
@@ -469,7 +469,7 @@ class ImportedEpisodeValidator:
         """
         Validate a single episode.
 
-        P0-3 FIX: Enhanced validation with comprehensive checks for:
+        Enhanced validation with comprehensive checks for:
         - Required fields
         - Observation/action shapes
         - NaN/Inf values
@@ -507,13 +507,13 @@ class ImportedEpisodeValidator:
         elif actual_size < 1024:  # Less than 1KB
             warnings.append(f"Episode file is suspiciously small: {actual_size} bytes")
 
-        # P0-3 FIX: Load and validate episode data structure
+        # Load and validate episode data structure
         try:
             import pyarrow.parquet as pq
             table = pq.read_table(episode_file)
             df = table.to_pandas()
 
-            # P0-3 FIX: Check required fields
+            # Check required fields
             required_fields = ["observation", "action"]
             optional_fields = ["reward", "done", "timestamp"]
 
@@ -523,7 +523,7 @@ class ImportedEpisodeValidator:
                 if not any(variation in df.columns or any(variation in col for col in df.columns) for variation in field_variations):
                     errors.append(f"Missing required field: {field}")
 
-            # P0-3 FIX: Check for NaN/Inf values
+            # Check for NaN/Inf values
             for col in df.columns:
                 if df[col].dtype in [np.float32, np.float64]:
                     if df[col].isna().any():
@@ -531,14 +531,14 @@ class ImportedEpisodeValidator:
                     if np.isinf(df[col]).any():
                         errors.append(f"Column '{col}' contains Inf values")
 
-            # P0-3 FIX: Check timestamp monotonicity
+            # Check timestamp monotonicity
             timestamp_cols = [col for col in df.columns if 'timestamp' in col.lower() or 'time' in col.lower()]
             for ts_col in timestamp_cols:
                 if df[ts_col].dtype in [np.float32, np.float64, np.int32, np.int64]:
                     if not df[ts_col].is_monotonic_increasing:
                         errors.append(f"Timestamps in '{ts_col}' are not monotonic")
 
-            # P0-3 FIX: Check observation shapes are consistent
+            # Check observation shapes are consistent
             obs_cols = [col for col in df.columns if col.startswith('observation')]
             for obs_col in obs_cols:
                 if df[obs_col].apply(lambda x: hasattr(x, '__len__')).any():
@@ -547,7 +547,7 @@ class ImportedEpisodeValidator:
                     if len(unique_shapes) > 1:
                         warnings.append(f"Inconsistent shapes in '{obs_col}': {unique_shapes}")
 
-            # P0-3 FIX: Check action bounds are reasonable
+            # Check action bounds are reasonable
             action_cols = [col for col in df.columns if 'action' in col.lower()]
             for action_col in action_cols:
                 if df[action_col].dtype in [np.float32, np.float64]:
@@ -950,7 +950,7 @@ def run_import_job(
         if not download_result.success:
             result.errors.extend(download_result.errors)
 
-            # P0-8 FIX: Write failed episodes details for debugging
+            # Write failed episodes details for debugging
             if download_result.errors:
                 failed_episodes_path = config.output_dir / "failed_episodes.json"
                 failed_episodes_data = {
@@ -980,7 +980,7 @@ def run_import_job(
         print(f"[IMPORT] ✅ Downloaded {download_result.episode_count} episodes")
         print(f"[IMPORT]    Total size: {download_result.total_size_bytes / 1024 / 1024:.1f} MB\n")
 
-        # P0-8 FIX: Check for partial failures (some episodes downloaded, others failed)
+        # Check for partial failures (some episodes downloaded, others failed)
         if download_result.errors:
             print(f"[IMPORT] ⚠️  WARNING: {len(download_result.errors)} episodes had errors during download")
             result.warnings.extend(download_result.errors)
@@ -1009,7 +1009,7 @@ def run_import_job(
             except Exception as e:
                 print(f"[IMPORT]    WARNING: Could not write failed episodes file: {e}")
 
-            # P0-8 FIX: Optionally fail on partial errors
+            # Optionally fail on partial errors
             if config.fail_on_partial_error:
                 result.errors.append(
                     f"{len(download_result.errors)} episodes failed and fail_on_partial_error=True"
@@ -1747,10 +1747,10 @@ def main():
     poll_interval = int(os.getenv("GENIE_SIM_POLL_INTERVAL", "30"))
     wait_for_completion = os.getenv("WAIT_FOR_COMPLETION", "true").lower() == "true"
 
-    # P0-8 FIX: Error handling configuration
+    # Error handling configuration
     fail_on_partial_error = os.getenv("FAIL_ON_PARTIAL_ERROR", "false").lower() == "true"
 
-    # P0-7 FIX: Validate credentials at startup
+    # Validate credentials at startup
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     try:
         from startup_validation import validate_and_fail_fast
@@ -1803,7 +1803,7 @@ def main():
         require_lerobot=require_lerobot,
         poll_interval=poll_interval,
         wait_for_completion=wait_for_completion,
-        fail_on_partial_error=fail_on_partial_error,  # P0-8 FIX
+        fail_on_partial_error=fail_on_partial_error,
         submission_mode=submission_mode,
         job_metadata_path=job_metadata_path,
         local_episodes_prefix=local_episodes_prefix,

@@ -75,7 +75,7 @@ from tools.validation.entrypoint_checks import (
     validate_scene_manifest,
 )
 
-# P0-5 FIX: Import quality gates for validation before export
+# Import quality gates for validation before export
 try:
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     from quality_gates.quality_gate import (
@@ -283,7 +283,7 @@ def run_geniesim_export_job(
     output_dir = root / geniesim_prefix
     service_mode = _is_service_mode()
 
-    # P1-7 FIX: Validate upstream job completion before starting export
+    # Validate upstream job completion before starting export
     print("\n[GENIESIM-EXPORT-JOB] Validating upstream job completion...")
     upstream_errors = []
 
@@ -322,7 +322,7 @@ def run_geniesim_export_job(
     else:
         print("[GENIESIM-EXPORT-JOB] ⚠️  Replicator prefix not specified, skipping replicator validation")
 
-    # P1-7 FIX: Block export if upstream jobs are not complete
+    # Block export if upstream jobs are not complete
     if upstream_errors:
         print("\n[GENIESIM-EXPORT-JOB] ❌ ERROR: Upstream jobs not complete")
         for error in upstream_errors:
@@ -341,7 +341,7 @@ def run_geniesim_export_job(
         print(f"[GENIESIM-EXPORT-JOB] ERROR: Manifest not found: {manifest_path}")
         return 1
 
-    # P1-6 FIX: Load variation assets and apply commercial filtering BEFORE merging
+    # Load variation assets and apply commercial filtering BEFORE merging
     # This is CRITICAL for commercial use - Genie Sim's assets are CC BY-NC-SA 4.0
     variation_assets_dir = None
     variation_objects = []
@@ -388,7 +388,7 @@ def run_geniesim_export_job(
                     obj["asset"]["commercial_ok"] = True
                     obj["is_variation_asset"] = True
 
-                # P1-6 FIX: Apply commercial filtering to variation assets BEFORE merging
+                # Apply commercial filtering to variation assets BEFORE merging
                 if filter_commercial:
                     filtered_variation_objects = []
                     non_commercial_count = 0
@@ -523,7 +523,7 @@ def run_geniesim_export_job(
         print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: Failed to generate asset provenance: {exc}")
         return 1
 
-    # P0-5 FIX: Run quality gates before export
+    # Run quality gates before export
     gate_names = [
         "manifest_completeness",
         "asset_existence",
@@ -778,11 +778,11 @@ def run_geniesim_export_job(
             print(f"[GENIESIM-EXPORT-JOB]   Tasks: {result.num_tasks}")
 
             # Export premium analytics manifests (DEFAULT: ENABLED)
-            # P1-8 FIX: Make premium analytics failures block export
+            # Make premium analytics failures block export
             premium_analytics_manifests = {}
             if enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting premium analytics manifests (DEFAULT - NO LONGER UPSELL)")
-                # P1-8 FIX: Don't catch exceptions - let them propagate to block export
+                # Don't catch exceptions - let them propagate to block export
                 analytics_dir = output_dir / "premium_analytics"
                 analytics_config = DefaultPremiumAnalyticsConfig(enabled=True)
                 analytics_exporter = create_default_premium_analytics_exporter(
@@ -805,7 +805,7 @@ def run_geniesim_export_job(
             all_premium_features_manifests = {}
 
             # 1. Sim2Real Fidelity Matrix ($20k-$50k value)
-            # P1-8 FIX: Make failures block export
+            # Make failures block export
             if SIM2REAL_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Fidelity Matrix ($20k-$50k value - NOW FREE)")
                 sim2real_dir = output_dir / "sim2real_fidelity"
@@ -821,7 +821,7 @@ def run_geniesim_export_job(
                 print("[GENIESIM-EXPORT-JOB]   ✓ Trust matrix for deployment")
 
             # 2. Embodiment Transfer Analysis ($20k-$100k value)
-            # P1-8 FIX: Make failures block export
+            # Make failures block export
             if EMBODIMENT_TRANSFER_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Embodiment Transfer Analysis ($20k-$100k value - NOW FREE)")
                 embodiment_dir = output_dir / "embodiment_transfer"
@@ -837,7 +837,7 @@ def run_geniesim_export_job(
                 print("[GENIESIM-EXPORT-JOB]   ✓ Transfer strategy recommendations")
 
             # 3. Trajectory Optimality Analysis ($10k-$25k value)
-            # P1-8 FIX: Make failures block export
+            # Make failures block export
             if TRAJECTORY_OPTIMALITY_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Trajectory Optimality Analysis ($10k-$25k value - NOW FREE)")
                 trajectory_dir = output_dir / "trajectory_optimality"
@@ -852,7 +852,7 @@ def run_geniesim_export_job(
                 print("[GENIESIM-EXPORT-JOB]   ✓ Training suitability assessment")
 
             # 4. Policy Leaderboard ($20k-$40k value)
-            # P1-8 FIX: Make failures block export
+            # Make failures block export
             if POLICY_LEADERBOARD_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Policy Leaderboard ($20k-$40k value - NOW FREE)")
                 leaderboard_dir = output_dir / "policy_leaderboard"
@@ -867,7 +867,7 @@ def run_geniesim_export_job(
                 print("[GENIESIM-EXPORT-JOB]   ✓ Pairwise comparison matrix")
 
             # 5. Tactile Sensor Simulation ($15k-$30k value)
-            # P1-8 FIX: Make failures block export
+            # Make failures block export
             if TACTILE_SENSOR_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Tactile Sensor Simulation ($15k-$30k value - NOW FREE)")
                 tactile_dir = output_dir / "tactile_sensors"
@@ -882,7 +882,7 @@ def run_geniesim_export_job(
                 print("[GENIESIM-EXPORT-JOB]   ✓ 81%+ success vs 50% vision-only")
 
             # 6. Language Annotations ($10k-$25k value)
-            # P1-8 FIX: Make failures block export
+            # Make failures block export
             if LANGUAGE_ANNOTATIONS_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Language Annotations ($10k-$25k value - NOW FREE)")
                 language_dir = output_dir / "language_annotations"
@@ -897,7 +897,7 @@ def run_geniesim_export_job(
                 print("[GENIESIM-EXPORT-JOB]   ✓ Required for VLA training (OpenVLA, Pi0, RT-2)")
 
             # 7. Generalization Analyzer ($15k-$35k value)
-            # P1-8 FIX: Make failures block export
+            # Make failures block export
             if GENERALIZATION_ANALYZER_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Generalization Analyzer ($15k-$35k value - NOW FREE)")
                 generalization_dir = output_dir / "generalization_analysis"
@@ -912,7 +912,7 @@ def run_geniesim_export_job(
                 print("[GENIESIM-EXPORT-JOB]   ✓ Curriculum learning recommendations")
 
             # 8. Sim2Real Validation Service ($5k-$25k/study value)
-            # P1-8 FIX: Make failures block export
+            # Make failures block export
             if SIM2REAL_VALIDATION_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Validation Service ($5k-$25k/study - NOW FREE)")
                 sim2real_validation_dir = output_dir / "sim2real_validation"
@@ -929,7 +929,7 @@ def run_geniesim_export_job(
                 print("[GENIESIM-EXPORT-JOB]   ✓ Failure mode comparison (sim vs real)")
 
             # 9. Audio Narration ($5k-$15k value)
-            # P1-8 FIX: Make failures block export
+            # Make failures block export
             if AUDIO_NARRATION_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Audio Narration ($5k-$15k value - NOW FREE)")
                 audio_narration_dir = output_dir / "audio_narration"
@@ -986,7 +986,7 @@ def run_geniesim_export_job(
                 print(f"\n  💰 Total Value Delivered: ${total_value:,} (NOW FREE BY DEFAULT!)")
                 print("="*80 + "\n")
 
-            # P1-9 FIX: Write completion marker with schema version tracking
+            # Write completion marker with schema version tracking
             import datetime
             marker_path = output_dir / "_GENIESIM_EXPORT_COMPLETE"
             metrics = get_metrics()
@@ -1001,7 +1001,7 @@ def run_geniesim_export_job(
                 "commercial_data": filter_commercial,
                 "premium_analytics_enabled": enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE,
                 "premium_analytics_manifests": len(premium_analytics_manifests),
-                # P1-9 FIX: Add schema version tracking
+                # Add schema version tracking
                 "export_schema_version": "1.0.0",  # BlueprintPipeline export schema version
                 "geniesim_schema_version": "3.0.0",  # Genie Sim API version compatibility
                 "blueprintpipeline_version": "1.0.0",  # Pipeline version
@@ -1020,7 +1020,7 @@ def run_geniesim_export_job(
                     "variation_assets": len(variation_objects),
                 },
                 "metrics_summary": metrics_summary,
-                # P1-9 FIX: Track which premium features were exported
+                # Track which premium features were exported
                 "premium_features_exported": {
                     "sim2real_fidelity": SIM2REAL_AVAILABLE,
                     "embodiment_transfer": EMBODIMENT_TRANSFER_AVAILABLE,
@@ -1051,7 +1051,7 @@ def run_geniesim_export_job(
 
 def main():
     """Main entry point."""
-    # P0-7 FIX: Validate credentials at startup
+    # Validate credentials at startup
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     try:
         from startup_validation import validate_and_fail_fast

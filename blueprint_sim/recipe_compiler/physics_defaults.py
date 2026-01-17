@@ -222,7 +222,7 @@ class PhysicsDefaults:
             "ceramic": 2400,
             "stone": 2600,
             "rubber": 1200,
-            # New materials (P2-5)
+            # New materials
             "foam": 200,  # Low-density polyurethane foam
             "cork": 240,  # Natural cork
             "leather": 900,  # Treated leather
@@ -245,7 +245,7 @@ class PhysicsDefaults:
             "cabinet": 720,
             "shelf": 680,
             "appliance": 2200,
-            # New categories (P2-5)
+            # New categories
             "box": 600,
             "container": 1000,
             "bag": 300,

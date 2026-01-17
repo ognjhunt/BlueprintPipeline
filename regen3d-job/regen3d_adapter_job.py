@@ -587,10 +587,10 @@ def run_regen3d_adapter_job(
             regen3d_output,
             scene_id=scene_id,
             environment_type=environment_type,
-            scale_factor=scale_factor,  # (P1-23) Apply scale_factor consistently
+            scale_factor=scale_factor,  # Apply scale_factor consistently
         )
 
-        # Validate manifest against schema (P1-21)
+        # Validate manifest against schema
         print("[REGEN3D-JOB] Validating manifest against schema...")
         try:
             validate_manifest(manifest)
@@ -618,7 +618,7 @@ def run_regen3d_adapter_job(
         return 1
 
     # 4. Generate semantic inventory (for replicator/policy targeting)
-    # (P1-22) Make inventory generation failures fatal - required for downstream jobs
+    # Make inventory generation failures fatal - required for downstream jobs
     if not skip_inventory:
         print("[REGEN3D-JOB] Generating semantic inventory...")
         try:
@@ -678,7 +678,7 @@ def run_regen3d_adapter_job(
             return 1
 
     # 6. Write completion marker
-    # (P2-14) Use only .regen3d_complete as the primary marker.
+    # Use only .regen3d_complete as the primary marker.
     # This marker signals that the 3D-RE-GEN adapter job has completed
     # and all outputs (manifest, layout, inventory) are ready for downstream jobs.
     # All downstream workflows should trigger on .regen3d_complete.
