@@ -18,21 +18,33 @@ Usage:
 
 import json
 import os
+import threading
+import time
+from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from .geniesim_grpc_pb2 import (
-    GetObservationRequest, GetObservationResponse,
-    GetJointPositionRequest, GetJointPositionResponse,
-    SetJointPositionRequest, SetJointPositionResponse,
+    CameraObservation,
+    CommandRequest, CommandResponse,
+    CommandType,
     GetEEPoseRequest, GetEEPoseResponse,
-    SetGripperStateRequest, SetGripperStateResponse,
+    GetJointPositionRequest, GetJointPositionResponse,
     GetObjectPoseRequest, GetObjectPoseResponse,
+    GetObservationRequest, GetObservationResponse,
+    JointState,
+    Pose,
+    Quaternion,
+    ResetRequest, ResetResponse,
+    RobotState,
+    SceneState,
+    SetGripperStateRequest, SetGripperStateResponse,
+    SetJointPositionRequest, SetJointPositionResponse,
     SetObjectPoseRequest, SetObjectPoseResponse,
     SetTrajectoryRequest, SetTrajectoryResponse,
     StartRecordingRequest, StartRecordingResponse,
     StopRecordingRequest, StopRecordingResponse,
-    ResetRequest, ResetResponse,
-    CommandRequest, CommandResponse,
+    TrajectoryPoint,
+    Vector3,
 )
 
 
@@ -352,15 +364,49 @@ class GenieSimServiceServicer:
     server behavior.
     """
 
+    def __init__(self, joint_count: int = 7, delegate: Optional[Any] = None) -> None:
+        self._delegate = delegate
+        self._state_lock = threading.Lock()
+        self._joint_positions = [0.0] * joint_count
+        self._joint_velocities = [0.0] * joint_count
+        self._joint_efforts = [0.0] * joint_count
+        self._joint_names = [f"joint_{idx}" for idx in range(joint_count)]
+        self._object_poses = {}
+        self._ee_pose = self._default_pose()
+        self._gripper_width = 0.0
+        self._gripper_force = 0.0
+        self._gripper_is_grasping = False
+        self._recording = None
+
     def GetObservation(
         self,
         request: GetObservationRequest,
         context,
     ) -> GetObservationResponse:
         """Get current observation from simulation."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("GetObservation")
+        if delegate:
+            return self._call_delegate(delegate, request, context, GetObservationResponse(success=False))
+        with self._state_lock:
+            joint_state = self._build_joint_state()
+            ee_pose = self._ee_pose
+        robot_state = RobotState(
+            joint_state=joint_state,
+            end_effector_pose=ee_pose,
+            gripper_width=self._gripper_width,
+            gripper_is_grasping=self._gripper_is_grasping,
+            link_poses=[],
+            link_names=[],
+        )
+        scene_state = SceneState(objects=[], simulation_time=time.time(), step_count=0)
+        camera_observation = CameraObservation(images=[])
+        return GetObservationResponse(
+            success=True,
+            robot_state=robot_state,
+            scene_state=scene_state,
+            camera_observation=camera_observation,
+            timestamp=time.time(),
+        )
 
     def GetJointPosition(
         self,
@@ -368,9 +414,12 @@ class GenieSimServiceServicer:
         context,
     ) -> GetJointPositionResponse:
         """Get current joint positions."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("GetJointPosition")
+        if delegate:
+            return self._call_delegate(delegate, request, context, GetJointPositionResponse(success=False))
+        with self._state_lock:
+            joint_state = self._build_joint_state()
+        return GetJointPositionResponse(success=True, joint_state=joint_state)
 
     def SetJointPosition(
         self,
@@ -378,9 +427,18 @@ class GenieSimServiceServicer:
         context,
     ) -> SetJointPositionResponse:
         """Set robot joint positions."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("SetJointPosition")
+        if delegate:
+            return self._call_delegate(delegate, request, context, SetJointPositionResponse(success=False))
+        if not request.positions:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "No joint positions provided")
+            return SetJointPositionResponse(success=False, error_message="No joint positions provided")
+        with self._state_lock:
+            self._joint_positions = list(request.positions)
+            self._joint_velocities = list(request.velocities) or [0.0] * len(self._joint_positions)
+            self._joint_efforts = [0.0] * len(self._joint_positions)
+            joint_state = self._build_joint_state()
+        return SetJointPositionResponse(success=True, current_state=joint_state)
 
     def GetEEPose(
         self,
@@ -388,9 +446,12 @@ class GenieSimServiceServicer:
         context,
     ) -> GetEEPoseResponse:
         """Get end-effector pose."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("GetEEPose")
+        if delegate:
+            return self._call_delegate(delegate, request, context, GetEEPoseResponse(success=False))
+        with self._state_lock:
+            pose = self._ee_pose
+        return GetEEPoseResponse(success=True, pose=pose)
 
     def SetGripperState(
         self,
@@ -398,9 +459,18 @@ class GenieSimServiceServicer:
         context,
     ) -> SetGripperStateResponse:
         """Set gripper state."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("SetGripperState")
+        if delegate:
+            return self._call_delegate(delegate, request, context, SetGripperStateResponse(success=False))
+        with self._state_lock:
+            self._gripper_width = request.width
+            self._gripper_force = request.force
+            self._gripper_is_grasping = request.force > 0.0 and request.width <= 0.02
+        return SetGripperStateResponse(
+            success=True,
+            current_width=self._gripper_width,
+            is_grasping=self._gripper_is_grasping,
+        )
 
     def GetObjectPose(
         self,
@@ -408,9 +478,18 @@ class GenieSimServiceServicer:
         context,
     ) -> GetObjectPoseResponse:
         """Get object pose."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("GetObjectPose")
+        if delegate:
+            return self._call_delegate(delegate, request, context, GetObjectPoseResponse(success=False))
+        if not request.object_id:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "object_id is required")
+            return GetObjectPoseResponse(success=False, error_message="object_id is required")
+        with self._state_lock:
+            pose = self._object_poses.get(request.object_id)
+        if pose is None:
+            self._set_context_status(context, self._grpc_status("NOT_FOUND"), "object not found")
+            return GetObjectPoseResponse(success=False, error_message="object not found")
+        return GetObjectPoseResponse(success=True, pose=pose)
 
     def SetObjectPose(
         self,
@@ -418,9 +497,18 @@ class GenieSimServiceServicer:
         context,
     ) -> SetObjectPoseResponse:
         """Set object pose."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("SetObjectPose")
+        if delegate:
+            return self._call_delegate(delegate, request, context, SetObjectPoseResponse(success=False))
+        if not request.object_id:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "object_id is required")
+            return SetObjectPoseResponse(success=False, error_message="object_id is required")
+        if request.pose is None:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "pose is required")
+            return SetObjectPoseResponse(success=False, error_message="pose is required")
+        with self._state_lock:
+            self._object_poses[request.object_id] = request.pose
+        return SetObjectPoseResponse(success=True)
 
     def SetTrajectory(
         self,
@@ -428,9 +516,24 @@ class GenieSimServiceServicer:
         context,
     ) -> SetTrajectoryResponse:
         """Execute a trajectory."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("SetTrajectory")
+        if delegate:
+            return self._call_delegate(delegate, request, context, SetTrajectoryResponse(success=False))
+        if not request.points:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "Trajectory points are required")
+            return SetTrajectoryResponse(success=False, error_message="Trajectory points are required")
+        last_point: TrajectoryPoint = request.points[-1]
+        with self._state_lock:
+            if last_point.positions:
+                self._joint_positions = list(last_point.positions)
+                self._joint_velocities = list(last_point.velocities) or [0.0] * len(self._joint_positions)
+                self._joint_efforts = [0.0] * len(self._joint_positions)
+        execution_time = max(last_point.time_from_start, 0.0)
+        return SetTrajectoryResponse(
+            success=True,
+            points_executed=len(request.points),
+            execution_time=execution_time,
+        )
 
     def StartRecording(
         self,
@@ -438,9 +541,25 @@ class GenieSimServiceServicer:
         context,
     ) -> StartRecordingResponse:
         """Start recording an episode."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("StartRecording")
+        if delegate:
+            return self._call_delegate(delegate, request, context, StartRecordingResponse(success=False))
+        episode_id = request.episode_id or f"episode-{int(time.time())}"
+        output_dir = Path(request.output_directory or "/tmp/geniesim_recordings")
+        recording_path = output_dir / episode_id
+        try:
+            recording_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._set_context_status(context, self._grpc_status("INTERNAL"), "Failed to create recording directory")
+            return StartRecordingResponse(success=False, error_message=str(exc))
+        with self._state_lock:
+            self._recording = {
+                "episode_id": episode_id,
+                "output_directory": recording_path,
+                "started_at": time.time(),
+                "frames_recorded": 0,
+            }
+        return StartRecordingResponse(success=True, recording_path=str(recording_path))
 
     def StopRecording(
         self,
@@ -448,9 +567,22 @@ class GenieSimServiceServicer:
         context,
     ) -> StopRecordingResponse:
         """Stop recording current episode."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("StopRecording")
+        if delegate:
+            return self._call_delegate(delegate, request, context, StopRecordingResponse(success=False))
+        with self._state_lock:
+            recording = self._recording
+            self._recording = None
+        if recording is None:
+            self._set_context_status(context, self._grpc_status("FAILED_PRECONDITION"), "No active recording")
+            return StopRecordingResponse(success=False, error_message="No active recording")
+        duration = max(time.time() - recording["started_at"], 0.0)
+        return StopRecordingResponse(
+            success=True,
+            frames_recorded=recording["frames_recorded"],
+            duration_seconds=duration,
+            recording_path=str(recording["output_directory"]),
+        )
 
     def Reset(
         self,
@@ -458,9 +590,20 @@ class GenieSimServiceServicer:
         context,
     ) -> ResetResponse:
         """Reset the simulation environment."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("Reset")
+        if delegate:
+            return self._call_delegate(delegate, request, context, ResetResponse(success=False))
+        with self._state_lock:
+            self._joint_positions = [0.0] * len(self._joint_positions)
+            self._joint_velocities = [0.0] * len(self._joint_positions)
+            self._joint_efforts = [0.0] * len(self._joint_positions)
+            self._ee_pose = self._default_pose()
+            self._gripper_width = 0.0
+            self._gripper_force = 0.0
+            self._gripper_is_grasping = False
+            self._object_poses.clear()
+            self._recording = None
+        return ResetResponse(success=True)
 
     def SendCommand(
         self,
@@ -468,9 +611,235 @@ class GenieSimServiceServicer:
         context,
     ) -> CommandResponse:
         """Send a generic command."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED if grpc else None)
-        context.set_details("Method not implemented")
-        raise NotImplementedError("Method not implemented!")
+        delegate = self._resolve_delegate("SendCommand")
+        if delegate:
+            return self._call_delegate(delegate, request, context, CommandResponse(success=False))
+        payload_data = {}
+        if request.payload:
+            try:
+                payload_data = json.loads(request.payload.decode())
+            except json.JSONDecodeError:
+                self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "Invalid JSON payload")
+                return CommandResponse(success=False, error_message="Invalid JSON payload")
+        command_type = request.command_type
+        try:
+            if command_type == CommandType.GET_OBSERVATION:
+                response = self.GetObservation(
+                    GetObservationRequest(
+                        include_images=payload_data.get("include_images", False),
+                        include_depth=payload_data.get("include_depth", False),
+                        include_semantic=payload_data.get("include_semantic", False),
+                        camera_ids=payload_data.get("camera_ids", []),
+                    ),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    payload=json.dumps(self._payload_for_observation(response)).encode(),
+                )
+            if command_type == CommandType.GET_JOINT_POSITION:
+                response = self.GetJointPosition(GetJointPositionRequest(), context)
+                return CommandResponse(
+                    success=response.success,
+                    payload=json.dumps(self._payload_for_joint_state(response)).encode(),
+                )
+            if command_type == CommandType.SET_JOINT_POSITION:
+                response = self.SetJointPosition(
+                    SetJointPositionRequest(
+                        positions=payload_data.get("positions", []),
+                        velocities=payload_data.get("velocities", []),
+                        duration=payload_data.get("duration", 0.0),
+                        wait_for_completion=payload_data.get("wait_for_completion", False),
+                    ),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_set_joint(response)).encode(),
+                )
+            if command_type == CommandType.GET_EE_POSE:
+                response = self.GetEEPose(
+                    GetEEPoseRequest(ee_link_name=payload_data.get("ee_link_name", "")),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    payload=json.dumps(self._payload_for_pose(response.pose)).encode(),
+                )
+            if command_type == CommandType.SET_GRIPPER_STATE:
+                response = self.SetGripperState(
+                    SetGripperStateRequest(
+                        width=payload_data.get("width", 0.0),
+                        force=payload_data.get("force", 0.0),
+                        wait_for_completion=payload_data.get("wait_for_completion", False),
+                    ),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_gripper(response)).encode(),
+                )
+            if command_type == CommandType.GET_OBJECT_POSE:
+                response = self.GetObjectPose(
+                    GetObjectPoseRequest(object_id=payload_data.get("object_id", "")),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_object_pose(response)).encode(),
+                )
+            if command_type == CommandType.SET_OBJECT_POSE:
+                response = self.SetObjectPose(
+                    SetObjectPoseRequest(
+                        object_id=payload_data.get("object_id", ""),
+                        pose=self._pose_from_payload(payload_data.get("pose")),
+                    ),
+                    context,
+                )
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_simple(response.success, response.error_message)).encode(),
+                )
+            if command_type == CommandType.RESET:
+                response = self.Reset(ResetRequest(), context)
+                return CommandResponse(
+                    success=response.success,
+                    error_message=response.error_message,
+                    payload=json.dumps(self._payload_for_simple(response.success, response.error_message)).encode(),
+                )
+        except Exception as exc:
+            self._set_context_status(context, self._grpc_status("INTERNAL"), "Command handling failed")
+            return CommandResponse(success=False, error_message=str(exc))
+        self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "Unsupported command type")
+        return CommandResponse(success=False, error_message="Unsupported command type")
+
+    def _resolve_delegate(self, method_name: str) -> Optional[Callable]:
+        if self._delegate is None:
+            return None
+        handler = getattr(self._delegate, method_name, None)
+        if handler is None:
+            return None
+        base_handler = getattr(GenieSimServiceServicer, method_name, None)
+        if base_handler and getattr(handler, "__func__", None) is base_handler:
+            return None
+        return handler
+
+    def _call_delegate(self, handler: Callable, request: Any, context: Any, fallback_response: Any) -> Any:
+        try:
+            return handler(request, context)
+        except Exception as exc:
+            self._set_context_status(context, self._grpc_status("INTERNAL"), "Delegate failure")
+            if hasattr(fallback_response, "error_message"):
+                fallback_response.error_message = str(exc)
+            return fallback_response
+
+    @staticmethod
+    def _set_context_status(context: Any, code: Any, details: str) -> None:
+        if context is None:
+            return
+        if grpc is not None and code is not None:
+            try:
+                context.set_code(code)
+            except Exception:
+                return
+        try:
+            context.set_details(details)
+        except Exception:
+            return
+
+    @staticmethod
+    def _payload_for_observation(response: GetObservationResponse) -> dict:
+        return {
+            "success": response.success,
+            "robot_state": response.robot_state.to_dict() if response.robot_state else {},
+            "scene_state": response.scene_state.to_dict() if response.scene_state else {},
+            "timestamp": response.timestamp,
+        }
+
+    @staticmethod
+    def _payload_for_joint_state(response: GetJointPositionResponse) -> dict:
+        return {
+            "success": response.success,
+            "joint_state": response.joint_state.to_dict() if response.joint_state else {},
+        }
+
+    @staticmethod
+    def _payload_for_set_joint(response: SetJointPositionResponse) -> dict:
+        return {
+            "success": response.success,
+            "error_message": response.error_message,
+            "current_state": response.current_state.to_dict() if response.current_state else {},
+        }
+
+    @staticmethod
+    def _payload_for_pose(pose: Optional[Pose]) -> dict:
+        return {"pose": pose.to_dict() if pose else {}}
+
+    @staticmethod
+    def _payload_for_gripper(response: SetGripperStateResponse) -> dict:
+        return {
+            "success": response.success,
+            "error_message": response.error_message,
+            "current_width": response.current_width,
+            "is_grasping": response.is_grasping,
+        }
+
+    @staticmethod
+    def _payload_for_object_pose(response: GetObjectPoseResponse) -> dict:
+        return {
+            "success": response.success,
+            "error_message": response.error_message,
+            "pose": response.pose.to_dict() if response.pose else {},
+        }
+
+    @staticmethod
+    def _payload_for_simple(success: bool, error_message: str) -> dict:
+        return {"success": success, "error_message": error_message}
+
+    @staticmethod
+    def _grpc_status(code_name: str) -> Any:
+        if grpc is None:
+            return None
+        return getattr(grpc.StatusCode, code_name, None)
+
+    def _build_joint_state(self) -> JointState:
+        return JointState(
+            positions=list(self._joint_positions),
+            velocities=list(self._joint_velocities),
+            efforts=list(self._joint_efforts),
+            names=list(self._joint_names),
+        )
+
+    @staticmethod
+    def _default_pose() -> Pose:
+        return Pose(
+            position=Vector3(x=0.0, y=0.0, z=0.0),
+            orientation=Quaternion(w=1.0, x=0.0, y=0.0, z=0.0),
+        )
+
+    @classmethod
+    def _pose_from_payload(cls, payload: Optional[dict]) -> Pose:
+        if not payload:
+            return cls._default_pose()
+        position = payload.get("position") or {}
+        orientation = payload.get("orientation") or {}
+        return Pose(
+            position=Vector3(
+                x=float(position.get("x", 0.0)),
+                y=float(position.get("y", 0.0)),
+                z=float(position.get("z", 0.0)),
+            ),
+            orientation=Quaternion(
+                w=float(orientation.get("w", 1.0)),
+                x=float(orientation.get("x", 0.0)),
+                y=float(orientation.get("y", 0.0)),
+                z=float(orientation.get("z", 0.0)),
+            ),
+        )
 
 
 def add_GenieSimServiceServicer_to_server(servicer: GenieSimServiceServicer, server):
