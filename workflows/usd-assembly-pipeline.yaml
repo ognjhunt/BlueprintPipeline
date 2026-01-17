@@ -58,6 +58,7 @@ main:
           - simreadyFailedMarker: '${"scenes/" + sceneId + "/simready/.failed"}'
           - replicatorFailedMarker: '${"scenes/" + sceneId + "/replicator/.failed"}'
           - isaacLabFailedMarker: '${"scenes/" + sceneId + "/isaac_lab/.failed"}'
+          - lockObject: '${"scenes/" + sceneId + "/locks/regen3d-prep.lock"}'
           - usdJobName: "usd-assembly-job"
           - convertTimeoutSeconds: 1800
           - simreadyTimeoutSeconds: 3600
@@ -65,6 +66,48 @@ main:
           - replicatorJobName: "replicator-job"
           - replicatorTimeoutSeconds: 1800
           - isaacLabTimeoutSeconds: 1800
+        next: acquire_lock
+
+    - acquire_lock:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${lockObject}
+            ifGenerationMatch: 0
+            uploadType: "media"
+            body: ${json.encode({
+              "scene_id": sceneId,
+              "workflow": "usd-assembly-pipeline",
+              "lock": "regen3d-prep",
+              "timestamp": time.format(sys.now()),
+              "execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")
+            })}
+        except:
+          as: e
+          steps:
+            - lock_exists_check:
+                switch:
+                  - condition: '${e.code == 409 or e.code == 412}'
+                    next: log_lock_exists
+                next: raise_lock_error
+        next: log_lock_acquired
+
+    - log_lock_exists:
+        call: sys.log
+        args:
+          text: '${"Lock already exists for scene " + sceneId + " at " + lockObject + " - skipping"}'
+          severity: "INFO"
+        next: skip_locked
+
+    - raise_lock_error:
+        raise: ${e}
+
+    - log_lock_acquired:
+        call: sys.log
+        args:
+          text: '${"Acquired lock for scene " + sceneId + " at " + lockObject}'
+          severity: "INFO"
         next: log_start
 
     - log_start:
@@ -188,6 +231,11 @@ main:
                 args:
                   text: '${"Failed to start USD convert job after retries: " + e.message}'
                   severity: "ERROR"
+            - release_lock_after_convert_start_error:
+                call: googleapis.storage.v1.objects.delete
+                args:
+                  bucket: ${bucket}
+                  object: ${lockObject}
             - raise_convert_error:
                 raise: ${e}
         next: set_convert_execution_name
@@ -316,6 +364,13 @@ main:
         args:
           text: ${errorMsg}
           severity: "ERROR"
+        next: release_lock_after_convert_failure
+
+    - release_lock_after_convert_failure:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
         next: raise_convert_error
 
     - raise_convert_error:
@@ -408,6 +463,11 @@ main:
                 args:
                   text: '${"Failed to start simready job after retries: " + e.message}'
                   severity: "ERROR"
+            - release_lock_after_simready_start_error:
+                call: googleapis.storage.v1.objects.delete
+                args:
+                  bucket: ${bucket}
+                  object: ${lockObject}
             - raise_simready_error:
                 raise: ${e}
         next: init_simready_poll
@@ -539,6 +599,13 @@ main:
         args:
           text: ${errorMsg}
           severity: "ERROR"
+        next: release_lock_after_simready_failure
+
+    - release_lock_after_simready_failure:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
         next: raise_simready_error
 
     - raise_simready_error:
@@ -633,6 +700,11 @@ main:
                 args:
                   text: '${"Failed to start USD job after retries: " + e.message}'
                   severity: "ERROR"
+            - release_lock_after_usd_start_error:
+                call: googleapis.storage.v1.objects.delete
+                args:
+                  bucket: ${bucket}
+                  object: ${lockObject}
             - raise_usd_error:
                 raise: ${e}
         next: set_usd_execution_name
@@ -761,6 +833,13 @@ main:
         args:
           text: ${errorMsg}
           severity: "ERROR"
+        next: release_lock_after_usd_failure
+
+    - release_lock_after_usd_failure:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
         next: raise_usd_error
 
     - raise_usd_error:
@@ -861,6 +940,11 @@ main:
                 args:
                   text: '${"Failed to start replicator job after retries: " + e.message}'
                   severity: "ERROR"
+            - release_lock_after_replicator_start_error:
+                call: googleapis.storage.v1.objects.delete
+                args:
+                  bucket: ${bucket}
+                  object: ${lockObject}
             - raise_replicator_error:
                 raise: ${e}
         next: set_replicator_execution_name
@@ -1085,6 +1169,11 @@ main:
                 args:
                   text: '${"Failed to start Isaac Lab job after retries: " + e.message}'
                   severity: "ERROR"
+            - release_lock_after_isaac_lab_start_error:
+                call: googleapis.storage.v1.objects.delete
+                args:
+                  bucket: ${bucket}
+                  object: ${lockObject}
             - raise_isaac_lab_error:
                 raise: ${e}
         next: set_isaac_lab_execution_name
@@ -1154,7 +1243,7 @@ main:
         args:
           text: '${"Isaac Lab task generation completed for scene " + sceneId}'
           severity: "INFO"
-        next: done
+        next: release_lock_before_done
 
     - isaac_lab_failed:
         # Isaac Lab failure is non-fatal - scene is usable for sim without RL tasks
@@ -1189,7 +1278,35 @@ main:
         args:
           text: '${"WARNING: Isaac Lab task generation failed for scene " + sceneId + " - scene is still usable but without RL training packages"}'
           severity: "WARNING"
+        next: release_lock_before_done_without_isaac_lab
+
+    - release_lock_before_done:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
+        next: done
+
+    - release_lock_before_done_without_isaac_lab:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
         next: done_without_isaac_lab
+
+    - release_lock_before_done_without_replicator:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
+        next: done_without_replicator
+
+    - release_lock_before_skip_not_ready:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
+        next: skip_not_ready
 
     # =========================================================================
     # Completion
@@ -1237,6 +1354,12 @@ main:
           status: "WAITING"
           scene_id: ${sceneId}
           message: '${"Waiting for all asset generation jobs to complete for scene " + sceneId}'
+
+    - skip_locked:
+        return:
+          status: "SKIPPED"
+          scene_id: ${sceneId}
+          message: '${"Lock already exists for scene " + sceneId + " at " + lockObject}'
 
     - skip:
         return:
