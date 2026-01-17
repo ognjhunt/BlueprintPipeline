@@ -543,13 +543,39 @@ def call_particulate_service(
             metrics = get_metrics()
             scene_id = os.getenv("SCENE_ID", "")
             start = time.time()
+            resp_status = None
             with metrics.track_api_call("particulate", "articulation", scene_id):
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     elapsed = int(time.time() - start)
+                    resp_status = resp.status
                     log(f"Response: {resp.status} ({elapsed}s)", obj_id=obj_id)
 
                     text = resp.read().decode("utf-8", errors="replace")
-                    data = json.loads(text)
+                    try:
+                        data = json.loads(text)
+                    except json.JSONDecodeError as decode_err:
+                        preview = text[:200]
+                        log(
+                            "Failed to decode Particulate response JSON "
+                            f"({decode_err}); preview: {preview}",
+                            level="ERROR",
+                            obj_id=obj_id,
+                        )
+                        if resp_status is not None and 400 <= resp_status < 500 and resp_status != 429:
+                            return None
+                        if attempt < MAX_RETRIES:
+                            time.sleep(10 * (attempt + 1))
+                            continue
+                        return None
+
+                if "placeholder" not in data or "articulation" not in data:
+                    log(
+                        "Invalid Particulate response schema; "
+                        "missing required keys 'placeholder' or 'articulation'.",
+                        level="ERROR",
+                        obj_id=obj_id,
+                    )
+                    return None
 
                 is_placeholder = data.get("placeholder", True)
                 articulation = data.get("articulation", {})
