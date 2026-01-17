@@ -182,6 +182,9 @@ class LeRobotEpisode:
     camera_capture_warnings: List[str] = field(default_factory=list)
     camera_error_counts: Dict[str, int] = field(default_factory=dict)
     camera_frame_counts: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    rgb_frames_expected_total: int = 0
+    rgb_frames_written_total: int = 0
+    dropped_frames_total: int = 0
 
 
 @dataclass
@@ -334,6 +337,7 @@ class LeRobotExporter:
         self._temp_export_dir: Optional[Path] = None
         self._backup_output_dir: Optional[Path] = None
         self._export_output_dir: Optional[Path] = None
+        self.dropped_frames_total: int = 0
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -1692,7 +1696,12 @@ class LeRobotExporter:
                 self._write_invalid_episodes(
                     meta_dir,
                     alignment_errors,
+                    reason="trajectory_sensor_alignment",
+                    summary={
+                        "mismatch_summary": self._summarize_alignment_mismatches(alignment_errors),
+                    },
                     export_blocked=is_production or self.config.strict_alignment,
+                    blocked_reason="frame_mismatch",
                 )
 
                 if is_production or self.config.strict_alignment:
@@ -1749,7 +1758,7 @@ class LeRobotExporter:
             if self.config.include_images:
                 self.log("Writing visual observations...")
                 try:
-                    self._write_visual_observations(temp_dir)
+                    self._write_visual_observations(temp_dir, meta_dir)
                 except Exception as exc:
                     self._cleanup_failed_export("Failed to write visual observations", exc)
                     raise
@@ -2208,32 +2217,108 @@ class LeRobotExporter:
         meta_dir: Path,
         invalid_entries: List[Dict[str, Any]],
         *,
+        reason: str,
+        summary: Dict[str, Any],
         export_blocked: bool = False,
+        blocked_reason: Optional[str] = None,
     ) -> None:
         """Write invalid episode details to meta directory."""
         invalid_path = meta_dir / "invalid_episodes.json"
-        mismatch_summary = self._summarize_alignment_mismatches(invalid_entries)
-        payload = {
-            "reason": "trajectory_sensor_alignment",
+        entry = {
+            "reason": reason,
             "total_dropped": len(invalid_entries),
             "episodes": invalid_entries,
-            "generated_at": datetime.utcnow().isoformat() + "Z",
             "summary": {
                 "export_blocked": export_blocked,
-                "blocked_reason": "frame_mismatch" if export_blocked else None,
+                "blocked_reason": blocked_reason if export_blocked else None,
                 "message": (
-                    "Export blocked due to frame mismatches."
+                    "Export blocked due to invalid episodes."
                     if export_blocked
-                    else "Episodes dropped due to frame mismatches."
+                    else "Episodes dropped due to validation issues."
                 ),
-                "mismatch_summary": mismatch_summary,
+                **summary,
             },
         }
+        payload = {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "entries": [entry],
+        }
+
+        if invalid_path.exists():
+            try:
+                existing = json.loads(invalid_path.read_text())
+            except json.JSONDecodeError:
+                existing = None
+            if isinstance(existing, dict):
+                existing_entries = existing.get("entries")
+                if existing_entries is None and "reason" in existing:
+                    existing_entries = [{
+                        "reason": existing.get("reason"),
+                        "total_dropped": existing.get("total_dropped"),
+                        "episodes": existing.get("episodes", []),
+                        "summary": existing.get("summary", {}),
+                    }]
+                if isinstance(existing_entries, list):
+                    payload["generated_at"] = existing.get("generated_at", payload["generated_at"])
+                    payload["entries"] = existing_entries + [entry]
+
         self._atomic_write(
             invalid_path,
             lambda tmp_path: tmp_path.write_text(json.dumps(payload, indent=2)),
             record_checksum=True,
         )
+
+    def _summarize_dropped_frames(
+        self,
+        invalid_entries: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        totals = {
+            "rgb_frames_expected": 0,
+            "rgb_frames_written": 0,
+            "rgb_frames_dropped": 0,
+        }
+        for entry in invalid_entries:
+            totals["rgb_frames_expected"] += int(entry.get("rgb_frames_expected_total", 0) or 0)
+            totals["rgb_frames_written"] += int(entry.get("rgb_frames_written_total", 0) or 0)
+            totals["rgb_frames_dropped"] += int(entry.get("dropped_frames_total", 0) or 0)
+        return {
+            "episode_count": len(invalid_entries),
+            **totals,
+        }
+
+    def _remove_checksum_entry(self, path: Path) -> None:
+        if self.output_dir is None:
+            return
+        try:
+            rel_path = path.resolve().relative_to(self.output_dir.resolve()).as_posix()
+        except ValueError:
+            return
+        self.checksum_manifest.pop(rel_path, None)
+
+    def _drop_episode_files(
+        self,
+        output_dir: Path,
+        episode_index: int,
+        camera_ids: List[str],
+    ) -> None:
+        chunk_idx = episode_index // self.config.chunk_size
+        data_chunk_dir = output_dir / "data" / f"chunk-{chunk_idx:03d}"
+        for suffix in (".parquet", ".json"):
+            episode_path = data_chunk_dir / f"episode_{episode_index:06d}{suffix}"
+            if episode_path.exists():
+                episode_path.unlink()
+                self._remove_checksum_entry(episode_path)
+
+        videos_chunk_dir = output_dir / "videos" / f"chunk-{chunk_idx:03d}"
+        for camera_id in camera_ids:
+            video_path = (
+                videos_chunk_dir
+                / f"observation.images.{camera_id}"
+                / f"episode_{episode_index:06d}.mp4"
+            )
+            if video_path.exists():
+                video_path.unlink()
+                self._remove_checksum_entry(video_path)
 
     def _write_info(self, meta_dir: Path) -> None:
         """Write dataset info JSON."""
@@ -2369,8 +2454,14 @@ class LeRobotExporter:
                 "warnings": data_source_info["warnings"],
                 "video_integrity": (
                     {
-                        "partial_frames_allowed": True,
-                        "note": "Invalid RGB frames are dropped during export; refer to episodes.jsonl for per-episode counts."
+                        "partial_frames_allowed": False,
+                        "dropped_frames_total": self.dropped_frames_total,
+                        "dropped_frames_allowed": not self._is_production_mode(),
+                        "note": (
+                            "Episodes with invalid RGB frames are either blocked (production) or excluded "
+                            "from export (non-production). Refer to episodes.jsonl and invalid_episodes.json "
+                            "for per-episode counts."
+                        ),
                     }
                     if self.config.include_images
                     else None
@@ -2435,6 +2526,9 @@ class LeRobotExporter:
                         meta["camera_error_counts"] = episode.camera_error_counts
                     if episode.camera_frame_counts:
                         meta["camera_frame_counts"] = episode.camera_frame_counts
+                    meta["rgb_frames_expected_total"] = episode.rgb_frames_expected_total
+                    meta["rgb_frames_written_total"] = episode.rgb_frames_written_total
+                    meta["dropped_frames_total"] = episode.dropped_frames_total
                     meta["lineage_ref"] = "meta/info.json#/lineage"
                     f.write(json.dumps(meta) + "\n")
 
@@ -2451,7 +2545,7 @@ class LeRobotExporter:
             record_checksum=False,
         )
 
-    def _write_visual_observations(self, output_dir: Path) -> None:
+    def _write_visual_observations(self, output_dir: Path, meta_dir: Path) -> None:
         """Write visual observations (images, videos) for all episodes."""
         if not self.config.include_images:
             return
@@ -2459,6 +2553,8 @@ class LeRobotExporter:
             videos_dir = output_dir / "videos"
 
             chunk_idx = 0
+            dropped_frames_entries: List[Dict[str, Any]] = []
+            is_production = self._is_production_mode()
 
             for episode in self.episodes:
                 # Determine chunk
@@ -2469,9 +2565,51 @@ class LeRobotExporter:
 
                 if episode.sensor_data is not None:
                     self._write_episode_videos(episode, chunk_dir)
+                    if episode.dropped_frames_total > 0:
+                        dropped_frames_entries.append({
+                            "episode_index": episode.episode_index,
+                            "task_index": episode.task_index,
+                            "scene_id": episode.scene_id,
+                            "variation_index": episode.variation_index,
+                            "dropped_frames_total": episode.dropped_frames_total,
+                            "rgb_frames_expected_total": episode.rgb_frames_expected_total,
+                            "rgb_frames_written_total": episode.rgb_frames_written_total,
+                            "camera_frame_counts": episode.camera_frame_counts,
+                        })
+                        if not is_production:
+                            self._drop_episode_files(
+                                output_dir,
+                                episode.episode_index,
+                                list(getattr(episode.sensor_data, "camera_ids", [])),
+                            )
                 elif episode.camera_video_path is not None:
                     # Legacy: copy existing video if available
                     self._copy_video(episode.camera_video_path, chunk_dir, episode.episode_index)
+            if dropped_frames_entries:
+                self._write_invalid_episodes(
+                    meta_dir,
+                    dropped_frames_entries,
+                    reason="dropped_frames",
+                    summary={
+                        "dropped_frames_summary": self._summarize_dropped_frames(dropped_frames_entries),
+                        "drops_allowed": not is_production,
+                    },
+                    export_blocked=is_production,
+                    blocked_reason="dropped_frames",
+                )
+                if is_production:
+                    raise ValueError(
+                        "Production export blocked due to dropped RGB frames in visual observations."
+                    )
+                dropped_episode_ids = {entry["episode_index"] for entry in dropped_frames_entries}
+                self.log(
+                    f"  Dropping {len(dropped_episode_ids)} episodes due to dropped RGB frames.",
+                    "WARNING",
+                )
+                self.episodes = [
+                    episode for episode in self.episodes
+                    if episode.episode_index not in dropped_episode_ids
+                ]
         except Exception as exc:
             self._cleanup_failed_export("Failed during visual observations write", exc)
             raise
@@ -2481,6 +2619,10 @@ class LeRobotExporter:
         sensor_data = episode.sensor_data
         if sensor_data is None or not hasattr(sensor_data, 'frames'):
             return
+
+        total_expected = 0
+        total_written = 0
+        total_dropped = 0
 
         # Write video for each camera
         for camera_id in sensor_data.camera_ids if hasattr(sensor_data, 'camera_ids') else []:
@@ -2526,6 +2668,15 @@ class LeRobotExporter:
 
             if frames:
                 self._write_video(frames, video_path, self.config.fps)
+
+            total_expected += expected_frames
+            total_written += written_frames
+            total_dropped += dropped_frames
+
+        episode.rgb_frames_expected_total = total_expected
+        episode.rgb_frames_written_total = total_written
+        episode.dropped_frames_total = total_dropped
+        self.dropped_frames_total += total_dropped
 
     def _write_video(self, frames: List[np.ndarray], video_path: Path, fps: float) -> None:
         """Write frames to a video file."""
