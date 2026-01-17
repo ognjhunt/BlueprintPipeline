@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
+from tools.config.env_flags import env_flag
 from tools.config.production_mode import resolve_production_mode
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 from monitoring.alerting import send_alert
@@ -2024,6 +2025,9 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
 # ---------- Main pipeline ----------
 
 
+def _resolve_production_mode() -> bool:
+    pipeline_env = _get_env_value("PIPELINE_ENV", "").strip().lower()
+    return env_flag(_get_env_value("SIMREADY_PRODUCTION_MODE")) or pipeline_env in {"prod", "production"}
 def _env_flag(name: str, default: bool = False) -> bool:
     value = _get_env_value(name)
     if value is None:
@@ -2050,8 +2054,14 @@ def prepare_simready_assets_job(
     if production_mode is None:
         production_mode = production_mode_env
     if allow_heuristic_fallback is None:
-        allow_heuristic_fallback = _env_flag("SIMREADY_ALLOW_HEURISTIC_FALLBACK")
+        allow_heuristic_fallback = env_flag(_get_env_value("SIMREADY_ALLOW_HEURISTIC_FALLBACK"))
     physics_mode = (_get_env_value("SIMREADY_PHYSICS_MODE", "auto") or "auto").strip().lower()
+    allow_deterministic_physics = env_flag(_get_env_value("SIMREADY_ALLOW_DETERMINISTIC_PHYSICS"))
+    pipeline_env_raw = (_get_env_value("PIPELINE_ENV", "") or "").strip().lower()
+    production_mode_set = env_flag(_get_env_value("SIMREADY_PRODUCTION_MODE")) or pipeline_env_raw in {
+        "prod",
+        "production",
+    }
     allow_deterministic_physics = _env_flag("SIMREADY_ALLOW_DETERMINISTIC_PHYSICS")
     production_mode_set = production_mode_env or bool(production_mode)
     if physics_mode == "deterministic" and not production_mode_set:
