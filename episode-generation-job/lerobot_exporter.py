@@ -171,6 +171,7 @@ class LeRobotEpisode:
     # Capture diagnostics
     camera_capture_warnings: List[str] = field(default_factory=list)
     camera_error_counts: Dict[str, int] = field(default_factory=dict)
+    camera_frame_counts: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -1898,6 +1899,14 @@ class LeRobotExporter:
                 "validation_type": data_source_info["validation_type"],
                 "isaac_sim_used": data_source_info["isaac_sim_used"],
                 "warnings": data_source_info["warnings"],
+                "video_integrity": (
+                    {
+                        "partial_frames_allowed": True,
+                        "note": "Invalid RGB frames are dropped during export; refer to episodes.jsonl for per-episode counts."
+                    }
+                    if self.config.include_images
+                    else None
+                ),
             },
             "splits": {
                 "train": f"0:{len(self.episodes)}",
@@ -1953,6 +1962,8 @@ class LeRobotExporter:
                         meta["camera_capture_warnings"] = episode.camera_capture_warnings
                     if episode.camera_error_counts:
                         meta["camera_error_counts"] = episode.camera_error_counts
+                    if episode.camera_frame_counts:
+                        meta["camera_frame_counts"] = episode.camera_frame_counts
                     f.write(json.dumps(meta) + "\n")
 
         self._atomic_write(episodes_path, write_episodes)
@@ -2008,9 +2019,13 @@ class LeRobotExporter:
             # P2-5 FIX: Collect RGB frames with validation
             frames = []
             validation_errors = []
+            expected_frames = 0
+            written_frames = 0
+            dropped_frames = 0
 
             for frame_idx, frame in enumerate(sensor_data.frames):
                 if hasattr(frame, 'rgb_images') and camera_id in frame.rgb_images:
+                    expected_frames += 1
                     rgb_frame = frame.rgb_images[camera_id]
 
                     # P2-5 FIX: Validate RGB frame
@@ -2019,14 +2034,22 @@ class LeRobotExporter:
                     )
                     if frame_errors:
                         validation_errors.extend(frame_errors)
+                        dropped_frames += 1
                     else:
                         frames.append(rgb_frame)
+                        written_frames += 1
 
             # Log validation errors (but don't fail - continue with valid frames)
             if validation_errors:
                 self.log(f"  Episode {episode.episode_index}, camera {camera_id}: {len(validation_errors)} validation errors", "WARNING")
                 for error in validation_errors[:3]:  # Log first 3
                     self.log(f"    - {error}", "WARNING")
+
+            episode.camera_frame_counts[camera_id] = {
+                "rgb_frames_expected": expected_frames,
+                "rgb_frames_written": written_frames,
+                "rgb_frames_dropped": dropped_frames,
+            }
 
             if frames:
                 self._write_video(frames, video_path, self.config.fps)
