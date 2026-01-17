@@ -61,6 +61,35 @@ export PIPELINE_SEED=1234
 
 ---
 
+## Production Mode Resolution
+
+Production mode is resolved through a shared helper (`tools/config/production_mode.py`). It treats the following
+environment variables as production indicators, in the order below. The first match that evaluates to production
+enables production mode; there is no explicit "false override" once any flag is set to a production value.
+
+**Canonical flags (preferred)**:
+1. `PIPELINE_ENV=production` or `PIPELINE_ENV=prod`
+2. `PRODUCTION_MODE=1|true|yes`
+3. `SIMREADY_PRODUCTION_MODE=1|true|yes`
+
+**Legacy compatibility flags (still honored)**:
+- `DATA_QUALITY_LEVEL=production`
+- `ISAAC_SIM_REQUIRED=1|true|yes`
+- `REQUIRE_REAL_PHYSICS=1|true|yes`
+- `PRODUCTION=1|true|yes`
+- `LABS_STAGING=1|true|yes`
+
+**Example**:
+```bash
+# Canonical production indicator
+export PIPELINE_ENV=production
+
+# Legacy compatibility (still supported)
+export DATA_QUALITY_LEVEL=production
+```
+
+---
+
 ### BP_QUALITY_* - Quality Gate Configuration
 
 Quality validation thresholds can be overridden via environment variables.
@@ -254,8 +283,20 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_ALLOW_LINEAR_FALLBACK` | bool | unset | Allow linear interpolation fallback when cuRobo is unavailable (`1` to enable, `0` to disable). In non-production, the local framework auto-enables this fallback if cuRobo is missing and this variable is unset; in production, cuRobo is required and the framework fails fast. |
 | `ISAAC_SIM_ENDPOINT` | url | `http://localhost:8011` | Isaac Sim endpoint |
 | `ISAAC_SIM_PATH` | path | `/isaac-sim` | Isaac Sim installation path (local framework) |
+| `OMNIVERSE_HOST` | str | `localhost` | Omniverse host used to resolve USD asset paths |
+| `OMNIVERSE_PATH_ROOT` | path | (contextual) | Omniverse path root for USD assets (e.g., `NVIDIA/Assets/Isaac` or `NVIDIA/Robots`) |
+| `PARTICULATE_HEALTHCHECK_HOST` | str | `localhost` | Hostname used for the particulate service health check |
 | `PARTICULATE_SERVICE_PORT` | int | 5000 | Particulate service port |
 | `INVENTORY_ENRICHMENT_ENDPOINT` | url | unset | Inventory enrichment service endpoint |
+
+**Example**:
+```bash
+export GENIESIM_HOST=geniesim.internal
+export GENIESIM_PORT=50051
+export OMNIVERSE_HOST=omniverse.internal
+export OMNIVERSE_PATH_ROOT=NVIDIA/Assets/Isaac
+export PARTICULATE_HEALTHCHECK_HOST=particulate.internal
+```
 
 ---
 
