@@ -68,7 +68,7 @@ Run the deployment script to create dashboards, alert policies, and log-based me
 - **geniesim_jobs_submitted_total**: Jobs submitted to Genie Sim
 - **geniesim_episodes_generated_total**: Episodes generated
 - **geniesim_job_duration_seconds**: Job duration
-- **geniesim_api_latency_seconds**: API latency
+- **geniesim_server_latency_seconds**: Server latency
   - Alert: If unavailable for > 5 minutes
 
 ### Quality Metrics
@@ -129,10 +129,10 @@ endpoint when health checks fail or jobs crash.
    notification: PagerDuty
    ```
 
-2. **Genie Sim API Unavailable**:
+2. **Genie Sim Server Unavailable**:
    ```yaml
    condition:
-     - metric: geniesim_api_latency_seconds
+     - metric: geniesim_server_latency_seconds
      - threshold: no data for 5 minutes
    notification: Slack
    ```
@@ -211,13 +211,13 @@ groups:
           summary: "High pipeline failure rate"
           description: "Pipeline failure rate is {{ $value }}%"
 
-      - alert: GenieSimAPIUnavailable
+      - alert: GenieSimServerUnavailable
         expr: up{job="blueprint_pipeline"} == 0
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Genie Sim API unavailable"
+          summary: "Genie Sim server unavailable"
 ```
 
 ## Cost Monitoring
