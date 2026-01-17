@@ -20,7 +20,8 @@ To use MANO hand model, you need:
 2. Install smplx package: pip install smplx
 3. Set MANO_MODEL_PATH environment variable or pass model_path to MANOHandMesh
 
-Without MANO files, the renderer falls back to SimpleHandMesh (geometric boxes).
+Without MANO files, the renderer falls back to SimpleHandMesh (geometric boxes)
+unless require_mano is enabled.
 """
 
 import json
@@ -123,6 +124,7 @@ class HandRenderConfig:
     # MANO-specific configuration
     mano_model_path: Optional[str] = None  # Path to MANO model files
     is_right_hand: bool = True  # Use right hand model
+    require_mano: bool = False  # If True, MANO must be available (no fallback)
 
     # Background
     background_color: tuple[int, int, int, int] = (0, 0, 0, 255)  # RGBA
@@ -138,12 +140,17 @@ class HandRenderConfig:
     # Output format
     output_format: str = "png"
 
-    def with_mano(self, model_path: Optional[str] = None) -> "HandRenderConfig":
+    def with_mano(
+        self,
+        model_path: Optional[str] = None,
+        require_mano: Optional[bool] = None,
+    ) -> "HandRenderConfig":
         """
         Create a copy configured for MANO rendering.
 
         Args:
             model_path: Path to MANO model files (optional)
+            require_mano: If set, override strict MANO requirement
 
         Returns:
             New HandRenderConfig with MANO settings
@@ -153,7 +160,13 @@ class HandRenderConfig:
         config.hand_model = HandModel.MANO
         if model_path:
             config.mano_model_path = model_path
+        if require_mano is not None:
+            config.require_mano = require_mano
         return config
+
+
+class MANOUnavailableError(RuntimeError):
+    """Raised when MANO dependencies or assets are unavailable."""
 
 
 class SimpleHandMesh:
@@ -331,7 +344,6 @@ class MANOHandMesh:
         # Model state
         self._model = None
         self._model_loaded = False
-        self._fallback_mesh = None
 
         # Resolve model path
         self.model_path = model_path or get_mano_model_path()
@@ -347,12 +359,15 @@ class MANOHandMesh:
             True if model loaded successfully
         """
         if self.model_path is None:
-            logger.warning(
+            raise MANOUnavailableError(
                 "MANO model path not set. Set MANO_MODEL_PATH environment variable "
-                "or pass model_path parameter. Falling back to SimpleHandMesh."
+                "or pass model_path parameter."
             )
-            self._init_fallback()
-            return False
+        if not Path(self.model_path).exists():
+            raise MANOUnavailableError(
+                f"MANO model path does not exist: {self.model_path}. "
+                "Set MANO_MODEL_PATH to a valid MANO assets directory."
+            )
 
         try:
             import smplx
@@ -378,24 +393,14 @@ class MANOHandMesh:
             return True
 
         except ImportError as e:
-            logger.warning(
-                f"smplx package not available: {e}. "
-                "Install with: pip install smplx. Falling back to SimpleHandMesh."
-            )
-            self._init_fallback()
-            return False
+            raise MANOUnavailableError(
+                "smplx package not available. Install with: pip install smplx."
+            ) from e
 
         except Exception as e:
-            logger.warning(
-                f"Failed to load MANO model: {e}. Falling back to SimpleHandMesh."
-            )
-            self._init_fallback()
-            return False
-
-    def _init_fallback(self):
-        """Initialize fallback SimpleHandMesh."""
-        self._fallback_mesh = SimpleHandMesh()
-        self.faces = self._fallback_mesh.faces
+            raise MANOUnavailableError(
+                f"Failed to load MANO model from {self.model_path}: {e}"
+            ) from e
 
     @property
     def is_loaded(self) -> bool:
@@ -418,9 +423,8 @@ class MANOHandMesh:
             vertices: (778, 3) array of vertex positions in world space
             joints (optional): (16, 3) array of joint positions
         """
-        # Use fallback if MANO not available
         if not self._model_loaded:
-            return self._fallback_mesh.get_vertices(hand_pose)
+            raise RuntimeError("MANO model is not loaded; cannot generate vertices.")
 
         try:
             import torch
@@ -483,8 +487,7 @@ class MANOHandMesh:
             return vertices
 
         except Exception as e:
-            logger.warning(f"MANO forward pass failed: {e}. Using fallback.")
-            return self._fallback_mesh.get_vertices(hand_pose)
+            raise RuntimeError(f"MANO forward pass failed: {e}") from e
 
     def get_rest_pose_vertices(
         self,
@@ -500,7 +503,7 @@ class MANOHandMesh:
             vertices: (778, 3) array of vertex positions
         """
         if not self._model_loaded:
-            return self._fallback_mesh.vertices
+            raise RuntimeError("MANO model is not loaded; cannot get rest pose.")
 
         try:
             import torch
@@ -517,8 +520,7 @@ class MANOHandMesh:
             return output.vertices[0].numpy()
 
         except Exception as e:
-            logger.warning(f"Failed to get rest pose: {e}")
-            return self._fallback_mesh.vertices
+            raise RuntimeError(f"Failed to get MANO rest pose: {e}") from e
 
     @staticmethod
     def get_fingertip_indices() -> dict[str, int]:
@@ -558,6 +560,7 @@ def create_hand_mesh(
     hand_model: HandModel,
     model_path: Optional[str] = None,
     is_right_hand: bool = True,
+    require_mano: bool = False,
 ) -> "SimpleHandMesh | MANOHandMesh":
     """
     Factory function to create the appropriate hand mesh.
@@ -566,16 +569,22 @@ def create_hand_mesh(
         hand_model: Which hand model to use
         model_path: Path to MANO model files (for MANO model)
         is_right_hand: Use right hand model
+        require_mano: If True, do not fall back when MANO is unavailable
 
     Returns:
         Hand mesh instance (MANOHandMesh or SimpleHandMesh)
     """
     if hand_model == HandModel.MANO:
-        mesh = MANOHandMesh(model_path=model_path, is_right_hand=is_right_hand)
-        if mesh.is_loaded:
-            return mesh
-        else:
-            logger.warning("MANO requested but not available, using SimpleHandMesh")
+        try:
+            return MANOHandMesh(model_path=model_path, is_right_hand=is_right_hand)
+        except MANOUnavailableError as exc:
+            message = f"MANO requested but unavailable: {exc}"
+            if require_mano:
+                raise MANOUnavailableError(message) from exc
+            logger.warning(
+                "%s. Falling back to SimpleHandMesh (set require_mano=True to enforce).",
+                message,
+            )
             return SimpleHandMesh()
 
     elif hand_model == HandModel.SIMPLE:
@@ -607,7 +616,8 @@ class HandMeshRenderer:
         - SIMPLE: Geometric placeholder (always available)
         - FRANKA_GRIPPER, SHADOW_HAND: Robot hands (placeholder for now)
 
-        If MANO is requested but not available, falls back to SIMPLE automatically.
+        If MANO is requested but not available, falls back to SIMPLE automatically
+        unless config.require_mano is True.
         """
         self.config = config or HandRenderConfig()
 
@@ -616,6 +626,7 @@ class HandMeshRenderer:
             hand_model=self.config.hand_model,
             model_path=self.config.mano_model_path,
             is_right_hand=self.config.is_right_hand,
+            require_mano=self.config.require_mano,
         )
 
         # Log which model is being used
