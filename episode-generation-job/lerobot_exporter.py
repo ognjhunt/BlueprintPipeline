@@ -331,6 +331,8 @@ class LeRobotExporter:
         self.checksum_manifest: Dict[str, str] = {}
         self.checksum_generated_at: Optional[str] = None
         self.output_dir: Optional[Path] = None
+        self._temp_export_dir: Optional[Path] = None
+        self._backup_output_dir: Optional[Path] = None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -1400,6 +1402,9 @@ class LeRobotExporter:
         data_dir = temp_dir / "data"
         meta_dir.mkdir(exist_ok=True)
         data_dir.mkdir(exist_ok=True)
+        backup_dir = output_dir.with_name(f"{output_dir.name}.bak")
+        self._temp_export_dir = temp_dir
+        self._backup_output_dir = backup_dir
 
         try:
             # Validate episode completeness before export
@@ -1541,7 +1546,13 @@ class LeRobotExporter:
 
             # Step 1: Write episode data (joint-space trajectories)
             self.log("Writing episode data...")
-            self._write_episodes(data_dir)
+            try:
+                self._write_episodes(data_dir)
+            except Exception:
+                self._cleanup_failed_export(
+                    "writing episode data", temp_dir, output_dir, backup_dir
+                )
+                raise
 
             # Verify Parquet exports after writing
             self.log("Verifying Parquet file exports...")
@@ -1560,7 +1571,13 @@ class LeRobotExporter:
             # Step 2: Write visual observations (RGB videos per camera)
             if self.config.include_images:
                 self.log("Writing visual observations...")
-                self._write_visual_observations(temp_dir)
+                try:
+                    self._write_visual_observations(temp_dir)
+                except Exception:
+                    self._cleanup_failed_export(
+                        "writing visual observations", temp_dir, output_dir, backup_dir
+                    )
+                    raise
 
             # Step 3: Write ground-truth labels (Plus/Full packs)
             if any([
@@ -1571,26 +1588,66 @@ class LeRobotExporter:
                 self.config.include_contacts,
             ]):
                 self.log("Writing ground-truth labels...")
-                self._write_ground_truth(temp_dir)
+                try:
+                    self._write_ground_truth(temp_dir)
+                except Exception:
+                    self._cleanup_failed_export(
+                        "writing ground-truth labels", temp_dir, output_dir, backup_dir
+                    )
+                    raise
 
             # Step 4: Calculate and write statistics
             self.log("Calculating statistics...")
-            self._calculate_stats()
-            self._write_stats(meta_dir)
+            try:
+                self._calculate_stats()
+                self._write_stats(meta_dir)
+            except Exception:
+                self._cleanup_failed_export(
+                    "calculating statistics", temp_dir, output_dir, backup_dir
+                )
+                raise
 
             # Step 5: Write metadata
             self.log("Writing metadata...")
-            self._write_info(meta_dir)
-            self._write_tasks(meta_dir)
-            self._write_episodes_meta(meta_dir)
+            try:
+                self._write_info(meta_dir)
+                self._write_tasks(meta_dir)
+                self._write_episodes_meta(meta_dir)
+            except Exception:
+                self._cleanup_failed_export(
+                    "writing metadata", temp_dir, output_dir, backup_dir
+                )
+                raise
 
             # Step 6: Write checksums manifest
-            self._write_checksums_manifest(meta_dir)
+            try:
+                self._write_checksums_manifest(meta_dir)
+            except Exception:
+                self._cleanup_failed_export(
+                    "writing checksums manifest", temp_dir, output_dir, backup_dir
+                )
+                raise
 
             # Finalize export atomically
-            if output_dir.exists():
-                shutil.rmtree(output_dir)
-            os.replace(temp_dir, output_dir)
+            try:
+                if output_dir.exists():
+                    if backup_dir.exists():
+                        shutil.rmtree(backup_dir)
+                    os.replace(output_dir, backup_dir)
+                os.replace(temp_dir, output_dir)
+            except Exception:
+                self._log_export_state(temp_dir, output_dir, backup_dir, "ERROR")
+                if backup_dir.exists() and not output_dir.exists():
+                    try:
+                        os.replace(backup_dir, output_dir)
+                    except Exception:
+                        self.log("  Failed to restore backup directory after export error.", "ERROR")
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                raise
+            else:
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir, ignore_errors=True)
 
             self.output_dir = output_dir
 
@@ -1629,35 +1686,75 @@ class LeRobotExporter:
 
             return output_dir
         except Exception:
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            self._cleanup_failed_export(
+                "export", temp_dir, output_dir, backup_dir
+            )
             raise
+        finally:
+            self._temp_export_dir = None
+            self._backup_output_dir = None
+
+    def _log_export_state(
+        self,
+        temp_dir: Path,
+        output_dir: Path,
+        backup_dir: Optional[Path],
+        level: str,
+    ) -> None:
+        backup_label = str(backup_dir) if backup_dir is not None else "None"
+        self.log(
+            "  Export paths: "
+            f"temp_dir={temp_dir} output_dir={output_dir} backup_dir={backup_label}",
+            level,
+        )
+
+    def _cleanup_failed_export(
+        self,
+        context: str,
+        temp_dir: Path,
+        output_dir: Path,
+        backup_dir: Optional[Path],
+    ) -> None:
+        self.log(f"  Export failed while {context}. Cleaning up temp directory.", "ERROR")
+        self._log_export_state(temp_dir, output_dir, backup_dir, "ERROR")
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _write_episodes(self, data_dir: Path) -> None:
         """Write episode data to Parquet files."""
 
-        chunk_idx = 0
-        chunk_dir = data_dir / f"chunk-{chunk_idx:03d}"
-        chunk_dir.mkdir(exist_ok=True)
+        try:
+            chunk_idx = 0
+            chunk_dir = data_dir / f"chunk-{chunk_idx:03d}"
+            chunk_dir.mkdir(exist_ok=True)
 
-        for episode in self.episodes:
-            # Create episode data
-            episode_data = self._trajectory_to_arrow_table(episode)
+            for episode in self.episodes:
+                # Create episode data
+                episode_data = self._trajectory_to_arrow_table(episode)
 
-            # Write to Parquet
-            episode_path = chunk_dir / f"episode_{episode.episode_index:06d}.parquet"
+                # Write to Parquet
+                episode_path = chunk_dir / f"episode_{episode.episode_index:06d}.parquet"
 
-            if HAVE_PYARROW:
-                self._atomic_write(episode_path, lambda tmp_path: pq.write_table(episode_data, tmp_path))
-            else:
-                # Fallback: write as JSON
-                self._write_episode_json(episode, episode_path.with_suffix(".json"))
+                if HAVE_PYARROW:
+                    self._atomic_write(episode_path, lambda tmp_path: pq.write_table(episode_data, tmp_path))
+                else:
+                    # Fallback: write as JSON
+                    self._write_episode_json(episode, episode_path.with_suffix(".json"))
 
-            # Handle chunk rotation
-            if (episode.episode_index + 1) % self.config.chunk_size == 0:
-                chunk_idx += 1
-                chunk_dir = data_dir / f"chunk-{chunk_idx:03d}"
-                chunk_dir.mkdir(exist_ok=True)
+                # Handle chunk rotation
+                if (episode.episode_index + 1) % self.config.chunk_size == 0:
+                    chunk_idx += 1
+                    chunk_dir = data_dir / f"chunk-{chunk_idx:03d}"
+                    chunk_dir.mkdir(exist_ok=True)
+        except Exception:
+            if self._temp_export_dir is not None:
+                self._cleanup_failed_export(
+                    "writing episode parquet files",
+                    self._temp_export_dir,
+                    self.config.output_dir,
+                    self._backup_output_dir,
+                )
+            raise
 
     def _validate_lerobot_schema(
         self,
@@ -2168,22 +2265,32 @@ class LeRobotExporter:
         if not self.config.include_images:
             return
 
-        videos_dir = output_dir / "videos"
+        try:
+            videos_dir = output_dir / "videos"
 
-        chunk_idx = 0
+            chunk_idx = 0
 
-        for episode in self.episodes:
-            # Determine chunk
-            if episode.episode_index > 0 and episode.episode_index % self.config.chunk_size == 0:
-                chunk_idx += 1
+            for episode in self.episodes:
+                # Determine chunk
+                if episode.episode_index > 0 and episode.episode_index % self.config.chunk_size == 0:
+                    chunk_idx += 1
 
-            chunk_dir = videos_dir / f"chunk-{chunk_idx:03d}"
+                chunk_dir = videos_dir / f"chunk-{chunk_idx:03d}"
 
-            if episode.sensor_data is not None:
-                self._write_episode_videos(episode, chunk_dir)
-            elif episode.camera_video_path is not None:
-                # Legacy: copy existing video if available
-                self._copy_video(episode.camera_video_path, chunk_dir, episode.episode_index)
+                if episode.sensor_data is not None:
+                    self._write_episode_videos(episode, chunk_dir)
+                elif episode.camera_video_path is not None:
+                    # Legacy: copy existing video if available
+                    self._copy_video(episode.camera_video_path, chunk_dir, episode.episode_index)
+        except Exception:
+            if self._temp_export_dir is not None:
+                self._cleanup_failed_export(
+                    "writing visual observations",
+                    self._temp_export_dir,
+                    self.config.output_dir,
+                    self._backup_output_dir,
+                )
+            raise
 
     def _write_episode_videos(self, episode: LeRobotEpisode, chunk_dir: Path) -> None:
         """Write video files with per-frame validation."""
@@ -2309,17 +2416,27 @@ class LeRobotExporter:
         ]):
             return
 
-        gt_dir = output_dir / "ground_truth"
-        chunk_idx = 0
+        try:
+            gt_dir = output_dir / "ground_truth"
+            chunk_idx = 0
 
-        for episode in self.episodes:
-            if episode.episode_index > 0 and episode.episode_index % self.config.chunk_size == 0:
-                chunk_idx += 1
+            for episode in self.episodes:
+                if episode.episode_index > 0 and episode.episode_index % self.config.chunk_size == 0:
+                    chunk_idx += 1
 
-            chunk_dir = gt_dir / f"chunk-{chunk_idx:03d}"
+                chunk_dir = gt_dir / f"chunk-{chunk_idx:03d}"
 
-            if episode.sensor_data is not None:
-                self._write_episode_ground_truth(episode, chunk_dir)
+                if episode.sensor_data is not None:
+                    self._write_episode_ground_truth(episode, chunk_dir)
+        except Exception:
+            if self._temp_export_dir is not None:
+                self._cleanup_failed_export(
+                    "writing ground-truth data",
+                    self._temp_export_dir,
+                    self.config.output_dir,
+                    self._backup_output_dir,
+                )
+            raise
 
     def _write_episode_ground_truth(self, episode: LeRobotEpisode, chunk_dir: Path) -> None:
         """Write ground-truth data for a single episode."""
