@@ -439,8 +439,6 @@ class JobRegistry:
             "isaac-lab-job",
             "arena-export-job",  # Isaac Lab-Arena integration (affordances + tasks)
             "episode-generation-job",  # Generates training episodes
-            "dwm-preparation-job",  # DWM conditioning data (parallel)
-            "dream2flow-preparation-job",  # Dream2Flow bundles (parallel)
         ]
 
     def print_status_report(self):
