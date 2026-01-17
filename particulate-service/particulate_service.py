@@ -17,9 +17,12 @@ The service:
 3. Exports segmented mesh + URDF with joint definitions
 
 Environment Variables:
+    ENV: Service environment (set to "production" to disable /debug)
     PARTICULATE_ROOT: Path to Particulate installation (default: /opt/particulate)
-    PARTICULATE_DEBUG: Enable verbose logging (default: 0)
-    PARTICULATE_DEBUG_TOKEN: Shared secret required for /debug access (default: unset)
+    DEBUG_MODE: Enable /debug in non-production (default: 0)
+    DEBUG_TOKEN: Shared secret required for /debug access (default: unset)
+    PARTICULATE_DEBUG: Legacy flag for /debug (default: 0)
+    PARTICULATE_DEBUG_TOKEN: Legacy shared secret for /debug access (default: unset)
     PARTICULATE_MAX_GLB_BYTES: Max decoded GLB size (default: 52428800)
     PORT: Service port (default: 8080)
 
@@ -68,8 +71,11 @@ PARTICULATE_ROOT = Path(os.environ.get("PARTICULATE_ROOT", "/opt/particulate"))
 PARTICULATE_INFER = PARTICULATE_ROOT / "infer.py"
 TMP_ROOT = Path("/tmp/particulate")
 
-DEBUG_MODE = os.environ.get("PARTICULATE_DEBUG", "0") == "1"
-DEBUG_TOKEN = os.environ.get("PARTICULATE_DEBUG_TOKEN")
+ENVIRONMENT = os.environ.get("ENV", "").lower()
+DEBUG_MODE = os.environ.get("DEBUG_MODE", os.environ.get("PARTICULATE_DEBUG", "0")) == "1"
+DEBUG_TOKEN = os.environ.get("DEBUG_TOKEN", os.environ.get("PARTICULATE_DEBUG_TOKEN", ""))
+if DEBUG_TOKEN is not None:
+    DEBUG_TOKEN = DEBUG_TOKEN.strip() or None
 PARTICULATE_MAX_GLB_BYTES = int(os.environ.get("PARTICULATE_MAX_GLB_BYTES", "52428800"))
 PARTICULATE_MAX_GLB_B64_CHARS = ((PARTICULATE_MAX_GLB_BYTES + 2) // 3) * 4
 
@@ -773,25 +779,46 @@ def readiness():
     return f"not ready: {_warmup_error or 'loading'}", 503
 
 
-def _debug_authorized() -> bool:
-    if not DEBUG_MODE or not DEBUG_TOKEN:
-        return False
+def _debug_block_reason() -> Optional[str]:
+    if ENVIRONMENT == "production":
+        return "production_environment"
+    if not DEBUG_MODE:
+        return "debug_mode_disabled"
+    if not DEBUG_TOKEN:
+        return "debug_token_missing"
 
     auth_header = request.headers.get("Authorization", "")
     if not auth_header:
-        return False
+        return "authorization_missing"
 
     token = auth_header
     if auth_header.lower().startswith("bearer "):
         token = auth_header[7:].strip()
 
-    return hmac.compare_digest(token, DEBUG_TOKEN)
+    if not hmac.compare_digest(token, DEBUG_TOKEN):
+        return "authorization_invalid"
+
+    return None
+
+
+def _debug_authorized() -> bool:
+    return _debug_block_reason() is None
 
 
 @app.route("/debug", methods=["GET"])
 def debug_info():
     """Debug endpoint with service state."""
     if not _debug_authorized():
+        block_reason = _debug_block_reason() or "unknown"
+        log(
+            (
+                "Denied debug request: "
+                f"reason={block_reason} "
+                f"remote={request.remote_addr or 'unknown'} "
+                f"auth_header_present={bool(request.headers.get('Authorization'))}"
+            ),
+            level="WARNING",
+        )
         return jsonify({"error": "debug access forbidden"}), 403
 
     is_valid, msg, details = validate_particulate_model()
