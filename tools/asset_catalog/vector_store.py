@@ -9,6 +9,7 @@ while providing the same API shape that cloud backends use.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
 import heapq
 import os
@@ -547,6 +548,12 @@ class VertexAIVectorStore(BaseVectorStore):
     - google-cloud-aiplatform package
     - Valid GCP project with Vertex AI enabled
     - Pre-created Vector Search index and deployed endpoint
+
+    Metadata caching:
+    - Metadata is stored locally because Vertex AI does not persist it for vector lookups.
+    - Cache entries are maintained using an LRU policy to avoid unbounded growth.
+    - When the cache exceeds the configured maximum, least-recently-used entries are evicted.
+    - Fetch/list return only currently cached metadata; evicted entries are simply absent.
     """
 
     def __init__(
@@ -556,15 +563,32 @@ class VertexAIVectorStore(BaseVectorStore):
         index_endpoint_name: str,
         deployed_index_id: str,
         index_name: Optional[str] = None,
+        max_metadata_entries: Optional[int] = 10000,
     ):
         self.project_id = project_id
         self.location = location
         self.index_endpoint_name = index_endpoint_name
         self.deployed_index_id = deployed_index_id
         self.index_name = index_name
+        self.max_metadata_entries = max_metadata_entries
         self._endpoint = None
         self._index = None
-        self._metadata_store: Dict[str, Dict[str, Any]] = {}  # Local metadata cache
+        self._metadata_store: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+
+    def _touch_metadata(self, record_id: str) -> None:
+        if record_id in self._metadata_store:
+            self._metadata_store.move_to_end(record_id)
+
+    def _cache_metadata(self, record_id: str, metadata: Dict[str, Any]) -> None:
+        self._metadata_store[record_id] = metadata
+        self._metadata_store.move_to_end(record_id)
+        self._evict_if_needed()
+
+    def _evict_if_needed(self) -> None:
+        if self.max_metadata_entries is None:
+            return
+        while len(self._metadata_store) > self.max_metadata_entries:
+            self._metadata_store.popitem(last=False)
 
     def _get_endpoint(self):
         """Get or create endpoint client."""
@@ -611,7 +635,7 @@ class VertexAIVectorStore(BaseVectorStore):
 
         # Store metadata locally (Vertex AI doesn't store metadata natively)
         for record in records_list:
-            self._metadata_store[record.id] = record.metadata
+            self._cache_metadata(record.id, record.metadata)
 
         # Prepare datapoints for upsert
         datapoints = []
@@ -648,7 +672,14 @@ class VertexAIVectorStore(BaseVectorStore):
                 score = 1.0 - neighbor.distance  # Convert distance to similarity
 
                 # Get metadata from local cache
-                metadata = self._metadata_store.get(record_id, {})
+                metadata = self._metadata_store.get(record_id)
+
+                if metadata is None:
+                    if filter_metadata:
+                        continue
+                    metadata = {}
+                else:
+                    self._touch_metadata(record_id)
 
                 # Apply metadata filter if provided
                 if filter_metadata:
@@ -672,6 +703,7 @@ class VertexAIVectorStore(BaseVectorStore):
         results = []
         for record_id in ids:
             if record_id in self._metadata_store:
+                self._touch_metadata(record_id)
                 results.append(
                     VectorRecord(
                         id=record_id,
@@ -686,11 +718,13 @@ class VertexAIVectorStore(BaseVectorStore):
     ) -> List[VectorRecord]:
         """List all records from metadata cache."""
         results = []
-        for record_id, metadata in self._metadata_store.items():
+        accessed_ids = []
+        for record_id, metadata in list(self._metadata_store.items()):
             if filter_metadata:
                 if not all(metadata.get(k) == v for k, v in filter_metadata.items()):
                     continue
 
+            accessed_ids.append(record_id)
             results.append(
                 VectorRecord(
                     id=record_id,
@@ -698,6 +732,8 @@ class VertexAIVectorStore(BaseVectorStore):
                     metadata=metadata,
                 )
             )
+        for record_id in accessed_ids:
+            self._touch_metadata(record_id)
         return results
 
 
