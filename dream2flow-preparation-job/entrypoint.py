@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from monitoring.alerting import send_alert
 from prepare_dream2flow_bundle import Dream2FlowJobConfig, Dream2FlowPreparationJob
 from models import TaskType, RobotEmbodiment
+from tools.config.env_flags import env_flag
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
@@ -154,12 +155,6 @@ def main():
     bucket_name = os.environ.get("BUCKET")
     scene_id = os.environ.get("SCENE_ID")
 
-    def env_flag(name: str, default: bool = True) -> bool:
-        value = os.environ.get(name)
-        if value is None:
-            return default
-        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
     # Get optional environment variables
     assets_prefix = os.environ.get("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
     usd_prefix = os.environ.get("USD_PREFIX", f"scenes/{scene_id}/usd")
@@ -176,11 +171,11 @@ def main():
     depth_api = os.environ.get("DEPTH_API")
     tracking_api = os.environ.get("TRACKING_API")
     robot_tracking_api = os.environ.get("ROBOT_TRACKING_API")
-    enable_video = env_flag("DREAM2FLOW_ENABLE_VIDEO", True)
-    enable_flow = env_flag("DREAM2FLOW_ENABLE_FLOW", True)
-    enable_robot = env_flag("DREAM2FLOW_ENABLE_ROBOT", True)
-    allow_placeholder = env_flag("DREAM2FLOW_ALLOW_PLACEHOLDER", True)
-    require_real_backends = env_flag("DREAM2FLOW_REQUIRE_REAL_BACKENDS", False)
+    enable_video = env_flag(os.environ.get("DREAM2FLOW_ENABLE_VIDEO"), default=True)
+    enable_flow = env_flag(os.environ.get("DREAM2FLOW_ENABLE_FLOW"), default=True)
+    enable_robot = env_flag(os.environ.get("DREAM2FLOW_ENABLE_ROBOT"), default=True)
+    allow_placeholder = env_flag(os.environ.get("DREAM2FLOW_ALLOW_PLACEHOLDER"), default=True)
+    require_real_backends = env_flag(os.environ.get("DREAM2FLOW_REQUIRE_REAL_BACKENDS"), default=False)
 
     # Map robot name to enum
     robot_map = {

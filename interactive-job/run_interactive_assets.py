@@ -44,6 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
+from tools.config.env_flags import env_flag
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.workflow import FailureMarkerWriter
@@ -78,11 +79,6 @@ def log(msg: str, level: str = "INFO", obj_id: str = "") -> None:
     prefix = f"[{obj_id}] " if obj_id else ""
     stream = sys.stderr if level in ("ERROR", "WARNING") else sys.stdout
     print(f"[INTERACTIVE] [{level}] {prefix}{msg}", file=stream, flush=True)
-
-
-def parse_env_flag(value: str) -> bool:
-    """Parse boolean-like environment variable values."""
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def raise_placeholder_error(obj_id: str, reason: str) -> None:
@@ -1569,9 +1565,9 @@ def main() -> None:
     )
 
     mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
-    production_mode = parse_env_flag(os.getenv("PRODUCTION_MODE", "false"))
-    labs_mode = parse_env_flag(os.getenv("LABS_MODE", "false"))
-    disallow_placeholder_env = parse_env_flag(os.getenv("DISALLOW_PLACEHOLDER_URDF", "false"))
+    production_mode = env_flag(os.getenv("PRODUCTION_MODE"), default=False)
+    labs_mode = env_flag(os.getenv("LABS_MODE"), default=False)
+    disallow_placeholder_env = env_flag(os.getenv("DISALLOW_PLACEHOLDER_URDF"), default=False)
     disallow_placeholder_urdf = production_mode or disallow_placeholder_env
     articulation_backend = os.getenv("ARTICULATION_BACKEND", "particulate").strip().lower() or "particulate"
     local_model_id = os.getenv("PARTICULATE_LOCAL_MODEL", "").strip()
