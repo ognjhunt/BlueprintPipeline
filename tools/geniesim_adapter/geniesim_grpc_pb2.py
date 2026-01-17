@@ -488,6 +488,42 @@ class GetEEPoseResponse:
 
 
 @dataclass
+class LinearMoveRequest:
+    """Request to move linearly to a target pose."""
+    target_pose: Optional[Pose] = None
+    velocity: float = 0.0
+    acceleration: float = 0.0
+    wait_for_completion: bool = True
+
+    def SerializeToString(self) -> bytes:
+        return json.dumps({
+            "target_pose": self.target_pose.to_dict() if self.target_pose else {},
+            "velocity": self.velocity,
+            "acceleration": self.acceleration,
+            "wait_for_completion": self.wait_for_completion,
+        }).encode()
+
+
+@dataclass
+class LinearMoveResponse:
+    """Response from linear move."""
+    success: bool = False
+    error_message: str = ""
+    planning_success: bool = False
+    execution_success: bool = False
+
+    @classmethod
+    def FromString(cls, data: bytes) -> "LinearMoveResponse":
+        d = json.loads(data)
+        return cls(
+            success=d.get("success", False),
+            error_message=d.get("error_message", ""),
+            planning_success=d.get("planning_success", False),
+            execution_success=d.get("execution_success", False),
+        )
+
+
+@dataclass
 class SetGripperStateRequest:
     """Request to set gripper state."""
     width: float = 0.04
@@ -518,6 +554,33 @@ class SetGripperStateResponse:
             error_message=d.get("error_message", ""),
             current_width=d.get("current_width", 0.0),
             is_grasping=d.get("is_grasping", False),
+        )
+
+
+@dataclass
+class GetGripperStateRequest:
+    """Request to get gripper state."""
+
+    def SerializeToString(self) -> bytes:
+        return json.dumps({}).encode()
+
+
+@dataclass
+class GetGripperStateResponse:
+    """Response with gripper state."""
+    success: bool = False
+    width: float = 0.0
+    is_grasping: bool = False
+    force: float = 0.0
+
+    @classmethod
+    def FromString(cls, data: bytes) -> "GetGripperStateResponse":
+        d = json.loads(data)
+        return cls(
+            success=d.get("success", False),
+            width=d.get("width", 0.0),
+            is_grasping=d.get("is_grasping", False),
+            force=d.get("force", 0.0),
         )
 
 
@@ -720,5 +783,193 @@ class SetObjectPoseResponse:
         d = json.loads(data)
         return cls(
             success=d.get("success", False),
+            error_message=d.get("error_message", ""),
+        )
+
+
+@dataclass
+class AttachObjectRequest:
+    """Request to attach an object to a robot link."""
+    object_id: str = ""
+    link_name: str = ""
+
+    def SerializeToString(self) -> bytes:
+        return json.dumps({
+            "object_id": self.object_id,
+            "link_name": self.link_name,
+        }).encode()
+
+
+@dataclass
+class AttachObjectResponse:
+    """Response from attaching an object."""
+    success: bool = False
+    error_message: str = ""
+
+    @classmethod
+    def FromString(cls, data: bytes) -> "AttachObjectResponse":
+        d = json.loads(data)
+        return cls(
+            success=d.get("success", False),
+            error_message=d.get("error_message", ""),
+        )
+
+
+@dataclass
+class DetachObjectRequest:
+    """Request to detach an object."""
+    object_id: str = ""
+
+    def SerializeToString(self) -> bytes:
+        return json.dumps({"object_id": self.object_id}).encode()
+
+
+@dataclass
+class DetachObjectResponse:
+    """Response from detaching an object."""
+    success: bool = False
+    error_message: str = ""
+
+    @classmethod
+    def FromString(cls, data: bytes) -> "DetachObjectResponse":
+        d = json.loads(data)
+        return cls(
+            success=d.get("success", False),
+            error_message=d.get("error_message", ""),
+        )
+
+
+@dataclass
+class InitRobotRequest:
+    """Request to initialize a robot."""
+    robot_type: str = ""
+    urdf_path: str = ""
+    base_pose: Optional[Pose] = None
+    initial_joint_positions: List[float] = field(default_factory=list)
+
+    def SerializeToString(self) -> bytes:
+        return json.dumps({
+            "robot_type": self.robot_type,
+            "urdf_path": self.urdf_path,
+            "base_pose": self.base_pose.to_dict() if self.base_pose else {},
+            "initial_joint_positions": self.initial_joint_positions,
+        }).encode()
+
+
+@dataclass
+class InitRobotResponse:
+    """Response from initializing a robot."""
+    success: bool = False
+    error_message: str = ""
+    num_joints: int = 0
+    joint_names: List[str] = field(default_factory=list)
+
+    @classmethod
+    def FromString(cls, data: bytes) -> "InitRobotResponse":
+        d = json.loads(data)
+        return cls(
+            success=d.get("success", False),
+            error_message=d.get("error_message", ""),
+            num_joints=d.get("num_joints", 0),
+            joint_names=d.get("joint_names", []),
+        )
+
+
+@dataclass
+class AddCameraRequest:
+    """Request to add a camera."""
+    camera_id: str = ""
+    pose: Optional[Pose] = None
+    parent_link: str = ""
+    width: int = 0
+    height: int = 0
+    fov: float = 0.0
+    near_clip: float = 0.0
+    far_clip: float = 0.0
+
+    def SerializeToString(self) -> bytes:
+        return json.dumps({
+            "camera_id": self.camera_id,
+            "pose": self.pose.to_dict() if self.pose else {},
+            "parent_link": self.parent_link,
+            "width": self.width,
+            "height": self.height,
+            "fov": self.fov,
+            "near_clip": self.near_clip,
+            "far_clip": self.far_clip,
+        }).encode()
+
+
+@dataclass
+class AddCameraResponse:
+    """Response from adding a camera."""
+    success: bool = False
+    error_message: str = ""
+
+    @classmethod
+    def FromString(cls, data: bytes) -> "AddCameraResponse":
+        d = json.loads(data)
+        return cls(
+            success=d.get("success", False),
+            error_message=d.get("error_message", ""),
+        )
+
+
+@dataclass
+class GetIKStatusRequest:
+    """Request to get IK status."""
+    target_pose: Optional[Pose] = None
+    seed_positions: List[float] = field(default_factory=list)
+
+    def SerializeToString(self) -> bytes:
+        return json.dumps({
+            "target_pose": self.target_pose.to_dict() if self.target_pose else {},
+            "seed_positions": self.seed_positions,
+        }).encode()
+
+
+@dataclass
+class GetIKStatusResponse:
+    """Response with IK status."""
+    success: bool = False
+    ik_solvable: bool = False
+    solution: List[float] = field(default_factory=list)
+    error_message: str = ""
+
+    @classmethod
+    def FromString(cls, data: bytes) -> "GetIKStatusResponse":
+        d = json.loads(data)
+        return cls(
+            success=d.get("success", False),
+            ik_solvable=d.get("ik_solvable", False),
+            solution=d.get("solution", []),
+            error_message=d.get("error_message", ""),
+        )
+
+
+@dataclass
+class TaskStatusRequest:
+    """Request to get task status."""
+    task_id: str = ""
+
+    def SerializeToString(self) -> bytes:
+        return json.dumps({"task_id": self.task_id}).encode()
+
+
+@dataclass
+class TaskStatusResponse:
+    """Response with task status."""
+    success: bool = False
+    status: str = ""
+    progress: float = 0.0
+    error_message: str = ""
+
+    @classmethod
+    def FromString(cls, data: bytes) -> "TaskStatusResponse":
+        d = json.loads(data)
+        return cls(
+            success=d.get("success", False),
+            status=d.get("status", ""),
+            progress=d.get("progress", 0.0),
             error_message=d.get("error_message", ""),
         )
