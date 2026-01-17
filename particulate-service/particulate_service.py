@@ -35,6 +35,7 @@ import base64
 import hmac
 import io
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -51,6 +52,7 @@ from xml.dom import minidom
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Configuration
@@ -86,7 +88,9 @@ class ParticulateError(RuntimeError):
 
 def log(msg: str, level: str = "INFO") -> None:
     """Log with prefix for easy filtering."""
-    print(f"[PARTICULATE-SERVICE] [{level}] {msg}", flush=True)
+    level_name = level.upper()
+    log_level = getattr(logging, level_name, logging.INFO)
+    logger.log(log_level, "[PARTICULATE-SERVICE] [%s] %s", level_name, msg)
 
 
 # =============================================================================
