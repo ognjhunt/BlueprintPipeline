@@ -157,6 +157,10 @@ GENIESIM_MOCK_MODE=false \
 /isaac-sim/python.sh -m pytest tests/test_geniesim_staging_e2e.py -v
 ```
 
+> **Note:** Production mode (`PIPELINE_ENV=production` or other production flags) force-disable
+> `GENIESIM_MOCK_MODE`. For non-production mock runs, set `ALLOW_GENIESIM_MOCK=1` or pass an
+> explicit `mock_mode=True` in code.
+
 ### Cloud Deployment
 
 The pipeline runs on Google Cloud using:

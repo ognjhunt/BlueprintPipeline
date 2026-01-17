@@ -31,6 +31,7 @@ For local framework details, see tools/geniesim_adapter/local_framework.py.
 
 Environment Variables:
     GENIESIM_MOCK_MODE: Enable mock mode for testing (default: false)
+    ALLOW_GENIESIM_MOCK: Allow mock mode in non-production runs (default: 0)
     GENIESIM_HOST: gRPC host (default: localhost)
     GENIESIM_PORT: gRPC port (default: 50051)
 """
@@ -52,6 +53,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import aiohttp
 import requests
 
+from tools.config.production_mode import resolve_production_mode
 from tools.error_handling import CircuitBreaker, CircuitBreakerOpen
 
 # Configure logging
@@ -599,11 +601,33 @@ class GenieSimClient:
             validate_on_init: Validate local framework is reachable on initialization
             mock_mode: Enable mock mode for testing (default: disabled)
         """
-        self.mock_mode = (
-            mock_mode
-            if mock_mode is not None
-            else os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
-        )
+        env_mock_mode = os.getenv("GENIESIM_MOCK_MODE", "false").lower() == "true"
+        explicit_mock_mode = mock_mode is not None
+        mock_mode_requested = mock_mode if explicit_mock_mode else env_mock_mode
+        production_mode = resolve_production_mode()
+
+        if production_mode:
+            if env_mock_mode:
+                logger.warning(
+                    "GENIESIM_MOCK_MODE=true ignored in production; forcing mock_mode=False."
+                )
+            if explicit_mock_mode and mock_mode:
+                logger.warning(
+                    "Explicit mock_mode requested in production; forcing mock_mode=False."
+                )
+            self.mock_mode = False
+        else:
+            if mock_mode_requested:
+                allow_mock_override = (
+                    explicit_mock_mode or os.getenv("ALLOW_GENIESIM_MOCK", "0") == "1"
+                )
+                if not allow_mock_override:
+                    raise RuntimeError(
+                        "GENIESIM_MOCK_MODE requested but not permitted. "
+                        "Set ALLOW_GENIESIM_MOCK=1 or pass mock_mode=True explicitly "
+                        "to enable mock mode in non-production runs."
+                    )
+            self.mock_mode = bool(mock_mode_requested)
 
         # For local framework operation, use gRPC endpoint configuration
         self.grpc_host = os.getenv("GENIESIM_HOST", "localhost")
