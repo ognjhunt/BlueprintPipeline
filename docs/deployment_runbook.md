@@ -149,6 +149,59 @@ Optionally run a canary workflow with a known scene ID:
 gcloud workflows run blueprint-pipeline --data='{ "scene_id": "<scene_id>" }'
 ```
 
+## Canary deployment process
+
+Use the canary pipeline to route a tagged subset of scenes through a new Genie Sim image tag before
+full rollout.
+
+1. Tag scenes for canary:
+   - Add `tags` (or `scene_tags`) to the per-scene config file at `scenes/<scene_id>/config.json`.
+   - Example:
+
+     ```json
+     {
+       "tags": ["canary", "geniesim-v3.1"]
+     }
+     ```
+
+2. Deploy the canary workflow definition:
+
+   ```bash
+   gcloud workflows deploy canary-pipeline \
+     --source=workflows/canary-pipeline.yaml \
+     --location=<region>
+   ```
+
+3. Trigger the canary workflow with the desired tags + image tag:
+
+   ```bash
+   gcloud workflows run canary-pipeline \
+     --location=<region> \
+     --data='{"data":{"bucket":"<bucket>","name":"scenes/<scene_id>/variation_assets/.variation_pipeline_complete"},"canary_tags":"canary","canary_image_tag":"isaacsim-canary","canary_release_channel":"canary"}'
+   ```
+
+4. Monitor the canary run:
+   - Watch `scenes/<scene_id>/geniesim/job.json` for `canary` metadata and status.
+   - Verify the `geniesim` outputs before expanding tags or raising the canary image to stable.
+
+## Canary rollback steps
+
+If a canary scene fails, the submission job writes a rollback marker at
+`scenes/<scene_id>/geniesim/.canary_rollback` containing the failure details and assignment metadata.
+
+1. Confirm the rollback marker exists:
+
+   ```bash
+   gsutil cat gs://<bucket>/scenes/<scene_id>/geniesim/.canary_rollback
+   ```
+
+2. Disable or narrow canary traffic:
+   - Remove the canary tag from `scenes/<scene_id>/config.json`, or
+   - Update `canary_tags` / `canary_scene_ids` to exclude the scene.
+
+3. Re-run the standard pipeline (stable image tag) by triggering `genie-sim-export-pipeline`
+   or waiting for the next `.variation_pipeline_complete` marker.
+
 ## Post-deploy validation
 
 - Confirm recent Cloud Run job executions succeed.
