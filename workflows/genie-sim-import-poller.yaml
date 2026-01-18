@@ -23,12 +23,30 @@ main:
           - import_workflow: "genie-sim-import-pipeline"
           - page_token: null
     - list_objects:
-        call: googleapis.storage.v1.objects.list
-        args:
-          bucket: ${bucket}
-          prefix: "scenes/"
-          pageToken: ${page_token}
-        result: list_result
+        try:
+          call: googleapis.storage.v1.objects.list
+          args:
+            bucket: ${bucket}
+            prefix: "scenes/"
+            pageToken: ${page_token}
+          result: list_result
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_list_retry_exhausted:
+                call: sys.log
+                args:
+                  text: ${"Failed to list objects for bucket " + bucket + " (prefix: scenes/): " + e.message}
+                  severity: "ERROR"
+            - raise_list_error:
+                raise: ${e}
         next: scan_objects
 
     - scan_objects:
@@ -50,16 +68,23 @@ main:
                     object: ${object.name}
                     alt: "media"
                   result: job_metadata_raw
+                retry:
+                  predicate: ${http.default_retry_predicate}
+                  max_retries: 3
+                  backoff:
+                    initial_delay: 2
+                    max_delay: 30
+                    multiplier: 2
                 except:
                   as: e
                   steps:
                     - log_read_error:
                         call: sys.log
                         args:
-                          text: ${"Failed to read job metadata " + object.name + ": " + e.message}
-                          severity: "WARNING"
-                    - continue_after_read_error:
-                        next: continue
+                          text: ${"Failed to read job metadata in bucket " + bucket + " for object " + object.name + ": " + e.message}
+                          severity: "ERROR"
+                    - raise_read_error:
+                        raise: ${e}
                 next: parse_job_metadata
 
             - parse_job_metadata:
@@ -85,6 +110,13 @@ main:
                     bucket: ${bucket}
                     object: ${"scenes/" + scene_id + "/geniesim/.geniesim_import_complete"}
                   result: marker_exists
+                retry:
+                  predicate: ${http.default_retry_predicate}
+                  max_retries: 3
+                  backoff:
+                    initial_delay: 2
+                    max_delay: 30
+                    multiplier: 2
                 except:
                   as: e
                   steps:
@@ -92,7 +124,14 @@ main:
                         switch:
                           - condition: ${e.code == 404}
                             next: trigger_import
-                        next: continue
+                        next: log_marker_error
+                    - log_marker_error:
+                        call: sys.log
+                        args:
+                          text: ${"Failed to check import marker in bucket " + bucket + " for scene " + scene_id + ": " + e.message}
+                          severity: "ERROR"
+                    - raise_marker_error:
+                        raise: ${e}
                 next: continue
 
             - trigger_import:
