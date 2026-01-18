@@ -18,9 +18,10 @@ import json
 import logging
 import math
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -245,6 +246,9 @@ class RelationInferencer:
     def infer_relations(
         self,
         nodes: List[GenieSimNode],
+        progress_callback: Optional[Callable[[int, float], None]] = None,
+        progress_interval_s: float = 5.0,
+        progress_every_pairs: Optional[int] = None,
     ) -> List[GenieSimEdge]:
         """
         Infer spatial relations between nodes.
@@ -256,11 +260,40 @@ class RelationInferencer:
         4. Similar rotation (< angle threshold) → "aligned" edge
         """
         edges = []
+        start_time = time.monotonic()
+        last_report_time = start_time
+        processed_pairs = 0
+        total_pairs = (len(nodes) * (len(nodes) - 1)) // 2
+
+        def report_progress(force: bool = False) -> None:
+            nonlocal last_report_time
+            if processed_pairs == 0:
+                return
+            now = time.monotonic()
+            should_report = force
+            if progress_every_pairs and processed_pairs % progress_every_pairs == 0:
+                should_report = True
+            if progress_interval_s and now - last_report_time >= progress_interval_s:
+                should_report = True
+            if not should_report:
+                return
+            elapsed = now - start_time
+            if progress_callback:
+                progress_callback(processed_pairs, elapsed)
+            if self.verbose:
+                self.log(
+                    f"Relation inference progress: {processed_pairs}/{total_pairs} "
+                    f"pairs in {elapsed:.1f}s"
+                )
+            last_report_time = now
 
         for i, node_a in enumerate(nodes):
             for j, node_b in enumerate(nodes):
                 if i >= j:
                     continue
+
+                processed_pairs += 1
+                report_progress()
 
                 # Check for "on" relation
                 on_edge = self._check_on_relation(node_a, node_b)
@@ -284,6 +317,7 @@ class RelationInferencer:
                 if aligned_edge:
                     edges.append(aligned_edge)
 
+        report_progress(force=True)
         self.log(f"Inferred {len(edges)} relations from {len(nodes)} nodes")
         return edges
 
@@ -505,7 +539,8 @@ class SceneGraphConverter:
         Returns:
             GenieSimSceneGraph ready for Genie Sim
         """
-        self.log("Converting BlueprintPipeline manifest to Genie Sim scene graph")
+        start_time = time.monotonic()
+        self.log("Starting non-streaming manifest conversion")
 
         scene_id = manifest.get("scene_id", "unknown")
         scene_config = manifest.get("scene", {})
@@ -515,14 +550,21 @@ class SceneGraphConverter:
         coord_frame = scene_config.get("coordinate_frame", "y_up")
         meters_per_unit = scene_config.get("meters_per_unit", 1.0)
 
-        self.log(f"Scene: {scene_id}, {len(objects)} objects, coord={coord_frame}")
+        total_objects = len(objects)
+        self.log(f"Scene: {scene_id}, {total_objects} objects, coord={coord_frame}")
 
         # Convert nodes
         nodes = []
-        for obj in objects:
+        progress_every = None
+        if self.verbose and total_objects >= 200:
+            progress_every = max(50, total_objects // 10)
+
+        for index, obj in enumerate(objects, start=1):
             node = self._convert_object_to_node(obj, usd_base_path)
             if node:
                 nodes.append(node)
+            if progress_every and index % progress_every == 0:
+                self.log(f"Converted {index}/{total_objects} objects to nodes")
 
         self.log(f"Converted {len(nodes)} nodes")
 
@@ -531,7 +573,10 @@ class SceneGraphConverter:
         self.log(f"Found {len(explicit_edges)} explicit relationships")
 
         # Infer additional edges
-        inferred_edges = self.relation_inferencer.infer_relations(nodes)
+        inferred_edges = self.relation_inferencer.infer_relations(
+            nodes,
+            progress_callback=self._relation_inference_progress,
+        )
 
         # Merge edges (explicit edges take priority)
         edges = self._merge_edges(explicit_edges, inferred_edges)
@@ -551,7 +596,14 @@ class SceneGraphConverter:
             },
         )
 
+        duration = time.monotonic() - start_time
+        self.log(f"Finished non-streaming conversion in {duration:.2f}s")
         return scene_graph
+
+    def _relation_inference_progress(self, processed_pairs: int, elapsed: float) -> None:
+        """Progress callback for relation inference."""
+        if self.verbose:
+            self.log(f"Relation inference processed {processed_pairs} pairs in {elapsed:.1f}s")
 
     def _convert_object_to_node(
         self,
@@ -808,7 +860,10 @@ class SceneGraphConverter:
 
     def _infer_relations(self, nodes: List[GenieSimNode]) -> List[GenieSimEdge]:
         """Infer spatial relations between nodes."""
-        return self.relation_inferencer.infer_relations(nodes)
+        return self.relation_inferencer.infer_relations(
+            nodes,
+            progress_callback=self._relation_inference_progress,
+        )
 
 
 # =============================================================================
@@ -870,11 +925,18 @@ def convert_manifest_to_scene_graph(
         parser = StreamingManifestParser(str(manifest_path))
         usd_base_path = manifest.get("usd_file")
 
-        batch_count = 0
-        for batch in parser.stream_objects(batch_size=100):
-            batch_count += 1
-            if verbose and batch_count % 10 == 0:
-                print(f"[SCENE-GRAPH-CONVERTER] Processed {batch_count * 100} objects...")
+        def stream_progress(processed_objects: int, elapsed: float) -> None:
+            if verbose:
+                print(
+                    "[SCENE-GRAPH-CONVERTER] Streamed "
+                    f"{processed_objects} objects in {elapsed:.1f}s"
+                )
+
+        for batch in parser.stream_objects(
+            batch_size=100,
+            progress_callback=stream_progress,
+            progress_interval_s=5.0,
+        ):
 
             # Convert batch of objects to nodes
             for obj in batch:
@@ -894,7 +956,6 @@ def convert_manifest_to_scene_graph(
         # Standard mode for small manifests
         with open(manifest_path) as f:
             manifest = json.load(f)
-
         converter = SceneGraphConverter(verbose=verbose)
         scene_graph = converter.convert(manifest)
 
