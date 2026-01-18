@@ -56,6 +56,14 @@ export GENIESIM_AUTH_TOKEN_PATH=/etc/secrets/geniesim.jwt
   - `tools/geniesim_adapter/scene_graph.py`
   - `tools/geniesim_adapter/asset_index.py`
 
+## Local mock server behavior
+
+When using the lightweight local mock server (`tools/geniesim_adapter/geniesim_server.py`) for development or CI, the servicer provides deterministic, non-error responses for core telemetry endpoints:
+
+- **GetIKStatus** returns `success=true`, `ik_solvable=true`, and a mock solution based on the current joint state (or seed positions when supplied).
+- **GetTaskStatus** returns `success=true` with a basic `status` and `progress` value for quick availability checks.
+- **StreamObservations** yields a short sequence of static `GetObservationResponse` frames to emulate streaming updates.
+
 ## Preflight recap (quick checklist)
 
 - [ ] `GENIESIM_HOST` and `GENIESIM_PORT` accessible from the runner.
