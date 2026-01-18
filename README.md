@@ -333,7 +333,7 @@ python tools/run_local_pipeline.py \
 ```
 
 CI enforces a unit-test coverage gate: the unit-test job publishes `coverage.xml`
-from `pytest-cov` and fails if total line coverage drops below 75%. Update the
+from `pytest-cov` and fails if total line coverage drops below 85%. Update the
 threshold in `.github/workflows/test-unit.yml` if the baseline changes.
 
 ### Staging Isaac Sim E2E (Labs pre-production)
