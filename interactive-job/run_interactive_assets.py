@@ -1976,4 +1976,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from tools.startup_validation import validate_and_fail_fast
+
+    validate_and_fail_fast(job_name="INTERACTIVE", validate_gcs=True)
     main()

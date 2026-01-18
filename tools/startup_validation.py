@@ -246,6 +246,11 @@ def validate_and_fail_fast(
     Raises:
         SystemExit: If validation fails
     """
+    skip_flag = os.getenv("SKIP_STARTUP_VALIDATION", "").strip().lower()
+    if skip_flag in {"1", "true", "yes", "y"}:
+        print(f"[{job_name}] ⚠️ Skipping startup validation (SKIP_STARTUP_VALIDATION={skip_flag})")
+        return
+
     try:
         result = validate_all_credentials(
             require_geniesim=require_geniesim,
