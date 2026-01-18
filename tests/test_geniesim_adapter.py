@@ -32,6 +32,7 @@ from tools.geniesim_adapter.scene_graph import (
     GenieSimNode,
     GenieSimEdge,
     HAVE_STREAMING_PARSER,
+    Pose,
     RelationInferencer,
 )
 from tools.geniesim_adapter.asset_index import (
@@ -291,6 +292,39 @@ class TestSceneGraphConverter:
         # (depending on position values - adjust if needed)
         assert len(scene_graph.edges) >= 0  # May have inferred edges
 
+    def test_relation_inference_cache(self):
+        """Ensure relation inference caches identical inputs."""
+        inferencer = RelationInferencer(verbose=False)
+        nodes = [
+            GenieSimNode(
+                asset_id="box_001",
+                semantic="box",
+                size=[1.0, 1.0, 1.0],
+                pose=Pose(position=[0.0, 0.0, 0.5], orientation=[1.0, 0.0, 0.0, 0.0]),
+                task_tag=[],
+                usd_path="",
+            ),
+            GenieSimNode(
+                asset_id="box_002",
+                semantic="box",
+                size=[1.0, 1.0, 1.0],
+                pose=Pose(position=[0.0, 0.0, 1.6], orientation=[1.0, 0.0, 0.0, 0.0]),
+                task_tag=[],
+                usd_path="",
+            ),
+        ]
+
+        first_edges = inferencer.infer_relations(nodes, scene_id="cache_scene")
+        assert inferencer.last_cache_hit is False
+
+        second_edges = inferencer.infer_relations(nodes, scene_id="cache_scene")
+        assert inferencer.last_cache_hit is True
+        assert second_edges == first_edges
+
+        nodes[0].size = [1.0, 1.0, 1.1]
+        _ = inferencer.infer_relations(nodes, scene_id="cache_scene")
+        assert inferencer.last_cache_hit is False
+
     def test_save_and_load(self, sample_manifest, tmp_path):
         """Test saving and loading scene graph."""
         converter = SceneGraphConverter(verbose=False)
@@ -327,7 +361,7 @@ class TestSceneGraphConverter:
         ]
         called = {}
 
-        def fake_infer(self, nodes):
+        def fake_infer(self, nodes, scene_id=None):
             called["count"] = len(nodes)
             return expected_edges
 
