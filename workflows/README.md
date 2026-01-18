@@ -18,7 +18,7 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 
 ## Key environment variables
 - Environment variables used by trigger setup scripts and workflow runtime configuration.
+- `WORKFLOW_REGION`: region for Cloud Run job invocations in workflows. Defaults to `us-central1` if not set.
 
 ## How to run locally
 - Run trigger setup scripts directly (e.g., `./setup-all-triggers.sh`) after exporting the required credentials.
-
