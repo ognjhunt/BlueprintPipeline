@@ -123,7 +123,7 @@ main:
             job: ${arenaJobName}
             scene_id: ${sceneId}
             timeout_seconds: ${arenaTimeoutSeconds}
-            retry_max: 3
+            retry_max: 5
             start_time: ${arenaStartTime}
           severity: "INFO"
         next: run_arena_export_job
@@ -166,10 +166,10 @@ main:
           result: arenaExec
         retry:
           predicate: ${http.default_retry_predicate}
-          max_retries: 3
+          max_retries: 5
           backoff:
-            initial_delay: 2
-            max_delay: 30
+            initial_delay: 1
+            max_delay: 60
             multiplier: 2
         except:
           as: e
@@ -182,7 +182,7 @@ main:
                     workflow: "arena-export-pipeline"
                     job: ${arenaJobName}
                     scene_id: ${sceneId}
-                    retry_max: 3
+                    retry_max: 5
                     error: ${e.message}
                   severity: "ERROR"
             - log_arena_error:

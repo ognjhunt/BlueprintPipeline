@@ -55,10 +55,10 @@ Retries are applied to transient failures:
 | Component | Timeout | Retry Strategy |
 |-----------|---------|-----------------|
 | Convert Job (GLB→USDZ) | 3600s (1 hour) | 5 retries, exponential backoff |
-| Simready Job | 3600s (1 hour) | 3 retries, exponential backoff |
-| USD Assembly Job | 3600s (1 hour) | 3 retries, exponential backoff |
-| Replicator Job | 1800s (30 min) | 3 retries, exponential backoff |
-| Isaac Lab Job | 1800s (30 min) | 3 retries, exponential backoff |
+| Simready Job | 3600s (1 hour) | 5 retries, exponential backoff |
+| USD Assembly Job | 3600s (1 hour) | 5 retries, exponential backoff |
+| Replicator Job | 1800s (30 min) | 5 retries, exponential backoff |
+| Isaac Lab Job | 1800s (30 min) | 5 retries, exponential backoff |
 
 ### Genie Sim Export Pipeline
 - **Job Timeout:** 2700s (45 minutes)
@@ -67,55 +67,55 @@ Retries are applied to transient failures:
 
 ### Arena Export Pipeline
 - **Job Timeout:** 1800s (30 minutes)
-- **Retry:** 3 retries with exponential backoff
+- **Retry:** 5 retries with exponential backoff
 - **Reason:** Affordance detection and policy scoring
 
 ### Genie Sim Import Pipeline
 - **Job Timeout:** 1800s (30 minutes) - explicit
-- **Retry:** 3 retries with exponential backoff
+- **Retry:** 5 retries with exponential backoff
 - **Reason:** Episode validation and manifests are I/O intensive
 
 ### Objects Pipeline
 - **Job Timeout:** 3600s (explicit Cloud Run default)
-- **Retry:** 3 retries with exponential backoff
+- **Retry:** 5 retries with exponential backoff
 - **Reason:** Object detection is typically fast, non-critical, but explicit timeout supports metrics
 
 ### Scale Pipeline
 - **Job Timeout:** 3600s (explicit Cloud Run default)
-- **Retry:** 3 retries with exponential backoff
+- **Retry:** 5 retries with exponential backoff
 - **Reason:** Layout scaling is typically fast, non-critical, but explicit timeout supports metrics
 
 ### Dream2Flow Preparation Pipeline
 - **Preparation Job Timeout:** 3600s (explicit Cloud Run default)
 - **Inference Job Timeout:** 3600s (explicit Cloud Run default)
-- **Retry:** 3 retries with exponential backoff (both jobs)
+- **Retry:** 5 retries with exponential backoff (both jobs)
 - **Reason:** 3D flow extraction and inference can be I/O intensive; explicit timeout supports metrics
 
 ### DWM Preparation Pipeline
 - **Preparation Job Timeout:** 3600s (explicit Cloud Run default)
 - **Inference Job Timeout:** 3600s (explicit Cloud Run default)
-- **Retry:** 3 retries with exponential backoff (both jobs)
+- **Retry:** 5 retries with exponential backoff (both jobs)
 - **Reason:** Hand mesh video rendering and inference is compute-intensive; explicit timeout supports metrics
 
 ### Variation Assets Pipeline
 - **Variation-Gen Job Timeout:** 1800s (explicit override)
 - **Simready Job Timeout:** 3600s (explicit override)
-- **Retry:** 3 retries with exponential backoff (both jobs)
+- **Retry:** 5 retries with exponential backoff (both jobs)
 - **Reason:** Domain randomization asset generation is I/O intensive
 
 ### Scene Generation Pipeline
 - **Job Timeout:** 3600s (explicit Cloud Run default)
-- **Retry:** 3 retries with exponential backoff
+- **Retry:** 5 retries with exponential backoff
 - **Reason:** Daily batch generation benefits from default timeout + metrics
 
 ### Interactive Pipeline
 - **Job Timeout:** 1800s (explicit override)
-- **Retry:** 3 retries with exponential backoff
+- **Retry:** 5 retries with exponential backoff
 - **Reason:** Interactive articulation extraction has bounded runtime
 
 ### Training Pipeline
 - **Job Timeout:** 21600s (6 hours)
-- **Retry:** 3 retries with exponential backoff
+- **Retry:** 5 retries with exponential backoff
 - **Reason:** Model training is long-running and CPU/GPU intensive
 
 ## Maintenance workflows
@@ -126,7 +126,7 @@ auditors can trace deletions back to workflow executions.
 
 ### Regen3D Pipeline
 - **Job Timeout:** 3600s (1 hour) - explicit
-- **Retry:** 3 retries with exponential backoff (job start); marker polling has exponential backoff
+- **Retry:** 5 retries with exponential backoff (job start); marker polling has exponential backoff
 - **Marker Verification:** Exponential backoff polling, max 6 attempts, capped at 30s between attempts
 - **Reason:** 3D reconstruction is compute-intensive, marker polling must handle eventual consistency
 
@@ -313,7 +313,7 @@ Future updates should consider:
 ## Implementation Status
 
 ✓ **Implemented (2026-01-11):**
-- Exponential backoff retry logic on critical job launches (3 retries: 2s initial, 30s max)
+- Exponential backoff retry logic on critical job launches (5 retries: 1s initial, 60s max)
 - Standardized timeout values for each job
 - Retry policy documentation with detailed specifications
 - Added retry logic to: dream2flow (both jobs), dwm (both jobs), variation-assets (both jobs), objects, scale, regen3d-import
