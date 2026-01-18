@@ -9,6 +9,7 @@ handles both cases and normalizes manifests into the legacy structure.
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -80,19 +81,33 @@ def load_manifest_or_scene_assets(assets_root: Path) -> Optional[Dict]:
     if manifest_path.is_file():
         with manifest_path.open("r") as f:
             manifest = json.load(f)
+        from tools.scene_manifest.validate_manifest import validate_manifest
+
+        validate_manifest(manifest)
         return _manifest_to_legacy(manifest)
 
     legacy_path = assets_root / "scene_assets.json"
     if legacy_path.is_file():
         with legacy_path.open("r") as f:
-            return json.load(f)
+            legacy_assets = json.load(f)
+        warnings.warn(
+            "Schema validation skipped for legacy scene_assets.json input.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return legacy_assets
 
     return None
 
 
 def load_manifest(manifest_path: Path) -> Dict:
     with manifest_path.open("r") as f:
-        return json.load(f)
+        manifest = json.load(f)
+
+    from tools.scene_manifest.validate_manifest import validate_manifest
+
+    validate_manifest(manifest)
+    return manifest
 
 
 __all__ = [
