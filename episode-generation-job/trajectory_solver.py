@@ -31,6 +31,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.config.env import parse_bool_env
+
 from motion_planner import MotionPlan, Waypoint, MotionPhase
 
 
@@ -1335,7 +1337,7 @@ class TrajectorySolver:
     def _is_production_mode(self) -> bool:
         """Detect production mode for fail-closed behavior."""
         return (
-            os.getenv("PRODUCTION_MODE", "false").lower() == "true"
+            parse_bool_env(os.getenv("PRODUCTION_MODE"), default=False)
             or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
         )
 

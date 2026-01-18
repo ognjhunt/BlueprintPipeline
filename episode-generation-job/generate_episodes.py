@@ -83,6 +83,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from monitoring.alerting import send_alert
+from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import set_global_seed
 from tools.metrics.pipeline_metrics import get_metrics
@@ -1227,7 +1228,7 @@ class EpisodeGenerator:
         override = os.getenv("ALLOW_LEROBOT_EXPORT_FAILURE")
         if override is None:
             return True
-        return override.lower() == "true"
+        return bool(parse_bool_env(override, default=False))
 
     def _enforce_physics_backed_qc(self, validated_episodes: List[GeneratedEpisode]) -> None:
         """Ensure production exports only use physics-backed QC results."""
@@ -3032,7 +3033,10 @@ def _run_main():
 
             logger.info("[EPISODE-GEN-JOB] ✅ Environment check passed")
 
-            allow_mock_capture_env = os.getenv("ALLOW_MOCK_CAPTURE", os.getenv("ALLOW_MOCK_DATA", "false")).lower() == "true"
+            allow_mock_capture_env = parse_bool_env(
+                os.getenv("ALLOW_MOCK_CAPTURE", os.getenv("ALLOW_MOCK_DATA")),
+                default=False,
+            )
             if required_quality.value == "production" or resolve_production_mode():
                 allow_mock_capture = False
                 if allow_mock_capture_env:
@@ -3082,7 +3086,7 @@ def _run_main():
             os.getenv("KUBERNETES_SERVICE_HOST") is not None or  # K8s
             os.getenv("K_SERVICE") is not None or  # Cloud Run
             os.path.exists("/.dockerenv") or  # Docker
-            os.getenv("PRODUCTION", "false").lower() == "true"
+            parse_bool_env(os.getenv("PRODUCTION"), default=False)
             or production_env_flags
         )
 
@@ -3093,7 +3097,10 @@ def _run_main():
         else:
             default_require_real = "false"
 
-        require_real_physics = os.getenv("REQUIRE_REAL_PHYSICS", default_require_real).lower() == "true"
+        require_real_physics = parse_bool_env(
+            os.getenv("REQUIRE_REAL_PHYSICS", default_require_real),
+            default=False,
+        )
         if production_env_flags:
             require_real_physics = True
 
@@ -3102,7 +3109,7 @@ def _run_main():
         # This prevents labs from wasting GPU hours on garbage data
         if is_production:
             allow_mock_data = False  # NEVER allow mock data in production
-            if os.getenv("ALLOW_MOCK_DATA", "").lower() == "true":
+            if parse_bool_env(os.getenv("ALLOW_MOCK_DATA"), default=False):
                 logger.error("%s", "=" * 80)
                 logger.error(
                     "❌ FATAL ERROR: ALLOW_MOCK_DATA not permitted in production"
@@ -3117,7 +3124,7 @@ def _run_main():
                 logger.error("%s", "=" * 80)
         else:
             # Development mode: allow override for testing
-            allow_mock_data = os.getenv("ALLOW_MOCK_DATA", "false").lower() == "true"
+            allow_mock_data = parse_bool_env(os.getenv("ALLOW_MOCK_DATA"), default=False)
 
         # Log configuration BEFORE checking Isaac Sim
         logger.info("[EPISODE-GEN-JOB] Production mode: %s", is_production)
@@ -3221,8 +3228,8 @@ def _run_main():
         logger.error("[EPISODE-GEN-JOB] Invalid FPS: %s", e)
         sys.exit(1)
 
-    use_llm = os.getenv("USE_LLM", "true").lower() == "true"
-    use_cpgen = os.getenv("USE_CPGEN", "true").lower() == "true"
+    use_llm = parse_bool_env(os.getenv("USE_LLM"), default=True)
+    use_cpgen = parse_bool_env(os.getenv("USE_CPGEN"), default=True)
 
     try:
         # LABS-BLOCKER-002 FIX: Default raised from 0.7 to 0.85 for production quality
@@ -3264,8 +3271,8 @@ def _run_main():
         logger.error("[EPISODE-GEN-JOB] Invalid IMAGE_RESOLUTION: %s", e)
         sys.exit(1)
 
-    capture_sensor_data = os.getenv("CAPTURE_SENSOR_DATA", "true").lower() == "true"
-    use_mock_capture = os.getenv("USE_MOCK_CAPTURE", "false").lower() == "true"
+    capture_sensor_data = parse_bool_env(os.getenv("CAPTURE_SENSOR_DATA"), default=True)
+    use_mock_capture = parse_bool_env(os.getenv("USE_MOCK_CAPTURE"), default=False)
 
     # Bundle tier for upsell features (standard, pro, enterprise, foundation)
     bundle_tier = os.getenv("BUNDLE_TIER", "standard")

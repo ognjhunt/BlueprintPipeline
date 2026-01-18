@@ -36,6 +36,7 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Dict
 
+from tools.config.env import parse_bool_env
 
 class PipelineMode(str, Enum):
     """Pipeline execution mode."""
@@ -94,7 +95,7 @@ class PipelineSelector:
         Returns GENIESIM by default. Set USE_GENIESIM=false to use
         BlueprintPipeline's own episode generation instead.
         """
-        use_geniesim = os.getenv("USE_GENIESIM", "true").lower() == "true"
+        use_geniesim = parse_bool_env(os.getenv("USE_GENIESIM"), default=True)
         if use_geniesim:
             return PipelineMode.GENIESIM
         return PipelineMode.REGEN3D_FIRST
@@ -105,7 +106,7 @@ class PipelineSelector:
         Returns GENIESIM by default. Set USE_GENIESIM=false to use
         BlueprintPipeline's own episode generation instead.
         """
-        use_geniesim = os.getenv("USE_GENIESIM", "true").lower() == "true"
+        use_geniesim = parse_bool_env(os.getenv("USE_GENIESIM"), default=True)
         if use_geniesim:
             return DataGenerationBackend.GENIESIM
         return DataGenerationBackend.BLUEPRINTPIPELINE
@@ -297,7 +298,7 @@ def is_geniesim_enabled() -> bool:
 
     Returns True by default. Set USE_GENIESIM=false to disable.
     """
-    return os.getenv("USE_GENIESIM", "true").lower() == "true"
+    return parse_bool_env(os.getenv("USE_GENIESIM"), default=True)
 
 
 def should_skip_deprecated_job(job_name: str) -> bool:
