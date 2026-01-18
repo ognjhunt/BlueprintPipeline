@@ -185,6 +185,75 @@ spec:
     - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
 
 ---
+# Cost Anomaly Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-cost-anomaly
+spec:
+  displayName: "[Blueprint] Cost Anomaly Detected"
+  documentation:
+    content: |
+      Hourly pipeline cost spiked relative to the 24h rolling average.
+
+      Actions:
+      1. Review recent pipeline runs for unusually long runtimes or retries
+      2. Validate Gemini/Genie Sim usage and pricing overrides
+      3. Inspect top-cost scenes in cost tracking reports
+    mimeType: text/markdown
+  conditions:
+    - displayName: Hourly Cost > 1.5x 24h Avg
+      conditionMonitoringQueryLanguage:
+        query: |
+          fetch global
+          | metric 'custom.googleapis.com/blueprint_pipeline/pipeline_cost_total_usd'
+          | align delta(1h)
+          | group_by 1h, [hourly_cost: sum(value)]
+          | every 1h
+          | window 24h
+          | group_by [], [
+              avg_cost: mean(hourly_cost),
+              current_cost: last(hourly_cost)
+            ]
+          | condition current_cost > avg_cost * 1.5
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Pipeline Failure Rate Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-pipeline-failure-rate
+spec:
+  displayName: "[Blueprint] Pipeline Failure Rate Above 5%"
+  documentation:
+    content: |
+      Pipeline failure rate exceeded 5% over the last 30 minutes.
+
+      Actions:
+      1. Check recent job failures for shared root cause
+      2. Inspect workload capacity and dependency health
+      3. Escalate to on-call if failure rate persists
+    mimeType: text/markdown
+  conditions:
+    - displayName: Failure Rate > 5% (30m)
+      conditionMonitoringQueryLanguage:
+        query: |
+          fetch global
+          | metric 'custom.googleapis.com/blueprint_pipeline/pipeline_runs_total'
+          | group_by 30m, [
+              failed: sum(if(metric.label.status == "failure", value, 0)),
+              total: sum(value)
+            ]
+          | value [failure_rate: failed / total]
+          | condition failure_rate > 0.05
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
 # Stage Latency SLO Alert
 apiVersion: monitoring.googleapis.com/v1
 kind: AlertPolicy
