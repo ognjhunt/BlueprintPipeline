@@ -7,4 +7,5 @@
 ## Key references
 - [Pipeline analysis](PIPELINE_ANALYSIS.md)
 - [Genie Sim integration checklist](GENIESIM_INTEGRATION.md)
+- [Lab integration data contract](lab_integration.md)
 - [Production E2E validation runbook](PRODUCTION_E2E_VALIDATION.md)
