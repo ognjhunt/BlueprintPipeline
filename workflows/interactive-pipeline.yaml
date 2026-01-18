@@ -1,3 +1,24 @@
+# interactive-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that:
+#   1. Triggers on assets-plan output (scene_assets.json)
+#   2. Runs interactive-job to detect articulations and generate interactive assets
+#   3. Writes outputs under scenes/{sceneId}/assets/interactive
+#
+# Trigger:
+#   Type: Cloud Storage object finalized (Eventarc)
+#   Bucket/prefix filter: bucket=${BUCKET}, object name matches scenes/*/assets/scene_assets.json
+#
+# Eventarc setup example:
+#   gcloud eventarc triggers create interactive-trigger \
+#     --location=us-central1 \
+#     --service-account="${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+#     --destination-workflow=interactive-pipeline \
+#     --destination-workflow-location=us-central1 \
+#     --event-filters="type=google.cloud.storage.object.v1.finalized" \
+#     --event-filters="bucket=${BUCKET}" \
+#     --event-data-content-type="application/json"
+
 main:
   params: [event]
   steps:
