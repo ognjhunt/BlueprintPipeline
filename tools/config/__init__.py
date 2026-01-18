@@ -203,6 +203,14 @@ class SceneGraphConfig:
 
 
 @dataclass
+class ABTestingConfig:
+    """A/B testing configuration."""
+    enabled: bool = False
+    split_ratios: Dict[str, float] = field(default_factory=lambda: {"A": 0.5, "B": 0.5})
+    assignment_store_path: str = "./sim2real_experiments/ab_assignments.json"
+
+
+@dataclass
 class HealthChecksConfig:
     """Health check configuration defaults."""
     probe_timeout_s: float = 2.0
@@ -269,6 +277,7 @@ class PipelineConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
     resources: ResourceConfig = field(default_factory=ResourceConfig)
     scene_graph: SceneGraphConfig = field(default_factory=SceneGraphConfig)
+    ab_testing: ABTestingConfig = field(default_factory=ABTestingConfig)
     health_checks: HealthChecksConfig = field(default_factory=HealthChecksConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
 
@@ -729,6 +738,7 @@ class ConfigLoader:
         reward = config.get("reward_shaping", {})
         resources = config.get("resource_allocation", {})
         scene_graph = config.get("scene_graph", {})
+        ab_testing = config.get("ab_testing", {})
         health_checks = config.get("health_checks", {})
         models_cfg = config.get("models", {})
 
@@ -816,6 +826,14 @@ class ConfigLoader:
                 ),
                 streaming=SceneGraphStreamingConfig(
                     batch_size=scene_graph.get("streaming", {}).get("batch_size", 100),
+                ),
+            ),
+            ab_testing=ABTestingConfig(
+                enabled=ab_testing.get("enabled", False),
+                split_ratios=ab_testing.get("split_ratios", {"A": 0.5, "B": 0.5}),
+                assignment_store_path=ab_testing.get(
+                    "assignment_store_path",
+                    "./sim2real_experiments/ab_assignments.json",
                 ),
             ),
             health_checks=HealthChecksConfig(
@@ -979,6 +997,26 @@ class ConfigLoader:
             if isinstance(health_checks, dict):
                 if "probe_timeout_s" in health_checks and health_checks["probe_timeout_s"] <= 0:
                     errors["health_checks.probe_timeout_s"] = "Must be positive"
+
+        if "ab_testing" in config:
+            ab_testing = config["ab_testing"]
+            if isinstance(ab_testing, dict):
+                split_ratios = ab_testing.get("split_ratios")
+                if split_ratios is not None:
+                    if not isinstance(split_ratios, dict) or not split_ratios:
+                        errors["ab_testing.split_ratios"] = "Must be a non-empty mapping"
+                    else:
+                        total = 0.0
+                        for variant, weight in split_ratios.items():
+                            if not isinstance(weight, (int, float)):
+                                errors[f"ab_testing.split_ratios.{variant}"] = "Must be a number"
+                                continue
+                            if weight < 0:
+                                errors[f"ab_testing.split_ratios.{variant}"] = "Must be non-negative"
+                                continue
+                            total += float(weight)
+                        if total <= 0:
+                            errors["ab_testing.split_ratios"] = "Total split ratios must be positive"
 
         return errors
 
