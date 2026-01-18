@@ -286,6 +286,23 @@ class GenerationHistoryEntry:
     success: bool
 
 
+@dataclass
+class FirestoreWriteError:
+    """Structured error for Firestore write failures."""
+    message: str
+    exception_type: str
+    details: Optional[str] = None
+
+
+@dataclass
+class FirestoreWriteResult:
+    """Structured result for Firestore write attempts."""
+    success: bool
+    operation: str
+    documents_written: int = 0
+    errors: List[FirestoreWriteError] = field(default_factory=list)
+
+
 # ============================================================================
 # Firestore History Tracking
 # ============================================================================
@@ -360,22 +377,69 @@ class GenerationHistoryTracker:
             print(f"[SCENE-GEN] WARNING: Failed to get coverage: {e}", file=sys.stderr)
             return {}
 
-    def record_generation(self, entry: GenerationHistoryEntry) -> bool:
-        """Record a generation in history."""
+    def _build_history_payload(self, entry: GenerationHistoryEntry) -> Dict[str, Any]:
+        data = asdict(entry)
+        # Always store a Firestore timestamp to avoid string ordering issues
+        data["generated_at"] = firestore.SERVER_TIMESTAMP if firestore is not None else entry.generated_at
+        return data
+
+    def record_generations(self, entries: List[GenerationHistoryEntry]) -> FirestoreWriteResult:
+        """Record one or more generations in history."""
+        if not entries:
+            return FirestoreWriteResult(success=True, operation="noop", documents_written=0)
         if not self.enabled or not self.db:
-            return False
+            return FirestoreWriteResult(
+                success=False,
+                operation="history_write",
+                documents_written=0,
+                errors=[
+                    FirestoreWriteError(
+                        message="Firestore history tracking is disabled or unavailable.",
+                        exception_type="FirestoreUnavailable",
+                    )
+                ],
+            )
 
         try:
-            doc_ref = self.db.collection(FIRESTORE_COLLECTION_HISTORY).document(entry.scene_id)
-            data = asdict(entry)
-            # Always store a Firestore timestamp to avoid string ordering issues
-            data["generated_at"] = firestore.SERVER_TIMESTAMP if firestore is not None else entry.generated_at
-            doc_ref.set(data)
-            return True
+            if len(entries) == 1:
+                entry = entries[0]
+                doc_ref = self.db.collection(FIRESTORE_COLLECTION_HISTORY).document(entry.scene_id)
+                doc_ref.set(self._build_history_payload(entry))
+                return FirestoreWriteResult(
+                    success=True,
+                    operation="history_set",
+                    documents_written=1,
+                )
+
+            batch = self.db.batch()
+            for entry in entries:
+                doc_ref = self.db.collection(FIRESTORE_COLLECTION_HISTORY).document(entry.scene_id)
+                batch.set(doc_ref, self._build_history_payload(entry))
+            batch.commit()
+            return FirestoreWriteResult(
+                success=True,
+                operation="history_batch_set",
+                documents_written=len(entries),
+            )
 
         except Exception as e:
-            print(f"[SCENE-GEN] WARNING: Failed to record history: {e}", file=sys.stderr)
-            return False
+            LOGGER.error("Failed to record history entries in Firestore.", exc_info=True)
+            return FirestoreWriteResult(
+                success=False,
+                operation="history_write",
+                documents_written=0,
+                errors=[
+                    FirestoreWriteError(
+                        message=str(e),
+                        exception_type=type(e).__name__,
+                        details=repr(e),
+                    )
+                ],
+            )
+
+    def record_generation(self, entry: GenerationHistoryEntry) -> FirestoreWriteResult:
+        """Record a generation in history."""
+        return self.record_generations([entry])
 
     def get_archetype_counts(self, days: int = 7) -> Dict[str, int]:
         """Get generation counts per archetype for load balancing."""
@@ -974,6 +1038,7 @@ def generate_scene_batch(
 
     # Generate scenes
     results: List[SceneGenerationResult] = []
+    history_entries: List[GenerationHistoryEntry] = []
 
     for i, archetype in enumerate(archetypes):
         print(f"\n[SCENE-GEN] === Scene {i + 1}/{count} ===")
@@ -1016,7 +1081,7 @@ def generate_scene_batch(
                 generated_at=datetime.datetime.now(datetime.timezone.utc),
                 success=True
             )
-            history_tracker.record_generation(history_entry)
+            history_entries.append(history_entry)
 
             # Trigger downstream pipeline
             if not dry_run:
@@ -1036,6 +1101,14 @@ def generate_scene_batch(
         arch = r.archetype.value
         archetype_counts[arch] = archetype_counts.get(arch, 0) + 1
 
+    history_write_result = history_tracker.record_generations(history_entries)
+    if history_write_result.errors:
+        print(
+            f"[SCENE-GEN] ERROR: Failed to record history: "
+            f"{[error.message for error in history_write_result.errors]}",
+            file=sys.stderr,
+        )
+
     summary = {
         "total_attempted": len(results),
         "successful": successful,
@@ -1045,7 +1118,8 @@ def generate_scene_batch(
         "archetype_distribution": archetype_counts,
         "image_model": GEMINI_IMAGE_MODEL,
         "prompt_model": GEMINI_PRO_MODEL,
-        "dry_run": dry_run
+        "dry_run": dry_run,
+        "history_write": asdict(history_write_result),
     }
 
     return results, summary
