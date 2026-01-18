@@ -1,3 +1,4 @@
+import datetime
 import importlib.util
 import json
 import logging
@@ -2067,6 +2068,45 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
+def load_progress_marker(path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    if path is None or not path.is_file():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("[SIMREADY] Failed to read progress marker %s: %s", path, exc)
+        return None
+
+
+def extract_completed_simready_ids(progress_data: Optional[Dict[str, Any]]) -> set:
+    if not progress_data:
+        return set()
+    simready_assets = progress_data.get("simready_assets")
+    if isinstance(simready_assets, dict):
+        return {str(key) for key in simready_assets.keys()}
+    if isinstance(simready_assets, list):
+        return {str(value) for value in simready_assets}
+    simready_ids = progress_data.get("simready_ids")
+    if isinstance(simready_ids, list):
+        return {str(value) for value in simready_ids}
+    return set()
+
+
+def resolve_progress_marker_path(root: Path, assets_prefix: str) -> Path:
+    env_path = _get_env_value("PROGRESS_MARKER_PATH")
+    if env_path:
+        path = Path(env_path)
+        return path if path.is_absolute() else root / env_path.lstrip("/")
+    return root / assets_prefix / ".progress.json"
+
+
+def simready_asset_exists(assets_root: Path, oid: Any) -> bool:
+    return (assets_root / f"obj_{oid}/simready.usda").is_file() or (
+        assets_root / f"static/obj_{oid}/simready.usda"
+    ).is_file()
+
+
 def prepare_simready_assets_job(
     bucket: str,
     scene_id: str,
@@ -2081,6 +2121,8 @@ def prepare_simready_assets_job(
 
     assets_root = root / assets_prefix
     manifest_path = assets_root / "scene_manifest.json"
+    resume_from_progress = _env_flag("RESUME_FROM_PROGRESS")
+    progress_marker_path = resolve_progress_marker_path(root, assets_prefix)
 
     production_mode_env = resolve_production_mode()
     if production_mode is None:
@@ -2137,6 +2179,25 @@ def prepare_simready_assets_job(
         return 1
     objects = scene_assets.get("objects", [])
     print(f"[SIMREADY] Found {len(objects)} objects in manifest")
+    if resume_from_progress:
+        progress_data = load_progress_marker(progress_marker_path)
+        completed_ids = extract_completed_simready_ids(progress_data)
+        filtered_objects = []
+        skipped = 0
+        for obj in objects:
+            oid = obj.get("id")
+            if oid is None:
+                filtered_objects.append(obj)
+                continue
+            if str(oid) in completed_ids or simready_asset_exists(assets_root, oid):
+                skipped += 1
+                continue
+            filtered_objects.append(obj)
+        if skipped:
+            print(
+                f"[SIMREADY] Resume enabled; skipping {skipped} already processed objects"
+            )
+        objects = filtered_objects
 
     catalog_client = AssetCatalogClient()
 
@@ -2436,6 +2497,28 @@ def prepare_simready_assets_job(
             "[SIMREADY] No simready assets were created; created completion marker anyway",
             file=sys.stderr,
         )
+
+    try:
+        progress_data = load_progress_marker(progress_marker_path) or {}
+        existing_assets = progress_data.get("simready_assets")
+        merged_assets: Dict[str, str] = {}
+        if isinstance(existing_assets, dict):
+            merged_assets.update({str(key): str(value) for key, value in existing_assets.items()})
+        merged_assets.update({str(key): str(value) for key, value in simready_paths.items()})
+        progress_data.update(
+            {
+                "simready_assets": merged_assets,
+                "simready_count": len(merged_assets),
+                "simready_updated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                "scene_id": progress_data.get("scene_id") or scene_id,
+                "assets_prefix": progress_data.get("assets_prefix") or assets_prefix,
+            }
+        )
+        progress_marker_path.parent.mkdir(parents=True, exist_ok=True)
+        progress_marker_path.write_text(json.dumps(progress_data, indent=2), encoding="utf-8")
+        print(f"[SIMREADY] Updated progress marker at {progress_marker_path}")
+    except Exception as exc:  # pragma: no cover - progress marker is best-effort
+        print(f"[SIMREADY] WARNING: failed to update progress marker: {exc}", file=sys.stderr)
 
     return 0
 
