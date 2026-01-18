@@ -30,6 +30,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tools.gcs_upload import calculate_md5_base64, verify_blob_upload
+
 # Ensure repo root is in path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -649,10 +651,24 @@ class CustomerConfigService:
             try:
                 bucket_obj = self.storage_client.bucket(bucket)
                 blob = bucket_obj.blob(f"scenes/{config.scene_id}/config.json")
+                payload_json = json.dumps(config.to_dict(), indent=2)
+                payload_bytes = payload_json.encode("utf-8")
                 blob.upload_from_string(
-                    json.dumps(config.to_dict(), indent=2),
-                    content_type="application/json"
+                    payload_json,
+                    content_type="application/json",
                 )
+                verified, failure_reason = verify_blob_upload(
+                    blob,
+                    gcs_uri=f"gs://{bucket}/scenes/{config.scene_id}/config.json",
+                    expected_size=len(payload_bytes),
+                    expected_md5=calculate_md5_base64(payload_bytes),
+                )
+                if not verified:
+                    self.log(
+                        f"Error verifying GCS upload for {config.scene_id}: {failure_reason}",
+                        "ERROR",
+                    )
+                    success = False
                 self.log(f"Saved scene config to GCS: {config.scene_id}")
             except Exception as e:
                 self.log(f"Error saving to GCS: {e}", "ERROR")
