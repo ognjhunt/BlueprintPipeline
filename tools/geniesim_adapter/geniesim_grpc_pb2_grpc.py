@@ -21,8 +21,9 @@ import logging
 import os
 import threading
 import time
+from collections import namedtuple
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, Tuple
 
 from .geniesim_grpc_pb2 import (
     AddCameraRequest, AddCameraResponse,
@@ -66,6 +67,11 @@ except ImportError:
     grpc = None
 
 logger = logging.getLogger(__name__)
+
+_ClientCallDetails = namedtuple(
+    "_ClientCallDetails",
+    ("method", "timeout", "metadata", "credentials", "wait_for_ready", "compression"),
+)
 
 
 # =============================================================================
@@ -280,6 +286,20 @@ class GenieSimServiceStub:
             channel: gRPC channel to use for communication
         """
         self._channel = channel
+        self._cb_lock = threading.Lock()
+        self._cb_failure_count = 0
+        self._cb_tripped_until = 0.0
+        self._cb_failure_threshold = None
+        self._cb_backoff_seconds = None
+
+        if GRPC_AVAILABLE:
+            from tools.geniesim_adapter.config import (
+                get_geniesim_circuit_breaker_backoff_seconds,
+                get_geniesim_circuit_breaker_failure_threshold,
+            )
+
+            self._cb_failure_threshold = get_geniesim_circuit_breaker_failure_threshold()
+            self._cb_backoff_seconds = get_geniesim_circuit_breaker_backoff_seconds()
 
         if GRPC_AVAILABLE and channel is not None:
             # Create method stubs
@@ -295,6 +315,58 @@ class GenieSimServiceStub:
                     )
                 )
 
+    def _wait_for_circuit(self, method_name: str) -> None:
+        if not self._cb_failure_threshold or self._cb_failure_threshold <= 0:
+            return
+        sleep_for = 0.0
+        with self._cb_lock:
+            now = time.time()
+            if self._cb_tripped_until > now:
+                sleep_for = self._cb_tripped_until - now
+                self._cb_tripped_until = 0.0
+                self._cb_failure_count = 0
+        if sleep_for > 0:
+            logger.warning(
+                "Circuit breaker tripped for %s; backing off for %.2fs.",
+                method_name,
+                sleep_for,
+            )
+            time.sleep(sleep_for)
+
+    def _record_failure(self, method_name: str, exc: Exception) -> None:
+        if not self._cb_failure_threshold or self._cb_failure_threshold <= 0:
+            return
+        with self._cb_lock:
+            self._cb_failure_count += 1
+            if self._cb_failure_count >= self._cb_failure_threshold:
+                backoff = self._cb_backoff_seconds or 0.0
+                self._cb_tripped_until = time.time() + backoff
+                logger.warning(
+                    "Circuit breaker tripped after %s failures for %s; backing off for %.2fs.",
+                    self._cb_failure_count,
+                    method_name,
+                    backoff,
+                )
+
+    def _record_success(self) -> None:
+        if not self._cb_failure_threshold or self._cb_failure_threshold <= 0:
+            return
+        with self._cb_lock:
+            self._cb_failure_count = 0
+            self._cb_tripped_until = 0.0
+
+    def _call(self, method_name: str, handler: Callable, request: Any, timeout: Optional[float], metadata: Optional[tuple]):
+        if not GRPC_AVAILABLE or self._channel is None:
+            raise RuntimeError("gRPC not available or channel not connected")
+        self._wait_for_circuit(method_name)
+        try:
+            response = handler(request, timeout=timeout, metadata=metadata)
+        except Exception as exc:
+            self._record_failure(method_name, exc)
+            raise
+        self._record_success()
+        return response
+
     def GetObservation(
         self,
         request: GetObservationRequest,
@@ -302,9 +374,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> GetObservationResponse:
         """Get current observation from simulation."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._GetObservation_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("GetObservation", self._GetObservation_stub, request, timeout, metadata)
 
     def GetJointPosition(
         self,
@@ -313,9 +383,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> GetJointPositionResponse:
         """Get current joint positions."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._GetJointPosition_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("GetJointPosition", self._GetJointPosition_stub, request, timeout, metadata)
 
     def SetJointPosition(
         self,
@@ -324,9 +392,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> SetJointPositionResponse:
         """Set robot joint positions."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._SetJointPosition_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("SetJointPosition", self._SetJointPosition_stub, request, timeout, metadata)
 
     def GetEEPose(
         self,
@@ -335,9 +401,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> GetEEPoseResponse:
         """Get end-effector pose."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._GetEEPose_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("GetEEPose", self._GetEEPose_stub, request, timeout, metadata)
 
     def GetGripperState(
         self,
@@ -346,9 +410,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> GetGripperStateResponse:
         """Get gripper state."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._GetGripperState_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("GetGripperState", self._GetGripperState_stub, request, timeout, metadata)
 
     def GetIKStatus(
         self,
@@ -357,9 +419,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> GetIKStatusResponse:
         """Get IK solver status."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._GetIKStatus_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("GetIKStatus", self._GetIKStatus_stub, request, timeout, metadata)
 
     def GetTaskStatus(
         self,
@@ -368,9 +428,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> TaskStatusResponse:
         """Get task status."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._GetTaskStatus_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("GetTaskStatus", self._GetTaskStatus_stub, request, timeout, metadata)
 
     def SetGripperState(
         self,
@@ -379,9 +437,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> SetGripperStateResponse:
         """Set gripper state (width and force)."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._SetGripperState_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("SetGripperState", self._SetGripperState_stub, request, timeout, metadata)
 
     def LinearMove(
         self,
@@ -390,9 +446,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> LinearMoveResponse:
         """Execute a linear move."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._LinearMove_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("LinearMove", self._LinearMove_stub, request, timeout, metadata)
 
     def GetObjectPose(
         self,
@@ -401,9 +455,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> GetObjectPoseResponse:
         """Get object pose."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._GetObjectPose_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("GetObjectPose", self._GetObjectPose_stub, request, timeout, metadata)
 
     def InitRobot(
         self,
@@ -412,9 +464,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> InitRobotResponse:
         """Initialize robot."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._InitRobot_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("InitRobot", self._InitRobot_stub, request, timeout, metadata)
 
     def SetObjectPose(
         self,
@@ -423,9 +473,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> SetObjectPoseResponse:
         """Set object pose."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._SetObjectPose_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("SetObjectPose", self._SetObjectPose_stub, request, timeout, metadata)
 
     def AttachObject(
         self,
@@ -434,9 +482,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> AttachObjectResponse:
         """Attach an object to a robot link."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._AttachObject_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("AttachObject", self._AttachObject_stub, request, timeout, metadata)
 
     def DetachObject(
         self,
@@ -445,9 +491,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> DetachObjectResponse:
         """Detach an object from a robot link."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._DetachObject_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("DetachObject", self._DetachObject_stub, request, timeout, metadata)
 
     def SetTrajectory(
         self,
@@ -456,9 +500,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> SetTrajectoryResponse:
         """Execute a trajectory."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._SetTrajectory_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("SetTrajectory", self._SetTrajectory_stub, request, timeout, metadata)
 
     def StartRecording(
         self,
@@ -467,9 +509,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> StartRecordingResponse:
         """Start recording an episode."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._StartRecording_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("StartRecording", self._StartRecording_stub, request, timeout, metadata)
 
     def StopRecording(
         self,
@@ -478,9 +518,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> StopRecordingResponse:
         """Stop recording current episode."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._StopRecording_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("StopRecording", self._StopRecording_stub, request, timeout, metadata)
 
     def Reset(
         self,
@@ -489,9 +527,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> ResetResponse:
         """Reset the simulation environment."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._Reset_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("Reset", self._Reset_stub, request, timeout, metadata)
 
     def AddCamera(
         self,
@@ -500,9 +536,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> AddCameraResponse:
         """Add a camera to the simulation."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._AddCamera_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("AddCamera", self._AddCamera_stub, request, timeout, metadata)
 
     def SendCommand(
         self,
@@ -511,9 +545,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> CommandResponse:
         """Send a generic command."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._SendCommand_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("SendCommand", self._SendCommand_stub, request, timeout, metadata)
 
     def StreamObservations(
         self,
@@ -522,9 +554,7 @@ class GenieSimServiceStub:
         metadata: Optional[tuple] = None,
     ) -> Iterator[GetObservationResponse]:
         """Stream observations from simulation."""
-        if not GRPC_AVAILABLE or self._channel is None:
-            raise RuntimeError("gRPC not available or channel not connected")
-        return self._StreamObservations_stub(request, timeout=timeout, metadata=metadata)
+        return self._call("StreamObservations", self._StreamObservations_stub, request, timeout, metadata)
 
 # =============================================================================
 # Service Servicer (Server - for reference/testing)
@@ -1380,6 +1410,79 @@ def is_grpc_available() -> bool:
     return GRPC_AVAILABLE
 
 
+if GRPC_AVAILABLE:
+    class _AuthInterceptor(grpc.UnaryUnaryClientInterceptor, grpc.UnaryStreamClientInterceptor):
+        """Inject auth metadata on outbound requests."""
+
+        def __init__(self, metadata: Tuple[Tuple[str, str], ...]):
+            self._metadata = metadata
+
+        def _augment_details(self, client_call_details):
+            base_metadata = []
+            if client_call_details.metadata:
+                base_metadata.extend(client_call_details.metadata)
+            base_metadata.extend(self._metadata)
+            return _ClientCallDetails(
+                method=client_call_details.method,
+                timeout=client_call_details.timeout,
+                metadata=tuple(base_metadata),
+                credentials=client_call_details.credentials,
+                wait_for_ready=client_call_details.wait_for_ready,
+                compression=client_call_details.compression,
+            )
+
+        def intercept_unary_unary(self, continuation, client_call_details, request):
+            return continuation(self._augment_details(client_call_details), request)
+
+        def intercept_unary_stream(self, continuation, client_call_details, request):
+            return continuation(self._augment_details(client_call_details), request)
+else:
+    class _AuthInterceptor:
+        """No-op interceptor placeholder when gRPC is unavailable."""
+
+        def __init__(self, metadata: Tuple[Tuple[str, str], ...]):
+            self._metadata = metadata
+
+
+def _load_file_bytes(path_value: Optional[str]) -> Optional[bytes]:
+    if not path_value:
+        return None
+    return Path(path_value).read_bytes()
+
+
+def _load_file_text(path_value: Optional[str]) -> Optional[str]:
+    if not path_value:
+        return None
+    return Path(path_value).read_text()
+
+
+def _build_auth_metadata() -> Tuple[Tuple[str, str], ...]:
+    from tools.geniesim_adapter.config import (
+        get_geniesim_auth_cert_path,
+        get_geniesim_auth_key_path,
+        get_geniesim_auth_token,
+        get_geniesim_auth_token_path,
+    )
+
+    token = get_geniesim_auth_token()
+    token_path = get_geniesim_auth_token_path()
+    if not token and token_path:
+        token = _load_file_text(token_path)
+
+    metadata = []
+    if token:
+        metadata.append(("authorization", f"Bearer {token.strip()}"))
+
+    auth_cert_path = get_geniesim_auth_cert_path()
+    auth_key_path = get_geniesim_auth_key_path()
+    if auth_cert_path:
+        metadata.append(("x-geniesim-client-cert", _load_file_text(auth_cert_path) or ""))
+    if auth_key_path:
+        metadata.append(("x-geniesim-client-key", _load_file_text(auth_key_path) or ""))
+
+    return tuple(metadata)
+
+
 def create_channel(
     host: Optional[str] = None,
     port: Optional[int] = None,
@@ -1413,4 +1516,32 @@ def create_channel(
             ('grpc.max_send_message_length', 16 * 1024 * 1024),
         ]
 
-    return grpc.insecure_channel(f"{host}:{port}", options=options)
+    from tools.geniesim_adapter.config import (
+        get_geniesim_tls_ca_path,
+        get_geniesim_tls_cert_path,
+        get_geniesim_tls_key_path,
+    )
+
+    tls_cert_path = get_geniesim_tls_cert_path()
+    tls_key_path = get_geniesim_tls_key_path()
+    tls_ca_path = get_geniesim_tls_ca_path()
+    use_tls = any([tls_cert_path, tls_key_path, tls_ca_path])
+
+    if use_tls:
+        root_certificates = _load_file_bytes(tls_ca_path)
+        private_key = _load_file_bytes(tls_key_path)
+        certificate_chain = _load_file_bytes(tls_cert_path)
+        credentials = grpc.ssl_channel_credentials(
+            root_certificates=root_certificates,
+            private_key=private_key,
+            certificate_chain=certificate_chain,
+        )
+        channel = grpc.secure_channel(f"{host}:{port}", credentials, options=options)
+    else:
+        channel = grpc.insecure_channel(f"{host}:{port}", options=options)
+
+    auth_metadata = _build_auth_metadata()
+    if auth_metadata:
+        channel = grpc.intercept_channel(channel, _AuthInterceptor(auth_metadata))
+
+    return channel
