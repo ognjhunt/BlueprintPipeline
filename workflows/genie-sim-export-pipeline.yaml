@@ -696,7 +696,7 @@ main:
             timeout_usage_ratio: ${submissionTimeoutUsageRatio}
             timed_out: ${submissionTimedOut}
             status: "FAILED"
-            execution_name: ${submissionExecutionName}
+            execution_name: ${default(submissionExecutionName, "unknown")}
             start_time: ${submissionStartTime}
             end_time: ${submissionEndTime}
           severity: "ERROR"
@@ -968,7 +968,7 @@ main:
             timeout_usage_ratio: ${exportTimeoutUsageRatio}
             timed_out: ${exportTimedOut}
             status: "FAILED"
-            execution_name: ${executionName}
+            execution_name: ${default(executionName, "unknown")}
             start_time: ${exportStartTime}
             end_time: ${exportEndTime}
           severity: "ERROR"
@@ -1024,7 +1024,7 @@ main:
               "stack_trace": null
             },
             "context": {
-              "execution_id": geniesimExecutionName,
+              "execution_id": ${default(executionName, "unknown")},
               "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
               "attempt_number": 1,
               "config_context": {
