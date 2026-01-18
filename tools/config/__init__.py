@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 try:
-    from pydantic import BaseModel, ValidationError, validator
+    from pydantic import BaseModel, ConfigDict, ValidationError, validator
     HAVE_PYDANTIC = True
 except ImportError:
     HAVE_PYDANTIC = False
@@ -306,8 +306,7 @@ if HAVE_PYDANTIC:
         errors: List[str] = field(default_factory=list)
         warnings: List[str] = field(default_factory=list)
 
-        class Config:
-            arbitrary_types_allowed = True
+        model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 # =============================================================================
