@@ -241,6 +241,24 @@ print(f"Genie Sim: ${breakdown.geniesim:.4f}")
 print(f"Compute: ${breakdown.cloud_run:.4f}")
 ```
 
+### Cost tracking configuration
+
+Cost tracking reads pricing overrides from environment variables:
+
+* `GENIESIM_JOB_COST` and `GENIESIM_EPISODE_COST` must be set to real values in
+  production (`BP_ENV` or `GENIESIM_ENV` set to `production`/`prod`), otherwise
+  the tracker raises an error.
+* `GENIESIM_GPU_RATE_TABLE` can contain JSON for per-region or per-node hourly
+  GPU rates (for example, `{"default": {"g5.xlarge": 1.006}}`).
+* `GENIESIM_GPU_RATE_TABLE_PATH` points at a JSON file with the same structure.
+* `GENIESIM_GPU_HOURLY_RATE` provides a single fallback hourly rate if no table
+  entry matches.
+* `GENIESIM_GPU_REGION` and `GENIESIM_GPU_NODE_TYPE` can be used to select the
+  hourly rate when job metadata does not include region or node type.
+* `COST_TRACKING_PRICING_JSON` or `COST_TRACKING_PRICING_PATH` can override any
+  pricing keys in `tools/cost_tracking/tracker.py` (for example, Cloud Run
+  pricing).
+
 ## SLO Targets & On-Call Escalation
 
 ### SLO Targets
