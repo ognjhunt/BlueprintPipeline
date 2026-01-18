@@ -111,6 +111,38 @@ Edit `configs/<policy_id>.json` to customize:
 - Capture resolution
 - Annotations to generate
 
+### Physics Hint Keys
+
+Some randomizers accept optional physics hints to keep randomization physically plausible. These keys can be set under
+`randomizers[].parameters.physics_hints` (or as top-level keys in `parameters`) and are applied during material/pose
+randomization.
+
+Defaults applied when not specified:
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `dynamic_friction_range` | `[0.3, 0.9]` | Applied to `physxMaterial:dynamicFriction` on randomized materials. |
+| `static_friction_range` | `[0.4, 1.0]` | Applied to `physxMaterial:staticFriction` on randomized materials. |
+| `restitution_range` | `[0.0, 0.2]` | Applied to `physxMaterial:restitution` on randomized materials. |
+| `mass_scale_range` | `[0.9, 1.1]` | Applied to `physxMassProperties:massScale` on scattered/material-randomized prims. |
+| `density_scale_range` | `[0.9, 1.1]` | Applied to `physxMassProperties:densityScale` on scattered/material-randomized prims. |
+| `collision_check` | `true` | Enables collision-aware scattering for `object_scatter`/`object_placement`. |
+
+Example:
+
+```json
+{
+  "name": "material_variation",
+  "parameters": {
+    "physics_hints": {
+      "dynamic_friction_range": [0.2, 0.8],
+      "static_friction_range": [0.3, 0.9],
+      "mass_scale_range": [0.8, 1.2]
+    }
+  }
+}
+```
+
 ## Environment Variables
 
 | Variable | Required | Description |
