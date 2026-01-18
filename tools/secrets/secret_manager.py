@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Dict, Optional
 
@@ -337,6 +338,9 @@ def update_secret(
     secret_id: str,
     secret_value: str,
     project_id: Optional[str] = None,
+    rotation_reason: Optional[str] = None,
+    rotation_actor: Optional[str] = None,
+    rotation_metadata: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Update an existing secret with a new value.
@@ -382,8 +386,57 @@ def update_secret(
         )
 
         logger.info(f"Updated secret: {secret_id} (version: {response.name})")
+        resolved_reason = (
+            rotation_reason
+            or os.getenv("SECRET_ROTATION_REASON")
+            or "manual"
+        )
+        resolved_actor = rotation_actor or os.getenv("SECRET_ROTATION_ACTOR")
+        metadata_payload = {
+            "project_id": project_id,
+            **(rotation_metadata or {}),
+        }
+        record_rotation_metadata(
+            secret_id=secret_id,
+            version=response.name,
+            rotated_at=datetime.now(timezone.utc).isoformat(),
+            actor=resolved_actor,
+            reason=resolved_reason,
+            metadata=metadata_payload,
+        )
 
     except Exception as e:
         raise SecretManagerError(
             f"Failed to update secret '{secret_id}': {e}"
         ) from e
+
+
+def record_rotation_metadata(
+    secret_id: str,
+    version: str,
+    rotated_at: Optional[str] = None,
+    actor: Optional[str] = None,
+    reason: Optional[str] = None,
+    metadata: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    Record secret rotation metadata for audit logging.
+
+    Args:
+        secret_id: Secret identifier
+        version: Secret version name
+        rotated_at: ISO-8601 timestamp (UTC recommended)
+        actor: Actor performing the rotation (service account or user)
+        reason: Rotation reason (scheduled/manual/break-glass)
+        metadata: Additional metadata to log
+    """
+    payload = {
+        "event": "secret_rotation",
+        "secret_id": secret_id,
+        "version": version,
+        "rotated_at": rotated_at or datetime.now(timezone.utc).isoformat(),
+        "actor": actor,
+        "reason": reason,
+        "metadata": metadata or {},
+    }
+    logger.info("Secret rotation metadata recorded: %s", payload)
