@@ -775,6 +775,26 @@ class CostTracker:
         self.entries.append(entry)
         self._update_scene_total(scene_id, amount)
         self._save_entry(entry)
+        self._emit_cost_metric(entry)
+
+    def _emit_cost_metric(self, entry: CostEntry) -> None:
+        try:
+            from tools.metrics.pipeline_metrics import get_metrics
+        except Exception:
+            return
+
+        try:
+            metrics = get_metrics()
+            metrics.pipeline_cost_total_usd.inc(
+                entry.amount,
+                labels={
+                    "job": f"{entry.category}:{entry.subcategory}",
+                    "scene_id": entry.scene_id,
+                    "status": "recorded",
+                },
+            )
+        except Exception:
+            logger.debug("Failed to emit cost metric for entry %s", entry)
 
     def _load_data(self) -> None:
         """Load existing cost data."""
