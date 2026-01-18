@@ -89,6 +89,47 @@ echo -n "<new-value>" | gcloud secrets versions add PIPELINE_API_KEY --data-file
 
 Ensure IAM bindings allow the runtime service accounts to access the secret versions.
 
+### Automated rotation (Cloud Scheduler + Cloud Run job)
+
+The pipeline supports automated secret rotation via a Cloud Run job and a Cloud Scheduler trigger managed by
+Terraform. The job generates new secret versions at a fixed cadence and relies on workloads to use `latest`
+secret versions at runtime (Cloud Run/GKE workloads fetch `latest` by default). Restart long-lived services
+after rotation if they cache secrets in memory.
+
+**Configure rotation in Terraform**
+
+1. Build/push the rotation job image from `infrastructure/secret-rotation/`.
+2. Update Terraform variables:
+   - `secret_rotation_job_image`
+   - `secret_rotation_secret_ids`
+   - `secret_rotation_schedule` / `secret_rotation_time_zone`
+3. Apply Terraform to deploy the scheduler + job.
+
+**Validation**
+
+```bash
+gcloud run jobs describe secret-rotation-job --region=<region>
+gcloud scheduler jobs describe secret-rotation-schedule --location=<region>
+```
+
+**Rollback**
+
+1. Pause the scheduler:
+
+```bash
+gcloud scheduler jobs pause secret-rotation-schedule --location=<region>
+```
+
+2. Pin the desired secret version (if a rollback is required):
+
+```bash
+gcloud secrets versions list <SECRET_ID>
+gcloud secrets versions access <VERSION> --secret=<SECRET_ID> > /tmp/secret-value
+echo -n \"$(cat /tmp/secret-value)\" | gcloud secrets versions add <SECRET_ID> --data-file=-
+```
+
+3. Restart Cloud Run services/jobs or GKE workloads if they cache secrets in memory.
+
 ## Step 3: Deploy Cloud Run jobs
 
 Update each pipeline job to point at the desired image tag. Use the same region as the infrastructure.

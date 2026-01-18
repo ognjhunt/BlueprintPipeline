@@ -103,3 +103,22 @@ labels = {
   team        = "robotics"
   cost_center = "engineering"
 }
+
+# =============================================================================
+# Secret rotation automation
+# =============================================================================
+
+# Container image for the Cloud Run rotation job
+secret_rotation_job_image = "us-docker.pkg.dev/your-gcp-project-id/pipeline/secret-rotation:latest"
+
+# Comma-delimited list of secret IDs to rotate
+secret_rotation_secret_ids = [
+  "pipeline-internal-token",
+]
+
+# Cron schedule (default: daily at 03:00 UTC)
+secret_rotation_schedule  = "0 3 * * *"
+secret_rotation_time_zone = "Etc/UTC"
+
+# Random byte length for generated values
+secret_rotation_byte_length = 32
