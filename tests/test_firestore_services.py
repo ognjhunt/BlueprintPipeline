@@ -32,6 +32,8 @@ class FakeDocRef:
         return FakeDoc(self.collection._documents.get(self.doc_id), exists=exists)
 
     def set(self, data, merge: bool = False):
+        if self.collection.fail_writes:
+            raise RuntimeError("set failed")
         self.set_calls.append({"data": data, "merge": merge})
         if merge and self.doc_id in self.collection._documents:
             merged = dict(self.collection._documents[self.doc_id])
@@ -81,11 +83,12 @@ class FakeQuery:
 class FakeCollection:
     """Collection wrapper that produces document refs and queries."""
 
-    def __init__(self, name, documents=None):
+    def __init__(self, name, documents=None, fail_writes: bool = False):
         self.name = name
         self._documents = documents or {}
         self._doc_refs = {}
         self.last_query = None
+        self.fail_writes = fail_writes
 
     def document(self, doc_id: str):
         if doc_id not in self._doc_refs:
@@ -100,16 +103,48 @@ class FakeCollection:
 class FakeFirestoreClient:
     """Client wrapper that stores collections."""
 
-    def __init__(self, initial=None):
+    def __init__(self, initial=None, batch_should_fail: bool = False, fail_writes: bool = False):
         self._collections = {}
+        self.batch_should_fail = batch_should_fail
+        self.fail_writes = fail_writes
+        self.batch_calls = []
         for name, docs in (initial or {}).items():
-            self._collections[name] = FakeCollection(name, documents=docs)
+            self._collections[name] = FakeCollection(
+                name,
+                documents=docs,
+                fail_writes=fail_writes,
+            )
 
     def collection(self, name: str):
         if name not in self._collections:
-            self._collections[name] = FakeCollection(name)
+            self._collections[name] = FakeCollection(name, fail_writes=self.fail_writes)
         return self._collections[name]
 
+    def batch(self):
+        batch = FakeBatch(self, should_fail=self.batch_should_fail)
+        self.batch_calls.append(batch)
+        return batch
+
+
+class FakeBatch:
+    """Batch write implementation for testing."""
+
+    def __init__(self, client, should_fail: bool = False):
+        self.client = client
+        self.should_fail = should_fail
+        self.set_calls = []
+        self.commit_calls = 0
+
+    def set(self, doc_ref, data):
+        self.set_calls.append({"doc_ref": doc_ref, "data": data})
+
+    def commit(self):
+        self.commit_calls += 1
+        if self.should_fail:
+            raise RuntimeError("batch commit failed")
+        for call in self.set_calls:
+            doc_ref = call["doc_ref"]
+            doc_ref.set(call["data"])
 
 class FakeFirestoreModule:
     """Fake firestore module providing Client and constants."""
@@ -197,11 +232,87 @@ def test_generation_history_tracker_records_generation(load_job_module, monkeypa
         success=True,
     )
 
-    assert tracker.record_generation(entry) is True
+    result = tracker.record_generation(entry)
+    assert result.success is True
     doc_ref = client.collection(collection_name)._doc_refs[entry.scene_id]
     assert doc_ref.set_calls
     payload = doc_ref.set_calls[0]["data"]
     assert payload["generated_at"] is fake_firestore.SERVER_TIMESTAMP
+
+
+def test_generation_history_tracker_batches_multiple_entries(load_job_module, monkeypatch):
+    module = _load_scene_generation_module(load_job_module)
+    collection_name = module.FIRESTORE_COLLECTION_HISTORY
+    client = FakeFirestoreClient({collection_name: {}})
+    fake_firestore = FakeFirestoreModule(client)
+    monkeypatch.setattr(module, "firestore", fake_firestore)
+    monkeypatch.setattr(module, "HAVE_CLOUD_DEPS", True)
+
+    tracker = module.GenerationHistoryTracker()
+    entries = [
+        module.GenerationHistoryEntry(
+            scene_id="scene-1",
+            archetype="kitchen",
+            prompt_hash="hash1",
+            prompt_summary="summary1",
+            variation_tags=["tag1"],
+            generated_at=datetime.datetime.now(datetime.timezone.utc),
+            success=True,
+        ),
+        module.GenerationHistoryEntry(
+            scene_id="scene-2",
+            archetype="office",
+            prompt_hash="hash2",
+            prompt_summary="summary2",
+            variation_tags=["tag2"],
+            generated_at=datetime.datetime.now(datetime.timezone.utc),
+            success=True,
+        ),
+    ]
+
+    result = tracker.record_generations(entries)
+    assert result.success is True
+    assert result.documents_written == 2
+    assert len(client.batch_calls) == 1
+    batch = client.batch_calls[0]
+    assert batch.commit_calls == 1
+    assert len(batch.set_calls) == 2
+
+
+def test_generation_history_tracker_surfaces_batch_failure(load_job_module, monkeypatch):
+    module = _load_scene_generation_module(load_job_module)
+    collection_name = module.FIRESTORE_COLLECTION_HISTORY
+    client = FakeFirestoreClient({collection_name: {}}, batch_should_fail=True)
+    fake_firestore = FakeFirestoreModule(client)
+    monkeypatch.setattr(module, "firestore", fake_firestore)
+    monkeypatch.setattr(module, "HAVE_CLOUD_DEPS", True)
+
+    tracker = module.GenerationHistoryTracker()
+    entries = [
+        module.GenerationHistoryEntry(
+            scene_id="scene-1",
+            archetype="kitchen",
+            prompt_hash="hash1",
+            prompt_summary="summary1",
+            variation_tags=["tag1"],
+            generated_at=datetime.datetime.now(datetime.timezone.utc),
+            success=True,
+        ),
+        module.GenerationHistoryEntry(
+            scene_id="scene-2",
+            archetype="office",
+            prompt_hash="hash2",
+            prompt_summary="summary2",
+            variation_tags=["tag2"],
+            generated_at=datetime.datetime.now(datetime.timezone.utc),
+            success=True,
+        ),
+    ]
+
+    result = tracker.record_generations(entries)
+    assert result.success is False
+    assert result.errors
+    assert result.errors[0].exception_type == "RuntimeError"
 
 
 def test_generation_history_tracker_firestore_unavailable(load_job_module, monkeypatch, capsys):
