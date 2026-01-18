@@ -24,6 +24,8 @@ Environment Variables:
     APPROVED_PARTICULATE_MODELS: Comma-separated allowlist for local Particulate models (default: pat_b)
     REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
+    BP_ENV / PIPELINE_ENV: Pipeline environment (e.g., "production") for production guardrails
+    PRODUCTION_MODE: Explicit boolean override for production mode (takes priority over BP_ENV/PIPELINE_ENV)
     DISALLOW_PLACEHOLDER_URDF: "true" to fail if placeholder URDFs are generated
     LABS_MODE: "true" to enforce labs guardrails (Particulate required, no heuristics)
 """
@@ -106,6 +108,23 @@ def normalize_particulate_mode(value: str) -> str:
 def parse_csv_env(value: str) -> List[str]:
     """Parse a comma-separated environment value into a normalized list."""
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def resolve_production_mode() -> Tuple[bool, str, Optional[str]]:
+    """Resolve production mode from explicit override or pipeline environment."""
+    explicit_value = os.getenv("PRODUCTION_MODE")
+    if explicit_value is not None:
+        return env_flag(explicit_value, default=False), "PRODUCTION_MODE", explicit_value
+
+    pipeline_env = os.getenv("BP_ENV")
+    if pipeline_env is not None:
+        return pipeline_env.strip().lower() in {"production", "prod"}, "BP_ENV", pipeline_env
+
+    pipeline_env = os.getenv("PIPELINE_ENV")
+    if pipeline_env is not None:
+        return pipeline_env.strip().lower() in {"production", "prod"}, "PIPELINE_ENV", pipeline_env
+
+    return False, "default", None
 
 
 def resolve_particulate_endpoint(
@@ -196,6 +215,26 @@ def write_status_marker(
     }
     save_json(payload, marker_path)
     log(f"Wrote status marker: {marker_path} ({status})")
+    return marker_path
+
+
+def write_placeholder_warning_marker(
+    assets_root: Path,
+    scene_id: str,
+    placeholders: List[Dict[str, Any]],
+) -> Path:
+    """Write a warning marker when placeholder URDFs are generated."""
+    marker_path = assets_root / ".interactive_placeholder_warning"
+    payload = {
+        "scene_id": scene_id,
+        "status": "warning",
+        "reason": "placeholder_urdf_generated",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "placeholder_count": len(placeholders),
+        "objects": placeholders,
+    }
+    save_json(payload, marker_path)
+    log(f"Wrote placeholder warning marker: {marker_path}", "WARNING")
     return marker_path
 
 
@@ -1365,6 +1404,7 @@ def process_object(
         "urdf_path": None,
         "joint_count": 0,
         "is_articulated": False,
+        "placeholder": False,
     }
 
     # Find GLB mesh from 3D-RE-GEN
@@ -1411,6 +1451,8 @@ def process_object(
             encoding="utf-8",
         )
         result["urdf_path"] = str(urdf_path)
+        result["placeholder"] = True
+        result["placeholder_reason"] = "no_glb"
         return result
 
     # Check if Particulate endpoint is configured
@@ -1603,7 +1645,7 @@ def main() -> None:
     )
 
     mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
-    production_mode = env_flag(os.getenv("PRODUCTION_MODE"), default=False)
+    production_mode, production_source, production_value = resolve_production_mode()
     labs_mode = env_flag(os.getenv("LABS_MODE"), default=False)
     disallow_placeholder_env = env_flag(os.getenv("DISALLOW_PLACEHOLDER_URDF"), default=False)
     disallow_placeholder_urdf = production_mode or disallow_placeholder_env
@@ -1656,6 +1698,9 @@ def main() -> None:
     log(f"Mode: {mode}")
     log(f"Interactive objects: {len(interactive_objects)}")
     log(f"Production mode: {production_mode}")
+    if production_mode:
+        source_value = production_value.strip() if isinstance(production_value, str) else production_value
+        log(f"Production mode source: {production_source}={source_value}")
     log(f"Labs mode: {labs_mode}")
     log(f"Disallow placeholder URDFs: {disallow_placeholder_urdf}")
     log(f"Articulation backend: {articulation_backend}")
@@ -1668,6 +1713,8 @@ def main() -> None:
         "mode": mode,
         "particulate_mode": particulate_mode,
         "production_mode": production_mode,
+        "production_mode_source": production_source,
+        "production_mode_value": production_value,
         "labs_mode": labs_mode,
         "disallow_placeholder_urdf": disallow_placeholder_urdf,
         "particulate_endpoint": particulate_endpoint or None,
@@ -1876,6 +1923,17 @@ def main() -> None:
     error_count = sum(1 for r in results if r.get("status") == "error")
     fallback_count = sum(1 for r in results if r.get("status") in ("fallback", "static"))
     skipped_count = sum(1 for r in results if r.get("status") == "skipped")
+    placeholder_results = [
+        {
+            "id": r.get("id"),
+            "name": r.get("name"),
+            "class_name": r.get("class_name"),
+            "reason": r.get("placeholder_reason"),
+            "urdf_path": r.get("urdf_path"),
+        }
+        for r in results
+        if r.get("placeholder")
+    ]
     error_payloads, warning_payloads = collect_result_payloads(results)
 
     # Write results
@@ -1898,6 +1956,13 @@ def main() -> None:
     ensure_dir(results_path.parent)
     save_json(results_data, results_path)
     log(f"Results written to {results_path}")
+
+    if placeholder_results and not production_mode:
+        write_placeholder_warning_marker(
+            assets_root=assets_root,
+            scene_id=scene_id,
+            placeholders=placeholder_results,
+        )
 
     if production_mode and ok_count == 0 and len(interactive_objects) > 0:
         log("No successful articulations in production mode", "ERROR")
