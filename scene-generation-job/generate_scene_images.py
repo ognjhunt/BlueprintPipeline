@@ -777,6 +777,7 @@ class SceneImageGenerator:
                 local_path,
                 gcs_uri,
                 logger=LOGGER,
+                verify_upload=True,
             )
 
             if not result.success:
@@ -824,6 +825,7 @@ class SceneImageGenerator:
                     marker_uri,
                     logger=LOGGER,
                     content_type="application/json",
+                    verify_upload=True,
                 )
 
             if not result.success:

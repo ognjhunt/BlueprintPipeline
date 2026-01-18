@@ -6,6 +6,7 @@ Downloads prepared DWM bundles from GCS, runs the DWM inference pipeline,
 and uploads interaction videos + frames back to the same prefix.
 """
 
+import logging
 import os
 import sys
 import tempfile
@@ -15,6 +16,12 @@ from pathlib import Path
 from google.cloud import storage
 
 from dwm_inference_job import DWMInferenceConfig, DWMInferenceJob
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.gcs_upload import upload_blob_from_filename
 
 
 def download_dwm_bundles(
@@ -49,13 +56,26 @@ def upload_dwm_bundles(
     """Upload updated DWM bundles back to GCS."""
     bucket = client.bucket(bucket_name)
     upload_count = 0
+    logger = logging.getLogger("dwm-inference-job")
 
     for local_path in local_dir.rglob("*"):
         if local_path.is_file():
             relative_path = local_path.relative_to(local_dir)
             blob_path = f"{dwm_prefix}/{relative_path}"
             blob = bucket.blob(blob_path)
-            blob.upload_from_filename(str(local_path))
+            gcs_uri = f"gs://{bucket_name}/{blob_path}"
+            result = upload_blob_from_filename(
+                blob,
+                local_path,
+                gcs_uri,
+                logger=logger,
+                verify_upload=True,
+            )
+            if not result.success:
+                print(
+                    "[DWM-INFERENCE] WARNING: Upload verification failed for "
+                    f"{gcs_uri}: {result.error}"
+                )
             upload_count += 1
 
             if upload_count % 50 == 0:

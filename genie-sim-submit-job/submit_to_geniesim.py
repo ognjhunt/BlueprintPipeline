@@ -40,7 +40,11 @@ from geniesim_adapter.local_framework import (
     run_geniesim_preflight_or_exit,
 )
 from tools.metrics.pipeline_metrics import get_metrics
-from tools.gcs_upload import upload_blob_from_filename
+from tools.gcs_upload import (
+    calculate_md5_base64,
+    upload_blob_from_filename,
+    verify_blob_upload,
+)
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
@@ -137,7 +141,19 @@ def _read_json_blob(client: storage.Client, bucket: str, blob_name: str) -> Dict
 
 def _write_json_blob(client: storage.Client, bucket: str, blob_name: str, payload: Dict[str, Any]) -> None:
     blob = client.bucket(bucket).blob(blob_name)
-    blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
+    payload_json = json.dumps(payload, indent=2)
+    payload_bytes = payload_json.encode("utf-8")
+    blob.upload_from_string(payload_json, content_type="application/json")
+    gcs_uri = f"gs://{bucket}/{blob_name}"
+    verified, failure_reason = verify_blob_upload(
+        blob,
+        gcs_uri=gcs_uri,
+        expected_size=len(payload_bytes),
+        expected_md5=calculate_md5_base64(payload_bytes),
+        logger=logging.getLogger("genie-sim-submit-job"),
+    )
+    if not verified:
+        raise RuntimeError(f"GCS upload verification failed for {gcs_uri}: {failure_reason}")
 
 
 def _write_failure_marker(
@@ -598,6 +614,7 @@ def main() -> int:
                     file_path,
                     gcs_uri,
                     logger=logger,
+                    verify_upload=True,
                 )
                 if not result.success:
                     upload_failures.append(

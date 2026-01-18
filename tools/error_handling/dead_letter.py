@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tools.gcs_upload import calculate_md5_base64, verify_blob_upload
+
 from .errors import PipelineError, ErrorContext
 
 logger = logging.getLogger(__name__)
@@ -200,10 +202,21 @@ class GCSDeadLetterQueue(DeadLetterQueue):
 
         blob_path = self._get_blob_path(message.message_id, message.status)
         blob = self._bucket.blob(blob_path)
-        blob.upload_from_string(
-            message.to_json(),
-            content_type="application/json",
+        payload_json = message.to_json()
+        payload_bytes = payload_json.encode("utf-8")
+        blob.upload_from_string(payload_json, content_type="application/json")
+        verified, failure_reason = verify_blob_upload(
+            blob,
+            gcs_uri=f"gs://{self.bucket_name}/{blob_path}",
+            expected_size=len(payload_bytes),
+            expected_md5=calculate_md5_base64(payload_bytes),
+            logger=logger,
         )
+        if not verified:
+            logger.error(
+                "DLQ upload verification failed: %s",
+                failure_reason,
+            )
 
         logger.info(f"Published to DLQ: {message.message_id} at {blob_path}")
         return message.message_id
@@ -340,11 +353,25 @@ class GCSDeadLetterQueue(DeadLetterQueue):
                                 data.setdefault("metadata", {}).update(metadata)
 
                             # Write back with optimistic locking
+                            payload_json = json.dumps(data, indent=2)
+                            payload_bytes = payload_json.encode("utf-8")
                             blob.upload_from_string(
-                                json.dumps(data, indent=2),
+                                payload_json,
                                 content_type="application/json",
                                 if_generation_match=generation,
                             )
+                            verified, failure_reason = verify_blob_upload(
+                                blob,
+                                gcs_uri=f"gs://{self.bucket_name}/{blob_path}",
+                                expected_size=len(payload_bytes),
+                                expected_md5=calculate_md5_base64(payload_bytes),
+                                logger=logger,
+                            )
+                            if not verified:
+                                logger.error(
+                                    "DLQ status update verification failed: %s",
+                                    failure_reason,
+                                )
 
                             # Move if status changed
                             if current_status != status:

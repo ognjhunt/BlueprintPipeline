@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tools.gcs_upload import calculate_md5_base64, verify_blob_upload
+
 logger = logging.getLogger(__name__)
 
 
@@ -344,24 +346,42 @@ class FailureMarkerWriter:
             # Write detailed failure marker
             blob_path = f"{self.base_path}/.failed"
             blob = bucket.blob(blob_path)
-            blob.upload_from_string(
-                context.to_json(),
-                content_type="application/json",
+            detailed_json = context.to_json()
+            detailed_bytes = detailed_json.encode("utf-8")
+            blob.upload_from_string(detailed_json, content_type="application/json")
+            verified, failure_reason = verify_blob_upload(
+                blob,
+                gcs_uri=f"gs://{self.bucket}/{blob_path}",
+                expected_size=len(detailed_bytes),
+                expected_md5=calculate_md5_base64(detailed_bytes),
+                logger=logger,
             )
+            if not verified:
+                logger.error("Failed to verify failure marker upload: %s", failure_reason)
 
             # Also write a simple marker for backward compatibility
             simple_marker_path = f"{self.base_path}/.failed.summary"
             simple_blob = bucket.blob(simple_marker_path)
-            simple_blob.upload_from_string(
-                json.dumps({
+            summary_payload = json.dumps(
+                {
                     "scene_id": self.scene_id,
                     "job_name": self.job_name,
                     "status": "failed",
                     "timestamp": context.timestamp,
                     "error": context.error_message,
-                }),
-                content_type="application/json",
+                }
             )
+            summary_bytes = summary_payload.encode("utf-8")
+            simple_blob.upload_from_string(summary_payload, content_type="application/json")
+            verified, failure_reason = verify_blob_upload(
+                simple_blob,
+                gcs_uri=f"gs://{self.bucket}/{simple_marker_path}",
+                expected_size=len(summary_bytes),
+                expected_md5=calculate_md5_base64(summary_bytes),
+                logger=logger,
+            )
+            if not verified:
+                logger.error("Failed to verify failure summary upload: %s", failure_reason)
 
             return Path(f"gs://{self.bucket}/{blob_path}")
 

@@ -140,6 +140,7 @@ def upload_dream2flow_bundles(
                 local_path,
                 gcs_uri,
                 logger=logger,
+                verify_upload=True,
             )
             attempted_count += 1
             if result.success:
