@@ -12,9 +12,12 @@ Provides comprehensive input validation to prevent:
 from __future__ import annotations
 
 import logging
+import math
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Collection, Dict, List, Optional, Pattern, Union
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -455,6 +458,151 @@ def validate_rgb_color(color: Union[List[float], tuple]) -> List[float]:
         ))
 
     return validated
+
+
+def validate_quaternion(
+    quaternion: Union[List[float], tuple, np.ndarray, Dict[str, float]],
+    field_name: Optional[str] = None,
+    auto_normalize: bool = True,
+    warn_on_fix: bool = True,
+    eps: float = 1e-6,
+) -> List[float]:
+    """
+    Validate a quaternion and optionally normalize it.
+
+    Args:
+        quaternion: Quaternion as [w, x, y, z] or dict with w/x/y/z keys.
+        field_name: Field name for error messages/logging.
+        auto_normalize: Normalize when norm deviates from 1.
+        warn_on_fix: Emit warning when normalization occurs.
+        eps: Minimum norm threshold before treating as invalid.
+
+    Returns:
+        Normalized quaternion as list [w, x, y, z].
+
+    Raises:
+        ValidationError: If quaternion is invalid or cannot be normalized.
+    """
+    if isinstance(quaternion, dict):
+        components = [
+            quaternion.get("w", 1.0),
+            quaternion.get("x", 0.0),
+            quaternion.get("y", 0.0),
+            quaternion.get("z", 0.0),
+        ]
+    elif isinstance(quaternion, (list, tuple, np.ndarray)):
+        if len(quaternion) != 4:
+            raise ValidationError(
+                f"Quaternion must have 4 components, got {len(quaternion)}",
+                field=field_name,
+                value=quaternion,
+            )
+        components = list(quaternion)
+    else:
+        raise ValidationError(
+            f"Expected quaternion as list, tuple, array, or dict, got {type(quaternion).__name__}",
+            field=field_name,
+            value=quaternion,
+        )
+
+    validated = []
+    for i, component in enumerate(components):
+        validated.append(validate_numeric(
+            component,
+            field_name=f"{field_name}[{i}]" if field_name else None,
+        ))
+
+    norm = math.sqrt(sum(component * component for component in validated))
+    if norm < eps:
+        raise ValidationError(
+            f"Quaternion norm {norm:.6f} is too small to normalize",
+            field=field_name,
+            value=validated,
+        )
+
+    if abs(norm - 1.0) > 1e-3:
+        if not auto_normalize:
+            raise ValidationError(
+                f"Quaternion norm {norm:.6f} deviates from 1.0",
+                field=field_name,
+                value=validated,
+            )
+        normalized = [component / norm for component in validated]
+        if warn_on_fix:
+            logger.warning(
+                "Normalized quaternion for %s (norm %.6f -> 1.0)",
+                field_name or "quaternion",
+                norm,
+            )
+        return normalized
+
+    return validated
+
+
+def validate_rotation_matrix(
+    matrix: Union[List[List[float]], np.ndarray],
+    field_name: Optional[str] = None,
+    auto_fix: bool = True,
+    warn_on_fix: bool = True,
+    atol: float = 1e-3,
+) -> np.ndarray:
+    """
+    Validate a 3x3 rotation matrix and optionally project it onto SO(3).
+
+    Args:
+        matrix: 3x3 rotation matrix.
+        field_name: Field name for error messages/logging.
+        auto_fix: Use SVD to project to nearest rotation matrix when invalid.
+        warn_on_fix: Emit warning when a fix is applied.
+        atol: Tolerance for orthogonality and determinant checks.
+
+    Returns:
+        Valid rotation matrix as a numpy array.
+
+    Raises:
+        ValidationError: If matrix is invalid and cannot be fixed.
+    """
+    try:
+        rot = np.array(matrix, dtype=np.float64)
+    except Exception as exc:
+        raise ValidationError(
+            f"Rotation matrix conversion failed: {exc}",
+            field=field_name,
+            value=matrix,
+        )
+
+    if rot.shape != (3, 3):
+        raise ValidationError(
+            f"Rotation matrix must be 3x3, got shape {rot.shape}",
+            field=field_name,
+            value=matrix,
+        )
+
+    identity = np.eye(3)
+    orth_error = float(np.linalg.norm(rot.T @ rot - identity, ord="fro"))
+    det = float(np.linalg.det(rot))
+
+    if orth_error > atol or abs(det - 1.0) > atol:
+        if not auto_fix:
+            raise ValidationError(
+                f"Rotation matrix invalid (orth_error={orth_error:.6f}, det={det:.6f})",
+                field=field_name,
+                value=matrix,
+            )
+        u, _, vt = np.linalg.svd(rot)
+        rot = u @ vt
+        if np.linalg.det(rot) < 0:
+            u[:, -1] *= -1
+            rot = u @ vt
+        if warn_on_fix:
+            logger.warning(
+                "Adjusted rotation matrix for %s (orth_error=%.6f, det=%.6f)",
+                field_name or "rotation_matrix",
+                orth_error,
+                det,
+            )
+
+    return rot
 
 
 def validate_enum(

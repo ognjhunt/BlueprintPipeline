@@ -43,6 +43,7 @@ try:
         validate_category,
         validate_description,
         validate_dimensions,
+        validate_quaternion,
         ValidationError,
         ALLOWED_ASSET_CATEGORIES,
     )
@@ -809,6 +810,16 @@ class SceneGraphConverter:
                 )
             else:
                 orientation = [1.0, 0.0, 0.0, 0.0]
+
+            if HAVE_VALIDATION_TOOLS:
+                try:
+                    orientation = validate_quaternion(
+                        orientation,
+                        field_name=f"{obj_id}.rotation_quaternion",
+                    )
+                except ValidationError as e:
+                    logger.warning("Object %s quaternion invalid: %s. Using identity.", obj_id, e)
+                    orientation = [1.0, 0.0, 0.0, 0.0]
 
             pose = Pose(position=pos, orientation=orientation)
 
