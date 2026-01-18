@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -57,6 +58,13 @@ try:
 except ImportError:
     HAVE_STREAMING_PARSER = False
     logger.warning("Streaming JSON parser not available - may OOM on large manifests (>1000 objects)")
+
+try:
+    from tools.config import load_pipeline_config
+    HAVE_PIPELINE_CONFIG = True
+except ImportError:
+    HAVE_PIPELINE_CONFIG = False
+    logger.warning("Pipeline config loader not available - scene graph config will use defaults only")
 
 
 # =============================================================================
@@ -156,6 +164,95 @@ class GenieSimSceneGraph:
 
 
 # =============================================================================
+# Configuration
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class SceneGraphRuntimeConfig:
+    vertical_proximity_threshold: float
+    horizontal_proximity_threshold: float
+    alignment_angle_threshold: float
+    streaming_batch_size: int
+
+
+_SCENE_GRAPH_CONFIG: Optional[SceneGraphRuntimeConfig] = None
+
+
+def _parse_env_float(key: str, default: float) -> float:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%s; using default %.3f", key, raw, default)
+        return default
+
+
+def _parse_env_int(key: str, default: int) -> int:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%s; using default %d", key, raw, default)
+        return default
+
+
+def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
+    global _SCENE_GRAPH_CONFIG
+    if _SCENE_GRAPH_CONFIG is not None:
+        return _SCENE_GRAPH_CONFIG
+
+    if HAVE_PIPELINE_CONFIG:
+        pipeline_config = load_pipeline_config()
+        relation_config = pipeline_config.scene_graph.relation_inference
+        streaming_config = pipeline_config.scene_graph.streaming
+        vertical_default = relation_config.vertical_proximity_threshold
+        horizontal_default = relation_config.horizontal_proximity_threshold
+        alignment_default = relation_config.alignment_angle_threshold
+        batch_default = streaming_config.batch_size
+    else:
+        vertical_default = 0.05
+        horizontal_default = 0.15
+        alignment_default = 5.0
+        batch_default = 100
+
+    config = SceneGraphRuntimeConfig(
+        vertical_proximity_threshold=_parse_env_float(
+            "BP_SCENE_GRAPH_VERTICAL_PROXIMITY_THRESHOLD",
+            vertical_default,
+        ),
+        horizontal_proximity_threshold=_parse_env_float(
+            "BP_SCENE_GRAPH_HORIZONTAL_PROXIMITY_THRESHOLD",
+            horizontal_default,
+        ),
+        alignment_angle_threshold=_parse_env_float(
+            "BP_SCENE_GRAPH_ALIGNMENT_ANGLE_THRESHOLD",
+            alignment_default,
+        ),
+        streaming_batch_size=_parse_env_int(
+            "BP_SCENE_GRAPH_STREAMING_BATCH_SIZE",
+            batch_default,
+        ),
+    )
+
+    logger.info(
+        "Scene graph config: vertical_proximity_threshold=%.3f, horizontal_proximity_threshold=%.3f, "
+        "alignment_angle_threshold=%.3f, streaming_batch_size=%d",
+        config.vertical_proximity_threshold,
+        config.horizontal_proximity_threshold,
+        config.alignment_angle_threshold,
+        config.streaming_batch_size,
+    )
+
+    _SCENE_GRAPH_CONFIG = config
+    return config
+
+
+# =============================================================================
 # Task Tag Mapping
 # =============================================================================
 
@@ -230,14 +327,14 @@ RELATION_TYPE_MAPPING = {
 class RelationInferencer:
     """Infers spatial relations between objects when not explicitly provided."""
 
-    # Thresholds for inference
-    VERTICAL_PROXIMITY_THRESHOLD = 0.05  # 5cm
-    HORIZONTAL_PROXIMITY_THRESHOLD = 0.15  # 15cm
-    ALIGNMENT_ANGLE_THRESHOLD = 5.0  # 5 degrees
     CONTAINMENT_MARGIN = 0.02  # 2cm margin for containment check
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, config: Optional[SceneGraphRuntimeConfig] = None):
         self.verbose = verbose
+        self.config = config or _load_scene_graph_runtime_config()
+        self.vertical_proximity_threshold = self.config.vertical_proximity_threshold
+        self.horizontal_proximity_threshold = self.config.horizontal_proximity_threshold
+        self.alignment_angle_threshold = self.config.alignment_angle_threshold
 
     def log(self, msg: str) -> None:
         if self.verbose:
@@ -341,7 +438,7 @@ class RelationInferencer:
             a_bottom = pos_a[2] - size_a[2] / 2
             b_top = pos_b[2] + size_b[2] / 2
 
-            if abs(a_bottom - b_top) < self.VERTICAL_PROXIMITY_THRESHOLD:
+            if abs(a_bottom - b_top) < self.vertical_proximity_threshold:
                 # Check horizontal overlap
                 if self._has_horizontal_overlap(node_a, node_b):
                     return GenieSimEdge(
@@ -356,7 +453,7 @@ class RelationInferencer:
             b_bottom = pos_b[2] - size_b[2] / 2
             a_top = pos_a[2] + size_a[2] / 2
 
-            if abs(b_bottom - a_top) < self.VERTICAL_PROXIMITY_THRESHOLD:
+            if abs(b_bottom - a_top) < self.vertical_proximity_threshold:
                 if self._has_horizontal_overlap(node_a, node_b):
                     return GenieSimEdge(
                         source=node_b.asset_id,
@@ -415,7 +512,7 @@ class RelationInferencer:
         expected_sep = (size_a[0] + size_b[0]) / 2  # Use width as proxy
 
         # Check if close but not overlapping
-        if horiz_dist < expected_sep + self.HORIZONTAL_PROXIMITY_THRESHOLD:
+        if horiz_dist < expected_sep + self.horizontal_proximity_threshold:
             if horiz_dist > expected_sep * 0.5:  # Not overlapping too much
                 return GenieSimEdge(
                     source=node_a.asset_id,
@@ -441,7 +538,7 @@ class RelationInferencer:
         angle_rad = 2 * math.acos(dot)
         angle_deg = math.degrees(angle_rad)
 
-        if angle_deg < self.ALIGNMENT_ANGLE_THRESHOLD:
+        if angle_deg < self.alignment_angle_threshold:
             return GenieSimEdge(
                 source=node_a.asset_id,
                 target=node_b.asset_id,
@@ -891,6 +988,8 @@ def convert_manifest_to_scene_graph(
     Returns:
         GenieSimSceneGraph
     """
+    runtime_config = _load_scene_graph_runtime_config()
+
     # Auto-detect if streaming is needed based on file size
     if use_streaming is None:
         file_size_mb = manifest_path.stat().st_size / (1024 * 1024)
@@ -925,6 +1024,12 @@ def convert_manifest_to_scene_graph(
         parser = StreamingManifestParser(str(manifest_path))
         usd_base_path = manifest.get("usd_file")
 
+        batch_count = 0
+        batch_size = runtime_config.streaming_batch_size
+        for batch in parser.stream_objects(batch_size=batch_size):
+            batch_count += 1
+            if verbose and batch_count % 10 == 0:
+                print(f"[SCENE-GRAPH-CONVERTER] Processed {batch_count * batch_size} objects...")
         def stream_progress(processed_objects: int, elapsed: float) -> None:
             if verbose:
                 print(

@@ -46,6 +46,9 @@ Particulate takes a 3D mesh as input and infers its articulated structure (parts
 
 Returns service status and readiness.
 
+The health check uses `HEALTH_PROBE_TIMEOUT_S` (defaults to the centralized pipeline config)
+to bound dependency probe latency.
+
 ### GET /debug - Debug Info
 
 Returns detailed service state and model validation info when debug access is explicitly enabled.
