@@ -26,6 +26,8 @@ Environment Variables:
     MESHY_API_KEY: API key for Meshy 3D generation (required when backend="meshy").
     EXTERNAL_3D_SERVICE_URL: External service endpoint for 3D generation.
     EXTERNAL_3D_SERVICE_TOKEN: Optional bearer token for external 3D service.
+    RESUME_FROM_PROGRESS: When true, skip assets already recorded in progress marker.
+    PROGRESS_MARKER_PATH: GCS-relative path to progress marker JSON.
 """
 
 import datetime
@@ -36,7 +38,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, asdict
 
 from PIL import Image, ImageDraw, ImageFont
@@ -184,6 +186,43 @@ def gcs_relative_path(path: Optional[str]) -> Optional[str]:
         return str(path_obj).replace(str(GCS_ROOT) + "/", "")
     except Exception:
         return path
+
+
+def load_progress_marker(path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    if path is None or not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("[VARIATION-GEN] Failed to read progress marker %s: %s", path, exc)
+        return None
+
+
+def extract_completed_assets(progress_data: Optional[Dict[str, Any]]) -> Set[str]:
+    if not progress_data:
+        return set()
+
+    if isinstance(progress_data.get("variation_gen"), dict):
+        progress_data = progress_data["variation_gen"]
+
+    generated_assets = progress_data.get("generated_assets")
+    if isinstance(generated_assets, list):
+        return {str(asset) for asset in generated_assets if asset}
+
+    results = progress_data.get("results")
+    if isinstance(results, list):
+        return {
+            str(result.get("asset_name"))
+            for result in results
+            if result and result.get("success") is True and result.get("asset_name")
+        }
+
+    return set()
+
+
+def asset_already_generated(output_dir: Path, asset_name: str) -> bool:
+    reference_path = output_dir / asset_name / "reference.png"
+    return reference_path.is_file()
 
 
 def create_normal_map_placeholder(output_path: Path, size: int = 1024) -> None:
@@ -1195,6 +1234,8 @@ def process_variation_assets(
     enable_3d_generation: bool = False,
     three_d_backend: str = "meshy",
     fail_on_3d_failure: bool = False,
+    resume_from_progress: bool = False,
+    progress_marker_path: Optional[Path] = None,
 ) -> ProcessOutcome:
     """
     Main processing function for variation asset generation.
@@ -1241,11 +1282,35 @@ def process_variation_assets(
         "[VARIATION-GEN] %s assets need generation", len(assets_to_generate)
     )
 
+    # Create output directory
+    output_dir = root / variation_assets_prefix
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if resume_from_progress:
+        progress_data = load_progress_marker(progress_marker_path)
+        completed_assets = extract_completed_assets(progress_data)
+        if not completed_assets:
+            completed_assets = {
+                asset.name
+                for asset in assets_to_generate
+                if asset_already_generated(output_dir, asset.name)
+            }
+        if completed_assets:
+            original_count = len(assets_to_generate)
+            assets_to_generate = [
+                asset for asset in assets_to_generate if asset.name not in completed_assets
+            ]
+            logger.info(
+                "[VARIATION-GEN] Resume enabled; skipping %s/%s already generated assets",
+                original_count - len(assets_to_generate),
+                original_count,
+            )
+        else:
+            logger.info("[VARIATION-GEN] Resume enabled; no completed assets detected")
+
     if not assets_to_generate:
         logger.info("[VARIATION-GEN] No assets need generation; exiting.")
         # Still write completion marker
-        output_dir = root / variation_assets_prefix
-        output_dir.mkdir(parents=True, exist_ok=True)
         marker_path = output_dir / ".variation_pipeline_complete"
         marker_path.write_text(f"No assets to generate at {datetime.datetime.utcnow().isoformat()}Z\n")
         return ProcessOutcome(success=True, partial_success=False, should_fail_job=False)
@@ -1253,10 +1318,6 @@ def process_variation_assets(
     # Get scene context for generation
     scene_type = manifest.get("scene_type", "generic")
     policy_context = f"{scene_type} scene" if scene_type != "generic" else None
-
-    # Create output directory
-    output_dir = root / variation_assets_prefix
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create Gemini client
     if not dry_run and not mock_mode:
@@ -1407,6 +1468,11 @@ def main():
 
     priority_filter = os.getenv("PRIORITY_FILTER", "")  # "required", "recommended", "optional"
     priority_filter = priority_filter if priority_filter else None
+    resume_from_progress = os.getenv("RESUME_FROM_PROGRESS", "").lower() in {"1", "true", "yes"}
+    progress_marker_env = os.getenv("PROGRESS_MARKER_PATH")
+    progress_marker_path = Path(progress_marker_env) if progress_marker_env else None
+    if progress_marker_path is None:
+        progress_marker_path = Path(variation_assets_prefix) / ".progress.json"
 
     logger.info("[VARIATION-GEN] Starting variation asset generation")
     logger.info("[VARIATION-GEN] Scene ID: %s", scene_id)
@@ -1427,8 +1493,20 @@ def main():
         logger.info("[VARIATION-GEN] DRY RUN MODE - no actual generation")
     if mock_mode:
         logger.info("[VARIATION-GEN] MOCK MODE - using placeholder images")
+    if resume_from_progress:
+        logger.info("[VARIATION-GEN] Resume from progress: enabled")
+        if progress_marker_path:
+            logger.info(
+                "[VARIATION-GEN] Progress marker path: %s",
+                gcs_relative_path(progress_marker_path),
+            )
 
     try:
+        progress_marker_path = (
+            progress_marker_path
+            if progress_marker_path is None or progress_marker_path.is_absolute()
+            else GCS_ROOT / progress_marker_path
+        )
         outcome = process_variation_assets(
             root=GCS_ROOT,
             scene_id=scene_id,
@@ -1441,6 +1519,8 @@ def main():
             enable_3d_generation=enable_3d_generation,
             three_d_backend=three_d_backend,
             fail_on_3d_failure=fail_on_3d_failure,
+            resume_from_progress=resume_from_progress,
+            progress_marker_path=progress_marker_path,
         )
 
         if outcome.success and not outcome.partial_success:
