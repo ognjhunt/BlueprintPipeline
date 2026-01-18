@@ -929,7 +929,7 @@ def handle_request():
     except Exception as e:
         log(f"[{request_id}] Unexpected error: {e}", "ERROR")
         log(traceback.format_exc(), "ERROR")
-        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+        return jsonify({"error": "internal_error", "request_id": request_id}), 500
     finally:
         _gpu_lock.release()
         log(f"[{request_id}] GPU lock released")
