@@ -24,6 +24,7 @@ MANIFEST_SCHEMA_DEFINITION = {
         "metrics_summary": "Pipeline metrics snapshot.",
         "file_inventory": "List of all output files (path + size).",
         "checksums": "SHA256 checksums for episodes, metadata, and full bundle files.",
+        "source_assets": "Optional source asset checksum metadata from upstream exports.",
         "provenance": "Source control, pipeline version, config snapshot, and tool versions.",
     },
     "notes": [

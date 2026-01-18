@@ -60,6 +60,7 @@ from PIL import Image
 
 from tools.gcs_upload import upload_blob_from_filename
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.source_asset_checksums import write_source_checksums
 
 
 # ============================================================================
@@ -103,6 +104,7 @@ class SceneGenerationErrorCode(str, Enum):
     GCS_UPLOAD_FAILED = "SCENEGEN-3002"
     PIPELINE_TRIGGER_FAILED = "SCENEGEN-3003"
     IMAGE_GENERATION_FAILED = "SCENEGEN-4001"
+    CHECKSUM_WRITE_FAILED = "SCENEGEN-4002"
     UNKNOWN_ARCHETYPE = "SCENEGEN-5001"
     BATCH_FAILED = "SCENEGEN-9001"
 
@@ -938,10 +940,38 @@ class SceneImageGenerator:
                 img = Image.open(io.BytesIO(image_bytes))
                 img.save(str(image_path), format='PNG')
 
+                checksum_path = scene_dir / "source_checksums.json"
+                try:
+                    write_source_checksums(checksum_path, scene_dir, [image_path])
+                except Exception as e:
+                    issue = SceneGenerationIssue(
+                        code=SceneGenerationErrorCode.CHECKSUM_WRITE_FAILED,
+                        message="Failed to write source asset checksum file.",
+                        context={"scene_id": request.scene_id, "path": str(checksum_path)},
+                        fatal=True,
+                    )
+                    _log_issue(logging.ERROR, issue, exc=e)
+                    elapsed = time.time() - start_time
+                    return SceneGenerationResult(
+                        scene_id=request.scene_id,
+                        archetype=request.archetype,
+                        success=False,
+                        image_path=str(image_path),
+                        prompt_used=request.prompt,
+                        generation_time_seconds=elapsed,
+                        error=issue.message,
+                        error_code=issue.code.value,
+                        error_context=issue.context,
+                    )
+
                 # Upload to GCS if configured
                 gcs_uri = None
                 if self.gcs_bucket and self.storage_client:
-                    gcs_uri, upload_issue = self._upload_to_gcs(request.scene_id, image_path)
+                    gcs_uri, upload_issue = self._upload_to_gcs(
+                        request.scene_id,
+                        image_path,
+                        checksum_path,
+                    )
                     if upload_issue:
                         _log_issue(logging.ERROR, upload_issue)
                         elapsed = time.time() - start_time
@@ -1011,7 +1041,12 @@ class SceneImageGenerator:
             error_context={"scene_id": request.scene_id, "archetype": request.archetype.value},
         )
 
-    def _upload_to_gcs(self, scene_id: str, local_path: Path) -> Tuple[Optional[str], Optional[SceneGenerationIssue]]:
+    def _upload_to_gcs(
+        self,
+        scene_id: str,
+        local_path: Path,
+        checksum_path: Path,
+    ) -> Tuple[Optional[str], Optional[SceneGenerationIssue]]:
         """Upload image to GCS and return URI."""
         try:
             bucket = self.storage_client.bucket(self.gcs_bucket)
@@ -1042,6 +1077,31 @@ class SceneImageGenerator:
                 return None, issue
 
             print(f"[SCENE-GEN] Uploaded to: {gcs_uri}")
+
+            checksum_blob_path = f"scenes/{scene_id}/source_checksums.json"
+            checksum_blob = bucket.blob(checksum_blob_path)
+            checksum_uri = f"gs://{self.gcs_bucket}/{checksum_blob_path}"
+            checksum_result = upload_blob_from_filename(
+                checksum_blob,
+                checksum_path,
+                checksum_uri,
+                logger=LOGGER,
+                content_type="application/json",
+                verify_upload=True,
+            )
+            if not checksum_result.success:
+                issue = SceneGenerationIssue(
+                    code=SceneGenerationErrorCode.GCS_UPLOAD_FAILED,
+                    message="GCS checksum upload failed after retries.",
+                    context={
+                        "scene_id": scene_id,
+                        "bucket": self.gcs_bucket,
+                        "attempts": checksum_result.attempts,
+                        "error": checksum_result.error,
+                    },
+                    fatal=True,
+                )
+                return None, issue
             return gcs_uri, None
 
         except Exception as e:

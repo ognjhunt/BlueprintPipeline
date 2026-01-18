@@ -1263,6 +1263,7 @@ def run_local_import_job(
     }
     provenance = collect_provenance(REPO_ROOT, config_snapshot)
     provenance.update(base_provenance)
+    source_assets = job_metadata.get("source_assets") if job_metadata else None
 
     regression_payload = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -1321,6 +1322,7 @@ def run_local_import_job(
         "metrics_summary": metrics_summary,
         "regression_metrics": regression_payload,
         "checksums": checksums_payload,
+        "source_assets": source_assets,
         "provenance": provenance,
     }
 
