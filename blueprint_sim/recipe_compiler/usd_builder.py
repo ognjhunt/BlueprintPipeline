@@ -313,8 +313,10 @@ class USDSceneBuilder:
         """Ensure the asset path exists in the loaded catalog."""
         normalized_path = self._normalize_catalog_path(asset_path)
 
-        assert self._catalog_asset_paths, "Asset catalog is not loaded; cannot validate asset paths"
-        assert normalized_path in self._catalog_asset_paths, f"Asset path {normalized_path} not found in catalog"
+        if not self._catalog_asset_paths:
+            raise RuntimeError("Asset catalog is not loaded; cannot validate asset paths")
+        if normalized_path not in self._catalog_asset_paths:
+            raise ValueError(f"Asset path '{normalized_path}' not found in catalog")
 
     def _normalize_catalog_path(self, asset_path: str) -> str:
         """Strip pack name prefix if present."""
