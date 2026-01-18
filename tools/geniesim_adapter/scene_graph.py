@@ -806,6 +806,10 @@ class SceneGraphConverter:
 
         return merged
 
+    def _infer_relations(self, nodes: List[GenieSimNode]) -> List[GenieSimEdge]:
+        """Infer spatial relations between nodes."""
+        return self.relation_inferencer.infer_relations(nodes)
+
 
 # =============================================================================
 # Convenience Functions
