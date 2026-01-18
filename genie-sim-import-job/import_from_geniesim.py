@@ -20,6 +20,7 @@ Environment Variables:
     MIN_QUALITY_SCORE: Minimum quality score for import (default: from quality_config.json)
     ENABLE_VALIDATION: Enable quality validation (default: true)
     REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: false)
+    LEROBOT_SKIP_RATE_MAX: Max allowed LeRobot skip rate percentage (default: 0.0 in production)
 """
 
 import hashlib
@@ -63,6 +64,7 @@ from monitoring.alerting import send_alert
 from tools.geniesim_adapter.local_framework import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
+from tools.config.production_mode import resolve_production_mode
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.utils.atomic_write import write_json_atomic, write_text_atomic
 from quality_config import (
@@ -146,6 +148,19 @@ def _resolve_export_schema_version() -> str:
         or os.getenv("EXPORT_SCHEMA_VERSION")
         or "1.0.0"
     )
+
+
+def _resolve_skip_rate_max(raw_value: Optional[str]) -> float:
+    if raw_value is None:
+        production_mode = resolve_production_mode()
+        return 0.0 if production_mode else 100.0
+    try:
+        skip_rate = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid LEROBOT_SKIP_RATE_MAX value: {raw_value}") from exc
+    if skip_rate < 0.0:
+        raise ValueError("LEROBOT_SKIP_RATE_MAX must be >= 0")
+    return skip_rate
 
 
 def _build_dataset_info(
@@ -409,6 +424,7 @@ class ImportConfig:
     enable_validation: bool = True
     filter_low_quality: bool = True
     require_lerobot: bool = False
+    lerobot_skip_rate_max: float = 0.0
 
     # Polling (if waiting for completion)
     poll_interval: int = 30
@@ -689,6 +705,7 @@ def convert_to_lerobot(
         converted_count = 0
         skipped_count = 0
         total_frames = 0
+        conversion_failures: List[Dict[str, str]] = []
         dataset_info = _build_dataset_info(
             job_id=job_id,
             scene_id=scene_id,
@@ -705,6 +722,12 @@ def convert_to_lerobot(
             episode_file = episodes_dir / f"{ep_metadata.episode_id}.parquet"
             if not episode_file.exists():
                 skipped_count += 1
+                conversion_failures.append(
+                    {
+                        "episode_id": ep_metadata.episode_id,
+                        "error": "Episode file missing",
+                    }
+                )
                 continue
 
             episode_output = output_dir / f"episode_{converted_count:06d}.parquet"
@@ -727,6 +750,14 @@ def convert_to_lerobot(
         dataset_info["total_episodes"] = converted_count
         dataset_info["total_frames"] = total_frames
         dataset_info["skipped_episodes"] = skipped_count
+        total_source_episodes = len(episode_metadata_list)
+        skip_rate_percent = (
+            (skipped_count / total_source_episodes) * 100.0
+            if total_source_episodes
+            else 0.0
+        )
+        dataset_info["skip_rate_percent"] = skip_rate_percent
+        dataset_info["conversion_failures"] = conversion_failures
         if quality_scores:
             dataset_info["average_quality_score"] = float(np.mean(quality_scores))
             dataset_info["min_quality_score"] = float(np.min(quality_scores))
@@ -746,7 +777,9 @@ def convert_to_lerobot(
             "success": True,
             "converted_count": converted_count,
             "skipped_count": skipped_count,
+            "skip_rate_percent": skip_rate_percent,
             "total_frames": total_frames,
+            "conversion_failures": conversion_failures,
             "output_dir": output_dir,
             "metadata_file": metadata_file,
         }
@@ -763,6 +796,7 @@ def convert_to_lerobot(
     converted_count = 0
     skipped_count = 0
     total_frames = 0
+    conversion_failures: List[Dict[str, str]] = []
 
     # LeRobot dataset metadata
     dataset_info = _build_dataset_info(
@@ -783,6 +817,12 @@ def convert_to_lerobot(
         episode_file = episodes_dir / f"{ep_metadata.episode_id}.parquet"
         if not episode_file.exists():
             skipped_count += 1
+            conversion_failures.append(
+                {
+                    "episode_id": ep_metadata.episode_id,
+                    "error": "Episode file missing",
+                }
+            )
             continue
 
         try:
@@ -845,6 +885,12 @@ def convert_to_lerobot(
 
         except Exception as e:
             print(f"[LEROBOT] Warning: Failed to convert episode {ep_metadata.episode_id}: {e}")
+            conversion_failures.append(
+                {
+                    "episode_id": ep_metadata.episode_id,
+                    "error": str(e),
+                }
+            )
             skipped_count += 1
             continue
 
@@ -852,6 +898,14 @@ def convert_to_lerobot(
     dataset_info["total_episodes"] = converted_count
     dataset_info["total_frames"] = total_frames
     dataset_info["skipped_episodes"] = skipped_count
+    total_source_episodes = len(episode_metadata_list)
+    skip_rate_percent = (
+        (skipped_count / total_source_episodes) * 100.0
+        if total_source_episodes
+        else 0.0
+    )
+    dataset_info["skip_rate_percent"] = skip_rate_percent
+    dataset_info["conversion_failures"] = conversion_failures
     if quality_scores:
         dataset_info["average_quality_score"] = float(np.mean(quality_scores))
         dataset_info["min_quality_score"] = float(np.min(quality_scores))
@@ -873,7 +927,9 @@ def convert_to_lerobot(
         "success": True,
         "converted_count": converted_count,
         "skipped_count": skipped_count,
+        "skip_rate_percent": skip_rate_percent,
         "total_frames": total_frames,
+        "conversion_failures": conversion_failures,
         "output_dir": output_dir,
         "metadata_file": metadata_file,
     }
@@ -964,6 +1020,7 @@ def run_local_import_job(
     lerobot_dir = config.output_dir / "lerobot"
     dataset_info_path = lerobot_dir / "dataset_info.json"
     episodes_index_path = lerobot_dir / "episodes.jsonl"
+    dataset_info_payload = None
     if dataset_info_path.exists():
         try:
             dataset_info_payload = _load_json_file(dataset_info_path)
@@ -1035,15 +1092,58 @@ def run_local_import_job(
 
     lerobot_error = None
     lerobot_episode_files = []
+    lerobot_skipped_count = 0
+    lerobot_skip_rate_percent = 0.0
+    conversion_failures: List[Dict[str, str]] = []
     if lerobot_dir.exists():
         lerobot_episode_files = [
             path for path in lerobot_dir.glob("*.json") if path.name != "dataset_info.json"
         ]
         result.lerobot_conversion_success = True
+        if isinstance(dataset_info_payload, dict):
+            lerobot_skipped_count = int(dataset_info_payload.get("skipped_episodes", 0))
+            lerobot_skip_rate_percent = float(
+                dataset_info_payload.get("skip_rate_percent", 0.0)
+            )
+            conversion_failures = dataset_info_payload.get("conversion_failures", []) or []
+            if not dataset_info_payload.get("skip_rate_percent"):
+                total_source_episodes = (
+                    int(dataset_info_payload.get("total_episodes", 0)) + lerobot_skipped_count
+                )
+                lerobot_skip_rate_percent = (
+                    (lerobot_skipped_count / total_source_episodes) * 100.0
+                    if total_source_episodes
+                    else 0.0
+                )
     else:
         result.lerobot_conversion_success = False
         lerobot_error = "LeRobot output directory not found for local import."
-        result.warnings.append(lerobot_error)
+        if config.require_lerobot:
+            result.errors.append(lerobot_error)
+        else:
+            result.warnings.append(lerobot_error)
+
+    if conversion_failures and config.require_lerobot:
+        failure_ids = ", ".join(
+            sorted({entry.get("episode_id", "unknown") for entry in conversion_failures})
+        )
+        result.errors.append(
+            "LeRobot conversion failures detected with REQUIRE_LEROBOT=true: "
+            + failure_ids
+        )
+
+    if lerobot_skip_rate_percent > config.lerobot_skip_rate_max:
+        result.errors.append(
+            "LeRobot skip rate "
+            f"{lerobot_skip_rate_percent:.2f}% exceeded max "
+            f"{config.lerobot_skip_rate_max:.2f}%"
+        )
+
+    if lerobot_skipped_count > 0:
+        print(
+            "[IMPORT] ⚠️  LeRobot conversion skipped episodes: "
+            f"{lerobot_skipped_count} ({lerobot_skip_rate_percent:.2f}%)"
+        )
 
     # Write machine-readable import manifest for workflows
     import_manifest_path = config.output_dir / "import_manifest.json"
@@ -1053,6 +1153,16 @@ def run_local_import_job(
         gcs_output_path = "gs://" + output_dir_str[len("/mnt/gcs/"):]
 
     metrics = get_metrics()
+    if lerobot_skipped_count > 0:
+        metrics.geniesim_import_episodes_skipped_total.inc(
+            lerobot_skipped_count,
+            labels={"scene_id": scene_id, "job_id": config.job_id},
+        )
+        if metrics.enable_logging:
+            print(
+                "[METRICS] Genie Sim import skipped episodes: "
+                f"{lerobot_skipped_count} (scene: {scene_id}, job: {config.job_id})"
+            )
     metrics_summary = {
         "backend": metrics.backend.value,
         "stats": metrics.get_stats(),
@@ -1133,6 +1243,7 @@ def run_local_import_job(
             "enable_validation": config.enable_validation,
             "filter_low_quality": config.filter_low_quality,
             "require_lerobot": config.require_lerobot,
+            "lerobot_skip_rate_max": config.lerobot_skip_rate_max,
             "poll_interval": config.poll_interval,
             "wait_for_completion": config.wait_for_completion,
             "fail_on_partial_error": config.fail_on_partial_error,
@@ -1177,9 +1288,13 @@ def run_local_import_job(
         "lerobot": {
             "conversion_success": result.lerobot_conversion_success,
             "converted_count": len(lerobot_episode_files),
+            "skipped_episodes": lerobot_skipped_count,
+            "skip_rate_percent": lerobot_skip_rate_percent,
+            "conversion_failures": conversion_failures,
             "output_dir": _relative_to_bundle(bundle_root, lerobot_dir),
             "error": lerobot_error,
-            "required": False,
+            "required": config.require_lerobot,
+            "skip_rate_max": config.lerobot_skip_rate_max,
         },
         "validation": {
             "episodes": {
@@ -1387,6 +1502,13 @@ def main():
     enable_validation = os.getenv("ENABLE_VALIDATION", "true").lower() == "true"
     filter_low_quality = os.getenv("FILTER_LOW_QUALITY", "true").lower() == "true"
     require_lerobot = os.getenv("REQUIRE_LEROBOT", "false").lower() == "true"
+    try:
+        lerobot_skip_rate_max = _resolve_skip_rate_max(
+            os.getenv("LEROBOT_SKIP_RATE_MAX")
+        )
+    except ValueError as exc:
+        print(f"[GENIE-SIM-IMPORT] ERROR: {exc}")
+        sys.exit(1)
 
     # Polling configuration
     poll_interval = int(os.getenv("GENIE_SIM_POLL_INTERVAL", "30"))
@@ -1421,6 +1543,7 @@ def main():
     )
     print(f"[GENIE-SIM-IMPORT]   Enable Validation: {enable_validation}")
     print(f"[GENIE-SIM-IMPORT]   Require LeRobot: {require_lerobot}")
+    print(f"[GENIE-SIM-IMPORT]   LeRobot Skip Rate Max: {lerobot_skip_rate_max:.2f}%")
     print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}")
     print(f"[GENIE-SIM-IMPORT]   Fail on Partial Error: {fail_on_partial_error}\n")
 
@@ -1441,6 +1564,7 @@ def main():
         enable_validation=enable_validation,
         filter_low_quality=filter_low_quality,
         require_lerobot=require_lerobot,
+        lerobot_skip_rate_max=lerobot_skip_rate_max,
         poll_interval=poll_interval,
         wait_for_completion=wait_for_completion,
         fail_on_partial_error=fail_on_partial_error,
