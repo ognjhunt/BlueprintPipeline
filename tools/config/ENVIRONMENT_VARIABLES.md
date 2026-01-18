@@ -125,10 +125,13 @@ Format: `BP_QUALITY_SECTION_KEY=value`
 **Episode Thresholds**:
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN` | float | 0.80 | Min collision-free rate |
-| `BP_QUALITY_EPISODES_QUALITY_SCORE_MIN` | float | 0.85 | Min quality score |
-| `BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN` | float | 0.50 | Min pass rate |
-| `BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED` | int | 1 | Min episodes to validate |
+| `BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN` | float | 0.90 | Min collision-free rate |
+| `BP_QUALITY_EPISODES_QUALITY_SCORE_MIN` | float | 0.90 | Min quality score |
+| `BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN` | float | 0.70 | Min pass rate |
+| `BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED` | int | 3 | Min episodes to validate |
+| `BP_QUALITY_EPISODES_TIER_THRESHOLDS` | json | unset | JSON mapping of tier thresholds (core/plus/full). See example below. |
+
+Tier overrides are merged by data pack tier (`DATA_PACK_TIER` or per-scene `data_pack_tier`). In production, episode thresholds must meet the production floor even if tier overrides are lower.
 
 **Simulation Thresholds**:
 | Variable | Type | Default | Description |
@@ -142,6 +145,9 @@ Format: `BP_QUALITY_SECTION_KEY=value`
 # Stricter quality requirements
 export BP_QUALITY_EPISODES_QUALITY_SCORE_MIN=0.95
 export BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN=0.95
+
+# Tier overrides (JSON)
+export BP_QUALITY_EPISODES_TIER_THRESHOLDS='{"core":{"collision_free_rate_min":0.90,"quality_score_min":0.90,"quality_pass_rate_min":0.70,"min_episodes_required":3},"plus":{"collision_free_rate_min":0.90,"quality_score_min":0.90,"quality_pass_rate_min":0.70,"min_episodes_required":4},"full":{"collision_free_rate_min":0.90,"quality_score_min":0.90,"quality_pass_rate_min":0.70,"min_episodes_required":5}}'
 
 # Relaxed physics constraints
 export BP_QUALITY_PHYSICS_FRICTION_MAX=5.0
