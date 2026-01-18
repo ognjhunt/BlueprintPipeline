@@ -14,10 +14,15 @@ which orchestrates the full pipeline.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
 import sys
+import threading
+import time
+from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -45,6 +50,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 PHYSX_SCHEMA = getattr(pxr, "PhysxSchema", None)
+
+CACHE_MISS = object()
 
 
 class ObjectAddFailures(Exception):
@@ -93,6 +100,56 @@ def safe_path_join(root: Path, rel: str) -> Path:
     """Join a relative path against a root, stripping any leading '/'."""
     rel_path = rel.lstrip("/")
     return root / rel_path
+
+
+@contextmanager
+def timed_phase(name: str) -> None:
+    """Lightweight timing helper for major phases."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        print(f"[USD] Timing: {name} took {elapsed:.3f}s")
+
+
+def _parse_int_env(var_name: str, default: int) -> int:
+    """Parse int environment values with fallback."""
+    value = os.getenv(var_name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("[USD] Invalid %s=%s; using %s", var_name, value, default)
+        return default
+
+
+class SizedCache:
+    """Thread-safe LRU cache with max entry count."""
+
+    def __init__(self, max_entries: int):
+        self.max_entries = max_entries
+        self._entries: "OrderedDict[Any, Any]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: Any) -> Tuple[bool, Any]:
+        if self.max_entries <= 0:
+            return False, None
+        with self._lock:
+            if key not in self._entries:
+                return False, None
+            self._entries.move_to_end(key)
+            return True, self._entries[key]
+
+    def set(self, key: Any, value: Any) -> None:
+        if self.max_entries <= 0:
+            return
+        with self._lock:
+            self._entries[key] = value
+            self._entries.move_to_end(key)
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
 
 
 # -----------------------------------------------------------------------------
@@ -307,6 +364,31 @@ def load_object_metadata(
     return None
 
 
+def _metadata_cache_key(root: Path, assets_prefix: str, obj: Dict) -> Tuple[Any, ...]:
+    metadata_rel = obj.get("metadata_path") or ""
+    asset_path = obj.get("asset_path") or ""
+    oid = obj.get("id")
+    return (str(root), assets_prefix, metadata_rel, asset_path, oid)
+
+
+def load_object_metadata_cached(
+    root: Path,
+    obj: Dict,
+    assets_prefix: str,
+    cache: Optional[SizedCache] = None,
+    catalog_client: Optional[AssetCatalogClient] = None,
+) -> Optional[dict]:
+    cache_key = _metadata_cache_key(root, assets_prefix, obj)
+    if cache is not None:
+        found, cached = cache.get(cache_key)
+        if found:
+            return None if cached is CACHE_MISS else cached
+    metadata = load_object_metadata(root, obj, assets_prefix, catalog_client)
+    if cache is not None:
+        cache.set(cache_key, metadata if metadata is not None else CACHE_MISS)
+    return metadata
+
+
 def alignment_from_metadata(metadata: dict) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Extract alignment information from metadata.
@@ -389,6 +471,35 @@ def resolve_usdz_asset_path(
             return rel.replace("\\", "/")
 
     return None
+
+
+def _usdz_cache_key(
+    root: Path,
+    assets_prefix: str,
+    usd_prefix: str,
+    oid: Any,
+    asset_path: Optional[str],
+) -> Tuple[Any, ...]:
+    return (str(root), assets_prefix, usd_prefix, oid, asset_path or "")
+
+
+def resolve_usdz_asset_path_cached(
+    root: Path,
+    assets_prefix: str,
+    usd_prefix: str,
+    oid: Any,
+    asset_path: Optional[str] = None,
+    cache: Optional[SizedCache] = None,
+) -> Optional[str]:
+    cache_key = _usdz_cache_key(root, assets_prefix, usd_prefix, oid, asset_path)
+    if cache is not None:
+        found, cached = cache.get(cache_key)
+        if found:
+            return None if cached is CACHE_MISS else cached
+    resolved = resolve_usdz_asset_path(root, assets_prefix, usd_prefix, oid, asset_path)
+    if cache is not None:
+        cache.set(cache_key, resolved if resolved is not None else CACHE_MISS)
+    return resolved
 
 
 # -----------------------------------------------------------------------------
@@ -546,12 +657,20 @@ class SceneBuilder:
         root: Path,
         assets_prefix: str,
         usd_prefix: str,
+        metadata_cache: Optional[SizedCache] = None,
+        usdz_cache: Optional[SizedCache] = None,
+        prefetched_metadata: Optional[Dict[Any, Optional[dict]]] = None,
+        prefetched_usdz: Optional[Dict[Any, Optional[str]]] = None,
     ):
         self.stage = stage
         self.root = root
         self.assets_prefix = assets_prefix
         self.usd_prefix = usd_prefix
         self.catalog_client = AssetCatalogClient()
+        self.metadata_cache = metadata_cache
+        self.usdz_cache = usdz_cache
+        self.prefetched_metadata = prefetched_metadata or {}
+        self.prefetched_usdz = prefetched_usdz or {}
 
         # Configure stage
         UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
@@ -816,12 +935,22 @@ class SceneBuilder:
                     asset_type = "unknown"
 
         # Load metadata
-        metadata = load_object_metadata(
-            self.root,
-            {"id": oid, "asset_path": asset_path, "metadata_path": obj.get("metadata_path")},
-            self.assets_prefix,
-            self.catalog_client,
-        )
+        if oid in self.prefetched_metadata:
+            metadata = self.prefetched_metadata[oid]
+        else:
+            metadata = load_object_metadata_cached(
+                self.root,
+                {
+                    "id": oid,
+                    "asset_path": asset_path,
+                    "metadata_path": obj.get("metadata_path"),
+                    "logical_asset_id": obj.get("logical_asset_id"),
+                    "logical_id": obj.get("logical_id"),
+                },
+                self.assets_prefix,
+                self.metadata_cache,
+                self.catalog_client,
+            )
         translation, mesh_half_extents = alignment_from_metadata(metadata or {})
 
         # Create object prim
@@ -926,9 +1055,17 @@ class SceneBuilder:
             )
 
         # Add geometry reference
-        usdz_rel = resolve_usdz_asset_path(
-            self.root, self.assets_prefix, self.usd_prefix, oid, asset_path
-        )
+        if oid in self.prefetched_usdz:
+            usdz_rel = self.prefetched_usdz[oid]
+        else:
+            usdz_rel = resolve_usdz_asset_path_cached(
+                self.root,
+                self.assets_prefix,
+                self.usd_prefix,
+                oid,
+                asset_path,
+                self.usdz_cache,
+            )
 
         if usdz_rel:
             geom_path = f"{obj_path}/Geom"
@@ -1050,6 +1187,63 @@ def _validate_usd_stage(stage: Usd.Stage, output_path: Path, objects: List[Dict]
     print(f"[USD] Stage validation passed: {output_path}")
 
 
+def _prefetch_asset_data(
+    objects: List[Dict],
+    root: Path,
+    assets_prefix: str,
+    usd_prefix: str,
+    metadata_cache: Optional[SizedCache],
+    usdz_cache: Optional[SizedCache],
+    max_workers: int,
+    use_catalog: bool = True,
+) -> Tuple[Dict[Any, Optional[dict]], Dict[Any, Optional[str]]]:
+    metadata_by_id: Dict[Any, Optional[dict]] = {}
+    usdz_by_id: Dict[Any, Optional[str]] = {}
+
+    def _load_for_object(obj: Dict) -> Tuple[Any, Optional[dict], Optional[str]]:
+        oid = obj.get("id")
+        if oid is None:
+            return oid, None, None
+        catalog_client = AssetCatalogClient() if use_catalog else None
+        metadata_cache_local = metadata_cache if use_catalog else None
+        metadata = load_object_metadata_cached(
+            root,
+            obj,
+            assets_prefix,
+            metadata_cache_local,
+            catalog_client,
+        )
+        usdz_rel = resolve_usdz_asset_path_cached(
+            root,
+            assets_prefix,
+            usd_prefix,
+            oid,
+            obj.get("asset_path"),
+            usdz_cache,
+        )
+        return oid, metadata, usdz_rel
+
+    if max_workers <= 1:
+        for obj in objects:
+            oid, metadata, usdz_rel = _load_for_object(obj)
+            if oid is None:
+                continue
+            metadata_by_id[oid] = metadata
+            usdz_by_id[oid] = usdz_rel
+        return metadata_by_id, usdz_by_id
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_load_for_object, obj) for obj in objects]
+        for future in concurrent.futures.as_completed(futures):
+            oid, metadata, usdz_rel = future.result()
+            if oid is None:
+                continue
+            metadata_by_id[oid] = metadata
+            usdz_by_id[oid] = usdz_rel
+
+    return metadata_by_id, usdz_by_id
+
+
 # -----------------------------------------------------------------------------
 # Main Entry Point
 # -----------------------------------------------------------------------------
@@ -1072,144 +1266,145 @@ def build_scene(
     assets_root = root / assets_prefix
     print(f"[USD] Loading asset manifest from {assets_path}")
 
+    metadata_cache_size = _parse_int_env("USD_ASSET_METADATA_CACHE_SIZE", 512)
+    usdz_cache_size = _parse_int_env("USD_ASSET_USDZ_CACHE_SIZE", 1024)
+    asset_load_threads = _parse_int_env(
+        "USD_ASSET_LOAD_THREADS", min(4, os.cpu_count() or 1)
+    )
+    use_catalog_prefetch = os.getenv("USD_ASSET_PREFETCH_CATALOG", "1").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    metadata_cache = SizedCache(metadata_cache_size)
+    usdz_cache = SizedCache(usdz_cache_size)
+
     def _has_spatial_data(layout_json: Dict[str, Any]) -> bool:
         return any(
             obj.get("obb") is not None or obj.get("center3d") is not None
             for obj in layout_json.get("objects", [])
         )
 
-    # Load input files
-    primary_layout = load_json(layout_path)
-    layout = primary_layout
+    with timed_phase("asset loading"):
+        # Load input files
+        primary_layout = load_json(layout_path)
+        layout = primary_layout
 
-    # Discover candidate layouts for fallback if the scaled layout lacks spatial
-    # data. Preference order:
-    #   1. scene_layout_scaled.json (primary)
-    #   2. scene_layout.json in the same prefix
-    #   3. DA3 layout path (../layout/scene_layout.json)
-    fallback_layouts: List[Tuple[Path, Dict[str, Any]]] = []
+        # Discover candidate layouts for fallback if the scaled layout lacks spatial
+        # data. Preference order:
+        #   1. scene_layout_scaled.json (primary)
+        #   2. scene_layout.json in the same prefix
+        #   3. DA3 layout path (../layout/scene_layout.json)
+        fallback_layouts: List[Tuple[Path, Dict[str, Any]]] = []
 
-    same_prefix_fallback = layout_path.with_name("scene_layout.json")
-    if same_prefix_fallback != layout_path and same_prefix_fallback.is_file():
-        try:
-            fallback_layouts.append((same_prefix_fallback, load_json(same_prefix_fallback)))
-        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
-            logger.warning(
-                "[USD] Skipping fallback layout %s due to load error: %s",
-                same_prefix_fallback,
-                exc,
-            )
-
-    da3_layout_path = layout_path.parent.parent / "layout" / "scene_layout.json"
-    if da3_layout_path not in {layout_path, same_prefix_fallback} and da3_layout_path.is_file():
-        try:
-            fallback_layouts.append((da3_layout_path, load_json(da3_layout_path)))
-        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
-            logger.warning(
-                "[USD] Skipping fallback layout %s due to load error: %s",
-                da3_layout_path,
-                exc,
-            )
-
-    layout_used_path = layout_path
-    if not _has_spatial_data(layout):
-        print(
-            f"[USD] WARNING: {layout_path} has no objects with 'obb' or 'center3d'; "
-            "attempting to fall back to DA3 layout outputs"
-        )
-
-        for candidate_path, candidate_layout in fallback_layouts:
-            if _has_spatial_data(candidate_layout):
-                layout = candidate_layout
-                layout_used_path = candidate_path
-                print(
-                    f"[USD] Using layout from {candidate_path} because the scaled layout "
-                    "was missing spatial data"
+        same_prefix_fallback = layout_path.with_name("scene_layout.json")
+        if same_prefix_fallback != layout_path and same_prefix_fallback.is_file():
+            try:
+                fallback_layouts.append((same_prefix_fallback, load_json(same_prefix_fallback)))
+            except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+                logger.warning(
+                    "[USD] Skipping fallback layout %s due to load error: %s",
+                    same_prefix_fallback,
+                    exc,
                 )
-                break
 
-    # Flag to track if we need to generate synthetic positions
-    using_synthetic_positions = False
+        da3_layout_path = layout_path.parent.parent / "layout" / "scene_layout.json"
+        if (
+            da3_layout_path not in {layout_path, same_prefix_fallback}
+            and da3_layout_path.is_file()
+        ):
+            try:
+                fallback_layouts.append((da3_layout_path, load_json(da3_layout_path)))
+            except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+                logger.warning(
+                    "[USD] Skipping fallback layout %s due to load error: %s",
+                    da3_layout_path,
+                    exc,
+                )
 
-    if not _has_spatial_data(layout):
-        tried_paths = [str(layout_path)] + [str(p) for p, _ in fallback_layouts]
-        print(
-            f"[USD] WARNING: No spatial data (obb/center3d) found in any layout. "
-            f"Checked: {', '.join(tried_paths)}. "
-            "Will generate synthetic positions from approx_location or grid layout."
-        )
-        using_synthetic_positions = True
-
-    if layout_used_path != layout_path:
-        print(f"[USD] Layout override: using {layout_used_path}")
-    else:
-        print(f"[USD] Using scaled layout at {layout_used_path}")
-
-    if layout_used_path != layout_path:
-        fallback_layout: Dict[str, Any] = primary_layout
-    else:
-        fallback_layout = next(
-            (data for path, data in fallback_layouts if path != layout_used_path),
-            {},
-        )
-    scene_assets = load_manifest_or_scene_assets(assets_root)
-    if scene_assets is None:
-        raise FileNotFoundError(
-            f"scene manifest not found at {assets_root / 'scene_manifest.json'} "
-            f"or legacy plan at {assets_root / 'scene_assets.json'}"
-        )
-
-    # Extract data
-    cameras = layout.get("camera_trajectory") or []
-    room_planes = layout.get("room_planes", {})
-    room_box = layout.get("room_box", {})
-
-    # Build layout_objects dict with both integer and string keys for compatibility.
-    # If the scaled layout is missing spatial fields, fall back to the original
-    # (unscaled) layout to recover obb/center information.
-    def _merge_spatial(target: Dict[str, Any], source: Dict[str, Any]) -> None:
-        for key in ("obb", "center3d", "center", "bounds", "scale"):
-            if key not in target and key in source:
-                target[key] = source[key]
-
-    layout_objects: Dict[Any, Dict] = {}
-    layout_objects_by_class: Dict[str, List[Dict]] = {}
-
-    # First, populate from the primary (scaled) layout
-    for o in layout.get("objects", []):
-        oid = o.get("id")
-        if oid is None:
-            continue
-
-        fallback_obj = None
-        if fallback_layout:
-            fallback_obj = next(
-                (
-                    obj
-                    for obj in fallback_layout.get("objects", [])
-                    if obj.get("id") == oid or str(obj.get("id")) == str(oid)
-                ),
-                None,
+        layout_used_path = layout_path
+        if not _has_spatial_data(layout):
+            print(
+                f"[USD] WARNING: {layout_path} has no objects with 'obb' or 'center3d'; "
+                "attempting to fall back to DA3 layout outputs"
             )
-            if fallback_obj:
-                _merge_spatial(o, fallback_obj)
 
-        layout_objects[oid] = o
-        if not isinstance(oid, str):
-            layout_objects[str(oid)] = o
+            for candidate_path, candidate_layout in fallback_layouts:
+                if _has_spatial_data(candidate_layout):
+                    layout = candidate_layout
+                    layout_used_path = candidate_path
+                    print(
+                        f"[USD] Using layout from {candidate_path} because the scaled layout "
+                        "was missing spatial data"
+                    )
+                    break
 
-        cls = (o.get("class_name") or "").lower()
-        if cls:
-            layout_objects_by_class.setdefault(cls, []).append(o)
+        # Flag to track if we need to generate synthetic positions
+        using_synthetic_positions = False
 
-    # Next, add any fallback-only objects so we don't drop transforms entirely
-    if fallback_layout:
-        for o in fallback_layout.get("objects", []):
+        if not _has_spatial_data(layout):
+            tried_paths = [str(layout_path)] + [str(p) for p, _ in fallback_layouts]
+            print(
+                f"[USD] WARNING: No spatial data (obb/center3d) found in any layout. "
+                f"Checked: {', '.join(tried_paths)}. "
+                "Will generate synthetic positions from approx_location or grid layout."
+            )
+            using_synthetic_positions = True
+
+        if layout_used_path != layout_path:
+            print(f"[USD] Layout override: using {layout_used_path}")
+        else:
+            print(f"[USD] Using scaled layout at {layout_used_path}")
+
+        if layout_used_path != layout_path:
+            fallback_layout: Dict[str, Any] = primary_layout
+        else:
+            fallback_layout = next(
+                (data for path, data in fallback_layouts if path != layout_used_path),
+                {},
+            )
+        scene_assets = load_manifest_or_scene_assets(assets_root)
+        if scene_assets is None:
+            raise FileNotFoundError(
+                f"scene manifest not found at {assets_root / 'scene_manifest.json'} "
+                f"or legacy plan at {assets_root / 'scene_assets.json'}"
+            )
+
+        # Extract data
+        cameras = layout.get("camera_trajectory") or []
+        room_planes = layout.get("room_planes", {})
+        room_box = layout.get("room_box", {})
+
+        # Build layout_objects dict with both integer and string keys for compatibility.
+        # If the scaled layout is missing spatial fields, fall back to the original
+        # (unscaled) layout to recover obb/center information.
+        def _merge_spatial(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+            for key in ("obb", "center3d", "center", "bounds", "scale"):
+                if key not in target and key in source:
+                    target[key] = source[key]
+
+        layout_objects: Dict[Any, Dict] = {}
+        layout_objects_by_class: Dict[str, List[Dict]] = {}
+
+        # First, populate from the primary (scaled) layout
+        for o in layout.get("objects", []):
             oid = o.get("id")
             if oid is None:
                 continue
-            if oid in layout_objects or str(oid) in layout_objects:
-                continue
+
+            fallback_obj = None
+            if fallback_layout:
+                fallback_obj = next(
+                    (
+                        obj
+                        for obj in fallback_layout.get("objects", [])
+                        if obj.get("id") == oid or str(obj.get("id")) == str(oid)
+                    ),
+                    None,
+                )
+                if fallback_obj:
+                    _merge_spatial(o, fallback_obj)
+
             layout_objects[oid] = o
             if not isinstance(oid, str):
                 layout_objects[str(oid)] = o
@@ -1218,63 +1413,104 @@ def build_scene(
             if cls:
                 layout_objects_by_class.setdefault(cls, []).append(o)
 
-    # Merge objects from assets with layout data so downstream logic always
-    # sees the spatial information produced by DA3/scale jobs. This merged
-    # list is passed to the builder below instead of the raw assets list to
-    # avoid dropping transforms when the IDs match but the assets.json entry
-    # doesn't carry spatial fields.
-    objects: List[Dict] = []
-    matched_layout_ids: Set[Any] = set()
-    for obj in scene_assets.get("objects", []):
-        merged = dict(obj)
-        oid = obj.get("id")
-        cls = (obj.get("class_name") or "").lower()
+        # Next, add any fallback-only objects so we don't drop transforms entirely
+        if fallback_layout:
+            for o in fallback_layout.get("objects", []):
+                oid = o.get("id")
+                if oid is None:
+                    continue
+                if oid in layout_objects or str(oid) in layout_objects:
+                    continue
+                layout_objects[oid] = o
+                if not isinstance(oid, str):
+                    layout_objects[str(oid)] = o
 
-        # Try both the original ID and string version
-        layout_obj = layout_objects.get(oid) or layout_objects.get(str(oid))
+                cls = (o.get("class_name") or "").lower()
+                if cls:
+                    layout_objects_by_class.setdefault(cls, []).append(o)
 
-        # Fallback: if IDs don't line up (common after inventory remapping),
-        # try to match by class name so we still apply DA3/scale spatial data.
-        if not layout_obj and cls:
-            candidates = layout_objects_by_class.get(cls, [])
-            layout_obj = next((o for o in candidates if o.get("id") not in matched_layout_ids), None)
-            if layout_obj:
-                matched_layout_ids.add(layout_obj.get("id"))
-                merged["layout_match_source"] = layout_obj.get("id")
-
-        if layout_obj:
-            for key in ("obb", "center3d", "center", "bounds", "scale", "approx_location"):
-                if key in layout_obj:
-                    merged[key] = layout_obj[key]
-        objects.append(merged)
-
-    # Generate synthetic spatial data for objects without obb/center3d
-    if using_synthetic_positions:
-        synthetic_data = generate_synthetic_spatial_data(objects, room_box or None)
-        for obj in objects:
+        # Merge objects from assets with layout data so downstream logic always
+        # sees the spatial information produced by DA3/scale jobs. This merged
+        # list is passed to the builder below instead of the raw assets list to
+        # avoid dropping transforms when the IDs match but the assets.json entry
+        # doesn't carry spatial fields.
+        objects: List[Dict] = []
+        matched_layout_ids: Set[Any] = set()
+        for obj in scene_assets.get("objects", []):
+            merged = dict(obj)
             oid = obj.get("id")
-            if oid and oid in synthetic_data:
-                synth = synthetic_data[oid]
-                for key in ("obb", "center3d", "synthetic", "approx_location"):
-                    if key in synth:
-                        obj[key] = synth[key]
+            cls = (obj.get("class_name") or "").lower()
+
+            # Try both the original ID and string version
+            layout_obj = layout_objects.get(oid) or layout_objects.get(str(oid))
+
+            # Fallback: if IDs don't line up (common after inventory remapping),
+            # try to match by class name so we still apply DA3/scale spatial data.
+            if not layout_obj and cls:
+                candidates = layout_objects_by_class.get(cls, [])
+                layout_obj = next(
+                    (o for o in candidates if o.get("id") not in matched_layout_ids),
+                    None,
+                )
+                if layout_obj:
+                    matched_layout_ids.add(layout_obj.get("id"))
+                    merged["layout_match_source"] = layout_obj.get("id")
+
+            if layout_obj:
+                for key in ("obb", "center3d", "center", "bounds", "scale", "approx_location"):
+                    if key in layout_obj:
+                        merged[key] = layout_obj[key]
+            objects.append(merged)
+
+        # Generate synthetic spatial data for objects without obb/center3d
+        if using_synthetic_positions:
+            synthetic_data = generate_synthetic_spatial_data(objects, room_box or None)
+            for obj in objects:
+                oid = obj.get("id")
+                if oid and oid in synthetic_data:
+                    synth = synthetic_data[oid]
+                    for key in ("obb", "center3d", "synthetic", "approx_location"):
+                        if key in synth:
+                            obj[key] = synth[key]
+
+        prefetched_metadata, prefetched_usdz = _prefetch_asset_data(
+            objects,
+            root,
+            assets_prefix,
+            usd_prefix,
+            metadata_cache,
+            usdz_cache,
+            asset_load_threads,
+            use_catalog_prefetch,
+        )
 
     # Create stage
     ensure_dir(output_path.parent)
     stage = Usd.Stage.CreateNew(str(output_path))
 
     # Build scene
-    builder = SceneBuilder(stage, root, assets_prefix, usd_prefix)
-    builder.add_room_planes(room_planes, room_box)
-    builder.add_cameras(cameras)
+    builder = SceneBuilder(
+        stage,
+        root,
+        assets_prefix,
+        usd_prefix,
+        metadata_cache=metadata_cache,
+        usdz_cache=usdz_cache,
+        prefetched_metadata=prefetched_metadata,
+        prefetched_usdz=prefetched_usdz,
+    )
+    with timed_phase("physics setup"):
+        builder.add_room_planes(room_planes, room_box)
 
-    # Create scene shell geometry from room_box if available
-    if room_box:
-        builder.add_scene_shell_geometry(room_box)
-    else:
-        print("[USD] WARNING: No room_box data in layout, skipping scene shell geometry")
+        # Create scene shell geometry from room_box if available
+        if room_box:
+            builder.add_scene_shell_geometry(room_box)
+        else:
+            print("[USD] WARNING: No room_box data in layout, skipping scene shell geometry")
 
-    builder.add_objects(objects, layout_objects, room_box)
+    with timed_phase("prim creation"):
+        builder.add_cameras(cameras)
+        builder.add_objects(objects, layout_objects, room_box)
 
     # Save stage
     stage.GetRootLayer().Save()

@@ -88,6 +88,21 @@ If you are running in a container, make sure the NVIDIA Container Toolkit is con
 - Capture per-job timing and artifact sizes in logs.
 - Track per-scene throughput and queue depth to plan scaling.
 
+## USD assembly tuning knobs
+
+Use these environment variables to tune asset loading in `usd-assembly-job`:
+
+- `USD_ASSET_LOAD_THREADS` (default: 4 or CPU count, whichever is lower)  
+  Controls the number of threads used to prefetch asset metadata and USD references.
+  Set to `1` to disable parallel prefetch.
+- `USD_ASSET_METADATA_CACHE_SIZE` (default: 512)  
+  LRU cache size (entries) for asset metadata reads. Set to `0` to disable caching.
+- `USD_ASSET_USDZ_CACHE_SIZE` (default: 1024)  
+  LRU cache size (entries) for USD reference resolution. Set to `0` to disable caching.
+- `USD_ASSET_PREFETCH_CATALOG` (default: `1`)  
+  Enable (`1`) or disable (`0`) catalog lookups during metadata prefetch. If disabled,
+  catalog metadata will be resolved lazily per object.
+
 ## Suggested tuning checklist
 
 - [ ] Verify CPU/memory limits match the largest scene size.
