@@ -30,7 +30,8 @@ if TYPE_CHECKING:
 
 # Import configuration
 try:
-    from tools.config import load_quality_config, QualityConfig
+from tools.config import load_quality_config, QualityConfig
+from tools.config.env import parse_bool_env
     HAVE_CONFIG = True
 except ImportError:
     HAVE_CONFIG = False
@@ -323,9 +324,9 @@ class HumanApprovalManager:
             )
         else:
             self.timeout_hours = float(os.getenv("APPROVAL_TIMEOUT_HOURS", "24"))
-            auto_approve_on_timeout = os.getenv("AUTO_APPROVE_ON_TIMEOUT", "false").lower() == "true"
+            auto_approve_on_timeout = parse_bool_env(os.getenv("AUTO_APPROVE_ON_TIMEOUT"), default=False)
             allow_auto_approve_non_prod = (
-                os.getenv("ALLOW_AUTO_APPROVE_ON_TIMEOUT_NON_PROD", "false").lower() == "true"
+                parse_bool_env(os.getenv("ALLOW_AUTO_APPROVE_ON_TIMEOUT_NON_PROD"), default=False)
             )
 
         auto_approve_requested = auto_approve_on_timeout

@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from tools.config.env import parse_bool_env
+
 from .benchmark_validation import (
     resolve_isaac_lab_arena_version,
     validate_arena_benchmark_results,
@@ -221,7 +223,7 @@ class ArenaEvaluationRunner:
 
         # Build Docker command if using containerized Isaac Sim
         docker_image = os.getenv("ISAAC_SIM_DOCKER_IMAGE", "nvcr.io/nvidia/isaac-sim:4.0.0")
-        use_docker = os.getenv("USE_DOCKER_EVALUATION", "true").lower() == "true"
+        use_docker = parse_bool_env(os.getenv("USE_DOCKER_EVALUATION"), default=True)
 
         if use_docker:
             cmd = [

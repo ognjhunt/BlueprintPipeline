@@ -75,6 +75,7 @@ from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
 )
+from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 
 # Import quality gates for validation before export
@@ -1174,14 +1175,14 @@ def main():
     robot_type = os.getenv("ROBOT_TYPE", "franka")
     urdf_path = os.getenv("URDF_PATH")  # Optional custom URDF
     max_tasks = int(os.getenv("MAX_TASKS", "50"))
-    generate_embeddings = os.getenv("GENERATE_EMBEDDINGS", "false").lower() == "true"
-    filter_commercial = os.getenv("FILTER_COMMERCIAL", "true").lower() == "true"
-    copy_usd = os.getenv("COPY_USD", "true").lower() == "true"
-    enable_multi_robot = os.getenv("ENABLE_MULTI_ROBOT", "true").lower() == "true"
-    enable_bimanual = os.getenv("ENABLE_BIMANUAL", "true").lower() == "true"
-    enable_vla_packages = os.getenv("ENABLE_VLA_PACKAGES", "true").lower() == "true"
-    enable_rich_annotations = os.getenv("ENABLE_RICH_ANNOTATIONS", "true").lower() == "true"
-    enable_premium_analytics = os.getenv("ENABLE_PREMIUM_ANALYTICS", "true").lower() == "true"
+    generate_embeddings = parse_bool_env(os.getenv("GENERATE_EMBEDDINGS"), default=False)
+    filter_commercial = parse_bool_env(os.getenv("FILTER_COMMERCIAL"), default=True)
+    copy_usd = parse_bool_env(os.getenv("COPY_USD"), default=True)
+    enable_multi_robot = parse_bool_env(os.getenv("ENABLE_MULTI_ROBOT"), default=True)
+    enable_bimanual = parse_bool_env(os.getenv("ENABLE_BIMANUAL"), default=True)
+    enable_vla_packages = parse_bool_env(os.getenv("ENABLE_VLA_PACKAGES"), default=True)
+    enable_rich_annotations = parse_bool_env(os.getenv("ENABLE_RICH_ANNOTATIONS"), default=True)
+    enable_premium_analytics = parse_bool_env(os.getenv("ENABLE_PREMIUM_ANALYTICS"), default=True)
     require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
     production_mode = resolve_production_mode()
     if production_mode and not require_quality_gates:

@@ -65,6 +65,7 @@ from tools.cost_tracking.estimate import (
     format_estimate_summary,
     load_estimate_config,
 )
+from tools.config.env import parse_bool_env
 from tools.config.seed_manager import configure_pipeline_seed
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
@@ -1750,9 +1751,9 @@ class LocalPipelineRunner:
             job_id=job_id,
             output_dir=output_dir,
             min_quality_score=float(os.getenv("MIN_QUALITY_SCORE", "0.85")),
-            enable_validation=os.getenv("ENABLE_VALIDATION", "true").lower() == "true",
-            filter_low_quality=os.getenv("FILTER_LOW_QUALITY", "true").lower() == "true",
-            require_lerobot=os.getenv("REQUIRE_LEROBOT", "false").lower() == "true",
+            enable_validation=parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True),
+            filter_low_quality=parse_bool_env(os.getenv("FILTER_LOW_QUALITY"), default=True),
+            require_lerobot=parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False),
             wait_for_completion=True,
             poll_interval=0,
             job_metadata_path=str(job_path),

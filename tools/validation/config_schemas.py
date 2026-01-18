@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from tools.config.env import parse_bool_env
 
 # ============================================================================
 # Scene Manifest Schemas
@@ -514,10 +515,10 @@ def load_and_validate_env_config() -> EnvironmentConfig:
         scene_id=os.getenv("SCENE_ID", ""),
         assets_prefix=os.getenv("ASSETS_PREFIX", "assets"),
         geniesim_prefix=os.getenv("GENIESIM_PREFIX", "geniesim"),
-        enable_premium_analytics=os.getenv("ENABLE_PREMIUM_ANALYTICS", "true").lower() == "true",
-        enable_multi_robot=os.getenv("ENABLE_MULTI_ROBOT", "true").lower() == "true",
-        enable_cuRobo=os.getenv("ENABLE_CUROBO", "true").lower() == "true",
-        enable_cp_gen=os.getenv("ENABLE_CP_GEN", "true").lower() == "true",
+        enable_premium_analytics=parse_bool_env(os.getenv("ENABLE_PREMIUM_ANALYTICS"), default=True),
+        enable_multi_robot=parse_bool_env(os.getenv("ENABLE_MULTI_ROBOT"), default=True),
+        enable_cuRobo=parse_bool_env(os.getenv("ENABLE_CUROBO"), default=True),
+        enable_cp_gen=parse_bool_env(os.getenv("ENABLE_CP_GEN"), default=True),
         particulate_endpoint=os.getenv("PARTICULATE_ENDPOINT"),
         max_tasks=int(os.getenv("MAX_TASKS", "10")),
         episodes_per_variation=int(os.getenv("EPISODES_PER_VARIATION", "5")),

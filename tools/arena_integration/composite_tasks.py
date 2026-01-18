@@ -50,6 +50,8 @@ from typing import Any, Callable, Optional, Protocol
 
 import numpy as np
 
+from tools.config.env import parse_bool_env
+
 from .components import (
     ArenaScene,
     ArenaTask,
@@ -393,7 +395,7 @@ class CompositeTask:
 class GoalDecompositionConfig:
     """Configuration for goal decomposition with an LLM."""
     enabled: bool = field(
-        default_factory=lambda: os.getenv("ARENA_LLM_DECOMPOSITION", "false").lower() == "true"
+        default_factory=lambda: parse_bool_env(os.getenv("ARENA_LLM_DECOMPOSITION"), default=False)
     )
     provider: str = "auto"
     model: str = "gpt-4o-mini"

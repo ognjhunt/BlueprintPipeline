@@ -54,6 +54,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.config.env import parse_bool_env
+
 # Import Isaac Sim integration for availability checking
 try:
     from isaac_sim_integration import (
@@ -95,11 +97,11 @@ class SensorDataCaptureMode(Enum):
 def _is_production_run() -> bool:
     """Detect production runs where fail-closed should be enforced."""
     return (
-        os.getenv("REQUIRE_REAL_PHYSICS", "").lower() == "true"
+        parse_bool_env(os.getenv("REQUIRE_REAL_PHYSICS"), default=False)
         or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
-        or os.getenv("PRODUCTION_MODE", "").lower() == "true"
-        or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
-        or os.getenv("PRODUCTION", "").lower() == "true"
+        or parse_bool_env(os.getenv("PRODUCTION_MODE"), default=False)
+        or parse_bool_env(os.getenv("ISAAC_SIM_REQUIRED"), default=False)
+        or parse_bool_env(os.getenv("PRODUCTION"), default=False)
         or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
     )
 
@@ -109,7 +111,7 @@ def _mock_capture_disallowed() -> bool:
     return (
         os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
         or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
-        or os.getenv("ISAAC_SIM_REQUIRED", "").lower() == "true"
+        or parse_bool_env(os.getenv("ISAAC_SIM_REQUIRED"), default=False)
     )
 
 
@@ -123,9 +125,9 @@ def _log_mock_capture_blocked(
         "event": "mock_capture_blocked",
         "reason": reason,
         "capture_mode": capture_mode.value if capture_mode else None,
-        "use_mock": os.getenv("USE_MOCK_CAPTURE", "").lower() == "true",
-        "allow_mock_capture": os.getenv("ALLOW_MOCK_CAPTURE", "").lower() == "true",
-        "allow_mock_data": os.getenv("ALLOW_MOCK_DATA", "").lower() == "true",
+        "use_mock": parse_bool_env(os.getenv("USE_MOCK_CAPTURE"), default=False),
+        "allow_mock_capture": parse_bool_env(os.getenv("ALLOW_MOCK_CAPTURE"), default=False),
+        "allow_mock_data": parse_bool_env(os.getenv("ALLOW_MOCK_DATA"), default=False),
         "sensor_capture_mode": os.getenv("SENSOR_CAPTURE_MODE", ""),
         "data_quality_level": os.getenv("DATA_QUALITY_LEVEL", ""),
         "labs_staging": os.getenv("LABS_STAGING", ""),
@@ -2117,8 +2119,8 @@ def create_sensor_capture(
             capture_mode = get_capture_mode_from_env()
 
     allow_mock_env = (
-        os.getenv("ALLOW_MOCK_DATA", "").lower() == "true"
-        or os.getenv("ALLOW_MOCK_CAPTURE", "").lower() == "true"
+        parse_bool_env(os.getenv("ALLOW_MOCK_DATA"), default=False)
+        or parse_bool_env(os.getenv("ALLOW_MOCK_CAPTURE"), default=False)
     )
 
     if _is_production_run():

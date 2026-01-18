@@ -70,11 +70,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-def _parse_bool_env_with_default(key: str, default: bool) -> bool:
-    value = os.getenv(key)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+from tools.config.env import parse_bool_env
 
 from trajectory_solver import JointTrajectory, JointState, RobotConfig, ROBOT_CONFIGS
 
@@ -238,9 +234,9 @@ class LeRobotDatasetConfig:
 
     # Episode completeness enforcement
     require_complete_episodes: bool = field(
-        default_factory=lambda: _parse_bool_env_with_default(
-            "REQUIRE_COMPLETE_EPISODES",
-            False,
+        default_factory=lambda: parse_bool_env(
+            os.getenv("REQUIRE_COMPLETE_EPISODES"),
+            default=False,
         )
     )
 
@@ -615,10 +611,7 @@ class LeRobotExporter:
         }
 
     def _parse_bool_env(self, key: str) -> Optional[bool]:
-        value = os.getenv(key)
-        if value is None:
-            return None
-        return value.lower() in {"1", "true", "yes", "y"}
+        return parse_bool_env(os.getenv(key))
 
     def _is_production_mode(self) -> bool:
         return (
@@ -717,7 +710,7 @@ class LeRobotExporter:
                 resolved_thresholds[key] = value
 
         post_rollout_seconds = float(os.getenv("SIM_VALIDATOR_POST_ROLLOUT_SECONDS", "0.5"))
-        load_scene = os.getenv("SIM_VALIDATOR_LOAD_SCENE", "true").lower() == "true"
+        load_scene = parse_bool_env(os.getenv("SIM_VALIDATOR_LOAD_SCENE"), default=True)
         require_real_physics = self._parse_bool_env("REQUIRE_REAL_PHYSICS")
 
         return {
