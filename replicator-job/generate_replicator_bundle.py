@@ -34,12 +34,13 @@ except ImportError:
 
 # Unified LLM client supporting Gemini + OpenAI
 try:
-    from tools.llm_client import create_llm_client, LLMProvider
+    from tools.llm_client import create_llm_client, LLMProvider, LLMClient
     HAVE_LLM_CLIENT = True
 except ImportError:
     HAVE_LLM_CLIENT = False
     create_llm_client = None
     LLMProvider = None
+    LLMClient = None
 
 from tools.asset_catalog import AssetCatalogClient
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
@@ -294,6 +295,8 @@ def get_llm_provider_name() -> str:
     provider = os.getenv("LLM_PROVIDER", "auto").lower()
     if provider == "openai" and os.getenv("OPENAI_API_KEY"):
         return "openai"
+    if provider == "mock":
+        return "mock"
     return "gemini"
 
 
@@ -651,12 +654,55 @@ def analyze_scene_with_gemini(
         print(f"[REPLICATOR] WARNING: Failed to parse Gemini response: {e}", file=sys.stderr)
         print(f"[REPLICATOR] Response was: {response_text[:500]}...", file=sys.stderr)
         # Return minimal valid structure
-        return {
-            "analysis": {"scene_summary": "Analysis failed", "recommended_policies": []},
-            "placement_regions": [],
-            "variation_assets": [],
-            "policy_configs": []
-        }
+        return build_minimal_analysis_result("Analysis failed")
+
+
+def build_minimal_analysis_result(scene_summary: str) -> dict:
+    """Return a minimal analysis result compatible with downstream parsing."""
+    return {
+        "analysis": {"scene_summary": scene_summary, "recommended_policies": []},
+        "placement_regions": [],
+        "variation_assets": [],
+        "policy_configs": []
+    }
+
+
+def analyze_scene_with_llm(
+    client: LLMClient,
+    scene_type: str,
+    environment_type: EnvironmentType,
+    inventory: dict,
+    scene_assets: dict,
+    requested_policies: Optional[List[str]] = None
+) -> dict:
+    """Use the unified LLM client to analyze a scene."""
+
+    prompt = build_scene_analysis_prompt(
+        scene_type=scene_type,
+        environment_type=environment_type,
+        inventory=inventory,
+        scene_assets=scene_assets,
+        requested_policies=requested_policies
+    )
+
+    print("[REPLICATOR] Calling unified LLM for scene analysis...")
+
+    response = client.generate(
+        prompt=prompt,
+        json_output=True,
+        temperature=0.3,
+        max_tokens=16000,
+    )
+
+    try:
+        result = response.parse_json() if hasattr(response, "parse_json") else json.loads(response.text)
+        print("[REPLICATOR] Successfully parsed unified LLM response")
+        return result
+    except (json.JSONDecodeError, AttributeError, TypeError) as exc:
+        print(f"[REPLICATOR] WARNING: Failed to parse LLM response: {exc}", file=sys.stderr)
+        response_preview = getattr(response, "text", "")[:500]
+        print(f"[REPLICATOR] Response was: {response_preview}...", file=sys.stderr)
+        return build_minimal_analysis_result("Analysis failed")
 
 
 # ============================================================================
@@ -1455,18 +1501,34 @@ def process_scene(
 
     print(f"[REPLICATOR] Detected environment: {environment_type.value}")
 
-    # Create Gemini client and analyze scene
-    client = create_gemini_client()
-    catalog_client = create_catalog_client()
+    # Create LLM client and analyze scene
+    llm_provider = os.getenv("LLM_PROVIDER", "auto").lower()
+    mock_mode = llm_provider == "mock"
 
-    analysis_result = analyze_scene_with_gemini(
-        client=client,
-        scene_type=scene_type,
-        environment_type=environment_type,
-        inventory=inventory,
-        scene_assets=scene_assets,
-        requested_policies=requested_policies
-    )
+    client = create_unified_llm_client()
+    catalog_client = None if mock_mode else create_catalog_client()
+
+    if mock_mode and not (HAVE_LLM_CLIENT and isinstance(client, LLMClient)):
+        print("[REPLICATOR] Mock mode enabled without unified LLM client; using minimal analysis.")
+        analysis_result = build_minimal_analysis_result("Mock analysis (client unavailable)")
+    elif HAVE_LLM_CLIENT and isinstance(client, LLMClient):
+        analysis_result = analyze_scene_with_llm(
+            client=client,
+            scene_type=scene_type,
+            environment_type=environment_type,
+            inventory=inventory,
+            scene_assets=scene_assets,
+            requested_policies=requested_policies
+        )
+    else:
+        analysis_result = analyze_scene_with_gemini(
+            client=client,
+            scene_type=scene_type,
+            environment_type=environment_type,
+            inventory=inventory,
+            scene_assets=scene_assets,
+            requested_policies=requested_policies
+        )
 
     # Parse results into data structures
     placement_regions = []
