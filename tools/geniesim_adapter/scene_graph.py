@@ -14,12 +14,14 @@ References:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import os
 import sys
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -330,6 +332,8 @@ class RelationInferencer:
     """Infers spatial relations between objects when not explicitly provided."""
 
     CONTAINMENT_MARGIN = 0.02  # 2cm margin for containment check
+    CACHE_MAX_ENTRIES = 32
+    HASH_DECIMAL_PLACES = 6
 
     def __init__(self, verbose: bool = False, config: Optional[SceneGraphRuntimeConfig] = None):
         self.verbose = verbose
@@ -337,6 +341,10 @@ class RelationInferencer:
         self.vertical_proximity_threshold = self.config.vertical_proximity_threshold
         self.horizontal_proximity_threshold = self.config.horizontal_proximity_threshold
         self.alignment_angle_threshold = self.config.alignment_angle_threshold
+        self._cache: "OrderedDict[Tuple[str, str], List[GenieSimEdge]]" = OrderedDict()
+        self.last_cache_hit = False
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def log(self, msg: str) -> None:
         if self.verbose:
@@ -345,6 +353,7 @@ class RelationInferencer:
     def infer_relations(
         self,
         nodes: List[GenieSimNode],
+        scene_id: Optional[str] = None,
         progress_callback: Optional[Callable[[int, float], None]] = None,
         progress_interval_s: float = 5.0,
         progress_every_pairs: Optional[int] = None,
@@ -358,7 +367,21 @@ class RelationInferencer:
         3. Horizontal proximity (< threshold) → "adjacent" edge
         4. Similar rotation (< angle threshold) → "aligned" edge
         """
-        edges = []
+        cache_key = self._build_cache_key(scene_id or "unknown", nodes)
+        cached_edges = self._cache.get(cache_key)
+        if cached_edges is not None:
+            self._cache.move_to_end(cache_key)
+            self.last_cache_hit = True
+            self._cache_hits += 1
+            self.log(
+                f"Cache hit for scene_id={scene_id or 'unknown'} "
+                f"({len(nodes)} nodes)."
+            )
+            return list(cached_edges)
+
+        self.last_cache_hit = False
+        self._cache_misses += 1
+        edges: List[GenieSimEdge] = []
         start_time = time.monotonic()
         last_report_time = start_time
         processed_pairs = 0
@@ -418,7 +441,47 @@ class RelationInferencer:
 
         report_progress(force=True)
         self.log(f"Inferred {len(edges)} relations from {len(nodes)} nodes")
+        self._store_cache_entry(cache_key, edges)
         return edges
+
+    def _build_cache_key(self, scene_id: str, nodes: List[GenieSimNode]) -> Tuple[str, str]:
+        node_hashes = [self._hash_node(node) for node in nodes]
+        payload = json.dumps(
+            {
+                "scene_id": scene_id,
+                "node_hashes": node_hashes,
+                "node_count": len(nodes),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = self._sha256(payload)
+        return scene_id, digest
+
+    def _hash_node(self, node: GenieSimNode) -> str:
+        payload = json.dumps(
+            {
+                "asset_id": node.asset_id,
+                "position": self._round_floats(node.pose.position),
+                "orientation": self._round_floats(node.pose.orientation),
+                "size": self._round_floats(node.size),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return self._sha256(payload)
+
+    def _round_floats(self, values: List[float]) -> List[float]:
+        return [round(float(value), self.HASH_DECIMAL_PLACES) for value in values]
+
+    def _sha256(self, payload: str) -> str:
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _store_cache_entry(self, cache_key: Tuple[str, str], edges: List[GenieSimEdge]) -> None:
+        self._cache[cache_key] = list(edges)
+        self._cache.move_to_end(cache_key)
+        if len(self._cache) > self.CACHE_MAX_ENTRIES:
+            self._cache.popitem(last=False)
 
     def _check_on_relation(
         self,
@@ -674,6 +737,7 @@ class SceneGraphConverter:
         # Infer additional edges
         inferred_edges = self.relation_inferencer.infer_relations(
             nodes,
+            scene_id=scene_id,
             progress_callback=self._relation_inference_progress,
         )
 
@@ -971,10 +1035,15 @@ class SceneGraphConverter:
 
         return merged
 
-    def _infer_relations(self, nodes: List[GenieSimNode]) -> List[GenieSimEdge]:
+    def _infer_relations(
+        self,
+        nodes: List[GenieSimNode],
+        scene_id: Optional[str] = None,
+    ) -> List[GenieSimEdge]:
         """Infer spatial relations between nodes."""
         return self.relation_inferencer.infer_relations(
             nodes,
+            scene_id=scene_id,
             progress_callback=self._relation_inference_progress,
         )
 
@@ -1068,7 +1137,10 @@ def convert_manifest_to_scene_graph(
         # Infer relations from node positions
         if verbose:
             print(f"[SCENE-GRAPH-CONVERTER] Inferring spatial relations for {len(scene_graph.nodes)} nodes...")
-        scene_graph.edges = converter._infer_relations(scene_graph.nodes)
+        scene_graph.edges = converter._infer_relations(
+            scene_graph.nodes,
+            scene_id=scene_graph.scene_id,
+        )
 
         if verbose:
             print(f"[SCENE-GRAPH-CONVERTER] Streaming conversion complete: {len(scene_graph.nodes)} nodes, {len(scene_graph.edges)} edges")
