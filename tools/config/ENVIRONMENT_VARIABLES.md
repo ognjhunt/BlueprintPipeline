@@ -390,9 +390,13 @@ export PARTICULATE_HEALTHCHECK_HOST=localhost
 **Production Example**:
 ```bash
 export GENIESIM_ENV=production
+export PIPELINE_ENV=production
 export ISAACSIM_REQUIRED=true
 export CUROBO_REQUIRED=true
 ```
+
+For production asset indexing/embedding flows, ensure a valid embedding provider is configured
+(`OPENAI_API_KEY` or `QWEN_API_KEY`/`DASHSCOPE_API_KEY`, plus the corresponding embedding model).
 
 ---
 
