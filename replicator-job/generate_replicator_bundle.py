@@ -862,6 +862,8 @@ To use: Open scene.usda in Isaac Sim, then run this script in the Script Editor.
 import omni.replicator.core as rep
 from typing import List, Dict, Any, Optional
 import random
+import json
+from pathlib import Path
 
 # ============================================================================
 # Configuration
@@ -881,6 +883,9 @@ CAPTURE_CONFIG = {json.dumps(capture, indent=4)}
 
 # Randomization parameters
 RANDOMIZER_CONFIGS = {json.dumps([asdict(r) if hasattr(r, '__dataclass_fields__') else r for r in randomizers], indent=4)}
+
+# Tracks objects spawned by scatter randomizer
+SPAWNED_OBJECTS = []
 
 
 # ============================================================================
@@ -912,6 +917,99 @@ def load_variation_assets() -> List[str]:
     return list(VARIATION_ASSETS.values())
 
 
+def load_variation_metadata() -> Dict[str, Any]:
+    """Load variation asset metadata if available."""
+    candidate_paths = [
+        Path("./variation_assets/variation_assets.json"),
+        Path("./variation_assets.json"),
+        Path("./variation_assets/manifest.json"),
+    ]
+    for path in candidate_paths:
+        if path.is_file():
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+                assets = data.get("assets") or data.get("variation_assets") or []
+                return {
+                    "assets": assets,
+                    "raw": data,
+                }
+            except json.JSONDecodeError:
+                print(f"[REPLICATOR] Warning: Failed to parse variation metadata at {path}")
+                return {"assets": [], "raw": {}}
+    return {"assets": [], "raw": {}}
+
+
+def _material_ranges_from_hint(material_hint: str) -> Dict[str, Any]:
+    hint = (material_hint or "").lower()
+    ranges = {
+        "base_color_min": (0.4, 0.4, 0.4),
+        "base_color_max": (1.0, 1.0, 1.0),
+        "roughness": (0.2, 0.8),
+        "metallic": (0.0, 0.2),
+    }
+    if any(token in hint for token in ["metal", "aluminum", "steel", "stainless"]):
+        ranges.update({
+            "roughness": (0.05, 0.4),
+            "metallic": (0.6, 1.0),
+        })
+    elif any(token in hint for token in ["glass", "ceramic", "porcelain", "stoneware"]):
+        ranges.update({
+            "roughness": (0.05, 0.3),
+            "metallic": (0.0, 0.1),
+        })
+    elif any(token in hint for token in ["fabric", "cloth", "cotton", "textile"]):
+        ranges.update({
+            "roughness": (0.6, 1.0),
+            "metallic": (0.0, 0.05),
+        })
+    elif any(token in hint for token in ["plastic", "polymer", "rubber"]):
+        ranges.update({
+            "roughness": (0.3, 0.7),
+            "metallic": (0.0, 0.1),
+        })
+    elif "wood" in hint:
+        ranges.update({
+            "roughness": (0.4, 0.85),
+            "metallic": (0.0, 0.05),
+        })
+    return ranges
+
+
+def _collect_texture_variants(asset_metadata: Dict[str, Any]) -> List[str]:
+    for key in ["texture_variants", "textures", "texture_paths", "material_textures"]:
+        textures = asset_metadata.get(key)
+        if isinstance(textures, list):
+            return [t for t in textures if isinstance(t, str)]
+    return []
+
+
+def _build_material_metadata_index(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    by_name = {}
+    by_semantic = {}
+    textures_by_name = {}
+    textures_by_semantic = {}
+    for asset in metadata.get("assets", []):
+        name = asset.get("name")
+        semantic = asset.get("semantic_class")
+        if name:
+            by_name[name] = asset
+            textures = _collect_texture_variants(asset)
+            if textures:
+                textures_by_name[name] = textures
+        if semantic:
+            by_semantic.setdefault(semantic, []).append(asset)
+            textures = _collect_texture_variants(asset)
+            if textures:
+                textures_by_semantic.setdefault(semantic, []).extend(textures)
+    return {
+        "by_name": by_name,
+        "by_semantic": by_semantic,
+        "textures_by_name": textures_by_name,
+        "textures_by_semantic": textures_by_semantic,
+    }
+
+
 # ============================================================================
 # Randomizers
 # ============================================================================
@@ -939,6 +1037,7 @@ def create_object_scatter_randomizer(
             semantics=[("class", semantic_class)],
             count=num_objects
         )
+        SPAWNED_OBJECTS.append(objects)
 
         with objects:
             # Random rotation
@@ -959,28 +1058,74 @@ def create_object_scatter_randomizer(
     return randomize_objects
 
 
-def create_material_randomizer(
-    target_prims,
-    vary_color: bool = True,
-    vary_roughness: bool = True,
-    roughness_range: tuple = (0.2, 0.8)
+def create_material_variation_randomizer(
+    variation_metadata: Dict[str, Any],
+    target_semantic_class: str = "object",
+    allow_textures: bool = True
 ):
-    """Create a randomizer for material properties."""
+    """Create a randomizer for material properties on spawned variant objects."""
+    metadata_index = _build_material_metadata_index(variation_metadata)
+
+    def _select_target_prims():
+        if SPAWNED_OBJECTS:
+            return SPAWNED_OBJECTS
+        prims = rep.get.prims(semantics=[("class", target_semantic_class)])
+        if prims:
+            return [prims]
+        prims = rep.get.prims(semantics=[("variant", "true")])
+        if prims:
+            return [prims]
+        prims = rep.get.prims(semantics=[("variant", "variant")])
+        if prims:
+            return [prims]
+        return []
+
+    def _resolve_material_ranges(semantic_class: str) -> Dict[str, Any]:
+        assets = metadata_index["by_semantic"].get(semantic_class, [])
+        hints = [a.get("material_hint") for a in assets if a.get("material_hint")]
+        if hints:
+            return _material_ranges_from_hint(random.choice(hints))
+        return _material_ranges_from_hint("")
+
+    def _resolve_textures(semantic_class: str) -> List[str]:
+        textures = metadata_index["textures_by_semantic"].get(semantic_class, [])
+        return list({t for t in textures if isinstance(t, str)})
 
     def randomize_materials():
-        with target_prims:
-            if vary_color:
-                # Slight color variation
-                rep.modify.attribute(
-                    "inputs:diffuse_tint",
-                    rep.distribution.uniform((0.8, 0.8, 0.8), (1.0, 1.0, 1.0))
-                )
+        target_groups = _select_target_prims()
+        if not target_groups:
+            return
 
-            if vary_roughness:
+        material_ranges = _resolve_material_ranges(target_semantic_class)
+        textures = _resolve_textures(target_semantic_class) if allow_textures else []
+        for target_prims in target_groups:
+            with target_prims:
+                rep.modify.attribute(
+                    "inputs:base_color",
+                    rep.distribution.uniform(
+                        material_ranges["base_color_min"],
+                        material_ranges["base_color_max"],
+                    ),
+                )
                 rep.modify.attribute(
                     "inputs:roughness",
-                    rep.distribution.uniform(roughness_range[0], roughness_range[1])
+                    rep.distribution.uniform(
+                        material_ranges["roughness"][0],
+                        material_ranges["roughness"][1],
+                    ),
                 )
+                rep.modify.attribute(
+                    "inputs:metallic",
+                    rep.distribution.uniform(
+                        material_ranges["metallic"][0],
+                        material_ranges["metallic"][1],
+                    ),
+                )
+                if textures:
+                    texture_choice = rep.distribution.choice(textures)
+                    rep.modify.attribute("inputs:diffuse_texture", texture_choice)
+                    rep.modify.attribute("inputs:diffuseTexture", texture_choice)
+                    rep.modify.attribute("inputs:base_color_texture", texture_choice)
 
     return randomize_materials
 
@@ -1050,6 +1195,7 @@ def setup_replicator():
 
         # Load variation assets
         asset_paths = load_variation_assets()
+        variation_metadata = load_variation_metadata()
 
         # Create render product
         resolution = tuple(CAPTURE_CONFIG.get("resolution", [1280, 720]))
@@ -1077,8 +1223,17 @@ def setup_replicator():
                 registered_randomizers.append(("object_scatter", randomizer, config.get("frequency", "per_frame")))
 
             elif name == "material_variation":
-                # Will be applied to spawned objects
-                pass
+                randomizer = create_material_variation_randomizer(
+                    variation_metadata=variation_metadata,
+                    target_semantic_class=params.get("semantic_class", "object"),
+                    allow_textures=params.get("allow_textures", True)
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append((
+                    "material_variation",
+                    randomizer,
+                    config.get("frequency", "per_frame")
+                ))
 
             elif name == "lighting_variation":
                 randomizer = create_lighting_randomizer(
