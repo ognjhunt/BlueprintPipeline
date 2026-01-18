@@ -1533,6 +1533,9 @@ def plan_drawer_open(
 
 if __name__ == "__main__":
     # Test the motion planner
+    from tools.logging_config import init_logging
+
+    init_logging()
     planner = AIMotionPlanner(robot_type="franka", use_llm=False, verbose=True)
 
     # Test pick-place

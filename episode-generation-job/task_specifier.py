@@ -1198,6 +1198,9 @@ def specify_task(
 
 if __name__ == "__main__":
     # Test the task specifier
+    from tools.logging_config import init_logging
+
+    init_logging()
     logger.info("Testing Task Specifier")
     logger.info("%s", "=" * 60)
 

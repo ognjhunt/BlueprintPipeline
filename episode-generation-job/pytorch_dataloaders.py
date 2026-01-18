@@ -743,6 +743,9 @@ def count_episodes(dataset_path: Union[str, Path]) -> int:
 
 
 if __name__ == "__main__":
+    from tools.logging_config import init_logging
+
+    init_logging()
     logger.info("BlueprintPipeline PyTorch DataLoaders")
     logger.info("%s", "=" * 50)
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import logging
 import os
 import shutil
 import struct
@@ -31,16 +32,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 try:
     from pygltflib import GLTF2
 except ImportError:
-    print("ERROR: pygltflib is required. Install with: pip install pygltflib")
+    logger.error("ERROR: pygltflib is required. Install with: pip install pygltflib")
     sys.exit(1)
 
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils, Vt
 except ImportError:
-    print("ERROR: usd-core is required. Install with: pip install usd-core")
+    logger.error("ERROR: usd-core is required. Install with: pip install usd-core")
     sys.exit(1)
 
 
@@ -447,7 +450,9 @@ class USDBuilder:
 
         # Get positions (required)
         if attrs.POSITION is None:
-            print(f"[WARN] Skipping primitive at {prim_path}: no POSITION attribute")
+            logger.warning(
+                "[WARN] Skipping primitive at %s: no POSITION attribute", prim_path
+            )
             return
 
         positions = self.reader.get_accessor_data(attrs.POSITION)
@@ -665,7 +670,7 @@ class USDBuilder:
         try:
             image_data, ext = self.reader.get_image_data(texture.source)
         except Exception as e:
-            print(f"[WARN] Failed to extract texture {texture_index}: {e}")
+            logger.warning("[WARN] Failed to extract texture %s: %s", texture_index, e)
             return None
 
         image_filename = f"texture_{texture_index}{ext}"
@@ -723,13 +728,13 @@ def convert_glb_to_usd(
     Returns:
         True if successful, False otherwise
     """
-    print(f"[glb_to_usd] Converting {input_path} -> {output_path}")
+    logger.info("[glb_to_usd] Converting %s -> %s", input_path, output_path)
 
     # Load GLB
     try:
         gltf = GLTF2().load(str(input_path))
     except Exception as e:
-        print(f"[ERROR] Failed to load GLB: {e}")
+        logger.error("[ERROR] Failed to load GLB: %s", e)
         return False
 
     reader = GLBReader(gltf, input_path)
@@ -758,14 +763,12 @@ def convert_glb_to_usd(
         try:
             builder.build()
         except Exception as e:
-            print(f"[ERROR] Failed to build USD stage: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("[ERROR] Failed to build USD stage: %s", e)
             return False
 
         # Save the stage
         stage.GetRootLayer().Save()
-        print(f"[glb_to_usd] Created USD stage: {usda_path}")
+        logger.info("[glb_to_usd] Created USD stage: %s", usda_path)
 
         # Package as USDZ if requested
         if is_usdz:
@@ -785,23 +788,23 @@ def convert_glb_to_usd(
 
                 if not success:
                     # Fallback: try creating a simple zip-based USDZ
-                    print("[glb_to_usd] UsdUtils.CreateNewUsdzPackage returned False, trying fallback...")
+                    logger.warning(
+                        "[glb_to_usd] UsdUtils.CreateNewUsdzPackage returned False, trying fallback..."
+                    )
                     success = _create_usdz_fallback(usda_path, output_path, texture_dir)
 
                 if success:
-                    print(f"[glb_to_usd] Created USDZ package: {output_path}")
+                    logger.info("[glb_to_usd] Created USDZ package: %s", output_path)
                 else:
-                    print(f"[ERROR] Failed to create USDZ package")
+                    logger.error("[ERROR] Failed to create USDZ package")
                     # Copy the USDA as fallback
                     usda_fallback = output_path.with_suffix(".usda")
                     shutil.copy(usda_path, usda_fallback)
-                    print(f"[glb_to_usd] Saved fallback USDA: {usda_fallback}")
+                    logger.info("[glb_to_usd] Saved fallback USDA: %s", usda_fallback)
                     return False
 
             except Exception as e:
-                print(f"[ERROR] Failed to create USDZ: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("[ERROR] Failed to create USDZ: %s", e)
                 return False
         else:
             # For non-USDZ output, copy textures to output directory
@@ -831,7 +834,7 @@ def _create_usdz_fallback(usda_path: Path, output_path: Path, texture_dir: Path)
 
         return True
     except Exception as e:
-        print(f"[ERROR] Fallback USDZ creation failed: {e}")
+        logger.exception("[ERROR] Fallback USDZ creation failed: %s", e)
         return False
 
 
@@ -850,7 +853,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.input.exists():
-        print(f"[ERROR] Input file not found: {args.input}")
+        logger.error("[ERROR] Input file not found: %s", args.input)
         return 1
 
     success = convert_glb_to_usd(args.input, args.output)
@@ -858,4 +861,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from tools.logging_config import init_logging
+
+    init_logging()
     sys.exit(main())

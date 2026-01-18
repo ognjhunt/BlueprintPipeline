@@ -328,6 +328,9 @@ def get_data_quality_level() -> DataQualityLevel:
 
 if __name__ == "__main__":
     # Print environment report when run directly
+    from tools.logging_config import init_logging
+
+    init_logging()
     capabilities = get_environment_capabilities()
     print_environment_report(capabilities)
 
