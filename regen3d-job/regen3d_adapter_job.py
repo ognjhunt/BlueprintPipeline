@@ -796,7 +796,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from tools.startup_validation import validate_and_fail_fast
     from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+
+    validate_and_fail_fast(job_name="REGEN3D", validate_gcs=True)
 
     input_params = {
         "bucket": os.getenv("BUCKET"),

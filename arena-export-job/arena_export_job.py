@@ -597,7 +597,10 @@ def run_cli(args: argparse.Namespace) -> int:
 
 
 if __name__ == "__main__":
+    from tools.startup_validation import validate_and_fail_fast
     from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+
+    validate_and_fail_fast(job_name="ARENA-EXPORT", validate_gcs=True)
 
     cli_args = parse_args()
     scene_id = os.getenv("SCENE_ID") or (
