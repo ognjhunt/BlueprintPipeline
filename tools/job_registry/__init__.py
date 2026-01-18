@@ -10,6 +10,7 @@ This registry is the source of truth for:
 
 Usage:
     from tools.job_registry import JobRegistry, JobStatus, PipelineMode
+    from tools.job_registry import JOBS, JOBS_BY_NAME
 
     registry = JobRegistry()
 
@@ -22,6 +23,10 @@ Usage:
 
     # Get job sequence
     sequence = registry.get_job_sequence()
+
+    # Or access a stable list of jobs without instantiating JobRegistry
+    jobs = JOBS
+    job = JOBS_BY_NAME["regen3d-job"]
 """
 
 from .registry import (
@@ -31,6 +36,8 @@ from .registry import (
     JobInfo,
     JobRegistry,
     get_registry,
+    JOBS,
+    JOBS_BY_NAME,
 )
 
 __all__ = [
@@ -40,4 +47,6 @@ __all__ = [
     "JobInfo",
     "JobRegistry",
     "get_registry",
+    "JOBS",
+    "JOBS_BY_NAME",
 ]
