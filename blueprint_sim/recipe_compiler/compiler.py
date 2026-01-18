@@ -539,7 +539,16 @@ class RecipeCompiler:
     def _merge_articulation_configs(
         self, primary: dict[str, Any], secondary: dict[str, Any]
     ) -> dict[str, Any]:
-        merged = {"type": None, "axis": None, "limits": {}, "damping": None}
+        merged = {
+            "type": None,
+            "axis": None,
+            "limits": {},
+            "damping": None,
+            "stiffness": None,
+            "friction": None,
+            "velocity_limit": None,
+            "effort_limit": None,
+        }
         for source in (secondary or {}, primary or {}):
             if not isinstance(source, dict):
                 continue
@@ -580,17 +589,67 @@ class RecipeCompiler:
             except (TypeError, ValueError):
                 normalized_damping = None
 
+        stiffness = config.get("stiffness")
+        normalized_stiffness = None
+        if stiffness is not None:
+            try:
+                normalized_stiffness = float(stiffness)
+            except (TypeError, ValueError):
+                normalized_stiffness = None
+
+        friction = config.get("friction")
+        normalized_friction = None
+        if friction is not None:
+            try:
+                normalized_friction = float(friction)
+            except (TypeError, ValueError):
+                normalized_friction = None
+
+        velocity_limit = config.get("velocity_limit")
+        normalized_velocity_limit = None
+        if velocity_limit is not None:
+            try:
+                normalized_velocity_limit = float(velocity_limit)
+            except (TypeError, ValueError):
+                normalized_velocity_limit = None
+
+        effort_limit = config.get("effort_limit")
+        normalized_effort_limit = None
+        if effort_limit is not None:
+            try:
+                normalized_effort_limit = float(effort_limit)
+            except (TypeError, ValueError):
+                normalized_effort_limit = None
+
         normalized_type = None
         if isinstance(joint_type, str):
             normalized_type = joint_type.lower()
             if normalized_type not in {"revolute", "prismatic"}:
                 normalized_type = None
 
+        if normalized_stiffness is None:
+            normalized_stiffness = 0.0
+
+        if normalized_friction is None:
+            normalized_friction = 0.0
+
+        if normalized_velocity_limit is None:
+            if normalized_type == "revolute":
+                normalized_velocity_limit = 6.0
+            elif normalized_type == "prismatic":
+                normalized_velocity_limit = 1.0
+            else:
+                normalized_velocity_limit = 1.0
+
         return {
             "type": normalized_type,
             "axis": normalized_axis,
             "limits": normalized_limits,
             "damping": normalized_damping,
+            "stiffness": normalized_stiffness,
+            "friction": normalized_friction,
+            "velocity_limit": normalized_velocity_limit,
+            "effort_limit": normalized_effort_limit,
         }
 
     def _is_complete_articulation(self, config: dict[str, Any]) -> bool:
@@ -603,6 +662,9 @@ class RecipeCompiler:
             and config.get("axis") in {"x", "y", "z"}
             and limits.get("lower") is not None
             and limits.get("upper") is not None
+            and config.get("stiffness") is not None
+            and config.get("friction") is not None
+            and config.get("velocity_limit") is not None
         )
 
     def _articulation_from_metadata(self, obj: dict[str, Any], matched: dict[str, Any]) -> dict[str, Any]:
@@ -631,6 +693,10 @@ class RecipeCompiler:
                 "axis": entry.get("axis") or entry.get("joint_axis"),
                 "limits": entry.get("limits") or entry.get("joint_limits") or {},
                 "damping": entry.get("damping") or entry.get("joint_damping"),
+                "stiffness": entry.get("stiffness") or entry.get("joint_stiffness"),
+                "friction": entry.get("friction") or entry.get("joint_friction"),
+                "velocity_limit": entry.get("velocity_limit") or entry.get("joint_velocity_limit"),
+                "effort_limit": entry.get("effort_limit") or entry.get("joint_effort_limit"),
             }
             config = self._sanitize_articulation_config(config)
             if self._is_complete_articulation(config):
@@ -641,6 +707,10 @@ class RecipeCompiler:
             "axis": None,
             "limits": {},
             "damping": None,
+            "stiffness": None,
+            "friction": None,
+            "velocity_limit": None,
+            "effort_limit": None,
         }
         axes = obj.get("articulation_axes") or []
         if axes:
@@ -651,11 +721,46 @@ class RecipeCompiler:
     def _default_articulation(self, obj: dict[str, Any]) -> dict[str, Any]:
         art_type = obj.get("articulation_type", "door")
         type_mapping = {
-            "door": {"type": "revolute", "axis": "y", "limits": {"lower": 0, "upper": 1.57}},
-            "drawer": {"type": "prismatic", "axis": "z", "limits": {"lower": 0, "upper": 0.5}},
-            "lid": {"type": "revolute", "axis": "x", "limits": {"lower": 0, "upper": 1.57}},
-            "knob": {"type": "revolute", "axis": "z", "limits": {"lower": 0, "upper": 6.28}},
-            "lever": {"type": "revolute", "axis": "x", "limits": {"lower": -0.5, "upper": 0.5}},
+            "door": {
+                "type": "revolute",
+                "axis": "y",
+                "limits": {"lower": 0, "upper": 1.57},
+                "stiffness": 0.0,
+                "friction": 0.0,
+                "velocity_limit": 6.0,
+            },
+            "drawer": {
+                "type": "prismatic",
+                "axis": "z",
+                "limits": {"lower": 0, "upper": 0.5},
+                "stiffness": 0.0,
+                "friction": 0.0,
+                "velocity_limit": 1.0,
+            },
+            "lid": {
+                "type": "revolute",
+                "axis": "x",
+                "limits": {"lower": 0, "upper": 1.57},
+                "stiffness": 0.0,
+                "friction": 0.0,
+                "velocity_limit": 6.0,
+            },
+            "knob": {
+                "type": "revolute",
+                "axis": "z",
+                "limits": {"lower": 0, "upper": 6.28},
+                "stiffness": 0.0,
+                "friction": 0.0,
+                "velocity_limit": 6.0,
+            },
+            "lever": {
+                "type": "revolute",
+                "axis": "x",
+                "limits": {"lower": -0.5, "upper": 0.5},
+                "stiffness": 0.0,
+                "friction": 0.0,
+                "velocity_limit": 6.0,
+            },
         }
         fallback = type_mapping.get(art_type, type_mapping["door"])
         return self._sanitize_articulation_config(fallback)
@@ -695,14 +800,19 @@ class RecipeCompiler:
                     "required": ["lower", "upper"],
                 },
                 "damping": {"type": "number"},
+                "stiffness": {"type": "number"},
+                "friction": {"type": "number"},
+                "velocity_limit": {"type": "number"},
+                "effort_limit": {"type": "number"},
             },
-            "required": ["type", "axis", "limits"],
+            "required": ["type", "axis", "limits", "stiffness", "friction", "velocity_limit"],
         }
 
         prompt = (
             "Infer a realistic articulation joint for a USD asset.\n"
             "Use the provided object context to choose joint type (revolute/prismatic), primary axis (x/y/z),"
-            " motion limits (radians for revolute, meters for prismatic), and damping suitable for household scale.\n"
+            " motion limits (radians for revolute, meters for prismatic), stiffness, friction, velocity limits, and damping"
+            " suitable for household scale.\n"
             "Prefer metadata hints if present; avoid placeholders or overly broad ranges.\n"
             f"Object context: {json.dumps(context, ensure_ascii=False)}\n"
             f"Partial articulation (may be incomplete): {json.dumps(partial, ensure_ascii=False)}\n"

@@ -259,9 +259,14 @@ class USDSceneBuilder:
         axis = (articulation.get("axis") or "y").upper()
         limits = articulation.get("limits", {})
         damping = articulation.get("damping")
+        stiffness = articulation.get("stiffness")
+        friction = articulation.get("friction")
+        velocity_limit = articulation.get("velocity_limit")
+        effort_limit = articulation.get("effort_limit")
 
         joint_path = f"{prim_path}/joint"
 
+        drive_type = "angular"
         if joint_type == "revolute":
             joint = self.UsdPhysics.RevoluteJoint.Define(stage, joint_path)
             joint.CreateAxisAttr().Set(axis)
@@ -282,12 +287,28 @@ class USDSceneBuilder:
                     joint.CreateLowerLimitAttr().Set(lower)
                 if upper is not None:
                     joint.CreateUpperLimitAttr().Set(upper)
+            drive_type = "linear"
         else:
             joint = self.UsdPhysics.RevoluteJoint.Define(stage, joint_path)
             joint.CreateAxisAttr().Set(axis)
 
         if damping is not None:
             joint.CreateDampingAttr().Set(float(damping))
+
+        joint_prim = joint.GetPrim()
+        drive_api = self.UsdPhysics.DriveAPI.Apply(joint_prim, drive_type)
+        if stiffness is not None:
+            drive_api.CreateStiffnessAttr().Set(float(stiffness))
+        if effort_limit is not None:
+            drive_api.CreateMaxForceAttr().Set(float(effort_limit))
+        if friction is not None:
+            joint_prim.CreateAttribute(
+                "physxJoint:friction", self.Sdf.ValueTypeNames.Float
+            ).Set(float(friction))
+        if velocity_limit is not None:
+            joint_prim.CreateAttribute(
+                "physxJoint:velocityLimit", self.Sdf.ValueTypeNames.Float
+            ).Set(float(velocity_limit))
 
     def _resolve_asset_path(self, asset_path: str, asset_root: str) -> Any:
         """Resolve an asset path relative to asset root."""
