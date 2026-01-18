@@ -14,6 +14,11 @@ MANIFEST_SCHEMA_DEFINITION = {
         "generated_at": "UTC timestamp for manifest generation.",
         "output_dir": "Output directory relative to the bundle root (or '.' for the root).",
         "gcs_output_path": "Optional GCS URI pointing at the bundle root containing output_dir.",
+        "upload_status": "Status of any post-import upload to a GCS target.",
+        "upload_failures": "List of upload failures with file paths and errors.",
+        "upload_started_at": "UTC timestamp for when uploads started.",
+        "upload_completed_at": "UTC timestamp for when uploads completed.",
+        "upload_summary": "Upload summary counts for total, uploaded, skipped, failed.",
         "readme_path": "Relative path to the bundle README describing LeRobot usage.",
         "checksums_path": "Relative path to the checksums JSON file for bundle artifacts.",
         "asset_provenance_path": "Relative path or URI to asset provenance JSON for legal review.",
@@ -48,6 +53,8 @@ ENV_SNAPSHOT_KEYS = [
     "SCENE_ID",
     "JOB_METADATA_PATH",
     "LOCAL_EPISODES_PREFIX",
+    "GCS_OUTPUT_PATH",
+    "DISABLE_GCS_UPLOAD",
 ]
 
 PIPELINE_VERSION_KEYS = [
