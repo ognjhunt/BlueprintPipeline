@@ -59,6 +59,12 @@ from xml.dom import minidom
 
 from flask import Flask, jsonify, request
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.config import load_pipeline_config
+
 from monitoring.alerting import send_alert
 
 app = Flask(__name__)
@@ -231,7 +237,7 @@ def _isaac_sim_probe(timeout_s: float) -> Dict[str, Any]:
 
 
 def _dependency_health() -> Tuple[bool, Dict[str, Any]]:
-    timeout_s = float(os.getenv("HEALTH_PROBE_TIMEOUT_S", "2.0"))
+    timeout_s = _get_health_probe_timeout_s()
     gpu_required = os.getenv("GPU_HEALTH_REQUIRED", "true").lower() == "true"
     isaac_required = os.getenv("ISAAC_SIM_HEALTH_REQUIRED", "false").lower() == "true"
     llm_required = os.getenv("LLM_HEALTH_REQUIRED", "false").lower() == "true"
@@ -258,6 +264,14 @@ def _dependency_health() -> Tuple[bool, Dict[str, Any]]:
             })
 
     return not errors, {"dependencies": dependencies, "errors": errors}
+
+
+def _get_health_probe_timeout_s() -> float:
+    env_value = os.getenv("HEALTH_PROBE_TIMEOUT_S")
+    if env_value is not None:
+        return float(env_value)
+    pipeline_config = load_pipeline_config()
+    return float(pipeline_config.health_checks.probe_timeout_s)
 
 
 # =============================================================================

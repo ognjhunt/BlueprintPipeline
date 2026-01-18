@@ -185,6 +185,28 @@ export BP_PIPELINE_RESOURCE_ALLOCATION_GPU_MEMORY_FRACTION=0.9
 
 ---
 
+### BP_SCENE_GRAPH_* - Scene Graph Configuration
+
+Scene graph relation inference thresholds and streaming options.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `BP_SCENE_GRAPH_VERTICAL_PROXIMITY_THRESHOLD` | float | 0.05 | Vertical proximity threshold (meters) for inferring "on" relations |
+| `BP_SCENE_GRAPH_HORIZONTAL_PROXIMITY_THRESHOLD` | float | 0.15 | Horizontal proximity threshold (meters) for inferring "adjacent" relations |
+| `BP_SCENE_GRAPH_ALIGNMENT_ANGLE_THRESHOLD` | float | 5.0 | Alignment threshold (degrees) for inferring "aligned" relations |
+| `BP_SCENE_GRAPH_STREAMING_BATCH_SIZE` | int | 100 | Batch size for streaming scene manifest parsing |
+
+**Example**:
+```bash
+# Tune relation inference sensitivity
+export BP_SCENE_GRAPH_VERTICAL_PROXIMITY_THRESHOLD=0.03
+export BP_SCENE_GRAPH_HORIZONTAL_PROXIMITY_THRESHOLD=0.10
+export BP_SCENE_GRAPH_ALIGNMENT_ANGLE_THRESHOLD=3.0
+export BP_SCENE_GRAPH_STREAMING_BATCH_SIZE=200
+```
+
+---
+
 ### BP_ENABLE_CONFIG_AUDIT
 
 Enable configuration audit trail logging.
@@ -328,6 +350,22 @@ export GENIESIM_PORT=50051
 export OMNIVERSE_HOST=localhost
 export OMNIVERSE_PATH_ROOT=NVIDIA/Assets/Isaac
 export PARTICULATE_HEALTHCHECK_HOST=localhost
+```
+
+---
+
+## Health Checks
+
+Shared health probe settings used by webhook/services.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `HEALTH_PROBE_TIMEOUT_S` | float | 2.0 | Default timeout (seconds) for dependency health probes |
+
+**Example**:
+```bash
+# Allow a longer probe window for slow startups
+export HEALTH_PROBE_TIMEOUT_S=5.0
 ```
 
 ---
