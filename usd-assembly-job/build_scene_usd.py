@@ -32,7 +32,8 @@ import numpy as np
 from tools.asset_catalog import AssetCatalogClient
 
 try:
-    from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+    import pxr
 except ImportError:
     print("ERROR: usd-core is required. Install with: pip install usd-core")
     sys.exit(1)
@@ -43,6 +44,7 @@ except ImportError:
 # -----------------------------------------------------------------------------
 
 logger = logging.getLogger(__name__)
+PHYSX_SCHEMA = getattr(pxr, "PhysxSchema", None)
 
 
 def load_json(path: Path) -> dict:
@@ -591,6 +593,11 @@ class SceneBuilder:
 
         This creates collision/physics-ready geometry based on room_box dimensions.
         The shell is rendered as an inverted box (normals facing inward).
+
+        Optional contact sensor schema (enabled with SCENE_SHELL_CONTACT_SENSOR_ENABLED):
+          - contactSensor:enabled (bool)
+          - contactSensor:threshold (float, Newtons)
+          - contactSensor:radius (float, meters)
         """
         if not room_box:
             print("[USD] WARNING: No room_box data available, skipping scene shell geometry")
@@ -630,11 +637,63 @@ class SceneBuilder:
         prim.CreateAttribute("isSceneShell", Sdf.ValueTypeNames.Bool).Set(True)
         prim.CreateAttribute("sim_role", Sdf.ValueTypeNames.String).Set("scene_shell")
 
+        collision_api = UsdPhysics.CollisionAPI.Apply(prim)
+        collision_api.CreateCollisionEnabledAttr().Set(True)
+
+        rigid_body_api = UsdPhysics.RigidBodyAPI.Apply(prim)
+        rigid_body_api.CreateRigidBodyEnabledAttr().Set(True)
+        rigid_body_api.CreateKinematicEnabledAttr().Set(True)
+
+        static_friction = float(os.getenv("SCENE_SHELL_STATIC_FRICTION", "0.8"))
+        dynamic_friction = float(os.getenv("SCENE_SHELL_DYNAMIC_FRICTION", "0.6"))
+        restitution = float(os.getenv("SCENE_SHELL_RESTITUTION", "0.1"))
+
+        material_path = f"{shell_path}/PhysicsMaterial"
+        material = UsdShade.Material.Define(self.stage, material_path)
+        material_prim = material.GetPrim()
+        physics_material_api = UsdPhysics.MaterialAPI.Apply(material_prim)
+        physics_material_api.CreateStaticFrictionAttr().Set(static_friction)
+        physics_material_api.CreateDynamicFrictionAttr().Set(dynamic_friction)
+        physics_material_api.CreateRestitutionAttr().Set(restitution)
+
+        if PHYSX_SCHEMA:
+            physx_material_api = PHYSX_SCHEMA.PhysxMaterialAPI.Apply(material_prim)
+            physx_material_api.CreateStaticFrictionAttr().Set(static_friction)
+            physx_material_api.CreateDynamicFrictionAttr().Set(dynamic_friction)
+            physx_material_api.CreateRestitutionAttr().Set(restitution)
+
+        UsdShade.MaterialBindingAPI(prim).Bind(material, UsdShade.Tokens.physics)
+
+        contact_sensor_enabled = os.getenv("SCENE_SHELL_CONTACT_SENSOR_ENABLED", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if contact_sensor_enabled:
+            prim.CreateAttribute("contactSensor:enabled", Sdf.ValueTypeNames.Bool).Set(True)
+            prim.CreateAttribute("contactSensor:threshold", Sdf.ValueTypeNames.Float).Set(
+                float(os.getenv("SCENE_SHELL_CONTACT_SENSOR_THRESHOLD", "1.0"))
+            )
+            prim.CreateAttribute("contactSensor:radius", Sdf.ValueTypeNames.Float).Set(
+                float(os.getenv("SCENE_SHELL_CONTACT_SENSOR_RADIUS", "0.05"))
+            )
+
         # Store room dimensions
         room_min = room_box.get("min", [-5, 0, -5])
         room_max = room_box.get("max", [5, 3, 5])
         prim.CreateAttribute("shellMin", Sdf.ValueTypeNames.Double3).Set(Gf.Vec3d(*room_min))
         prim.CreateAttribute("shellMax", Sdf.ValueTypeNames.Double3).Set(Gf.Vec3d(*room_max))
+
+        root_layer = self.stage.GetRootLayer()
+        custom_data = dict(root_layer.customLayerData or {})
+        custom_data["scene_shell_physics"] = True
+        custom_data["scene_shell_physics_material"] = {
+            "static_friction": static_friction,
+            "dynamic_friction": dynamic_friction,
+            "restitution": restitution,
+        }
+        custom_data["scene_shell_contact_sensors"] = contact_sensor_enabled
+        root_layer.customLayerData = custom_data
 
         print(f"[USD] Created scene shell geometry at {shell_path}")
         print(f"[USD]   Room bounds: min={room_min}, max={room_max}")
