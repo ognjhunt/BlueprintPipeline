@@ -937,6 +937,30 @@ def run_local_import_job(
         result.errors.append(f"No local episode files found under {recordings_dir}")
         return result
 
+    validator = ImportedEpisodeValidator(min_quality_score=config.min_quality_score)
+    validation_summary = validator.validate_batch(episode_metadata_list, recordings_dir)
+    failed_episode_ids = [
+        entry["episode_id"]
+        for entry in validation_summary["episode_results"]
+        if not entry["passed"]
+    ]
+    filtered_episode_ids = (
+        failed_episode_ids if not config.fail_on_partial_error else []
+    )
+    if validation_summary["failed_count"] > 0:
+        failure_message = (
+            f"{validation_summary['failed_count']} local episodes failed validation"
+        )
+        if config.fail_on_partial_error:
+            result.errors.append(failure_message)
+            result.success = False
+        else:
+            result.warnings.append(failure_message)
+            result.warnings.append(
+                "Excluding failed episodes from manifest: "
+                + ", ".join(failed_episode_ids)
+            )
+
     lerobot_dir = config.output_dir / "lerobot"
     dataset_info_path = lerobot_dir / "dataset_info.json"
     episodes_index_path = lerobot_dir / "episodes.jsonl"
@@ -994,8 +1018,8 @@ def run_local_import_job(
     low_quality_episodes = [
         ep for ep in episode_metadata_list if ep.quality_score < config.min_quality_score
     ]
-    result.episodes_passed_validation = len(episode_metadata_list) - len(low_quality_episodes)
-    result.episodes_filtered = len(low_quality_episodes)
+    result.episodes_passed_validation = validation_summary["passed_count"]
+    result.episodes_filtered = validation_summary["failed_count"]
     quality_scores = [ep.quality_score for ep in episode_metadata_list]
     result.average_quality_score = float(np.mean(quality_scores)) if quality_scores else 0.0
     quality_min_score = float(np.min(quality_scores)) if quality_scores else 0.0
@@ -1084,7 +1108,7 @@ def run_local_import_job(
     checksums_payload = {
         "download_manifest": None,
         "episodes": episode_checksums,
-        "filtered_episodes": [],
+        "filtered_episodes": filtered_episode_ids,
         "lerobot": lerobot_checksums,
         "metadata": file_checksums["metadata"],
         "missing_episode_ids": file_checksums["missing_episode_ids"],
@@ -1156,6 +1180,14 @@ def run_local_import_job(
             "output_dir": _relative_to_bundle(bundle_root, lerobot_dir),
             "error": lerobot_error,
             "required": False,
+        },
+        "validation": {
+            "episodes": {
+                **validation_summary,
+                "failed_episode_ids": failed_episode_ids,
+                "filtered_episode_ids": filtered_episode_ids,
+                "fail_on_partial_error": config.fail_on_partial_error,
+            },
         },
         "verification": {
             "checksums": {},
