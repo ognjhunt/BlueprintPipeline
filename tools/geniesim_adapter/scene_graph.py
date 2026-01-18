@@ -44,6 +44,7 @@ try:
         validate_description,
         validate_dimensions,
         ValidationError,
+        ALLOWED_ASSET_CATEGORIES,
     )
     HAVE_VALIDATION_TOOLS = True
 except ImportError:
@@ -726,7 +727,11 @@ class SceneGraphConverter:
 
                     # Validate and sanitize category
                     category_raw = obj.get("category", "object")
-                    category = validate_category(category_raw)
+                    category = validate_category(
+                        category_raw,
+                        allowed_categories=ALLOWED_ASSET_CATEGORIES,
+                        strict=False,
+                    )
 
                     # Validate and sanitize description
                     description_raw = obj.get("description", "")

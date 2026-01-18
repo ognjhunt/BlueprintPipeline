@@ -38,12 +38,14 @@ from tools.geniesim_adapter.asset_index import (
     AssetIndexBuilder,
     GenieSimAssetIndex,
     GenieSimAsset,
+    CATEGORY_MAPPING,
 )
 from tools.geniesim_adapter.task_config import (
     TaskConfigGenerator,
     GenieSimTaskConfig,
     SuggestedTask,
 )
+from tools.validation import ValidationError
 
 
 # =============================================================================
@@ -407,6 +409,45 @@ class TestAssetIndexBuilder:
 
         assert nc_plate is not None
         assert nc_plate.commercial_ok is False
+
+    def test_unknown_category_warns(self, capsys):
+        """Test that unknown categories emit warnings and fallback."""
+        manifest = {
+            "scene_id": "test_scene",
+            "objects": [
+                {
+                    "id": "mystery_001",
+                    "category": "mystery_box",
+                    "asset": {"path": "objects/mystery/asset.usdz"},
+                }
+            ],
+        }
+
+        builder = AssetIndexBuilder(verbose=True, strict_category_validation=False)
+        index = builder.build(manifest)
+
+        captured = capsys.readouterr()
+        assert "Unknown category" in captured.out
+        assert "mystery_001" in captured.out
+        assert "mystery_box" in captured.out
+        assert index.assets[0].categories == CATEGORY_MAPPING["object"]
+
+    def test_unknown_category_strict_raises(self):
+        """Test that strict category validation raises on unknown categories."""
+        manifest = {
+            "scene_id": "test_scene",
+            "objects": [
+                {
+                    "id": "mystery_002",
+                    "category": "mystery_box",
+                    "asset": {"path": "objects/mystery/asset.usdz"},
+                }
+            ],
+        }
+
+        builder = AssetIndexBuilder(verbose=False, strict_category_validation=True)
+        with pytest.raises(ValidationError):
+            builder.build(manifest)
 
 
 # =============================================================================
