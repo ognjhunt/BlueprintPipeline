@@ -26,6 +26,7 @@ Environment Variables:
 import hashlib
 import json
 import os
+import logging
 import shutil
 import sys
 import tarfile
@@ -66,6 +67,11 @@ from tools.geniesim_adapter.local_framework import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.config.production_mode import resolve_production_mode
+from tools.gcs_upload import (
+    calculate_file_md5_base64,
+    upload_blob_from_filename,
+    verify_blob_upload,
+)
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.utils.atomic_write import write_json_atomic, write_text_atomic
 from quality_config import (
@@ -364,6 +370,24 @@ def _resolve_local_output_dir(
     return Path("/mnt/gcs") / bucket / output_prefix / f"geniesim_{job_id}"
 
 
+def _resolve_gcs_output_path(
+    output_dir: Path,
+    *,
+    bucket: Optional[str],
+    output_prefix: Optional[str],
+    job_id: str,
+    explicit_gcs_output_path: Optional[str],
+) -> Optional[str]:
+    if explicit_gcs_output_path:
+        return explicit_gcs_output_path
+    output_dir_str = str(output_dir)
+    if output_dir_str.startswith("/mnt/gcs/"):
+        return "gs://" + output_dir_str[len("/mnt/gcs/"):]
+    if bucket and output_prefix:
+        return f"gs://{bucket}/{output_prefix}/geniesim_{job_id}"
+    return None
+
+
 def _load_local_job_metadata(
     bucket: str,
     job_metadata_path: Optional[str],
@@ -390,6 +414,112 @@ def _resolve_job_idempotency(job_metadata: Optional[Dict[str, Any]]) -> Optional
         return None
     idempotency = job_metadata.get("idempotency")
     return idempotency if isinstance(idempotency, dict) else None
+
+
+def _resolve_gcs_upload_target(gcs_output_path: str) -> Dict[str, str]:
+    parsed = _parse_gcs_uri(gcs_output_path)
+    if not parsed or not parsed.get("bucket"):
+        raise ValueError(f"Invalid GCS output path: {gcs_output_path}")
+    return parsed
+
+
+def _build_gcs_object_path(prefix: str, rel_path: str) -> str:
+    normalized_prefix = prefix.strip("/")
+    normalized_rel = rel_path.lstrip("/")
+    if not normalized_prefix:
+        return normalized_rel
+    return f"{normalized_prefix}/{normalized_rel}"
+
+
+def _upload_output_dir(
+    output_dir: Path,
+    gcs_output_path: str,
+) -> Dict[str, Any]:
+    try:
+        from google.cloud import storage  # type: ignore
+    except ImportError as exc:
+        return {
+            "status": "failed",
+            "started_at": datetime.utcnow().isoformat() + "Z",
+            "completed_at": datetime.utcnow().isoformat() + "Z",
+            "total_files": 0,
+            "uploaded": 0,
+            "skipped": 0,
+            "failed": 0,
+            "failures": [
+                {
+                    "path": None,
+                    "error": f"google-cloud-storage unavailable: {exc}",
+                }
+            ],
+        }
+
+    parsed = _resolve_gcs_upload_target(gcs_output_path)
+    bucket_name = parsed["bucket"]
+    prefix = parsed.get("object", "")
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    log = logging.getLogger(__name__)
+
+    started_at = datetime.utcnow().isoformat() + "Z"
+    failures: List[Dict[str, Any]] = []
+    uploaded = 0
+    skipped = 0
+    failed = 0
+    files = [path for path in output_dir.rglob("*") if path.is_file()]
+    total_files = len(files)
+
+    for path in sorted(files):
+        rel_path = path.relative_to(output_dir).as_posix()
+        object_name = _build_gcs_object_path(prefix, rel_path)
+        gcs_uri = f"gs://{bucket_name}/{object_name}"
+        blob = bucket.blob(object_name)
+        expected_size = path.stat().st_size
+        expected_md5 = calculate_file_md5_base64(path)
+
+        if blob.exists():
+            verified, reason = verify_blob_upload(
+                blob,
+                gcs_uri=gcs_uri,
+                expected_size=expected_size,
+                expected_md5=expected_md5,
+                logger=log,
+            )
+            if verified:
+                skipped += 1
+                continue
+
+        result = upload_blob_from_filename(
+            blob,
+            path,
+            gcs_uri,
+            logger=log,
+            verify_upload=True,
+        )
+        if result.success:
+            uploaded += 1
+        else:
+            failed += 1
+            failures.append(
+                {
+                    "path": rel_path,
+                    "gcs_uri": gcs_uri,
+                    "error": result.error,
+                }
+            )
+
+    completed_at = datetime.utcnow().isoformat() + "Z"
+    status = "completed" if failed == 0 else "failed"
+    return {
+        "status": status,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "total_files": total_files,
+        "uploaded": uploaded,
+        "skipped": skipped,
+        "failed": failed,
+        "failures": failures,
+    }
 
 
 def _collect_local_episode_metadata(
@@ -434,6 +564,8 @@ class ImportConfig:
 
     # Output
     output_dir: Path
+    gcs_output_path: Optional[str] = None
+    enable_gcs_uploads: bool = True
 
     # Quality filtering
     min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE
@@ -476,6 +608,10 @@ class ImportResult:
     lerobot_conversion_success: bool = True
     checksum_verification_passed: bool = True
     checksum_verification_errors: List[str] = field(default_factory=list)
+    upload_status: Optional[str] = None
+    upload_failures: List[Dict[str, Any]] = field(default_factory=list)
+    upload_started_at: Optional[str] = None
+    upload_completed_at: Optional[str] = None
 
     # Errors
     errors: List[str] = field(default_factory=list)
@@ -1177,9 +1313,9 @@ def run_local_import_job(
 
     # Write machine-readable import manifest for workflows
     import_manifest_path = config.output_dir / "import_manifest.json"
-    gcs_output_path = None
+    gcs_output_path = config.gcs_output_path
     output_dir_str = str(config.output_dir)
-    if output_dir_str.startswith("/mnt/gcs/"):
+    if not gcs_output_path and output_dir_str.startswith("/mnt/gcs/"):
         gcs_output_path = "gs://" + output_dir_str[len("/mnt/gcs/"):]
 
     metrics = get_metrics()
@@ -1269,6 +1405,8 @@ def run_local_import_job(
         "config": {
             "job_id": config.job_id,
             "output_dir": output_dir_str,
+            "gcs_output_path": gcs_output_path,
+            "enable_gcs_uploads": config.enable_gcs_uploads,
             "min_quality_score": config.min_quality_score,
             "enable_validation": config.enable_validation,
             "filter_low_quality": config.filter_low_quality,
@@ -1373,6 +1511,27 @@ def run_local_import_job(
         "size_bytes": package_path.stat().st_size,
     }
     file_inventory = build_file_inventory(config.output_dir, exclude_paths=[import_manifest_path])
+    upload_summary: Dict[str, Any] = {
+        "status": "not_configured",
+        "started_at": None,
+        "completed_at": None,
+        "total_files": 0,
+        "uploaded": 0,
+        "skipped": 0,
+        "failed": 0,
+        "failures": [],
+    }
+    if not config.enable_gcs_uploads:
+        upload_summary["status"] = "disabled"
+    elif output_dir_str.startswith("/mnt/gcs/"):
+        upload_summary["status"] = "not_required"
+    elif gcs_output_path:
+        upload_summary = _upload_output_dir(config.output_dir, gcs_output_path)
+    result.upload_status = upload_summary["status"]
+    result.upload_failures = upload_summary["failures"]
+    result.upload_started_at = upload_summary["started_at"]
+    result.upload_completed_at = upload_summary["completed_at"]
+
     asset_provenance_path = _resolve_asset_provenance_reference(
         bundle_root=bundle_root,
         output_dir=config.output_dir,
@@ -1392,6 +1551,16 @@ def run_local_import_job(
     }
     import_manifest["file_inventory"] = file_inventory
     import_manifest["asset_provenance_path"] = asset_provenance_path
+    import_manifest["upload_status"] = upload_summary["status"]
+    import_manifest["upload_failures"] = upload_summary["failures"]
+    import_manifest["upload_started_at"] = upload_summary["started_at"]
+    import_manifest["upload_completed_at"] = upload_summary["completed_at"]
+    import_manifest["upload_summary"] = {
+        "total_files": upload_summary["total_files"],
+        "uploaded": upload_summary["uploaded"],
+        "skipped": upload_summary["skipped"],
+        "failed": upload_summary["failed"],
+    }
     checksums_verification = verify_checksums_manifest(bundle_root, checksums_path)
     import_manifest["verification"]["checksums"] = checksums_verification
     import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
@@ -1521,6 +1690,7 @@ def main():
     bucket = os.environ["BUCKET"]
     scene_id = os.environ["SCENE_ID"]
     output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
+    explicit_gcs_output_path = os.getenv("GCS_OUTPUT_PATH") or None
     job_metadata_path = os.getenv("JOB_METADATA_PATH") or None
     local_episodes_prefix = os.getenv("LOCAL_EPISODES_PREFIX") or None
 
@@ -1548,6 +1718,7 @@ def main():
     enable_validation = os.getenv("ENABLE_VALIDATION", "true").lower() == "true"
     filter_low_quality = os.getenv("FILTER_LOW_QUALITY", "true").lower() == "true"
     require_lerobot = os.getenv("REQUIRE_LEROBOT", "false").lower() == "true"
+    disable_gcs_upload = os.getenv("DISABLE_GCS_UPLOAD", "false").lower() == "true"
     try:
         lerobot_skip_rate_max = _resolve_skip_rate_max(
             os.getenv("LEROBOT_SKIP_RATE_MAX")
@@ -1590,6 +1761,7 @@ def main():
     print(f"[GENIE-SIM-IMPORT]   Enable Validation: {enable_validation}")
     print(f"[GENIE-SIM-IMPORT]   Require LeRobot: {require_lerobot}")
     print(f"[GENIE-SIM-IMPORT]   LeRobot Skip Rate Max: {lerobot_skip_rate_max:.2f}%")
+    print(f"[GENIE-SIM-IMPORT]   GCS Uploads Enabled: {not disable_gcs_upload}")
     print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}")
     print(f"[GENIE-SIM-IMPORT]   Fail on Partial Error: {fail_on_partial_error}\n")
 
@@ -1601,11 +1773,20 @@ def main():
         local_episodes_prefix=local_episodes_prefix,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    gcs_output_path = _resolve_gcs_output_path(
+        output_dir,
+        bucket=bucket,
+        output_prefix=output_prefix,
+        job_id=job_id,
+        explicit_gcs_output_path=explicit_gcs_output_path,
+    )
 
     # Create configuration
     config = ImportConfig(
         job_id=job_id,
         output_dir=output_dir,
+        gcs_output_path=gcs_output_path,
+        enable_gcs_uploads=not disable_gcs_upload,
         min_quality_score=min_quality_score,
         enable_validation=enable_validation,
         filter_low_quality=filter_low_quality,
