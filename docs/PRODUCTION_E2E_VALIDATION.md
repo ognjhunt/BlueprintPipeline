@@ -119,6 +119,23 @@ If the report or certificate fails these criteria, the downstream workflow write
 }
 ```
 
+### Golden Dataset Regression (Quality Drift Guard)
+Use the pinned golden dataset fixture to detect regressions in episode counts, quality distributions, and checksum
+consistency. The regression test enforces drift thresholds so CI fails when metrics deviate from the baseline.
+
+**How to run:**
+- `pytest tests/test_dataset_regression.py`
+- Metrics and thresholds live under `tests/fixtures/golden/dataset_regression/`:
+  - `baseline_metrics.json` (pinned expected metrics)
+  - `thresholds.json` (allowed drift)
+
+**Manual metric generation (optional):**
+```bash
+python -m tools.dataset_regression.metrics --dataset-dir <bundle_dir>
+```
+This uses the dataset recordings and checksums (or `import_manifest.json`) to summarize collision rates, quality
+scores, and episode durations.
+
 ### 3) Sim Validation (Genie Sim Import)
 **Workflow:** `genie-sim-import-pipeline`
 
