@@ -47,6 +47,17 @@ logger = logging.getLogger(__name__)
 PHYSX_SCHEMA = getattr(pxr, "PhysxSchema", None)
 
 
+class ObjectAddFailures(Exception):
+    """Raised when one or more objects fail to be added to the USD stage."""
+
+    def __init__(self, failures: List[Tuple[Optional[Any], Exception]]):
+        self.failures = failures
+        details = ", ".join(
+            f"{oid if oid is not None else 'unknown'}: {exc}" for oid, exc in failures
+        )
+        super().__init__(f"{len(failures)} object(s) failed to add: {details}")
+
+
 def load_json(path: Path) -> dict:
     """Load a JSON file."""
     if not path.is_file():
@@ -960,15 +971,28 @@ class SceneBuilder:
         objects: List[Dict],
         layout_objects: Dict[Any, Dict],
         room_box: Optional[Dict] = None,
+        strict: bool = True,
     ) -> None:
         """Add all objects to the scene."""
         objects_scope = UsdGeom.Scope.Define(self.stage, "/World/Objects")
+        failures: List[Tuple[Optional[Any], Exception]] = []
 
         for obj in objects:
             try:
                 self.add_object(obj, layout_objects, room_box)
-            except Exception as e:
-                print(f"[WARN] Failed to add object {obj.get('id')}: {e}")
+            except Exception as exc:
+                oid = obj.get("id")
+                failures.append((oid, exc))
+                print(f"[WARN] Failed to add object {oid}: {exc}")
+
+        if failures:
+            summary = ", ".join(
+                str(oid) if oid is not None else "unknown" for oid, _ in failures
+            )
+            message = f"{len(failures)} object(s) failed to add: {summary}"
+            if strict:
+                raise ObjectAddFailures(failures)
+            print(f"[WARN] {message}")
 
 
 # -----------------------------------------------------------------------------
