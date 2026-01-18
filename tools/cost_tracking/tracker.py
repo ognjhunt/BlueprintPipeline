@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 # Pricing constants (as of January 2026)
 # Note: Update these based on actual pricing
+PLACEHOLDER_GENIESIM_JOB_COST = 0.10
+PLACEHOLDER_GENIESIM_EPISODE_COST = 0.002
+
 PRICING = {
     # Gemini API pricing (per 1K tokens)
     "gemini_input_per_1k": 0.00125,  # $0.00125 per 1K input tokens
@@ -42,9 +45,207 @@ PRICING = {
     "gcs_operation_class_b": 0.0004 / 10000,  # $0.0004 per 10K operations
 
     # Genie Sim API (placeholder - need actual pricing)
-    "geniesim_job": 0.10,  # $0.10 per job (PLACEHOLDER)
-    "geniesim_episode": 0.002,  # $0.002 per episode (PLACEHOLDER)
+    "geniesim_job": PLACEHOLDER_GENIESIM_JOB_COST,  # $0.10 per job (PLACEHOLDER)
+    "geniesim_episode": PLACEHOLDER_GENIESIM_EPISODE_COST,  # $0.002 per episode (PLACEHOLDER)
 }
+
+GENIESIM_PRICING_ENV_VARS = ("GENIESIM_JOB_COST", "GENIESIM_EPISODE_COST")
+GENIESIM_GPU_RATE_TABLE_ENV = "GENIESIM_GPU_RATE_TABLE"
+GENIESIM_GPU_RATE_TABLE_PATH_ENV = "GENIESIM_GPU_RATE_TABLE_PATH"
+GENIESIM_GPU_HOURLY_RATE_ENV = "GENIESIM_GPU_HOURLY_RATE"
+GENIESIM_GPU_REGION_ENV = "GENIESIM_GPU_REGION"
+GENIESIM_GPU_NODE_TYPE_ENV = "GENIESIM_GPU_NODE_TYPE"
+COST_TRACKING_PRICING_ENV = "COST_TRACKING_PRICING_JSON"
+COST_TRACKING_PRICING_PATH_ENV = "COST_TRACKING_PRICING_PATH"
+
+DEFAULT_GENIESIM_GPU_RATES = {
+    "default": {
+        "g5.xlarge": 1.006,
+        "g5.2xlarge": 1.212,
+        "g5.12xlarge": 4.384,
+        "a2-highgpu-1g": 1.685,
+    },
+}
+
+
+def _parse_float(value: str, *, env_var: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid float for {env_var}: {value!r}") from exc
+
+
+def _parse_pricing_json(payload: str, *, source: str) -> Dict[str, float]:
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid pricing JSON in {source}: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Pricing data in {source} must be a JSON object.")
+    sanitized: Dict[str, float] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str):
+            raise ValueError(f"Pricing keys must be strings in {source}.")
+        sanitized[key] = _parse_float(value, env_var=source)
+    return sanitized
+
+
+def _load_custom_pricing_from_env() -> Dict[str, float]:
+    pricing_json = os.getenv(COST_TRACKING_PRICING_ENV)
+    pricing_path = os.getenv(COST_TRACKING_PRICING_PATH_ENV)
+    if pricing_json:
+        return _parse_pricing_json(pricing_json, source=COST_TRACKING_PRICING_ENV)
+    if pricing_path:
+        path = Path(pricing_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Pricing config not found: {pricing_path}")
+        return _parse_pricing_json(path.read_text(), source=pricing_path)
+    return {}
+
+
+def _is_production_env() -> bool:
+    env_values = [
+        os.getenv("BP_ENV", "").strip().lower(),
+        os.getenv("GENIESIM_ENV", "").strip().lower(),
+    ]
+    return any(value in {"prod", "production"} for value in env_values if value)
+
+
+def _load_geniesim_pricing_from_env() -> Dict[str, float]:
+    pricing_overrides: Dict[str, float] = {}
+    job_cost = os.getenv("GENIESIM_JOB_COST")
+    episode_cost = os.getenv("GENIESIM_EPISODE_COST")
+    if job_cost is not None:
+        pricing_overrides["geniesim_job"] = _parse_float(job_cost, env_var="GENIESIM_JOB_COST")
+    if episode_cost is not None:
+        pricing_overrides["geniesim_episode"] = _parse_float(
+            episode_cost,
+            env_var="GENIESIM_EPISODE_COST",
+        )
+    return pricing_overrides
+
+
+def _validate_geniesim_pricing(pricing: Dict[str, float]) -> None:
+    job_cost = pricing.get("geniesim_job", PLACEHOLDER_GENIESIM_JOB_COST)
+    episode_cost = pricing.get("geniesim_episode", PLACEHOLDER_GENIESIM_EPISODE_COST)
+    if _is_production_env():
+        if job_cost == PLACEHOLDER_GENIESIM_JOB_COST or episode_cost == PLACEHOLDER_GENIESIM_EPISODE_COST:
+            raise RuntimeError(
+                "Genie Sim pricing is still set to placeholder defaults in production. "
+                "Set GENIESIM_JOB_COST and GENIESIM_EPISODE_COST to real values."
+            )
+
+
+def _load_geniesim_gpu_rate_table() -> Dict[str, Any]:
+    rate_table_json = os.getenv(GENIESIM_GPU_RATE_TABLE_ENV)
+    rate_table_path = os.getenv(GENIESIM_GPU_RATE_TABLE_PATH_ENV)
+    if rate_table_json:
+        try:
+            parsed = json.loads(rate_table_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid GPU rate table JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("GENIESIM_GPU_RATE_TABLE must be a JSON object.")
+        return parsed
+    if rate_table_path:
+        path = Path(rate_table_path)
+        if not path.exists():
+            raise FileNotFoundError(f"GPU rate table config not found: {rate_table_path}")
+        try:
+            parsed = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid GPU rate table JSON in {rate_table_path}: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("GPU rate table config must be a JSON object.")
+        return parsed
+    return DEFAULT_GENIESIM_GPU_RATES.copy()
+
+
+def _resolve_gpu_hourly_rate(
+    *,
+    rate_table: Dict[str, Any],
+    region: Optional[str],
+    node_type: Optional[str],
+) -> Optional[float]:
+    if not rate_table:
+        return None
+    region_key = region or "default"
+    if isinstance(rate_table.get(region_key), dict):
+        region_rates = rate_table.get(region_key, {})
+        if node_type and node_type in region_rates:
+            return _parse_float(region_rates[node_type], env_var="GENIESIM_GPU_RATE_TABLE")
+        if "default" in region_rates:
+            return _parse_float(region_rates["default"], env_var="GENIESIM_GPU_RATE_TABLE")
+        return None
+    if node_type and node_type in rate_table:
+        return _parse_float(rate_table[node_type], env_var="GENIESIM_GPU_RATE_TABLE")
+    if "default" in rate_table:
+        return _parse_float(rate_table["default"], env_var="GENIESIM_GPU_RATE_TABLE")
+    return None
+
+
+def _extract_episode_count(job_metadata: Dict[str, Any]) -> Optional[int]:
+    job_metrics = job_metadata.get("job_metrics", {})
+    for key in ("episodes_collected", "total_episodes", "episodes_passed"):
+        value = job_metrics.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    generation_params = job_metadata.get("generation_params", {})
+    episodes_per_task = generation_params.get("episodes_per_task")
+    num_variations = generation_params.get("num_variations")
+    if isinstance(episodes_per_task, int) and isinstance(num_variations, int):
+        return max(1, episodes_per_task * num_variations)
+    return None
+
+
+def _extract_duration_seconds(job_metadata: Dict[str, Any]) -> Optional[float]:
+    job_metrics = job_metadata.get("job_metrics", {})
+    duration = job_metrics.get("duration_seconds")
+    if isinstance(duration, (int, float)) and duration > 0:
+        return float(duration)
+    return None
+
+
+def _calculate_geniesim_episode_cost(
+    *,
+    job_metadata: Dict[str, Any],
+    rate_table: Dict[str, Any],
+) -> Optional[Dict[str, float]]:
+    duration_seconds = _extract_duration_seconds(job_metadata)
+    episode_count = _extract_episode_count(job_metadata)
+    if duration_seconds is None or episode_count is None:
+        return None
+    region = (
+        job_metadata.get("local_execution", {})
+        .get("server_info", {})
+        .get("region")
+    ) or os.getenv(GENIESIM_GPU_REGION_ENV)
+    node_type = (
+        job_metadata.get("local_execution", {})
+        .get("server_info", {})
+        .get("node_type")
+    ) or os.getenv(GENIESIM_GPU_NODE_TYPE_ENV)
+    hourly_rate = _resolve_gpu_hourly_rate(
+        rate_table=rate_table,
+        region=region,
+        node_type=node_type,
+    )
+    if hourly_rate is None:
+        fallback_rate = os.getenv(GENIESIM_GPU_HOURLY_RATE_ENV)
+        if fallback_rate:
+            hourly_rate = _parse_float(fallback_rate, env_var=GENIESIM_GPU_HOURLY_RATE_ENV)
+    if hourly_rate is None:
+        return None
+    duration_hours = duration_seconds / 3600.0
+    total_cost = duration_hours * hourly_rate
+    per_episode_cost = total_cost / episode_count if episode_count > 0 else 0.0
+    return {
+        "duration_seconds": duration_seconds,
+        "episode_count": float(episode_count),
+        "hourly_rate": hourly_rate,
+        "total_cost": total_cost,
+        "per_episode_cost": per_episode_cost,
+    }
 
 
 @dataclass
@@ -143,8 +344,10 @@ class CostTracker:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.pricing = PRICING.copy()
+        self.pricing.update(_load_geniesim_pricing_from_env())
         if custom_pricing:
             self.pricing.update(custom_pricing)
+        _validate_geniesim_pricing(self.pricing)
 
         self.enable_logging = enable_logging
 
@@ -257,6 +460,7 @@ class CostTracker:
         job_id: str,
         episode_count: int,
         duration_seconds: float = 0,
+        job_metadata: Optional[Dict[str, Any]] = None,
     ) -> float:
         """Track Genie Sim API cost.
 
@@ -265,6 +469,7 @@ class CostTracker:
             job_id: Genie Sim job ID
             episode_count: Number of episodes generated
             duration_seconds: Optional job duration
+            job_metadata: Optional Genie Sim job metadata payload
 
         Returns:
             Cost of this job
@@ -272,6 +477,18 @@ class CostTracker:
         # Calculate cost (job base cost + per-episode cost)
         job_cost = self.pricing["geniesim_job"]
         episode_cost = episode_count * self.pricing["geniesim_episode"]
+        runtime_pricing: Optional[Dict[str, float]] = None
+        if job_metadata:
+            rate_table = _load_geniesim_gpu_rate_table()
+            runtime_pricing = _calculate_geniesim_episode_cost(
+                job_metadata=job_metadata,
+                rate_table=rate_table,
+            )
+        if runtime_pricing:
+            runtime_episode_count = int(runtime_pricing["episode_count"])
+            episode_cost = runtime_pricing["total_cost"]
+            if runtime_episode_count > 0:
+                episode_count = runtime_episode_count
         total_cost = job_cost + episode_cost
 
         # Record
@@ -286,6 +503,7 @@ class CostTracker:
                 "duration_seconds": duration_seconds,
                 "job_cost": job_cost,
                 "episode_cost": episode_cost,
+                "runtime_pricing": runtime_pricing,
             }
         )
 
@@ -590,5 +808,6 @@ def get_cost_tracker() -> CostTracker:
     """
     global _cost_tracker
     if _cost_tracker is None:
-        _cost_tracker = CostTracker()
+        custom_pricing = _load_custom_pricing_from_env()
+        _cost_tracker = CostTracker(custom_pricing=custom_pricing or None)
     return _cost_tracker
