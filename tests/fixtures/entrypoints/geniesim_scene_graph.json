@@ -1,0 +1,26 @@
+{
+  "scene_id": "scene_1",
+  "coordinate_system": "y_up",
+  "meters_per_unit": 1.0,
+  "nodes": [
+    {
+      "asset_id": "asset_1",
+      "semantic": "mug",
+      "size": [0.1, 0.1, 0.12],
+      "pose": {
+        "position": [0.0, 0.0, 0.0],
+        "orientation": [1.0, 0.0, 0.0, 0.0]
+      },
+      "task_tag": ["grasp"],
+      "usd_path": "assets/mug.usd"
+    }
+  ],
+  "edges": [
+    {
+      "source": "asset_1",
+      "target": "table_1",
+      "relation": "on",
+      "confidence": 0.9
+    }
+  ]
+}

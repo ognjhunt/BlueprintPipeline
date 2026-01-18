@@ -1,0 +1,10 @@
+{
+  "export_schema_version": "1.0.0",
+  "geniesim_schema_version": "3.0.0",
+  "blueprintpipeline_version": "test",
+  "export_timestamp": "2025-01-01T00:00:00Z",
+  "schema_compatibility": {
+    "min_geniesim_version": "3.0.0",
+    "max_geniesim_version": "3.9.0"
+  }
+}
