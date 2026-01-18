@@ -560,6 +560,7 @@ main:
     - set_manifest_location:
         assign:
           - manifest_object: ${"scenes/" + scene_id + "/episodes/geniesim_" + job_id + "/import_manifest.json"}
+          - delivery_manifest_object: ${"scenes/" + scene_id + "/geniesim/import_manifest.json"}
         next: read_import_manifest
 
     - read_import_manifest:
@@ -628,6 +629,45 @@ main:
           uploadType: "media"
           body: ${"{\"scene_id\": \"" + scene_id + "\", \"job_id\": \"" + job_id + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}
         result: import_marker
+        next: copy_import_manifest_for_delivery
+
+    - copy_import_manifest_for_delivery:
+        call: googleapis.storage.v1.objects.copy
+        args:
+          sourceBucket: ${bucket}
+          sourceObject: ${manifest_object}
+          destinationBucket: ${bucket}
+          destinationObject: ${delivery_manifest_object}
+        result: delivery_manifest_copy
+        next: run_delivery_job
+
+    - run_delivery_job:
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + project_id + "/locations/" + region + "/jobs/dataset-delivery-job"}
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${scene_id}
+                      - name: JOB_ID
+                        value: ${job_id}
+                      - name: IMPORT_MANIFEST_PATH
+                        value: ${"gs://" + bucket + "/" + delivery_manifest_object}
+                timeout: "1800s"
+          result: delivery_job_execution
+        except:
+          as: e
+          steps:
+            - log_delivery_job_error:
+                call: sys.log
+                args:
+                  text: ${"Failed to start dataset delivery job: " + e.message}
+                  severity: "ERROR"
         next: check_training_enabled
 
     # Trigger downstream training pipeline (optional)
