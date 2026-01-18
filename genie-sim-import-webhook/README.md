@@ -20,6 +20,8 @@ Webhook service for ingesting GenieSim import events.
 - `HEALTHCHECK_ALLOWED_HOSTS`: optional comma-separated list of hostnames permitted for
   `LLM_HEALTH_URL` and `ISAAC_SIM_HEALTH_URL` checks. When set, the health probes only run
   against hosts in this allowlist and still require HTTPS.
+- `HEALTH_PROBE_TIMEOUT_S`: optional timeout (seconds) for dependency probes; defaults to the
+  centralized pipeline config value.
 - Webhook deduplication (Firestore):
   - `GOOGLE_CLOUD_PROJECT`: GCP project hosting the Firestore database.
   - `FIRESTORE_DEDUP_COLLECTION`: optional Firestore collection name for webhook markers

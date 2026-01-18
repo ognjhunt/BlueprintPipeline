@@ -171,6 +171,33 @@ class ResourceConfig:
 
 
 @dataclass
+class SceneGraphRelationInferenceConfig:
+    """Relation inference thresholds for scene graph generation."""
+    vertical_proximity_threshold: float = 0.05
+    horizontal_proximity_threshold: float = 0.15
+    alignment_angle_threshold: float = 5.0
+
+
+@dataclass
+class SceneGraphStreamingConfig:
+    """Streaming configuration for large scene manifests."""
+    batch_size: int = 100
+
+
+@dataclass
+class SceneGraphConfig:
+    """Scene graph conversion configuration."""
+    relation_inference: SceneGraphRelationInferenceConfig = field(default_factory=SceneGraphRelationInferenceConfig)
+    streaming: SceneGraphStreamingConfig = field(default_factory=SceneGraphStreamingConfig)
+
+
+@dataclass
+class HealthChecksConfig:
+    """Health check configuration defaults."""
+    probe_timeout_s: float = 2.0
+
+
+@dataclass
 class ModelConfig:
     """LLM model configuration."""
     model_name: str
@@ -230,6 +257,8 @@ class PipelineConfig:
     domain_randomization: DomainRandomizationConfig = field(default_factory=DomainRandomizationConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     resources: ResourceConfig = field(default_factory=ResourceConfig)
+    scene_graph: SceneGraphConfig = field(default_factory=SceneGraphConfig)
+    health_checks: HealthChecksConfig = field(default_factory=HealthChecksConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
 
 
@@ -664,6 +693,8 @@ class ConfigLoader:
         dr = config.get("domain_randomization", {})
         reward = config.get("reward_shaping", {})
         resources = config.get("resource_allocation", {})
+        scene_graph = config.get("scene_graph", {})
+        health_checks = config.get("health_checks", {})
         models_cfg = config.get("models", {})
 
         # Parse models configuration
@@ -732,6 +763,28 @@ class ConfigLoader:
                 num_cpu_workers=resources.get("num_cpu_workers", 4),
                 num_gpu_workers=resources.get("num_gpu_workers", 1),
                 memory_limit_gb=resources.get("memory_limit_gb", 32),
+            ),
+            scene_graph=SceneGraphConfig(
+                relation_inference=SceneGraphRelationInferenceConfig(
+                    vertical_proximity_threshold=scene_graph.get("relation_inference", {}).get(
+                        "vertical_proximity_threshold",
+                        0.05,
+                    ),
+                    horizontal_proximity_threshold=scene_graph.get("relation_inference", {}).get(
+                        "horizontal_proximity_threshold",
+                        0.15,
+                    ),
+                    alignment_angle_threshold=scene_graph.get("relation_inference", {}).get(
+                        "alignment_angle_threshold",
+                        5.0,
+                    ),
+                ),
+                streaming=SceneGraphStreamingConfig(
+                    batch_size=scene_graph.get("streaming", {}).get("batch_size", 100),
+                ),
+            ),
+            health_checks=HealthChecksConfig(
+                probe_timeout_s=health_checks.get("probe_timeout_s", 2.0),
             ),
             models=models,
         )
@@ -868,6 +921,29 @@ class ConfigLoader:
                         errors["resource_allocation.gpu_memory_fraction"] = "Must be between 0.0 and 1.0"
                 if "memory_limit_gb" in resources and resources["memory_limit_gb"] <= 0:
                     errors["resource_allocation.memory_limit_gb"] = "Must be positive"
+
+        if "scene_graph" in config:
+            scene_graph = config["scene_graph"]
+            if isinstance(scene_graph, dict):
+                relation_inference = scene_graph.get("relation_inference", {})
+                if isinstance(relation_inference, dict):
+                    for key in [
+                        "vertical_proximity_threshold",
+                        "horizontal_proximity_threshold",
+                        "alignment_angle_threshold",
+                    ]:
+                        if key in relation_inference and relation_inference[key] < 0:
+                            errors[f"scene_graph.relation_inference.{key}"] = "Must be non-negative"
+                streaming = scene_graph.get("streaming", {})
+                if isinstance(streaming, dict):
+                    if "batch_size" in streaming and streaming["batch_size"] <= 0:
+                        errors["scene_graph.streaming.batch_size"] = "Must be positive"
+
+        if "health_checks" in config:
+            health_checks = config["health_checks"]
+            if isinstance(health_checks, dict):
+                if "probe_timeout_s" in health_checks and health_checks["probe_timeout_s"] <= 0:
+                    errors["health_checks.probe_timeout_s"] = "Must be positive"
 
         return errors
 

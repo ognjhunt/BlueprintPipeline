@@ -4,8 +4,10 @@ import hmac
 import hashlib
 import ipaddress
 import subprocess
+import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request
@@ -15,6 +17,12 @@ from google.cloud import firestore
 from google.cloud.workflows import executions_v1
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.config import load_pipeline_config
 
 app = Flask(__name__)
 
@@ -187,7 +195,7 @@ def _isaac_sim_probe(timeout_s: float) -> dict:
 
 
 def _dependency_health() -> tuple[bool, dict]:
-    timeout_s = float(os.getenv("HEALTH_PROBE_TIMEOUT_S", "2.0"))
+    timeout_s = _get_health_probe_timeout_s()
     gpu_required = os.getenv("GPU_HEALTH_REQUIRED", "false").lower() == "true"
     isaac_required = os.getenv("ISAAC_SIM_HEALTH_REQUIRED", "false").lower() == "true"
     llm_required = os.getenv("LLM_HEALTH_REQUIRED", "false").lower() == "true"
@@ -214,6 +222,14 @@ def _dependency_health() -> tuple[bool, dict]:
             })
 
     return not errors, {"dependencies": dependencies, "errors": errors}
+
+
+def _get_health_probe_timeout_s() -> float:
+    env_value = os.getenv("HEALTH_PROBE_TIMEOUT_S")
+    if env_value is not None:
+        return float(env_value)
+    pipeline_config = load_pipeline_config()
+    return float(pipeline_config.health_checks.probe_timeout_s)
 
 
 def _get_project_id() -> str:

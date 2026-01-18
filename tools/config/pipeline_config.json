@@ -158,6 +158,22 @@
     "distributed_backend": "ray",
     "description": "Compute resource allocation settings"
   },
+  "scene_graph": {
+    "relation_inference": {
+      "vertical_proximity_threshold": 0.05,
+      "horizontal_proximity_threshold": 0.15,
+      "alignment_angle_threshold": 5.0,
+      "description": "Thresholds for inferring spatial relations (meters/degrees)."
+    },
+    "streaming": {
+      "batch_size": 100,
+      "description": "Streaming batch size for large scene manifests."
+    }
+  },
+  "health_checks": {
+    "probe_timeout_s": 2.0,
+    "description": "Default timeout (seconds) for dependency health probes."
+  },
   "export_formats": {
     "default_format": "lerobot",
     "available_formats": ["lerobot", "isaac_lab", "arena", "hdf5", "tfrecord", "rosbag"],
