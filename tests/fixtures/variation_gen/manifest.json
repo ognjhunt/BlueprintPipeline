@@ -20,6 +20,33 @@
           0.2
         ]
       }
+  "scene_type": "kitchen",
+  "environment_type": "indoor",
+  "assets": [
+    {
+      "name": "mock_plate",
+      "category": "dishes",
+      "description": "white ceramic dinner plate",
+      "semantic_class": "dish",
+      "priority": "required",
+      "source_hint": "generate",
+      "example_variants": ["small plate", "large plate"],
+      "physics_hints": {
+        "mass_range_kg": [0.3, 0.7]
+      },
+      "material_hint": "glossy ceramic",
+      "style_hint": "studio product photo",
+      "generation_prompt_hint": "a white ceramic dinner plate"
+    },
+    {
+      "name": "mock_spatula",
+      "category": "utensils",
+      "description": "stainless steel spatula",
+      "semantic_class": "tool",
+      "priority": "optional",
+      "source_hint": "existing",
+      "example_variants": [],
+      "physics_hints": {}
     }
   ]
 }
