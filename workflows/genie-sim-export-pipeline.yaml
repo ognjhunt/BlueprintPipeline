@@ -85,6 +85,15 @@ main:
           - gkeNamespace: '${default(map.get(event, "gke_namespace"), "blueprint")}'
           - gkeGpuAccelerator: '${default(map.get(event, "gke_gpu_accelerator"), "nvidia-tesla-t4")}'
           - gkeServiceAccount: '${default(map.get(event, "gke_service_account"), "blueprint-pipeline-sa")}'
+          - canaryEnabled: '${default(map.get(event, "canary_enabled"), false)}'
+          - canaryTags: '${default(map.get(event, "canary_tags"), default(sys.get_env("CANARY_TAGS"), ""))}'
+          - canarySceneIds: '${default(map.get(event, "canary_scene_ids"), "")}'
+          - canaryPercent: '${default(map.get(event, "canary_percent"), default(sys.get_env("CANARY_PERCENT"), "0"))}'
+          - canaryReleaseChannel: '${default(map.get(event, "canary_release_channel"), default(sys.get_env("CANARY_RELEASE_CHANNEL"), "stable"))}'
+          - stableImageTag: '${default(sys.get_env("GENIESIM_IMAGE_TAG"), "isaacsim")}'
+          - canaryImageTag: '${default(map.get(event, "canary_image_tag"), default(sys.get_env("GENIESIM_CANARY_IMAGE_TAG"), "isaacsim-canary"))}'
+          - geniesimImageTag: ${if(canaryEnabled, canaryImageTag, stableImageTag)}
+          - canaryRollbackMarker: '${default(map.get(event, "canary_rollback_marker"), "")}'
         next: filter_completion_markers
 
     # Filter for .variation_pipeline_complete marker files
@@ -560,7 +569,7 @@ main:
                                 effect: NoSchedule
                             containers:
                               - name: genie-sim-local
-                                image: gcr.io/${projectId}/blueprint-genie-sim:isaacsim
+                                image: gcr.io/${projectId}/blueprint-genie-sim:${geniesimImageTag}
                                 imagePullPolicy: Always
                                 env:
                                   - name: BUCKET
@@ -591,6 +600,18 @@ main:
                                     value: ${default(sys.get_env("ISAAC_SIM_PATH"), "/isaac-sim")}
                                   - name: GOOGLE_APPLICATION_CREDENTIALS
                                     value: /secrets/gcs/key.json
+                                  - name: CANARY_ENABLED
+                                    value: '${if(canaryEnabled, "true", "false")}'
+                                  - name: CANARY_TAGS
+                                    value: ${canaryTags}
+                                  - name: CANARY_SCENE_IDS
+                                    value: ${canarySceneIds}
+                                  - name: CANARY_PERCENT
+                                    value: ${string(canaryPercent)}
+                                  - name: CANARY_RELEASE_CHANNEL
+                                    value: ${canaryReleaseChannel}
+                                  - name: CANARY_ROLLBACK_MARKER
+                                    value: ${if(canaryRollbackMarker == "", geniesimPrefix + "/.canary_rollback", canaryRollbackMarker)}
                                 resources:
                                   requests:
                                     cpu: "4"

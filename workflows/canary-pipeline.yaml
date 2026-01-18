@@ -1,0 +1,156 @@
+# canary-pipeline.yaml
+#
+# Canary workflow that routes a tagged subset of scenes to the canary Genie Sim
+# image tag by invoking the standard genie-sim-export-pipeline with canary
+# flags. This workflow is intended to be attached to the same Eventarc trigger
+# as the standard pipeline, or run manually with a variation completion marker.
+#
+# Example manual trigger:
+#   gcloud workflows run canary-pipeline \
+#     --location=us-central1 \
+#     --data='{"data":{"bucket":"your-bucket","name":"scenes/scene_001/variation_assets/.variation_pipeline_complete"},"canary_tags":"canary","canary_image_tag":"isaacsim-canary"}'
+
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: '${event}'
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: ${default(sys.get_env("PRIMARY_WORKFLOW_REGION"), "us-central1")}
+          - workflowName: "canary-pipeline"
+          - targetWorkflow: "genie-sim-export-pipeline"
+          - canaryEnabled: '${default(map.get(event, "canary_enabled"), true)}'
+          - canaryTagsRaw: '${default(map.get(event, "canary_tags"), default(sys.get_env("CANARY_TAGS"), ""))}'
+          - canarySceneIdsRaw: '${default(map.get(event, "canary_scene_ids"), "")}'
+          - canaryPercent: '${default(map.get(event, "canary_percent"), default(sys.get_env("CANARY_PERCENT"), "0"))}'
+          - canaryReleaseChannel: '${default(map.get(event, "canary_release_channel"), default(sys.get_env("CANARY_RELEASE_CHANNEL"), "canary"))}'
+          - canaryImageTag: '${default(map.get(event, "canary_image_tag"), default(sys.get_env("GENIESIM_CANARY_IMAGE_TAG"), "isaacsim-canary"))}'
+          - canaryRollbackMarker: '${default(map.get(event, "canary_rollback_marker"), "")}'
+        next: filter_completion_markers
+
+    - filter_completion_markers:
+        switch:
+          - condition: '${text.match_regex(object, "^scenes/.+/variation_assets/\\.variation_pipeline_complete$")}'
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - sceneConfigPath: '${"scenes/" + sceneId + "/config.json"}'
+        next: load_scene_config
+
+    - load_scene_config:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${sceneConfigPath}
+            alt: "media"
+          result: sceneConfigRaw
+        except:
+          as: e
+          steps:
+            - log_no_config:
+                call: sys.log
+                args:
+                  text: '${"No scene config found for canary tag evaluation: " + sceneId}'
+                  severity: "INFO"
+            - set_empty_config:
+                assign:
+                  - sceneConfigRaw: "{}"
+        next: parse_scene_config
+
+    - parse_scene_config:
+        assign:
+          - sceneConfig: ${json.decode(sceneConfigRaw)}
+          - sceneTags: ${default(map.get(sceneConfig, "tags"), default(map.get(sceneConfig, "scene_tags"), []))}
+          - canaryTags: ${if(canaryTagsRaw == "", [], text.split(canaryTagsRaw, ","))}
+          - canarySceneIds: ${if(canarySceneIdsRaw == "", [], text.split(canarySceneIdsRaw, ","))}
+          - isTagged: false
+          - isAllowlisted: false
+        next: check_scene_id_match
+
+    - check_scene_id_match:
+        for:
+          value: canarySceneId
+          in: ${canarySceneIds}
+          steps:
+            - update_scene_id_match:
+                assign:
+                  - isAllowlisted: ${isAllowlisted or text.trim(canarySceneId) == sceneId}
+        next: check_tag_match
+
+    - check_tag_match:
+        for:
+          value: canaryTag
+          in: ${canaryTags}
+          steps:
+            - update_tag_match:
+                assign:
+                  - isTagged: ${isTagged or list.contains(sceneTags, text.trim(canaryTag))}
+        next: decide_canary
+
+    - decide_canary:
+        assign:
+          - isCanaryScene: ${canaryEnabled and (isTagged or isAllowlisted)}
+        next: check_canary
+
+    - check_canary:
+        switch:
+          - condition: ${isCanaryScene}
+            next: build_canary_scene_ids
+        next: skip
+
+    - build_canary_scene_ids:
+        assign:
+          - canarySceneIdsForJob: ${if(canarySceneIdsRaw == "", sceneId, canarySceneIdsRaw + "," + sceneId)}
+        next: trigger_canary_pipeline
+
+    - trigger_canary_pipeline:
+        call: googleapis.workflows.v1.projects.locations.workflows.executions.create
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/workflows/" + targetWorkflow}'
+          body:
+            argument: ${json.encode({
+              "data": {
+                "bucket": bucket,
+                "name": object
+              },
+              "canary_enabled": true,
+              "canary_tags": canaryTagsRaw,
+              "canary_scene_ids": canarySceneIdsForJob,
+              "canary_percent": canaryPercent,
+              "canary_release_channel": canaryReleaseChannel,
+              "canary_image_tag": canaryImageTag,
+              "canary_rollback_marker": canaryRollbackMarker
+            })}
+        result: canaryExecution
+        next: log_canary_invocation
+
+    - log_canary_invocation:
+        call: sys.log
+        args:
+          text: '${"Triggered canary export pipeline for scene " + sceneId + " (execution: " + canaryExecution.name + ")"}'
+          severity: "INFO"
+        next: done
+
+    - skip:
+        call: sys.log
+        args:
+          text: '${"Skipping canary export for scene " + default(sceneId, "unknown") + " (not tagged/allowlisted)"}'
+          severity: "INFO"
+        next: done
+
+    - done:
+        return: "ok"
