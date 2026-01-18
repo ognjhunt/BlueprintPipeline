@@ -60,6 +60,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from monitoring.alerting import send_alert
 
+from tools.dataset_regression.metrics import compute_regression_metrics
 from tools.geniesim_adapter.local_framework import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
@@ -1152,6 +1153,16 @@ def run_local_import_job(
     provenance = collect_provenance(REPO_ROOT, config_snapshot)
     provenance.update(base_provenance)
 
+    regression_payload = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "metrics": {},
+        "error": None,
+    }
+    try:
+        regression_payload["metrics"] = compute_regression_metrics(config.output_dir)
+    except Exception as exc:
+        regression_payload["error"] = f"{type(exc).__name__}: {exc}"
+
     import_manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "schema_definition": MANIFEST_SCHEMA_DEFINITION,
@@ -1193,6 +1204,7 @@ def run_local_import_job(
             "checksums": {},
         },
         "metrics_summary": metrics_summary,
+        "regression_metrics": regression_payload,
         "checksums": checksums_payload,
         "provenance": provenance,
     }

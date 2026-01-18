@@ -1,0 +1,12 @@
+{
+  "files": {
+    "recordings/episode_000001.json": {
+      "sha256": "25a25088de700f2a71b17c44ab9a4991f32dba5e93f3bc23254dce3bf73e3a56",
+      "size_bytes": 253
+    },
+    "recordings/episode_000000.json": {
+      "sha256": "63c14437b1e987446a90a93e28b60f7e12386d588e7733f2e5f8c185a3b7e971",
+      "size_bytes": 252
+    }
+  }
+}

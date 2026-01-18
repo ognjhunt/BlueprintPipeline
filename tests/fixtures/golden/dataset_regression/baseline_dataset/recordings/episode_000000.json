@@ -1,0 +1,16 @@
+{
+  "episode_id": "episode_000000",
+  "task_name": "pick_mug",
+  "quality_score": 0.92,
+  "validation_passed": true,
+  "collision_count": 0,
+  "frame_count": 36,
+  "frames": [
+    {
+      "timestamp": 0.0
+    },
+    {
+      "timestamp": 1.2
+    }
+  ]
+}

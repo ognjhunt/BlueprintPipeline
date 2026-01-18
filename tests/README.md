@@ -18,6 +18,7 @@ Automated tests covering pipeline integrations, contracts, and job behavior.
 ## How to run locally
 - Run all tests: `pytest`
 - Run a subset: `pytest tests/test_pipeline_e2e.py`
+- Run dataset regression checks: `pytest tests/test_dataset_regression.py` (uses thresholds in `tests/fixtures/golden/dataset_regression/thresholds.json` to detect metric drift).
 
 ## Test dependencies
 - Install test requirements: `pip install -r tests/requirements.txt`.
