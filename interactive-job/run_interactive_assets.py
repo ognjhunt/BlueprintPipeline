@@ -18,7 +18,7 @@ Environment Variables:
     SCENE_ID: Scene identifier
     ASSETS_PREFIX: Path to assets (contains scene_assets.json)
     PARTICULATE_ENDPOINT: Particulate Cloud Run service URL
-    PARTICULATE_MODE: "remote" (default), "local", or "skip" for inference control
+    PARTICULATE_MODE: "remote" (default), "local", "mock", or "skip" for inference control
     PARTICULATE_LOCAL_ENDPOINT: Optional local Particulate URL for PARTICULATE_MODE=local
     PARTICULATE_LOCAL_MODEL: Identifier for the locally hosted Particulate model (required in labs/prod)
     APPROVED_PARTICULATE_MODELS: Comma-separated allowlist for local Particulate models (default: pat_b)
@@ -67,6 +67,7 @@ MODE_IMAGE = "image"  # Legacy crop image input
 
 PARTICULATE_MODE_REMOTE = "remote"
 PARTICULATE_MODE_LOCAL = "local"
+PARTICULATE_MODE_MOCK = "mock"
 PARTICULATE_MODE_SKIP = "skip"
 
 
@@ -93,7 +94,7 @@ def raise_placeholder_error(obj_id: str, reason: str) -> None:
 def normalize_particulate_mode(value: str) -> str:
     """Normalize particulate mode env var to a supported value."""
     mode = value.strip().lower()
-    if mode not in {PARTICULATE_MODE_REMOTE, PARTICULATE_MODE_LOCAL, PARTICULATE_MODE_SKIP}:
+    if mode not in {PARTICULATE_MODE_REMOTE, PARTICULATE_MODE_LOCAL, PARTICULATE_MODE_MOCK, PARTICULATE_MODE_SKIP}:
         log(
             f"Unknown PARTICULATE_MODE '{value}', defaulting to '{PARTICULATE_MODE_REMOTE}'",
             "WARNING",
@@ -121,6 +122,8 @@ def resolve_particulate_endpoint(
                 "WARNING",
             )
         return endpoint, "local"
+    if particulate_mode == PARTICULATE_MODE_MOCK:
+        return "", "mock"
     if particulate_mode == PARTICULATE_MODE_REMOTE:
         return remote_endpoint, "remote"
     return "", None
@@ -612,6 +615,36 @@ def call_particulate_service(
                 time.sleep(10)
 
     return None
+
+
+def build_mock_particulate_response(
+    glb_path: Path,
+    obj_id: str,
+    placeholder: bool,
+) -> Optional[dict]:
+    """Build a mock Particulate response payload for tests."""
+    if not glb_path or not glb_path.is_file():
+        log("Mock Particulate missing GLB input", "ERROR", obj_id=obj_id)
+        return None
+
+    glb_bytes = glb_path.read_bytes()
+    response = {
+        "placeholder": placeholder,
+        "generator": "particulate-mock",
+        "articulation": {
+            "joint_count": 0,
+            "part_count": 1,
+            "is_articulated": False,
+        },
+    }
+
+    if placeholder:
+        return response
+
+    response["mesh_base64"] = base64.b64encode(glb_bytes).decode("utf-8")
+    static_urdf = generate_static_urdf(obj_id, "part.glb").encode("utf-8")
+    response["urdf_base64"] = base64.b64encode(static_urdf).decode("utf-8")
+    return response
 
 
 # =============================================================================
@@ -1396,9 +1429,14 @@ def process_object(
         result["urdf_path"] = str(urdf_path)
         return result
 
-    # Call Particulate service
-    log(f"Calling Particulate for articulation", obj_id=obj_name)
-    response = call_particulate_service(particulate_endpoint, glb_path, obj_name)
+    # Call Particulate service or mock response
+    if particulate_mode == PARTICULATE_MODE_MOCK:
+        mock_placeholder = env_flag(os.getenv("PARTICULATE_MOCK_PLACEHOLDER"), default=False)
+        log(f"Building mock Particulate response (placeholder={mock_placeholder})", obj_id=obj_name)
+        response = build_mock_particulate_response(glb_path, obj_name, mock_placeholder)
+    else:
+        log(f"Calling Particulate for articulation", obj_id=obj_name)
+        response = call_particulate_service(particulate_endpoint, glb_path, obj_name)
 
     if not response:
         log("Particulate service call failed", "ERROR", obj_name)
