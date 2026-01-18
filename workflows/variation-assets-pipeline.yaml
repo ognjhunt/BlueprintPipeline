@@ -44,12 +44,14 @@ main:
           - sceneId: ${parts[1]}
           - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
           - variationAssetsPrefix: '${"scenes/" + sceneId + "/variation_assets"}'
+          - variationAssetsProgressMarker: '${"scenes/" + sceneId + "/variation_assets/.progress.json"}'
+          - variationAssetsReportObject: '${"scenes/" + sceneId + "/variation_assets/generation_report.json"}'
           - variationAssetsFailedMarker: '${"scenes/" + sceneId + "/variation_assets/.failed"}'
           - variationSimreadyFailedMarker: '${"scenes/" + sceneId + "/variation_assets/simready/.failed"}'
           - variationGenJobName: "variation-gen-job"
-          - variationGenTimeoutSeconds: 1800
+          - variationGenTimeoutSeconds: '${int(default(sys.get_env("VARIATION_GEN_TIMEOUT_SECONDS"), "1800"))}'
           - simreadyJobName: "simready-job"
-          - simreadyTimeoutSeconds: 3600
+          - simreadyTimeoutSeconds: '${int(default(sys.get_env("SIMREADY_TIMEOUT_SECONDS"), "3600"))}'
         next: log_start
 
     - log_start:
@@ -57,7 +59,70 @@ main:
         args:
           text: '${"Variation assets pipeline triggered for scene " + sceneId}'
           severity: "INFO"
+        next: init_pipeline_metrics
+
+    - init_pipeline_metrics:
+        assign:
+          - pipelineStartTime: '${time.format(sys.now())}'
+          - pipelineTimeoutSeconds: '${variationGenTimeoutSeconds + simreadyTimeoutSeconds}'
+          - pipelineStatus: "SUCCESS"
+        next: emit_pipeline_metrics_start
+
+    - emit_pipeline_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "pipeline_invocation"
+            event: "start"
+            workflow: "variation-assets-pipeline"
+            scene_id: ${sceneId}
+            timeout_seconds: ${pipelineTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${pipelineStartTime}
+          severity: "INFO"
+        next: check_variation_assets_progress_marker
+
+    - check_variation_assets_progress_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${variationAssetsProgressMarker}
+          result: variationAssetsProgressMarkerObject
+        except:
+          as: e
+          steps:
+            - handle_progress_marker_missing:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: detect_partial_outputs
+                next: raise_progress_marker_error
+        next: set_resume_from_progress
+
+    - detect_partial_outputs:
+        call: googleapis.storage.v1.objects.list
+        args:
+          bucket: ${bucket}
+          prefix: ${variationAssetsPrefix + "/"}
+          maxResults: 1
+        result: variationAssetsPartialList
+        next: set_resume_from_partial_outputs
+
+    - set_resume_from_partial_outputs:
+        assign:
+          - resumeFromProgress: '${len(default(variationAssetsPartialList.items, [])) > 0}'
         next: init_variation_gen_metrics
+
+    - set_resume_from_progress:
+        assign:
+          - resumeFromProgress: true
+        next: init_variation_gen_metrics
+
+    - raise_progress_marker_error:
+        raise: '${e}'
 
     - init_variation_gen_metrics:
         assign:
@@ -103,6 +168,10 @@ main:
                         value: ${replicatorPrefix}
                       - name: VARIATION_ASSETS_PREFIX
                         value: ${variationAssetsPrefix}
+                      - name: PROGRESS_MARKER_PATH
+                        value: ${variationAssetsProgressMarker}
+                      - name: RESUME_FROM_PROGRESS
+                        value: '${if(resumeFromProgress, "true", "false")}'
                       # Generate only required and recommended assets by default
                       # Set to empty string to generate all
                       - name: PRIORITY_FILTER
@@ -246,6 +315,54 @@ main:
         args:
           text: '${"Variation generation completed for scene " + sceneId + " - starting simready-job"}'
           severity: "INFO"
+        next: read_variation_gen_report
+
+    - read_variation_gen_report:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${variationAssetsReportObject}
+            alt: "media"
+          result: variationGenReportRaw
+        except:
+          as: e
+          steps:
+            - handle_variation_gen_report_missing:
+                switch:
+                  - condition: ${e.code == 404}
+                    next: set_variation_gen_report_missing
+                next: raise_variation_gen_report_error
+        next: parse_variation_gen_report
+
+    - parse_variation_gen_report:
+        assign:
+          - variationGenReport: ${json.decode(variationGenReportRaw)}
+          - variationGenReportMissing: false
+        next: write_variation_gen_progress_marker
+
+    - set_variation_gen_report_missing:
+        assign:
+          - variationGenReport: null
+          - variationGenReportMissing: true
+        next: write_variation_gen_progress_marker
+
+    - raise_variation_gen_report_error:
+        raise: '${e}'
+
+    - write_variation_gen_progress_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${variationAssetsProgressMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "variation_assets_prefix": variationAssetsPrefix,
+            "updated_at": time.format(sys.now()),
+            "report_missing": variationGenReportMissing,
+            "variation_gen": variationGenReport
+          })}
         next: check_variation_assets_exist
 
     - variation_gen_failed:
@@ -305,8 +422,13 @@ main:
                 args:
                   text: '${"No variation assets were generated for scene " + sceneId + " - pipeline complete"}'
                   severity: "INFO"
-                next: done_no_assets
+                next: set_pipeline_status_no_assets
         next: init_simready_metrics
+
+    - set_pipeline_status_no_assets:
+        assign:
+          - pipelineStatus: "SUCCESS_NO_ASSETS"
+        next: finalize_pipeline_metrics
 
     # =========================================================================
     # Stage 2: Add physics properties to variation assets
@@ -352,6 +474,10 @@ main:
                         value: ${variationAssetsPrefix}
                       - name: SIMREADY_PHYSICS_MODE
                         value: "deterministic"
+                      - name: PROGRESS_MARKER_PATH
+                        value: ${variationAssetsProgressMarker}
+                      - name: RESUME_FROM_PROGRESS
+                        value: '${if(resumeFromProgress, "true", "false")}'
               timeout: '${string(simreadyTimeoutSeconds) + "s"}'
           result: simreadyExec
         retry:
@@ -491,7 +617,7 @@ main:
         args:
           text: '${"Simready job completed for scene " + sceneId + " variation assets"}'
           severity: "INFO"
-        next: write_completion_marker
+        next: set_pipeline_status_success
 
     - simready_failed:
         assign:
@@ -525,6 +651,11 @@ main:
         args:
           text: '${"WARNING: Simready job failed for scene " + sceneId + " variation assets - assets may not have physics properties"}'
           severity: "WARNING"
+        next: set_pipeline_status_success
+
+    - set_pipeline_status_success:
+        assign:
+          - pipelineStatus: "SUCCESS"
         next: write_completion_marker
 
     # =========================================================================
@@ -541,6 +672,38 @@ main:
           uploadType: "media"
           data: '${"Completed at " + time.format(sys.now())}'
         result: markerResult
+        next: finalize_pipeline_metrics
+
+    - finalize_pipeline_metrics:
+        assign:
+          - pipelineEndTime: '${time.format(sys.now())}'
+          - pipelineDurationSeconds: '${time.parse(pipelineEndTime) - time.parse(pipelineStartTime)}'
+          - pipelineTimeoutUsageRatio: '${pipelineDurationSeconds / pipelineTimeoutSeconds}'
+          - pipelineTimedOut: '${pipelineDurationSeconds >= pipelineTimeoutSeconds}'
+        next: emit_pipeline_metrics_complete
+
+    - emit_pipeline_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "pipeline_invocation"
+            event: "complete"
+            workflow: "variation-assets-pipeline"
+            scene_id: ${sceneId}
+            timeout_seconds: ${pipelineTimeoutSeconds}
+            duration_seconds: ${pipelineDurationSeconds}
+            timeout_usage_ratio: ${pipelineTimeoutUsageRatio}
+            timed_out: ${pipelineTimedOut}
+            status: ${pipelineStatus}
+            start_time: ${pipelineStartTime}
+            end_time: ${pipelineEndTime}
+          severity: "INFO"
+        next: pipeline_metrics_complete_switch
+
+    - pipeline_metrics_complete_switch:
+        switch:
+          - condition: '${pipelineStatus == "SUCCESS_NO_ASSETS"}'
+            next: done_no_assets
         next: done
 
     # =========================================================================
