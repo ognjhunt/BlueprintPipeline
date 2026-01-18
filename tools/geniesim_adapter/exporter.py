@@ -195,6 +195,7 @@ class GenieSimExporter:
         manifest_path: Path,
         output_dir: Path,
         usd_source_dir: Optional[Path] = None,
+        source_assets: Optional[Dict[str, Any]] = None,
     ) -> GenieSimExportResult:
         """
         Export BlueprintPipeline scene to Genie Sim format.
@@ -342,6 +343,7 @@ class GenieSimExporter:
                 result=result,
                 config=self.config,
                 output_path=export_manifest_path,
+                source_assets=source_assets,
             )
 
             result.success = True
@@ -470,6 +472,7 @@ source:
         result: GenieSimExportResult,
         config: GenieSimExportConfig,
         output_path: Path,
+        source_assets: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Write export manifest JSON."""
         schema_version = "2.0"
@@ -483,6 +486,7 @@ source:
                 "config": "Export configuration snapshot.",
                 "result": "Export output paths, statistics, warnings, and errors.",
                 "geniesim_compatibility": "Target Genie Sim compatibility metadata.",
+                "source_assets": "Source asset checksum metadata and provenance.",
                 "file_inventory": "List of output files (path + size).",
                 "checksums": "SHA256 checksums for all output files.",
             },
@@ -526,6 +530,7 @@ source:
                     "scene_config": "yaml",
                 },
             },
+            "source_assets": source_assets,
             "file_inventory": file_inventory,
             "checksums": {
                 "files": file_checksums,

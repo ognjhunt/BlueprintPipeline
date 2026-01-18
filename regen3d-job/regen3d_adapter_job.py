@@ -69,6 +69,7 @@ from tools.scale_authority.authority import REFERENCE_DIMENSIONS
 from tools.scene_manifest.validate_manifest import validate_manifest
 from tools.workflow.failure_markers import FailureMarkerWriter
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.source_asset_checksums import iter_files_sorted, write_source_checksums
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
 logger = logging.getLogger(__name__)
@@ -591,6 +592,10 @@ def run_regen3d_adapter_job(
             assets_prefix.rsplit("/", 1)[-1],  # Just "assets" part
         )
         logger.info("[REGEN3D-JOB] Copied %s assets", len(asset_paths))
+        checksum_path = assets_dir / "source_checksums.json"
+        source_files = [path for path in iter_files_sorted(assets_dir) if path != checksum_path]
+        write_source_checksums(checksum_path, assets_dir, source_files)
+        logger.info("[REGEN3D-JOB] Wrote source asset checksums: %s", checksum_path)
     except Exception as e:
         logger.error("[REGEN3D-JOB] Failed to copy assets: %s", e)
         return 1

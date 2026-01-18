@@ -70,6 +70,7 @@ from tools.geniesim_adapter import (
 )
 from tools.quality_reports import generate_asset_provenance
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.source_asset_checksums import load_source_checksums, verify_source_checksums
 from tools.workflow.failure_markers import FailureMarkerWriter
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
@@ -364,6 +365,25 @@ def run_geniesim_export_job(
         return 1
 
     print("[GENIESIM-EXPORT-JOB] ✓ All upstream jobs validated\n")
+
+    source_checksums_path = assets_dir / "source_checksums.json"
+    checksum_result = verify_source_checksums(source_checksums_path, assets_dir)
+    if not checksum_result["success"]:
+        print("[GENIESIM-EXPORT-JOB] ❌ ERROR: Source asset checksum verification failed")
+        if checksum_result["errors"]:
+            print(f"[GENIESIM-EXPORT-JOB]   Errors: {checksum_result['errors']}")
+        if checksum_result["missing_files"]:
+            print(f"[GENIESIM-EXPORT-JOB]   Missing files: {checksum_result['missing_files'][:5]}")
+        if checksum_result["checksum_mismatches"]:
+            print(f"[GENIESIM-EXPORT-JOB]   Checksum mismatches: {checksum_result['checksum_mismatches'][:3]}")
+        if checksum_result["size_mismatches"]:
+            print(f"[GENIESIM-EXPORT-JOB]   Size mismatches: {checksum_result['size_mismatches'][:3]}")
+        return 1
+
+    source_assets = {
+        "checksums_path": str(source_checksums_path),
+        "checksums": load_source_checksums(source_checksums_path),
+    }
 
     # Load manifest
     manifest_path = assets_dir / "scene_manifest.json"
@@ -841,6 +861,7 @@ def run_geniesim_export_job(
             manifest_path=merged_manifest_path,
             output_dir=output_dir,
             usd_source_dir=usd_source_dir if copy_usd else None,
+            source_assets=source_assets,
         )
 
         if result.success:
