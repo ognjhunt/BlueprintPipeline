@@ -43,6 +43,7 @@ from geniesim_adapter.local_framework import (
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.gcs_upload import (
     calculate_md5_base64,
+    calculate_file_md5_base64,
     upload_blob_from_filename,
     verify_blob_upload,
 )
@@ -756,9 +757,52 @@ def main() -> int:
 
     if output_dir and local_root and not use_gcs_fuse:
         upload_failures: list[dict[str, str]] = []
+        manifest_mismatches: list[dict[str, str]] = []
         logger = logging.getLogger("genie-sim-submit-job")
+        manifest_entries: list[dict[str, Any]] = []
+        manifest_local_path = output_dir / "upload_manifest.json"
         for file_path in output_dir.rglob("*"):
-            if file_path.is_file():
+            if file_path.is_file() and file_path != manifest_local_path:
+                relative_path = file_path.relative_to(local_root)
+                manifest_entries.append(
+                    {
+                        "path": str(relative_path),
+                        "size": file_path.stat().st_size,
+                        "md5": calculate_file_md5_base64(file_path),
+                    }
+                )
+
+        manifest_payload = {
+            "scene_id": scene_id,
+            "job_id": job_id,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "entries": manifest_entries,
+        }
+        _write_local_json(manifest_local_path, manifest_payload)
+        manifest_relative_path = manifest_local_path.relative_to(local_root)
+        manifest_size = manifest_local_path.stat().st_size
+        manifest_md5 = calculate_file_md5_base64(manifest_local_path)
+
+        manifest_blob = storage_client.bucket(bucket).blob(str(manifest_relative_path))
+        manifest_gcs_uri = f"gs://{bucket}/{manifest_relative_path}"
+        manifest_upload = upload_blob_from_filename(
+            manifest_blob,
+            manifest_local_path,
+            manifest_gcs_uri,
+            logger=logger,
+            verify_upload=True,
+            content_type="application/json",
+        )
+        if not manifest_upload.success:
+            upload_failures.append(
+                {
+                    "path": str(manifest_relative_path),
+                    "error": manifest_upload.error or "unknown error",
+                }
+            )
+
+        for file_path in output_dir.rglob("*"):
+            if file_path.is_file() and file_path != manifest_local_path:
                 relative_path = file_path.relative_to(local_root)
                 blob = storage_client.bucket(bucket).blob(str(relative_path))
                 gcs_uri = f"gs://{bucket}/{relative_path}"
@@ -776,10 +820,45 @@ def main() -> int:
                             "error": result.error or "unknown error",
                         }
                     )
-        if upload_failures:
+        if manifest_upload.success:
+            verified, failure_reason = verify_blob_upload(
+                manifest_blob,
+                gcs_uri=manifest_gcs_uri,
+                expected_size=manifest_size,
+                expected_md5=manifest_md5,
+                logger=logger,
+            )
+            if not verified:
+                manifest_mismatches.append(
+                    {
+                        "path": str(manifest_relative_path),
+                        "error": failure_reason or "manifest verification failed",
+                    }
+                )
+
+        for entry in manifest_entries:
+            blob = storage_client.bucket(bucket).blob(entry["path"])
+            gcs_uri = f"gs://{bucket}/{entry['path']}"
+            verified, failure_reason = verify_blob_upload(
+                blob,
+                gcs_uri=gcs_uri,
+                expected_size=entry["size"],
+                expected_md5=entry["md5"],
+                logger=logger,
+            )
+            if not verified:
+                manifest_mismatches.append(
+                    {
+                        "path": entry["path"],
+                        "error": failure_reason or "upload verification failed",
+                    }
+                )
+
+        if upload_failures or manifest_mismatches:
             failure_details = {
                 **failure_details,
                 "upload_failures": upload_failures,
+                "manifest_mismatches": manifest_mismatches,
             }
             if job_status != "failed":
                 submission_message = "Local Genie Sim execution completed with upload failures."
