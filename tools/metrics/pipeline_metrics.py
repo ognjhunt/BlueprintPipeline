@@ -472,6 +472,12 @@ class PipelineMetricsCollector:
             "s",
         )
 
+        self.geniesim_import_episodes_skipped_total = self._create_metric(
+            "geniesim_import_episodes_skipped_total",
+            "Total number of Genie Sim episodes skipped during import",
+            MetricType.COUNTER,
+        )
+
         self.geniesim_api_latency_seconds = self._create_metric(
             "geniesim_api_latency_seconds",
             "Genie Sim API call latency",
