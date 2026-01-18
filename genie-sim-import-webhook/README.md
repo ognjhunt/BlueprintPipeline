@@ -20,6 +20,11 @@ Webhook service for ingesting GenieSim import events.
 - `HEALTHCHECK_ALLOWED_HOSTS`: optional comma-separated list of hostnames permitted for
   `LLM_HEALTH_URL` and `ISAAC_SIM_HEALTH_URL` checks. When set, the health probes only run
   against hosts in this allowlist and still require HTTPS.
+- Webhook deduplication (Firestore):
+  - `GOOGLE_CLOUD_PROJECT`: GCP project hosting the Firestore database.
+  - `FIRESTORE_DEDUP_COLLECTION`: optional Firestore collection name for webhook markers
+    (defaults to `webhook_dedup`).
+  - The runtime service account must have permission to read/write the collection.
 
 ## Webhook auth setup checklist
 1. Decide on authentication method (HMAC or OIDC).
