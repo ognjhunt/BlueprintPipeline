@@ -14,7 +14,12 @@
 #    Cloud Scheduler → Pub/Sub → Eventarc → Workflow
 #
 # Pipeline Flow:
-#   Genie Sim Job Complete → Import Job → Episode Validation → Training Pipeline
+#   Genie Sim Job Complete → Import Job → Episode Validation → Delivery Trigger → Training Pipeline
+#
+# Delivery Trigger:
+#   After a successful import, this workflow triggers the dataset delivery flow
+#   (via Eventarc) with the scene/job metadata and manifest location so operators
+#   can monitor delivery separately from training.
 #
 
 main:
@@ -561,6 +566,7 @@ main:
         assign:
           - manifest_object: ${"scenes/" + scene_id + "/episodes/geniesim_" + job_id + "/import_manifest.json"}
           - delivery_manifest_object: ${"scenes/" + scene_id + "/geniesim/import_manifest.json"}
+          - delivery_manifest_path: ${"gs://" + bucket + "/" + "scenes/" + scene_id + "/geniesim/import_manifest.json"}
         next: read_import_manifest
 
     - read_import_manifest:
@@ -613,6 +619,7 @@ main:
         assign:
           - episodes_imported: ${default(import_manifest.episodes.passed_validation, 0)}
           - output_path: ${default(import_manifest.gcs_output_path, import_manifest.output_dir)}
+          - delivery_failed_marker: ${"scenes/" + scene_id + "/geniesim/.dataset_delivery_failed"}
         next: write_import_marker
 
     - write_import_marker:
@@ -639,35 +646,54 @@ main:
           destinationBucket: ${bucket}
           destinationObject: ${delivery_manifest_object}
         result: delivery_manifest_copy
-        next: run_delivery_job
+        next: trigger_delivery_eventarc
 
-    - run_delivery_job:
+    - trigger_delivery_eventarc:
         try:
-          call: googleapis.run.v2.projects.locations.jobs.run
+          call: googleapis.eventarc.v1.projects.locations.channels.events.trigger
           args:
-            name: ${"projects/" + project_id + "/locations/" + region + "/jobs/dataset-delivery-job"}
+            parent: ${"projects/" + project_id + "/locations/" + region + "/channels/dataset-delivery-events"}
             body:
-              overrides:
-                containerOverrides:
-                  - env:
-                      - name: BUCKET
-                        value: ${bucket}
-                      - name: SCENE_ID
-                        value: ${scene_id}
-                      - name: JOB_ID
-                        value: ${job_id}
-                      - name: IMPORT_MANIFEST_PATH
-                        value: ${"gs://" + bucket + "/" + delivery_manifest_object}
-                timeout: "1800s"
-          result: delivery_job_execution
+              event:
+                type: "blueprintpipeline.dataset.delivery.requested"
+                source: "geniesim-import"
+                data:
+                  bucket: ${bucket}
+                  scene_id: ${scene_id}
+                  job_id: ${job_id}
+                  output_path: ${output_path}
+                  import_manifest_path: ${delivery_manifest_path}
+          result: delivery_trigger_result
         except:
           as: e
           steps:
             - log_delivery_job_error:
                 call: sys.log
                 args:
-                  text: ${"Failed to start dataset delivery job: " + e.message}
+                  text: ${"Failed to trigger dataset delivery: " + e.message}
                   severity: "ERROR"
+            - write_delivery_failed_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${delivery_failed_marker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": scene_id,
+                    "job_id": job_id,
+                    "output_path": output_path,
+                    "import_manifest_path": delivery_manifest_path,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "dataset_delivery_trigger_failed",
+                      "message": e.message,
+                      "type": "workflow_failure"
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")
+                    }
+                  })}
         next: check_training_enabled
 
     # Trigger downstream training pipeline (optional)
