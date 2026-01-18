@@ -1103,7 +1103,9 @@ class MultiFormatExporter:
 
 if __name__ == "__main__":
     import argparse
+    from tools.logging_config import init_logging
 
+    init_logging()
     parser = argparse.ArgumentParser(description="Multi-format episode exporter")
     parser.add_argument("--format", choices=["rlds", "hdf5", "rosbag", "all"], default="all")
     parser.add_argument("--output-dir", type=Path, default=Path("./exported_data"))

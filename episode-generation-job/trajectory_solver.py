@@ -1608,7 +1608,9 @@ def solve_trajectory(
 
 if __name__ == "__main__":
     from motion_planner import AIMotionPlanner
+    from tools.logging_config import init_logging
 
+    init_logging()
     # Test the full pipeline
     logger.info("Testing Motion Planner + Trajectory Solver")
     logger.info("%s", "=" * 60)

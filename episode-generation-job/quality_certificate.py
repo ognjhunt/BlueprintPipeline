@@ -592,7 +592,9 @@ def compute_episode_data_hash(episode_data: Dict[str, Any]) -> str:
 if __name__ == "__main__":
     # Example usage
     from isaac_sim_enforcement import get_environment_capabilities
+    from tools.logging_config import init_logging
 
+    init_logging()
     capabilities = get_environment_capabilities()
     generator = QualityCertificateGenerator(capabilities)
 

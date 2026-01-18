@@ -1037,6 +1037,9 @@ def enhance_motion_plan_with_collision_avoidance(
 
 
 if __name__ == "__main__":
+    from tools.logging_config import init_logging
+
+    init_logging()
     logger.info("Testing Collision-Aware Motion Planner")
     logger.info("=" * 60)
 

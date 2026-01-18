@@ -837,6 +837,9 @@ def create_curobo_planner(
 
 if __name__ == "__main__":
     # Test cuRobo availability
+    from tools.logging_config import init_logging
+
+    init_logging()
     if is_curobo_available():
         logger.info("✅ cuRobo is available")
 

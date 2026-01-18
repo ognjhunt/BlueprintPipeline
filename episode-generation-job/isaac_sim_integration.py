@@ -1027,6 +1027,9 @@ def get_isaac_sim_session() -> IsaacSimSession:
 
 if __name__ == "__main__":
     # Print availability report when run directly
+    from tools.logging_config import init_logging
+
+    init_logging()
     print_availability_report()
 
     # Test physics simulator

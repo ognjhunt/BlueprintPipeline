@@ -1561,7 +1561,9 @@ def augment_episode(
 if __name__ == "__main__":
     from task_specifier import TaskSpecifier
     from motion_planner import AIMotionPlanner
+    from tools.logging_config import init_logging
 
+    init_logging()
     logger.info("Testing CP-Gen Style Augmentation")
     logger.info("%s", "=" * 60)
 

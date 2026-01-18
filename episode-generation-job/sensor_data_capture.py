@@ -2370,6 +2370,9 @@ def check_sensor_capture_environment() -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
+    from tools.logging_config import init_logging
+
+    init_logging()
     logger.info("Testing Sensor Data Capture")
     logger.info("%s", "=" * 60)
 
