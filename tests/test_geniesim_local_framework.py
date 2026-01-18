@@ -30,3 +30,23 @@ def test_curobo_missing_production_fails_fast(monkeypatch):
 
     with pytest.raises(RuntimeError, match="pip install nvidia-curobo"):
         lf.GenieSimLocalFramework(config=config, verbose=False)
+
+
+@pytest.mark.unit
+def test_check_geniesim_availability_allows_mock(monkeypatch, tmp_path):
+    monkeypatch.setenv("GENIESIM_ENV", "development")
+    monkeypatch.setenv("ALLOW_GENIESIM_MOCK", "1")
+    monkeypatch.setenv("GENIESIM_ROOT", str(tmp_path / "missing_geniesim"))
+    isaac_path = tmp_path / "isaac"
+    isaac_path.mkdir()
+    (isaac_path / "python.sh").write_text("#!/bin/sh\necho isaac\n")
+    monkeypatch.setenv("ISAAC_SIM_PATH", str(isaac_path))
+
+    monkeypatch.setattr(lf.GenieSimGRPCClient, "_check_server_socket", lambda self: False)
+    monkeypatch.setitem(sys.modules, "grpc", type("GrpcStub", (), {})())
+
+    status = lf.check_geniesim_availability()
+
+    assert status["mock_server_allowed"] is True
+    assert status["isaac_sim_available"] is True
+    assert status["available"] is True
