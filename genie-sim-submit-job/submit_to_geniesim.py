@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import uuid
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ from geniesim_adapter.local_framework import (
     run_geniesim_preflight_or_exit,
 )
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.gcs_upload import upload_blob_from_filename
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
@@ -584,11 +586,35 @@ def main() -> int:
         job_status = "failed"
 
     if output_dir and local_root and not use_gcs_fuse:
+        upload_failures: list[dict[str, str]] = []
+        logger = logging.getLogger("genie-sim-submit-job")
         for file_path in output_dir.rglob("*"):
             if file_path.is_file():
                 relative_path = file_path.relative_to(local_root)
                 blob = storage_client.bucket(bucket).blob(str(relative_path))
-                blob.upload_from_filename(str(file_path))
+                gcs_uri = f"gs://{bucket}/{relative_path}"
+                result = upload_blob_from_filename(
+                    blob,
+                    file_path,
+                    gcs_uri,
+                    logger=logger,
+                )
+                if not result.success:
+                    upload_failures.append(
+                        {
+                            "path": str(relative_path),
+                            "error": result.error or "unknown error",
+                        }
+                    )
+        if upload_failures:
+            failure_details = {
+                **failure_details,
+                "upload_failures": upload_failures,
+            }
+            if job_status != "failed":
+                submission_message = "Local Genie Sim execution completed with upload failures."
+                job_status = "failed"
+            failure_reason = failure_reason or "GCS upload failed"
 
     metrics = get_metrics()
     metrics_summary = {

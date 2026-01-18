@@ -37,6 +37,7 @@ import os
 import sys
 import tempfile
 import traceback
+import logging
 from pathlib import Path
 
 from google.cloud import storage
@@ -52,6 +53,7 @@ from monitoring.alerting import send_alert
 from prepare_dream2flow_bundle import Dream2FlowJobConfig, Dream2FlowPreparationJob
 from models import TaskType, RobotEmbodiment
 from tools.config.env_flags import env_flag
+from tools.gcs_upload import upload_blob_from_filename
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
@@ -113,15 +115,18 @@ def upload_dream2flow_bundles(
     bucket_name: str,
     dream2flow_prefix: str,
     local_output_dir: Path,
-) -> int:
+) -> tuple[int, list[dict[str, str]]]:
     """
     Upload Dream2Flow bundles to GCS.
 
     Returns:
-        Number of files uploaded
+        Tuple of (number of files uploaded, list of upload failures)
     """
     bucket = client.bucket(bucket_name)
     upload_count = 0
+    attempted_count = 0
+    failures: list[dict[str, str]] = []
+    logger = logging.getLogger("dream2flow-preparation-job")
 
     for local_path in local_output_dir.rglob("*"):
         if local_path.is_file():
@@ -129,14 +134,39 @@ def upload_dream2flow_bundles(
             blob_path = f"{dream2flow_prefix}/{relative_path}"
 
             blob = bucket.blob(blob_path)
-            blob.upload_from_filename(str(local_path))
-            upload_count += 1
+            gcs_uri = f"gs://{bucket_name}/{blob_path}"
+            result = upload_blob_from_filename(
+                blob,
+                local_path,
+                gcs_uri,
+                logger=logger,
+            )
+            attempted_count += 1
+            if result.success:
+                upload_count += 1
+            else:
+                failures.append(
+                    {
+                        "path": blob_path,
+                        "error": result.error or "unknown error",
+                    }
+                )
 
-            if upload_count % 50 == 0:
-                print(f"[D2F-ENTRYPOINT] Uploaded {upload_count} files...")
+            if attempted_count % 50 == 0:
+                print(
+                    "[D2F-ENTRYPOINT] Uploaded "
+                    f"{upload_count}/{attempted_count} files..."
+                )
 
     print(f"[D2F-ENTRYPOINT] Uploaded {upload_count} files to gs://{bucket_name}/{dream2flow_prefix}/")
-    return upload_count
+    if failures:
+        print(f"[D2F-ENTRYPOINT] WARNING: {len(failures)} uploads failed.")
+        for failure in failures[:5]:
+            print(
+                "[D2F-ENTRYPOINT]   - "
+                f"{failure['path']}: {failure['error']}"
+            )
+    return upload_count, failures
 
 
 def main():
@@ -270,7 +300,7 @@ def main():
 
             # Step 3: Upload results to GCS
             print("[D2F-ENTRYPOINT] Uploading Dream2Flow bundles to GCS...")
-            upload_count = upload_dream2flow_bundles(
+            upload_count, upload_failures = upload_dream2flow_bundles(
                 client=client,
                 bucket_name=bucket_name,
                 dream2flow_prefix=dream2flow_prefix,
@@ -292,9 +322,11 @@ def main():
                 print(f"[D2F-ENTRYPOINT] Warnings: {len(output.errors)}")
                 for err in output.errors[:5]:
                     print(f"[D2F-ENTRYPOINT]   - {err}")
+            if upload_failures:
+                print(f"[D2F-ENTRYPOINT] Upload failures: {len(upload_failures)}")
 
             # Exit successfully
-            if output.success:
+            if output.success and not upload_failures:
                 sys.exit(0)
             else:
                 print("[D2F-ENTRYPOINT] Job completed with errors")

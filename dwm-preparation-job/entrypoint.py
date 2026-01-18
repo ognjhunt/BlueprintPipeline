@@ -29,6 +29,7 @@ import shutil
 import sys
 import tempfile
 import traceback
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from monitoring.alerting import send_alert
 from prepare_dwm_bundle import DWMJobConfig, DWMPreparationJob
 from models import TrajectoryType, HandActionType
+from tools.gcs_upload import upload_blob_from_filename
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
@@ -106,15 +108,18 @@ def upload_dwm_bundles(
     bucket_name: str,
     dwm_prefix: str,
     local_output_dir: Path,
-) -> int:
+) -> tuple[int, list[dict[str, str]]]:
     """
     Upload DWM bundles to GCS.
 
     Returns:
-        Number of files uploaded
+        Tuple of (number of files uploaded, list of upload failures)
     """
     bucket = client.bucket(bucket_name)
     upload_count = 0
+    attempted_count = 0
+    failures: list[dict[str, str]] = []
+    logger = logging.getLogger("dwm-preparation-job")
 
     for local_path in local_output_dir.rglob("*"):
         if local_path.is_file():
@@ -122,14 +127,39 @@ def upload_dwm_bundles(
             blob_path = f"{dwm_prefix}/{relative_path}"
 
             blob = bucket.blob(blob_path)
-            blob.upload_from_filename(str(local_path))
-            upload_count += 1
+            gcs_uri = f"gs://{bucket_name}/{blob_path}"
+            result = upload_blob_from_filename(
+                blob,
+                local_path,
+                gcs_uri,
+                logger=logger,
+            )
+            attempted_count += 1
+            if result.success:
+                upload_count += 1
+            else:
+                failures.append(
+                    {
+                        "path": blob_path,
+                        "error": result.error or "unknown error",
+                    }
+                )
 
-            if upload_count % 50 == 0:
-                print(f"[DWM-ENTRYPOINT] Uploaded {upload_count} files...")
+            if attempted_count % 50 == 0:
+                print(
+                    "[DWM-ENTRYPOINT] Uploaded "
+                    f"{upload_count}/{attempted_count} files..."
+                )
 
     print(f"[DWM-ENTRYPOINT] Uploaded {upload_count} files to gs://{bucket_name}/{dwm_prefix}/")
-    return upload_count
+    if failures:
+        print(f"[DWM-ENTRYPOINT] WARNING: {len(failures)} uploads failed.")
+        for failure in failures[:5]:
+            print(
+                "[DWM-ENTRYPOINT]   - "
+                f"{failure['path']}: {failure['error']}"
+            )
+    return upload_count, failures
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -274,7 +304,7 @@ def main():
 
             # Step 3: Upload results to GCS
             print("[DWM-ENTRYPOINT] Uploading DWM bundles to GCS...")
-            upload_count = upload_dwm_bundles(
+            upload_count, upload_failures = upload_dwm_bundles(
                 client=client,
                 bucket_name=bucket_name,
                 dwm_prefix=dwm_prefix,
@@ -294,9 +324,11 @@ def main():
                 print(f"[DWM-ENTRYPOINT] Warnings: {len(output.errors)}")
                 for err in output.errors[:5]:
                     print(f"[DWM-ENTRYPOINT]   - {err}")
+            if upload_failures:
+                print(f"[DWM-ENTRYPOINT] Upload failures: {len(upload_failures)}")
 
             # Exit successfully
-            if output.success:
+            if output.success and not upload_failures:
                 sys.exit(0)
             else:
                 print("[DWM-ENTRYPOINT] Job completed with errors")

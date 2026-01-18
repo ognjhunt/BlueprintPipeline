@@ -33,6 +33,8 @@ import hashlib
 import io
 import base64
 import random
+import logging
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
@@ -56,12 +58,15 @@ except ImportError:
 
 from PIL import Image
 
+from tools.gcs_upload import upload_blob_from_filename
+
 
 # ============================================================================
 # Constants
 # ============================================================================
 
 GCS_ROOT = Path("/mnt/gcs")
+LOGGER = logging.getLogger("scene-generation-job")
 
 # Gemini models
 GEMINI_PRO_MODEL = "gemini-3-pro-preview"  # For prompt diversification
@@ -766,11 +771,23 @@ class SceneImageGenerator:
             blob_path = f"scenes/{scene_id}/source_image.png"
             blob = bucket.blob(blob_path)
 
-            blob.upload_from_filename(str(local_path))
-
             gcs_uri = f"gs://{self.gcs_bucket}/{blob_path}"
-            print(f"[SCENE-GEN] Uploaded to: {gcs_uri}")
+            result = upload_blob_from_filename(
+                blob,
+                local_path,
+                gcs_uri,
+                logger=LOGGER,
+            )
 
+            if not result.success:
+                print(
+                    "[SCENE-GEN] WARNING: GCS upload failed "
+                    f"after {result.attempts} attempts: {result.error}",
+                    file=sys.stderr,
+                )
+                return None
+
+            print(f"[SCENE-GEN] Uploaded to: {gcs_uri}")
             return gcs_uri
 
         except Exception as e:
@@ -797,7 +814,25 @@ class SceneImageGenerator:
                 "ready_for": "3d-regen"
             }, indent=2)
 
-            marker_blob.upload_from_string(marker_content)
+            marker_uri = f"gs://{self.gcs_bucket}/{marker_path}"
+            with tempfile.TemporaryDirectory() as temp_dir:
+                marker_file = Path(temp_dir) / ".scene_generation_complete"
+                marker_file.write_text(marker_content)
+                result = upload_blob_from_filename(
+                    marker_blob,
+                    marker_file,
+                    marker_uri,
+                    logger=LOGGER,
+                    content_type="application/json",
+                )
+
+            if not result.success:
+                print(
+                    "[SCENE-GEN] WARNING: Failed to trigger pipeline "
+                    f"after {result.attempts} attempts: {result.error}",
+                    file=sys.stderr,
+                )
+                return False
 
             print(f"[SCENE-GEN] Pipeline trigger written: {marker_path}")
             return True
