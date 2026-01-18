@@ -13,6 +13,7 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
 - [ ] **NGC key** available when pulling NVIDIA Isaac Sim images (`NGC_API_KEY`).
 - [ ] **Genie Sim repo path** set locally via `GENIESIM_ROOT` when running the pipeline outside CI.
 - [ ] **gRPC Python dependency** (`grpcio`) installed in the Python environment used by the adapter.
+- [ ] **Production deployments** explicitly set `GENIESIM_ENV=production` and enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks.
 
 ## Server health checks
 
@@ -34,3 +35,13 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
 - [ ] `grpcio` installed.
 - [ ] `GENIESIM_ROOT` set for local runs.
 - [ ] Health check passes: `python -m tools.geniesim_adapter.geniesim_healthcheck`.
+
+## Production toggle
+
+Use `GENIESIM_ENV=production` as the canonical production toggle for Genie Sim integrations, along with required runtime flags:
+
+```bash
+export GENIESIM_ENV=production
+export ISAACSIM_REQUIRED=true
+export CUROBO_REQUIRED=true
+```

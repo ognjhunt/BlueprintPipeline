@@ -329,9 +329,12 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
+| `GENIESIM_ENV` | str | `development` | Environment toggle for Genie Sim integrations (`production` disables mock/fallback behavior). |
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework). |
 | `GENIESIM_ROOT` | path | `/opt/geniesim` | Genie Sim repository root (local framework) |
+| `ISAACSIM_REQUIRED` | bool | false | Require Isaac Sim + Genie Sim installs when using the local framework (enforces `GENIESIM_ROOT` and `ISAAC_SIM_PATH/python.sh`). |
+| `CUROBO_REQUIRED` | bool | false | Require cuRobo planning support when using the local framework. |
 | `GENIESIM_MOCK_MODE` | bool | false | Enable mock mode for Genie Sim clients in non-production runs (requires `ALLOW_GENIESIM_MOCK=1` or an explicit code flag; ignored in production). |
 | `ALLOW_GENIESIM_MOCK` | bool | 0 | Allow Genie Sim mock mode in non-production environments (`1` to enable; production always disables mock mode). |
 | `GENIESIM_ALLOW_LINEAR_FALLBACK` | bool | unset | Allow linear interpolation fallback when cuRobo is unavailable (`1` to enable, `0` to disable). In non-production, the local framework auto-enables this fallback if cuRobo is missing and this variable is unset; in production, cuRobo is required and the framework fails fast. |
@@ -350,6 +353,13 @@ export GENIESIM_PORT=50051
 export OMNIVERSE_HOST=localhost
 export OMNIVERSE_PATH_ROOT=NVIDIA/Assets/Isaac
 export PARTICULATE_HEALTHCHECK_HOST=localhost
+```
+
+**Production Example**:
+```bash
+export GENIESIM_ENV=production
+export ISAACSIM_REQUIRED=true
+export CUROBO_REQUIRED=true
 ```
 
 ---
