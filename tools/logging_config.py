@@ -9,25 +9,16 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from tools.config.env import parse_bool_env
+
 
 DEFAULT_JSON_ENV_KEYS = ("LOG_JSON", "LOG_FORMAT")
-
-
-def _env_truthy(value: Optional[str]) -> Optional[bool]:
-    if value is None:
-        return None
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on", "json"}:
-        return True
-    if normalized in {"0", "false", "no", "off", "plain", "text"}:
-        return False
-    return None
 
 
 def _should_use_json(env: dict[str, str]) -> bool:
     for key in DEFAULT_JSON_ENV_KEYS:
         if key in env:
-            parsed = _env_truthy(env.get(key))
+            parsed = parse_bool_env(env.get(key))
             if parsed is not None:
                 return parsed
     return True

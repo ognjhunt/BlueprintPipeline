@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from .store import CheckpointRecord
+from tools.config.env import parse_bool_env
 
 
 DEFAULT_PIPELINE_RETENTION_DAYS = 30
@@ -203,7 +204,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        default=os.getenv("PIPELINE_RETENTION_DRY_RUN", "false").lower() == "true",
+        default=parse_bool_env(os.getenv("PIPELINE_RETENTION_DRY_RUN"), default=False),
         help="Log deletions without removing files.",
     )
     return parser.parse_args()

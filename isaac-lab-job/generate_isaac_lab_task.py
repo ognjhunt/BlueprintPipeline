@@ -50,6 +50,7 @@ from tools.isaac_lab_tasks.runtime_validator import (
     IsaacLabRuntimeValidator,
     RuntimeValidationResult,
 )
+from tools.config.env import parse_bool_env
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
 logger = logging.getLogger(__name__)
@@ -702,9 +703,9 @@ def main():
     # Runtime validation settings
     # Set RUN_RUNTIME_VALIDATION=false to skip validation
     # Set SKIP_SANITY_ROLLOUT=true to skip environment steps (faster, less thorough)
-    run_runtime_validation = os.getenv("RUN_RUNTIME_VALIDATION", "true").lower() == "true"
-    skip_sanity_rollout = os.getenv("SKIP_SANITY_ROLLOUT", "false").lower() == "true"
-    strict_config_loading = os.getenv("STRICT_CONFIG_LOADING", "false").lower() == "true"
+    run_runtime_validation = parse_bool_env(os.getenv("RUN_RUNTIME_VALIDATION"), default=True)
+    skip_sanity_rollout = parse_bool_env(os.getenv("SKIP_SANITY_ROLLOUT"), default=False)
+    strict_config_loading = parse_bool_env(os.getenv("STRICT_CONFIG_LOADING"), default=False)
 
     logger.info("[ISAAC-LAB-JOB] Configuration:")
     logger.info("[ISAAC-LAB-JOB]   Bucket: %s", bucket)

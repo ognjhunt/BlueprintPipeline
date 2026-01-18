@@ -13,6 +13,16 @@ The pipeline uses environment variables for:
 
 Environment variables take precedence over JSON config files, allowing runtime customization without redeployment.
 
+## Canonical Boolean Values
+
+Boolean environment variables are parsed by the shared helper in `tools/config/env.py`. The canonical accepted values
+are listed below (case-insensitive, surrounding whitespace ignored):
+
+**Truthy values**: `1`, `true`, `yes`, `y`, `on`, `json`  
+**Falsey values**: `0`, `false`, `no`, `off`, `plain`, `text`
+
+When a value is unset or unrecognized, the caller's explicit default is used (for example `None`, `False`, or `True`).
+
 ## Job-Level Documentation
 
 Job-specific READMEs should link back to this centralized environment variable list for shared configuration details.

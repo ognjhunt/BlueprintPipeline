@@ -46,6 +46,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.config.env import parse_bool_env
+
 from motion_planner import MotionPlan, Waypoint
 from trajectory_solver import JointTrajectory, JointState, ROBOT_CONFIGS
 from quality_constants import (
@@ -424,7 +426,7 @@ class SimulationValidator:
         self._load_scene_in_sim = (
             load_scene_in_sim
             if load_scene_in_sim is not None
-            else os.getenv("SIM_VALIDATOR_LOAD_SCENE", "true").lower() == "true"
+            else parse_bool_env(os.getenv("SIM_VALIDATOR_LOAD_SCENE"), default=True)
         )
         if post_rollout_seconds is None:
             post_rollout_seconds = float(os.getenv("SIM_VALIDATOR_POST_ROLLOUT_SECONDS", "0.5"))

@@ -67,6 +67,7 @@ from tools.error_handling.retry import NonRetryableError, RetryConfig, RetryCont
 from tools.geniesim_adapter.local_framework import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
+from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 from tools.gcs_upload import (
     calculate_file_md5_base64,
@@ -1751,10 +1752,10 @@ def main():
     except ValueError as exc:
         print(f"[GENIE-SIM-IMPORT] ERROR: {exc}")
         sys.exit(1)
-    enable_validation = os.getenv("ENABLE_VALIDATION", "true").lower() == "true"
-    filter_low_quality = os.getenv("FILTER_LOW_QUALITY", "true").lower() == "true"
-    require_lerobot = os.getenv("REQUIRE_LEROBOT", "false").lower() == "true"
-    disable_gcs_upload = os.getenv("DISABLE_GCS_UPLOAD", "false").lower() == "true"
+    enable_validation = parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True)
+    filter_low_quality = parse_bool_env(os.getenv("FILTER_LOW_QUALITY"), default=True)
+    require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
+    disable_gcs_upload = parse_bool_env(os.getenv("DISABLE_GCS_UPLOAD"), default=False)
     try:
         lerobot_skip_rate_max = _resolve_skip_rate_max(
             os.getenv("LEROBOT_SKIP_RATE_MAX")
@@ -1765,10 +1766,10 @@ def main():
 
     # Polling configuration
     poll_interval = int(os.getenv("GENIE_SIM_POLL_INTERVAL", "30"))
-    wait_for_completion = os.getenv("WAIT_FOR_COMPLETION", "true").lower() == "true"
+    wait_for_completion = parse_bool_env(os.getenv("WAIT_FOR_COMPLETION"), default=True)
 
     # Error handling configuration
-    fail_on_partial_error = os.getenv("FAIL_ON_PARTIAL_ERROR", "false").lower() == "true"
+    fail_on_partial_error = parse_bool_env(os.getenv("FAIL_ON_PARTIAL_ERROR"), default=False)
 
     # Validate credentials at startup
     sys.path.insert(0, str(REPO_ROOT / "tools"))

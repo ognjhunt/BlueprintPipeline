@@ -48,6 +48,7 @@ from tools.gcs_upload import (
     verify_blob_upload,
 )
 from tools.config import load_pipeline_config
+from tools.config.env import parse_bool_env
 from tools.logging_config import init_logging
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
@@ -209,12 +210,6 @@ def _parse_csv_env(value: Optional[str]) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _coerce_bool(value: Optional[str]) -> bool:
-    if value is None:
-        return False
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _normalize_tags(tags: Any) -> list[str]:
@@ -596,7 +591,7 @@ def main() -> int:
     episodes_per_task = _resolve_episodes_per_task()
     num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
     min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
-    canary_enabled = _coerce_bool(os.getenv("CANARY_ENABLED"))
+    canary_enabled = parse_bool_env(os.getenv("CANARY_ENABLED"), default=False)
     canary_tags = _parse_csv_env(os.getenv("CANARY_TAGS"))
     canary_scene_ids = _parse_csv_env(os.getenv("CANARY_SCENE_IDS"))
     canary_percent = int(os.getenv("CANARY_PERCENT", "0"))

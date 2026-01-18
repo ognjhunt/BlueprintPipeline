@@ -18,6 +18,8 @@ import os
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, TypeVar, cast
 
+from tools.config.env import parse_bool_env
+
 logger = logging.getLogger(__name__)
 
 # Type variable for decorated functions
@@ -280,7 +282,7 @@ def init_tracing(
         # Enable in production or when explicitly configured
         enabled = (
             os.getenv("PIPELINE_ENV") == "production"
-            or os.getenv("ENABLE_TRACING", "").lower() == "true"
+            or parse_bool_env(os.getenv("ENABLE_TRACING"), default=False)
             or bool(os.getenv("GCP_PROJECT_ID"))
             or bool(os.getenv("JAEGER_ENDPOINT"))
             or bool(os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))

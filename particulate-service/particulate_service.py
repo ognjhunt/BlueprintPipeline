@@ -64,6 +64,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.config import load_pipeline_config
+from tools.config.env import parse_bool_env
 
 from monitoring.alerting import send_alert
 
@@ -285,9 +286,9 @@ def _isaac_sim_probe(timeout_s: float) -> Dict[str, Any]:
 
 def _dependency_health() -> Tuple[bool, Dict[str, Any]]:
     timeout_s = _get_health_probe_timeout_s()
-    gpu_required = os.getenv("GPU_HEALTH_REQUIRED", "true").lower() == "true"
-    isaac_required = os.getenv("ISAAC_SIM_HEALTH_REQUIRED", "false").lower() == "true"
-    llm_required = os.getenv("LLM_HEALTH_REQUIRED", "false").lower() == "true"
+    gpu_required = parse_bool_env(os.getenv("GPU_HEALTH_REQUIRED"), default=True)
+    isaac_required = parse_bool_env(os.getenv("ISAAC_SIM_HEALTH_REQUIRED"), default=False)
+    llm_required = parse_bool_env(os.getenv("LLM_HEALTH_REQUIRED"), default=False)
 
     dependencies: Dict[str, Any] = {
         "gpu": _gpu_probe(timeout_s),
