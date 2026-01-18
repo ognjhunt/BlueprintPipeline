@@ -1625,6 +1625,7 @@ def write_replicator_bundle(
     ensure_dir(output_dir / "policies")
     ensure_dir(output_dir / "configs")
     ensure_dir(output_dir / "variation_assets")
+    ensure_dir(output_dir / "placement_regions")
 
     # 1. Write placement regions USD layer
     usda_content = generate_placement_regions_usda(
@@ -1632,6 +1633,7 @@ def write_replicator_bundle(
         scene_id=bundle.scene_id
     )
     (output_dir / "placement_regions.usda").write_text(usda_content)
+    (output_dir / "placement_regions" / "placement_regions.usda").write_text(usda_content)
     print(f"[REPLICATOR] Written: placement_regions.usda ({len(bundle.global_placement_regions)} regions)")
 
     # 2. Write policy-specific Replicator scripts
