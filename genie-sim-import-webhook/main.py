@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from flask import Flask, jsonify, request
 from google.api_core import exceptions as google_exceptions
 from google.api_core import retry
+from google.cloud import firestore
 from google.cloud.workflows import executions_v1
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -349,6 +350,41 @@ def _validate_payload(payload: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def _dedup_collection_name() -> str:
+    return os.getenv("FIRESTORE_DEDUP_COLLECTION", "webhook_dedup")
+
+
+def _idempotency_key(payload: dict) -> str:
+    header_key = request.headers.get("X-Request-Id") or request.headers.get("X-Correlation-Id")
+    if header_key:
+        return header_key.strip()
+    job_id = payload.get("job_id", "")
+    status = payload.get("status", "")
+    digest = hashlib.sha256(f"{job_id}:{status}".encode("utf-8")).hexdigest()
+    return digest
+
+
+def _reserve_dedup_marker(payload: dict) -> tuple[bool, dict]:
+    dedup_key = _idempotency_key(payload)
+    client = firestore.Client(project=_get_project_id())
+    collection = client.collection(_dedup_collection_name())
+    document = collection.document(dedup_key)
+    marker = {
+        "idempotency_key": dedup_key,
+        "job_id": payload.get("job_id"),
+        "status": payload.get("status"),
+        "request_id": request.headers.get("X-Request-Id") or request.headers.get("X-Correlation-Id"),
+        "execution_name": None,
+        "created_at": firestore.SERVER_TIMESTAMP,
+    }
+    try:
+        document.create(marker)
+    except google_exceptions.AlreadyExists:
+        existing = document.get()
+        return False, existing.to_dict() if existing.exists else {}
+    return True, marker
+
+
 @app.post("/webhooks/geniesim/job-complete")
 def handle_job_complete():
     raw_body = request.get_data()
@@ -362,6 +398,32 @@ def handle_job_complete():
 
     payload = payload.copy()
     payload.setdefault("status", "completed")
+
+    storage_transient_exceptions = (
+        google_exceptions.ServiceUnavailable,
+        google_exceptions.DeadlineExceeded,
+        google_exceptions.TooManyRequests,
+        google_exceptions.InternalServerError,
+    )
+    try:
+        is_new_marker, marker = _reserve_dedup_marker(payload)
+    except storage_transient_exceptions as exc:
+        app.logger.warning(
+            "Failed to reserve dedup marker due to transient storage error: %s",
+            exc,
+        )
+        return jsonify({"error": "dedup_unavailable"}), 503
+    except Exception as exc:
+        app.logger.exception("Failed to reserve dedup marker: %s", exc)
+        return jsonify({"error": "dedup_failed"}), 500
+
+    if not is_new_marker:
+        execution_name = marker.get("execution_name")
+        return jsonify({
+            "status": "duplicate",
+            "execution": execution_name,
+            "idempotency_key": marker.get("idempotency_key"),
+        }), 200
 
     workflow_name = os.getenv("WORKFLOW_NAME", "genie-sim-import-pipeline")
     region = os.getenv("WORKFLOW_REGION", "us-central1")
@@ -393,6 +455,12 @@ def handle_job_complete():
             retry=retry_policy,
         )
     except Exception as exc:
+        try:
+            firestore.Client(project=_get_project_id()).collection(
+                _dedup_collection_name()
+            ).document(_idempotency_key(payload)).delete()
+        except Exception:
+            app.logger.warning("Failed to delete dedup marker after execution failure.")
         error_details = {
             "exception_type": type(exc).__name__,
             "message": str(exc),
@@ -412,6 +480,16 @@ def handle_job_complete():
                 "type": type(exc).__name__,
             },
         }), status_code
+
+    try:
+        firestore.Client(project=_get_project_id()).collection(
+            _dedup_collection_name()
+        ).document(_idempotency_key(payload)).update({
+            "execution_name": response.name,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        })
+    except Exception:
+        app.logger.warning("Failed to update dedup marker with execution name.")
 
     return jsonify({"status": "triggered", "execution": response.name}), 202
 
