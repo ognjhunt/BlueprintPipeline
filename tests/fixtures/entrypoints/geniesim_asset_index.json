@@ -1,0 +1,13 @@
+{
+  "assets": [
+    {
+      "asset_id": "asset_1",
+      "usd_path": "assets/mug.usd",
+      "semantic_description": "ceramic mug",
+      "categories": ["mug"],
+      "commercial_ok": true,
+      "license": "CC0",
+      "source": "fixtures"
+    }
+  ]
+}
