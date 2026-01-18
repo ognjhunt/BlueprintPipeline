@@ -79,6 +79,32 @@ export PIPELINE_SEED=1234
 
 ---
 
+## LLM Client Controls
+
+Controls for rate limiting, concurrency, and caching in `tools/llm_client`.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LLM_RATE_LIMIT_QPS` | float | unset | Global requests-per-second limit applied to all LLM providers. |
+| `LLM_RATE_LIMIT_QPS_GEMINI` | float | unset | Provider-specific QPS limit for Gemini (overrides global). |
+| `LLM_RATE_LIMIT_QPS_ANTHROPIC` | float | unset | Provider-specific QPS limit for Anthropic (overrides global). |
+| `LLM_RATE_LIMIT_QPS_OPENAI` | float | unset | Provider-specific QPS limit for OpenAI (overrides global). |
+| `LLM_MAX_CONCURRENCY` | int | unset | Max in-process concurrent LLM requests across providers (queued when saturated). |
+| `LLM_CACHE_ENABLED` | bool | true | Enable prompt+settings response caching when TTL is set. |
+| `LLM_CACHE_TTL_SECONDS` | int | 0 | Cache TTL in seconds; set >0 to enable caching. |
+
+**Example**:
+```bash
+# Limit Gemini to 2 QPS and cap concurrency at 4 requests
+export LLM_RATE_LIMIT_QPS_GEMINI=2
+export LLM_MAX_CONCURRENCY=4
+
+# Enable caching for 60 seconds
+export LLM_CACHE_TTL_SECONDS=60
+```
+
+---
+
 ## Production Mode Resolution
 
 Production mode is resolved through a shared helper (`tools/config/production_mode.py`). It treats the following
