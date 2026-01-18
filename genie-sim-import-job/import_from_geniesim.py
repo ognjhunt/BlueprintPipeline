@@ -377,6 +377,21 @@ def _load_local_job_metadata(
         return json.load(handle)
 
 
+def _load_existing_import_manifest(output_dir: Path) -> Optional[Dict[str, Any]]:
+    manifest_path = output_dir / "import_manifest.json"
+    if not manifest_path.exists():
+        return None
+    with open(manifest_path, "r") as handle:
+        return json.load(handle)
+
+
+def _resolve_job_idempotency(job_metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not job_metadata:
+        return None
+    idempotency = job_metadata.get("idempotency")
+    return idempotency if isinstance(idempotency, dict) else None
+
+
 def _collect_local_episode_metadata(
     recordings_dir: Path,
 ) -> List[GeneratedEpisodeMetadata]:
@@ -969,6 +984,20 @@ def run_local_import_job(
     result.output_dir = config.output_dir
     scene_id = os.environ.get("SCENE_ID", "unknown")
 
+    idempotency = _resolve_job_idempotency(job_metadata)
+    if idempotency:
+        existing_manifest = _load_existing_import_manifest(config.output_dir)
+        existing_idempotency = (
+            existing_manifest.get("job_idempotency", {}) if existing_manifest else {}
+        )
+        if existing_idempotency.get("key") == idempotency.get("key"):
+            result.success = True
+            result.warnings.append(
+                "Duplicate import detected; matching import_manifest.json "
+                "already exists for this idempotency key."
+            )
+            return result
+
     recordings_dir = config.output_dir / "recordings"
     if not recordings_dir.exists():
         result.errors.append(f"Local recordings directory missing: {recordings_dir}")
@@ -1281,6 +1310,11 @@ def run_local_import_job(
         "job_id": config.job_id,
         "output_dir": output_dir_str,
         "gcs_output_path": gcs_output_path,
+        "job_idempotency": {
+            "key": idempotency.get("key") if idempotency else None,
+            "first_submitted_at": idempotency.get("first_submitted_at") if idempotency else None,
+            "job_metadata_path": config.job_metadata_path,
+        },
         "readme_path": _relative_to_bundle(bundle_root, readme_path),
         "checksums_path": _relative_to_bundle(bundle_root, checksums_path),
         "episodes": {
