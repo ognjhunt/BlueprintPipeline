@@ -12,6 +12,7 @@ This directory hosts shared utilities and pipeline helpers used by jobs across B
 ## Common entrypoints
 
 - `tools/run_local_pipeline.py` — local end-to-end pipeline runner
+- `tools/run_scene_batch.py` — parallel batch runner with retries and checkpoints
 - `tools/geniesim_adapter/` — Genie Sim export + local framework client
 - `tools/llm_client/` — unified LLM provider client
 - `tools/asset_catalog/` — asset indexing, embeddings, vector stores
@@ -36,6 +37,7 @@ Shared tooling and libraries that support pipeline jobs, validation, and integra
 - `storage_layout/` storage layout utilities.
 - `workflow/` workflow helpers.
 - `run_local_pipeline.py` local pipeline runner.
+- `run_scene_batch.py` batch scene runner.
 - `run_full_isaacsim_pipeline.py` full IsaacSim pipeline runner.
 - `startup_validation.py` startup checks.
 

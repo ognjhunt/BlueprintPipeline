@@ -68,6 +68,45 @@ If you are running in a container, make sure the NVIDIA Container Toolkit is con
 
 ## Pipeline scaling tips
 
+### Batch runner (local or staging)
+- Use `tools/run_scene_batch.py` to process multiple scenes in parallel with retries and checkpoints.
+- Provide a scene list or manifest, tune concurrency, and write quality gate reports for auditability.
+
+Example scene list (newline-delimited IDs):
+```bash
+cat > /tmp/scene_ids.txt <<'EOF'
+kitchen_001
+kitchen_002
+loft_003
+EOF
+
+python tools/run_scene_batch.py \
+  --scene-root ./scenes \
+  --scene-list /tmp/scene_ids.txt \
+  --max-concurrent 4 \
+  --retry-attempts 3 \
+  --skip-completed
+```
+
+Example batch manifest (`batch_manifest.json`):
+```json
+{
+  "scenes": [
+    {"scene_id": "kitchen_001", "scene_dir": "./scenes/kitchen_001", "environment_type": "kitchen"},
+    {"scene_id": "warehouse_002", "scene_dir": "./scenes/warehouse_002", "environment_type": "warehouse"}
+  ]
+}
+```
+
+```bash
+python tools/run_scene_batch.py \
+  --manifest batch_manifest.json \
+  --steps regen3d,simready,usd,replicator \
+  --max-concurrent 6 \
+  --retry-attempts 2 \
+  --reports-dir ./batch_reports
+```
+
 ### Parallelization
 - Run jobs per scene in parallel using Cloud Workflows.
 - Fan out per-object operations (e.g., physics proxies) when possible.
@@ -87,6 +126,13 @@ If you are running in a container, make sure the NVIDIA Container Toolkit is con
 ### Observability
 - Capture per-job timing and artifact sizes in logs.
 - Track per-scene throughput and queue depth to plan scaling.
+- Store batch reports (`batch_reports/batch_report.json`) and per-scene quality gate reports for failure triage.
+
+### Large batch guidance
+- Start with conservative concurrency (`--max-concurrent 3-5`) and increase once CPU/RAM/GPU headroom is measured.
+- Use `--skip-completed` to resume after interruptions without reprocessing finished scenes.
+- Keep batch manifests in version control so reruns are reproducible.
+- Split very large runs into multiple manifests to keep retries targeted and reports smaller.
 
 ## USD assembly tuning knobs
 
