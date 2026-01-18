@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +21,54 @@ class StreamingJSONError(Exception):
     pass
 
 
+ProgressCallback = Callable[[int, float], None]
+
+
+def _report_progress(
+    processed_count: int,
+    start_time: float,
+    last_report_time: float,
+    progress_interval_s: Optional[float],
+    progress_every: Optional[int],
+    progress_callback: Optional[ProgressCallback],
+    progress_logger: Optional[logging.Logger],
+    *,
+    force: bool = False,
+) -> float:
+    if processed_count == 0:
+        return last_report_time
+
+    now = time.monotonic()
+    should_report = force
+    if progress_every and processed_count % progress_every == 0:
+        should_report = True
+    if progress_interval_s is not None and progress_interval_s > 0:
+        if now - last_report_time >= progress_interval_s:
+            should_report = True
+
+    if not should_report:
+        return last_report_time
+
+    elapsed = now - start_time
+    if progress_callback:
+        progress_callback(processed_count, elapsed)
+    if progress_logger:
+        progress_logger.info(
+            "Processed %s objects in %.2fs",
+            processed_count,
+            elapsed,
+        )
+    return now
+
+
 def stream_json_array(
     file_path: Union[str, Path],
     array_path: str = "objects",
     batch_size: int = 100,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_logger: Optional[logging.Logger] = None,
+    progress_interval_s: Optional[float] = 5.0,
+    progress_every: Optional[int] = None,
 ) -> Generator[List[Dict[str, Any]], None, None]:
     """
     Stream parse a JSON array without loading entire file into memory.
@@ -55,7 +100,15 @@ def stream_json_array(
             "Falling back to standard json.load (may use more memory)"
         )
         # Fallback to standard parsing
-        yield from _fallback_json_array(file_path, array_path, batch_size)
+        yield from _fallback_json_array(
+            file_path,
+            array_path,
+            batch_size,
+            progress_callback=progress_callback,
+            progress_logger=progress_logger,
+            progress_interval_s=progress_interval_s,
+            progress_every=progress_every,
+        )
         return
 
     try:
@@ -64,6 +117,9 @@ def stream_json_array(
             raise FileNotFoundError(f"File not found: {file_path}")
 
         batch = []
+        processed_count = 0
+        start_time = time.monotonic()
+        last_report_time = start_time
 
         with open(path, 'rb') as f:
             # Parse array items one at a time
@@ -71,6 +127,16 @@ def stream_json_array(
 
             for item in items:
                 batch.append(item)
+                processed_count += 1
+                last_report_time = _report_progress(
+                    processed_count,
+                    start_time,
+                    last_report_time,
+                    progress_interval_s,
+                    progress_every,
+                    progress_callback,
+                    progress_logger,
+                )
 
                 if len(batch) >= batch_size:
                     yield batch
@@ -79,6 +145,17 @@ def stream_json_array(
             # Yield remaining items
             if batch:
                 yield batch
+
+        _report_progress(
+            processed_count,
+            start_time,
+            last_report_time,
+            progress_interval_s,
+            progress_every,
+            progress_callback,
+            progress_logger,
+            force=True,
+        )
 
     except Exception as e:
         raise StreamingJSONError(
@@ -90,6 +167,10 @@ def _fallback_json_array(
     file_path: Union[str, Path],
     array_path: str,
     batch_size: int,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_logger: Optional[logging.Logger] = None,
+    progress_interval_s: Optional[float] = 5.0,
+    progress_every: Optional[int] = None,
 ) -> Generator[List[Dict[str, Any]], None, None]:
     """Fallback to standard JSON parsing when ijson not available."""
     path = Path(file_path)
@@ -108,13 +189,42 @@ def _fallback_json_array(
         )
 
     # Yield in batches
+    processed_count = 0
+    start_time = time.monotonic()
+    last_report_time = start_time
     for i in range(0, len(obj), batch_size):
-        yield obj[i:i + batch_size]
+        batch = obj[i:i + batch_size]
+        yield batch
+        processed_count += len(batch)
+        last_report_time = _report_progress(
+            processed_count,
+            start_time,
+            last_report_time,
+            progress_interval_s,
+            progress_every,
+            progress_callback,
+            progress_logger,
+        )
+
+    _report_progress(
+        processed_count,
+        start_time,
+        last_report_time,
+        progress_interval_s,
+        progress_every,
+        progress_callback,
+        progress_logger,
+        force=True,
+    )
 
 
 def stream_manifest_objects(
     manifest_path: Union[str, Path],
     batch_size: int = 100,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_logger: Optional[logging.Logger] = None,
+    progress_interval_s: Optional[float] = 5.0,
+    progress_every: Optional[int] = None,
 ) -> Generator[List[Dict[str, Any]], None, None]:
     """
     Stream parse objects from a scene manifest.
@@ -133,7 +243,15 @@ def stream_manifest_objects(
             for obj in batch:
                 print(f"Processing object: {obj['id']}")
     """
-    yield from stream_json_array(manifest_path, "objects", batch_size)
+    yield from stream_json_array(
+        manifest_path,
+        "objects",
+        batch_size,
+        progress_callback=progress_callback,
+        progress_logger=progress_logger,
+        progress_interval_s=progress_interval_s,
+        progress_every=progress_every,
+    )
 
 
 class StreamingManifestParser:
@@ -222,6 +340,10 @@ class StreamingManifestParser:
     def stream_objects(
         self,
         batch_size: int = 100,
+        progress_callback: Optional[ProgressCallback] = None,
+        progress_logger: Optional[logging.Logger] = None,
+        progress_interval_s: Optional[float] = 5.0,
+        progress_every: Optional[int] = None,
     ) -> Generator[List[Dict[str, Any]], None, None]:
         """
         Stream objects from manifest in batches.
@@ -232,7 +354,14 @@ class StreamingManifestParser:
         Yields:
             Batches of object dictionaries
         """
-        yield from stream_manifest_objects(self.manifest_path, batch_size)
+        yield from stream_manifest_objects(
+            self.manifest_path,
+            batch_size,
+            progress_callback=progress_callback,
+            progress_logger=progress_logger,
+            progress_interval_s=progress_interval_s,
+            progress_every=progress_every,
+        )
 
     def count_objects(self) -> int:
         """Count total number of objects (requires full scan)."""
