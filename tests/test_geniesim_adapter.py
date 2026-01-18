@@ -27,9 +27,12 @@ from tools.geniesim_adapter import (
 )
 from tools.geniesim_adapter.scene_graph import (
     SceneGraphConverter,
+    convert_manifest_to_scene_graph,
     GenieSimSceneGraph,
     GenieSimNode,
     GenieSimEdge,
+    HAVE_STREAMING_PARSER,
+    RelationInferencer,
 )
 from tools.geniesim_adapter.asset_index import (
     AssetIndexBuilder,
@@ -302,6 +305,40 @@ class TestSceneGraphConverter:
 
         assert loaded["scene_id"] == "test_kitchen_001"
         assert len(loaded["nodes"]) == len(scene_graph.nodes)
+
+    def test_streaming_relation_inference(self, sample_manifest, tmp_path, monkeypatch):
+        """Test relation inference in streaming mode."""
+        if not HAVE_STREAMING_PARSER:
+            pytest.skip("Streaming parser unavailable for streaming relation inference test.")
+
+        manifest_path = tmp_path / "scene_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(sample_manifest, f)
+
+        expected_edges = [
+            GenieSimEdge(
+                source="mug_001",
+                target="countertop_001",
+                relation="on",
+                confidence=0.42,
+            )
+        ]
+        called = {}
+
+        def fake_infer(self, nodes):
+            called["count"] = len(nodes)
+            return expected_edges
+
+        monkeypatch.setattr(RelationInferencer, "infer_relations", fake_infer)
+
+        scene_graph = convert_manifest_to_scene_graph(
+            manifest_path,
+            verbose=False,
+            use_streaming=True,
+        )
+
+        assert scene_graph.edges == expected_edges
+        assert called["count"] == len(scene_graph.nodes)
 
 
 # =============================================================================
