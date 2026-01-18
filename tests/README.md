@@ -19,3 +19,8 @@ Automated tests covering pipeline integrations, contracts, and job behavior.
 - Run all tests: `pytest`
 - Run a subset: `pytest tests/test_pipeline_e2e.py`
 
+## Test dependencies
+- Install test requirements: `pip install -r tests/requirements.txt`.
+- The staging and Isaac Sim test suites import `pxr`, so install the OpenUSD
+  Python bindings via `usd-core` (see the OpenUSD dependency note in the repo
+  `README.md`) before running those tests locally.
