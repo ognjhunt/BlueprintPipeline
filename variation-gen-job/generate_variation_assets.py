@@ -20,10 +20,16 @@ NOTE: For a complete end-to-end solution, consider using variation-asset-pipelin
 which combines image generation, 3D conversion, and physics assignment into one job.
 
 Environment Variables:
-    (None specific to model selection; always uses Gemini 3.0 Pro Image.)
+    ENABLE_3D_GENERATION: Enable 3D generation after image generation.
+    VARIATION_3D_BACKEND: Backend to use for 3D generation ("meshy" or "external").
+    FAIL_ON_3D_FAILURE: When true, fail the job if any 3D generation fails.
+    MESHY_API_KEY: API key for Meshy 3D generation (required when backend="meshy").
+    EXTERNAL_3D_SERVICE_URL: External service endpoint for 3D generation.
+    EXTERNAL_3D_SERVICE_TOKEN: Optional bearer token for external 3D service.
 """
 
 import datetime
+import base64
 import json
 import logging
 import os
@@ -32,7 +38,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
-from enum import Enum
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -69,6 +74,7 @@ DEFAULT_IMAGE_SIZE = 2048
 DEFAULT_ASPECT_RATIO = "1:1"
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
+USD_FROM_GLTF_TIMEOUT_S = 120
 
 # Asset categories that benefit from specific generation styles
 CATEGORY_STYLE_HINTS = {
@@ -136,6 +142,28 @@ class GenerationResult:
     generation_time_seconds: float = 0.0
 
 
+@dataclass
+class ThreeDGenerationResult:
+    """Result of generating a single asset 3D model."""
+    asset_name: str
+    success: bool
+    backend: str
+    glb_path: Optional[str] = None
+    obj_path: Optional[str] = None
+    usdz_path: Optional[str] = None
+    normal_map_path: Optional[str] = None
+    error: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    generation_time_seconds: float = 0.0
+
+
+@dataclass
+class ProcessOutcome:
+    success: bool
+    partial_success: bool
+    should_fail_job: bool
+
+
 # ============================================================================
 # Gemini Client
 # ============================================================================
@@ -146,6 +174,365 @@ def create_gemini_client():
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable is required")
     return genai.Client(api_key=api_key)
+
+
+def gcs_relative_path(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    try:
+        path_obj = Path(path)
+        return str(path_obj).replace(str(GCS_ROOT) + "/", "")
+    except Exception:
+        return path
+
+
+def create_normal_map_placeholder(output_path: Path, size: int = 1024) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", (size, size), color=(128, 128, 255))
+    image.save(output_path, format="PNG")
+
+
+def convert_glb_to_usdz(glb_path: Path, usdz_path: Path) -> bool:
+    """Convert GLB to USDZ using usd_from_gltf if available."""
+    import shutil
+    import subprocess
+
+    usd_from_gltf = shutil.which("usd_from_gltf")
+    if usd_from_gltf is None:
+        logger.warning("[VARIATION-GEN] usd_from_gltf not available")
+        return False
+
+    usdz_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [usd_from_gltf, str(glb_path), "-o", str(usdz_path)]
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=USD_FROM_GLTF_TIMEOUT_S,
+        )
+        return True
+    except subprocess.TimeoutExpired:
+        command_str = " ".join(command)
+        logger.error(
+            "[VARIATION-GEN] usd_from_gltf timed out after %ss: %s",
+            USD_FROM_GLTF_TIMEOUT_S,
+            command_str,
+        )
+        return False
+    except subprocess.CalledProcessError as exc:
+        details = []
+        if exc.stderr:
+            details.append(f"stderr: {exc.stderr.strip()}")
+        if exc.stdout:
+            details.append(f"stdout: {exc.stdout.strip()}")
+        detail_str = f" ({'; '.join(details)})" if details else ""
+        logger.error(
+            "[VARIATION-GEN] usd_from_gltf failed with exit code %s%s",
+            exc.returncode,
+            detail_str,
+        )
+        return False
+
+
+def convert_glb_to_obj(glb_path: Path, obj_path: Path) -> Tuple[bool, Optional[str]]:
+    """Convert GLB to OBJ using trimesh if available."""
+    try:
+        import trimesh
+    except ImportError:
+        return False, "trimesh not available"
+
+    try:
+        mesh = trimesh.load(str(glb_path))
+        obj_path.parent.mkdir(parents=True, exist_ok=True)
+        mesh.export(str(obj_path))
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def image_to_data_uri(img_path: Path) -> str:
+    mime = "image/png"
+    if img_path.suffix.lower() in [".jpg", ".jpeg"]:
+        mime = "image/jpeg"
+    data = img_path.read_bytes()
+    b64 = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def download_file(url: str, out_path: Path) -> None:
+    import urllib.request
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("[VARIATION-GEN] Downloading %s -> %s", url, out_path)
+    urllib.request.urlretrieve(url, out_path)
+
+
+def run_meshy_generation(
+    image_path: Path,
+    output_dir: Path,
+    asset_name: str,
+    api_key: str,
+    dry_run: bool = False,
+) -> Tuple[bool, Dict[str, Optional[Path]], Dict[str, Any], Optional[str]]:
+    """
+    Run Meshy image-to-3D generation.
+
+    Returns: (success, output_paths, metadata, error_message)
+    """
+    if dry_run:
+        asset_out_dir = output_dir / asset_name
+        asset_out_dir.mkdir(parents=True, exist_ok=True)
+        glb_path = asset_out_dir / "model.glb"
+        obj_path = asset_out_dir / "model.obj"
+        usdz_path = asset_out_dir / "model.usdz"
+        normal_map_path = asset_out_dir / "normal.png"
+        glb_path.write_text("dry run mesh placeholder")
+        obj_path.write_text("dry run mesh placeholder")
+        usdz_path.write_text("dry run usdz placeholder")
+        create_normal_map_placeholder(normal_map_path, size=256)
+        return (
+            True,
+            {
+                "glb": glb_path,
+                "obj": obj_path,
+                "usdz": usdz_path,
+                "normal_map": normal_map_path,
+            },
+            {"dry_run": True},
+            None,
+        )
+
+    try:
+        import requests
+    except ImportError:
+        return False, {}, {}, "requests not available for Meshy API"
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "image_url": image_to_data_uri(image_path),
+        "ai_model": "latest",
+        "topology": "triangle",
+        "should_remesh": False,
+        "should_texture": True,
+        "enable_pbr": True,
+    }
+
+    try:
+        response = requests.post(
+            "https://api.meshy.ai/openapi/v1/image-to-3d",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        task_id = response.json()["result"]
+    except Exception as exc:
+        return False, {}, {}, f"Meshy task creation failed: {exc}"
+
+    poll_url = f"https://api.meshy.ai/openapi/v1/image-to-3d/{task_id}"
+    start_time = time.time()
+    timeout = float(os.getenv("MESHY_TIMEOUT_S", "1800"))
+    while True:
+        response = requests.get(poll_url, headers={"Authorization": f"Bearer {api_key}"})
+        response.raise_for_status()
+        data = response.json()
+        status = data.get("status")
+        logger.info(
+            "[VARIATION-GEN] Meshy %s status=%s progress=%s",
+            task_id,
+            status,
+            data.get("progress"),
+        )
+        if status == "SUCCEEDED":
+            task = data
+            break
+        if status in {"FAILED", "CANCELED"}:
+            return False, {}, {}, f"Meshy task failed: {data.get('task_error')}"
+        if time.time() - start_time > timeout:
+            return False, {}, {}, "Meshy task timed out"
+        time.sleep(10.0)
+
+    asset_out_dir = output_dir / asset_name
+    asset_out_dir.mkdir(parents=True, exist_ok=True)
+
+    model_urls = task.get("model_urls", {})
+    output_paths: Dict[str, Optional[Path]] = {
+        "glb": None,
+        "obj": None,
+        "usdz": None,
+        "normal_map": None,
+    }
+
+    for fmt in ("glb", "obj", "usdz"):
+        url = model_urls.get(fmt)
+        if url:
+            out_path = asset_out_dir / f"model.{fmt}"
+            download_file(url, out_path)
+            output_paths[fmt] = out_path
+
+    if output_paths["glb"] and not output_paths["obj"]:
+        obj_path = asset_out_dir / "model.obj"
+        ok, err = convert_glb_to_obj(output_paths["glb"], obj_path)
+        if ok:
+            output_paths["obj"] = obj_path
+        else:
+            logger.warning("[VARIATION-GEN] GLB->OBJ conversion failed: %s", err)
+
+    if output_paths["glb"] and not output_paths["usdz"]:
+        usdz_path = asset_out_dir / "model.usdz"
+        if convert_glb_to_usdz(output_paths["glb"], usdz_path):
+            output_paths["usdz"] = usdz_path
+
+    normal_map_path = None
+    texture_urls = task.get("texture_urls", [])
+    for texture in texture_urls:
+        for key in ("normal", "normal_map", "normals", "normalMap"):
+            url = texture.get(key)
+            if url:
+                normal_map_path = asset_out_dir / "normal.png"
+                download_file(url, normal_map_path)
+                output_paths["normal_map"] = normal_map_path
+                break
+        if normal_map_path:
+            break
+
+    if not output_paths["normal_map"]:
+        normal_map_path = asset_out_dir / "normal.png"
+        create_normal_map_placeholder(normal_map_path, size=1024)
+        output_paths["normal_map"] = normal_map_path
+
+    metadata = {
+        "task_id": task_id,
+        "model_urls": model_urls,
+        "texture_urls": texture_urls,
+    }
+    missing_outputs = [key for key in ("glb", "obj", "usdz", "normal_map") if not output_paths.get(key)]
+    if missing_outputs:
+        metadata["missing_outputs"] = missing_outputs
+        return False, output_paths, metadata, f"Missing outputs: {', '.join(missing_outputs)}"
+
+    return True, output_paths, metadata, None
+
+
+def run_external_3d_service(
+    image_path: Path,
+    output_dir: Path,
+    asset_name: str,
+    service_url: str,
+    token: Optional[str] = None,
+    dry_run: bool = False,
+) -> Tuple[bool, Dict[str, Optional[Path]], Dict[str, Any], Optional[str]]:
+    """
+    Run an external 3D generation service.
+
+    Expected response payload:
+    {
+      "model_urls": {"glb": "...", "obj": "...", "usdz": "..."},
+      "normal_map_url": "...",
+      "metadata": {...}
+    }
+    """
+    if dry_run:
+        asset_out_dir = output_dir / asset_name
+        asset_out_dir.mkdir(parents=True, exist_ok=True)
+        glb_path = asset_out_dir / "model.glb"
+        obj_path = asset_out_dir / "model.obj"
+        usdz_path = asset_out_dir / "model.usdz"
+        normal_map_path = asset_out_dir / "normal.png"
+        glb_path.write_text("dry run mesh placeholder")
+        obj_path.write_text("dry run mesh placeholder")
+        usdz_path.write_text("dry run usdz placeholder")
+        create_normal_map_placeholder(normal_map_path, size=256)
+        return (
+            True,
+            {
+                "glb": glb_path,
+                "obj": obj_path,
+                "usdz": usdz_path,
+                "normal_map": normal_map_path,
+            },
+            {"dry_run": True},
+            None,
+        )
+
+    try:
+        import requests
+    except ImportError:
+        return False, {}, {}, "requests not available for external 3D service"
+
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    payload = {
+        "asset_name": asset_name,
+        "image_base64": base64.b64encode(image_path.read_bytes()).decode("ascii"),
+    }
+
+    try:
+        response = requests.post(
+            service_url,
+            headers=headers,
+            json=payload,
+            timeout=float(os.getenv("EXTERNAL_3D_TIMEOUT_S", "1800")),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        return False, {}, {}, f"External 3D service error: {exc}"
+
+    asset_out_dir = output_dir / asset_name
+    asset_out_dir.mkdir(parents=True, exist_ok=True)
+
+    output_paths: Dict[str, Optional[Path]] = {
+        "glb": None,
+        "obj": None,
+        "usdz": None,
+        "normal_map": None,
+    }
+
+    model_urls = data.get("model_urls", {})
+    for fmt in ("glb", "obj", "usdz"):
+        url = model_urls.get(fmt)
+        if url:
+            out_path = asset_out_dir / f"model.{fmt}"
+            download_file(url, out_path)
+            output_paths[fmt] = out_path
+
+    if output_paths["glb"] and not output_paths["obj"]:
+        obj_path = asset_out_dir / "model.obj"
+        ok, err = convert_glb_to_obj(output_paths["glb"], obj_path)
+        if ok:
+            output_paths["obj"] = obj_path
+        else:
+            logger.warning("[VARIATION-GEN] GLB->OBJ conversion failed: %s", err)
+
+    if output_paths["glb"] and not output_paths["usdz"]:
+        usdz_path = asset_out_dir / "model.usdz"
+        if convert_glb_to_usdz(output_paths["glb"], usdz_path):
+            output_paths["usdz"] = usdz_path
+
+    normal_map_url = data.get("normal_map_url")
+    if normal_map_url:
+        normal_map_path = asset_out_dir / "normal.png"
+        download_file(normal_map_url, normal_map_path)
+        output_paths["normal_map"] = normal_map_path
+
+    if not output_paths["normal_map"]:
+        normal_map_path = asset_out_dir / "normal.png"
+        create_normal_map_placeholder(normal_map_path, size=1024)
+        output_paths["normal_map"] = normal_map_path
+
+    metadata = data.get("metadata", {})
+    metadata["raw_response"] = data
+    missing_outputs = [key for key in ("glb", "obj", "usdz", "normal_map") if not output_paths.get(key)]
+    if missing_outputs:
+        metadata["missing_outputs"] = missing_outputs
+        return False, output_paths, metadata, f"Missing outputs: {', '.join(missing_outputs)}"
+
+    return True, output_paths, metadata, None
 
 
 # ============================================================================
@@ -313,7 +700,6 @@ def generate_asset_image(
         GenerationResult with success status and image path
     """
     import io
-    import base64
 
     start_time = time.time()
 
@@ -549,7 +935,8 @@ def create_hunyuan_assets_json(
     results: List[GenerationResult],
     assets: List[VariationAssetSpec],
     output_dir: Path,
-    scene_id: str
+    scene_id: str,
+    three_d_results: Optional[Dict[str, ThreeDGenerationResult]] = None,
 ) -> Path:
     """
     Create a scene_assets.json-compatible file for downstream processing.
@@ -569,6 +956,8 @@ def create_hunyuan_assets_json(
         if asset is None:
             continue
 
+        three_d_result = three_d_results.get(result.asset_name) if three_d_results else None
+
         # Create object entry compatible with downstream 3D conversion
         obj = {
             "id": result.asset_name,
@@ -577,13 +966,26 @@ def create_hunyuan_assets_json(
             "sim_role": "manipulable_object",
             "must_be_separate_asset": True,
             # Reference image path relative to GCS mount
-            "preferred_view": result.image_path.replace(str(GCS_ROOT) + "/", "") if result.image_path else None,
+            "preferred_view": gcs_relative_path(result.image_path),
             "multiview_dir": None,
             "crop_path": None,
             # Physics hints for simready-job
             "physics_hints": asset.physics_hints,
             "semantic_class": asset.semantic_class,
         }
+
+        if three_d_result:
+            obj["generated_3d"] = {
+                "status": "success" if three_d_result.success else "failed",
+                "backend": three_d_result.backend,
+                "glb_path": gcs_relative_path(three_d_result.glb_path),
+                "obj_path": gcs_relative_path(three_d_result.obj_path),
+                "usdz_path": gcs_relative_path(three_d_result.usdz_path),
+                "normal_map_path": gcs_relative_path(three_d_result.normal_map_path),
+                "generation_time_seconds": three_d_result.generation_time_seconds,
+                "metadata": three_d_result.metadata or {},
+                "error": three_d_result.error,
+            }
         objects.append(obj)
 
     assets_json = {
@@ -610,11 +1012,13 @@ def create_hunyuan_assets_json(
 def update_manifest_with_results(
     manifest: Dict[str, Any],
     results: List[GenerationResult],
-    output_path: Path
+    output_path: Path,
+    three_d_results: Optional[Dict[str, ThreeDGenerationResult]] = None,
 ) -> None:
     """Update the manifest with generation results."""
     # Create lookup of results
     result_lookup = {r.asset_name: r for r in results}
+    three_d_lookup = three_d_results or {}
 
     # Update each asset in manifest
     for asset in manifest.get("assets", []):
@@ -627,6 +1031,19 @@ def update_manifest_with_results(
                 asset["reference_image_path"] = result.image_path
             if result.error:
                 asset["generation_error"] = result.error
+
+        three_d_result = three_d_lookup.get(name)
+        if three_d_result:
+            asset["generation_3d_status"] = "success" if three_d_result.success else "failed"
+            asset["generation_3d_backend"] = three_d_result.backend
+            asset["generated_3d"] = {
+                "glb_path": three_d_result.glb_path,
+                "obj_path": three_d_result.obj_path,
+                "usdz_path": three_d_result.usdz_path,
+                "normal_map_path": three_d_result.normal_map_path,
+                "metadata": three_d_result.metadata or {},
+                "error": three_d_result.error,
+            }
 
     # Add generation metadata
     manifest["generation_completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
@@ -644,6 +1061,125 @@ def update_manifest_with_results(
 
 
 # ============================================================================
+# 3D Generation
+# ============================================================================
+
+def generate_3d_asset(
+    asset_name: str,
+    image_path: Path,
+    output_dir: Path,
+    backend: str,
+    dry_run: bool = False,
+) -> ThreeDGenerationResult:
+    start_time = time.time()
+    backend_lower = backend.lower()
+
+    if backend_lower == "meshy":
+        api_key = os.getenv("MESHY_API_KEY")
+        if not api_key:
+            return ThreeDGenerationResult(
+                asset_name=asset_name,
+                success=False,
+                backend=backend,
+                error="MESHY_API_KEY not set",
+                generation_time_seconds=0.0,
+                metadata={},
+            )
+        success, output_paths, metadata, error = run_meshy_generation(
+            image_path=image_path,
+            output_dir=output_dir,
+            asset_name=asset_name,
+            api_key=api_key,
+            dry_run=dry_run,
+        )
+    elif backend_lower == "external":
+        service_url = os.getenv("EXTERNAL_3D_SERVICE_URL")
+        if not service_url:
+            return ThreeDGenerationResult(
+                asset_name=asset_name,
+                success=False,
+                backend=backend,
+                error="EXTERNAL_3D_SERVICE_URL not set",
+                generation_time_seconds=0.0,
+                metadata={},
+            )
+        success, output_paths, metadata, error = run_external_3d_service(
+            image_path=image_path,
+            output_dir=output_dir,
+            asset_name=asset_name,
+            service_url=service_url,
+            token=os.getenv("EXTERNAL_3D_SERVICE_TOKEN"),
+            dry_run=dry_run,
+        )
+    else:
+        return ThreeDGenerationResult(
+            asset_name=asset_name,
+            success=False,
+            backend=backend,
+            error=f"Unsupported 3D backend: {backend}",
+            generation_time_seconds=0.0,
+            metadata={},
+        )
+
+    elapsed = time.time() - start_time
+    return ThreeDGenerationResult(
+        asset_name=asset_name,
+        success=success,
+        backend=backend,
+        glb_path=str(output_paths.get("glb")) if output_paths.get("glb") else None,
+        obj_path=str(output_paths.get("obj")) if output_paths.get("obj") else None,
+        usdz_path=str(output_paths.get("usdz")) if output_paths.get("usdz") else None,
+        normal_map_path=str(output_paths.get("normal_map")) if output_paths.get("normal_map") else None,
+        error=error,
+        metadata=metadata or {},
+        generation_time_seconds=elapsed,
+    )
+
+
+def generate_all_3d_assets(
+    results: List[GenerationResult],
+    output_dir: Path,
+    backend: str,
+    dry_run: bool = False,
+) -> Tuple[List[ThreeDGenerationResult], Dict[str, Any]]:
+    assets_to_process = [r for r in results if r.success and r.image_path]
+    logger.info(
+        "[VARIATION-GEN] 3D generation enabled for %s assets using %s",
+        len(assets_to_process),
+        backend,
+    )
+
+    three_d_results: List[ThreeDGenerationResult] = []
+    for result in assets_to_process:
+        image_path = Path(result.image_path)
+        three_d_result = generate_3d_asset(
+            asset_name=result.asset_name,
+            image_path=image_path,
+            output_dir=output_dir,
+            backend=backend,
+            dry_run=dry_run,
+        )
+        three_d_results.append(three_d_result)
+        if not three_d_result.success:
+            logger.warning(
+                "[VARIATION-GEN] 3D generation failed for %s: %s",
+                result.asset_name,
+                three_d_result.error,
+            )
+
+    total_time = sum(r.generation_time_seconds for r in three_d_results)
+    summary = {
+        "total_attempted": len(three_d_results),
+        "successful": sum(1 for r in three_d_results if r.success),
+        "failed": sum(1 for r in three_d_results if not r.success),
+        "total_generation_time_seconds": total_time,
+        "average_time_per_asset_seconds": total_time / len(three_d_results) if three_d_results else 0,
+        "backend": backend,
+    }
+
+    return three_d_results, summary
+
+# ============================================================================
 # Main Processing
 # ============================================================================
 
@@ -656,7 +1192,10 @@ def process_variation_assets(
     dry_run: bool = False,
     priority_filter: Optional[str] = None,
     mock_mode: bool = False,
-) -> bool:
+    enable_3d_generation: bool = False,
+    three_d_backend: str = "meshy",
+    fail_on_3d_failure: bool = False,
+) -> ProcessOutcome:
     """
     Main processing function for variation asset generation.
 
@@ -670,7 +1209,7 @@ def process_variation_assets(
         priority_filter: Optional filter ("required", "recommended", "optional")
 
     Returns:
-        True if successful, False otherwise
+        ProcessOutcome describing success and failure state.
     """
     logger.info("[VARIATION-GEN] Processing variation assets for scene: %s", scene_id)
 
@@ -681,7 +1220,7 @@ def process_variation_assets(
         manifest, assets = load_manifest(manifest_path)
     except FileNotFoundError as e:
         logger.error("[VARIATION-GEN] %s", e)
-        return False
+        return ProcessOutcome(success=False, partial_success=False, should_fail_job=True)
 
     logger.info("[VARIATION-GEN] Loaded manifest with %s assets", len(assets))
 
@@ -709,7 +1248,7 @@ def process_variation_assets(
         output_dir.mkdir(parents=True, exist_ok=True)
         marker_path = output_dir / ".variation_pipeline_complete"
         marker_path.write_text(f"No assets to generate at {datetime.datetime.utcnow().isoformat()}Z\n")
-        return True
+        return ProcessOutcome(success=True, partial_success=False, should_fail_job=False)
 
     # Get scene context for generation
     scene_type = manifest.get("scene_type", "generic")
@@ -725,7 +1264,7 @@ def process_variation_assets(
             client = create_gemini_client()
         except ValueError as e:
             logger.error("[VARIATION-GEN] %s", e)
-            return False
+            return ProcessOutcome(success=False, partial_success=False, should_fail_job=True)
     else:
         client = None
 
@@ -748,18 +1287,36 @@ def process_variation_assets(
         summary["total_generation_time_seconds"],
     )
 
+    three_d_results: List[ThreeDGenerationResult] = []
+    three_d_summary: Optional[Dict[str, Any]] = None
+    if enable_3d_generation:
+        three_d_results, three_d_summary = generate_all_3d_assets(
+            results=results,
+            output_dir=output_dir,
+            backend=three_d_backend,
+            dry_run=dry_run,
+        )
+
+    three_d_lookup = {r.asset_name: r for r in three_d_results}
+
     # Create hunyuan-compatible assets file
     if summary['successful'] > 0:
         create_hunyuan_assets_json(
             results=results,
             assets=assets,
             output_dir=output_dir,
-            scene_id=scene_id
+            scene_id=scene_id,
+            three_d_results=three_d_lookup if three_d_lookup else None,
         )
 
     # Update manifest with results
     updated_manifest_path = output_dir / "manifest_with_results.json"
-    update_manifest_with_results(manifest, results, updated_manifest_path)
+    update_manifest_with_results(
+        manifest,
+        results,
+        updated_manifest_path,
+        three_d_results=three_d_lookup if three_d_lookup else None,
+    )
 
     # Write generation report
     report = {
@@ -775,6 +1332,12 @@ def process_variation_assets(
             "mock_mode": mock_mode,
         }
     }
+    if three_d_summary is not None:
+        report["summary_3d"] = three_d_summary
+        report["results_3d"] = [asdict(r) for r in three_d_results]
+        report["config"]["enable_3d_generation"] = enable_3d_generation
+        report["config"]["three_d_backend"] = three_d_backend
+        report["config"]["fail_on_3d_failure"] = fail_on_3d_failure
     report_path = output_dir / "generation_report.json"
     with report_path.open("w") as f:
         json.dump(report, f, indent=2)
@@ -788,7 +1351,19 @@ def process_variation_assets(
     )
     logger.info("[VARIATION-GEN] Wrote completion marker: %s", marker_path)
 
-    return summary['failed'] == 0 or summary['successful'] > 0
+    image_failed = summary["failed"] > 0
+    three_d_failed = (
+        three_d_summary["failed"] > 0
+        if three_d_summary is not None
+        else False
+    )
+    should_fail_job = enable_3d_generation and fail_on_3d_failure and three_d_failed
+    success = (summary["failed"] == 0 or summary["successful"] > 0) and not should_fail_job
+    return ProcessOutcome(
+        success=success,
+        partial_success=image_failed or three_d_failed,
+        should_fail_job=should_fail_job,
+    )
 
 
 # ============================================================================
@@ -802,6 +1377,9 @@ def main():
     variation_gen_mode = os.getenv("VARIATION_GEN_MODE", "").lower()
     dry_run = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"}
     mock_mode = variation_gen_mode == "mock"
+    enable_3d_generation = os.getenv("ENABLE_3D_GENERATION", "").lower() in {"1", "true", "yes"}
+    three_d_backend = os.getenv("VARIATION_3D_BACKEND", "meshy")
+    fail_on_3d_failure = os.getenv("FAIL_ON_3D_FAILURE", "").lower() in {"1", "true", "yes"}
 
     required_env_vars = {
         "BUCKET": "GCS bucket name",
@@ -809,6 +1387,10 @@ def main():
     }
     if not mock_mode and not dry_run:
         required_env_vars["GEMINI_API_KEY"] = "Gemini API key for image generation"
+    if enable_3d_generation and three_d_backend.lower() == "meshy":
+        required_env_vars["MESHY_API_KEY"] = "Meshy API key for 3D generation"
+    if enable_3d_generation and three_d_backend.lower() == "external":
+        required_env_vars["EXTERNAL_3D_SERVICE_URL"] = "External 3D service URL"
 
     validate_required_env_vars(required_env_vars, label="[VARIATION-GEN]")
 
@@ -833,6 +1415,10 @@ def main():
     logger.info("[VARIATION-GEN] Output prefix: %s", variation_assets_prefix)
     image_model_display = "Mock generator" if mock_mode else GEMINI_IMAGE_MODEL_NAME
     logger.info("[VARIATION-GEN] Image model: %s", image_model_display)
+    if enable_3d_generation:
+        logger.info("[VARIATION-GEN] 3D generation enabled (backend=%s)", three_d_backend)
+    if fail_on_3d_failure:
+        logger.info("[VARIATION-GEN] 3D failure will fail the job")
     if max_assets:
         logger.info("[VARIATION-GEN] Max assets: %s", max_assets)
     if priority_filter:
@@ -843,7 +1429,7 @@ def main():
         logger.info("[VARIATION-GEN] MOCK MODE - using placeholder images")
 
     try:
-        success = process_variation_assets(
+        outcome = process_variation_assets(
             root=GCS_ROOT,
             scene_id=scene_id,
             replicator_prefix=replicator_prefix,
@@ -852,16 +1438,21 @@ def main():
             dry_run=dry_run,
             priority_filter=priority_filter,
             mock_mode=mock_mode,
+            enable_3d_generation=enable_3d_generation,
+            three_d_backend=three_d_backend,
+            fail_on_3d_failure=fail_on_3d_failure,
         )
 
-        if success:
+        if outcome.success and not outcome.partial_success:
             logger.info("[VARIATION-GEN] SUCCESS: Variation asset generation complete")
             sys.exit(0)
-        else:
-            logger.warning(
-                "[VARIATION-GEN] PARTIAL SUCCESS: Some assets failed to generate"
-            )
-            sys.exit(0)  # Don't fail the job for partial success
+        if outcome.should_fail_job:
+            logger.error("[VARIATION-GEN] ERROR: 3D generation failures detected")
+            sys.exit(1)
+        logger.warning(
+            "[VARIATION-GEN] PARTIAL SUCCESS: Some assets failed to generate"
+        )
+        sys.exit(0)  # Don't fail the job for partial success
 
     except Exception as e:
         logger.exception("[VARIATION-GEN] ERROR: %s", e)
