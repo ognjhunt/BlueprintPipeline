@@ -39,7 +39,19 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 
 ## Key environment variables
 - Environment variables used by trigger setup scripts and workflow runtime configuration.
-- `WORKFLOW_REGION`: region for Cloud Run job invocations in workflows. Defaults to `us-central1` if not set.
+- `PRIMARY_WORKFLOW_REGION`: primary region for Cloud Run job invocations. Defaults to `us-central1`.
+- `SECONDARY_WORKFLOW_REGION`: secondary region used when primary health checks fail. Defaults to `us-east1`.
+- `WORKFLOW_REGION`: legacy override for workflows that do not yet use primary/secondary routing.
+- `PRIMARY_BUCKET`: default bucket for manual or scheduler-driven workflows (replaces hardcoded bucket names).
+
+## Region routing logic
+Selected workflows perform regional health checks before invoking Cloud Run jobs:
+
+1. Try the primary region (`PRIMARY_WORKFLOW_REGION`) by calling `run.jobs.get`.
+2. If the primary region is unavailable, try the secondary region (`SECONDARY_WORKFLOW_REGION`).
+3. Route job executions to the first healthy region and log any regional failures.
+
+This keeps new workloads running during regional outages while preserving idempotency markers in GCS.
 
 ## Policy compliance
 - Standard retry/backoff and timeout defaults live in `TIMEOUT_AND_RETRY_POLICY.md` and `policy_configs/adaptive_timeouts.yaml`.

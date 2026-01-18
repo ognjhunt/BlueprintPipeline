@@ -45,9 +45,15 @@ main:
           - bucket: ${event.data.bucket}
           - object: ${event.data.name}
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
-          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
-          - gkeCluster: "blueprint-cluster"
-          - gkeZone: "us-central1-a"
+          - primaryRegion: ${default(sys.get_env("PRIMARY_WORKFLOW_REGION"), "us-central1")}
+          - secondaryRegion: ${default(sys.get_env("SECONDARY_WORKFLOW_REGION"), "us-east1")}
+          - region: ${primaryRegion}
+          - primaryGkeCluster: '${default(sys.get_env("PRIMARY_GKE_CLUSTER"), "blueprint-cluster")}'
+          - secondaryGkeCluster: '${default(sys.get_env("SECONDARY_GKE_CLUSTER"), "blueprint-cluster-secondary")}'
+          - primaryGkeZone: '${default(sys.get_env("PRIMARY_GKE_ZONE"), "us-central1-a")}'
+          - secondaryGkeZone: '${default(sys.get_env("SECONDARY_GKE_ZONE"), "us-east1-b")}'
+          - gkeCluster: '${primaryGkeCluster}'
+          - gkeZone: '${primaryGkeZone}'
           - namespace: "blueprint"
           - enforceQualityGates: '${default(map.get(event, "enforce_quality_gates"), sys.get_env("BP_ENV") == "production")}'
           - runStagingE2E: '${default(map.get(event, "run_staging_e2e"), sys.get_env("BP_ENV") == "production")}'
@@ -89,6 +95,76 @@ main:
           - sceneConfigPath: '${"scenes/" + sceneId + "/config.json"}'
           - qualityGateJobName: "quality-gate-job"
           - qualityGateTimeoutSeconds: 1800
+        next: init_region_health
+
+    - init_region_health:
+        assign:
+          - primaryHealthy: false
+          - secondaryHealthy: false
+        next: check_primary_cluster
+
+    - check_primary_cluster:
+        try:
+          call: googleapis.container.v1.projects.locations.clusters.get
+          args:
+            name: '${"projects/" + projectId + "/locations/" + primaryGkeZone + "/clusters/" + primaryGkeCluster}'
+          result: primaryCluster
+        next: mark_primary_healthy
+        except:
+          as: primaryError
+          steps:
+            - log_primary_unhealthy:
+                call: sys.log
+                args:
+                  text: '${"Primary GKE cluster " + primaryGkeCluster + " unavailable: " + primaryError.message}'
+                  severity: "WARNING"
+            - check_secondary_cluster:
+                try:
+                  call: googleapis.container.v1.projects.locations.clusters.get
+                  args:
+                    name: '${"projects/" + projectId + "/locations/" + secondaryGkeZone + "/clusters/" + secondaryGkeCluster}'
+                  result: secondaryCluster
+                next: mark_secondary_healthy
+                except:
+                  as: secondaryError
+                  steps:
+                    - log_secondary_unhealthy:
+                        call: sys.log
+                        args:
+                          text: '${"Secondary GKE cluster " + secondaryGkeCluster + " unavailable: " + secondaryError.message}'
+                          severity: "ERROR"
+                    - select_cluster
+
+    - mark_primary_healthy:
+        assign:
+          - primaryHealthy: true
+        next: select_cluster
+
+    - mark_secondary_healthy:
+        assign:
+          - secondaryHealthy: true
+        next: select_cluster
+
+    - select_cluster:
+        switch:
+          - condition: ${primaryHealthy}
+            next: use_primary_cluster
+          - condition: ${secondaryHealthy}
+            next: use_secondary_cluster
+        next: use_primary_cluster
+
+    - use_primary_cluster:
+        assign:
+          - gkeCluster: ${primaryGkeCluster}
+          - gkeZone: ${primaryGkeZone}
+          - region: ${primaryRegion}
+        next: lookup_scene_config
+
+    - use_secondary_cluster:
+        assign:
+          - gkeCluster: ${secondaryGkeCluster}
+          - gkeZone: ${secondaryGkeZone}
+          - region: ${secondaryRegion}
         next: lookup_scene_config
 
     # Lookup scene config from GCS to get customer-specific bundle tier

@@ -25,8 +25,10 @@ main:
     - init:
         assign:
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
-          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
-          - bucket: '${default(map.get(args, "bucket"), "blueprint-scenes")}'
+          - primaryRegion: ${default(sys.get_env("PRIMARY_WORKFLOW_REGION"), "us-central1")}
+          - secondaryRegion: ${default(sys.get_env("SECONDARY_WORKFLOW_REGION"), "us-east1")}
+          - region: ${primaryRegion}
+          - bucket: '${default(map.get(args, "bucket"), default(sys.get_env("PRIMARY_BUCKET"), "blueprint-scenes"))}'
           - scenesPerRun: '${default(map.get(args, "scenes_per_run"), 10)}'
           - dryRun: '${default(map.get(args, "dry_run"), false)}'
           - jobName: "scene-generation-job"
@@ -42,6 +44,72 @@ main:
         args:
           text: '${"Scene generation pipeline started - generating " + string(scenesPerRun) + " scenes"}'
           severity: "INFO"
+        next: init_region_health
+
+    - init_region_health:
+        assign:
+          - primaryHealthy: false
+          - secondaryHealthy: false
+        next: check_primary_region
+
+    - check_primary_region:
+        try:
+          call: googleapis.run.v1.projects.locations.jobs.get
+          args:
+            name: '${"projects/" + projectId + "/locations/" + primaryRegion + "/jobs/" + jobName}'
+          result: primaryJob
+        next: mark_primary_healthy
+        except:
+          as: primaryError
+          steps:
+            - log_primary_unhealthy:
+                call: sys.log
+                args:
+                  text: '${"Primary region " + primaryRegion + " job " + jobName + " unavailable: " + primaryError.message}'
+                  severity: "WARNING"
+            - check_secondary_region:
+                try:
+                  call: googleapis.run.v1.projects.locations.jobs.get
+                  args:
+                    name: '${"projects/" + projectId + "/locations/" + secondaryRegion + "/jobs/" + jobName}'
+                  result: secondaryJob
+                next: mark_secondary_healthy
+                except:
+                  as: secondaryError
+                  steps:
+                    - log_secondary_unhealthy:
+                        call: sys.log
+                        args:
+                          text: '${"Secondary region " + secondaryRegion + " job " + jobName + " unavailable: " + secondaryError.message}'
+                          severity: "ERROR"
+                    - select_region
+
+    - mark_primary_healthy:
+        assign:
+          - primaryHealthy: true
+        next: select_region
+
+    - mark_secondary_healthy:
+        assign:
+          - secondaryHealthy: true
+        next: select_region
+
+    - select_region:
+        switch:
+          - condition: ${primaryHealthy}
+            next: use_primary_region
+          - condition: ${secondaryHealthy}
+            next: use_secondary_region
+        next: use_primary_region
+
+    - use_primary_region:
+        assign:
+          - region: ${primaryRegion}
+        next: check_dry_run
+
+    - use_secondary_region:
+        assign:
+          - region: ${secondaryRegion}
         next: check_dry_run
 
     - check_dry_run:
