@@ -67,7 +67,9 @@ main:
           - bucket: ${event.data.bucket}
           - object: ${event.data.name}
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
-          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
+          - primaryRegion: ${default(sys.get_env("PRIMARY_WORKFLOW_REGION"), "us-central1")}
+          - secondaryRegion: ${default(sys.get_env("SECONDARY_WORKFLOW_REGION"), "us-east1")}
+          - region: ${primaryRegion}
           - workflowName: "genie-sim-export-pipeline"
           - geniesimExportTimeoutSeconds: 2700
           - geniesimSubmissionTimeoutSeconds: 14400
@@ -111,6 +113,72 @@ main:
           - geniesimJobMetadataPath: '${"scenes/" + sceneId + "/geniesim/job.json"}'
           - geniesimFailedMarker: '${"scenes/" + sceneId + "/geniesim/.failed"}'
           - geniesimLegacyFailedMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_failed"}'
+        next: init_region_health
+
+    - init_region_health:
+        assign:
+          - primaryHealthy: false
+          - secondaryHealthy: false
+        next: check_primary_region
+
+    - check_primary_region:
+        try:
+          call: googleapis.run.v1.projects.locations.jobs.get
+          args:
+            name: '${"projects/" + projectId + "/locations/" + primaryRegion + "/jobs/" + geniesimJobName}'
+          result: primaryJob
+        next: mark_primary_healthy
+        except:
+          as: primaryError
+          steps:
+            - log_primary_unhealthy:
+                call: sys.log
+                args:
+                  text: '${"Primary region " + primaryRegion + " job " + geniesimJobName + " unavailable: " + primaryError.message}'
+                  severity: "WARNING"
+            - check_secondary_region:
+                try:
+                  call: googleapis.run.v1.projects.locations.jobs.get
+                  args:
+                    name: '${"projects/" + projectId + "/locations/" + secondaryRegion + "/jobs/" + geniesimJobName}'
+                  result: secondaryJob
+                next: mark_secondary_healthy
+                except:
+                  as: secondaryError
+                  steps:
+                    - log_secondary_unhealthy:
+                        call: sys.log
+                        args:
+                          text: '${"Secondary region " + secondaryRegion + " job " + geniesimJobName + " unavailable: " + secondaryError.message}'
+                          severity: "ERROR"
+                    - select_region
+
+    - mark_primary_healthy:
+        assign:
+          - primaryHealthy: true
+        next: select_region
+
+    - mark_secondary_healthy:
+        assign:
+          - secondaryHealthy: true
+        next: select_region
+
+    - select_region:
+        switch:
+          - condition: ${primaryHealthy}
+            next: use_primary_region
+          - condition: ${secondaryHealthy}
+            next: use_secondary_region
+        next: use_primary_region
+
+    - use_primary_region:
+        assign:
+          - region: ${primaryRegion}
+        next: check_geniesim_enabled
+
+    - use_secondary_region:
+        assign:
+          - region: ${secondaryRegion}
         next: check_geniesim_enabled
 
     # Check if Genie Sim mode is enabled (can be overridden per-scene)

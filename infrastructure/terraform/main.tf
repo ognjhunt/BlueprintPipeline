@@ -231,7 +231,7 @@ resource "google_service_account_iam_member" "pipeline_workload_identity" {
 
 resource "google_storage_bucket" "pipeline_data" {
   name          = "${var.project_id}-blueprint-data"
-  location      = var.region
+  location      = var.bucket_location
   force_destroy = false
   project       = var.project_id
 
@@ -272,7 +272,7 @@ resource "google_storage_bucket" "pipeline_data" {
 # Dead letter bucket for failed jobs
 resource "google_storage_bucket" "dead_letter" {
   name          = "${var.project_id}-blueprint-dead-letter"
-  location      = var.region
+  location      = var.bucket_location
   force_destroy = false
   project       = var.project_id
 
