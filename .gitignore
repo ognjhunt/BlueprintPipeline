@@ -18,3 +18,9 @@ src/
 # Generated demo outputs
 embodiment_demo/
 sim2real_demo/
+
+# Test artifacts
+.coverage
+coverage.xml
+htmlcov/
+tests/pytest.log
