@@ -524,6 +524,13 @@ class PipelineMetricsCollector:
             "By",
         )
 
+        self.pipeline_cost_total_usd = self._create_metric(
+            "pipeline_cost_total_usd",
+            "Total pipeline cost in USD",
+            MetricType.COUNTER,
+            "USD",
+        )
+
         # Error metrics
         self.errors_total = self._create_metric(
             "errors_total",
@@ -587,6 +594,23 @@ class PipelineMetricsCollector:
                 duration,
                 labels={"job": job_name, "scene_id": scene_id}
             )
+
+            try:
+                from tools.cost_tracking import get_cost_tracker
+
+                cost_tracker = get_cost_tracker()
+                cost_tracker.track_compute(
+                    scene_id=scene_id,
+                    job_name=job_name,
+                    duration_seconds=duration,
+                )
+            except Exception as e:
+                logger.debug(
+                    "[METRICS] Cost tracking skipped for %s/%s: %s",
+                    job_name,
+                    scene_id,
+                    e,
+                )
 
             # Decrement in-progress gauge
             self.scenes_in_progress.set(0, labels={"job": job_name})
