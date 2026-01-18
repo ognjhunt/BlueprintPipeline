@@ -28,6 +28,8 @@ from urllib import request as url_request
 
 import numpy as np
 
+from tools.validation import ALLOWED_ASSET_CATEGORIES, ValidationError, validate_category
+
 
 # =============================================================================
 # Data Models
@@ -299,6 +301,7 @@ class AssetIndexBuilder:
         embedding_model: Optional[str] = None,
         embedding_provider: Optional[str] = None,
         verbose: bool = True,
+        strict_category_validation: Optional[bool] = None,
     ):
         """
         Initialize asset index builder.
@@ -315,6 +318,11 @@ class AssetIndexBuilder:
         self.embedding_provider = embedding_provider
         self.description_generator = SemanticDescriptionGenerator()
         self.environment = os.getenv("GENIESIM_ENV", os.getenv("BP_ENV", "development")).lower()
+        if strict_category_validation is None:
+            strict_env = os.getenv("GENIESIM_STRICT_CATEGORY", "")
+            self.strict_category_validation = strict_env.lower() in {"1", "true", "yes", "on"}
+        else:
+            self.strict_category_validation = strict_category_validation
 
         # Embedding client (initialized lazily)
         self._embedding_client = None
@@ -435,8 +443,26 @@ class AssetIndexBuilder:
             semantic_description = self.description_generator.generate(obj)
 
             # Get categories
-            category = (obj.get("category") or "object").lower()
-            categories = CATEGORY_MAPPING.get(category, CATEGORY_MAPPING["object"])
+            category_raw = obj.get("category") or "object"
+            category = validate_category(
+                category_raw,
+                allowed_categories=ALLOWED_ASSET_CATEGORIES,
+                strict=False,
+            )
+            if category not in CATEGORY_MAPPING:
+                self.log(
+                    f"Unknown category '{category_raw}' for asset {obj_id}. Using default categories.",
+                    "WARNING",
+                )
+                if self.strict_category_validation:
+                    raise ValidationError(
+                        f"Unknown category '{category_raw}'",
+                        field="category",
+                        value=category_raw,
+                    )
+                categories = CATEGORY_MAPPING["object"]
+            else:
+                categories = CATEGORY_MAPPING[category]
 
             # Get physics properties
             physics = obj.get("physics", {})
@@ -512,6 +538,11 @@ class AssetIndexBuilder:
                 bp_metadata=bp_metadata,
             )
 
+        except ValidationError:
+            if self.strict_category_validation:
+                raise
+            self.log(f"Failed to build asset for {obj.get('id', 'unknown')}: invalid input", "WARNING")
+            return None
         except Exception as e:
             self.log(f"Failed to build asset for {obj.get('id', 'unknown')}: {e}", "WARNING")
             return None

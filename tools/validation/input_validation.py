@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Pattern, Union
+from typing import Any, Collection, Dict, List, Optional, Pattern, Union
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,52 @@ PATTERN_SCENE_ID = re.compile(r'^[a-zA-Z0-9_\-]+$')
 PATTERN_UUID = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     re.IGNORECASE
+)
+
+ALLOWED_ASSET_CATEGORIES = frozenset(
+    {
+        "cup",
+        "mug",
+        "plate",
+        "bowl",
+        "utensil",
+        "bottle",
+        "pot",
+        "pan",
+        "microwave",
+        "refrigerator",
+        "oven",
+        "dishwasher",
+        "sink",
+        "faucet",
+        "countertop",
+        "cabinet",
+        "box",
+        "package",
+        "carton",
+        "tote",
+        "pallet",
+        "shelf",
+        "rack",
+        "conveyor",
+        "desk",
+        "chair",
+        "monitor",
+        "keyboard",
+        "mouse",
+        "phone",
+        "book",
+        "pen",
+        "drawer",
+        "filing_cabinet",
+        "door",
+        "window",
+        "table",
+        "couch",
+        "bed",
+        "object",
+        "unknown",
+    }
 )
 
 
@@ -264,7 +310,11 @@ def validate_scene_id(scene_id: str) -> str:
     )
 
 
-def validate_category(category: str) -> str:
+def validate_category(
+    category: str,
+    allowed_categories: Optional[Collection[str]] = None,
+    strict: bool = False,
+) -> str:
     """
     Validate object category.
 
@@ -277,12 +327,22 @@ def validate_category(category: str) -> str:
     Raises:
         ValidationError: If category is invalid
     """
-    return sanitize_string(
+    sanitized = sanitize_string(
         category,
         max_length=64,
         allow_pattern=PATTERN_ALPHANUMERIC,
         field_name="category",
     )
+    sanitized = sanitized.lower()
+    categories = allowed_categories or ALLOWED_ASSET_CATEGORIES
+    if categories and sanitized not in categories and strict:
+        raise ValidationError(
+            f"Category '{sanitized}' is not in the allowed list",
+            field="category",
+            value=sanitized,
+        )
+
+    return sanitized
 
 
 def validate_description(description: str) -> str:
