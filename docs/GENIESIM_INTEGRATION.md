@@ -70,6 +70,10 @@ Use `GENIESIM_ENV=production` as the canonical production toggle for Genie Sim i
 
 ```bash
 export GENIESIM_ENV=production
+export PIPELINE_ENV=production
 export ISAACSIM_REQUIRED=true
 export CUROBO_REQUIRED=true
 ```
+
+Production runs that generate asset indexes must also configure a valid embedding provider
+(`OPENAI_API_KEY` or `QWEN_API_KEY`/`DASHSCOPE_API_KEY` plus the matching embedding model).
