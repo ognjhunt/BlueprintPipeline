@@ -1,0 +1,27 @@
+{
+  "checksums": {
+    "mismatched_files": [],
+    "missing_files": [],
+    "success": true,
+    "total_files": 2
+  },
+  "checksums_path": "tests/fixtures/golden/dataset_regression/baseline_dataset/checksums.json",
+  "collision_rate": 0.5,
+  "duration_seconds": {
+    "average_seconds": 1.6,
+    "max_seconds": 2.0,
+    "min_seconds": 1.2
+  },
+  "episode_count": 2,
+  "quality_distribution": {
+    "0.0-0.5": 0,
+    "0.5-0.8": 1,
+    "0.8-0.9": 0,
+    "0.9-1.0": 1
+  },
+  "quality_summary": {
+    "average_score": 0.835,
+    "max_score": 0.92,
+    "min_score": 0.75
+  }
+}

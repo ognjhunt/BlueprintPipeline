@@ -1,0 +1,8 @@
+{
+  "checksum_mismatch_allowed": 0,
+  "checksum_missing_allowed": 0,
+  "collision_rate_delta": 0.0,
+  "duration_average_delta": 0.0,
+  "episode_count_delta": 0,
+  "quality_distribution_delta": 0
+}

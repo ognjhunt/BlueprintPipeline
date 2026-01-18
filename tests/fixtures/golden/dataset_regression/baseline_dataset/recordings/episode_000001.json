@@ -1,0 +1,16 @@
+{
+  "episode_id": "episode_000001",
+  "task_name": "place_mug",
+  "quality_score": 0.75,
+  "validation_passed": true,
+  "collision_count": 2,
+  "frame_count": 60,
+  "frames": [
+    {
+      "timestamp": 0.0
+    },
+    {
+      "timestamp": 2.0
+    }
+  ]
+}
