@@ -353,6 +353,15 @@ class CostTracker:
 
         # In-memory cache
         self.entries: List[CostEntry] = []
+        self.scene_totals: Dict[str, float] = {}
+
+        self.metrics = None
+        try:
+            from tools.metrics.pipeline_metrics import get_metrics
+
+            self.metrics = get_metrics()
+        except Exception as exc:  # pragma: no cover - metrics optional
+            logger.debug(f"Metrics unavailable for cost tracking: {exc}")
 
         # Load existing data
         self._load_data()
@@ -764,6 +773,7 @@ class CostTracker:
         )
 
         self.entries.append(entry)
+        self._update_scene_total(scene_id, amount)
         self._save_entry(entry)
 
     def _load_data(self) -> None:
@@ -777,6 +787,7 @@ class CostTracker:
                             data = json.loads(line)
                             entry = CostEntry(**data)
                             self.entries.append(entry)
+                            self._update_scene_total(entry.scene_id, entry.amount)
             except Exception as e:
                 logger.warning(f"Failed to load cost data: {e}")
 
@@ -788,6 +799,15 @@ class CostTracker:
                 f.write(json.dumps(entry.to_dict()) + '\n')
         except Exception as e:
             logger.warning(f"Failed to save cost entry: {e}")
+
+    def _update_scene_total(self, scene_id: str, amount: float) -> None:
+        """Update per-scene totals and emit metrics."""
+        self.scene_totals[scene_id] = self.scene_totals.get(scene_id, 0.0) + amount
+        if self.metrics:
+            self.metrics.cost_per_scene.set(
+                self.scene_totals[scene_id],
+                labels={"job": "cost_tracking", "scene_id": scene_id},
+            )
 
 
 # Global singleton instance
