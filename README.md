@@ -371,10 +371,11 @@ The pipeline produces outputs ready for integration with existing workflows:
 3. **Domain Randomization**: Use `replicator/` scripts with Omniverse Replicator
 
 Labs must provide the Particulate service endpoint for interactive articulation
-(`PARTICULATE_ENDPOINT`). In production or when `DISALLOW_PLACEHOLDER_URDF=true`,
-interactive-job raises errors instead of emitting placeholder URDFs (e.g., if
-Particulate is unavailable or a mesh is missing). Expect staging runs to fail
-fast and emit `.interactive_failed` when that dependency is not satisfied.
+(`PARTICULATE_ENDPOINT`). In production (`BP_ENV=production` or `PIPELINE_ENV=production`)
+or when `DISALLOW_PLACEHOLDER_URDF=true`, interactive-job raises errors instead
+of emitting placeholder URDFs (e.g., if Particulate is unavailable or a mesh is
+missing). Expect staging runs to fail fast and emit `.interactive_failed` when
+that dependency is not satisfied.
 
 Example Isaac Lab usage:
 ```python
