@@ -21,3 +21,19 @@ The script performs checks on:
 This lightweight validation replaces manual Eventarc trigger inspection when you
 just need to assert the wiring is present and the orchestration order is
 correct.
+
+## Related workflow trigger map
+See the workflow → trigger mapping in `workflows/README.md` for the full list of
+Eventarc, custom event, and scheduler-based triggers, including manual-only
+workflows.
+
+## Additional trigger requirements
+The verification script does **not** validate these Eventarc storage triggers,
+so ensure they are configured when wiring up the pipeline:
+
+- **Interactive pipeline** – requires finalized
+  `scenes/*/assets/scene_assets.json` to trigger `interactive-pipeline`.
+- **Objects pipeline** – requires finalized
+  `scenes/*/layout/scene_layout.json` to trigger `objects-pipeline`.
+- **Scale pipeline** – requires finalized
+  `scenes/*/layout/scene_layout.json` to trigger `scale-pipeline`.
