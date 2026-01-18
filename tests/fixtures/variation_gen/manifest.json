@@ -1,0 +1,25 @@
+{
+  "scene_id": "test_scene",
+  "scene_type": "kitchen",
+  "environment_type": "kitchen",
+  "assets": [
+    {
+      "name": "spatula_01",
+      "category": "tools",
+      "description": "a silicone kitchen spatula",
+      "semantic_class": "tool",
+      "priority": "required",
+      "source_hint": "generate",
+      "example_variants": [
+        "wooden handle",
+        "all silicone"
+      ],
+      "physics_hints": {
+        "mass_range_kg": [
+          0.05,
+          0.2
+        ]
+      }
+    }
+  ]
+}

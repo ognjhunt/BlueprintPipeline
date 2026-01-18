@@ -281,6 +281,8 @@ def generate_asset_image(
 
     if dry_run:
         logger.info("[VARIATION-GEN] [DRY-RUN] Would generate: %s", asset.name)
+        placeholder = Image.new("RGBA", (1, 1), (255, 255, 255, 0))
+        placeholder.save(str(image_path), format="PNG")
         return GenerationResult(
             asset_name=asset.name,
             success=True,
