@@ -222,6 +222,7 @@ def generate_mock_regen3d(
         "rotation_quaternion": [1.0, 0.0, 0.0, 0.0],
         "scale": [1.0, 1.0, 1.0],
         "confidence": 1.0,
+        "is_floor_contact": True,
     }
     (background_dir / "pose.json").write_text(json.dumps(bg_pose, indent=2))
 
