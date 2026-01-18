@@ -8,6 +8,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.geniesim_adapter import local_framework as lf
+from tools.geniesim_adapter import geniesim_server
+from tools.geniesim_adapter.geniesim_grpc_pb2 import (
+    GetIKStatusRequest,
+    GetObservationRequest,
+    TaskStatusRequest,
+)
 
 
 def test_curobo_missing_enables_fallback_non_production(monkeypatch):
@@ -50,3 +56,35 @@ def test_check_geniesim_availability_allows_mock(monkeypatch, tmp_path):
     assert status["mock_server_allowed"] is True
     assert status["isaac_sim_available"] is True
     assert status["available"] is True
+
+
+@pytest.mark.unit
+def test_local_servicer_get_ik_status_returns_success():
+    servicer = geniesim_server.GenieSimLocalServicer(joint_count=6)
+
+    response = servicer.GetIKStatus(GetIKStatusRequest(), context=None)
+
+    assert response.success is True
+    assert response.ik_solvable is True
+    assert len(response.solution) == 6
+
+
+@pytest.mark.unit
+def test_local_servicer_get_task_status_returns_success():
+    servicer = geniesim_server.GenieSimLocalServicer()
+
+    response = servicer.GetTaskStatus(TaskStatusRequest(task_id="task-1"), context=None)
+
+    assert response.success is True
+    assert response.status
+    assert response.progress >= 0.0
+
+
+@pytest.mark.unit
+def test_local_servicer_stream_observations_yields_responses():
+    servicer = geniesim_server.GenieSimLocalServicer()
+
+    responses = list(servicer.StreamObservations(GetObservationRequest(), context=None))
+
+    assert responses
+    assert all(response.success for response in responses)
