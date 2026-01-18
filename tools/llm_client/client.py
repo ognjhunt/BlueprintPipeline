@@ -24,12 +24,16 @@ Environment Variables:
 from __future__ import annotations
 
 import base64
+import copy
+import hashlib
 import io
 import json
 import os
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -160,6 +164,195 @@ class LLMResponse:
         text = text.strip()
         self.data = json.loads(text)
         return self.data
+
+
+# =============================================================================
+# Rate Limiting, Concurrency, and Caching
+# =============================================================================
+
+
+class _LeakyBucketRateLimiter:
+    def __init__(self, rate_qps: float):
+        if rate_qps <= 0:
+            raise ValueError("rate_qps must be > 0")
+        self._interval = 1.0 / rate_qps
+        self._next_available = time.monotonic()
+        self._lock = threading.Lock()
+
+    def reserve_delay(self) -> float:
+        with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_available - now)
+            self._next_available = max(self._next_available, now) + self._interval
+            return wait
+
+
+class _LLMResponseCache:
+    def __init__(self, ttl_seconds: float):
+        self._ttl_seconds = ttl_seconds
+        self._cache: Dict[str, tuple[float, LLMResponse]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> Optional[LLMResponse]:
+        now = time.monotonic()
+        with self._lock:
+            entry = self._cache.get(key)
+            if not entry:
+                return None
+            expires_at, response = entry
+            if expires_at < now:
+                self._cache.pop(key, None)
+                return None
+            return copy.deepcopy(response)
+
+    def set(self, key: str, response: LLMResponse) -> None:
+        expires_at = time.monotonic() + self._ttl_seconds
+        cached_response = LLMResponse(
+            text=response.text,
+            provider=response.provider,
+            model=response.model,
+            raw_response=None,
+            error_message=response.error_message,
+            data=copy.deepcopy(response.data),
+            usage=copy.deepcopy(response.usage),
+            latency_seconds=0.0,
+            images=copy.deepcopy(response.images),
+            sources=copy.deepcopy(response.sources),
+        )
+        with self._lock:
+            self._cache[key] = (expires_at, cached_response)
+
+
+class _LLMRequestManager:
+    def __init__(self) -> None:
+        self._rate_limiters: Dict[LLMProvider, Optional[_LeakyBucketRateLimiter]] = {}
+        self._rate_lock = threading.Lock()
+        cache_ttl = self._get_float_env("LLM_CACHE_TTL_SECONDS", 0.0)
+        cache_enabled = os.getenv("LLM_CACHE_ENABLED", "true").lower() == "true"
+        self._cache = _LLMResponseCache(cache_ttl) if cache_ttl > 0 and cache_enabled else None
+        max_concurrency = self._get_int_env("LLM_MAX_CONCURRENCY", 0)
+        self._semaphore = (
+            threading.BoundedSemaphore(max_concurrency) if max_concurrency > 0 else None
+        )
+
+    @staticmethod
+    def _get_float_env(name: str, default: float) -> float:
+        value = os.getenv(name)
+        if value is None or value == "":
+            return default
+        try:
+            return float(value)
+        except ValueError:
+            print(f"[LLM] WARNING: Invalid {name}={value}, using default {default}", file=sys.stderr)
+            return default
+
+    @staticmethod
+    def _get_int_env(name: str, default: int) -> int:
+        value = os.getenv(name)
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except ValueError:
+            print(f"[LLM] WARNING: Invalid {name}={value}, using default {default}", file=sys.stderr)
+            return default
+
+    def _resolve_rate_limit(self, provider: LLMProvider) -> Optional[float]:
+        provider_key = f"LLM_RATE_LIMIT_QPS_{provider.value.upper()}"
+        for key in (provider_key, "LLM_RATE_LIMIT_QPS"):
+            value = os.getenv(key)
+            if value is None or value == "":
+                continue
+            try:
+                qps = float(value)
+            except ValueError:
+                print(f"[LLM] WARNING: Invalid {key}={value}; ignoring", file=sys.stderr)
+                return None
+            return qps if qps > 0 else None
+        return None
+
+    def _get_rate_limiter(self, provider: LLMProvider) -> Optional[_LeakyBucketRateLimiter]:
+        with self._rate_lock:
+            if provider in self._rate_limiters:
+                return self._rate_limiters[provider]
+            qps = self._resolve_rate_limit(provider)
+            limiter = _LeakyBucketRateLimiter(qps) if qps else None
+            self._rate_limiters[provider] = limiter
+            return limiter
+
+    def _apply_rate_limit(self, provider: LLMProvider) -> None:
+        limiter = self._get_rate_limiter(provider)
+        if limiter is None:
+            return
+        delay = limiter.reserve_delay()
+        if delay > 0:
+            print(
+                f"[LLM] Throttling {provider.value} for {delay:.2f}s (rate limit).",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+    @contextmanager
+    def request_context(self, provider: LLMProvider):
+        self._apply_rate_limit(provider)
+        if self._semaphore is None:
+            yield
+            return
+        start = time.monotonic()
+        self._semaphore.acquire()
+        wait = time.monotonic() - start
+        if wait > 0:
+            print(f"[LLM] Throttling for {wait:.2f}s (max concurrency).", file=sys.stderr)
+        try:
+            yield
+        finally:
+            self._semaphore.release()
+
+    def build_cache_key(
+        self,
+        *,
+        provider: LLMProvider,
+        model: str,
+        prompt: str,
+        json_output: bool,
+        use_web_search: bool,
+        temperature: float,
+        max_tokens: Optional[int],
+        extra: Dict[str, Any],
+        image: Optional[Any],
+        images: Optional[List[Any]],
+    ) -> Optional[str]:
+        if self._cache is None:
+            return None
+        if image is not None or images:
+            return None
+        payload = {
+            "provider": provider.value,
+            "model": model,
+            "prompt": prompt,
+            "json_output": json_output,
+            "use_web_search": use_web_search,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "extra": extra,
+        }
+        encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def get_cached_response(self, key: Optional[str]) -> Optional[LLMResponse]:
+        if self._cache is None or key is None:
+            return None
+        return self._cache.get(key)
+
+    def set_cached_response(self, key: Optional[str], response: LLMResponse) -> None:
+        if self._cache is None or key is None:
+            return
+        if response.error_message:
+            return
+        self._cache.set(key, response)
+
+
+_REQUEST_MANAGER = _LLMRequestManager()
 
 
 # =============================================================================
@@ -295,15 +488,33 @@ class MockLLMClient(LLMClient):
         max_tokens: Optional[int] = None,
         **kwargs
     ) -> LLMResponse:
+        cache_key = _REQUEST_MANAGER.build_cache_key(
+            provider=self.provider,
+            model=self.model,
+            prompt=prompt,
+            json_output=json_output,
+            use_web_search=use_web_search,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra={},
+            image=image,
+            images=images,
+        )
+        cached = _REQUEST_MANAGER.get_cached_response(cache_key)
+        if cached:
+            return cached
+
         response_data = self._load_mock_response() or self._default_analysis()
         response_text = json.dumps(response_data, indent=2)
-        return LLMResponse(
+        response = LLMResponse(
             text=response_text,
             provider=self.provider,
             model=self.model,
             raw_response=response_data,
             data=response_data,
         )
+        _REQUEST_MANAGER.set_cached_response(cache_key, response)
+        return response
 
     def _generate_image(
         self,
@@ -449,6 +660,22 @@ class GeminiClient(LLMClient):
     ) -> LLMResponse:
         """Generate content using Gemini."""
 
+        cache_key = _REQUEST_MANAGER.build_cache_key(
+            provider=self.provider,
+            model=self.model,
+            prompt=prompt,
+            json_output=json_output,
+            use_web_search=use_web_search,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra={},
+            image=image,
+            images=images,
+        )
+        cached = _REQUEST_MANAGER.get_cached_response(cache_key)
+        if cached:
+            return cached
+
         start_time = time.time()
 
         # Build contents
@@ -500,11 +727,12 @@ class GeminiClient(LLMClient):
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                response = self._client.models.generate_content(
-                    model=self.model,
-                    contents=contents,
-                    config=config,
-                )
+                with _REQUEST_MANAGER.request_context(self.provider):
+                    response = self._client.models.generate_content(
+                        model=self.model,
+                        contents=contents,
+                        config=config,
+                    )
 
                 latency = time.time() - start_time
 
@@ -520,7 +748,7 @@ class GeminiClient(LLMClient):
                                 "url": getattr(meta.search_entry_point, 'uri', ''),
                             })
 
-                return LLMResponse(
+                llm_response = LLMResponse(
                     text=response.text or "",
                     provider=self.provider,
                     model=self.model,
@@ -528,6 +756,8 @@ class GeminiClient(LLMClient):
                     latency_seconds=latency,
                     sources=sources,
                 )
+                _REQUEST_MANAGER.set_cached_response(cache_key, llm_response)
+                return llm_response
 
             except Exception as e:
                 last_error = e
@@ -554,11 +784,12 @@ class GeminiClient(LLMClient):
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                response = self._client.models.generate_content(
-                    model=self.default_image_model,
-                    contents=prompt,
-                    config=config,
-                )
+                with _REQUEST_MANAGER.request_context(self.provider):
+                    response = self._client.models.generate_content(
+                        model=self.default_image_model,
+                        contents=prompt,
+                        config=config,
+                    )
 
                 # Extract images from response
                 images = []
@@ -669,6 +900,26 @@ class OpenAIClient(LLMClient):
     ) -> LLMResponse:
         """Generate content using GPT-5.2 Thinking."""
 
+        # Enable adaptive reasoning for GPT-5.1
+        # Use reasoning_effort from kwargs, instance default, or "high"
+        effort = kwargs.get("reasoning_effort", self.reasoning_effort)
+
+        cache_key = _REQUEST_MANAGER.build_cache_key(
+            provider=self.provider,
+            model=self.model,
+            prompt=prompt,
+            json_output=json_output,
+            use_web_search=use_web_search,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra={"reasoning_effort": effort},
+            image=image,
+            images=images,
+        )
+        cached = _REQUEST_MANAGER.get_cached_response(cache_key)
+        if cached:
+            return cached
+
         start_time = time.time()
 
         # Build messages
@@ -725,9 +976,6 @@ class OpenAIClient(LLMClient):
         if json_output:
             request_kwargs["response_format"] = {"type": "json_object"}
 
-        # Enable adaptive reasoning for GPT-5.1
-        # Use reasoning_effort from kwargs, instance default, or "high"
-        effort = kwargs.get("reasoning_effort", self.reasoning_effort)
         if effort and effort != "none":
             request_kwargs["reasoning_effort"] = effort
 
@@ -735,7 +983,8 @@ class OpenAIClient(LLMClient):
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                response = self._client.chat.completions.create(**request_kwargs)
+                with _REQUEST_MANAGER.request_context(self.provider):
+                    response = self._client.chat.completions.create(**request_kwargs)
 
                 latency = time.time() - start_time
 
@@ -765,7 +1014,7 @@ class OpenAIClient(LLMClient):
                     if hasattr(response.usage, 'reasoning_tokens'):
                         usage["reasoning_tokens"] = response.usage.reasoning_tokens
 
-                return LLMResponse(
+                llm_response = LLMResponse(
                     text=text,
                     provider=self.provider,
                     model=self.model,
@@ -774,6 +1023,8 @@ class OpenAIClient(LLMClient):
                     latency_seconds=latency,
                     sources=sources,
                 )
+                _REQUEST_MANAGER.set_cached_response(cache_key, llm_response)
+                return llm_response
 
             except Exception as e:
                 last_error = e
@@ -795,14 +1046,15 @@ class OpenAIClient(LLMClient):
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                response = self._client.images.generate(
-                    model=self.default_image_model,
-                    prompt=prompt,
-                    size=size,
-                    quality=kwargs.get("quality", "hd"),
-                    n=1,
-                    response_format="b64_json",
-                )
+                with _REQUEST_MANAGER.request_context(self.provider):
+                    response = self._client.images.generate(
+                        model=self.default_image_model,
+                        prompt=prompt,
+                        size=size,
+                        quality=kwargs.get("quality", "hd"),
+                        n=1,
+                        response_format="b64_json",
+                    )
 
                 # Extract image data
                 images = []
@@ -905,6 +1157,29 @@ class AnthropicClient(LLMClient):
     ) -> LLMResponse:
         """Generate content using Claude Sonnet 4.5 with extended thinking."""
 
+        # Default max_tokens needs to accommodate thinking budget
+        thinking_enabled = kwargs.get("enable_thinking", self.enable_thinking)
+        thinking_budget = kwargs.get("thinking_budget", self.thinking_budget)
+
+        cache_key = _REQUEST_MANAGER.build_cache_key(
+            provider=self.provider,
+            model=self.model,
+            prompt=prompt,
+            json_output=json_output,
+            use_web_search=use_web_search,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra={
+                "enable_thinking": thinking_enabled,
+                "thinking_budget": thinking_budget,
+            },
+            image=image,
+            images=images,
+        )
+        cached = _REQUEST_MANAGER.get_cached_response(cache_key)
+        if cached:
+            return cached
+
         start_time = time.time()
 
         # Build messages
@@ -939,10 +1214,6 @@ class AnthropicClient(LLMClient):
         messages.append({"role": "user", "content": content})
 
         # Build request kwargs
-        # Default max_tokens needs to accommodate thinking budget
-        thinking_enabled = kwargs.get("enable_thinking", self.enable_thinking)
-        thinking_budget = kwargs.get("thinking_budget", self.thinking_budget)
-
         # When thinking is enabled, max_tokens must be > thinking_budget
         default_max = 20000 if thinking_enabled else 8192
         actual_max_tokens = max_tokens or default_max
@@ -974,7 +1245,8 @@ class AnthropicClient(LLMClient):
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                response = self._client.messages.create(**request_kwargs)
+                with _REQUEST_MANAGER.request_context(self.provider):
+                    response = self._client.messages.create(**request_kwargs)
 
                 latency = time.time() - start_time
 
@@ -997,7 +1269,7 @@ class AnthropicClient(LLMClient):
                         "output_tokens": response.usage.output_tokens,
                     }
 
-                return LLMResponse(
+                llm_response = LLMResponse(
                     text=text,
                     provider=self.provider,
                     model=self.model,
@@ -1006,6 +1278,8 @@ class AnthropicClient(LLMClient):
                     latency_seconds=latency,
                     sources=[],  # Claude doesn't have web search sources
                 )
+                _REQUEST_MANAGER.set_cached_response(cache_key, llm_response)
+                return llm_response
 
             except Exception as e:
                 last_error = e
