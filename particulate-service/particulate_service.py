@@ -70,6 +70,53 @@ from monitoring.alerting import send_alert
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
 
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def _parse_allowed_origins() -> set[str]:
+    raw_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+    if not raw_origins:
+        return set()
+    return {origin.strip() for origin in raw_origins.split(",") if origin.strip()}
+
+
+def _allowed_origin(origin: str, allowed: set[str]) -> str | None:
+    if not origin or not allowed:
+        return None
+    if "*" in allowed:
+        return "*"
+    if origin in allowed:
+        return origin
+    return None
+
+
+@app.after_request
+def _apply_security_headers(response):  # type: ignore[override]
+    """Apply API security headers.
+
+    These endpoints are API-only. If they are ever exposed to browsers for
+    state-changing actions, enforce CSRF tokens on those routes.
+    """
+    for header, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(header, value)
+
+    allowed_origins = _parse_allowed_origins()
+    origin = request.headers.get("Origin", "")
+    allow_origin = _allowed_origin(origin, allowed_origins)
+    if allow_origin:
+        response.headers["Access-Control-Allow-Origin"] = allow_origin
+        response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        request_headers = request.headers.get("Access-Control-Request-Headers")
+        if request_headers:
+            response.headers.setdefault("Access-Control-Allow-Headers", request_headers)
+        if allow_origin != "*":
+            response.headers.setdefault("Vary", "Origin")
+    return response
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -957,6 +1004,9 @@ def handle_request():
 
 def start_warmup():
     """Start warmup in background thread."""
+    if os.getenv("PARTICULATE_SKIP_WARMUP", "").lower() in ("1", "true", "yes"):
+        log("Skipping warmup (PARTICULATE_SKIP_WARMUP enabled)")
+        return
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     log(f"PARTICULATE_ROOT={PARTICULATE_ROOT}")
     log(f"DEBUG_MODE={DEBUG_MODE}")
