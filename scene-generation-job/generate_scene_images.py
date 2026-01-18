@@ -21,6 +21,9 @@ Environment Variables:
     SCENES_PER_RUN: Number of scenes to generate (default: 10)
     DRY_RUN: If "true", skip actual generation (for testing)
     FIRESTORE_PROJECT: GCP project for Firestore (optional, uses default)
+    GEMINI_PRO_MODEL: Override prompt diversification model (default: gemini-3-pro-preview)
+    GEMINI_IMAGE_MODEL: Override image generation model (default: gemini-3-pro-image-preview)
+    GEMINI_IMAGE_MODEL_FALLBACK: Fallback GA image model (default: gemini-2.0-flash-image-generation)
 """
 
 import json
@@ -70,9 +73,31 @@ from tools.source_asset_checksums import write_source_checksums
 GCS_ROOT = Path("/mnt/gcs")
 LOGGER = logging.getLogger("scene-generation-job")
 
-# Gemini models
-GEMINI_PRO_MODEL = "gemini-3-pro-preview"  # For prompt diversification
-GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"  # For image generation (Nano Banana Pro)
+# Gemini models (defaults, can be overridden via environment variables)
+DEFAULT_GEMINI_PRO_MODEL = "gemini-3-pro-preview"  # For prompt diversification
+DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"  # For image generation (Nano Banana Pro)
+DEFAULT_GEMINI_IMAGE_FALLBACK_MODEL = "gemini-2.0-flash-image-generation"  # Stable GA fallback
+
+
+def get_prompt_model() -> str:
+    """Return the Gemini model used for prompt diversification."""
+    return os.getenv("GEMINI_PRO_MODEL", DEFAULT_GEMINI_PRO_MODEL)
+
+
+def get_image_model_overrides() -> Tuple[str, str]:
+    """Return (primary, fallback) Gemini image models from environment/defaults."""
+    primary = os.getenv("GEMINI_IMAGE_MODEL", DEFAULT_GEMINI_IMAGE_MODEL)
+    fallback = os.getenv("GEMINI_IMAGE_MODEL_FALLBACK", DEFAULT_GEMINI_IMAGE_FALLBACK_MODEL)
+    return primary, fallback
+
+
+def get_image_model_chain() -> List[str]:
+    """Return ordered list of image models to attempt."""
+    primary, fallback = get_image_model_overrides()
+    chain = [primary]
+    if fallback and fallback != primary:
+        chain.append(fallback)
+    return chain
 
 # Generation settings
 DEFAULT_SCENES_PER_RUN = 10
@@ -708,7 +733,7 @@ Return ONLY the JSON, no additional text."""
 
         try:
             response = self.client.models.generate_content(
-                model=GEMINI_PRO_MODEL,
+                model=get_prompt_model(),
                 contents=[diversification_prompt],
                 config=types.GenerateContentConfig(
                     temperature=0.9,  # Higher for diversity
@@ -873,53 +898,60 @@ class SceneImageGenerator:
                 image_path=str(image_path),
                 prompt_used=request.prompt,
                 generation_time_seconds=0.0,
-                metadata={"dry_run": True}
+                metadata={
+                    "dry_run": True,
+                    "prompt_model": get_prompt_model(),
+                    "image_model": get_image_model_overrides()[0],
+                }
             )
 
         print(f"[SCENE-GEN] Generating scene: {request.scene_id}")
         print(f"[SCENE-GEN]   Archetype: {request.archetype.value}")
-        print(f"[SCENE-GEN]   Model: {GEMINI_IMAGE_MODEL}")
 
-        # Retry loop for robustness
+        model_chain = get_image_model_chain()
+        primary_model = model_chain[0] if model_chain else DEFAULT_GEMINI_IMAGE_MODEL
+        fallback_model = model_chain[1] if len(model_chain) > 1 else None
+        print(f"[SCENE-GEN]   Image model (primary): {primary_model}")
+        if fallback_model:
+            print(f"[SCENE-GEN]   Image model (fallback): {fallback_model}")
+
+        # Retry loop for robustness with fallback chain
         last_error = None
-        for attempt in range(MAX_RETRIES):
-            try:
-                # Build content with prompt
-                contents = [
-                    types.Content(
-                        role="user",
-                        parts=[
-                            types.Part.from_text(text=request.prompt),
-                        ],
-                    ),
-                ]
+        for model_index, model_id in enumerate(model_chain):
+            model_role = "primary" if model_index == 0 else "fallback"
+            for attempt in range(MAX_RETRIES):
+                try:
+                    # Build content with prompt
+                    contents = [
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part.from_text(text=request.prompt),
+                            ],
+                        ),
+                    ]
 
-                # Enable Google Search grounding
-                tools = [
-                    types.Tool(googleSearch=types.GoogleSearch()),
-                ]
+                    # Enable Google Search grounding
+                    tools = [
+                        types.Tool(googleSearch=types.GoogleSearch()),
+                    ]
 
-                # Configure image generation
-                generate_config = types.GenerateContentConfig(
-                    response_modalities=["IMAGE", "TEXT"],
-                    image_config=types.ImageConfig(
-                        aspect_ratio=DEFAULT_ASPECT_RATIO,
-                        image_size=DEFAULT_IMAGE_SIZE,
-                    ),
-                    tools=tools,
-                )
+                    # Configure image generation
+                    generate_config = types.GenerateContentConfig(
+                        response_modalities=["IMAGE", "TEXT"],
+                        image_config=types.ImageConfig(
+                            aspect_ratio=DEFAULT_ASPECT_RATIO,
+                            image_size=DEFAULT_IMAGE_SIZE,
+                        ),
+                        tools=tools,
+                    )
 
-                # Generate with streaming
-                image_data = None
-                for chunk in self.client.models.generate_content_stream(
-                    model=GEMINI_IMAGE_MODEL,
-                    contents=contents,
-                    config=generate_config,
-                ):
-                    if (
-                        chunk.candidates is None
-                        or chunk.candidates[0].content is None
-                        or chunk.candidates[0].content.parts is None
+                    # Generate with streaming
+                    image_data = None
+                    for chunk in self.client.models.generate_content_stream(
+                        model=model_id,
+                        contents=contents,
+                        config=generate_config,
                     ):
                         continue
 
@@ -1004,29 +1036,103 @@ class SceneImageGenerator:
                         "aspect_ratio": DEFAULT_ASPECT_RATIO,
                     }
                 )
+                        if (
+                            chunk.candidates is None
+                            or chunk.candidates[0].content is None
+                            or chunk.candidates[0].content.parts is None
+                        ):
+                            continue
 
-            except Exception as e:
-                last_error = str(e)
-                issue = SceneGenerationIssue(
-                    code=SceneGenerationErrorCode.IMAGE_GENERATION_FAILED,
-                    message="Scene image generation attempt failed.",
-                    context={
-                        "scene_id": request.scene_id,
-                        "archetype": request.archetype.value,
-                        "attempt": attempt + 1,
-                        "max_retries": MAX_RETRIES,
-                    },
-                    fatal=False,
+                        part = chunk.candidates[0].content.parts[0]
+                        if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
+                            image_data = part.inline_data.data
+                            break
+
+                    if not image_data:
+                        raise ValueError("No image data in Gemini response")
+
+                    # Save image
+                    if isinstance(image_data, str):
+                        image_bytes = base64.b64decode(image_data)
+                    else:
+                        image_bytes = image_data
+
+                    img = Image.open(io.BytesIO(image_bytes))
+                    img.save(str(image_path), format='PNG')
+
+                    # Upload to GCS if configured
+                    gcs_uri = None
+                    if self.gcs_bucket and self.storage_client:
+                        gcs_uri, upload_issue = self._upload_to_gcs(request.scene_id, image_path)
+                        if upload_issue:
+                            _log_issue(logging.ERROR, upload_issue)
+                            elapsed = time.time() - start_time
+                            return SceneGenerationResult(
+                                scene_id=request.scene_id,
+                                archetype=request.archetype,
+                                success=False,
+                                image_path=str(image_path),
+                                prompt_used=request.prompt,
+                                generation_time_seconds=elapsed,
+                                error=upload_issue.message,
+                                error_code=upload_issue.code.value,
+                                error_context=upload_issue.context,
+                            )
+
+                    elapsed = time.time() - start_time
+                    print(f"[SCENE-GEN] Generated: {request.scene_id} ({elapsed:.1f}s)")
+                    print(f"[SCENE-GEN]   Image model used: {model_id}")
+
+                    return SceneGenerationResult(
+                        scene_id=request.scene_id,
+                        archetype=request.archetype,
+                        success=True,
+                        image_path=str(image_path),
+                        gcs_uri=gcs_uri,
+                        prompt_used=request.prompt,
+                        generation_time_seconds=elapsed,
+                        metadata={
+                            "variation_hints": request.variation_hints,
+                            "image_size": DEFAULT_IMAGE_SIZE,
+                            "aspect_ratio": DEFAULT_ASPECT_RATIO,
+                            "image_model": model_id,
+                            "image_model_role": model_role,
+                            "image_model_primary": primary_model,
+                            "image_model_fallback": fallback_model,
+                            "prompt_model": get_prompt_model(),
+                        }
+                    )
+
+                except Exception as e:
+                    last_error = str(e)
+                    issue = SceneGenerationIssue(
+                        code=SceneGenerationErrorCode.IMAGE_GENERATION_FAILED,
+                        message="Scene image generation attempt failed.",
+                        context={
+                            "scene_id": request.scene_id,
+                            "archetype": request.archetype.value,
+                            "attempt": attempt + 1,
+                            "max_retries": MAX_RETRIES,
+                            "model": model_id,
+                            "model_role": model_role,
+                        },
+                        fatal=False,
+                    )
+                    _log_issue(logging.WARNING, issue, exc=e)
+                    try:
+                        metrics = get_metrics()
+                        metrics.retries_total.inc(labels={"job": JOB_NAME, "scene_id": request.scene_id})
+                    except Exception:
+                        LOGGER.debug("Retry metrics emission failed.", exc_info=True)
+
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+
+            if model_index < len(model_chain) - 1:
+                print(
+                    "[SCENE-GEN] Primary image model failed; switching to fallback model: "
+                    f"{model_chain[model_index + 1]}"
                 )
-                _log_issue(logging.WARNING, issue, exc=e)
-                try:
-                    metrics = get_metrics()
-                    metrics.retries_total.inc(labels={"job": JOB_NAME, "scene_id": request.scene_id})
-                except Exception:
-                    LOGGER.debug("Retry metrics emission failed.", exc_info=True)
-
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
 
         # All retries failed
         elapsed = time.time() - start_time
@@ -1332,6 +1438,7 @@ def generate_scene_batch(
 
         # Generate unique scene ID
         scene_id = f"{archetype.value}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        print(f"[SCENE-GEN]   Prompt model: {get_prompt_model()}")
 
         # Get history for diversity
         recent_prompts = history_tracker.get_recent_prompts(archetype)
@@ -1428,8 +1535,9 @@ def generate_scene_batch(
         "total_generation_time_seconds": total_time,
         "average_time_per_scene_seconds": total_time / len(results) if results else 0,
         "archetype_distribution": archetype_counts,
-        "image_model": GEMINI_IMAGE_MODEL,
-        "prompt_model": GEMINI_PRO_MODEL,
+        "image_model": get_image_model_overrides()[0],
+        "image_model_fallback": get_image_model_overrides()[1],
+        "prompt_model": get_prompt_model(),
         "dry_run": dry_run,
         "history_write": asdict(history_write_result),
     }
@@ -1483,8 +1591,11 @@ def main():
     print(f"[SCENE-GEN] Starting scene generation job")
     print(f"[SCENE-GEN] Scenes per run: {scenes_per_run}")
     print(f"[SCENE-GEN] Bucket: {bucket or '(local only)'}")
-    print(f"[SCENE-GEN] Prompt model: {GEMINI_PRO_MODEL}")
-    print(f"[SCENE-GEN] Image model: {GEMINI_IMAGE_MODEL}")
+    primary_image_model, fallback_image_model = get_image_model_overrides()
+    print(f"[SCENE-GEN] Prompt model: {get_prompt_model()}")
+    print(f"[SCENE-GEN] Image model (primary): {primary_image_model}")
+    if fallback_image_model and fallback_image_model != primary_image_model:
+        print(f"[SCENE-GEN] Image model (fallback): {fallback_image_model}")
     if specific_archetypes:
         print(f"[SCENE-GEN] Specific archetypes: {specific_archetypes}")
     if dry_run:

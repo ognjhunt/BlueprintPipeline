@@ -71,6 +71,7 @@ class GenieSimAsset:
 
     # Embedding (2048-dim for QWEN, generated separately)
     embedding: Optional[List[float]] = None
+    embedding_status: str = "pending"
 
     # Licensing/provenance
     commercial_ok: bool = True
@@ -90,6 +91,7 @@ class GenieSimAsset:
             "material": self.material.to_dict(),
             "collision_hull_path": self.collision_hull_path,
             "texture_variants": self.texture_variants,
+            "embedding_status": self.embedding_status,
             "commercial_ok": self.commercial_ok,
             "license": self.license,
             "source": self.source,
@@ -360,9 +362,19 @@ class AssetIndexBuilder:
 
         self.log(f"Built {len(assets)} assets from {len(objects)} objects")
 
+        embedding_errors: List[Dict[str, str]] = []
+        embedding_failure_rate = 0.0
+        embedding_failures = 0
+
         # Generate embeddings if requested
         if self.generate_embeddings and assets:
-            self._generate_embeddings(assets)
+            embedding_result = self._generate_embeddings(assets)
+            embedding_errors = embedding_result["errors"]
+            embedding_failure_rate = embedding_result["failure_rate"]
+            embedding_failures = embedding_result["failure_count"]
+        else:
+            for asset in assets:
+                asset.embedding_status = "not_requested"
 
         # Build metadata
         metadata = {
@@ -370,7 +382,16 @@ class AssetIndexBuilder:
             "total_assets": len(assets),
             "commercial_assets": sum(1 for a in assets if a.commercial_ok),
             "embedding_model": self.embedding_model if self.generate_embeddings else None,
+            "embedding_errors": embedding_errors,
+            "embedding_failure_rate": embedding_failure_rate,
+            "embedding_failures": embedding_failures,
         }
+
+        if embedding_failures > 0 and not self._is_production():
+            metadata["warning_banner"] = (
+                f"Embedding generation had {embedding_failures} failures; placeholder "
+                "embeddings were used for affected assets."
+            )
 
         return GenieSimAssetIndex(assets=assets, metadata=metadata)
 
@@ -547,30 +568,56 @@ class AssetIndexBuilder:
             self.log(f"Failed to build asset for {obj.get('id', 'unknown')}: {e}", "WARNING")
             return None
 
-    def _generate_embeddings(self, assets: List[GenieSimAsset]) -> None:
+    def _generate_embeddings(self, assets: List[GenieSimAsset]) -> Dict[str, Any]:
         """Generate embeddings for all assets."""
         self.log(f"Generating embeddings for {len(assets)} assets...")
         production_mode = self._is_production()
+        errors: List[Dict[str, str]] = []
 
-        try:
-            for asset in assets:
-                asset.embedding = self._get_embedding(asset.semantic_description)
+        for asset in assets:
+            try:
+                embedding, status, error_message = self._get_embedding_with_status(
+                    asset.semantic_description
+                )
+            except Exception as e:
+                if production_mode:
+                    raise RuntimeError(
+                        f"Embedding generation failed in production for asset {asset.asset_id}: {e}"
+                    ) from e
+                embedding = self._get_placeholder_embedding(asset.semantic_description)
+                status = "placeholder"
+                error_message = str(e)
 
+            asset.embedding = embedding
+            asset.embedding_status = status
+
+            if status != "ok":
+                errors.append({"asset_id": asset.asset_id, "error": error_message})
+                if production_mode:
+                    raise RuntimeError(
+                        f"Embedding generation failed in production for asset {asset.asset_id}: "
+                        f"{error_message}"
+                    )
+
+        failure_count = len(errors)
+        failure_rate = failure_count / len(assets) if assets else 0.0
+        self.log(
+            f"Embedding failure rate: {failure_rate:.2%} ({failure_count}/{len(assets)})"
+        )
+        if failure_count > 0:
+            self.log(
+                f"Embedding generation had {failure_count} failures", "WARNING"
+            )
+        else:
             self.log(f"Generated embeddings for {len(assets)} assets")
 
-        except Exception as e:
-            if production_mode:
-                raise RuntimeError(f"Embedding generation failed in production: {e}") from e
-            self.log(f"Embedding generation failed: {e}", "WARNING")
+        return {
+            "errors": errors,
+            "failure_rate": failure_rate,
+            "failure_count": failure_count,
+        }
 
-    def _get_embedding(self, text: str) -> List[float]:
-        """
-        Get embedding for text.
-
-        Uses a configured embedding provider:
-        - OpenAI embeddings via OPENAI_API_KEY
-        - Qwen embeddings via QWEN_API_KEY / DASHSCOPE_API_KEY
-        """
+    def _get_embedding_with_status(self, text: str) -> tuple[List[float], str, str]:
         config = self._resolve_embedding_config()
         if not config:
             if self._is_production():
@@ -579,15 +626,23 @@ class AssetIndexBuilder:
                     "is configured. Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
                 )
             self.log("Embedding provider unavailable; using placeholder embeddings.", "WARNING")
-            return self._get_placeholder_embedding(text)
+            return (
+                self._get_placeholder_embedding(text),
+                "placeholder",
+                "Embedding provider unavailable; placeholder embedding used.",
+            )
 
         try:
-            return self._request_embedding(text, config)
+            return self._request_embedding(text, config), "ok", ""
         except Exception as e:
             if self._is_production():
                 raise
             self.log(f"Embedding request failed; using placeholder embeddings: {e}", "WARNING")
-            return self._get_placeholder_embedding(text)
+            return (
+                self._get_placeholder_embedding(text),
+                "placeholder",
+                f"Embedding request failed; placeholder embedding used: {e}",
+            )
 
     def _request_embedding(self, text: str, config: Dict[str, str]) -> List[float]:
         payload = {
