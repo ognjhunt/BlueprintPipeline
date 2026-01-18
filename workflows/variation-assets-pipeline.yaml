@@ -111,10 +111,10 @@ main:
           result: variationGenExec
         retry:
           predicate: ${http.default_retry_predicate}
-          max_retries: 3
+          max_retries: 5
           backoff:
-            initial_delay: 2
-            max_delay: 30
+            initial_delay: 1
+            max_delay: 60
             multiplier: 2
         except:
           as: e
@@ -127,7 +127,7 @@ main:
                     workflow: "variation-assets-pipeline"
                     job: ${variationGenJobName}
                     scene_id: ${sceneId}
-                    retry_max: 3
+                    retry_max: 5
                     error: ${e.message}
                   severity: "ERROR"
             - log_variation_gen_job_error:
@@ -356,10 +356,10 @@ main:
           result: simreadyExec
         retry:
           predicate: ${http.default_retry_predicate}
-          max_retries: 3
+          max_retries: 5
           backoff:
-            initial_delay: 2
-            max_delay: 30
+            initial_delay: 1
+            max_delay: 60
             multiplier: 2
         except:
           as: e
@@ -372,7 +372,7 @@ main:
                     workflow: "variation-assets-pipeline"
                     job: ${simreadyJobName}
                     scene_id: ${sceneId}
-                    retry_max: 3
+                    retry_max: 5
                     error: ${e.message}
                   severity: "ERROR"
             - log_simready_job_error:
