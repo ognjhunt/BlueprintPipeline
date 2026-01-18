@@ -148,6 +148,17 @@ class PhysicsValidator:
 
         # 4. Center of mass validation
         if bounds:
+            if physics.get("center_of_mass_m") is None:
+                computed_com, com_source = self._compute_center_of_mass(physics, bounds)
+                physics["center_of_mass_m"] = computed_com.tolist()
+                if com_source != "mesh":
+                    result.add_issue(
+                        ValidationLevel.WARNING,
+                        "center_of_mass",
+                        "Center of mass missing; inferred from bounds instead of mesh data",
+                        current_value=physics["center_of_mass_m"],
+                        suggested_value="mesh-derived center of mass",
+                    )
             self._validate_center_of_mass(physics, bounds, result)
 
         # 5. Collision shape appropriateness
@@ -274,8 +285,19 @@ class PhysicsValidator:
             com = np.array(com)
 
         # Get bounding box
-        bbox_min = bounds.get("min", [-0.1, -0.1, -0.1])
-        bbox_max = bounds.get("max", [0.1, 0.1, 0.1])
+        bbox_min = bounds.get("min")
+        bbox_max = bounds.get("max")
+
+        if bbox_min is None or bbox_max is None:
+            size_m = bounds.get("size_m") or bounds.get("size") or [0.2, 0.2, 0.2]
+            center_m = bounds.get("center_m") or bounds.get("center") or [0.0, 0.0, 0.0]
+            bbox_min = [center_m[i] - 0.5 * size_m[i] for i in range(3)]
+            bbox_max = [center_m[i] + 0.5 * size_m[i] for i in range(3)]
+
+        if bbox_min is None:
+            bbox_min = [-0.1, -0.1, -0.1]
+        if bbox_max is None:
+            bbox_max = [0.1, 0.1, 0.1]
         if isinstance(bbox_min, list):
             bbox_min = np.array(bbox_min)
         if isinstance(bbox_max, list):
@@ -291,6 +313,34 @@ class PhysicsValidator:
                 current_value=com.tolist() if isinstance(com, np.ndarray) else com,
                 suggested_value="center of bounding box",
             )
+
+    def _compute_center_of_mass(
+        self,
+        physics: Dict[str, Any],
+        bounds: Dict[str, Any],
+    ) -> Tuple[np.ndarray, str]:
+        """Compute center of mass from mesh bounds or fallback to bounding box."""
+        mesh_bounds = physics.get("mesh_bounds") or bounds.get("mesh_bounds") or {}
+        mesh_center = mesh_bounds.get("center")
+        if mesh_center is None:
+            mesh_min = mesh_bounds.get("min") or mesh_bounds.get("minimum")
+            mesh_max = mesh_bounds.get("max") or mesh_bounds.get("maximum")
+            if mesh_min is not None and mesh_max is not None:
+                mesh_center = [(mesh_min[i] + mesh_max[i]) * 0.5 for i in range(3)]
+
+        if mesh_center is not None:
+            return np.array(mesh_center, dtype=float), "mesh"
+
+        bounds_center = bounds.get("center_m") or bounds.get("center")
+        if bounds_center is None:
+            bounds_min = bounds.get("min")
+            bounds_max = bounds.get("max")
+            if bounds_min is not None and bounds_max is not None:
+                bounds_center = [(bounds_min[i] + bounds_max[i]) * 0.5 for i in range(3)]
+            else:
+                bounds_center = [0.0, 0.0, 0.0]
+
+        return np.array(bounds_center, dtype=float), "bounds"
 
     def _validate_collision_shape(
         self,
