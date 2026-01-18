@@ -59,6 +59,7 @@ except ImportError:
 from PIL import Image
 
 from tools.gcs_upload import upload_blob_from_filename
+from tools.metrics.pipeline_metrics import get_metrics
 
 
 # ============================================================================
@@ -82,6 +83,97 @@ RETRY_DELAY_SECONDS = 5
 # Firestore collection names
 FIRESTORE_COLLECTION_HISTORY = "scene_generation_history"
 FIRESTORE_COLLECTION_PROMPTS = "scene_generation_prompts"
+JOB_NAME = "scene-generation-job"
+
+
+# ============================================================================
+# Error Handling
+# ============================================================================
+
+class SceneGenerationErrorCode(str, Enum):
+    """Unique error codes for scene generation failures."""
+    CONFIG_MISSING_API_KEY = "SCENEGEN-0001"
+    FIRESTORE_INIT_FAILED = "SCENEGEN-1001"
+    FIRESTORE_QUERY_FAILED = "SCENEGEN-1002"
+    FIRESTORE_COVERAGE_FAILED = "SCENEGEN-1003"
+    FIRESTORE_COUNTS_FAILED = "SCENEGEN-1004"
+    FIRESTORE_WRITE_FAILED = "SCENEGEN-1005"
+    PROMPT_DIVERSIFICATION_FAILED = "SCENEGEN-2001"
+    GCS_CLIENT_UNAVAILABLE = "SCENEGEN-3001"
+    GCS_UPLOAD_FAILED = "SCENEGEN-3002"
+    PIPELINE_TRIGGER_FAILED = "SCENEGEN-3003"
+    IMAGE_GENERATION_FAILED = "SCENEGEN-4001"
+    UNKNOWN_ARCHETYPE = "SCENEGEN-5001"
+    BATCH_FAILED = "SCENEGEN-9001"
+
+
+@dataclass
+class SceneGenerationIssue:
+    """Structured error/warning payload for scene generation."""
+    code: SceneGenerationErrorCode
+    message: str
+    context: Dict[str, Any] = field(default_factory=dict)
+    fatal: bool = False
+
+
+class SceneGenerationJobError(RuntimeError):
+    """Fatal error for scene-generation job."""
+    def __init__(
+        self,
+        code: SceneGenerationErrorCode,
+        message: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.context = context or {}
+
+
+class SceneGenerationBatchError(SceneGenerationJobError):
+    """Batch error that includes results and summary."""
+    def __init__(
+        self,
+        message: str,
+        results: List["SceneGenerationResult"],
+        summary: Dict[str, Any],
+        issues: List[SceneGenerationIssue]
+    ) -> None:
+        super().__init__(SceneGenerationErrorCode.BATCH_FAILED, message, {"failed": summary.get("failed", 0)})
+        self.results = results
+        self.summary = summary
+        self.issues = issues
+
+
+def _log_issue(level: int, issue: SceneGenerationIssue, exc: Optional[BaseException] = None) -> None:
+    """Log issue with error code and context, emit metrics for errors."""
+    if exc:
+        LOGGER.log(
+            level,
+            "%s | code=%s | context=%s",
+            issue.message,
+            issue.code.value,
+            issue.context,
+            exc_info=True,
+        )
+    else:
+        LOGGER.log(
+            level,
+            "%s | code=%s | context=%s",
+            issue.message,
+            issue.code.value,
+            issue.context,
+        )
+
+    if level >= logging.ERROR:
+        try:
+            metrics = get_metrics()
+            labels = {"job": JOB_NAME, "error_type": issue.code.value}
+            scene_id = issue.context.get("scene_id")
+            if scene_id:
+                labels["scene_id"] = scene_id
+            metrics.errors_total.inc(labels=labels)
+        except Exception:
+            LOGGER.debug("Metrics emission failed for %s.", issue.code.value, exc_info=True)
 
 
 # ============================================================================
@@ -271,6 +363,8 @@ class SceneGenerationResult:
     prompt_used: str = ""
     generation_time_seconds: float = 0.0
     error: Optional[str] = None
+    error_code: Optional[str] = None
+    error_context: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -323,7 +417,12 @@ class GenerationHistoryTracker:
                     self.db = firestore.Client()
                 print("[SCENE-GEN] Firestore history tracking enabled")
             except Exception as e:
-                print(f"[SCENE-GEN] WARNING: Firestore unavailable: {e}", file=sys.stderr)
+                issue = SceneGenerationIssue(
+                    code=SceneGenerationErrorCode.FIRESTORE_INIT_FAILED,
+                    message="Firestore unavailable; disabling history tracking.",
+                    context={"project_id": project_id or "default"},
+                )
+                _log_issue(logging.WARNING, issue, exc=e)
                 self.enabled = False
 
     def get_recent_prompts(
@@ -351,7 +450,12 @@ class GenerationHistoryTracker:
             return [doc.to_dict() for doc in docs]
 
         except Exception as e:
-            print(f"[SCENE-GEN] WARNING: Failed to query history: {e}", file=sys.stderr)
+            issue = SceneGenerationIssue(
+                code=SceneGenerationErrorCode.FIRESTORE_QUERY_FAILED,
+                message="Failed to query Firestore history; proceeding without history.",
+                context={"archetype": archetype.value, "days": days, "limit": limit},
+            )
+            _log_issue(logging.WARNING, issue, exc=e)
             return []
 
     def get_variation_coverage(
@@ -374,7 +478,12 @@ class GenerationHistoryTracker:
             return coverage
 
         except Exception as e:
-            print(f"[SCENE-GEN] WARNING: Failed to get coverage: {e}", file=sys.stderr)
+            issue = SceneGenerationIssue(
+                code=SceneGenerationErrorCode.FIRESTORE_COVERAGE_FAILED,
+                message="Failed to compute variation coverage; proceeding without coverage.",
+                context={"archetype": archetype.value, "days": days},
+            )
+            _log_issue(logging.WARNING, issue, exc=e)
             return {}
 
     def _build_history_payload(self, entry: GenerationHistoryEntry) -> Dict[str, Any]:
@@ -423,7 +532,13 @@ class GenerationHistoryTracker:
             )
 
         except Exception as e:
-            LOGGER.error("Failed to record history entries in Firestore.", exc_info=True)
+            issue = SceneGenerationIssue(
+                code=SceneGenerationErrorCode.FIRESTORE_WRITE_FAILED,
+                message="Failed to record history entries in Firestore.",
+                context={"documents": len(entries)},
+                fatal=False,
+            )
+            _log_issue(logging.ERROR, issue, exc=e)
             return FirestoreWriteResult(
                 success=False,
                 operation="history_write",
@@ -464,7 +579,12 @@ class GenerationHistoryTracker:
             return counts
 
         except Exception as e:
-            print(f"[SCENE-GEN] WARNING: Failed to get counts: {e}", file=sys.stderr)
+            issue = SceneGenerationIssue(
+                code=SceneGenerationErrorCode.FIRESTORE_COUNTS_FAILED,
+                message="Failed to get archetype counts; using default weights.",
+                context={"days": days},
+            )
+            _log_issue(logging.WARNING, issue, exc=e)
             return {}
 
 
@@ -616,7 +736,13 @@ Return ONLY the JSON, no additional text."""
             return enhanced_prompt, tags
 
         except Exception as e:
-            print(f"[SCENE-GEN] WARNING: Prompt diversification failed: {e}", file=sys.stderr)
+            issue = SceneGenerationIssue(
+                code=SceneGenerationErrorCode.PROMPT_DIVERSIFICATION_FAILED,
+                message="Prompt diversification failed; using fallback prompt.",
+                context={"archetype": archetype.value},
+                fatal=False,
+            )
+            _log_issue(logging.WARNING, issue, exc=e)
             # Fall back to template-based generation
             return self._fallback_prompt(archetype), ["fallback", archetype.value]
 
@@ -681,11 +807,36 @@ class SceneImageGenerator:
         self.gcs_bucket = gcs_bucket
         self.storage_client = None
 
-        if gcs_bucket and HAVE_CLOUD_DEPS and storage:
+        if gcs_bucket:
+            if not HAVE_CLOUD_DEPS or storage is None:
+                issue = SceneGenerationIssue(
+                    code=SceneGenerationErrorCode.GCS_CLIENT_UNAVAILABLE,
+                    message="GCS dependencies unavailable while bucket configured.",
+                    context={"bucket": gcs_bucket},
+                    fatal=True,
+                )
+                _log_issue(logging.ERROR, issue)
+                raise SceneGenerationJobError(
+                    code=issue.code,
+                    message=issue.message,
+                    context=issue.context,
+                )
+
             try:
                 self.storage_client = storage.Client()
             except Exception as e:
-                print(f"[SCENE-GEN] WARNING: GCS storage unavailable: {e}", file=sys.stderr)
+                issue = SceneGenerationIssue(
+                    code=SceneGenerationErrorCode.GCS_CLIENT_UNAVAILABLE,
+                    message="Failed to initialize GCS storage client.",
+                    context={"bucket": gcs_bucket},
+                    fatal=True,
+                )
+                _log_issue(logging.ERROR, issue, exc=e)
+                raise SceneGenerationJobError(
+                    code=issue.code,
+                    message=issue.message,
+                    context=issue.context,
+                ) from e
 
     def generate_scene_image(
         self,
@@ -790,7 +941,21 @@ class SceneImageGenerator:
                 # Upload to GCS if configured
                 gcs_uri = None
                 if self.gcs_bucket and self.storage_client:
-                    gcs_uri = self._upload_to_gcs(request.scene_id, image_path)
+                    gcs_uri, upload_issue = self._upload_to_gcs(request.scene_id, image_path)
+                    if upload_issue:
+                        _log_issue(logging.ERROR, upload_issue)
+                        elapsed = time.time() - start_time
+                        return SceneGenerationResult(
+                            scene_id=request.scene_id,
+                            archetype=request.archetype,
+                            success=False,
+                            image_path=str(image_path),
+                            prompt_used=request.prompt,
+                            generation_time_seconds=elapsed,
+                            error=upload_issue.message,
+                            error_code=upload_issue.code.value,
+                            error_context=upload_issue.context,
+                        )
 
                 elapsed = time.time() - start_time
                 print(f"[SCENE-GEN] Generated: {request.scene_id} ({elapsed:.1f}s)")
@@ -812,7 +977,23 @@ class SceneImageGenerator:
 
             except Exception as e:
                 last_error = str(e)
-                print(f"[SCENE-GEN] Attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
+                issue = SceneGenerationIssue(
+                    code=SceneGenerationErrorCode.IMAGE_GENERATION_FAILED,
+                    message="Scene image generation attempt failed.",
+                    context={
+                        "scene_id": request.scene_id,
+                        "archetype": request.archetype.value,
+                        "attempt": attempt + 1,
+                        "max_retries": MAX_RETRIES,
+                    },
+                    fatal=False,
+                )
+                _log_issue(logging.WARNING, issue, exc=e)
+                try:
+                    metrics = get_metrics()
+                    metrics.retries_total.inc(labels={"job": JOB_NAME, "scene_id": request.scene_id})
+                except Exception:
+                    LOGGER.debug("Retry metrics emission failed.", exc_info=True)
 
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
@@ -825,10 +1006,12 @@ class SceneImageGenerator:
             success=False,
             prompt_used=request.prompt,
             generation_time_seconds=elapsed,
-            error=last_error
+            error=last_error,
+            error_code=SceneGenerationErrorCode.IMAGE_GENERATION_FAILED.value,
+            error_context={"scene_id": request.scene_id, "archetype": request.archetype.value},
         )
 
-    def _upload_to_gcs(self, scene_id: str, local_path: Path) -> Optional[str]:
+    def _upload_to_gcs(self, scene_id: str, local_path: Path) -> Tuple[Optional[str], Optional[SceneGenerationIssue]]:
         """Upload image to GCS and return URI."""
         try:
             bucket = self.storage_client.bucket(self.gcs_bucket)
@@ -845,24 +1028,41 @@ class SceneImageGenerator:
             )
 
             if not result.success:
-                print(
-                    "[SCENE-GEN] WARNING: GCS upload failed "
-                    f"after {result.attempts} attempts: {result.error}",
-                    file=sys.stderr,
+                issue = SceneGenerationIssue(
+                    code=SceneGenerationErrorCode.GCS_UPLOAD_FAILED,
+                    message="GCS upload failed after retries.",
+                    context={
+                        "scene_id": scene_id,
+                        "bucket": self.gcs_bucket,
+                        "attempts": result.attempts,
+                        "error": result.error,
+                    },
+                    fatal=True,
                 )
-                return None
+                return None, issue
 
             print(f"[SCENE-GEN] Uploaded to: {gcs_uri}")
-            return gcs_uri
+            return gcs_uri, None
 
         except Exception as e:
-            print(f"[SCENE-GEN] WARNING: GCS upload failed: {e}", file=sys.stderr)
-            return None
+            issue = SceneGenerationIssue(
+                code=SceneGenerationErrorCode.GCS_UPLOAD_FAILED,
+                message="GCS upload failed with exception.",
+                context={"scene_id": scene_id, "bucket": self.gcs_bucket, "exception": repr(e)},
+                fatal=True,
+            )
+            return None, issue
 
     def trigger_pipeline(self, scene_id: str) -> bool:
         """Trigger downstream pipeline by writing completion marker."""
         if not self.gcs_bucket or not self.storage_client:
-            print(f"[SCENE-GEN] WARNING: Cannot trigger pipeline (no GCS)")
+            issue = SceneGenerationIssue(
+                code=SceneGenerationErrorCode.PIPELINE_TRIGGER_FAILED,
+                message="Cannot trigger pipeline; GCS not configured.",
+                context={"scene_id": scene_id},
+                fatal=True,
+            )
+            _log_issue(logging.ERROR, issue)
             return False
 
         try:
@@ -893,18 +1093,31 @@ class SceneImageGenerator:
                 )
 
             if not result.success:
-                print(
-                    "[SCENE-GEN] WARNING: Failed to trigger pipeline "
-                    f"after {result.attempts} attempts: {result.error}",
-                    file=sys.stderr,
+                issue = SceneGenerationIssue(
+                    code=SceneGenerationErrorCode.PIPELINE_TRIGGER_FAILED,
+                    message="Failed to trigger pipeline after retries.",
+                    context={
+                        "scene_id": scene_id,
+                        "bucket": self.gcs_bucket,
+                        "attempts": result.attempts,
+                        "error": result.error,
+                    },
+                    fatal=True,
                 )
+                _log_issue(logging.ERROR, issue)
                 return False
 
             print(f"[SCENE-GEN] Pipeline trigger written: {marker_path}")
             return True
 
         except Exception as e:
-            print(f"[SCENE-GEN] WARNING: Failed to trigger pipeline: {e}", file=sys.stderr)
+            issue = SceneGenerationIssue(
+                code=SceneGenerationErrorCode.PIPELINE_TRIGGER_FAILED,
+                message="Failed to trigger pipeline with exception.",
+                context={"scene_id": scene_id, "bucket": self.gcs_bucket},
+                fatal=True,
+            )
+            _log_issue(logging.ERROR, issue, exc=e)
             return False
 
 
@@ -1000,7 +1213,14 @@ def generate_scene_batch(
     # Initialize clients
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY environment variable is required")
+        issue = SceneGenerationIssue(
+            code=SceneGenerationErrorCode.CONFIG_MISSING_API_KEY,
+            message="GEMINI_API_KEY environment variable is required.",
+            context={},
+            fatal=True,
+        )
+        _log_issue(logging.ERROR, issue)
+        raise SceneGenerationJobError(issue.code, issue.message, issue.context)
 
     client = genai.Client(api_key=api_key)
 
@@ -1025,7 +1245,14 @@ def generate_scene_batch(
             try:
                 archetypes.append(EnvironmentArchetype(name))
             except ValueError:
-                print(f"[SCENE-GEN] WARNING: Unknown archetype '{name}'", file=sys.stderr)
+                issue = SceneGenerationIssue(
+                    code=SceneGenerationErrorCode.UNKNOWN_ARCHETYPE,
+                    message="Unknown archetype provided.",
+                    context={"archetype": name},
+                    fatal=True,
+                )
+                _log_issue(logging.ERROR, issue)
+                raise SceneGenerationJobError(issue.code, issue.message, issue.context)
 
         # Repeat to fill count
         while len(archetypes) < count:
@@ -1069,6 +1296,24 @@ def generate_scene_batch(
         result = generator.generate_scene_image(request, dry_run=dry_run)
         results.append(result)
 
+        if not result.success and result.error_code not in {
+            SceneGenerationErrorCode.GCS_UPLOAD_FAILED.value,
+            SceneGenerationErrorCode.PIPELINE_TRIGGER_FAILED.value,
+        }:
+            code = SceneGenerationErrorCode.IMAGE_GENERATION_FAILED
+            if result.error_code:
+                try:
+                    code = SceneGenerationErrorCode(result.error_code)
+                except ValueError:
+                    code = SceneGenerationErrorCode.IMAGE_GENERATION_FAILED
+            issue = SceneGenerationIssue(
+                code=code,
+                message=result.error or "Scene generation failed.",
+                context=result.error_context or {"scene_id": result.scene_id},
+                fatal=True,
+            )
+            _log_issue(logging.ERROR, issue)
+
         # Record in history
         if result.success:
             prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:16]
@@ -1085,7 +1330,12 @@ def generate_scene_batch(
 
             # Trigger downstream pipeline
             if not dry_run:
-                generator.trigger_pipeline(scene_id)
+                triggered = generator.trigger_pipeline(scene_id)
+                if not triggered:
+                    result.success = False
+                    result.error = "Pipeline trigger failed."
+                    result.error_code = SceneGenerationErrorCode.PIPELINE_TRIGGER_FAILED.value
+                    result.error_context = {"scene_id": scene_id, "bucket": bucket}
 
         # Delay between generations to avoid rate limiting
         if not dry_run and i < count - 1:
@@ -1103,11 +1353,13 @@ def generate_scene_batch(
 
     history_write_result = history_tracker.record_generations(history_entries)
     if history_write_result.errors:
-        print(
-            f"[SCENE-GEN] ERROR: Failed to record history: "
-            f"{[error.message for error in history_write_result.errors]}",
-            file=sys.stderr,
+        issue = SceneGenerationIssue(
+            code=SceneGenerationErrorCode.FIRESTORE_WRITE_FAILED,
+            message="Failed to record history entries.",
+            context={"errors": [error.message for error in history_write_result.errors]},
+            fatal=False,
         )
+        _log_issue(logging.WARNING, issue)
 
     summary = {
         "total_attempted": len(results),
@@ -1121,6 +1373,32 @@ def generate_scene_batch(
         "dry_run": dry_run,
         "history_write": asdict(history_write_result),
     }
+
+    if failed > 0:
+        issues = []
+        for result in results:
+            if result.success:
+                continue
+            code = SceneGenerationErrorCode.IMAGE_GENERATION_FAILED
+            if result.error_code:
+                try:
+                    code = SceneGenerationErrorCode(result.error_code)
+                except ValueError:
+                    code = SceneGenerationErrorCode.IMAGE_GENERATION_FAILED
+            issues.append(
+                SceneGenerationIssue(
+                    code=code,
+                    message=result.error or "Scene generation failed.",
+                    context=result.error_context or {"scene_id": result.scene_id},
+                    fatal=True,
+                )
+            )
+        raise SceneGenerationBatchError(
+            message="One or more scenes failed to generate or publish.",
+            results=results,
+            summary=summary,
+            issues=issues,
+        )
 
     return results, summary
 
@@ -1153,12 +1431,14 @@ def main():
         print(f"[SCENE-GEN] DRY RUN MODE - no actual generation")
 
     try:
-        results, summary = generate_scene_batch(
-            count=scenes_per_run,
-            bucket=bucket or None,
-            dry_run=dry_run,
-            specific_archetypes=specific_archetypes
-        )
+        metrics = get_metrics()
+        with metrics.track_job(JOB_NAME, scene_id="batch"):
+            results, summary = generate_scene_batch(
+                count=scenes_per_run,
+                bucket=bucket or None,
+                dry_run=dry_run,
+                specific_archetypes=specific_archetypes
+            )
 
         print(f"\n[SCENE-GEN] === Generation Complete ===")
         print(f"[SCENE-GEN] Successful: {summary['successful']}/{summary['total_attempted']}")
@@ -1169,11 +1449,16 @@ def main():
         # Write summary report
         report_path = Path("/tmp/scene_generation_report.json")
         with report_path.open("w") as f:
-            json.dump({
-                "summary": summary,
-                "results": [asdict(r) for r in results],
-                "generated_at": datetime.datetime.utcnow().isoformat() + "Z"
-            }, f, indent=2, default=str)
+            json.dump(
+                {
+                    "summary": summary,
+                    "results": [asdict(r) for r in results],
+                    "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                },
+                f,
+                indent=2,
+                default=str,
+            )
         print(f"[SCENE-GEN] Report written to: {report_path}")
 
         if summary['successful'] > 0:
@@ -1182,6 +1467,40 @@ def main():
         else:
             print("[SCENE-GEN] FAILURE: No scenes generated successfully")
             sys.exit(1)
+
+    except SceneGenerationBatchError as e:
+        issue = SceneGenerationIssue(
+            code=e.code,
+            message="Scene generation batch failed.",
+            context={"failed": e.summary.get("failed", 0)},
+            fatal=True,
+        )
+        _log_issue(logging.ERROR, issue)
+        report_path = Path("/tmp/scene_generation_report.json")
+        with report_path.open("w") as f:
+            json.dump(
+                {
+                    "summary": e.summary,
+                    "results": [asdict(r) for r in e.results],
+                    "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                    "issues": [asdict(issue) for issue in e.issues],
+                },
+                f,
+                indent=2,
+                default=str,
+            )
+        print(f"[SCENE-GEN] Report written to: {report_path}")
+        sys.exit(1)
+
+    except SceneGenerationJobError as e:
+        issue = SceneGenerationIssue(
+            code=e.code,
+            message=str(e),
+            context=e.context,
+            fatal=True,
+        )
+        _log_issue(logging.ERROR, issue)
+        sys.exit(1)
 
     except Exception as e:
         print(f"[SCENE-GEN] ERROR: {e}", file=sys.stderr)
