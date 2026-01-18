@@ -49,6 +49,8 @@ def job_dir_paths(repo_root: Path) -> Dict[str, Path]:
         "episode_generation": repo_root / "episode-generation-job",
         "geniesim_export": repo_root / "genie-sim-export-job",
         "geniesim_import": repo_root / "genie-sim-import-job",
+        "upsell_features": repo_root / "upsell-features-job",
+        "arena_export": repo_root / "arena-export-job",
     }
 
 
