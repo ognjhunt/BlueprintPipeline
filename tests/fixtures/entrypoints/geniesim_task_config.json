@@ -1,0 +1,21 @@
+{
+  "scene_id": "scene_1",
+  "environment_type": "kitchen",
+  "suggested_tasks": [
+    {
+      "task_type": "pick",
+      "target_object": "mug",
+      "difficulty": "easy",
+      "priority": 1,
+      "description_hint": "Pick up the mug"
+    }
+  ],
+  "robot_config": {
+    "type": "franka",
+    "base_position": [0.0, 0.0, 0.0],
+    "workspace_bounds": [
+      [0.0, 0.0, 0.0],
+      [1.0, 1.0, 1.0]
+    ]
+  }
+}
