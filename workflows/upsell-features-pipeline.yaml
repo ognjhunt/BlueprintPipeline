@@ -41,7 +41,7 @@ main:
           - bucket: ${event.data.bucket}
           - object: ${event.data.name}
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
-          - region: "us-central1"
+          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           # Bundle tier can be passed in event or defaults to standard
           - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
           # Force reprocessing even if already completed
