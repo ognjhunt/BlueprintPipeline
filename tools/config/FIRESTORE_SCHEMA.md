@@ -22,6 +22,7 @@ Stores customer account information and configuration.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `schema_version` | integer | Yes | Schema version for this document (start at `1`) |
 | `bundle_tier` | string | Yes | Tier: "standard", "pro", "enterprise", or "foundation" |
 | `organization_name` | string | No | Customer's organization name |
 | `email` | string | No | Primary contact email |
@@ -48,6 +49,7 @@ Stores customer account information and configuration.
 **Example**:
 ```json
 {
+  "schema_version": 1,
   "bundle_tier": "pro",
   "organization_name": "AI Research Lab",
   "email": "contact@ailab.edu",
@@ -80,6 +82,7 @@ Stores scene-level configurations and settings.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `schema_version` | integer | Yes | Schema version for this document (start at `1`) |
 | `customer_id` | string | Yes | Reference to customer document |
 | `bundle_tier` | string | No | Override bundle tier for this scene (inherits from customer if not set) |
 | `robot_type` | string | No | Robot type (e.g., "franka", "ur10") |
@@ -105,6 +108,7 @@ Stores scene-level configurations and settings.
 **Example**:
 ```json
 {
+  "schema_version": 1,
   "customer_id": "lab_001",
   "robot_type": "franka",
   "data_pack_tier": "plus",
@@ -136,6 +140,7 @@ Stores dynamic feature flags for customers and global overrides.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `schema_version` | integer | Schema version for this document (start at `1`) |
 | `audio_narration` | boolean | Enable audio narration |
 | `subtitle_generation` | boolean | Enable subtitle generation |
 | `vla_finetuning` | boolean | Enable VLA fine-tuning data |
@@ -155,6 +160,7 @@ Stores dynamic feature flags for customers and global overrides.
 **Example (customer-specific)**:
 ```json
 {
+  "schema_version": 1,
   "audio_narration": true,
   "subtitle_generation": true,
   "vla_finetuning": true,
@@ -167,6 +173,7 @@ Stores dynamic feature flags for customers and global overrides.
 ```json
 {
   "_comment": "Global policy - tactile sensor disabled due to beta status",
+  "schema_version": 1,
   "tactile": false,
   "streaming_export": false
 }
@@ -184,6 +191,7 @@ Records all billable actions and resource consumption.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `schema_version` | integer | Schema version for this document (start at `1`) |
 | `customer_id` | string | Customer ID (indexed) |
 | `scene_id` | string | Scene ID (indexed) |
 | `action` | string | Action type: "scene_generated", "episodes_generated", "upsell_applied", etc. |
@@ -202,6 +210,7 @@ Records all billable actions and resource consumption.
 **Example**:
 ```json
 {
+  "schema_version": 1,
   "customer_id": "lab_001",
   "scene_id": "scene_kitchen_v2",
   "action": "episodes_generated",

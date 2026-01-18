@@ -22,6 +22,8 @@ except Exception:  # pragma: no cover - dependency guard
 
 from .vector_store import VectorRecord, VectorStoreClient, VectorStoreConfig
 
+ASSET_CATALOG_SCHEMA_VERSION = 1
+
 
 @dataclass
 class StorageURIs:
@@ -131,6 +133,7 @@ class AssetIngestionService:
 
         document = {
             "asset_id": asset_id,
+            "schema_version": ASSET_CATALOG_SCHEMA_VERSION,
             "source": source,
             "pack": {
                 "name": pack_name,
