@@ -36,11 +36,13 @@ from tools.validation.entrypoint_checks import validate_required_env_vars
 import numpy as np
 from tools.asset_catalog import AssetCatalogClient
 
+logger = logging.getLogger(__name__)
+
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
     import pxr
 except ImportError:
-    print("ERROR: usd-core is required. Install with: pip install usd-core")
+    logger.error("ERROR: usd-core is required. Install with: pip install usd-core")
     sys.exit(1)
 
 
@@ -48,7 +50,6 @@ except ImportError:
 # Utility Functions
 # -----------------------------------------------------------------------------
 
-logger = logging.getLogger(__name__)
 PHYSX_SCHEMA = getattr(pxr, "PhysxSchema", None)
 
 CACHE_MISS = object()
@@ -110,7 +111,7 @@ def timed_phase(name: str) -> None:
         yield
     finally:
         elapsed = time.perf_counter() - start
-        print(f"[USD] Timing: {name} took {elapsed:.3f}s")
+        logger.info("[USD] Timing: %s took %.3fs", name, elapsed)
 
 
 def _parse_int_env(var_name: str, default: int) -> int:
@@ -297,7 +298,14 @@ def generate_synthetic_spatial_data(
             "synthetic": True,  # Flag for downstream processing
             "approx_location": approx_loc,
         }
-        print(f"[USD] obj_{oid}: generated synthetic position from approx_location='{approx_loc}' -> ({x:.2f}, {y:.2f}, {z:.2f})")
+        logger.info(
+            "[USD] obj_%s: generated synthetic position from approx_location='%s' -> (%.2f, %.2f, %.2f)",
+            oid,
+            approx_loc,
+            x,
+            y,
+            z,
+        )
 
     return synthetic
 
@@ -339,7 +347,7 @@ def load_object_metadata(
             if catalog_meta:
                 return catalog_meta
         except Exception as exc:  # pragma: no cover - network errors
-            print(f"[USD] WARNING: catalog lookup failed: {exc}", file=sys.stderr)
+            logger.warning("[USD] WARNING: catalog lookup failed: %s", exc)
 
     metadata_rel = obj.get("metadata_path")
     if metadata_rel:
@@ -730,7 +738,9 @@ class SceneBuilder:
           - contactSensor:radius (float, meters)
         """
         if not room_box:
-            print("[USD] WARNING: No room_box data available, skipping scene shell geometry")
+            logger.warning(
+                "[USD] WARNING: No room_box data available, skipping scene shell geometry"
+            )
             return
 
         # Create shell geometry
@@ -825,8 +835,8 @@ class SceneBuilder:
         custom_data["scene_shell_contact_sensors"] = contact_sensor_enabled
         root_layer.customLayerData = custom_data
 
-        print(f"[USD] Created scene shell geometry at {shell_path}")
-        print(f"[USD]   Room bounds: min={room_min}, max={room_max}")
+        logger.info("[USD] Created scene shell geometry at %s", shell_path)
+        logger.info("[USD]   Room bounds: min=%s, max=%s", room_min, room_max)
 
     def add_cameras(self, cameras: List[Dict]) -> None:
         """Add camera definitions."""
@@ -904,7 +914,10 @@ class SceneBuilder:
                 "R": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],  # Identity rotation
             }
             merged["center3d"] = room_center.tolist()
-            print(f"[USD] obj_{oid}: Created synthetic OBB from room_box for scene_background")
+            logger.info(
+                "[USD] obj_%s: Created synthetic OBB from room_box for scene_background",
+                oid,
+            )
 
         # Determine asset path
         asset_path = obj.get("asset_path")
@@ -1019,15 +1032,18 @@ class SceneBuilder:
                 T_pos[:3, 3] = np.array(center3d, dtype=np.float64)
                 xform = T_pos @ xform
                 applied = True
-                print(f"[USD] obj_{oid}: using center3d fallback position {center3d}")
+                logger.info(
+                    "[USD] obj_%s: using center3d fallback position %s", oid, center3d
+                )
 
         # Apply transform (always apply even if identity, to ensure consistent behavior)
         obj_xform.MakeMatrixXform().Set(numpy_to_gf_matrix(xform))
         if applied:
-            print(f"[USD] obj_{oid}: applied transform")
+            logger.info("[USD] obj_%s: applied transform", oid)
         else:
-            print(
-                f"[USD] obj_{oid}: no spatial data found; left at origin (check layout merge)"
+            logger.info(
+                "[USD] obj_%s: no spatial data found; left at origin (check layout merge)",
+                oid,
             )
 
         # Mesh metadata
@@ -1076,7 +1092,7 @@ class SceneBuilder:
             # a default prim set (which is required for prim-less references to work).
             # The glb_to_usd converter creates all geometry under /Root.
             geom_prim.GetReferences().AddReference(usdz_rel, primPath=Sdf.Path("/Root"))
-            print(f"[USD] obj_{oid}: referenced {usdz_rel}")
+            logger.info("[USD] obj_%s: referenced %s", oid, usdz_rel)
         else:
             # No USDZ found - try to discover a GLB candidate so we can flag it
             # for conversion in the wiring phase. This catches assets where the
@@ -1096,12 +1112,18 @@ class SceneBuilder:
                 rel_glb = str(existing_glb.relative_to(self.root)).replace("\\", "/")
                 prim.CreateAttribute("asset_path", Sdf.ValueTypeNames.String).Set(rel_glb)
                 prim.CreateAttribute("pendingConversion", Sdf.ValueTypeNames.Bool).Set(True)
-                print(
-                    f"[USD] obj_{oid}: missing USDZ, queued GLB for conversion ({rel_glb})"
+                logger.info(
+                    "[USD] obj_%s: missing USDZ, queued GLB for conversion (%s)",
+                    oid,
+                    rel_glb,
                 )
             elif asset_path and (asset_path.endswith(".glb") or asset_path.endswith(".gltf")):
                 prim.CreateAttribute("pendingConversion", Sdf.ValueTypeNames.Bool).Set(True)
-                print(f"[USD] obj_{oid}: marked for GLB->USDZ conversion ({asset_path})")
+                logger.info(
+                    "[USD] obj_%s: marked for GLB->USDZ conversion (%s)",
+                    oid,
+                    asset_path,
+                )
 
     def add_objects(
         self,
@@ -1120,7 +1142,7 @@ class SceneBuilder:
             except Exception as exc:
                 oid = obj.get("id")
                 failures.append((oid, exc))
-                print(f"[WARN] Failed to add object {oid}: {exc}")
+                logger.warning("[WARN] Failed to add object %s: %s", oid, exc)
 
         if failures:
             summary = ", ".join(
@@ -1129,7 +1151,7 @@ class SceneBuilder:
             message = f"{len(failures)} object(s) failed to add: {summary}"
             if strict:
                 raise ObjectAddFailures(failures)
-            print(f"[WARN] {message}")
+            logger.warning("[WARN] %s", message)
 
 
 # -----------------------------------------------------------------------------
@@ -1154,7 +1176,7 @@ def _validate_usd_stage(stage: Usd.Stage, output_path: Path, objects: List[Dict]
     # Validate stage has root prim
     root_prim = stage.GetDefaultPrim()
     if not root_prim or not root_prim.IsValid():
-        print("[USD] WARNING: Stage has no valid default prim")
+        logger.warning("[USD] WARNING: Stage has no valid default prim")
 
     # Validate World prim exists
     world_prim = stage.GetPrimAtPath("/World")
@@ -1164,7 +1186,7 @@ def _validate_usd_stage(stage: Usd.Stage, output_path: Path, objects: List[Dict]
     # Validate Objects scope exists
     objects_scope = stage.GetPrimAtPath("/World/Objects")
     if not objects_scope or not objects_scope.IsValid():
-        print("[USD] WARNING: /World/Objects scope not found")
+        logger.warning("[USD] WARNING: /World/Objects scope not found")
 
     # Validate at least some objects have references
     objects_with_refs = 0
@@ -1180,11 +1202,17 @@ def _validate_usd_stage(stage: Usd.Stage, output_path: Path, objects: List[Dict]
                         objects_with_refs += 1
 
     if len(objects) > 0 and objects_with_refs == 0:
-        print(f"[USD] WARNING: None of {len(objects)} objects have geometry references")
+        logger.warning(
+            "[USD] WARNING: None of %s objects have geometry references", len(objects)
+        )
     else:
-        print(f"[USD] Validation: {objects_with_refs}/{len(objects)} objects have geometry references")
+        logger.info(
+            "[USD] Validation: %s/%s objects have geometry references",
+            objects_with_refs,
+            len(objects),
+        )
 
-    print(f"[USD] Stage validation passed: {output_path}")
+    logger.info("[USD] Stage validation passed: %s", output_path)
 
 
 def _prefetch_asset_data(
@@ -1264,7 +1292,7 @@ def build_scene(
         Tuple of (stage, objects_list) for further processing
     """
     assets_root = root / assets_prefix
-    print(f"[USD] Loading asset manifest from {assets_path}")
+    logger.info("[USD] Loading asset manifest from %s", assets_path)
 
     metadata_cache_size = _parse_int_env("USD_ASSET_METADATA_CACHE_SIZE", 512)
     usdz_cache_size = _parse_int_env("USD_ASSET_USDZ_CACHE_SIZE", 1024)
@@ -1324,18 +1352,20 @@ def build_scene(
 
         layout_used_path = layout_path
         if not _has_spatial_data(layout):
-            print(
-                f"[USD] WARNING: {layout_path} has no objects with 'obb' or 'center3d'; "
-                "attempting to fall back to DA3 layout outputs"
+            logger.warning(
+                "[USD] WARNING: %s has no objects with 'obb' or 'center3d'; "
+                "attempting to fall back to DA3 layout outputs",
+                layout_path,
             )
 
             for candidate_path, candidate_layout in fallback_layouts:
                 if _has_spatial_data(candidate_layout):
                     layout = candidate_layout
                     layout_used_path = candidate_path
-                    print(
-                        f"[USD] Using layout from {candidate_path} because the scaled layout "
-                        "was missing spatial data"
+                    logger.info(
+                        "[USD] Using layout from %s because the scaled layout "
+                        "was missing spatial data",
+                        candidate_path,
                     )
                     break
 
@@ -1344,17 +1374,18 @@ def build_scene(
 
         if not _has_spatial_data(layout):
             tried_paths = [str(layout_path)] + [str(p) for p, _ in fallback_layouts]
-            print(
-                f"[USD] WARNING: No spatial data (obb/center3d) found in any layout. "
-                f"Checked: {', '.join(tried_paths)}. "
-                "Will generate synthetic positions from approx_location or grid layout."
+            logger.warning(
+                "[USD] WARNING: No spatial data (obb/center3d) found in any layout. "
+                "Checked: %s. "
+                "Will generate synthetic positions from approx_location or grid layout.",
+                ", ".join(tried_paths),
             )
             using_synthetic_positions = True
 
         if layout_used_path != layout_path:
-            print(f"[USD] Layout override: using {layout_used_path}")
+            logger.info("[USD] Layout override: using %s", layout_used_path)
         else:
-            print(f"[USD] Using scaled layout at {layout_used_path}")
+            logger.info("[USD] Using scaled layout at %s", layout_used_path)
 
         if layout_used_path != layout_path:
             fallback_layout: Dict[str, Any] = primary_layout
@@ -1506,7 +1537,9 @@ def build_scene(
         if room_box:
             builder.add_scene_shell_geometry(room_box)
         else:
-            print("[USD] WARNING: No room_box data in layout, skipping scene shell geometry")
+            logger.warning(
+                "[USD] WARNING: No room_box data in layout, skipping scene shell geometry"
+            )
 
     with timed_phase("prim creation"):
         builder.add_cameras(cameras)
@@ -1518,10 +1551,12 @@ def build_scene(
     # GAP-USD-002 FIX: Validate USD stage after save
     _validate_usd_stage(stage, output_path, objects)
 
-    print(f"[USD] Wrote stage to {output_path}")
-    print(f"[USD] Cameras: {len(cameras)} | Objects: {len(objects)}")
+    logger.info("[USD] Wrote stage to %s", output_path)
+    logger.info("[USD] Cameras: %s | Objects: %s", len(cameras), len(objects))
     if room_box:
-        print(f"[USD] Room box: min={room_box.get('min')}, max={room_box.get('max')}")
+        logger.info(
+            "[USD] Room box: min=%s, max=%s", room_box.get("min"), room_box.get("max")
+        )
 
     return stage, objects
 
@@ -1549,9 +1584,8 @@ def main() -> None:
     stage_path = root / usd_prefix / "scene.usda"
 
     if not assets_path.is_file():
-        print(
-            f"[USD] scene manifest not found at {manifest_path} or legacy scene_assets.json",
-            file=sys.stderr,
+        logger.error(
+            "[USD] scene manifest not found at %s or legacy scene_assets.json", manifest_path
         )
         sys.exit(1)
 
@@ -1567,6 +1601,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     from tools.startup_validation import validate_and_fail_fast
+    from tools.logging_config import init_logging
 
+    init_logging()
     validate_and_fail_fast(job_name="USD-ASSEMBLY", validate_gcs=True)
     main()

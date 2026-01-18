@@ -48,6 +48,7 @@ from tools.gcs_upload import (
     verify_blob_upload,
 )
 from tools.config import load_pipeline_config
+from tools.logging_config import init_logging
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
@@ -63,6 +64,8 @@ CONTRACT_SCHEMAS = {
     "asset_index": "asset_index.schema.json",
     "task_config": "task_config.schema.json",
 }
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -641,7 +644,7 @@ def main() -> int:
         existing_job_payload
         and existing_job_payload.get("idempotency", {}).get("key") == idempotency_key
     ):
-        print(
+        logger.info(
             "[GENIESIM-SUBMIT] Duplicate submission detected; "
             f"existing job metadata at gs://{bucket}/{job_output_path}."
         )
@@ -655,7 +658,7 @@ def main() -> int:
             if existing_metadata_path
             else f"gs://{bucket}/{job_output_path}"
         )
-        print(
+        logger.info(
             "[GENIESIM-SUBMIT] Duplicate submission detected; "
             f"existing idempotency record at gs://{bucket}/{job_idempotency_path} "
             f"for {location_hint}."
@@ -716,7 +719,7 @@ def main() -> int:
     )
     if scene_usd_path:
         scene_manifest["usd_path"] = str(scene_usd_path)
-        print(f"[GENIESIM-SUBMIT-JOB] Using USD scene path: {scene_usd_path}")
+        logger.info("[GENIESIM-SUBMIT-JOB] Using USD scene path: %s", scene_usd_path)
     _write_local_json(scene_manifest_path, scene_manifest)
     _write_local_json(task_config_path, task_config_local)
 
@@ -733,7 +736,7 @@ def main() -> int:
     local_run_end = datetime.utcnow()
     server_info = getattr(local_run_result, "server_info", {})
     if server_info:
-        print(
+        logger.info(
             "[GENIESIM-SUBMIT-JOB] Genie Sim server info: "
             f"version={server_info.get('version')}, "
             f"capabilities={server_info.get('capabilities')}"
@@ -1001,13 +1004,18 @@ def main() -> int:
                 "job_metadata_path": f"gs://{bucket}/{job_output_path}",
             },
         )
-    print(f"[GENIESIM-SUBMIT] Stored job metadata at gs://{bucket}/{job_output_path}")
+    logger.info(
+        "[GENIESIM-SUBMIT] Stored job metadata at gs://%s/%s",
+        bucket,
+        job_output_path,
+    )
     return 1 if job_status == "failed" else 0
 
 
 if __name__ == "__main__":
     from tools.startup_validation import validate_and_fail_fast
 
+    init_logging()
     validate_and_fail_fast(job_name="GENIE-SIM-SUBMIT", validate_gcs=True)
     metrics = get_metrics()
     scene_id = os.environ.get("SCENE_ID", "unknown")

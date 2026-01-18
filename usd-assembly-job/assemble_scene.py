@@ -21,10 +21,11 @@ Environment variables:
 """
 
 import json
+import logging
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
-import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -37,9 +38,12 @@ from tools.validation.entrypoint_checks import (
     validate_scene_manifest,
 )
 from tools.workflow.failure_markers import FailureMarkerWriter
+from tools.logging_config import init_logging
 
 JOB_NAME = "usd-assembly-job"
 GCS_ROOT = Path("/mnt/gcs")
+
+logger = logging.getLogger(__name__)
 
 
 def _should_bypass_quality_gates() -> bool:
@@ -86,7 +90,7 @@ def main() -> None:
         sys.exit(exit_code)
 
     if _should_bypass_quality_gates():
-        print("[USD-ASSEMBLY] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates")
+        logger.warning("[USD-ASSEMBLY] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates")
         sys.exit(exit_code)
 
     usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
@@ -101,7 +105,7 @@ def main() -> None:
     quality_gates.save_report(scene_id, report_path)
 
     if not quality_gates.can_proceed():
-        print("[USD-ASSEMBLY] ❌ Quality gates blocked downstream pipeline")
+        logger.error("[USD-ASSEMBLY] ❌ Quality gates blocked downstream pipeline")
         FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
             exception=RuntimeError("Quality gates blocked: USD validation failed"),
             failed_step="quality_gates",
@@ -146,5 +150,6 @@ def main() -> None:
 if __name__ == "__main__":
     from tools.startup_validation import validate_and_fail_fast
 
+    init_logging()
     validate_and_fail_fast(job_name="USD-ASSEMBLY", validate_gcs=True)
     main()

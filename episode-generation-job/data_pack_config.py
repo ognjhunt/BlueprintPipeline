@@ -1477,6 +1477,9 @@ def get_leorbot_feature_config(pack_config: DataPackConfig) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
+    from tools.logging_config import init_logging
+
+    init_logging()
     logger.info("Data Pack Configuration System")
     logger.info("%s", "=" * 60)
 

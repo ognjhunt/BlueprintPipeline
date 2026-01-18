@@ -1516,7 +1516,9 @@ def filter_valid_episodes(
 if __name__ == "__main__":
     from motion_planner import AIMotionPlanner
     from trajectory_solver import TrajectorySolver
+    from tools.logging_config import init_logging
 
+    init_logging()
     logger.info("Testing Simulation Validator")
     logger.info("%s", "=" * 60)
 
