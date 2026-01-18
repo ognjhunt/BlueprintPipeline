@@ -15,6 +15,34 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
 - [ ] **gRPC Python dependency** (`grpcio`) installed in the Python environment used by the adapter.
 - [ ] **Production deployments** explicitly set `GENIESIM_ENV=production` and enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks.
 
+## Secure gRPC configuration
+
+Use these environment variables to enable TLS, auth metadata, and circuit breaker behavior in the adapter:
+
+- **TLS channel configuration**
+  - `GENIESIM_TLS_CERT`: path to client certificate (PEM).
+  - `GENIESIM_TLS_KEY`: path to client private key (PEM).
+  - `GENIESIM_TLS_CA`: path to CA bundle (PEM).
+- **Auth metadata injection**
+  - `GENIESIM_AUTH_TOKEN`: inline JWT or bearer token.
+  - `GENIESIM_AUTH_TOKEN_PATH`: path to a file containing the JWT/bearer token.
+  - `GENIESIM_AUTH_CERT`: path to a client cert to forward in metadata (`x-geniesim-client-cert`).
+  - `GENIESIM_AUTH_KEY`: path to a client key to forward in metadata (`x-geniesim-client-key`).
+- **Circuit breaker controls**
+  - `GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD`: number of consecutive failures before tripping (default: 3).
+  - `GENIESIM_CIRCUIT_BREAKER_BACKOFF_SECONDS`: backoff window before retry (default: 2.0).
+
+Example secure configuration:
+
+```bash
+export GENIESIM_HOST=geniesim.internal
+export GENIESIM_PORT=50051
+export GENIESIM_TLS_CA=/etc/ssl/certs/geniesim-ca.pem
+export GENIESIM_TLS_CERT=/etc/ssl/certs/geniesim-client.pem
+export GENIESIM_TLS_KEY=/etc/ssl/private/geniesim-client-key.pem
+export GENIESIM_AUTH_TOKEN_PATH=/etc/secrets/geniesim.jwt
+```
+
 ## Server health checks
 
 - [ ] **Run the health check module** before submit/import steps:
