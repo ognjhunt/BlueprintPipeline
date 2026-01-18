@@ -46,7 +46,9 @@ main:
           - bucket: ${event.data.bucket}
           - object: ${event.data.name}
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
-          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
+          - primaryRegion: ${default(sys.get_env("PRIMARY_WORKFLOW_REGION"), "us-central1")}
+          - secondaryRegion: ${default(sys.get_env("SECONDARY_WORKFLOW_REGION"), "us-east1")}
+          - region: ${primaryRegion}
           - enableDwm: '${sys.get_env("ENABLE_DWM") != null and text.lower(sys.get_env("ENABLE_DWM")) == "true"}'
         next: filter_completion_markers
 
@@ -78,6 +80,72 @@ main:
           - dwmLegacyFailedMarker: '${"scenes/" + sceneId + "/dwm/.dwm_failed"}'
           - dwmInferenceFailedMarker: '${"scenes/" + sceneId + "/dwm/.failed"}'
           - dwmInferenceLegacyFailedMarker: '${"scenes/" + sceneId + "/dwm/.dwm_inference_failed"}'
+        next: init_region_health
+
+    - init_region_health:
+        assign:
+          - primaryHealthy: false
+          - secondaryHealthy: false
+        next: check_primary_region
+
+    - check_primary_region:
+        try:
+          call: googleapis.run.v1.projects.locations.jobs.get
+          args:
+            name: '${"projects/" + projectId + "/locations/" + primaryRegion + "/jobs/" + dwmJobName}'
+          result: primaryJob
+        next: mark_primary_healthy
+        except:
+          as: primaryError
+          steps:
+            - log_primary_unhealthy:
+                call: sys.log
+                args:
+                  text: '${"Primary region " + primaryRegion + " job " + dwmJobName + " unavailable: " + primaryError.message}'
+                  severity: "WARNING"
+            - check_secondary_region:
+                try:
+                  call: googleapis.run.v1.projects.locations.jobs.get
+                  args:
+                    name: '${"projects/" + projectId + "/locations/" + secondaryRegion + "/jobs/" + dwmJobName}'
+                  result: secondaryJob
+                next: mark_secondary_healthy
+                except:
+                  as: secondaryError
+                  steps:
+                    - log_secondary_unhealthy:
+                        call: sys.log
+                        args:
+                          text: '${"Secondary region " + secondaryRegion + " job " + dwmJobName + " unavailable: " + secondaryError.message}'
+                          severity: "ERROR"
+                    - select_region
+
+    - mark_primary_healthy:
+        assign:
+          - primaryHealthy: true
+        next: select_region
+
+    - mark_secondary_healthy:
+        assign:
+          - secondaryHealthy: true
+        next: select_region
+
+    - select_region:
+        switch:
+          - condition: ${primaryHealthy}
+            next: use_primary_region
+          - condition: ${secondaryHealthy}
+            next: use_secondary_region
+        next: use_primary_region
+
+    - use_primary_region:
+        assign:
+          - region: ${primaryRegion}
+        next: acquire_lock
+
+    - use_secondary_region:
+        assign:
+          - region: ${secondaryRegion}
         next: acquire_lock
 
     - acquire_lock:

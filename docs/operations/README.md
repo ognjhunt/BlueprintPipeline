@@ -11,6 +11,7 @@ starting point for incident response, on-call routines, and runtime troubleshoot
 - Runtime report template: [`docs/OPS_RUNTIME_REPORT.md`](../OPS_RUNTIME_REPORT.md)
 - Scripts overview: [`scripts/README.md`](../../scripts/README.md)
 - Workflow timeouts: [`workflows/TIMEOUT_AND_RETRY_POLICY.md`](../../workflows/TIMEOUT_AND_RETRY_POLICY.md)
+- Disaster recovery (RTO/RPO): [`docs/operations/disaster-recovery.md`](./disaster-recovery.md)
 
 ## Incident response
 

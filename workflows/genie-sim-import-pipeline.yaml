@@ -29,7 +29,7 @@ main:
         assign:
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
-          - bucket: ${sys.get_env("GCS_BUCKET", "blueprintpipeline-data")}
+          - bucket: ${default(sys.get_env("PRIMARY_BUCKET"), sys.get_env("GCS_BUCKET", "blueprintpipeline-data"))}
 
     - extract_event:
         switch:

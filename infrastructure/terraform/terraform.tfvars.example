@@ -16,6 +16,15 @@ project_id = "your-gcp-project-id"
 region = "us-central1"
 zone   = "us-central1-a"
 
+# Multi-region or dual-region bucket location (e.g., US, EU, NAM4)
+bucket_location = "US"
+
+# Optional secondary region (for GKE failover)
+enable_secondary_region = false
+secondary_region        = "us-east1"
+secondary_zone          = "us-east1-b"
+secondary_cluster_name  = "blueprint-cluster-secondary"
+
 # Environment (dev, staging, prod)
 environment = "prod"
 
