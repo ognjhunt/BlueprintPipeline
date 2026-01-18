@@ -25,6 +25,10 @@
 #   gcloud workflows run episode-generation-pipeline \
 #     --location=us-central1 \
 #     --data='{"data":{"bucket":"your-bucket","name":"scenes/kitchen_001/usd/.usd_complete"}}'
+#
+# Configurable inputs/environment:
+#   - build_poll_timeout_seconds: Max seconds to poll Cloud Build for episode job completion.
+#     Defaults to EPISODE_BUILD_POLL_TIMEOUT_SECONDS env var or 3600 seconds.
 
 main:
   params: [event]
@@ -49,6 +53,7 @@ main:
           - runStagingE2E: '${default(map.get(event, "run_staging_e2e"), sys.get_env("BP_ENV") == "production")}'
           - stagingDataRoot: '${default(map.get(event, "staging_data_root"), "/mnt/gcs")}'
           - monitoringGateEnabled: '${sys.get_env("BP_ENV") == "production"}'
+          - buildPollTimeoutSeconds: '${int(default(map.get(event, "build_poll_timeout_seconds"), default(sys.get_env("EPISODE_BUILD_POLL_TIMEOUT_SECONDS"), "3600")))}'
           # Bundle tier for upsell features (standard, pro, enterprise, foundation)
           # Can be passed in event or read from scene config
           - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
@@ -476,6 +481,12 @@ main:
                   })}
             - raise_episode_start_error:
                 raise: ${e}
+        next: init_build_poll_tracking
+
+    - init_build_poll_tracking:
+        assign:
+          - buildPollStartTime: '${time.format(sys.now())}'
+          - buildPollAttempt: 0
         next: wait_for_build
 
     - wait_for_build:
@@ -498,6 +509,19 @@ main:
             next: episode_job_failed
           - condition: '${buildStatus.status == "SUCCESS"}'
             next: log_episode_complete
+        next: evaluate_build_poll_guard
+
+    - evaluate_build_poll_guard:
+        assign:
+          - buildPollAttempt: ${buildPollAttempt + 1}
+          - buildPollNow: '${time.format(sys.now())}'
+          - buildPollElapsedSeconds: '${time.parse(buildPollNow) - time.parse(buildPollStartTime)}'
+        next: build_poll_guard_switch
+
+    - build_poll_guard_switch:
+        switch:
+          - condition: '${buildPollElapsedSeconds >= buildPollTimeoutSeconds}'
+            next: build_poll_timeout_failed
         next: wait_for_build_poll
 
     - wait_for_build_poll:
@@ -505,6 +529,73 @@ main:
         args:
           seconds: 30
         next: check_build_status
+
+    - build_poll_timeout_failed:
+        assign:
+          - episodeEndTime: '${time.format(sys.now())}'
+          - episodeDurationSeconds: '${time.parse(episodeEndTime) - time.parse(episodeStartTime)}'
+          - episodeTimeoutUsageRatio: '${episodeDurationSeconds / episodeJobTimeoutSeconds}'
+          - episodeTimedOut: true
+        next: emit_episode_poll_timeout_metrics
+
+    - emit_episode_poll_timeout_metrics:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "episode-generation-pipeline"
+            job: ${episodeJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${episodeJobTimeoutSeconds}
+            duration_seconds: ${episodeDurationSeconds}
+            timeout_usage_ratio: ${episodeTimeoutUsageRatio}
+            timed_out: ${episodeTimedOut}
+            status: "FAILED"
+            start_time: ${episodeStartTime}
+            end_time: ${episodeEndTime}
+          severity: "ERROR"
+        next: log_episode_poll_timeout
+
+    - log_episode_poll_timeout:
+        call: sys.log
+        args:
+          text: '${"ERROR: Episode generation build polling timed out after " + string(buildPollElapsedSeconds) + "s (max " + string(buildPollTimeoutSeconds) + "s, attempts=" + string(buildPollAttempt) + ") for scene " + sceneId}'
+          severity: "ERROR"
+        next: write_episode_poll_timeout_marker
+
+    - write_episode_poll_timeout_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${episodesFailedMarker}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "job_name": episodeJobName,
+            "status": "failed",
+            "timestamp": time.format(sys.now()),
+            "error": {
+              "code": "episode_generation_poll_timeout",
+              "message": "Polling timed out waiting for Cloud Build completion",
+              "type": "workflow_timeout",
+              "stack_trace": null
+            },
+            "context": {
+              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+              "attempt_number": buildPollAttempt,
+              "config_context": {
+                "episodes_prefix": episodesPrefix,
+                "poll_elapsed_seconds": buildPollElapsedSeconds,
+                "poll_timeout_seconds": buildPollTimeoutSeconds
+              }
+            },
+            "input_params": {
+              "scene_id": sceneId,
+              "bucket": bucket
+            }
+          })}
+        next: write_legacy_failure_marker
 
     - log_episode_complete:
         assign:
