@@ -339,7 +339,7 @@ main:
             scene_id: ${scene_id}
             job_id: ${job_id}
             timeout_seconds: ${importTimeoutSeconds}
-            retry_max: 3
+            retry_max: 5
             start_time: ${importStartTime}
           severity: "INFO"
         next: run_import_job
@@ -378,10 +378,10 @@ main:
           result: import_job_execution
         retry:
           predicate: ${http.default_retry_predicate}
-          max_retries: 3
+          max_retries: 5
           backoff:
-            initial_delay: 2
-            max_delay: 30
+            initial_delay: 1
+            max_delay: 60
             multiplier: 2
         except:
           as: e
@@ -395,7 +395,7 @@ main:
                     job: "genie-sim-import-job"
                     scene_id: ${scene_id}
                     job_id: ${job_id}
-                    retry_max: 3
+                    retry_max: 5
                     error: ${e.message}
                   severity: "ERROR"
             - log_import_job_error:
