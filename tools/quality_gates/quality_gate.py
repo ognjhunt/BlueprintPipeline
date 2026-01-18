@@ -1347,10 +1347,10 @@ class QualityGateRegistry:
                 }
             else:
                 base_thresholds = {
-                    "collision_free_rate_min": float(os.getenv("BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN", "0.8")),
-                    "quality_pass_rate_min": float(os.getenv("BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN", "0.5")),
-                    "quality_score_min": float(os.getenv("BP_QUALITY_EPISODES_QUALITY_SCORE_MIN", "0.85")),
-                    "min_episodes_required": int(os.getenv("BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED", "1")),
+                    "collision_free_rate_min": float(os.getenv("BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN", "0.90")),
+                    "quality_pass_rate_min": float(os.getenv("BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN", "0.70")),
+                    "quality_score_min": float(os.getenv("BP_QUALITY_EPISODES_QUALITY_SCORE_MIN", "0.90")),
+                    "min_episodes_required": int(os.getenv("BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED", "3")),
                 }
 
             env_threshold_keys = (
@@ -1389,18 +1389,25 @@ class QualityGateRegistry:
                 except json.JSONDecodeError:
                     tier_thresholds = {}
 
-            default_tier_minimums = {
-                "core": {},
-                "plus": {
-                    "collision_free_rate_min": 0.85,
-                    "quality_pass_rate_min": 0.6,
-                    "quality_score_min": 0.88,
+            default_tier_minimums = (
+                getattr(self.config.episodes, "tier_thresholds", {}) if self.config else {}
+            ) or {
+                "core": {
+                    "collision_free_rate_min": 0.90,
+                    "quality_pass_rate_min": 0.70,
+                    "quality_score_min": 0.90,
                     "min_episodes_required": 3,
                 },
+                "plus": {
+                    "collision_free_rate_min": 0.90,
+                    "quality_pass_rate_min": 0.70,
+                    "quality_score_min": 0.90,
+                    "min_episodes_required": 4,
+                },
                 "full": {
-                    "collision_free_rate_min": 0.9,
-                    "quality_pass_rate_min": 0.7,
-                    "quality_score_min": 0.92,
+                    "collision_free_rate_min": 0.90,
+                    "quality_pass_rate_min": 0.70,
+                    "quality_score_min": 0.90,
                     "min_episodes_required": 5,
                 },
             }
@@ -1423,6 +1430,20 @@ class QualityGateRegistry:
                     key: max(effective_thresholds[key], production_minimums[key])
                     for key in effective_thresholds
                 }
+
+            if env_overrides_used or tier_thresholds_source in {"environment", "context"} or context_overrides_used:
+                relaxed_below_production = {
+                    key: effective_thresholds[key] < production_minimums[key]
+                    for key in effective_thresholds
+                }
+                self.log(
+                    "Episode quality thresholds overridden: "
+                    f"env_overrides={env_overrides_used}, "
+                    f"tier_source={tier_thresholds_source}, "
+                    f"context_overrides={context_overrides_used}, "
+                    f"relaxed_below_production={relaxed_below_production}, "
+                    f"effective_thresholds={effective_thresholds}"
+                )
 
             if explicit_thresholds_configured:
                 quality_thresholds_source = "overrides"
