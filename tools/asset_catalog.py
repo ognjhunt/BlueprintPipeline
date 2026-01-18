@@ -20,6 +20,8 @@ import sys
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, Iterable, List, Optional
 
+ASSET_CATALOG_SCHEMA_VERSION = 1
+
 firestore_spec = importlib.util.find_spec("google.cloud.firestore")
 firestore = importlib.import_module("google.cloud.firestore") if firestore_spec else None
 
@@ -58,6 +60,7 @@ class AssetDocument:
     """Canonical document stored in the ``assets`` collection."""
 
     asset_id: str
+    schema_version: int = ASSET_CATALOG_SCHEMA_VERSION
     logical_id: Optional[str] = None
     source: str = "unknown"  # "nvidia_pack", "regen3d", "generated", ...
     usd_path: Optional[str] = None
@@ -79,6 +82,7 @@ class AssetDocument:
 
         return cls(
             asset_id=str(payload.get("asset_id") or payload.get("id")),
+            schema_version=int(payload.get("schema_version", ASSET_CATALOG_SCHEMA_VERSION)),
             logical_id=payload.get("logical_id"),
             source=payload.get("source", "unknown"),
             usd_path=payload.get("usd_path") or payload.get("asset_path"),
@@ -94,6 +98,7 @@ class AssetDocument:
             extra_metadata={k: v for k, v in payload.items() if k not in {
                 "asset_id",
                 "id",
+                "schema_version",
                 "logical_id",
                 "source",
                 "usd_path",
@@ -114,6 +119,7 @@ class AssetDocument:
     def to_firestore(self) -> Dict[str, Any]:
         payload = {
             "asset_id": self.asset_id,
+            "schema_version": self.schema_version,
             "logical_id": self.logical_id,
             "source": self.source,
             "usd_path": self.usd_path,
@@ -154,6 +160,7 @@ class SceneDocument:
     """Scene-level metadata stored in the ``scenes`` collection."""
 
     scene_id: str
+    schema_version: int = ASSET_CATALOG_SCHEMA_VERSION
     assets_prefix: Optional[str] = None
     usd_path: Optional[str] = None
     thumbnail_uri: Optional[str] = None
@@ -170,6 +177,7 @@ class SceneDocument:
 
         return cls(
             scene_id=str(payload.get("scene_id") or payload.get("id")),
+            schema_version=int(payload.get("schema_version", ASSET_CATALOG_SCHEMA_VERSION)),
             assets_prefix=payload.get("assets_prefix"),
             usd_path=payload.get("usd_path"),
             thumbnail_uri=payload.get("thumbnail_uri"),
@@ -179,6 +187,7 @@ class SceneDocument:
             extra_metadata={k: v for k, v in payload.items() if k not in {
                 "scene_id",
                 "id",
+                "schema_version",
                 "assets_prefix",
                 "usd_path",
                 "thumbnail_uri",
@@ -191,6 +200,7 @@ class SceneDocument:
     def to_firestore(self) -> Dict[str, Any]:
         payload = {
             "scene_id": self.scene_id,
+            "schema_version": self.schema_version,
             "assets_prefix": self.assets_prefix,
             "usd_path": self.usd_path,
             "thumbnail_uri": self.thumbnail_uri,
@@ -326,6 +336,7 @@ class AssetCatalogClient:
 
             payload: Dict[str, Any] = dict(metadata)
             payload["asset_id"] = asset_id
+            payload.setdefault("schema_version", ASSET_CATALOG_SCHEMA_VERSION)
             if asset_path:
                 payload.setdefault("asset_path", asset_path)
 
