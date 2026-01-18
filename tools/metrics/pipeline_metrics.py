@@ -261,24 +261,25 @@ class PrometheusMetric:
         try:
             from prometheus_client import Counter, Histogram, Gauge
 
+            labelnames = self._labelnames_for_type(metric_type)
             # Create metric based on type
             if metric_type == MetricType.COUNTER:
                 self.metric = Counter(
                     name,
                     description,
-                    labelnames=['job', 'scene_id', 'status']
+                    labelnames=labelnames
                 )
             elif metric_type == MetricType.HISTOGRAM:
                 self.metric = Histogram(
                     name,
                     description,
-                    labelnames=['job', 'scene_id']
+                    labelnames=labelnames
                 )
             else:  # GAUGE
                 self.metric = Gauge(
                     name,
                     description,
-                    labelnames=['job', 'scene_id']
+                    labelnames=labelnames
                 )
 
             self.enabled = True
@@ -289,35 +290,51 @@ class PrometheusMetric:
             )
             self.enabled = False
 
+    @staticmethod
+    def _labelnames_for_type(metric_type: MetricType) -> List[str]:
+        if metric_type == MetricType.COUNTER:
+            return [
+                "job",
+                "scene_id",
+                "status",
+                "error_type",
+                "api",
+                "operation",
+                "job_id",
+                "source",
+                "variant",
+            ]
+        if metric_type == MetricType.HISTOGRAM:
+            return ["job", "scene_id", "api", "operation", "job_id", "variant"]
+        return ["job", "scene_id", "variant"]
+
+    def _coerce_labels(self, labels: Optional[Dict[str, str]]) -> Dict[str, str]:
+        labelnames = list(self.metric._labelnames)  # type: ignore[attr-defined]
+        if labels is None:
+            return {name: "unknown" for name in labelnames}
+        filtered = {name: str(labels.get(name, "unknown")) for name in labelnames}
+        return filtered
+
     def inc(self, value: float = 1.0, labels: Optional[Dict[str, str]] = None) -> None:
         """Increment counter."""
         if not self.enabled:
             return
 
-        if labels:
-            self.metric.labels(**labels).inc(value)
-        else:
-            self.metric.inc(value)
+        self.metric.labels(**self._coerce_labels(labels)).inc(value)
 
     def observe(self, value: float, labels: Optional[Dict[str, str]] = None) -> None:
         """Observe histogram value."""
         if not self.enabled:
             return
 
-        if labels:
-            self.metric.labels(**labels).observe(value)
-        else:
-            self.metric.observe(value)
+        self.metric.labels(**self._coerce_labels(labels)).observe(value)
 
     def set(self, value: float, labels: Optional[Dict[str, str]] = None) -> None:
         """Set gauge value."""
         if not self.enabled:
             return
 
-        if labels:
-            self.metric.labels(**labels).set(value)
-        else:
-            self.metric.set(value)
+        self.metric.labels(**self._coerce_labels(labels)).set(value)
 
 
 class PipelineMetricsCollector:
@@ -550,13 +567,22 @@ class PipelineMetricsCollector:
             MetricType.COUNTER,
         )
 
+    def _with_variant(self, labels: Dict[str, str], variant: Optional[str]) -> Dict[str, str]:
+        """Attach a variant label to metric labels when provided."""
+        if not variant:
+            return labels
+        enriched = labels.copy()
+        enriched["variant"] = variant
+        return enriched
+
     @contextmanager
-    def track_job(self, job_name: str, scene_id: str):
+    def track_job(self, job_name: str, scene_id: str, variant: Optional[str] = None):
         """Context manager to track job execution.
 
         Args:
             job_name: Name of the job (e.g., "regen3d-job")
             scene_id: Scene identifier
+            variant: Optional A/B testing variant label
 
         Example:
             with metrics.track_job("regen3d-job", "scene_001"):
@@ -564,10 +590,13 @@ class PipelineMetricsCollector:
                 pass
         """
         start = time.time()
-        labels = {"job": job_name, "scene_id": scene_id, "status": "success"}
+        labels = self._with_variant(
+            {"job": job_name, "scene_id": scene_id, "status": "success"},
+            variant,
+        )
 
         # Increment in-progress gauge
-        self.scenes_in_progress.set(1, labels={"job": job_name})
+        self.scenes_in_progress.set(1, labels=self._with_variant({"job": job_name}, variant))
 
         try:
             yield
@@ -582,11 +611,11 @@ class PipelineMetricsCollector:
             # Failure
             labels["status"] = "failure"
             self.pipeline_runs_total.inc(labels=labels)
-            self.errors_total.inc(labels={
+            self.errors_total.inc(labels=self._with_variant({
                 "job": job_name,
                 "scene_id": scene_id,
-                "error_type": type(e).__name__
-            })
+                "error_type": type(e).__name__,
+            }, variant))
 
             if self.enable_logging:
                 logger.error(f"[METRICS] Job {job_name} failed for scene {scene_id}: {e}")
@@ -598,7 +627,7 @@ class PipelineMetricsCollector:
             duration = time.time() - start
             self.pipeline_duration_seconds.observe(
                 duration,
-                labels={"job": job_name, "scene_id": scene_id}
+                labels=self._with_variant({"job": job_name, "scene_id": scene_id}, variant)
             )
 
             try:
@@ -619,13 +648,19 @@ class PipelineMetricsCollector:
                 )
 
             # Decrement in-progress gauge
-            self.scenes_in_progress.set(0, labels={"job": job_name})
+            self.scenes_in_progress.set(0, labels=self._with_variant({"job": job_name}, variant))
 
             if self.enable_logging:
                 logger.info(f"[METRICS] Job {job_name} took {duration:.2f}s")
 
     @contextmanager
-    def track_api_call(self, api_name: str, operation: str, scene_id: str = ""):
+    def track_api_call(
+        self,
+        api_name: str,
+        operation: str,
+        scene_id: str = "",
+        variant: Optional[str] = None,
+    ):
         """Context manager to track API call latency.
 
         Args:
@@ -642,6 +677,7 @@ class PipelineMetricsCollector:
         labels = {"api": api_name, "operation": operation}
         if scene_id:
             labels["scene_id"] = scene_id
+        labels = self._with_variant(labels, variant)
 
         try:
             yield
@@ -659,6 +695,7 @@ class PipelineMetricsCollector:
         tokens_input: int,
         tokens_output: int,
         operation: str = "",
+        variant: Optional[str] = None,
     ) -> None:
         """Track a Gemini API call.
 
@@ -668,7 +705,7 @@ class PipelineMetricsCollector:
             tokens_output: Number of output tokens
             operation: Optional operation name
         """
-        labels = {"scene_id": scene_id}
+        labels = self._with_variant({"scene_id": scene_id}, variant)
         if operation:
             labels["operation"] = operation
 
@@ -688,6 +725,7 @@ class PipelineMetricsCollector:
         job_id: str,
         duration_seconds: float,
         episode_count: int,
+        variant: Optional[str] = None,
     ) -> None:
         """Track a Genie Sim job.
 
@@ -697,7 +735,7 @@ class PipelineMetricsCollector:
             duration_seconds: Job duration
             episode_count: Number of episodes generated
         """
-        labels = {"scene_id": scene_id, "job_id": job_id}
+        labels = self._with_variant({"scene_id": scene_id, "job_id": job_id}, variant)
 
         self.geniesim_jobs.inc(labels=labels)
         self.geniesim_episodes_generated.inc(episode_count, labels=labels)
