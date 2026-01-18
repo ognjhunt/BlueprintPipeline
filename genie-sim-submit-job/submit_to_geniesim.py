@@ -16,11 +16,12 @@ Environment Variables:
     MIN_QUALITY_SCORE: Minimum quality score (default: 0.85)
 """
 
+import hashlib
 import json
+import logging
 import os
 import sys
 import uuid
-import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -131,6 +132,32 @@ class LocalJobMetricsBuilder:
 def _write_local_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2))
+
+
+def _hash_payload(payload: Dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _build_idempotency_key(scene_id: str, task_config_hash: str, export_manifest_hash: str) -> str:
+    payload = {
+        "scene_id": scene_id,
+        "task_config_hash": task_config_hash,
+        "export_manifest_hash": export_manifest_hash,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _read_optional_json_blob(
+    client: storage.Client,
+    bucket: str,
+    blob_name: str,
+) -> Optional[Dict[str, Any]]:
+    blob = client.bucket(bucket).blob(blob_name)
+    if not blob.exists():
+        return None
+    return json.loads(blob.download_as_text())
 
 
 def _read_json_blob(client: storage.Client, bucket: str, blob_name: str) -> Dict[str, Any]:
@@ -506,6 +533,11 @@ def main() -> int:
     scene_graph = _read_json_blob(storage_client, bucket, f"{geniesim_prefix}/scene_graph.json")
     asset_index = _read_json_blob(storage_client, bucket, f"{geniesim_prefix}/asset_index.json")
     task_config = _read_json_blob(storage_client, bucket, f"{geniesim_prefix}/task_config.json")
+    export_manifest = _read_json_blob(
+        storage_client,
+        bucket,
+        f"{geniesim_prefix}/export_manifest.json",
+    )
     export_marker = _read_json_blob(
         storage_client,
         bucket,
@@ -527,6 +559,37 @@ def main() -> int:
         min_quality_score=min_quality_score,
     )
 
+    task_config_hash = _hash_payload(task_config)
+    export_manifest_hash = _hash_payload(export_manifest)
+    idempotency_key = _build_idempotency_key(scene_id, task_config_hash, export_manifest_hash)
+    job_idempotency_path = f"{geniesim_prefix}/job_idempotency.json"
+
+    existing_job_payload = _read_optional_json_blob(storage_client, bucket, job_output_path)
+    if (
+        existing_job_payload
+        and existing_job_payload.get("idempotency", {}).get("key") == idempotency_key
+    ):
+        print(
+            "[GENIESIM-SUBMIT] Duplicate submission detected; "
+            f"existing job metadata at gs://{bucket}/{job_output_path}."
+        )
+        return 0
+
+    existing_idempotency = _read_optional_json_blob(storage_client, bucket, job_idempotency_path)
+    if existing_idempotency and existing_idempotency.get("key") == idempotency_key:
+        existing_metadata_path = existing_idempotency.get("job_metadata_path")
+        location_hint = (
+            existing_metadata_path
+            if existing_metadata_path
+            else f"gs://{bucket}/{job_output_path}"
+        )
+        print(
+            "[GENIESIM-SUBMIT] Duplicate submission detected; "
+            f"existing idempotency record at gs://{bucket}/{job_idempotency_path} "
+            f"for {location_hint}."
+        )
+        return 0
+
     job_id = f"local-{uuid.uuid4()}"
     submission_message = "Local Genie Sim execution started."
     local_run_result = None
@@ -534,6 +597,7 @@ def main() -> int:
     failure_details: Dict[str, Any] = {}
     episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
     submitted_at = datetime.utcnow().isoformat() + "Z"
+    original_submitted_at = submitted_at
     local_run_end = None
 
     job_status = "submitted"
@@ -655,6 +719,12 @@ def main() -> int:
         "scene_id": scene_id,
         "status": job_status,
         "submitted_at": submitted_at,
+        "idempotency": {
+            "key": idempotency_key,
+            "task_config_hash": task_config_hash,
+            "export_manifest_hash": export_manifest_hash,
+            "first_submitted_at": original_submitted_at,
+        },
         "message": submission_message,
         "bundle": {
             "scene_graph": f"gs://{bucket}/{geniesim_prefix}/scene_graph.json",
@@ -721,6 +791,20 @@ def main() -> int:
     }
 
     _write_json_blob(storage_client, bucket, job_output_path, job_payload)
+    _write_json_blob(
+        storage_client,
+        bucket,
+        job_idempotency_path,
+        {
+            "key": idempotency_key,
+            "scene_id": scene_id,
+            "task_config_hash": task_config_hash,
+            "export_manifest_hash": export_manifest_hash,
+            "submitted_at": original_submitted_at,
+            "job_id": job_id,
+            "job_metadata_path": f"gs://{bucket}/{job_output_path}",
+        },
+    )
     if job_status == "failed":
         _write_failure_marker(
             storage_client,
