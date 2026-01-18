@@ -3411,7 +3411,9 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         from tools.startup_validation import validate_and_fail_fast
+        from tools.logging_config import init_logging
 
+        init_logging()
         validate_and_fail_fast(job_name="EPISODE-GEN", validate_gcs=True)
         main()
     except Exception as exc:
