@@ -122,6 +122,10 @@ class GeneratedTask:
     config: TaskConfig
 
 
+class TaskConfigValidationError(ValueError):
+    """Validation error for task configuration."""
+
+
 class IsaacLabTaskGenerator:
     """
     Generates Isaac Lab task packages from scene recipes.
@@ -186,9 +190,14 @@ class IsaacLabTaskGenerator:
         policy = self.policies.get(policy_id, {})
 
         # Build task configuration
-        task_config = self._build_task_config(
-            recipe, policy, policy_id, robot_type, num_envs, scene_path
-        )
+        try:
+            task_config = self._build_task_config(
+                recipe, policy, policy_id, robot_type, num_envs, scene_path
+            )
+        except TaskConfigValidationError as exc:
+            raise TaskConfigValidationError(
+                f"Task configuration validation failed for policy '{policy_id}': {exc}"
+            ) from exc
 
         self.reward_generator.validate_components(
             list(task_config.reward_weights.keys())
@@ -253,8 +262,15 @@ class IsaacLabTaskGenerator:
 
         # Map logical object identifiers to prim paths in the stage
         scene_entities = self._build_scene_entity_map(recipe)
-        if primary_target and primary_target not in scene_entities:
-            scene_entities[primary_target] = f"/World/Scene/{primary_target}"
+
+        self._validate_task_config(
+            policy=policy,
+            scene_entities=scene_entities,
+            primary_target=primary_target,
+            observation_space=obs_space,
+            action_space=action_space,
+            robot_config=robot_config,
+        )
 
         # Get reward weights - include sim2real penalties by default
         reward_components = policy.get("reward_components", [])
@@ -306,6 +322,136 @@ class IsaacLabTaskGenerator:
             randomization_config=randomization_config,
             physics_profile=physics_profile,
         )
+
+    def _validate_task_config(
+        self,
+        policy: dict[str, Any],
+        scene_entities: dict[str, str],
+        primary_target: Optional[str],
+        observation_space: dict[str, Any],
+        action_space: dict[str, Any],
+        robot_config: dict[str, Any],
+    ) -> None:
+        """Validate task configuration references and dimensions."""
+        errors: list[str] = []
+        errors.extend(
+            self._validate_scene_entity_references(
+                policy=policy,
+                scene_entities=scene_entities,
+                primary_target=primary_target,
+                observation_space=observation_space,
+                action_space=action_space,
+            )
+        )
+        errors.extend(
+            self._validate_space_dimensions(
+                observation_space=observation_space,
+                action_space=action_space,
+                robot_config=robot_config,
+            )
+        )
+
+        if errors:
+            raise TaskConfigValidationError("; ".join(errors))
+
+    def _validate_scene_entity_references(
+        self,
+        policy: dict[str, Any],
+        scene_entities: dict[str, str],
+        primary_target: Optional[str],
+        observation_space: dict[str, Any],
+        action_space: dict[str, Any],
+    ) -> list[str]:
+        """Ensure referenced entities exist in the scene entity map."""
+        references: set[str] = {"robot"}
+        references.update(self._extract_entity_names(policy.get("observation_entities")))
+        references.update(self._extract_entity_names(policy.get("action_entities")))
+        references.update(self._extract_entity_names(policy.get("observations")))
+        references.update(self._extract_entity_names(policy.get("actions")))
+        references.update(self._extract_entity_names(observation_space))
+        references.update(self._extract_entity_names(action_space))
+        if primary_target:
+            references.add(primary_target)
+
+        missing = sorted(ref for ref in references if ref not in scene_entities)
+        if missing:
+            return [
+                "Missing scene entity mappings for "
+                f"{', '.join(missing)} (available: {', '.join(sorted(scene_entities))})"
+            ]
+        return []
+
+    def _extract_entity_names(self, value: Any) -> set[str]:
+        """Extract entity references from policy-defined observation/action specs."""
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            return {value}
+        if isinstance(value, list):
+            names: set[str] = set()
+            for item in value:
+                names.update(self._extract_entity_names(item))
+            return names
+        if isinstance(value, dict):
+            names: set[str] = set()
+            for key in (
+                "entity",
+                "entities",
+                "asset",
+                "asset_name",
+                "object",
+                "object_id",
+                "target",
+                "target_object",
+                "target_entity",
+                "source",
+                "source_entity",
+            ):
+                if key in value:
+                    names.update(self._extract_entity_names(value[key]))
+            return names
+        return set()
+
+    def _validate_space_dimensions(
+        self,
+        observation_space: dict[str, Any],
+        action_space: dict[str, Any],
+        robot_config: dict[str, Any],
+    ) -> list[str]:
+        """Validate observation/action space dimensions against robot config."""
+        errors: list[str] = []
+        expected_arm = robot_config.get("num_dofs", 0)
+        expected_gripper = robot_config.get("gripper_dofs", 0)
+
+        robot_obs = observation_space.get("robot", {})
+        if "joint_pos" in robot_obs and robot_obs["joint_pos"] != expected_arm:
+            errors.append(
+                "Observation joint_pos dimension mismatch: "
+                f"{robot_obs['joint_pos']} != {expected_arm}"
+            )
+        if "joint_vel" in robot_obs and robot_obs["joint_vel"] != expected_arm:
+            errors.append(
+                "Observation joint_vel dimension mismatch: "
+                f"{robot_obs['joint_vel']} != {expected_arm}"
+            )
+        if "gripper_pos" in robot_obs and robot_obs["gripper_pos"] != expected_gripper:
+            errors.append(
+                "Observation gripper_pos dimension mismatch: "
+                f"{robot_obs['gripper_pos']} != {expected_gripper}"
+            )
+
+        if action_space.get("arm_dofs") != expected_arm:
+            errors.append(
+                "Action arm_dofs dimension mismatch: "
+                f"{action_space.get('arm_dofs')} != {expected_arm}"
+            )
+        if action_space.get("gripper_dofs") != expected_gripper:
+            errors.append(
+                "Action gripper_dofs dimension mismatch: "
+                f"{action_space.get('gripper_dofs')} != {expected_gripper}"
+            )
+
+        return errors
 
     def _build_observation_space(
         self,
