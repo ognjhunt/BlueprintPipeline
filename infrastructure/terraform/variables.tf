@@ -200,6 +200,40 @@ variable "master_cidr" {
   default     = "172.16.0.0/28"
 }
 
+# =============================================================================
+# Secret rotation automation
+# =============================================================================
+
+variable "secret_rotation_job_image" {
+  type        = string
+  description = "Container image for the secret rotation Cloud Run job"
+  default     = "us-docker.pkg.dev/example-project/pipeline/secret-rotation:latest"
+}
+
+variable "secret_rotation_secret_ids" {
+  type        = list(string)
+  description = "Secret Manager secret IDs to rotate on schedule"
+  default     = []
+}
+
+variable "secret_rotation_schedule" {
+  type        = string
+  description = "Cron schedule for secret rotation"
+  default     = "0 3 * * *"
+}
+
+variable "secret_rotation_time_zone" {
+  type        = string
+  description = "Time zone for the rotation schedule"
+  default     = "Etc/UTC"
+}
+
+variable "secret_rotation_byte_length" {
+  type        = number
+  description = "Byte length for generated secret values"
+  default     = 32
+}
+
 variable "authorized_networks" {
   type = list(object({
     cidr_block   = string
