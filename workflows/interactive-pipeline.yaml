@@ -151,49 +151,103 @@ main:
                   text: ${"ERROR: Interactive job failed: " + e.message}
                   severity: "ERROR"
             - list_interactive_outputs_for_cleanup:
-                call: googleapis.storage.v1.objects.list
-                args:
-                  bucket: ${bucket}
-                  prefix: ${interactiveOutputPrefix + "/"}
-                  maxResults: 1000
-                result: interactiveCleanupList
+                try:
+                  call: googleapis.storage.v1.objects.list
+                  args:
+                    bucket: ${bucket}
+                    prefix: ${interactiveOutputPrefix + "/"}
+                    maxResults: 1000
+                  result: interactiveCleanupList
+                retry:
+                  predicate: ${http.default_retry_predicate}
+                  max_retries: 3
+                  backoff:
+                    initial_delay: 2
+                    max_delay: 30
+                    multiplier: 2
+                except:
+                  as: e
+                  steps:
+                    - log_cleanup_list_error:
+                        call: sys.log
+                        args:
+                          text: ${"Failed to list interactive cleanup objects in bucket " + bucket + " for prefix " + interactiveOutputPrefix + ": " + e.message}
+                          severity: "ERROR"
+                    - raise_cleanup_list_error:
+                        raise: ${e}
             - delete_interactive_outputs_for_cleanup:
                 for:
                   value: interactiveCleanupItem
                   in: ${default(interactiveCleanupList.items, [])}
                   steps:
                     - delete_interactive_output:
-                        call: googleapis.storage.v1.objects.delete
-                        args:
-                          bucket: ${bucket}
-                          object: ${interactiveCleanupItem.name}
+                        try:
+                          call: googleapis.storage.v1.objects.delete
+                          args:
+                            bucket: ${bucket}
+                            object: ${interactiveCleanupItem.name}
+                        retry:
+                          predicate: ${http.default_retry_predicate}
+                          max_retries: 3
+                          backoff:
+                            initial_delay: 2
+                            max_delay: 30
+                            multiplier: 2
+                        except:
+                          as: e
+                          steps:
+                            - log_cleanup_delete_error:
+                                call: sys.log
+                                args:
+                                  text: ${"Failed to delete interactive cleanup object " + interactiveCleanupItem.name + " in bucket " + bucket + ": " + e.message}
+                                  severity: "ERROR"
+                            - raise_cleanup_delete_error:
+                                raise: ${e}
             - write_interactive_failure_marker:
-                call: googleapis.storage.v1.objects.insert
-                args:
-                  bucket: ${bucket}
-                  name: ${interactiveFailedMarker}
-                  uploadType: "media"
-                  body: ${json.encode({
-                    "scene_id": sceneId,
-                    "job_name": jobName,
-                    "status": "failed",
-                    "timestamp": time.format(sys.now()),
-                    "error": {
-                      "code": "interactive_job_start_failed",
-                      "message": e.message,
-                      "type": "workflow_failure",
-                      "stack_trace": null
-                    },
-                    "context": {
-                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
-                      "attempt_number": 1,
-                      "config_context": {
-                        "assets_prefix": assetsPrefix,
-                        "layout_prefix": layoutPrefix,
-                        "multiview_prefix": multiviewPrefix
+                try:
+                  call: googleapis.storage.v1.objects.insert
+                  args:
+                    bucket: ${bucket}
+                    name: ${interactiveFailedMarker}
+                    uploadType: "media"
+                    body: ${json.encode({
+                      "scene_id": sceneId,
+                      "job_name": jobName,
+                      "status": "failed",
+                      "timestamp": time.format(sys.now()),
+                      "error": {
+                        "code": "interactive_job_start_failed",
+                        "message": e.message,
+                        "type": "workflow_failure",
+                        "stack_trace": null
+                      },
+                      "context": {
+                        "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                        "attempt_number": 1,
+                        "config_context": {
+                          "assets_prefix": assetsPrefix,
+                          "layout_prefix": layoutPrefix,
+                          "multiview_prefix": multiviewPrefix
+                        }
                       }
-                    }
-                  })}
+                    })}
+                retry:
+                  predicate: ${http.default_retry_predicate}
+                  max_retries: 3
+                  backoff:
+                    initial_delay: 2
+                    max_delay: 30
+                    multiplier: 2
+                except:
+                  as: e
+                  steps:
+                    - log_failure_marker_insert_error:
+                        call: sys.log
+                        args:
+                          text: ${"Failed to write interactive failure marker " + interactiveFailedMarker + " in bucket " + bucket + ": " + e.message}
+                          severity: "ERROR"
+                    - raise_failure_marker_insert_error:
+                        raise: ${e}
             - next: done_failed
         next: set_interactive_execution_name
 
@@ -265,33 +319,51 @@ main:
         next: write_interactive_failure_marker_on_failure
 
     - write_interactive_failure_marker_on_failure:
-        call: googleapis.storage.v1.objects.insert
-        args:
-          bucket: ${bucket}
-          name: ${interactiveFailedMarker}
-          uploadType: "media"
-          body: ${json.encode({
-            "scene_id": sceneId,
-            "job_name": jobName,
-            "status": "failed",
-            "timestamp": time.format(sys.now()),
-            "error": {
-              "code": "interactive_job_failed",
-              "message": "Interactive job failed",
-              "type": "workflow_failure",
-              "stack_trace": null
-            },
-            "context": {
-              "execution_id": interactiveExecutionName,
-              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
-              "attempt_number": 1,
-              "config_context": {
-                "assets_prefix": assetsPrefix,
-                "layout_prefix": layoutPrefix,
-                "multiview_prefix": multiviewPrefix
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${interactiveFailedMarker}
+            uploadType: "media"
+            body: ${json.encode({
+              "scene_id": sceneId,
+              "job_name": jobName,
+              "status": "failed",
+              "timestamp": time.format(sys.now()),
+              "error": {
+                "code": "interactive_job_failed",
+                "message": "Interactive job failed",
+                "type": "workflow_failure",
+                "stack_trace": null
+              },
+              "context": {
+                "execution_id": interactiveExecutionName,
+                "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                "attempt_number": 1,
+                "config_context": {
+                  "assets_prefix": assetsPrefix,
+                  "layout_prefix": layoutPrefix,
+                  "multiview_prefix": multiviewPrefix
+                }
               }
-            }
-          })}
+            })}
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_failure_marker_on_failure_insert_error:
+                call: sys.log
+                args:
+                  text: ${"Failed to write interactive failure marker " + interactiveFailedMarker + " in bucket " + bucket + ": " + e.message}
+                  severity: "ERROR"
+            - raise_failure_marker_on_failure_insert_error:
+                raise: ${e}
         next: read_interactive_failure_marker
 
     - read_interactive_failure_marker:
@@ -302,13 +374,20 @@ main:
             object: ${interactiveFailedMarker}
             alt: "media"
           result: interactiveFailurePayload
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
         except:
           as: e
           steps:
             - log_interactive_failure_marker_read_error:
                 call: sys.log
                 args:
-                  text: ${"Failed to read .failed marker for interactive job in scene " + sceneId + ": " + e.message}
+                  text: ${"Failed to read .failed marker " + interactiveFailedMarker + " in bucket " + bucket + " for scene " + sceneId + ": " + e.message}
                   severity: "WARNING"
         next: log_interactive_failure_marker_payload
 
@@ -362,14 +441,23 @@ main:
             name: ${assetsPrefix + "/.interactive_complete"}
             body: ${"{\\"scene_id\\": \\"" + sceneId + "\\", \\"status\\": \\"completed\\", \\"backend\\": \\"" + articulationBackend + "\\", \\"timestamp\\": \\"" + time.format(sys.now()) + "\\"}" }
           result: markerResult
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
         except:
           as: e
           steps:
             - log_marker_error:
                 call: sys.log
                 args:
-                  text: ${"ERROR: Failed to create .interactive_complete marker: " + e.message}
+                  text: ${"ERROR: Failed to create .interactive_complete marker in bucket " + bucket + " for scene " + sceneId + ": " + e.message}
                   severity: "ERROR"
+            - raise_marker_error:
+                raise: ${e}
         next: log_marker_created
 
     - log_marker_created:
