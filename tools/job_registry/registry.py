@@ -20,6 +20,11 @@ Reference:
 - Paper: https://arxiv.org/abs/2512.17459
 - Project: https://3dregen.jdihlmann.com/
 - GitHub: https://github.com/cgtuebingen/3D-RE-GEN
+
+Module exports:
+    - JOBS: A stable, read-only tuple of all JobInfo entries.
+    - JOBS_BY_NAME: A name → JobInfo mapping for quick access.
+    Import these for callers that don't need to instantiate JobRegistry directly.
 """
 
 from __future__ import annotations
@@ -471,3 +476,7 @@ def get_registry() -> JobRegistry:
     if _registry is None:
         _registry = JobRegistry()
     return _registry
+
+
+JOBS = tuple(get_registry().get_all_jobs())
+JOBS_BY_NAME = {job.name: job for job in JOBS}
