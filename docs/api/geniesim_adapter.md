@@ -39,6 +39,10 @@ Local framework configuration uses environment variables when instantiating `Gen
 
 These are referenced directly by the local framework adapter, along with additional settings derived from `GenieSimConfig` for episodes per task and robot selection.【F:tools/geniesim_adapter/local_framework.py†L52-L96】【F:tools/geniesim_adapter/local_framework.py†L214-L249】
 
+## Supported multi-robot embodiments
+
+The multi-robot adapter ships with built-in specs for humanoids (G2, GR1, Figure 01, H1), arms (Franka, UR10, UR5e, KUKA iiwa), mobile manipulators (Fetch, Tiago, Spot), and dual-arm platforms (YuMi, Baxter). Robot asset paths are resolved relative to `tools/geniesim_adapter/robot_assets`, and URDF/USD presence is validated when generating Genie Sim robot configs.【F:tools/geniesim_adapter/multi_robot_config.py†L22-L430】
+
 ## Request/response payloads & data models
 
 ### Exporter payloads

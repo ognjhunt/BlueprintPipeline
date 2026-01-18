@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional
 import json
 from pathlib import Path
 
+ROBOT_ASSETS_DIR = Path(__file__).resolve().parent / "robot_assets"
+
 
 class RobotCategory(str, Enum):
     """Categories of robot embodiments."""
@@ -35,6 +37,7 @@ class RobotType(str, Enum):
     G2 = "g2"                    # AGIBOT G2 (Genie Sim native)
     GR1 = "gr1"                  # Fourier GR1
     FIGURE_01 = "figure_01"     # Figure AI
+    H1 = "h1"                   # Unitree H1
 
     # Arms
     FRANKA = "franka"           # Franka Emika Panda
@@ -92,6 +95,9 @@ class RobotSpec:
             "reach_radius": self.reach_radius,
             "base_height": self.base_height,
             "geniesim_native": self.geniesim_native,
+            "urdf_path": self.urdf_path,
+            "usd_path": self.usd_path,
+            "requires_urdf_import": self.requires_urdf_import,
         }
 
 
@@ -119,6 +125,8 @@ ROBOT_SPECS: Dict[RobotType, RobotSpec] = {
         max_gripper_aperture=0.10,
         reach_radius=0.85,
         base_height=0.0,
+        urdf_path="robots/gr1/gr1.urdf",
+        usd_path="robots/gr1/gr1.usd",
     ),
     RobotType.FIGURE_01: RobotSpec(
         robot_type=RobotType.FIGURE_01,
@@ -129,6 +137,20 @@ ROBOT_SPECS: Dict[RobotType, RobotSpec] = {
         max_gripper_aperture=0.10,
         reach_radius=0.9,
         base_height=0.0,
+        urdf_path="robots/figure_01/figure_01.urdf",
+        usd_path="robots/figure_01/figure_01.usd",
+    ),
+    RobotType.H1: RobotSpec(
+        robot_type=RobotType.H1,
+        category=RobotCategory.HUMANOID,
+        num_joints=27,
+        action_dim=28,
+        gripper_type="dexterous",
+        max_gripper_aperture=0.12,
+        reach_radius=0.9,
+        base_height=0.0,
+        urdf_path="robots/h1/h1.urdf",
+        usd_path="robots/h1/h1.usd",
     ),
 
     # Arms
@@ -265,6 +287,7 @@ class MultiRobotConfig:
     enable_bimanual: bool = True
     bimanual_robots: List[RobotType] = field(default_factory=lambda: [
         RobotType.G2,      # Humanoid with two arms
+        RobotType.H1,      # Humanoid with two arms
         RobotType.YUMI,    # Dedicated dual-arm
     ])
 
@@ -316,6 +339,7 @@ DEFAULT_MULTI_ROBOT_CONFIG = MultiRobotConfig(
     secondary_robots=[
         RobotType.UR10,     # Popular industrial arm
         RobotType.GR1,      # Alternative humanoid
+        RobotType.H1,       # Unitree humanoid
     ],
     generate_all=False,
     enable_bimanual=True,
@@ -340,12 +364,34 @@ def get_robot_spec(robot_type: str | RobotType) -> RobotSpec:
     return ROBOT_SPECS[robot_type]
 
 
+def resolve_robot_asset_path(asset_path: Optional[str]) -> Optional[Path]:
+    """Resolve a robot asset path relative to the robot asset root."""
+    if not asset_path:
+        return None
+    return (ROBOT_ASSETS_DIR / asset_path).resolve()
+
+
+def validate_robot_assets(spec: RobotSpec) -> None:
+    """Validate that robot assets referenced by the spec exist on disk."""
+    if spec.requires_urdf_import and not spec.urdf_path:
+        raise ValueError(
+            f"URDF import required but no urdf_path is set for {spec.robot_type.value}."
+        )
+    for asset_path in (spec.urdf_path, spec.usd_path):
+        resolved = resolve_robot_asset_path(asset_path)
+        if resolved and not resolved.is_file():
+            raise FileNotFoundError(
+                f"Robot asset missing for {spec.robot_type.value}: {resolved}"
+            )
+
+
 def get_geniesim_robot_config(
     robot_type: RobotType,
     base_position: tuple = (0.0, 0.0, 0.0),
 ) -> Dict[str, Any]:
     """Get Genie Sim compatible robot configuration."""
     spec = ROBOT_SPECS[robot_type]
+    validate_robot_assets(spec)
 
     return {
         "robot_type": robot_type.value,
@@ -359,6 +405,18 @@ def get_geniesim_robot_config(
         "gripper_type": spec.gripper_type,
         "urdf_import_required": spec.requires_urdf_import,
         "urdf_path": spec.urdf_path,
+        "usd_path": spec.usd_path,
+        "resolved_urdf_path": (
+            str(resolve_robot_asset_path(spec.urdf_path))
+            if spec.urdf_path
+            else None
+        ),
+        "resolved_usd_path": (
+            str(resolve_robot_asset_path(spec.usd_path))
+            if spec.usd_path
+            else None
+        ),
+        "asset_root": str(ROBOT_ASSETS_DIR),
         "geniesim_native": spec.geniesim_native,
     }
 
