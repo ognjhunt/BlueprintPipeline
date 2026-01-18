@@ -46,7 +46,7 @@ main:
           - bucket: ${event.data.bucket}
           - object: ${event.data.name}
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
-          - region: "us-central1"
+          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - enableDwm: '${sys.get_env("ENABLE_DWM") != null and text.lower(sys.get_env("ENABLE_DWM")) == "true"}'
         next: filter_completion_markers
 
