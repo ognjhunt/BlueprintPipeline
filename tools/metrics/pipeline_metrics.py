@@ -529,6 +529,12 @@ class PipelineMetricsCollector:
             "Total pipeline cost in USD",
             MetricType.COUNTER,
             "USD",
+        # Cost metrics
+        self.cost_per_scene = self._create_metric(
+            "cost_per_scene",
+            "Total cost per scene in USD",
+            MetricType.GAUGE,
+            "usd",
         )
 
         # Error metrics
