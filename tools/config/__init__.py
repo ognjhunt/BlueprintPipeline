@@ -85,6 +85,15 @@ class HumanApprovalConfig:
 
 
 @dataclass
+class ApprovalStoreConfig:
+    """Approval request storage configuration."""
+    backend: str = "filesystem"
+    filesystem_path: str = "/tmp/blueprintpipeline/approvals"
+    firestore_collection: str = "quality_gate_approvals"
+    migrate_from_filesystem: bool = False
+
+
+@dataclass
 class GateOverrideConfig:
     """Gate override configuration."""
     allow_manual_override: bool = True
@@ -114,6 +123,7 @@ class QualityConfig:
     data_quality: DataQualityThresholds = field(default_factory=DataQualityThresholds)
     simulation: SimulationThresholds = field(default_factory=SimulationThresholds)
     human_approval: HumanApprovalConfig = field(default_factory=HumanApprovalConfig)
+    approval_store: ApprovalStoreConfig = field(default_factory=ApprovalStoreConfig)
     gate_overrides: GateOverrideConfig = field(default_factory=GateOverrideConfig)
 
 
@@ -537,6 +547,14 @@ class ConfigLoader:
                         "override",
                     )
 
+            if "approval" in config and isinstance(config["approval"], dict):
+                store_override = config["approval"].get("store")
+                if isinstance(store_override, dict):
+                    approval_store = config.get("approval_store", {})
+                    if not isinstance(approval_store, dict):
+                        approval_store = {}
+                    config["approval_store"] = cls._deep_merge(approval_store, store_override)
+
             if use_cache and not overrides:
                 cls._quality_config_cache = config
 
@@ -586,6 +604,21 @@ class ConfigLoader:
                 ),
                 approval_methods=config.get("human_approval", {}).get("approval_methods", ["dashboard", "email", "api"]),
                 notification_channels=config.get("human_approval", {}).get("notification_channels", ["email", "console"]),
+            ),
+            approval_store=ApprovalStoreConfig(
+                backend=config.get("approval_store", {}).get("backend", "filesystem"),
+                filesystem_path=config.get("approval_store", {}).get(
+                    "filesystem_path",
+                    "/tmp/blueprintpipeline/approvals",
+                ),
+                firestore_collection=config.get("approval_store", {}).get(
+                    "firestore_collection",
+                    "quality_gate_approvals",
+                ),
+                migrate_from_filesystem=config.get("approval_store", {}).get(
+                    "migrate_from_filesystem",
+                    False,
+                ),
             ),
             gate_overrides=GateOverrideConfig(
                 allow_manual_override=config.get("gate_overrides", {}).get("allow_manual_override", True),
@@ -1042,6 +1075,16 @@ class ConfigLoader:
                         errors["gate_overrides.override_reason_schema.justification_min_length"] = (
                             "Must be a positive integer"
                         )
+
+        if "approval_store" in config:
+            approval_store = config["approval_store"]
+            if isinstance(approval_store, dict):
+                backend = approval_store.get("backend")
+                if backend and backend not in {"filesystem", "firestore"}:
+                    errors["approval_store.backend"] = "Must be 'filesystem' or 'firestore'"
+                firestore_collection = approval_store.get("firestore_collection")
+                if firestore_collection is not None and not str(firestore_collection).strip():
+                    errors["approval_store.firestore_collection"] = "Must be a non-empty string"
 
         return errors
 

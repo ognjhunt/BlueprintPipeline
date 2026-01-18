@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .notification_service import NotificationService, NotificationPayload
@@ -149,6 +149,112 @@ class ApprovalRequest:
             "approval_notes": self.approval_notes,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ApprovalRequest":
+        return cls(
+            request_id=data["request_id"],
+            gate_id=data["gate_id"],
+            scene_id=data["scene_id"],
+            checkpoint=data["checkpoint"],
+            status=ApprovalStatus(data["status"]),
+            failure_message=data.get("failure_message", ""),
+            failure_details=data.get("failure_details", {}),
+            recommendations=data.get("recommendations", []),
+            created_at=data.get("created_at", ""),
+            expires_at=data.get("expires_at", ""),
+            approved_by=data.get("approved_by"),
+            approved_at=data.get("approved_at"),
+            override_reason=data.get("override_reason"),
+            override_metadata=data.get("override_metadata"),
+            approval_notes=data.get("approval_notes"),
+        )
+
+
+class ApprovalStore(Protocol):
+    """Storage interface for approval requests and audit entries."""
+
+    def save_request(self, request: ApprovalRequest) -> None:
+        ...
+
+    def load_request(self, request_id: str) -> Optional[ApprovalRequest]:
+        ...
+
+    def list_requests(self, status: Optional[ApprovalStatus] = None) -> List[ApprovalRequest]:
+        ...
+
+    def write_audit_entry(self, audit_entry: Dict[str, Any]) -> None:
+        ...
+
+    def migrate_from_filesystem(self, base_dir: Path) -> int:
+        ...
+
+
+class FilesystemApprovalStore:
+    """Filesystem-backed approval store."""
+
+    DEFAULT_APPROVALS_DIR = Path("/tmp/blueprintpipeline/approvals")
+
+    def __init__(self, scene_id: str, base_dir: Optional[Path] = None) -> None:
+        self.scene_id = scene_id
+        self.base_dir = base_dir or self.DEFAULT_APPROVALS_DIR
+        self.scene_dir = self.base_dir / scene_id
+        self.scene_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_request(self, request: ApprovalRequest) -> None:
+        path = self.scene_dir / f"{request.request_id}.json"
+        with open(path, "w") as f:
+            json.dump(request.to_dict(), f, indent=2)
+
+    def load_request(self, request_id: str) -> Optional[ApprovalRequest]:
+        path = self.scene_dir / f"{request_id}.json"
+        if not path.exists():
+            return None
+        with open(path) as f:
+            data = json.load(f)
+        return ApprovalRequest.from_dict(data)
+
+    def list_requests(self, status: Optional[ApprovalStatus] = None) -> List[ApprovalRequest]:
+        requests: List[ApprovalRequest] = []
+        for path in self.scene_dir.glob("*.json"):
+            request = self.load_request(path.stem)
+            if not request:
+                continue
+            if status and request.status != status:
+                continue
+            requests.append(request)
+        return requests
+
+    def write_audit_entry(self, audit_entry: Dict[str, Any]) -> None:
+        audit_dir = self.scene_dir / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        audit_path = audit_dir / f"{audit_entry['request_id']}_{audit_entry['action'].lower()}.json"
+        with open(audit_path, "w") as f:
+            json.dump(audit_entry, f, indent=2)
+        log_path = audit_dir / "audit.log.jsonl"
+        with open(log_path, "a") as f:
+            f.write(json.dumps(audit_entry) + "\n")
+
+    def migrate_from_filesystem(self, base_dir: Path) -> int:
+        if base_dir.resolve() == self.base_dir.resolve():
+            return 0
+        migrated = 0
+        source_dir = base_dir / self.scene_id
+        if not source_dir.exists():
+            return 0
+        for path in source_dir.glob("*.json"):
+            with open(path) as f:
+                data = json.load(f)
+            self.save_request(ApprovalRequest.from_dict(data))
+            migrated += 1
+        audit_log = source_dir / "audit" / "audit.log.jsonl"
+        if audit_log.exists():
+            with open(audit_log) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    self.write_audit_entry(json.loads(line))
+        return migrated
+
 
 class HumanApprovalManager:
     """
@@ -188,9 +294,6 @@ class HumanApprovalManager:
             },
         )
     """
-
-    # Storage directory for pending approvals
-    APPROVALS_DIR = Path("/tmp/blueprintpipeline/approvals")
 
     def __init__(
         self,
@@ -243,9 +346,8 @@ class HumanApprovalManager:
                 )
             self.auto_approve_on_timeout = auto_approve_requested and allow_auto_approve_non_prod
 
-        # Ensure approvals directory exists
-        self.approvals_dir = self.APPROVALS_DIR / scene_id
-        self.approvals_dir.mkdir(parents=True, exist_ok=True)
+        self.store = self._init_store(scene_id)
+        self._run_store_migration_if_needed()
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -274,7 +376,7 @@ class HumanApprovalManager:
         )
 
         # Save to disk
-        self._save_request(request)
+        self.store.save_request(request)
 
         self.log(f"Created approval request {request.request_id} for gate {gate_result.gate_id}")
 
@@ -293,7 +395,7 @@ class HumanApprovalManager:
         Returns:
             ApprovalRequest with current status, or None if not found
         """
-        request = self._load_request(request_id)
+        request = self.store.load_request(request_id)
 
         if request and request.status == ApprovalStatus.PENDING:
             # Check if expired
@@ -308,7 +410,7 @@ class HumanApprovalManager:
                         request.approved_by = "SYSTEM:auto_timeout"
                         request.approved_at = datetime.utcnow().isoformat() + "Z"
                         request.approval_notes = f"Auto-approved after {self.timeout_hours}h timeout"
-                        self._save_request(request)
+                        self.store.save_request(request)
                         self._log_audit(
                             "AUTO_APPROVED_TIMEOUT",
                             request,
@@ -329,7 +431,7 @@ class HumanApprovalManager:
                         )
                     else:
                         request.approval_notes = f"Expired after {self.timeout_hours}h timeout"
-                    self._save_request(request)
+                    self.store.save_request(request)
                     self._log_audit(
                         "EXPIRED",
                         request,
@@ -429,7 +531,7 @@ class HumanApprovalManager:
         Returns:
             True if successfully approved
         """
-        request = self._load_request(request_id)
+        request = self.store.load_request(request_id)
 
         if not request:
             self.log(f"Approval request {request_id} not found", "ERROR")
@@ -444,7 +546,7 @@ class HumanApprovalManager:
         request.approved_at = datetime.utcnow().isoformat() + "Z"
         request.approval_notes = notes
 
-        self._save_request(request)
+        self.store.save_request(request)
         self._log_audit("APPROVED", request, approver)
 
         self.log(f"Request {request_id} approved by {approver}")
@@ -466,7 +568,7 @@ class HumanApprovalManager:
         Returns:
             True if successfully rejected
         """
-        request = self._load_request(request_id)
+        request = self.store.load_request(request_id)
 
         if not request:
             self.log(f"Approval request {request_id} not found", "ERROR")
@@ -481,7 +583,7 @@ class HumanApprovalManager:
         request.approved_at = datetime.utcnow().isoformat() + "Z"
         request.approval_notes = notes
 
-        self._save_request(request)
+        self.store.save_request(request)
         self._log_audit("REJECTED", request, approver)
 
         self.log(f"Request {request_id} rejected by {approver}")
@@ -507,7 +609,7 @@ class HumanApprovalManager:
         if not self._validate_override_metadata(override_metadata):
             return False
 
-        request = self._load_request(request_id)
+        request = self.store.load_request(request_id)
 
         if not request:
             self.log(f"Approval request {request_id} not found", "ERROR")
@@ -553,7 +655,7 @@ class HumanApprovalManager:
             "timestamp": str(override_metadata["timestamp"]).strip(),
         }
 
-        self._save_request(request)
+        self.store.save_request(request)
         self._log_audit(
             "OVERRIDDEN",
             request,
@@ -567,45 +669,7 @@ class HumanApprovalManager:
 
     def list_pending(self) -> List[ApprovalRequest]:
         """List all pending approval requests for this scene."""
-        requests = []
-        for path in self.approvals_dir.glob("*.json"):
-            request = self._load_request(path.stem)
-            if request and request.status == ApprovalStatus.PENDING:
-                requests.append(request)
-        return requests
-
-    def _save_request(self, request: ApprovalRequest) -> None:
-        """Save approval request to disk."""
-        path = self.approvals_dir / f"{request.request_id}.json"
-        with open(path, "w") as f:
-            json.dump(request.to_dict(), f, indent=2)
-
-    def _load_request(self, request_id: str) -> Optional[ApprovalRequest]:
-        """Load approval request from disk."""
-        path = self.approvals_dir / f"{request_id}.json"
-        if not path.exists():
-            return None
-
-        with open(path) as f:
-            data = json.load(f)
-
-        return ApprovalRequest(
-            request_id=data["request_id"],
-            gate_id=data["gate_id"],
-            scene_id=data["scene_id"],
-            checkpoint=data["checkpoint"],
-            status=ApprovalStatus(data["status"]),
-            failure_message=data.get("failure_message", ""),
-            failure_details=data.get("failure_details", {}),
-            recommendations=data.get("recommendations", []),
-            created_at=data.get("created_at", ""),
-            expires_at=data.get("expires_at", ""),
-            approved_by=data.get("approved_by"),
-            approved_at=data.get("approved_at"),
-            override_reason=data.get("override_reason"),
-            override_metadata=data.get("override_metadata"),
-            approval_notes=data.get("approval_notes"),
-        )
+        return self.store.list_requests(status=ApprovalStatus.PENDING)
 
     def _send_notification(self, request: ApprovalRequest) -> None:
         """Send notification for new approval request."""
@@ -641,9 +705,6 @@ class HumanApprovalManager:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Log audit trail for approval actions."""
-        audit_dir = self.approvals_dir / "audit"
-        audit_dir.mkdir(parents=True, exist_ok=True)
-
         audit_entry = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "action": action,
@@ -656,16 +717,55 @@ class HumanApprovalManager:
         }
         if action == "OVERRIDDEN" and metadata:
             audit_entry["override_metadata_hash"] = self._hash_override_metadata(metadata)
+        self.store.write_audit_entry(audit_entry)
 
-        audit_path = audit_dir / f"{request.request_id}_{action.lower()}.json"
-        with open(audit_path, "w") as f:
-            json.dump(audit_entry, f, indent=2)
-        self._append_audit_log(audit_dir / "audit.log.jsonl", audit_entry)
+    def _init_store(self, scene_id: str) -> ApprovalStore:
+        store_backend = None
+        store_config = None
+        if self.config and hasattr(self.config, "approval_store"):
+            store_config = self.config.approval_store
+            store_backend = store_config.backend
+        if not store_backend:
+            store_backend = os.getenv("BP_QUALITY_APPROVAL_STORE_BACKEND") or os.getenv(
+                "APPROVAL_STORE_BACKEND",
+                "filesystem",
+            )
 
-    def _append_audit_log(self, log_path: Path, audit_entry: Dict[str, Any]) -> None:
-        """Append audit entry to immutable log."""
-        with open(log_path, "a") as f:
-            f.write(json.dumps(audit_entry) + "\n")
+        backend = str(store_backend).lower()
+        if backend == "firestore":
+            from .approval_store_firestore import FirestoreApprovalStore
+
+            collection = "quality_gate_approvals"
+            if store_config and store_config.firestore_collection:
+                collection = store_config.firestore_collection
+            collection = os.getenv("BP_QUALITY_APPROVAL_STORE_FIRESTORE_COLLECTION", collection)
+            return FirestoreApprovalStore(scene_id=scene_id, collection=collection)
+
+        base_dir = FilesystemApprovalStore.DEFAULT_APPROVALS_DIR
+        if store_config and store_config.filesystem_path:
+            base_dir = Path(store_config.filesystem_path)
+        base_dir = Path(
+            os.getenv(
+                "BP_QUALITY_APPROVAL_STORE_FILESYSTEM_PATH",
+                os.getenv("APPROVAL_STORE_FILESYSTEM_PATH", str(base_dir)),
+            )
+        )
+        return FilesystemApprovalStore(scene_id=scene_id, base_dir=base_dir)
+
+    def _run_store_migration_if_needed(self) -> None:
+        if not self.config or not hasattr(self.config, "approval_store"):
+            return
+        store_config = self.config.approval_store
+        if not store_config.migrate_from_filesystem:
+            return
+        if store_config.backend != "firestore":
+            return
+        source_dir = FilesystemApprovalStore.DEFAULT_APPROVALS_DIR
+        if store_config.filesystem_path:
+            source_dir = Path(store_config.filesystem_path)
+        migrated = self.store.migrate_from_filesystem(source_dir)
+        if migrated:
+            self.log(f"Migrated {migrated} approval request(s) into {store_config.backend} store")
 
     def _hash_override_metadata(self, metadata: Dict[str, Any]) -> str:
         """Return a deterministic hash of override metadata."""
