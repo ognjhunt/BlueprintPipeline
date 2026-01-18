@@ -1,3 +1,24 @@
+# scale-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that:
+#   1. Triggers on layout output (scene_layout.json)
+#   2. Runs scale-job to normalize scene layout scale
+#   3. Writes scene_layout_scaled.done marker
+#
+# Trigger:
+#   Type: Cloud Storage object finalized (Eventarc)
+#   Bucket/prefix filter: bucket=${BUCKET}, object name matches scenes/*/layout/scene_layout.json
+#
+# Eventarc setup example:
+#   gcloud eventarc triggers create scale-trigger \
+#     --location=us-central1 \
+#     --service-account="${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com" \
+#     --destination-workflow=scale-pipeline \
+#     --destination-workflow-location=us-central1 \
+#     --event-filters="type=google.cloud.storage.object.v1.finalized" \
+#     --event-filters="bucket=${BUCKET}" \
+#     --event-data-content-type="application/json"
+
 main:
   params: [event]
   steps:
