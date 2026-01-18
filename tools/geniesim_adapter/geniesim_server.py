@@ -22,6 +22,8 @@ from geniesim_grpc_pb2 import (
     CameraObservation,
     CommandResponse,
     CommandType,
+    GetIKStatusRequest,
+    GetIKStatusResponse,
     GetJointPositionRequest,
     GetJointPositionResponse,
     GetObservationRequest,
@@ -41,6 +43,8 @@ from geniesim_grpc_pb2 import (
     StartRecordingResponse,
     StopRecordingRequest,
     StopRecordingResponse,
+    TaskStatusRequest,
+    TaskStatusResponse,
     Vector3,
 )
 from geniesim_grpc_pb2_grpc import (
@@ -56,8 +60,11 @@ DEFAULT_SERVER_CAPABILITIES = [
     "data_collection",
     "recording",
     "observation",
+    "observation_stream",
     "environment_reset",
+    "ik_status",
     "object_manipulation",
+    "task_status",
 ]
 
 
@@ -114,6 +121,34 @@ class GenieSimLocalServicer(GenieSimServiceServicer):
             timestamp=time.time(),
         )
 
+    def StreamObservations(
+        self,
+        request: GetObservationRequest,
+        context,
+    ):
+        LOGGER.debug("StreamObservations request")
+        for step in range(3):
+            with self._lock:
+                joint_state = self._build_joint_state()
+            robot_state = RobotState(
+                joint_state=joint_state,
+                end_effector_pose=self._default_pose(),
+                gripper_width=0.0,
+                gripper_is_grasping=False,
+                link_poses=[],
+                link_names=[],
+            )
+            scene_state = SceneState(objects=[], simulation_time=time.time(), step_count=step)
+            camera_observation = CameraObservation(images=[])
+            yield GetObservationResponse(
+                success=True,
+                robot_state=robot_state,
+                scene_state=scene_state,
+                camera_observation=camera_observation,
+                timestamp=time.time(),
+            )
+            time.sleep(0.05)
+
     def GetJointPosition(
         self,
         request: GetJointPositionRequest,
@@ -123,6 +158,37 @@ class GenieSimLocalServicer(GenieSimServiceServicer):
         with self._lock:
             joint_state = self._build_joint_state()
         return GetJointPositionResponse(success=True, joint_state=joint_state)
+
+    def GetIKStatus(
+        self,
+        request: GetIKStatusRequest,
+        context,
+    ) -> GetIKStatusResponse:
+        LOGGER.debug("GetIKStatus request")
+        with self._lock:
+            current_positions = list(self._joint_positions)
+        solution = list(request.seed_positions) or current_positions
+        return GetIKStatusResponse(
+            success=True,
+            ik_solvable=True,
+            solution=solution,
+        )
+
+    def GetTaskStatus(
+        self,
+        request: TaskStatusRequest,
+        context,
+    ) -> TaskStatusResponse:
+        LOGGER.debug("GetTaskStatus request: %s", request.task_id)
+        with self._lock:
+            has_recording = self._recording is not None
+        if request.task_id:
+            status = "running"
+            progress = 0.5
+        else:
+            status = "recording" if has_recording else "idle"
+            progress = 0.1 if has_recording else 0.0
+        return TaskStatusResponse(success=True, status=status, progress=progress)
 
     def SetJointPosition(
         self,
