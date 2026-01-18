@@ -81,6 +81,7 @@ Run the deployment script to create dashboards, alert policies, and log-based me
 ### Resource Usage
 - **objects_processed_total**: Objects processed
 - **storage_bytes_written_total**: Storage written
+- **pipeline_cost_total_usd**: Total pipeline cost emitted by cost tracking
 - **errors_total**: Errors by type
 - **retries_total**: Retry attempts
 
@@ -145,6 +146,14 @@ endpoint when health checks fail or jobs crash.
    notification: Email
    ```
 
+4. **Pipeline Failure Rate (MQL)**:
+   ```yaml
+   condition:
+     - metric: pipeline_runs_total
+     - threshold: failure_rate > 0.05 over 30m
+   notification: PagerDuty
+   ```
+
 ### Warning Alerts
 
 1. **High API Latency**:
@@ -161,6 +170,16 @@ endpoint when health checks fail or jobs crash.
      - metric: episode_diversity_score
      - threshold: < 0.4 for any scene
    notification: Email
+   ```
+
+### Cost Alerts
+
+1. **Cost Anomaly (Hourly Spike)**:
+   ```yaml
+   condition:
+     - metric: pipeline_cost_total_usd
+     - threshold: hourly_cost > 1.5x rolling 24h avg
+   notification: Slack
    ```
 
 ## Setting Up Alerts
