@@ -5,9 +5,12 @@ Provides convenience functions for tracking experiments and logging results.
 
 from __future__ import annotations
 
+import json
 import os
+import random
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from .validation import (
     Sim2RealValidator,
@@ -22,6 +25,7 @@ from .validation import (
 
 # Global validator instance
 _validator: Optional[Sim2RealValidator] = None
+_default_assignments_path: Optional[Path] = None
 
 
 def get_validator() -> Sim2RealValidator:
@@ -34,6 +38,103 @@ def get_validator() -> Sim2RealValidator:
         ))
         _validator = Sim2RealValidator(experiments_dir=experiments_dir)
     return _validator
+
+
+def _get_assignments_path(assignments_path: Optional[Path] = None) -> Path:
+    """Resolve the assignments store path for A/B tests."""
+    global _default_assignments_path
+    if assignments_path is not None:
+        return assignments_path
+    if _default_assignments_path is None:
+        experiments_dir = Path(os.getenv(
+            "SIM2REAL_EXPERIMENTS_DIR",
+            "./sim2real_experiments"
+        ))
+        _default_assignments_path = experiments_dir / "ab_assignments.json"
+    return _default_assignments_path
+
+
+def _load_assignments(assignments_path: Path) -> Dict[str, Dict[str, str]]:
+    """Load persisted scene assignments."""
+    if not assignments_path.exists():
+        return {}
+    try:
+        with assignments_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _persist_assignments(assignments_path: Path, assignments: Dict[str, Dict[str, str]]) -> None:
+    """Persist assignments to disk using atomic write."""
+    assignments_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = assignments_path.with_suffix(".tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(assignments, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temp_path.replace(assignments_path)
+
+
+def _normalize_split_ratios(split_ratios: Optional[Dict[str, float]]) -> Dict[str, float]:
+    """Normalize split ratios for A/B variants."""
+    ratios = split_ratios or {"A": 0.5, "B": 0.5}
+    total = sum(ratios.values())
+    if total <= 0:
+        raise ValueError("Split ratios must sum to a positive value.")
+    return {variant: weight / total for variant, weight in ratios.items() if weight > 0}
+
+
+def assign_scene_variant(
+    scene_id: str,
+    *,
+    enabled: bool = True,
+    split_ratios: Optional[Dict[str, float]] = None,
+    assignments_path: Optional[Path] = None,
+    seed: Optional[int] = None,
+) -> str:
+    """Assign a scene to an A/B testing variant and persist the assignment.
+
+    Args:
+        scene_id: Unique scene identifier.
+        enabled: Whether A/B testing is enabled. If disabled, returns "A".
+        split_ratios: Mapping of variant labels to weights (e.g., {"A": 0.5, "B": 0.5}).
+        assignments_path: Optional path to store assignments.
+        seed: Optional seed for deterministic assignment.
+
+    Returns:
+        Variant label (e.g., "A" or "B").
+    """
+    if not enabled:
+        return "A"
+
+    assignments_path = _get_assignments_path(assignments_path)
+    assignments = _load_assignments(assignments_path)
+
+    if scene_id in assignments and isinstance(assignments[scene_id], dict):
+        variant = assignments[scene_id].get("variant")
+        if isinstance(variant, str) and variant:
+            return variant
+
+    normalized = _normalize_split_ratios(split_ratios)
+    rng = random.Random(seed) if seed is not None else random.SystemRandom()
+    roll = rng.random()
+    cumulative = 0.0
+    variant = "A"
+    for label, weight in normalized.items():
+        cumulative += weight
+        if roll <= cumulative:
+            variant = label
+            break
+
+    assignments[scene_id] = {
+        "variant": variant,
+        "assigned_at": datetime.utcnow().isoformat() + "Z",
+    }
+    _persist_assignments(assignments_path, assignments)
+    return variant
 
 
 class ExperimentTracker:
