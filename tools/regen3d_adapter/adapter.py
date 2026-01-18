@@ -51,11 +51,21 @@ Reference:
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
+
+try:
+    from tools.validation import validate_rotation_matrix, ValidationError
+    HAVE_VALIDATION_TOOLS = True
+except ImportError:
+    HAVE_VALIDATION_TOOLS = False
+    ValidationError = ValueError
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -498,6 +508,13 @@ class Regen3DAdapter:
         for i in range(3):
             if scale[i] > 1e-6:
                 rot[:, i] /= scale[i]
+
+        if HAVE_VALIDATION_TOOLS:
+            try:
+                rot = validate_rotation_matrix(rot, field_name=f"{self.__class__.__name__}.rotation_matrix")
+            except ValidationError as exc:
+                logger.warning("Rotation matrix validation failed: %s. Using identity.", exc)
+                rot = np.eye(3)
 
         # Convert rotation matrix to quaternion
         rotation = self._matrix_to_quaternion(rot)
