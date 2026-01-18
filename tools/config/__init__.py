@@ -44,6 +44,7 @@ class EpisodeThresholds:
     quality_score_min: float = 0.90
     quality_pass_rate_min: float = 0.70
     min_episodes_required: int = 3
+    tier_thresholds: Dict[str, Dict[str, Union[float, int]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -555,6 +556,7 @@ class ConfigLoader:
                 quality_score_min=thresholds.get("episodes", {}).get("quality_score_min", 0.90),
                 quality_pass_rate_min=thresholds.get("episodes", {}).get("quality_pass_rate_min", 0.70),
                 min_episodes_required=thresholds.get("episodes", {}).get("min_episodes_required", 3),
+                tier_thresholds=thresholds.get("episodes", {}).get("tier_thresholds", {}),
             ),
             data_quality=DataQualityThresholds(
                 min_average_quality_score=data_quality.get("min_average_quality_score", 0.90),
@@ -974,6 +976,41 @@ class ConfigLoader:
                                 val = episodes[key]
                                 if not (0.0 <= val <= 1.0):
                                     errors[f"thresholds.episodes.{key}"] = "Must be between 0.0 and 1.0"
+                        if "min_episodes_required" in episodes and episodes["min_episodes_required"] < 0:
+                            errors["thresholds.episodes.min_episodes_required"] = "Must be non-negative"
+                        tier_thresholds = episodes.get("tier_thresholds", {})
+                        if isinstance(tier_thresholds, dict):
+                            for tier_name, tier_values in tier_thresholds.items():
+                                if not isinstance(tier_values, dict):
+                                    errors[f"thresholds.episodes.tier_thresholds.{tier_name}"] = "Must be a mapping"
+                                    continue
+                                for key in ["collision_free_rate_min", "quality_score_min", "quality_pass_rate_min"]:
+                                    if key in tier_values:
+                                        val = tier_values[key]
+                                        if not (0.0 <= val <= 1.0):
+                                            errors[
+                                                f"thresholds.episodes.tier_thresholds.{tier_name}.{key}"
+                                            ] = "Must be between 0.0 and 1.0"
+                                if (
+                                    "min_episodes_required" in tier_values
+                                    and tier_values["min_episodes_required"] < 0
+                                ):
+                                    errors[
+                                        f"thresholds.episodes.tier_thresholds.{tier_name}.min_episodes_required"
+                                    ] = "Must be non-negative"
+
+                        if os.getenv("PIPELINE_ENV", "").lower() == "production":
+                            production_floor = {
+                                "collision_free_rate_min": 0.90,
+                                "quality_pass_rate_min": 0.75,
+                                "quality_score_min": 0.92,
+                                "min_episodes_required": 5,
+                            }
+                            for key, floor_value in production_floor.items():
+                                if key in episodes and episodes[key] < floor_value:
+                                    errors[f"thresholds.episodes.{key}"] = (
+                                        f"Must be >= {floor_value} in production"
+                                    )
 
                 # Data quality thresholds
                 if "data_quality" in thresholds:

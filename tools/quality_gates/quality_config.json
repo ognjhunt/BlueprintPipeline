@@ -17,6 +17,26 @@
       "quality_score_min": 0.90,
       "quality_pass_rate_min": 0.70,
       "min_episodes_required": 3,
+      "tier_thresholds": {
+        "core": {
+          "collision_free_rate_min": 0.90,
+          "quality_score_min": 0.90,
+          "quality_pass_rate_min": 0.70,
+          "min_episodes_required": 3
+        },
+        "plus": {
+          "collision_free_rate_min": 0.90,
+          "quality_score_min": 0.90,
+          "quality_pass_rate_min": 0.70,
+          "min_episodes_required": 4
+        },
+        "full": {
+          "collision_free_rate_min": 0.90,
+          "quality_score_min": 0.90,
+          "quality_pass_rate_min": 0.70,
+          "min_episodes_required": 5
+        }
+      },
       "description": "Episode generation quality thresholds"
     },
     "data_quality": {
