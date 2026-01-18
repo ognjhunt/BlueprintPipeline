@@ -54,6 +54,8 @@ Environment Variables:
     GENIESIM_TIMEOUT: Connection timeout in seconds (default: 30)
     GENIESIM_ROOT: Path to Genie Sim installation (default: /opt/geniesim)
     ISAAC_SIM_PATH: Path to Isaac Sim installation (default: /isaac-sim)
+    ISAACSIM_REQUIRED: Enforce Isaac Sim + Genie Sim installation checks (default: false)
+    CUROBO_REQUIRED: Enforce cuRobo availability checks (default: false)
     ALLOW_GENIESIM_MOCK: Allow local mock gRPC server when GENIESIM_ROOT is missing (default: 0)
 """
 
@@ -219,6 +221,8 @@ class GenieSimConfig:
     # Installation paths
     geniesim_root: Path = Path("/opt/geniesim")
     isaac_sim_path: Path = Path("/isaac-sim")
+    isaacsim_required: bool = False
+    curobo_required: bool = False
 
     # Data collection settings
     episodes_per_task: int = 100
@@ -246,6 +250,8 @@ class GenieSimConfig:
             timeout=float(os.getenv("GENIESIM_TIMEOUT", "30")),
             geniesim_root=Path(os.getenv("GENIESIM_ROOT", "/opt/geniesim")),
             isaac_sim_path=Path(os.getenv("ISAAC_SIM_PATH", "/isaac-sim")),
+            isaacsim_required=_parse_bool(os.getenv("ISAACSIM_REQUIRED"), default=False),
+            curobo_required=_parse_bool(os.getenv("CUROBO_REQUIRED"), default=False),
             headless=os.getenv("HEADLESS", "1") == "1",
             robot_type=os.getenv("ROBOT_TYPE", "franka"),
             environment=environment,
@@ -295,6 +301,12 @@ def _parse_version(version: str) -> tuple:
     parts = version.split(".")
     padded = (parts + ["0", "0", "0"])[:3]
     return tuple(int(part) if part.isdigit() else 0 for part in padded)
+
+
+def _parse_bool(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 # =============================================================================
@@ -940,9 +952,9 @@ class GenieSimLocalFramework:
         curobo_enabled = CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo
         allow_fallback_env = os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK")
 
-        if production_mode and not curobo_enabled:
+        if (production_mode or self.config.curobo_required) and not curobo_enabled:
             raise RuntimeError(
-                "cuRobo motion planning is required in production. "
+                "cuRobo motion planning is required (CUROBO_REQUIRED=1 or GENIESIM_ENV=production). "
                 "Install cuRobo (pip install nvidia-curobo) and enable use_curobo, "
                 "or set GENIESIM_ENV=development for local testing with linear fallback."
             )
@@ -967,6 +979,21 @@ class GenieSimLocalFramework:
                     "GENIESIM_ALLOW_LINEAR_FALLBACK=0.",
                     "WARNING",
                 )
+
+    def _validate_required_environment(self, stage: str) -> None:
+        """Validate required runtime dependencies before launching or running."""
+        if not (
+            self.config.environment == "production"
+            or self.config.isaacsim_required
+            or self.config.curobo_required
+        ):
+            return
+
+        run_geniesim_preflight_or_exit(
+            stage,
+            config=self.config,
+            require_server=False,
+        )
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -1019,6 +1046,8 @@ class GenieSimLocalFramework:
         Returns:
             True if server started successfully
         """
+        self._validate_required_environment("geniesim-start-server")
+
         if self.is_server_running():
             self.log("Server already running")
             return True
@@ -1240,6 +1269,7 @@ class GenieSimLocalFramework:
         Returns:
             DataCollectionResult with statistics and output paths
         """
+        self._validate_required_environment("geniesim-run-data-collection")
         start_time = time.time()
 
         self.log("=" * 70)
@@ -2082,14 +2112,14 @@ def run_local_data_collection(
     return result
 
 
-def check_geniesim_availability() -> Dict[str, Any]:
+def check_geniesim_availability(config: Optional[GenieSimConfig] = None) -> Dict[str, Any]:
     """
     Check if Genie Sim local framework is available.
 
     Returns:
         Dict with availability status and details
     """
-    config = GenieSimConfig.from_env()
+    config = config or GenieSimConfig.from_env()
 
     status = {
         "available": False,
@@ -2098,6 +2128,8 @@ def check_geniesim_availability() -> Dict[str, Any]:
         "server_running": False,
         "grpc_available": False,
         "grpc_stubs_available": GRPC_STUBS_AVAILABLE,
+        "curobo_available": CUROBO_INTEGRATION_AVAILABLE,
+        "use_curobo": config.use_curobo,
         "mock_server_allowed": False,
         "details": {},
     }
@@ -2107,6 +2139,10 @@ def check_geniesim_availability() -> Dict[str, Any]:
     status["mock_server_allowed"] = mock_allowed
     status["details"]["environment"] = config.environment
     status["details"]["allow_geniesim_mock"] = allow_mock_override
+    status["details"]["isaacsim_required"] = config.isaacsim_required
+    status["details"]["curobo_required"] = config.curobo_required
+    status["details"]["curobo_available"] = CUROBO_INTEGRATION_AVAILABLE
+    status["details"]["use_curobo"] = config.use_curobo
 
     # Check Genie Sim installation
     if config.geniesim_root.exists():
@@ -2150,12 +2186,13 @@ def check_geniesim_availability() -> Dict[str, Any]:
 def build_geniesim_preflight_report(
     status: Dict[str, Any],
     *,
+    config: Optional[GenieSimConfig] = None,
     require_server: bool = True,
     require_ready: bool = False,
     ping_timeout: float = 5.0,
 ) -> Dict[str, Any]:
     """Build a preflight report with remediation guidance."""
-    config = GenieSimConfig.from_env()
+    config = config or GenieSimConfig.from_env()
     missing: List[str] = []
     remediation: List[str] = []
     server_ready = False
@@ -2184,6 +2221,33 @@ def build_geniesim_preflight_report(
             "Run tools/geniesim_adapter/deployment/install_geniesim.sh or set GENIESIM_ROOT. "
             "For dev/test, set ALLOW_GENIESIM_MOCK=1."
         )
+
+    if config.isaacsim_required:
+        if not config.geniesim_root.exists():
+            missing.append("Genie Sim checkout required (ISAACSIM_REQUIRED=1)")
+            remediation.append(
+                f"Set GENIESIM_ROOT to the Genie Sim repo (expected path: {config.geniesim_root})."
+            )
+        if not (config.isaac_sim_path / "python.sh").exists():
+            missing.append("Isaac Sim runtime required (ISAACSIM_REQUIRED=1)")
+            remediation.append(
+                "Set ISAAC_SIM_PATH to the Isaac Sim install containing python.sh "
+                f"(expected: {config.isaac_sim_path / 'python.sh'})."
+            )
+
+    if config.curobo_required:
+        if not CUROBO_INTEGRATION_AVAILABLE:
+            missing.append("cuRobo integration required (CUROBO_REQUIRED=1)")
+            remediation.append(
+                "Install cuRobo so CUROBO_INTEGRATION_AVAILABLE is true "
+                "(pip install nvidia-curobo)."
+            )
+        if not config.use_curobo:
+            missing.append("cuRobo usage disabled while CUROBO_REQUIRED=1")
+            remediation.append(
+                "Enable cuRobo planning by setting use_curobo=True in GenieSimConfig "
+                "or ensuring the caller does not disable it."
+            )
 
     if require_server and not status.get("server_running", False):
         missing.append("Genie Sim gRPC server")
@@ -2218,14 +2282,16 @@ def build_geniesim_preflight_report(
 def run_geniesim_preflight(
     stage: str,
     *,
+    config: Optional[GenieSimConfig] = None,
     require_server: bool = True,
     require_ready: bool = False,
     ping_timeout: float = 5.0,
 ) -> Dict[str, Any]:
     """Run a preflight check with remediation guidance and return the report."""
-    status = check_geniesim_availability()
+    status = check_geniesim_availability(config)
     report = build_geniesim_preflight_report(
         status,
+        config=config,
         require_server=require_server,
         require_ready=require_ready,
         ping_timeout=ping_timeout,
@@ -2249,6 +2315,7 @@ def format_geniesim_preflight_failure(stage: str, report: Dict[str, Any]) -> str
 def run_geniesim_preflight_or_exit(
     stage: str,
     *,
+    config: Optional[GenieSimConfig] = None,
     require_server: bool = True,
     require_ready: bool = False,
     ping_timeout: float = 5.0,
@@ -2256,6 +2323,7 @@ def run_geniesim_preflight_or_exit(
     """Run a preflight check with remediation guidance, exiting on failure."""
     report = run_geniesim_preflight(
         stage,
+        config=config,
         require_server=require_server,
         require_ready=require_ready,
         ping_timeout=ping_timeout,
