@@ -63,6 +63,7 @@ if str(REPO_ROOT) not in sys.path:
 from monitoring.alerting import send_alert
 
 from tools.dataset_regression.metrics import compute_regression_metrics
+from tools.error_handling.retry import NonRetryableError, RetryConfig, RetryContext
 from tools.geniesim_adapter.local_framework import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
@@ -948,7 +949,7 @@ def convert_to_lerobot(
     converted_count = 0
     skipped_count = 0
     total_frames = 0
-    conversion_failures: List[Dict[str, str]] = []
+    conversion_failures: List[Dict[str, Any]] = []
 
     # LeRobot dataset metadata
     dataset_info = _build_dataset_info(
@@ -959,6 +960,22 @@ def convert_to_lerobot(
     )
 
     quality_scores = []
+
+    retryable_exceptions = {
+        OSError,
+        IOError,
+        pa.ArrowIOError,
+    }
+    if hasattr(pa, "lib") and hasattr(pa.lib, "ArrowIOError"):
+        retryable_exceptions.add(pa.lib.ArrowIOError)
+
+    retry_config = RetryConfig(
+        max_retries=3,
+        base_delay=1.0,
+        max_delay=10.0,
+        backoff_factor=2.0,
+    )
+    retry_config.retryable_exceptions.update(retryable_exceptions)
 
     for ep_metadata in episode_metadata_list:
         # Skip low-quality episodes
@@ -977,70 +994,89 @@ def convert_to_lerobot(
             )
             continue
 
-        try:
-            # Read Genie Sim episode
-            table = pq.read_table(episode_file)
-            df = table.to_pandas()
+        retry_ctx = RetryContext(config=retry_config)
+        conversion_error: Optional[Exception] = None
+        df = None
 
-            # Convert to LeRobot schema
-            # LeRobot expects: observations, actions, rewards, episode metadata
-            lerobot_data = {
-                # Observations (assume RGB images + robot state)
-                "observation.image": df.get("rgb_image", df.get("image", [])),
-                "observation.state": df.get("robot_state", []),
+        while retry_ctx.should_continue():
+            try:
+                # Read Genie Sim episode
+                table = pq.read_table(episode_file)
+                df = table.to_pandas()
 
-                # Actions (joint positions/velocities)
-                "action": df.get("action", df.get("joint_positions", [])),
+                # Convert to LeRobot schema
+                # LeRobot expects: observations, actions, rewards, episode metadata
+                lerobot_data = {
+                    # Observations (assume RGB images + robot state)
+                    "observation.image": df.get("rgb_image", df.get("image", [])),
+                    "observation.state": df.get("robot_state", []),
 
-                # Episode metadata
-                "episode_index": [converted_count] * len(df),
-                "frame_index": list(range(len(df))),
-                "timestamp": df.get("timestamp", list(range(len(df)))),
+                    # Actions (joint positions/velocities)
+                    "action": df.get("action", df.get("joint_positions", [])),
 
-                # Quality metrics
-                "quality_score": [ep_metadata.quality_score] * len(df),
-            }
+                    # Episode metadata
+                    "episode_index": [converted_count] * len(df),
+                    "frame_index": list(range(len(df))),
+                    "timestamp": df.get("timestamp", list(range(len(df)))),
 
-            # Add optional fields if available
-            if "depth_image" in df.columns:
-                lerobot_data["observation.depth"] = df["depth_image"]
-            if "reward" in df.columns:
-                lerobot_data["reward"] = df["reward"]
-            else:
-                # Default reward: 0 for all frames except last (1 if successful)
-                rewards = [0.0] * len(df)
-                if ep_metadata.validation_passed:
-                    rewards[-1] = 1.0
-                lerobot_data["reward"] = rewards
+                    # Quality metrics
+                    "quality_score": [ep_metadata.quality_score] * len(df),
+                }
 
-            # Convert to PyArrow table
-            lerobot_table = pa.Table.from_pydict(lerobot_data)
+                # Add optional fields if available
+                if "depth_image" in df.columns:
+                    lerobot_data["observation.depth"] = df["depth_image"]
+                if "reward" in df.columns:
+                    lerobot_data["reward"] = df["reward"]
+                else:
+                    # Default reward: 0 for all frames except last (1 if successful)
+                    rewards = [0.0] * len(df)
+                    if ep_metadata.validation_passed:
+                        rewards[-1] = 1.0
+                    lerobot_data["reward"] = rewards
 
-            # Write episode to LeRobot format
-            episode_output = output_dir / f"episode_{converted_count:06d}.parquet"
-            pq.write_table(lerobot_table, episode_output)
+                # Convert to PyArrow table
+                lerobot_table = pa.Table.from_pydict(lerobot_data)
 
-            # Update dataset info
-            dataset_info["episodes"].append({
-                "episode_id": ep_metadata.episode_id,
-                "episode_index": converted_count,
-                "num_frames": len(df),
-                "duration_seconds": ep_metadata.duration_seconds,
-                "quality_score": ep_metadata.quality_score,
-                "validation_passed": ep_metadata.validation_passed,
-                "file": str(episode_output.name),
-            })
+                # Write episode to LeRobot format
+                episode_output = output_dir / f"episode_{converted_count:06d}.parquet"
+                pq.write_table(lerobot_table, episode_output)
 
-            converted_count += 1
-            total_frames += len(df)
-            quality_scores.append(ep_metadata.quality_score)
+                # Update dataset info
+                dataset_info["episodes"].append({
+                    "episode_id": ep_metadata.episode_id,
+                    "episode_index": converted_count,
+                    "num_frames": len(df),
+                    "duration_seconds": ep_metadata.duration_seconds,
+                    "quality_score": ep_metadata.quality_score,
+                    "validation_passed": ep_metadata.validation_passed,
+                    "file": str(episode_output.name),
+                })
 
-        except Exception as e:
-            print(f"[LEROBOT] Warning: Failed to convert episode {ep_metadata.episode_id}: {e}")
+                converted_count += 1
+                total_frames += len(df)
+                quality_scores.append(ep_metadata.quality_score)
+                conversion_error = None
+                break
+            except Exception as exc:
+                retry_exception = exc
+                if not isinstance(exc, tuple(retryable_exceptions)):
+                    retry_exception = NonRetryableError(str(exc))
+                conversion_error = exc
+                if not retry_ctx.record_failure(retry_exception):
+                    break
+
+        if conversion_error is not None:
+            print(
+                "[LEROBOT] Warning: Failed to convert episode "
+                f"{ep_metadata.episode_id} after {retry_ctx.attempt} attempt(s): {conversion_error}"
+            )
             conversion_failures.append(
                 {
                     "episode_id": ep_metadata.episode_id,
-                    "error": str(e),
+                    "error": str(conversion_error),
+                    "retry_attempts": retry_ctx.attempt,
+                    "final_exception": repr(conversion_error),
                 }
             )
             skipped_count += 1
