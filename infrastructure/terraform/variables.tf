@@ -19,6 +19,36 @@ variable "zone" {
   default     = "us-central1-a"
 }
 
+variable "enable_secondary_region" {
+  type        = bool
+  description = "Enable secondary region resources for regional failover"
+  default     = false
+}
+
+variable "secondary_region" {
+  type        = string
+  description = "Secondary GCP region for failover resources"
+  default     = "us-east1"
+}
+
+variable "secondary_zone" {
+  type        = string
+  description = "Secondary GCP zone for failover resources"
+  default     = "us-east1-b"
+}
+
+variable "secondary_cluster_name" {
+  type        = string
+  description = "Name of the secondary GKE cluster"
+  default     = "blueprint-cluster-secondary"
+}
+
+variable "bucket_location" {
+  type        = string
+  description = "Bucket location (multi-region or dual-region) for pipeline data"
+  default     = "US"
+}
+
 variable "environment" {
   type        = string
   description = "Environment name (dev, staging, prod)"

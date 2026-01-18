@@ -47,7 +47,9 @@ main:
           - bucket: ${event.data.bucket}
           - object: ${event.data.name}
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
-          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
+          - primaryRegion: ${default(sys.get_env("PRIMARY_WORKFLOW_REGION"), "us-central1")}
+          - secondaryRegion: ${default(sys.get_env("SECONDARY_WORKFLOW_REGION"), "us-east1")}
+          - region: ${primaryRegion}
         next: filter_completion_markers
 
     # Filter for .regen3d_complete marker files
@@ -78,6 +80,72 @@ main:
           - dream2flowLegacyFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_failed"}'
           - dream2flowInferenceFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.failed"}'
           - dream2flowInferenceLegacyFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_inference_failed"}'
+        next: init_region_health
+
+    - init_region_health:
+        assign:
+          - primaryHealthy: false
+          - secondaryHealthy: false
+        next: check_primary_region
+
+    - check_primary_region:
+        try:
+          call: googleapis.run.v1.projects.locations.jobs.get
+          args:
+            name: '${"projects/" + projectId + "/locations/" + primaryRegion + "/jobs/" + dream2flowJobName}'
+          result: primaryJob
+        next: mark_primary_healthy
+        except:
+          as: primaryError
+          steps:
+            - log_primary_unhealthy:
+                call: sys.log
+                args:
+                  text: '${"Primary region " + primaryRegion + " job " + dream2flowJobName + " unavailable: " + primaryError.message}'
+                  severity: "WARNING"
+            - check_secondary_region:
+                try:
+                  call: googleapis.run.v1.projects.locations.jobs.get
+                  args:
+                    name: '${"projects/" + projectId + "/locations/" + secondaryRegion + "/jobs/" + dream2flowJobName}'
+                  result: secondaryJob
+                next: mark_secondary_healthy
+                except:
+                  as: secondaryError
+                  steps:
+                    - log_secondary_unhealthy:
+                        call: sys.log
+                        args:
+                          text: '${"Secondary region " + secondaryRegion + " job " + dream2flowJobName + " unavailable: " + secondaryError.message}'
+                          severity: "ERROR"
+                    - select_region
+
+    - mark_primary_healthy:
+        assign:
+          - primaryHealthy: true
+        next: select_region
+
+    - mark_secondary_healthy:
+        assign:
+          - secondaryHealthy: true
+        next: select_region
+
+    - select_region:
+        switch:
+          - condition: ${primaryHealthy}
+            next: use_primary_region
+          - condition: ${secondaryHealthy}
+            next: use_secondary_region
+        next: use_primary_region
+
+    - use_primary_region:
+        assign:
+          - region: ${primaryRegion}
+        next: acquire_lock
+
+    - use_secondary_region:
+        assign:
+          - region: ${secondaryRegion}
         next: acquire_lock
 
     - acquire_lock:
