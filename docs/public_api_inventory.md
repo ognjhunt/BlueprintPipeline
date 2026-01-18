@@ -631,6 +631,9 @@ It is intended as a starting point for API coverage and may be expanded with cla
 - `validate_gemini_credentials`
 - `validate_genie_sim_credentials`
 
+Environment flags:
+- `SKIP_STARTUP_VALIDATION=true` to bypass startup credential validation (local development only).
+
 ### tools/storage_layout/paths.py
 
 - `get_asset_index_path`
@@ -705,4 +708,3 @@ It is intended as a starting point for API coverage and may be expanded with cla
 ### tools/workflow/failure_markers.py
 
 - `write_failure_marker`
-

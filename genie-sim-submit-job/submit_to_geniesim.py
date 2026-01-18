@@ -741,6 +741,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from tools.startup_validation import validate_and_fail_fast
+
+    validate_and_fail_fast(job_name="GENIE-SIM-SUBMIT", validate_gcs=True)
     metrics = get_metrics()
     scene_id = os.environ.get("SCENE_ID", "unknown")
     with metrics.track_job("genie-sim-submit-job", scene_id):
