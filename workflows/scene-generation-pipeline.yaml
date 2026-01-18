@@ -25,7 +25,7 @@ main:
     - init:
         assign:
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
-          - region: "us-central1"
+          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - bucket: '${default(map.get(args, "bucket"), "blueprint-scenes")}'
           - scenesPerRun: '${default(map.get(args, "scenes_per_run"), 10)}'
           - dryRun: '${default(map.get(args, "dry_run"), false)}'

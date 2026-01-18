@@ -13,7 +13,7 @@ main:
           - bucket: ${event.data.bucket}
           - object: ${event.data.name}
           - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
-          - region: "us-central1"
+          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
         next: filter_scene_assets
 
     # Trigger only when scene_assets.json is created by assets-plan.
