@@ -7,10 +7,11 @@ Supports:
 - OpenAI GPT-5.1 (with adaptive reasoning)
 
 Environment Variables:
-    LLM_PROVIDER: "gemini" | "anthropic" | "openai" | "auto" (default: gemini)
+    LLM_PROVIDER: "gemini" | "anthropic" | "openai" | "mock" | "auto" (default: gemini)
     GEMINI_API_KEY: API key for Google Gemini
     ANTHROPIC_API_KEY: API key for Anthropic Claude
     OPENAI_API_KEY: API key for OpenAI
+    LLM_MOCK_RESPONSE_PATH: JSON response path for mock provider
     LLM_FALLBACK_ENABLED: "true" | "false" (default: true)
     LLM_MAX_RETRIES: Number of retries (default: 3)
 
@@ -115,6 +116,7 @@ class LLMProvider(str, Enum):
     GEMINI = "gemini"
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    MOCK = "mock"
     AUTO = "auto"
 
 
@@ -266,6 +268,120 @@ class LLMClient(ABC):
         buffer = io.BytesIO()
         img.save(buffer, format="PNG")
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+# =============================================================================
+# Mock Client
+# =============================================================================
+
+
+class MockLLMClient(LLMClient):
+    """Mock client for deterministic, credential-free LLM responses."""
+
+    provider = LLMProvider.MOCK
+
+    @property
+    def default_model(self) -> str:
+        return "mock"
+
+    def generate(
+        self,
+        prompt: str,
+        image: Optional[Any] = None,
+        images: Optional[List[Any]] = None,
+        json_output: bool = False,
+        use_web_search: bool = False,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> LLMResponse:
+        response_data = self._load_mock_response() or self._default_analysis()
+        response_text = json.dumps(response_data, indent=2)
+        return LLMResponse(
+            text=response_text,
+            provider=self.provider,
+            model=self.model,
+            raw_response=response_data,
+            data=response_data,
+        )
+
+    def _generate_image(
+        self,
+        prompt: str,
+        size: str = "1024x1024",
+        **kwargs
+    ) -> LLMResponse:
+        return self._unsupported_image_response()
+
+    def _load_mock_response(self) -> Optional[Dict[str, Any]]:
+        path_value = os.getenv("LLM_MOCK_RESPONSE_PATH")
+        if not path_value:
+            return None
+        path = Path(path_value)
+        if not path.is_file():
+            raise FileNotFoundError(f"Mock response path not found: {path}")
+        with path.open("r", encoding="utf-8") as file_handle:
+            return json.load(file_handle)
+
+    def _default_analysis(self) -> Dict[str, Any]:
+        return {
+            "analysis": {
+                "scene_summary": "Mock analysis response.",
+                "recommended_policies": ["general_manipulation"],
+            },
+            "placement_regions": [
+                {
+                    "name": "mock_table_region",
+                    "description": "Mock horizontal region on a table.",
+                    "surface_type": "horizontal",
+                    "parent_object_id": "table_01",
+                    "position": [0.0, 0.0, 0.75],
+                    "size": [0.8, 1.2, 0.02],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "semantic_tags": ["table", "surface"],
+                    "suitable_for": ["object", "props"],
+                }
+            ],
+            "variation_assets": [
+                {
+                    "name": "mock_box",
+                    "category": "props",
+                    "description": "Mock cardboard box",
+                    "semantic_class": "box",
+                    "priority": "recommended",
+                    "source_hint": "library",
+                    "example_variants": ["small box", "medium box"],
+                    "physics_hints": {
+                        "mass_range_kg": [0.2, 1.0],
+                        "friction": 0.6,
+                        "collision_shape": "convex",
+                    },
+                }
+            ],
+            "policy_configs": [
+                {
+                    "policy_id": "general_manipulation",
+                    "policy_name": "General Manipulation",
+                    "description": "Mock policy configuration.",
+                    "placement_regions_used": ["mock_table_region"],
+                    "variation_assets_used": ["mock_box"],
+                    "randomizers": [
+                        {
+                            "name": "light_randomizer",
+                            "enabled": True,
+                            "frequency": "per_episode",
+                            "parameters": {"intensity_range": [0.8, 1.2]},
+                        }
+                    ],
+                    "capture_config": {"annotations": ["rgb", "depth"]},
+                    "scene_modifications": {
+                        "hide_objects": [],
+                        "spawn_additional": False,
+                        "modify_existing": False,
+                    },
+                }
+            ],
+        }
 
 
 # =============================================================================
@@ -929,6 +1045,8 @@ def get_default_provider() -> LLMProvider:
         return LLMProvider.ANTHROPIC
     elif provider_str == "gemini":
         return LLMProvider.GEMINI
+    elif provider_str == "mock":
+        return LLMProvider.MOCK
     else:
         # Auto-detect based on available API keys (Gemini preferred)
         if _has_secret_or_env(
@@ -961,6 +1079,8 @@ def _create_client_for_provider(
     **kwargs
 ) -> LLMClient:
     """Create a client for a specific provider."""
+    if provider == LLMProvider.MOCK:
+        return MockLLMClient(model=model, **kwargs)
     if provider == LLMProvider.OPENAI:
         return OpenAIClient(model=model, **kwargs)
     elif provider == LLMProvider.ANTHROPIC:

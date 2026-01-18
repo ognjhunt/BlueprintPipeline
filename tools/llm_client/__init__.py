@@ -11,10 +11,11 @@ environment variables or explicit configuration, enabling fallback and
 A/B testing of different models.
 
 Environment Variables:
-    LLM_PROVIDER: "gemini" | "anthropic" | "openai" | "auto" (default: gemini)
+    LLM_PROVIDER: "gemini" | "anthropic" | "openai" | "mock" | "auto" (default: gemini)
     GEMINI_API_KEY: API key for Google Gemini
     ANTHROPIC_API_KEY: API key for Anthropic Claude
     OPENAI_API_KEY: API key for OpenAI
+    LLM_MOCK_RESPONSE_PATH: JSON response path for mock provider
 
 Usage:
     from tools.llm_client import create_llm_client, LLMProvider
@@ -53,6 +54,7 @@ from .client import (
     GeminiClient,
     AnthropicClient,
     OpenAIClient,
+    MockLLMClient,
     create_llm_client,
     get_default_provider,
 )
@@ -64,6 +66,7 @@ __all__ = [
     "GeminiClient",
     "AnthropicClient",
     "OpenAIClient",
+    "MockLLMClient",
     "create_llm_client",
     "get_default_provider",
 ]
