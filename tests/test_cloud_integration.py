@@ -22,6 +22,8 @@ Usage:
     python -m pytest tests/test_cloud_integration.py::TestGCSOperations -v
 """
 
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -220,16 +222,30 @@ class MockBlob:
         self._bucket = bucket
         self.name = name
         self._exists = exists or name in bucket._blobs
+        self.size = None
+        self.md5_hash = None
 
     def exists(self) -> bool:
         return self.name in self._bucket._blobs
 
     def upload_from_string(self, data: str, content_type: str = "text/plain"):
-        self._bucket._blobs[self.name] = data.encode() if isinstance(data, str) else data
+        payload = data.encode() if isinstance(data, str) else data
+        self._bucket._blobs[self.name] = payload
+        self.size = len(payload)
+        self.md5_hash = base64.b64encode(hashlib.md5(payload).digest()).decode("utf-8")
 
     def upload_from_filename(self, filename: str):
         with open(filename, "rb") as f:
-            self._bucket._blobs[self.name] = f.read()
+            payload = f.read()
+        self._bucket._blobs[self.name] = payload
+        self.size = len(payload)
+        self.md5_hash = base64.b64encode(hashlib.md5(payload).digest()).decode("utf-8")
+
+    def reload(self):
+        if self.name in self._bucket._blobs:
+            payload = self._bucket._blobs[self.name]
+            self.size = len(payload)
+            self.md5_hash = base64.b64encode(hashlib.md5(payload).digest()).decode("utf-8")
 
     def download_as_string(self) -> bytes:
         return self._bucket._blobs.get(self.name, b"")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +51,7 @@ def upload_blob_from_filename(
     *,
     logger: Optional[logging.Logger] = None,
     content_type: Optional[str] = None,
+    verify_upload: bool = False,
     max_attempts: int = 6,
     initial_backoff: float = 0.5,
     max_backoff: float = 8.0,
@@ -86,6 +89,41 @@ def upload_blob_from_filename(
 
     try:
         retry(_upload)
+        if verify_upload:
+            try:
+                file_path = Path(filename)
+                expected_size = file_path.stat().st_size
+                expected_md5 = calculate_file_md5_base64(file_path)
+                verified, failure_reason = verify_blob_upload(
+                    blob,
+                    gcs_uri=gcs_uri,
+                    expected_size=expected_size,
+                    expected_md5=expected_md5,
+                    logger=log,
+                )
+                if not verified:
+                    return UploadResult(
+                        success=False,
+                        gcs_uri=gcs_uri,
+                        error=failure_reason or "upload verification failed",
+                        attempts=attempts,
+                    )
+            except Exception as exc:
+                log.error(
+                    "gcs_upload_verification_error",
+                    extra={
+                        "gcs_uri": gcs_uri,
+                        "local_path": str(filename),
+                        "attempts": attempts,
+                    },
+                    exc_info=exc,
+                )
+                return UploadResult(
+                    success=False,
+                    gcs_uri=gcs_uri,
+                    error=str(exc),
+                    attempts=attempts,
+                )
         log.info(
             "gcs_upload_success",
             extra={
@@ -116,3 +154,81 @@ def upload_blob_from_filename(
             error=str(exc),
             attempts=attempts,
         )
+
+
+def calculate_md5_base64(data: bytes) -> str:
+    return base64.b64encode(hashlib.md5(data).digest()).decode("utf-8")
+
+
+def calculate_file_md5_base64(filename: Path | str, *, chunk_size: int = 8 * 1024 * 1024) -> str:
+    digest = hashlib.md5()
+    with Path(filename).open("rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return base64.b64encode(digest.digest()).decode("utf-8")
+
+
+def verify_blob_upload(
+    blob,
+    *,
+    gcs_uri: str,
+    expected_size: int,
+    expected_md5: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+) -> tuple[bool, Optional[str]]:
+    log = logger or logging.getLogger(__name__)
+    if not blob.exists():
+        log.error(
+            "gcs_upload_verification_failed",
+            extra={
+                "gcs_uri": gcs_uri,
+                "reason": "missing_blob",
+            },
+        )
+        return False, "blob missing after upload"
+
+    blob.reload()
+    actual_size = blob.size
+    if actual_size != expected_size:
+        log.error(
+            "gcs_upload_verification_failed",
+            extra={
+                "gcs_uri": gcs_uri,
+                "reason": "size_mismatch",
+                "expected_size": expected_size,
+                "actual_size": actual_size,
+            },
+        )
+        return False, f"size mismatch: expected {expected_size}, got {actual_size}"
+
+    if expected_md5:
+        if not blob.md5_hash:
+            log.error(
+                "gcs_upload_verification_failed",
+                extra={
+                    "gcs_uri": gcs_uri,
+                    "reason": "missing_md5",
+                    "expected_md5": expected_md5,
+                },
+            )
+            return False, "blob md5 missing after upload"
+        if blob.md5_hash != expected_md5:
+            log.error(
+                "gcs_upload_verification_failed",
+                extra={
+                    "gcs_uri": gcs_uri,
+                    "reason": "md5_mismatch",
+                    "expected_md5": expected_md5,
+                    "actual_md5": blob.md5_hash,
+                },
+            )
+            return False, "md5 mismatch after upload"
+
+    log.info(
+        "gcs_upload_verified",
+        extra={
+            "gcs_uri": gcs_uri,
+            "expected_size": expected_size,
+        },
+    )
+    return True, None

@@ -8,6 +8,8 @@ across test files and improve test maintainability.
 from __future__ import annotations
 
 import importlib.util
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -263,10 +265,15 @@ def mock_gcs_bucket(temp_test_dir: Path, monkeypatch):
             self.bucket = bucket
             self.name = name
             self._path = bucket._bucket_dir / name
+            self.size = None
+            self.md5_hash = None
 
         def upload_from_filename(self, filename):
             self._path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(filename, self._path)
+            payload = self._path.read_bytes()
+            self.size = len(payload)
+            self.md5_hash = base64.b64encode(hashlib.md5(payload).digest()).decode("utf-8")
 
         def download_to_filename(self, filename):
             Path(filename).parent.mkdir(parents=True, exist_ok=True)
@@ -274,6 +281,12 @@ def mock_gcs_bucket(temp_test_dir: Path, monkeypatch):
 
         def exists(self):
             return self._path.exists()
+
+        def reload(self):
+            if self._path.exists():
+                payload = self._path.read_bytes()
+                self.size = len(payload)
+                self.md5_hash = base64.b64encode(hashlib.md5(payload).digest()).decode("utf-8")
 
     class MockBucket:
         def __init__(self, bucket_dir):
