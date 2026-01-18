@@ -19,7 +19,8 @@ The service:
 Environment Variables:
     ENV: Service environment (set to "production" to disable /debug)
     PARTICULATE_ROOT: Path to Particulate installation (default: /opt/particulate)
-    DEBUG_MODE: Enable /debug in non-production (default: 0)
+    ENABLE_DEBUG_ENDPOINT: Enable /debug in non-production (default: false)
+    DEBUG_MODE: Legacy flag for /debug in non-production (default: 0)
     DEBUG_TOKEN: Shared secret required for /debug access (default: unset)
     PARTICULATE_DEBUG: Legacy flag for /debug (default: 0)
     PARTICULATE_DEBUG_TOKEN: Legacy shared secret for /debug access (default: unset)
@@ -72,7 +73,9 @@ PARTICULATE_INFER = PARTICULATE_ROOT / "infer.py"
 TMP_ROOT = Path("/tmp/particulate")
 
 ENVIRONMENT = os.environ.get("ENV", "").lower()
+ENABLE_DEBUG_ENDPOINT = os.environ.get("ENABLE_DEBUG_ENDPOINT", "false").lower() in ("1", "true", "yes")
 DEBUG_MODE = os.environ.get("DEBUG_MODE", os.environ.get("PARTICULATE_DEBUG", "0")) == "1"
+DEBUG_ENDPOINT_ENABLED = ENABLE_DEBUG_ENDPOINT or DEBUG_MODE
 DEBUG_TOKEN = os.environ.get("DEBUG_TOKEN", os.environ.get("PARTICULATE_DEBUG_TOKEN", ""))
 if DEBUG_TOKEN is not None:
     DEBUG_TOKEN = DEBUG_TOKEN.strip() or None
@@ -782,8 +785,8 @@ def readiness():
 def _debug_block_reason() -> Optional[str]:
     if ENVIRONMENT == "production":
         return "production_environment"
-    if not DEBUG_MODE:
-        return "debug_mode_disabled"
+    if not DEBUG_ENDPOINT_ENABLED:
+        return "debug_endpoint_disabled"
     if not DEBUG_TOKEN:
         return "debug_token_missing"
 
@@ -808,34 +811,43 @@ def _debug_authorized() -> bool:
 @app.route("/debug", methods=["GET"])
 def debug_info():
     """Debug endpoint with service state."""
+    request_id = request.headers.get("X-Request-Id") or request.headers.get("X-Request-ID")
+    if not request_id:
+        request_id = str(uuid.uuid4())[:8]
+    remote_addr = request.remote_addr or "unknown"
+
     if not _debug_authorized():
         block_reason = _debug_block_reason() or "unknown"
         log(
             (
                 "Denied debug request: "
                 f"reason={block_reason} "
-                f"remote={request.remote_addr or 'unknown'} "
+                f"request_id={request_id} "
+                f"remote={remote_addr} "
                 f"auth_header_present={bool(request.headers.get('Authorization'))}"
             ),
             level="WARNING",
         )
         return jsonify({"error": "debug access forbidden"}), 403
 
-    is_valid, msg, details = validate_particulate_model()
+    log(
+        (
+            "Debug request authorized: "
+            f"request_id={request_id} "
+            f"remote={remote_addr}"
+        )
+    )
+
+    warmup_status = "ready" if _models_ready.is_set() and not _warmup_error else "error"
+    if not _models_ready.is_set():
+        warmup_status = "warming_up"
 
     return jsonify({
         "models_ready": _models_ready.is_set(),
-        "warmup_error": _warmup_error,
-        "warmup_details": _warmup_details,
-        "installation_validation": {
-            "valid": is_valid,
-            "message": msg,
-            "details": details,
-        },
-        "paths": {
-            "particulate_root": str(PARTICULATE_ROOT),
-            "particulate_infer": str(PARTICULATE_INFER),
-        },
+        "warmup_status": warmup_status,
+        "warmup_ok": _warmup_error is None,
+        "environment": ENVIRONMENT or "unknown",
+        "debug_enabled": DEBUG_ENDPOINT_ENABLED,
     }), 200
 
 
