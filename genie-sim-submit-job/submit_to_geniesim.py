@@ -16,6 +16,7 @@ Environment Variables:
     MIN_QUALITY_SCORE: Minimum quality score (default: 0.85)
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -172,6 +173,71 @@ def _resolve_episodes_per_task() -> int:
         return int(env_value)
     pipeline_config = load_pipeline_config()
     return int(pipeline_config.episode_generation.episodes_per_task)
+
+
+def _parse_csv_env(value: Optional[str]) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _coerce_bool(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _normalize_tags(tags: Any) -> list[str]:
+    if isinstance(tags, list):
+        return [str(tag).strip() for tag in tags if str(tag).strip()]
+    if isinstance(tags, str):
+        return _parse_csv_env(tags)
+    return []
+
+
+def _resolve_scene_tags(scene_manifest: Dict[str, Any]) -> list[str]:
+    metadata = scene_manifest.get("metadata", {}) if isinstance(scene_manifest, dict) else {}
+    tags = metadata.get("tags")
+    scene_tags = metadata.get("scene_tags")
+    resolved = _normalize_tags(tags) + _normalize_tags(scene_tags)
+    return sorted(set(resolved))
+
+
+def _scene_hash_percentage(scene_id: str) -> int:
+    digest = hashlib.sha256(scene_id.encode("utf-8")).hexdigest()
+    return int(digest, 16) % 100
+
+
+def _resolve_canary_assignment(
+    *,
+    scene_id: str,
+    scene_tags: list[str],
+    canary_enabled: bool,
+    canary_tags: list[str],
+    canary_scene_ids: list[str],
+    canary_percent: int,
+) -> Dict[str, Any]:
+    match_reasons = []
+    matched_tags = sorted(set(scene_tags).intersection(set(canary_tags)))
+    if matched_tags:
+        match_reasons.append("tag_match")
+    if scene_id in canary_scene_ids:
+        match_reasons.append("scene_id_allowlist")
+    percent_hit = False
+    if canary_percent > 0:
+        percent_hit = _scene_hash_percentage(scene_id) < canary_percent
+        if percent_hit:
+            match_reasons.append("percentage_rollout")
+    is_canary = canary_enabled and bool(match_reasons)
+    return {
+        "enabled": canary_enabled,
+        "is_canary": is_canary,
+        "matched_tags": matched_tags,
+        "match_reasons": match_reasons,
+        "assignment_percent": canary_percent,
+        "scene_tags": scene_tags,
+        "scene_id": scene_id,
+    }
 
 
 def _find_scene_usd_path(
@@ -500,6 +566,12 @@ def main() -> int:
     episodes_per_task = _resolve_episodes_per_task()
     num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
     min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
+    canary_enabled = _coerce_bool(os.getenv("CANARY_ENABLED"))
+    canary_tags = _parse_csv_env(os.getenv("CANARY_TAGS"))
+    canary_scene_ids = _parse_csv_env(os.getenv("CANARY_SCENE_IDS"))
+    canary_percent = int(os.getenv("CANARY_PERCENT", "0"))
+    canary_release_channel = os.getenv("CANARY_RELEASE_CHANNEL", "stable")
+    canary_rollback_marker = os.getenv("CANARY_ROLLBACK_MARKER")
 
     storage_client = storage.Client()
 
@@ -550,6 +622,15 @@ def main() -> int:
     except FileNotFoundError:
         scene_manifest = {"scene_graph": scene_graph}
     task_config_local = task_config
+    scene_tags = _resolve_scene_tags(scene_manifest)
+    canary_assignment = _resolve_canary_assignment(
+        scene_id=scene_id,
+        scene_tags=scene_tags,
+        canary_enabled=canary_enabled,
+        canary_tags=canary_tags,
+        canary_scene_ids=canary_scene_ids,
+        canary_percent=canary_percent,
+    )
 
     gcs_root = Path("/mnt/gcs") / bucket
     use_gcs_fuse = gcs_root.exists()
@@ -656,6 +737,10 @@ def main() -> int:
         "status": job_status,
         "submitted_at": submitted_at,
         "message": submission_message,
+        "canary": {
+            **canary_assignment,
+            "release_channel": canary_release_channel,
+        },
         "bundle": {
             "scene_graph": f"gs://{bucket}/{geniesim_prefix}/scene_graph.json",
             "asset_index": f"gs://{bucket}/{geniesim_prefix}/asset_index.json",
@@ -706,6 +791,24 @@ def main() -> int:
     if job_status == "failed":
         job_payload["failure_reason"] = failure_reason
         job_payload["failure_details"] = failure_details
+        if canary_assignment["is_canary"]:
+            rollback_marker_path = canary_rollback_marker or f"{geniesim_prefix}/.canary_rollback"
+            _write_json_blob(
+                storage_client,
+                bucket,
+                rollback_marker_path,
+                {
+                    "scene_id": scene_id,
+                    "job_id": job_id,
+                    "status": job_status,
+                    "release_channel": canary_release_channel,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "reason": failure_reason,
+                    "details": failure_details,
+                    "job_metadata_path": f"gs://{bucket}/{job_output_path}",
+                    "assignment": canary_assignment,
+                },
+            )
     job_payload["artifacts"] = {
         "episodes_prefix": f"gs://{bucket}/{episodes_output_prefix}/geniesim_{job_id}",
         "lerobot_prefix": (
