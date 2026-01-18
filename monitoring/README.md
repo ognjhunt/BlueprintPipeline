@@ -39,8 +39,9 @@ Run the deployment script to create dashboards, alert policies, and log-based me
 
 2. **Import Grafana Dashboard**:
    ```bash
-   # Use grafana_dashboard.json (if available)
-   # Or manually create dashboard using Prometheus metrics
+   # In Grafana: Dashboards -> New -> Import
+   # Upload monitoring/grafana_dashboard.json or paste its JSON content.
+   # Select your Prometheus datasource when prompted.
    ```
 
 ## Key Metrics
@@ -84,6 +85,9 @@ Run the deployment script to create dashboards, alert policies, and log-based me
 - **pipeline_cost_total_usd**: Total pipeline cost emitted by cost tracking
 - **errors_total**: Errors by type
 - **retries_total**: Retry attempts
+
+### Cost Metrics
+- **cost_per_scene**: Rolling total cost per scene (USD)
 
 ## Alerts
 
@@ -259,6 +263,12 @@ print(f"Gemini: ${breakdown.gemini:.4f}")
 print(f"Genie Sim: ${breakdown.geniesim:.4f}")
 print(f"Compute: ${breakdown.cloud_run:.4f}")
 ```
+
+### Grafana dashboard JSON
+
+The Prometheus/Grafana dashboard definition lives in `monitoring/grafana_dashboard.json`.
+Import it in Grafana via **Dashboards → New → Import** and upload the JSON file, then
+select your Prometheus datasource when prompted.
 
 ### Cost tracking configuration
 
