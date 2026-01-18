@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 
 import pytest
 
@@ -315,7 +316,7 @@ def test_generation_history_tracker_surfaces_batch_failure(load_job_module, monk
     assert result.errors[0].exception_type == "RuntimeError"
 
 
-def test_generation_history_tracker_firestore_unavailable(load_job_module, monkeypatch, capsys):
+def test_generation_history_tracker_firestore_unavailable(load_job_module, monkeypatch, caplog):
     module = _load_scene_generation_module(load_job_module)
 
     class BadFirestore:
@@ -325,9 +326,10 @@ def test_generation_history_tracker_firestore_unavailable(load_job_module, monke
     monkeypatch.setattr(module, "firestore", BadFirestore())
     monkeypatch.setattr(module, "HAVE_CLOUD_DEPS", True)
 
+    caplog.set_level(logging.WARNING, logger="scene-generation-job")
     tracker = module.GenerationHistoryTracker()
-    captured = capsys.readouterr()
-    assert "WARNING: Firestore unavailable" in captured.err
+    assert "Firestore unavailable" in caplog.text
+    assert module.SceneGenerationErrorCode.FIRESTORE_INIT_FAILED.value in caplog.text
     assert tracker.get_recent_prompts(module.EnvironmentArchetype.KITCHEN) == []
 
 
