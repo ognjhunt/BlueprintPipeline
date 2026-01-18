@@ -935,7 +935,7 @@ def load_variation_metadata() -> Dict[str, Any]:
                     "raw": data,
                 }
             except json.JSONDecodeError:
-                print(f"[REPLICATOR] Warning: Failed to parse variation metadata at {path}")
+                print(f"[REPLICATOR] Warning: Failed to parse variation metadata at {{path}}")
                 return {"assets": [], "raw": {}}
     return {"assets": [], "raw": {}}
 
@@ -976,6 +976,17 @@ def _material_ranges_from_hint(material_hint: str) -> Dict[str, Any]:
     return ranges
 
 
+def _resolve_target_prims(targets: Optional[List[str]], label: str):
+    if not targets:
+        raise RuntimeError(f"[REPLICATOR] Missing target prims for {{label}}: no targets configured")
+    prims = []
+    for target in targets:
+        prims.extend(rep.get.prims(path_pattern=target))
+    if not prims:
+        raise RuntimeError(f"[REPLICATOR] Missing target prims for {{label}}: {{targets}}")
+    return prims
+
+
 def _collect_texture_variants(asset_metadata: Dict[str, Any]) -> List[str]:
     for key in ["texture_variants", "textures", "texture_paths", "material_textures"]:
         textures = asset_metadata.get(key)
@@ -1008,6 +1019,16 @@ def _build_material_metadata_index(metadata: Dict[str, Any]) -> Dict[str, Any]:
         "textures_by_name": textures_by_name,
         "textures_by_semantic": textures_by_semantic,
     }
+
+
+def _collect_assets_by_category(metadata: Dict[str, Any]) -> Dict[str, List[str]]:
+    assets_by_category: Dict[str, List[str]] = {}
+    for asset in metadata.get("assets", []):
+        category = asset.get("category")
+        asset_path = asset.get("asset_path") or asset.get("path") or asset.get("usd_path")
+        if category and asset_path:
+            assets_by_category.setdefault(category, []).append(asset_path)
+    return assets_by_category
 
 
 # ============================================================================
@@ -1175,6 +1196,417 @@ def create_camera_randomizer(
     return randomize_camera
 
 
+def create_articulation_state_randomizer(
+    targets: List[str],
+    open_probability: float = 0.5,
+    normalize_range: bool = True,
+):
+    """Randomize articulated joints to open/closed states."""
+    prims = _resolve_target_prims(targets, "articulation_state")
+
+    def randomize_articulation_state():
+        target_position = rep.distribution.choice(
+            [0.0, 1.0],
+            weights=[1.0 - open_probability, open_probability],
+        )
+        if not normalize_range:
+            target_position = rep.distribution.choice(
+                [0.0, 0.5, 1.0],
+                weights=[1.0 - open_probability, open_probability * 0.5, open_probability * 0.5],
+            )
+        for prim in prims:
+            with prim:
+                rep.modify.attribute("drive:targetPosition", target_position)
+
+    return randomize_articulation_state
+
+
+def create_object_placement_randomizer(
+    targets: List[str],
+    position_noise: float = 0.05,
+    rotation_noise: float = 5.0,
+    maintain_surface_contact: bool = True,
+    surfaces: Optional[List[Any]] = None,
+):
+    """Randomize poses for existing objects."""
+    prims = _resolve_target_prims(targets, "object_placement")
+
+    def randomize_object_placement():
+        if maintain_surface_contact and surfaces:
+            rep.randomizer.scatter_2d(
+                prims=prims,
+                surface_prims=surfaces,
+                check_for_collisions=True,
+                seed=random.randint(0, 999999),
+            )
+        for prim in prims:
+            with prim:
+                rep.modify.pose(
+                    position=rep.distribution.uniform(
+                        (-position_noise, -position_noise, 0.0),
+                        (position_noise, position_noise, position_noise),
+                    ),
+                    rotation=rep.distribution.uniform(
+                        (-rotation_noise, -rotation_noise, -rotation_noise),
+                        (rotation_noise, rotation_noise, rotation_noise),
+                    ),
+                )
+
+    return randomize_object_placement
+
+
+def create_drawer_state_randomizer(
+    targets: List[str],
+    open_range: List[float],
+):
+    """Randomize drawer joint positions."""
+    prims = _resolve_target_prims(targets, "drawer_state")
+
+    def randomize_drawer_state():
+        target_position = rep.distribution.uniform(open_range[0], open_range[1])
+        for prim in prims:
+            with prim:
+                rep.modify.attribute("drive:targetPosition", target_position)
+
+    return randomize_drawer_state
+
+
+def create_drawer_contents_randomizer(
+    targets: List[str],
+    asset_paths: List[str],
+    fill_ratio: List[float],
+    max_items: int = 8,
+):
+    """Scatter assets into drawer interiors."""
+    prims = _resolve_target_prims(targets, "drawer_contents")
+
+    def randomize_drawer_contents():
+        if not asset_paths:
+            raise RuntimeError("[REPLICATOR] Missing asset paths for drawer contents scatter")
+        count = max(1, int(random.uniform(fill_ratio[0], fill_ratio[1]) * max_items))
+        items = rep.create.from_usd(
+            rep.distribution.choice(asset_paths, count),
+            semantics=[("class", "drawer_contents")],
+            count=count,
+        )
+        SPAWNED_OBJECTS.append(items)
+        rep.randomizer.scatter_2d(
+            prims=items,
+            surface_prims=prims,
+            check_for_collisions=True,
+            seed=random.randint(0, 999999),
+        )
+
+    return randomize_drawer_contents
+
+
+def create_door_state_randomizer(
+    targets: List[str],
+    open_range: List[float],
+):
+    """Randomize door joint positions."""
+    prims = _resolve_target_prims(targets, "door_state")
+
+    def randomize_door_state():
+        target_position = rep.distribution.uniform(open_range[0], open_range[1])
+        for prim in prims:
+            with prim:
+                rep.modify.attribute("drive:targetPosition", target_position)
+
+    return randomize_door_state
+
+
+def create_knob_state_randomizer(
+    targets: List[str],
+    rotation_range: List[float],
+):
+    """Randomize knob rotation."""
+    prims = _resolve_target_prims(targets, "knob_state")
+
+    def randomize_knob_state():
+        target_position = rep.distribution.uniform(rotation_range[0], rotation_range[1])
+        for prim in prims:
+            with prim:
+                rep.modify.attribute("drive:targetPosition", target_position)
+
+    return randomize_knob_state
+
+
+def create_cloth_scatter_randomizer(
+    targets: List[str],
+    asset_paths: List[str],
+    min_items: int = 5,
+    max_items: int = 20,
+):
+    """Scatter cloth assets across hamper/basket surfaces."""
+    prims = _resolve_target_prims(targets, "cloth_scatter")
+
+    def randomize_cloth_scatter():
+        if not asset_paths:
+            raise RuntimeError("[REPLICATOR] Missing asset paths for cloth scatter")
+        count = random.randint(min_items, max_items)
+        items = rep.create.from_usd(
+            rep.distribution.choice(asset_paths, count),
+            semantics=[("class", "cloth")],
+            count=count,
+        )
+        SPAWNED_OBJECTS.append(items)
+        rep.randomizer.scatter_2d(
+            prims=items,
+            surface_prims=prims,
+            check_for_collisions=True,
+            seed=random.randint(0, 999999),
+        )
+
+    return randomize_cloth_scatter
+
+
+def create_cloth_deformation_randomizer(
+    targets: List[str],
+    simulation_steps: int = 10,
+    gravity_variation: List[float] = None,
+    wind_enabled: bool = False,
+):
+    """Randomize cloth simulation parameters."""
+    prims = _resolve_target_prims(targets, "cloth_deformation")
+    gravity_variation = gravity_variation or [-0.2, 0.2]
+
+    def randomize_cloth_deformation():
+        gravity_scale = rep.distribution.uniform(
+            1.0 + gravity_variation[0],
+            1.0 + gravity_variation[1],
+        )
+        for prim in prims:
+            with prim:
+                rep.modify.attribute("physxCloth:gravityScale", gravity_scale)
+                rep.modify.attribute("physxCloth:solverIterations", simulation_steps)
+                if wind_enabled:
+                    rep.modify.attribute("physxCloth:windDrag", rep.distribution.uniform(0.1, 1.0))
+
+    return randomize_cloth_deformation
+
+
+def create_shelf_population_randomizer(
+    targets: List[str],
+    asset_paths: List[str],
+    fill_ratio_range: List[float],
+):
+    """Populate shelves with random assets."""
+    prims = _resolve_target_prims(targets, "shelf_population")
+
+    def randomize_shelf_population():
+        if not asset_paths:
+            raise RuntimeError("[REPLICATOR] Missing asset paths for shelf population")
+        count = max(1, int(random.uniform(fill_ratio_range[0], fill_ratio_range[1]) * 20))
+        items = rep.create.from_usd(
+            rep.distribution.choice(asset_paths, count),
+            semantics=[("class", "shelf_item")],
+            count=count,
+        )
+        SPAWNED_OBJECTS.append(items)
+        rep.randomizer.scatter_2d(
+            prims=items,
+            surface_prims=prims,
+            check_for_collisions=True,
+            seed=random.randint(0, 999999),
+        )
+
+    return randomize_shelf_population
+
+
+def create_table_setup_randomizer(
+    targets: List[str],
+    asset_paths: List[str],
+    place_settings: List[int],
+    include_centerpiece: bool,
+):
+    """Set up table settings with dishes and utensils."""
+    prims = _resolve_target_prims(targets, "table_setup")
+
+    def randomize_table_setup():
+        if not asset_paths:
+            raise RuntimeError("[REPLICATOR] Missing asset paths for table setup")
+        count = random.randint(place_settings[0], place_settings[1])
+        items = rep.create.from_usd(
+            rep.distribution.choice(asset_paths, count),
+            semantics=[("class", "table_setting")],
+            count=count,
+        )
+        SPAWNED_OBJECTS.append(items)
+        rep.randomizer.scatter_2d(
+            prims=items,
+            surface_prims=prims,
+            check_for_collisions=True,
+            seed=random.randint(0, 999999),
+        )
+        if include_centerpiece:
+            centerpiece = rep.create.from_usd(
+                rep.distribution.choice(asset_paths),
+                semantics=[("class", "centerpiece")],
+                count=1,
+            )
+            SPAWNED_OBJECTS.append(centerpiece)
+            rep.randomizer.scatter_2d(
+                prims=centerpiece,
+                surface_prims=prims,
+                check_for_collisions=True,
+                seed=random.randint(0, 999999),
+            )
+
+    return randomize_table_setup
+
+
+def create_dirty_state_randomizer(
+    targets: List[str],
+    dirty_probability: float,
+    intensity_range: List[float],
+):
+    """Apply dirty material variations."""
+    prims = _resolve_target_prims(targets, "dirty_state")
+
+    def randomize_dirty_state():
+        if random.random() > dirty_probability:
+            return
+        intensity = rep.distribution.uniform(intensity_range[0], intensity_range[1])
+        for prim in prims:
+            with prim:
+                rep.modify.attribute(
+                    "inputs:base_color",
+                    rep.distribution.uniform((0.4, 0.3, 0.2), (0.9, 0.85, 0.8)),
+                )
+                rep.modify.attribute("inputs:roughness", intensity)
+
+    return randomize_dirty_state
+
+
+def create_dishwasher_state_randomizer(
+    targets: List[str],
+    door_state: str,
+    loaded_probability: float,
+    asset_paths: List[str],
+):
+    """Randomize dishwasher door and load contents."""
+    prims = _resolve_target_prims(targets, "dishwasher_state")
+
+    def randomize_dishwasher_state():
+        open_range = (0.0, 1.0) if door_state == "variable" else (0.0, 0.0)
+        if door_state == "open":
+            open_range = (1.0, 1.0)
+        target_position = rep.distribution.uniform(open_range[0], open_range[1])
+        for prim in prims:
+            with prim:
+                rep.modify.attribute("drive:targetPosition", target_position)
+        if asset_paths and random.random() < loaded_probability:
+            count = random.randint(4, 12)
+            items = rep.create.from_usd(
+                rep.distribution.choice(asset_paths, count),
+                semantics=[("class", "dishwasher_load")],
+                count=count,
+            )
+            SPAWNED_OBJECTS.append(items)
+            rep.randomizer.scatter_2d(
+                prims=items,
+                surface_prims=prims,
+                check_for_collisions=True,
+                seed=random.randint(0, 999999),
+            )
+
+    return randomize_dishwasher_state
+
+
+def create_switch_states_randomizer(
+    targets: List[str],
+    on_probability: float,
+):
+    """Randomize binary switch states."""
+    prims = _resolve_target_prims(targets, "switch_states")
+
+    def randomize_switch_states():
+        state = rep.distribution.choice([0, 1], weights=[1.0 - on_probability, on_probability])
+        for prim in prims:
+            with prim:
+                rep.modify.attribute("inputs:state", state)
+
+    return randomize_switch_states
+
+
+def create_label_variation_randomizer(
+    targets: List[str],
+    variation_metadata: Dict[str, Any],
+    texture_library: str,
+):
+    """Swap label textures on target assets."""
+    prims = _resolve_target_prims(targets, "label_variation")
+    metadata_index = _build_material_metadata_index(variation_metadata)
+    textures = metadata_index["textures_by_semantic"].get(texture_library, [])
+
+    if not textures:
+        raise RuntimeError(f"[REPLICATOR] Missing label textures for library '{{texture_library}}'")
+
+    def randomize_label_variation():
+        texture_choice = rep.distribution.choice(textures)
+        for prim in prims:
+            with prim:
+                rep.modify.attribute("inputs:diffuse_texture", texture_choice)
+                rep.modify.attribute("inputs:diffuseTexture", texture_choice)
+                rep.modify.attribute("inputs:base_color_texture", texture_choice)
+
+    return randomize_label_variation
+
+
+def create_pallet_placement_randomizer(
+    targets: List[str],
+    position_noise: float,
+    rotation_noise: float,
+):
+    """Randomize pallet poses."""
+    prims = _resolve_target_prims(targets, "pallet_placement")
+
+    def randomize_pallet_placement():
+        for prim in prims:
+            with prim:
+                rep.modify.pose(
+                    position=rep.distribution.uniform(
+                        (-position_noise, -position_noise, 0.0),
+                        (position_noise, position_noise, position_noise),
+                    ),
+                    rotation=rep.distribution.uniform(
+                        (-rotation_noise, -rotation_noise, -rotation_noise),
+                        (rotation_noise, rotation_noise, rotation_noise),
+                    ),
+                )
+
+    return randomize_pallet_placement
+
+
+def create_load_variation_randomizer(
+    targets: List[str],
+    asset_paths: List[str],
+    stack_height_range: List[int],
+):
+    """Randomize pallet load stacking."""
+    prims = _resolve_target_prims(targets, "load_variation")
+
+    def randomize_load_variation():
+        if not asset_paths:
+            raise RuntimeError("[REPLICATOR] Missing asset paths for load variation")
+        count = random.randint(stack_height_range[0], stack_height_range[1])
+        items = rep.create.from_usd(
+            rep.distribution.choice(asset_paths, count),
+            semantics=[("class", "pallet_load")],
+            count=count,
+        )
+        SPAWNED_OBJECTS.append(items)
+        rep.randomizer.scatter_2d(
+            prims=items,
+            surface_prims=prims,
+            check_for_collisions=True,
+            seed=random.randint(0, 999999),
+        )
+
+    return randomize_load_variation
+
+
 # ============================================================================
 # Main Replicator Setup
 # ============================================================================
@@ -1210,6 +1642,13 @@ def setup_replicator():
 
             name = config.get("name", "")
             params = config.get("parameters", {{}})
+            targets = config.get("targets") or params.get("targets") or []
+            metadata_assets_by_category = _collect_assets_by_category(variation_metadata)
+            asset_categories = params.get("asset_categories", [])
+            categorized_assets = []
+            for category in asset_categories:
+                categorized_assets.extend(metadata_assets_by_category.get(category, []))
+            resolved_assets = categorized_assets or asset_paths
 
             if name == "object_scatter":
                 randomizer = create_object_scatter_randomizer(
@@ -1250,6 +1689,153 @@ def setup_replicator():
                 )
                 rep.randomizer.register(randomizer)
                 registered_randomizers.append(("camera", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "articulation_state":
+                randomizer = create_articulation_state_randomizer(
+                    targets=targets,
+                    open_probability=params.get("open_probability", 0.5),
+                    normalize_range=params.get("normalize_range", True),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("articulation_state", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "object_placement":
+                randomizer = create_object_placement_randomizer(
+                    targets=targets,
+                    position_noise=params.get("position_noise", 0.05),
+                    rotation_noise=params.get("rotation_noise", 5),
+                    maintain_surface_contact=params.get("maintain_surface_contact", True),
+                    surfaces=surfaces,
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("object_placement", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "drawer_state":
+                randomizer = create_drawer_state_randomizer(
+                    targets=targets,
+                    open_range=params.get("open_range", [0.0, 1.0]),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("drawer_state", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "drawer_contents":
+                randomizer = create_drawer_contents_randomizer(
+                    targets=targets,
+                    asset_paths=resolved_assets,
+                    fill_ratio=params.get("fill_ratio", [0.2, 0.8]),
+                    max_items=params.get("max_items", 8),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("drawer_contents", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "door_state":
+                randomizer = create_door_state_randomizer(
+                    targets=targets,
+                    open_range=params.get("open_range", [0.0, 1.57]),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("door_state", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "knob_state":
+                randomizer = create_knob_state_randomizer(
+                    targets=targets,
+                    rotation_range=params.get("rotation_range", [0.0, 6.28]),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("knob_state", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "cloth_scatter":
+                randomizer = create_cloth_scatter_randomizer(
+                    targets=targets,
+                    asset_paths=resolved_assets,
+                    min_items=params.get("min_items", 5),
+                    max_items=params.get("max_items", 20),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("cloth_scatter", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "cloth_deformation":
+                randomizer = create_cloth_deformation_randomizer(
+                    targets=targets,
+                    simulation_steps=params.get("simulation_steps", 10),
+                    gravity_variation=params.get("gravity_variation", [-0.2, 0.2]),
+                    wind_enabled=params.get("wind_enabled", False),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("cloth_deformation", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "shelf_population":
+                randomizer = create_shelf_population_randomizer(
+                    targets=targets,
+                    asset_paths=resolved_assets,
+                    fill_ratio_range=params.get("fill_ratio_range", [0.3, 0.9]),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("shelf_population", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "table_setup":
+                randomizer = create_table_setup_randomizer(
+                    targets=targets,
+                    asset_paths=resolved_assets,
+                    place_settings=params.get("place_settings", [1, 6]),
+                    include_centerpiece=params.get("include_centerpiece", True),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("table_setup", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "dirty_state":
+                randomizer = create_dirty_state_randomizer(
+                    targets=targets,
+                    dirty_probability=params.get("dirty_probability", 0.7),
+                    intensity_range=params.get("intensity_range", [0.1, 0.8]),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("dirty_state", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "dishwasher_state":
+                randomizer = create_dishwasher_state_randomizer(
+                    targets=targets,
+                    door_state=params.get("door_state", "variable"),
+                    loaded_probability=params.get("loaded_probability", 0.3),
+                    asset_paths=resolved_assets,
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("dishwasher_state", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "switch_states":
+                randomizer = create_switch_states_randomizer(
+                    targets=targets,
+                    on_probability=params.get("on_probability", 0.5),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("switch_states", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "label_variation":
+                randomizer = create_label_variation_randomizer(
+                    targets=targets,
+                    variation_metadata=variation_metadata,
+                    texture_library=params.get("texture_library", "shipping_labels"),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("label_variation", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "pallet_placement":
+                randomizer = create_pallet_placement_randomizer(
+                    targets=targets,
+                    position_noise=params.get("position_noise", 0.1),
+                    rotation_noise=params.get("rotation_noise", 10),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("pallet_placement", randomizer, config.get("frequency", "per_frame")))
+
+            elif name == "load_variation":
+                randomizer = create_load_variation_randomizer(
+                    targets=targets,
+                    asset_paths=resolved_assets,
+                    stack_height_range=params.get("stack_height_range", [1, 4]),
+                )
+                rep.randomizer.register(randomizer)
+                registered_randomizers.append(("load_variation", randomizer, config.get("frequency", "per_frame")))
 
         # Set up writer for annotations
         annotations = CAPTURE_CONFIG.get("annotations", ["rgb"])
