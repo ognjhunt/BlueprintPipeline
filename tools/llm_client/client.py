@@ -39,6 +39,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from tools.config.env import parse_bool_env
 try:
     from PIL import Image
 except ImportError:
@@ -104,7 +105,7 @@ def _has_secret_or_env(secret_id: str, env_var: str) -> bool:
 
 def _is_production_env() -> bool:
     return (
-        os.getenv("PRODUCTION", "").lower() == "true"
+        parse_bool_env(os.getenv("PRODUCTION"), default=False)
         or os.getenv("K_SERVICE") is not None
         or os.getenv("KUBERNETES_SERVICE_HOST") is not None
     )
@@ -228,7 +229,7 @@ class _LLMRequestManager:
         self._rate_limiters: Dict[LLMProvider, Optional[_LeakyBucketRateLimiter]] = {}
         self._rate_lock = threading.Lock()
         cache_ttl = self._get_float_env("LLM_CACHE_TTL_SECONDS", 0.0)
-        cache_enabled = os.getenv("LLM_CACHE_ENABLED", "true").lower() == "true"
+        cache_enabled = parse_bool_env(os.getenv("LLM_CACHE_ENABLED"), default=True)
         self._cache = _LLMResponseCache(cache_ttl) if cache_ttl > 0 and cache_enabled else None
         max_concurrency = self._get_int_env("LLM_MAX_CONCURRENCY", 0)
         self._semaphore = (
@@ -1425,7 +1426,10 @@ def create_llm_client(
     if provider is None or provider == LLMProvider.AUTO:
         provider = get_default_provider()
 
-    fallback_enabled = fallback_enabled and os.getenv("LLM_FALLBACK_ENABLED", "true").lower() == "true"
+    fallback_enabled = fallback_enabled and parse_bool_env(
+        os.getenv("LLM_FALLBACK_ENABLED"),
+        default=True,
+    )
 
     try:
         return _create_client_for_provider(provider, model, **kwargs)
