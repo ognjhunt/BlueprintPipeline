@@ -128,11 +128,18 @@ def _create_object_scatter(
             "max_objects": params.get("max_objects", 20),
             "asset_categories": asset_categories,
             "regions": params.get("regions", []),
-            "collision_check": True,
+            "collision_check": params.get("collision_check", True),
             "orientation_distribution": {
                 "type": "uniform",
                 "rotation_axis": "Y",
                 "range": [0, 360],
+            },
+            "physics_hints": {
+                "dynamic_friction_range": params.get("dynamic_friction_range", [0.3, 0.9]),
+                "static_friction_range": params.get("static_friction_range", [0.4, 1.0]),
+                "restitution_range": params.get("restitution_range", [0.0, 0.2]),
+                "mass_scale_range": params.get("mass_scale_range", [0.9, 1.1]),
+                "density_scale_range": params.get("density_scale_range", [0.9, 1.1]),
             },
         },
     )
@@ -162,6 +169,13 @@ def _create_material_variation(
             "roughness_variation": {
                 "enabled": True,
                 "range": [-0.1, 0.1],
+            },
+            "physics_hints": {
+                "dynamic_friction_range": params.get("dynamic_friction_range", [0.3, 0.9]),
+                "static_friction_range": params.get("static_friction_range", [0.4, 1.0]),
+                "restitution_range": params.get("restitution_range", [0.0, 0.2]),
+                "mass_scale_range": params.get("mass_scale_range", [0.9, 1.1]),
+                "density_scale_range": params.get("density_scale_range", [0.9, 1.1]),
             },
         },
     )
@@ -250,6 +264,7 @@ def _create_object_placement(
             "position_noise": params.get("position_noise", 0.05),
             "rotation_noise": params.get("rotation_noise", 5),
             "maintain_surface_contact": True,
+            "collision_check": params.get("collision_check", True),
         },
     )
 
@@ -545,4 +560,3 @@ def _create_load_variation(
             "arrangement": params.get("arrangement", "aligned"),
         },
     )
-

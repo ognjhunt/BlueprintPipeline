@@ -1031,6 +1031,71 @@ def _collect_assets_by_category(metadata: Dict[str, Any]) -> Dict[str, List[str]
     return assets_by_category
 
 
+def _extract_physics_hints(params: Dict[str, Any]) -> Dict[str, Any]:
+    hints: Dict[str, Any] = {}
+    if isinstance(params.get("physics_hints"), dict):
+        hints.update(params["physics_hints"])
+    for key in (
+        "dynamic_friction_range",
+        "static_friction_range",
+        "restitution_range",
+        "mass_scale_range",
+        "density_scale_range",
+    ):
+        if key in params and key not in hints:
+            hints[key] = params[key]
+    return hints
+
+
+def _apply_physics_hints(target_prims, physics_hints: Dict[str, Any]) -> None:
+    if not physics_hints or target_prims is None:
+        return
+
+    dynamic_friction_range = physics_hints.get("dynamic_friction_range")
+    static_friction_range = physics_hints.get("static_friction_range")
+    restitution_range = physics_hints.get("restitution_range")
+    mass_scale_range = physics_hints.get("mass_scale_range")
+    density_scale_range = physics_hints.get("density_scale_range")
+
+    if not any(
+        [
+            dynamic_friction_range,
+            static_friction_range,
+            restitution_range,
+            mass_scale_range,
+            density_scale_range,
+        ]
+    ):
+        return
+
+    with target_prims:
+        if dynamic_friction_range:
+            rep.modify.attribute(
+                "physxMaterial:dynamicFriction",
+                rep.distribution.uniform(dynamic_friction_range[0], dynamic_friction_range[1]),
+            )
+        if static_friction_range:
+            rep.modify.attribute(
+                "physxMaterial:staticFriction",
+                rep.distribution.uniform(static_friction_range[0], static_friction_range[1]),
+            )
+        if restitution_range:
+            rep.modify.attribute(
+                "physxMaterial:restitution",
+                rep.distribution.uniform(restitution_range[0], restitution_range[1]),
+            )
+        if mass_scale_range:
+            rep.modify.attribute(
+                "physxMassProperties:massScale",
+                rep.distribution.uniform(mass_scale_range[0], mass_scale_range[1]),
+            )
+        if density_scale_range:
+            rep.modify.attribute(
+                "physxMassProperties:densityScale",
+                rep.distribution.uniform(density_scale_range[0], density_scale_range[1]),
+            )
+
+
 # ============================================================================
 # Randomizers
 # ============================================================================
@@ -1040,9 +1105,12 @@ def create_object_scatter_randomizer(
     asset_paths: List[str],
     min_objects: int = 5,
     max_objects: int = 15,
-    semantic_class: str = "object"
+    semantic_class: str = "object",
+    collision_check: bool = True,
+    physics_hints: Optional[Dict[str, Any]] = None,
 ):
     """Create a randomizer that scatters objects on surfaces."""
+    physics_hints = physics_hints or {}
 
     def randomize_objects():
         # Determine number of objects to spawn
@@ -1070,9 +1138,10 @@ def create_object_scatter_randomizer(
             if surfaces:
                 rep.randomizer.scatter_2d(
                     surface_prims=surfaces,
-                    check_for_collisions=True,
+                    check_for_collisions=collision_check,
                     seed=random.randint(0, 999999)
                 )
+        _apply_physics_hints(objects, physics_hints)
 
         return objects
 
@@ -1082,10 +1151,12 @@ def create_object_scatter_randomizer(
 def create_material_variation_randomizer(
     variation_metadata: Dict[str, Any],
     target_semantic_class: str = "object",
-    allow_textures: bool = True
+    allow_textures: bool = True,
+    physics_hints: Optional[Dict[str, Any]] = None,
 ):
     """Create a randomizer for material properties on spawned variant objects."""
     metadata_index = _build_material_metadata_index(variation_metadata)
+    physics_hints = physics_hints or {}
 
     def _select_target_prims():
         if SPAWNED_OBJECTS:
@@ -1147,6 +1218,7 @@ def create_material_variation_randomizer(
                     rep.modify.attribute("inputs:diffuse_texture", texture_choice)
                     rep.modify.attribute("inputs:diffuseTexture", texture_choice)
                     rep.modify.attribute("inputs:base_color_texture", texture_choice)
+            _apply_physics_hints(target_prims, physics_hints)
 
     return randomize_materials
 
@@ -1227,6 +1299,7 @@ def create_object_placement_randomizer(
     rotation_noise: float = 5.0,
     maintain_surface_contact: bool = True,
     surfaces: Optional[List[Any]] = None,
+    collision_check: bool = True,
 ):
     """Randomize poses for existing objects."""
     prims = _resolve_target_prims(targets, "object_placement")
@@ -1236,7 +1309,7 @@ def create_object_placement_randomizer(
             rep.randomizer.scatter_2d(
                 prims=prims,
                 surface_prims=surfaces,
-                check_for_collisions=True,
+                check_for_collisions=collision_check,
                 seed=random.randint(0, 999999),
             )
         for prim in prims:
@@ -1651,21 +1724,26 @@ def setup_replicator():
             resolved_assets = categorized_assets or asset_paths
 
             if name == "object_scatter":
+                physics_hints = _extract_physics_hints(params)
                 randomizer = create_object_scatter_randomizer(
                     surfaces=surfaces,
                     asset_paths=asset_paths,
                     min_objects=params.get("min_objects", 5),
                     max_objects=params.get("max_objects", 15),
-                    semantic_class=params.get("semantic_class", "object")
+                    semantic_class=params.get("semantic_class", "object"),
+                    collision_check=params.get("collision_check", True),
+                    physics_hints=physics_hints,
                 )
                 rep.randomizer.register(randomizer)
                 registered_randomizers.append(("object_scatter", randomizer, config.get("frequency", "per_frame")))
 
             elif name == "material_variation":
+                physics_hints = _extract_physics_hints(params)
                 randomizer = create_material_variation_randomizer(
                     variation_metadata=variation_metadata,
                     target_semantic_class=params.get("semantic_class", "object"),
-                    allow_textures=params.get("allow_textures", True)
+                    allow_textures=params.get("allow_textures", True),
+                    physics_hints=physics_hints,
                 )
                 rep.randomizer.register(randomizer)
                 registered_randomizers.append((
@@ -1706,6 +1784,7 @@ def setup_replicator():
                     rotation_noise=params.get("rotation_noise", 5),
                     maintain_surface_contact=params.get("maintain_surface_contact", True),
                     surfaces=surfaces,
+                    collision_check=params.get("collision_check", True),
                 )
                 rep.randomizer.register(randomizer)
                 registered_randomizers.append(("object_placement", randomizer, config.get("frequency", "per_frame")))
