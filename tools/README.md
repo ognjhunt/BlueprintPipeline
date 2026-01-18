@@ -7,6 +7,7 @@ This directory hosts shared utilities and pipeline helpers used by jobs across B
 - [API Reference](../docs/api/README.md)
 - [Environment variables](config/ENVIRONMENT_VARIABLES.md)
 - [Pipeline configuration](config/pipeline_config.json)
+- Scene graph + health check defaults are defined under `scene_graph` and `health_checks` in `config/pipeline_config.json`.
 
 ## Common entrypoints
 
@@ -52,4 +53,3 @@ Shared tooling and libraries that support pipeline jobs, validation, and integra
 ## How to run locally
 - Run helper scripts directly, for example: `python run_local_pipeline.py`.
 - Import modules in your own scripts using `from tools.<module> import ...`.
-

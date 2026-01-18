@@ -11,7 +11,7 @@ Environment Variables:
     GENIESIM_PREFIX: Prefix where export bundle is stored (default: scenes/<scene>/geniesim)
     JOB_OUTPUT_PATH: GCS path to write job metadata (default: scenes/<scene>/geniesim/job.json)
     ROBOT_TYPE: Robot type (default: franka)
-    EPISODES_PER_TASK: Episodes per task (default: 10)
+    EPISODES_PER_TASK: Episodes per task (default: tools/config/pipeline_config.json)
     NUM_VARIATIONS: Scene variations (default: 5)
     MIN_QUALITY_SCORE: Minimum quality score (default: 0.85)
 """
@@ -45,6 +45,7 @@ from tools.gcs_upload import (
     upload_blob_from_filename,
     verify_blob_upload,
 )
+from tools.config import load_pipeline_config
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
@@ -163,6 +164,14 @@ def _write_failure_marker(
     payload: Dict[str, Any],
 ) -> None:
     _write_json_blob(client, bucket, f"{geniesim_prefix}/.failed", payload)
+
+
+def _resolve_episodes_per_task() -> int:
+    env_value = os.getenv("EPISODES_PER_TASK")
+    if env_value is not None:
+        return int(env_value)
+    pipeline_config = load_pipeline_config()
+    return int(pipeline_config.episode_generation.episodes_per_task)
 
 
 def _find_scene_usd_path(
@@ -488,7 +497,7 @@ def main() -> int:
     job_output_path = os.getenv("JOB_OUTPUT_PATH", f"{geniesim_prefix}/job.json")
 
     robot_type = os.getenv("ROBOT_TYPE", "franka")
-    episodes_per_task = int(os.getenv("EPISODES_PER_TASK", "10"))
+    episodes_per_task = _resolve_episodes_per_task()
     num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
     min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
 
