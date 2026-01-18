@@ -63,12 +63,26 @@ def main() -> None:
         },
         label="[USD-ASSEMBLY]",
     )
+    bucket = os.environ["BUCKET"]
+    scene_id = os.environ["SCENE_ID"]
     assets_prefix = os.environ["ASSETS_PREFIX"]
     assets_root = GCS_ROOT / assets_prefix
     validate_scene_manifest(assets_root / "scene_manifest.json", label="[USD-ASSEMBLY]")
     exit_code = assemble_from_env()
 
     if exit_code != 0:
+        FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+            exception=RuntimeError("USD assembly failed during scene build"),
+            failed_step="assemble_scene",
+            input_params={
+                "scene_id": scene_id,
+                "assets_prefix": assets_prefix,
+                "layout_prefix": os.environ.get("LAYOUT_PREFIX", ""),
+                "usd_prefix": os.getenv("USD_PREFIX") or assets_prefix,
+            },
+            partial_results={"exit_code": exit_code},
+            recommendations=["Check usd-assembly-job logs for object add failures."],
+        )
         sys.exit(exit_code)
 
     if _should_bypass_quality_gates():
@@ -76,8 +90,6 @@ def main() -> None:
         sys.exit(exit_code)
 
     usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
-    scene_id = os.environ["SCENE_ID"]
-    bucket = os.environ["BUCKET"]
     usd_path = GCS_ROOT / usd_prefix / "scene.usda"
 
     quality_gates = QualityGateRegistry(verbose=True)

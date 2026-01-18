@@ -42,6 +42,7 @@ except ImportError as exc:  # pragma: no cover - runtime guard
 from build_scene_usd import (  # noqa: E402
     build_scene,
     load_json,
+    ObjectAddFailures,
     safe_path_join,
     resolve_usdz_asset_path,
 )
@@ -354,6 +355,13 @@ def assemble_scene(
             assets_prefix=assets_prefix,
             usd_prefix=usd_prefix,
         )
+    except ObjectAddFailures as exc:
+        print("[ERROR] Failed to add one or more objects to the USD scene:")
+        for oid, obj_exc in exc.failures:
+            obj_label = f"obj_{oid}" if oid is not None else "obj_unknown"
+            print(f"  - {obj_label}: {obj_exc}")
+        traceback.print_exc()
+        return 1
     except Exception as e:
         print(f"[ERROR] Failed to build scene: {e}")
         traceback.print_exc()
