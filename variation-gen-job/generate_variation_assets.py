@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -146,6 +146,50 @@ def create_gemini_client():
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable is required")
     return genai.Client(api_key=api_key)
+
+
+# ============================================================================
+# Mock Generator
+# ============================================================================
+
+class MockImageGenerator:
+    """Generate simple placeholder images for mock runs."""
+
+    def __init__(self, image_size: int = 512) -> None:
+        self.image_size = image_size
+
+    def generate(self, asset: VariationAssetSpec, output_dir: Path) -> GenerationResult:
+        start_time = time.time()
+
+        asset_dir = output_dir / asset.name
+        asset_dir.mkdir(parents=True, exist_ok=True)
+
+        image_path = asset_dir / "reference.png"
+        image = Image.new("RGB", (self.image_size, self.image_size), color=(255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.load_default()
+        text = asset.name
+
+        if hasattr(draw, "textbbox"):
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        else:
+            text_width, text_height = draw.textsize(text, font=font)
+
+        text_x = max((self.image_size - text_width) // 2, 0)
+        text_y = max((self.image_size - text_height) // 2, 0)
+        draw.text((text_x, text_y), text, fill=(0, 0, 0), font=font)
+        image.save(image_path, format="PNG")
+
+        elapsed = time.time() - start_time
+        logger.info("[VARIATION-GEN] [MOCK] Generated placeholder for: %s", asset.name)
+        return GenerationResult(
+            asset_name=asset.name,
+            success=True,
+            image_path=str(image_path),
+            generation_time_seconds=elapsed,
+        )
 
 
 # ============================================================================
@@ -372,6 +416,7 @@ def generate_all_assets(
     policy_context: Optional[str] = None,
     max_assets: Optional[int] = None,
     dry_run: bool = False,
+    mock_mode: bool = False,
 ) -> Tuple[List[GenerationResult], Dict[str, Any]]:
     """
     Generate reference images for all assets that need generation.
@@ -397,30 +442,35 @@ def generate_all_assets(
     if max_assets is not None:
         assets_to_generate = assets_to_generate[:max_assets]
 
+    image_model_name = "mock" if mock_mode else GEMINI_IMAGE_MODEL_NAME
     logger.info(
         "[VARIATION-GEN] Generating %s assets using %s...",
         len(assets_to_generate),
-        GEMINI_IMAGE_MODEL_NAME,
+        image_model_name,
     )
 
     results: List[GenerationResult] = []
+    mock_generator = MockImageGenerator() if mock_mode else None
 
     for i, asset in enumerate(assets_to_generate):
         logger.debug(
             "[VARIATION-GEN] Progress: %s/%s", i + 1, len(assets_to_generate)
         )
 
-        result = generate_asset_image(
-            client=client,
-            asset=asset,
-            output_dir=output_dir,
-            policy_context=policy_context,
-            dry_run=dry_run,
-        )
+        if mock_generator:
+            result = mock_generator.generate(asset=asset, output_dir=output_dir)
+        else:
+            result = generate_asset_image(
+                client=client,
+                asset=asset,
+                output_dir=output_dir,
+                policy_context=policy_context,
+                dry_run=dry_run,
+            )
         results.append(result)
 
         # Small delay between requests to avoid rate limiting
-        if not dry_run and i < len(assets_to_generate) - 1:
+        if not dry_run and not mock_mode and i < len(assets_to_generate) - 1:
             time.sleep(1.0)
 
     # Compute summary
@@ -434,7 +484,7 @@ def generate_all_assets(
         "failed": failed,
         "total_generation_time_seconds": total_time,
         "average_time_per_asset_seconds": total_time / len(results) if results else 0,
-        "image_model": GEMINI_IMAGE_MODEL_NAME
+        "image_model": image_model_name
     }
 
     return results, summary
@@ -602,7 +652,8 @@ def process_variation_assets(
     variation_assets_prefix: str,
     max_assets: Optional[int] = None,
     dry_run: bool = False,
-    priority_filter: Optional[str] = None
+    priority_filter: Optional[str] = None,
+    mock_mode: bool = False,
 ) -> bool:
     """
     Main processing function for variation asset generation.
@@ -667,7 +718,7 @@ def process_variation_assets(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create Gemini client
-    if not dry_run:
+    if not dry_run and not mock_mode:
         try:
             client = create_gemini_client()
         except ValueError as e:
@@ -684,6 +735,7 @@ def process_variation_assets(
         policy_context=policy_context,
         max_assets=max_assets,
         dry_run=dry_run,
+        mock_mode=mock_mode,
     )
 
     logger.info("[VARIATION-GEN] Generation complete:")
@@ -714,10 +766,11 @@ def process_variation_assets(
         "summary": summary,
         "results": [asdict(r) for r in results],
         "config": {
-            "image_model": GEMINI_IMAGE_MODEL,
+            "image_model": "mock" if mock_mode else GEMINI_IMAGE_MODEL,
             "max_assets": max_assets,
             "priority_filter": priority_filter,
-            "dry_run": dry_run
+            "dry_run": dry_run,
+            "mock_mode": mock_mode,
         }
     }
     report_path = output_dir / "generation_report.json"
@@ -743,20 +796,26 @@ def process_variation_assets(
 def main():
     """Main entry point for the variation-gen job."""
 
-    validate_required_env_vars(
-        {
-            "BUCKET": "GCS bucket name",
-            "SCENE_ID": "Scene identifier",
-            "GEMINI_API_KEY": "Gemini API key for image generation",
-        },
-        label="[VARIATION-GEN]",
-    )
-
     # Get configuration from environment
+    variation_gen_mode = os.getenv("VARIATION_GEN_MODE", "").lower()
+    dry_run = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"}
+    mock_mode = variation_gen_mode == "mock"
+
+    required_env_vars = {
+        "BUCKET": "GCS bucket name",
+        "SCENE_ID": "Scene identifier",
+    }
+    if not mock_mode and not dry_run:
+        required_env_vars["GEMINI_API_KEY"] = "Gemini API key for image generation"
+
+    validate_required_env_vars(required_env_vars, label="[VARIATION-GEN]")
+
     bucket = os.environ["BUCKET"]
     scene_id = os.environ["SCENE_ID"]
     replicator_prefix = os.getenv("REPLICATOR_PREFIX", f"scenes/{scene_id}/replicator")
-    variation_assets_prefix = os.getenv("VARIATION_ASSETS_PREFIX", f"scenes/{scene_id}/variation_assets")
+    variation_assets_prefix = os.getenv(
+        "VARIATION_ASSETS_PREFIX", f"scenes/{scene_id}/variation_assets"
+    )
 
     # Optional configuration
     max_assets_str = os.getenv("MAX_ASSETS", "")
@@ -765,20 +824,21 @@ def main():
     priority_filter = os.getenv("PRIORITY_FILTER", "")  # "required", "recommended", "optional"
     priority_filter = priority_filter if priority_filter else None
 
-    dry_run = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"}
-
     logger.info("[VARIATION-GEN] Starting variation asset generation")
     logger.info("[VARIATION-GEN] Scene ID: %s", scene_id)
     logger.info("[VARIATION-GEN] Bucket: %s", bucket)
     logger.info("[VARIATION-GEN] Replicator prefix: %s", replicator_prefix)
     logger.info("[VARIATION-GEN] Output prefix: %s", variation_assets_prefix)
-    logger.info("[VARIATION-GEN] Image model: %s", GEMINI_IMAGE_MODEL_NAME)
+    image_model_display = "Mock generator" if mock_mode else GEMINI_IMAGE_MODEL_NAME
+    logger.info("[VARIATION-GEN] Image model: %s", image_model_display)
     if max_assets:
         logger.info("[VARIATION-GEN] Max assets: %s", max_assets)
     if priority_filter:
         logger.info("[VARIATION-GEN] Priority filter: %s", priority_filter)
     if dry_run:
         logger.info("[VARIATION-GEN] DRY RUN MODE - no actual generation")
+    if mock_mode:
+        logger.info("[VARIATION-GEN] MOCK MODE - using placeholder images")
 
     try:
         success = process_variation_assets(
@@ -789,6 +849,7 @@ def main():
             max_assets=max_assets,
             dry_run=dry_run,
             priority_filter=priority_filter,
+            mock_mode=mock_mode,
         )
 
         if success:
