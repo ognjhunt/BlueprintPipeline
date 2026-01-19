@@ -167,7 +167,7 @@ spec:
 
       containers:
         - name: episode-generator
-          image: gcr.io/${PROJECT_ID}/blueprint-episode-gen:isaacsim
+          image: gcr.io/blueprint-project/blueprint-episode-gen:isaacsim
           imagePullPolicy: Always
 
           # Run episode generation
@@ -183,13 +183,13 @@ spec:
           env:
             # Scene-specific configuration (set via job parameters)
             - name: SCENE_ID
-              value: "${SCENE_ID}"
+              value: "$(SCENE_ID)"
             - name: BUCKET
-              value: "${BUCKET}"
+              value: "$(BUCKET)"
             - name: ASSETS_PREFIX
-              value: "scenes/${SCENE_ID}/assets"
+              value: "scenes/$(SCENE_ID)/assets"
             - name: EPISODES_PREFIX
-              value: "scenes/${SCENE_ID}/episodes"
+              value: "scenes/$(SCENE_ID)/episodes"
 
             # GCS credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -271,7 +271,7 @@ spec:
 
           containers:
             - name: episode-generator
-              image: gcr.io/${PROJECT_ID}/blueprint-episode-gen:isaacsim
+              image: gcr.io/blueprint-project/blueprint-episode-gen:isaacsim
               command: ["/entrypoint.sh", "generate"]
               envFrom:
                 - configMapRef:
@@ -282,7 +282,7 @@ spec:
                 - name: SCENE_ID
                   value: "batch-${JOB_ID}"
                 - name: BUCKET
-                  value: "${BUCKET}"
+                  value: "$(BUCKET)"
               resources:
                 requests:
                   nvidia.com/gpu: 1
