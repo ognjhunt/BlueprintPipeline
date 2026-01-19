@@ -341,6 +341,8 @@ class SensorDataConfig:
     render_offscreen: bool = True
     use_gpu_compression: bool = True
     max_concurrent_captures: int = 4
+    # If set, raise when more than this many cameras fail in a frame (0 == require all)
+    max_camera_failures: Optional[int] = None
 
     # Scene + robot configuration
     scene_usd_path: Optional[str] = None
@@ -1056,11 +1058,39 @@ class IsaacSimSensorCapture:
                 if self.verbose:
                     self.log(traceback.format_exc(), "DEBUG")
 
-        # Check if all cameras failed
-        if failed_cameras and len(failed_cameras) == len(self._annotators):
-            raise RuntimeError(f"All {len(failed_cameras)} cameras failed to capture frame {frame_index}")
-        elif failed_cameras:
-            self.log(f"Frame {frame_index}: {len(failed_cameras)}/{len(self._annotators)} cameras failed", "WARNING")
+        # Check failure thresholds
+        if failed_cameras:
+            total_cameras = len(self._annotators)
+            max_failures = self.config.max_camera_failures
+            if max_failures is not None and len(failed_cameras) > max_failures:
+                error_payload = {
+                    "event": "camera_failure_threshold_exceeded",
+                    "frame_index": frame_index,
+                    "failed_cameras": failed_cameras,
+                    "failed_count": len(failed_cameras),
+                    "total_cameras": total_cameras,
+                    "max_camera_failures": max_failures,
+                }
+                self.log(json.dumps(error_payload), "ERROR")
+                raise RuntimeError(
+                    "Camera failure threshold exceeded for frame "
+                    f"{frame_index}: failed {len(failed_cameras)}/{total_cameras} "
+                    f"cameras (max allowed={max_failures})."
+                )
+            if len(failed_cameras) == total_cameras:
+                error_payload = {
+                    "event": "all_cameras_failed",
+                    "frame_index": frame_index,
+                    "failed_cameras": failed_cameras,
+                    "failed_count": len(failed_cameras),
+                    "total_cameras": total_cameras,
+                }
+                self.log(json.dumps(error_payload), "ERROR")
+                raise RuntimeError(f"All {len(failed_cameras)} cameras failed to capture frame {frame_index}")
+            self.log(
+                f"Frame {frame_index}: {len(failed_cameras)}/{total_cameras} cameras failed",
+                "WARNING",
+            )
 
         # Object poses (if enabled)
         if self.config.include_object_poses and scene_objects:
@@ -2160,6 +2190,17 @@ def create_sensor_capture(
     )
     config.robot_prim_paths = robot_prim_paths
     config.scene_usd_path = scene_usd_path
+    max_camera_failures_env = os.getenv("MAX_CAMERA_FAILURES")
+    if max_camera_failures_env:
+        try:
+            config.max_camera_failures = int(max_camera_failures_env)
+        except ValueError:
+            logger.warning(
+                "Invalid MAX_CAMERA_FAILURES value %r; expected integer. Using default.",
+                max_camera_failures_env,
+            )
+    elif parse_bool_env(os.getenv("REQUIRE_ALL_CAMERAS"), default=False):
+        config.max_camera_failures = 0
 
     # Determine capture mode (prioritize new explicit mode)
     if capture_mode is None:
