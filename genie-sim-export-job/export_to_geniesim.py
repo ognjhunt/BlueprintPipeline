@@ -187,6 +187,26 @@ def _resolve_scene_root_for_provenance(assets_dir: Path) -> Path:
     return assets_dir
 
 
+def _embedding_provider_available() -> bool:
+    return bool(
+        os.getenv("OPENAI_API_KEY")
+        or os.getenv("QWEN_API_KEY")
+        or os.getenv("DASHSCOPE_API_KEY")
+    )
+
+
+def _resolve_embedding_model() -> Optional[str]:
+    if os.getenv("QWEN_EMBEDDING_MODEL"):
+        return os.getenv("QWEN_EMBEDDING_MODEL")
+    if os.getenv("OPENAI_EMBEDDING_MODEL"):
+        return os.getenv("OPENAI_EMBEDDING_MODEL")
+    if os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"):
+        return "qwen-text-embedding-v4"
+    if os.getenv("OPENAI_API_KEY"):
+        return "text-embedding-3-large"
+    return "qwen-text-embedding-v4"
+
+
 def _fail_variation_assets_requirement(
     *,
     bucket: str,
@@ -230,6 +250,7 @@ def run_geniesim_export_job(
     max_tasks: int = 50,
     generate_embeddings: bool = False,
     require_embeddings: bool = False,
+    embedding_model: Optional[str] = None,
     filter_commercial: bool = True,  # Default TRUE for commercial use
     copy_usd: bool = True,
     enable_multi_robot: bool = True,  # DEFAULT: ENABLED
@@ -256,6 +277,7 @@ def run_geniesim_export_job(
         max_tasks: Maximum suggested tasks
         generate_embeddings: Generate semantic embeddings
         require_embeddings: Require real embeddings (no placeholders)
+        embedding_model: Embedding model name (e.g., qwen-text-embedding-v4)
         filter_commercial: Only include commercial-use assets (DEFAULT: True)
         copy_usd: Copy USD files to output
         enable_multi_robot: Generate for multiple robot types (DEFAULT: True)
@@ -841,12 +863,23 @@ def run_geniesim_export_job(
             return 1
         print("[GENIESIM-EXPORT-JOB] ⚠️  Continuing without quality gate validation\n")
 
+    embedding_provider_available = _embedding_provider_available()
+    embedding_mode = (
+        "provider"
+        if generate_embeddings and embedding_provider_available
+        else "placeholder"
+    )
+
     # Configure exporter with enhanced features
+    resolved_embedding_model = embedding_model or _resolve_embedding_model()
+    if resolved_embedding_model:
+        print(f"[GENIESIM-EXPORT-JOB] Embedding model: {resolved_embedding_model}")
     config = GenieSimExportConfig(
         robot_type=robot_type,
         urdf_path=urdf_path,
         generate_embeddings=generate_embeddings,
         require_embeddings=require_embeddings,
+        embedding_model=resolved_embedding_model,
         max_tasks=max_tasks,
         copy_usd_files=copy_usd,
         filter_commercial_only=filter_commercial,
@@ -1217,6 +1250,8 @@ def run_geniesim_export_job(
                     "require_embeddings": require_embeddings,
                     "production_mode": production_mode,
                 },
+                "embedding_provider_available": embedding_provider_available,
+                "embedding_mode": embedding_mode,
                 # Track which premium features were exported
                 "premium_features_exported": {
                     "premium_analytics": premium_feature_status.get("premium_analytics", False),
@@ -1319,6 +1354,7 @@ def main():
     enable_premium_analytics = parse_bool_env(os.getenv("ENABLE_PREMIUM_ANALYTICS"), default=True)
     require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
     strict_premium_features = parse_bool_env(os.getenv("STRICT_PREMIUM_FEATURES"), default=False)
+    embedding_model = _resolve_embedding_model()
     if production_mode and not require_quality_gates:
         require_quality_gates = True
 
@@ -1334,6 +1370,7 @@ def main():
         "max_tasks": max_tasks,
         "generate_embeddings": generate_embeddings,
         "require_embeddings": require_embeddings,
+        "embedding_model": embedding_model,
         "filter_commercial": filter_commercial,
         "copy_usd": copy_usd,
         "enable_multi_robot": enable_multi_robot,
@@ -1364,18 +1401,21 @@ def main():
             partial_results=partial_results,
         )
 
-    if production_mode and (generate_embeddings or require_embeddings):
-        has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
-        has_qwen_key = bool(os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"))
-        if not (has_openai_key or has_qwen_key):
-            message = (
-                "Production mode requires embeddings, but no embedding provider keys were found. "
-                "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY, or explicitly disable "
-                "GENERATE_EMBEDDINGS and REQUIRE_EMBEDDINGS."
-            )
-            print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
-            _write_failure_marker(RuntimeError(message), "embedding_provider_validation")
-            sys.exit(1)
+    embedding_provider_available = _embedding_provider_available()
+    if production_mode and require_embeddings and not embedding_provider_available:
+        message = (
+            "Production mode requires embeddings, but no embedding provider keys were found. "
+            "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY, or explicitly disable "
+            "REQUIRE_EMBEDDINGS."
+        )
+        print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
+        _write_failure_marker(RuntimeError(message), "embedding_provider_validation")
+        sys.exit(1)
+    if generate_embeddings and not require_embeddings and not embedding_provider_available:
+        print(
+            "[GENIESIM-EXPORT-JOB] ⚠️  Embedding provider unavailable; "
+            "placeholder embeddings will be used."
+        )
 
     validated = False
     try:
@@ -1414,6 +1454,7 @@ def main():
                 max_tasks=max_tasks,
                 generate_embeddings=generate_embeddings,
                 require_embeddings=require_embeddings,
+                embedding_model=embedding_model,
                 filter_commercial=filter_commercial,
                 copy_usd=copy_usd,
                 # Enhanced features (DEFAULT: ENABLED)
