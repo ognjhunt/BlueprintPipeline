@@ -92,6 +92,15 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
+def _load_json(path: Path, context: str) -> Any:
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise NonRetryableError(
+            f"Failed to parse JSON for {context} at {path}: {exc}"
+        ) from exc
+
+
 class PipelineStep(str, Enum):
     """Pipeline steps in execution order."""
     REGEN3D = "regen3d"
@@ -364,14 +373,14 @@ class LocalPipelineRunner:
                 "checkpoint": QualityGateCheckpoint.MANIFEST_VALIDATED,
                 "context": {
                     "scene_id": self.scene_id,
-                    "manifest": json.loads(manifest_path.read_text()),
+                    "manifest": _load_json(manifest_path, "quality gate manifest"),
                 },
             }
         if step == PipelineStep.SIMREADY:
             manifest_path = self.assets_dir / "scene_manifest.json"
             if not manifest_path.is_file():
                 return None
-            manifest = json.loads(manifest_path.read_text())
+            manifest = _load_json(manifest_path, "quality gate simready manifest")
             physics_objects = []
             for obj in manifest.get("objects", []):
                 physics = obj.get("physics", {}) or {}
@@ -431,7 +440,12 @@ class LocalPipelineRunner:
         return None
 
     def _apply_quality_gates(self, step: PipelineStep, result: StepResult) -> StepResult:
-        gate_payload = self._quality_gate_context_for_step(step)
+        try:
+            gate_payload = self._quality_gate_context_for_step(step)
+        except NonRetryableError as exc:
+            result.success = False
+            result.message = str(exc)
+            return result
         if not gate_payload:
             return result
 
@@ -762,7 +776,11 @@ class LocalPipelineRunner:
                 return True
             return True
 
-        manifest = json.loads(manifest_path.read_text())
+        try:
+            manifest = _load_json(manifest_path, "articulation preflight manifest")
+        except NonRetryableError as exc:
+            self.log(str(exc), "ERROR")
+            return False
         required_ids = self._required_articulation_ids(manifest)
         if not required_ids:
             self._pending_articulation_preflight = False
@@ -886,6 +904,13 @@ class LocalPipelineRunner:
                     duration_seconds=0,
                     message=f"Unknown step: {step.value}",
                 )
+        except NonRetryableError as e:
+            result = StepResult(
+                step=step,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=str(e),
+            )
         except Exception as e:
             self._log_exception_traceback(f"Step {step.value} failed", e)
             result = StepResult(
@@ -1123,7 +1148,7 @@ class LocalPipelineRunner:
                     outputs={"completion_marker": str(marker_path), "warnings": warnings},
                 )
 
-            layout = json.loads(layout_path.read_text())
+            layout = _load_json(layout_path, "scale calibration layout")
             objects = layout.get("objects", [])
             room_box = layout.get("room_box")
 
@@ -1131,9 +1156,9 @@ class LocalPipelineRunner:
             manifest = None
             if manifest_path.is_file():
                 try:
-                    manifest = json.loads(manifest_path.read_text())
-                except json.JSONDecodeError:
-                    warnings.append(f"Failed to parse manifest at {manifest_path}")
+                    manifest = _load_json(manifest_path, "scale calibration manifest")
+                except NonRetryableError as exc:
+                    warnings.append(str(exc))
 
             metric_metadata, metadata_path = scale_module.load_metric_metadata(self.layout_dir)
 
@@ -1296,8 +1321,16 @@ class LocalPipelineRunner:
         manifest_path = self.assets_dir / "scene_manifest.json"
         required_ids: List[str] = []
         if manifest_path.is_file():
-            manifest = json.loads(manifest_path.read_text())
-            required_ids = self._required_articulation_ids(manifest)
+            try:
+                manifest = _load_json(manifest_path, "interactive manifest")
+                required_ids = self._required_articulation_ids(manifest)
+            except NonRetryableError as exc:
+                return StepResult(
+                    step=PipelineStep.INTERACTIVE,
+                    success=False,
+                    duration_seconds=0,
+                    message=str(exc),
+                )
 
         if self.skip_interactive:
             if production_mode:
@@ -1390,7 +1423,7 @@ class LocalPipelineRunner:
 
         failure_marker = self.assets_dir / ".interactive_failed"
         if failure_marker.is_file():
-            failure_payload = json.loads(failure_marker.read_text())
+            failure_payload = _load_json(failure_marker, "interactive failure payload")
             return StepResult(
                 step=PipelineStep.INTERACTIVE,
                 success=False,
@@ -1408,7 +1441,7 @@ class LocalPipelineRunner:
                 message="interactive-job results not found",
             )
 
-        results_data = json.loads(results_path.read_text())
+        results_data = _load_json(results_path, "interactive results")
         if required_ids:
             result_by_id = {
                 str(r.get("id")): r for r in results_data.get("objects", [])
@@ -1514,8 +1547,16 @@ class LocalPipelineRunner:
                 message="Layout not found",
             )
 
-        manifest = json.loads(manifest_path.read_text())
-        layout = json.loads(layout_path.read_text())
+        try:
+            manifest = _load_json(manifest_path, "usd assembly manifest")
+            layout = _load_json(layout_path, "usd assembly layout")
+        except NonRetryableError as exc:
+            return StepResult(
+                step=PipelineStep.USD,
+                success=False,
+                duration_seconds=0,
+                message=str(exc),
+            )
 
         # Generate a minimal scene.usda
         usda_content = self._generate_usda(manifest, layout)
@@ -1625,10 +1666,18 @@ class LocalPipelineRunner:
                 message="Manifest not found",
             )
 
-        manifest = json.loads(manifest_path.read_text())
-        inventory = {}
-        if inventory_path.is_file():
-            inventory = json.loads(inventory_path.read_text())
+        try:
+            manifest = _load_json(manifest_path, "replicator manifest")
+            inventory = {}
+            if inventory_path.is_file():
+                inventory = _load_json(inventory_path, "replicator inventory")
+        except NonRetryableError as exc:
+            return StepResult(
+                step=PipelineStep.REPLICATOR,
+                success=False,
+                duration_seconds=0,
+                message=str(exc),
+            )
 
         # Create replicator directories
         policies_dir = self.replicator_dir / "policies"
@@ -1697,7 +1746,15 @@ class LocalPipelineRunner:
         variation_assets_dir = self.scene_dir / "variation_assets"
         variation_assets_dir.mkdir(parents=True, exist_ok=True)
 
-        manifest = json.loads(manifest_path.read_text())
+        try:
+            manifest = _load_json(manifest_path, "variation assets manifest")
+        except NonRetryableError as exc:
+            return StepResult(
+                step=PipelineStep.VARIATION_GEN,
+                success=False,
+                duration_seconds=0,
+                message=str(exc),
+            )
         assets = manifest.get("assets", [])
         if not assets:
             return StepResult(
@@ -1780,6 +1837,13 @@ class LocalPipelineRunner:
                     success=False,
                     duration_seconds=0,
                     message="variation_assets.json missing after variation asset pipeline run",
+                )
+            except NonRetryableError as exc:
+                return StepResult(
+                    step=PipelineStep.VARIATION_GEN,
+                    success=False,
+                    duration_seconds=0,
+                    message=str(exc),
                 )
 
         if not marker_path.is_file():
@@ -1878,7 +1942,7 @@ class LocalPipelineRunner:
         if not simready_manifest_path.is_file():
             raise FileNotFoundError(str(simready_manifest_path))
 
-        simready_manifest = json.loads(simready_manifest_path.read_text())
+        simready_manifest = _load_json(simready_manifest_path, "variation simready manifest")
         objects: List[Dict[str, Any]] = []
         for asset in simready_manifest.get("assets", []):
             name = asset.get("name") or "variation_asset"
@@ -2004,7 +2068,7 @@ class LocalPipelineRunner:
             # Load policy config
             policy_config_path = REPO_ROOT / "policy_configs" / "environment_policies.json"
             if policy_config_path.is_file():
-                policy_config = json.loads(policy_config_path.read_text())
+                policy_config = _load_json(policy_config_path, "Isaac Lab policy config")
             else:
                 policy_config = {"policies": {}, "environments": {}}
 
@@ -2018,7 +2082,7 @@ class LocalPipelineRunner:
                     message="Manifest not found",
                 )
 
-            manifest = json.loads(manifest_path.read_text())
+            manifest = _load_json(manifest_path, "Isaac Lab manifest")
 
             # Build recipe from manifest
             recipe = {
@@ -2189,9 +2253,9 @@ class LocalPipelineRunner:
                 message=str(exc),
             )
 
-        scene_graph = json.loads(scene_graph_path.read_text())
-        asset_index = json.loads(asset_index_path.read_text())
-        task_config = json.loads(task_config_path.read_text())
+        scene_graph = _load_json(scene_graph_path, "Genie Sim scene graph")
+        asset_index = _load_json(asset_index_path, "Genie Sim asset index")
+        task_config = _load_json(task_config_path, "Genie Sim task config")
 
         robot_types = self._resolve_geniesim_robot_types()
         robot_type = robot_types[0]
@@ -2237,7 +2301,7 @@ class LocalPipelineRunner:
 
         merged_manifest_path = self.geniesim_dir / "merged_scene_manifest.json"
         if merged_manifest_path.is_file():
-            scene_manifest = json.loads(merged_manifest_path.read_text())
+            scene_manifest = _load_json(merged_manifest_path, "Genie Sim merged scene manifest")
         else:
             scene_manifest = {"scene_graph": scene_graph}
 
@@ -2523,7 +2587,7 @@ class LocalPipelineRunner:
                 message=str(exc),
             )
 
-        job_payload = json.loads(job_path.read_text())
+        job_payload = _load_json(job_path, "Genie Sim job payload")
         try:
             job_id = job_payload.get("job_id")
             if not job_id:
