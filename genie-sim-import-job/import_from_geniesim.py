@@ -226,6 +226,54 @@ def _preflight_firebase_upload() -> bool:
     return True
 
 
+def _alert_low_quality(
+    *,
+    scene_id: str,
+    job_id: str,
+    robot_type: str,
+    average_quality_score: float,
+    min_quality_score: float,
+    episodes_passed_validation: int,
+    episodes_filtered: int,
+) -> None:
+    if average_quality_score >= min_quality_score:
+        return
+    send_alert(
+        event_type="geniesim_import_low_quality",
+        summary="Genie Sim import quality score below threshold",
+        details={
+            "scene_id": scene_id,
+            "job_id": job_id,
+            "robot_type": robot_type,
+            "average_quality_score": average_quality_score,
+            "min_quality_score": min_quality_score,
+            "episodes_passed_validation": episodes_passed_validation,
+            "episodes_filtered": episodes_filtered,
+        },
+        severity=os.getenv("ALERT_LOW_QUALITY_SEVERITY", "warning"),
+    )
+
+
+def _alert_firebase_upload_failure(
+    *,
+    scene_id: str,
+    job_id: str,
+    robot_type: str,
+    error: str,
+) -> None:
+    send_alert(
+        event_type="geniesim_import_firebase_upload_failed",
+        summary="Genie Sim import Firebase upload failed",
+        details={
+            "scene_id": scene_id,
+            "job_id": job_id,
+            "robot_type": robot_type,
+            "error": error,
+        },
+        severity=os.getenv("ALERT_FIREBASE_UPLOAD_SEVERITY", "error"),
+    )
+
+
 def _read_parquet_dataframe(
     episode_file: Path,
     allow_fallback: bool,
@@ -2452,6 +2500,15 @@ def main():
                         robot_config,
                         job_metadata=robot_job_metadata,
                     )
+                _alert_low_quality(
+                    scene_id=scene_id,
+                    job_id=job_id,
+                    robot_type=robot_type,
+                    average_quality_score=result.average_quality_score,
+                    min_quality_score=min_quality_score,
+                    episodes_passed_validation=result.episodes_passed_validation,
+                    episodes_filtered=result.episodes_filtered,
+                )
                 try:
                     _emit_import_quality_gate(result, scene_id)
                 except Exception as exc:
@@ -2478,6 +2535,12 @@ def main():
                             prefix=f"{firebase_upload_prefix}/{robot_type}",
                         )
                     except Exception as exc:
+                        _alert_firebase_upload_failure(
+                            scene_id=scene_id,
+                            job_id=job_id,
+                            robot_type=robot_type,
+                            error=str(exc),
+                        )
                         print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
                         raise
                     print(
@@ -2559,6 +2622,15 @@ def main():
         result = None
         with metrics.track_job("genie-sim-import-job", scene_id):
             result = run_local_import_job(config, job_metadata=job_metadata)
+        _alert_low_quality(
+            scene_id=scene_id,
+            job_id=job_id,
+            robot_type="default",
+            average_quality_score=result.average_quality_score,
+            min_quality_score=min_quality_score,
+            episodes_passed_validation=result.episodes_passed_validation,
+            episodes_filtered=result.episodes_filtered,
+        )
         try:
             _emit_import_quality_gate(result, scene_id)
         except Exception as exc:
@@ -2583,6 +2655,12 @@ def main():
                         prefix=firebase_upload_prefix,
                     )
                 except Exception as exc:
+                    _alert_firebase_upload_failure(
+                        scene_id=scene_id,
+                        job_id=job_id,
+                        robot_type="default",
+                        error=str(exc),
+                    )
                     print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
                     raise
                 print(
