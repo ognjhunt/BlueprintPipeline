@@ -12,6 +12,7 @@ diso==0.1.4
 einops==0.8.1
 flash-attn==2.8.3
 flask==3.0.3
+firebase-admin==6.5.0
 google-cloud-firestore==2.11.0
 google-cloud-secret-manager==2.20.0
 google-cloud-storage==2.18.2

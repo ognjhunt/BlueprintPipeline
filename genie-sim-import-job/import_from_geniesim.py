@@ -21,6 +21,11 @@ Environment Variables:
     ENABLE_VALIDATION: Enable quality validation (default: true)
     REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: false)
     LEROBOT_SKIP_RATE_MAX: Max allowed LeRobot skip rate percentage (default: 0.0 in production)
+    ENABLE_FIREBASE_UPLOAD: Enable Firebase Storage upload of local episodes (default: false)
+    FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name for uploads
+    FIREBASE_SERVICE_ACCOUNT_JSON: Service account JSON payload for Firebase
+    FIREBASE_SERVICE_ACCOUNT_PATH: Path to service account JSON for Firebase
+    FIREBASE_UPLOAD_PREFIX: Remote prefix for Firebase uploads (default: datasets)
 """
 
 import hashlib
@@ -1756,6 +1761,8 @@ def main():
     filter_low_quality = parse_bool_env(os.getenv("FILTER_LOW_QUALITY"), default=True)
     require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
     disable_gcs_upload = parse_bool_env(os.getenv("DISABLE_GCS_UPLOAD"), default=False)
+    enable_firebase_upload = parse_bool_env(os.getenv("ENABLE_FIREBASE_UPLOAD"), default=False)
+    firebase_upload_prefix = os.getenv("FIREBASE_UPLOAD_PREFIX", "datasets")
     try:
         lerobot_skip_rate_max = _resolve_skip_rate_max(
             os.getenv("LEROBOT_SKIP_RATE_MAX")
@@ -1799,6 +1806,7 @@ def main():
     print(f"[GENIE-SIM-IMPORT]   Require LeRobot: {require_lerobot}")
     print(f"[GENIE-SIM-IMPORT]   LeRobot Skip Rate Max: {lerobot_skip_rate_max:.2f}%")
     print(f"[GENIE-SIM-IMPORT]   GCS Uploads Enabled: {not disable_gcs_upload}")
+    print(f"[GENIE-SIM-IMPORT]   Firebase Uploads Enabled: {enable_firebase_upload}")
     print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}")
     print(f"[GENIE-SIM-IMPORT]   Fail on Partial Error: {fail_on_partial_error}\n")
 
@@ -1846,6 +1854,23 @@ def main():
             print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")
             print(f"[GENIE-SIM-IMPORT] Episodes imported: {result.episodes_passed_validation}")
             print(f"[GENIE-SIM-IMPORT] Average quality: {result.average_quality_score:.2f}")
+            if enable_firebase_upload:
+                from tools.firebase_upload.uploader import upload_episodes_to_firebase
+
+                print("[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage...")
+                try:
+                    upload_summary = upload_episodes_to_firebase(
+                        result.output_dir,
+                        scene_id,
+                        prefix=firebase_upload_prefix,
+                    )
+                except Exception as exc:
+                    print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
+                    raise
+                print(
+                    "[GENIE-SIM-IMPORT] Firebase upload complete: "
+                    f"{upload_summary['uploaded']}/{upload_summary['total_files']} files"
+                )
             sys.exit(0)
         else:
             print(f"[GENIE-SIM-IMPORT] ❌ Import failed")
