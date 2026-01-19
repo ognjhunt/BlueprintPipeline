@@ -57,6 +57,7 @@ References:
 """
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -2414,6 +2415,56 @@ class LocalPipelineRunner:
         )
         min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
 
+        idempotency_payload = {
+            "scene_id": self.scene_id,
+            "task_config": task_config,
+            "robot_types": robot_types,
+            "episodes_per_task": episodes_per_task,
+            "num_variations": num_variations,
+            "min_quality_score": min_quality_score,
+        }
+        idempotency_key = hashlib.sha256(
+            json.dumps(idempotency_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        job_path = self.geniesim_dir / "job.json"
+        idempotency_path = self.geniesim_dir / "idempotency.json"
+
+        def _write_idempotency_payload() -> None:
+            idempotency_payload["idempotency_key"] = idempotency_key
+            _safe_write_text(
+                idempotency_path,
+                json.dumps(idempotency_payload, indent=2, sort_keys=True),
+                context="geniesim idempotency payload",
+            )
+        if job_path.is_file():
+            prior_job_payload = _load_json(job_path, "Genie Sim job payload")
+            prior_key = prior_job_payload.get("idempotency_key")
+            if not prior_key and idempotency_path.is_file():
+                prior_idempotency = _load_json(idempotency_path, "Genie Sim idempotency payload")
+                prior_key = prior_idempotency.get("idempotency_key")
+            prior_status = prior_job_payload.get("status")
+            if prior_key == idempotency_key and prior_status == "completed":
+                self.log(
+                    "Found completed Genie Sim job with matching idempotency key; reusing outputs.",
+                    "INFO",
+                )
+                return StepResult(
+                    step=PipelineStep.GENIESIM_SUBMIT,
+                    success=True,
+                    duration_seconds=time.time() - start_time,
+                    message="Reusing completed Genie Sim job outputs.",
+                    outputs={
+                        "job_id": prior_job_payload.get("job_id"),
+                        "job_status": prior_status,
+                        "job_payload": str(job_path),
+                    },
+                )
+            if prior_key == idempotency_key and prior_status == "failed":
+                self.log(
+                    "Prior Genie Sim job failed with matching idempotency key; rerunning.",
+                    "WARNING",
+                )
+
         job_id = None
         submission_message = None
         local_run_results: Dict[str, Any] = {}
@@ -2538,6 +2589,7 @@ class LocalPipelineRunner:
             "status": job_status,
             "submitted_at": datetime.utcnow().isoformat() + "Z",
             "message": submission_message,
+            "idempotency_key": idempotency_key,
             "bundle": {
                 "scene_graph": str(scene_graph_path),
                 "asset_index": str(asset_index_path),
@@ -2713,6 +2765,7 @@ class LocalPipelineRunner:
                     job_payload["failure_reason"] = failure_reason
                     job_payload["failure_details"] = {"firebase_upload": failure_reason}
                     job_path = self.geniesim_dir / "job.json"
+                    _write_idempotency_payload()
                     _safe_write_text(
                         job_path,
                         json.dumps(job_payload, indent=2),
@@ -2776,6 +2829,7 @@ class LocalPipelineRunner:
                     "firebase_upload": firebase_upload_error or None
                 }
                 job_path = self.geniesim_dir / "job.json"
+                _write_idempotency_payload()
                 _safe_write_text(
                     job_path,
                     json.dumps(job_payload, indent=2),
@@ -2810,7 +2864,7 @@ class LocalPipelineRunner:
             job_payload["failure_reason"] = failure_reason or "Genie Sim submission failed"
             job_payload["failure_details"] = failure_details or None
 
-        job_path = self.geniesim_dir / "job.json"
+        _write_idempotency_payload()
         _safe_write_text(
             job_path,
             json.dumps(job_payload, indent=2),
