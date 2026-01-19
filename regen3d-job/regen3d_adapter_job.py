@@ -455,6 +455,76 @@ def _extract_object_height(obj) -> Optional[float]:
     return None
 
 
+def _validate_object_bounds(obj) -> Dict[str, Any]:
+    bounds = obj.bounds or {}
+    size = bounds.get("size")
+    if size and len(size) == 3:
+        size_values = size
+    else:
+        min_pt = bounds.get("min")
+        max_pt = bounds.get("max")
+        if min_pt and max_pt and len(min_pt) == 3 and len(max_pt) == 3:
+            size_values = [
+                max_pt[0] - min_pt[0],
+                max_pt[1] - min_pt[1],
+                max_pt[2] - min_pt[2],
+            ]
+        else:
+            size_values = None
+
+    issues = []
+    if not size_values:
+        issues.append("missing_bounds_size")
+    else:
+        non_positive = [value for value in size_values if value is None or value <= 0]
+        if non_positive:
+            issues.append("non_positive_bounds_size")
+
+    height = _extract_object_height(obj)
+    if height is None or height <= 0:
+        issues.append("missing_height")
+
+    category_text = " ".join(
+        part for part in [obj.category, obj.description, obj.id] if part
+    ).lower()
+
+    height_range = None
+    for ref_key, ref_dims in REFERENCE_DIMENSIONS.items():
+        expected_height = ref_dims.get("height")
+        if not expected_height:
+            continue
+        ref_key_text = ref_key.replace("_", " ")
+        if ref_key in category_text or ref_key_text in category_text:
+            min_height = max(expected_height * 0.3, 0.05)
+            max_height = expected_height * 3.0
+            height_range = (min_height, max_height)
+            break
+
+    flagged_reasons = []
+    if height_range and height is not None:
+        min_height, max_height = height_range
+        if height < min_height or height > max_height:
+            flagged_reasons.append(
+                f"height_out_of_range ({height:.3f}m not in {min_height:.3f}-{max_height:.3f}m)"
+            )
+
+    if height is not None and not height_range:
+        if height < 0.01 or height > 10.0:
+            flagged_reasons.append(
+                f"height_out_of_reasonable_range ({height:.3f}m)"
+            )
+
+    is_valid = not issues
+    return {
+        "is_valid": is_valid,
+        "is_flagged": bool(flagged_reasons),
+        "issues": issues,
+        "flagged_reasons": flagged_reasons,
+        "size": size_values,
+        "height": height,
+    }
+
+
 def _auto_calibrate_scale(
     regen3d_output: Regen3DOutput,
     min_samples: int = 1,
@@ -556,6 +626,64 @@ def run_regen3d_adapter_job(
         logger.error("[REGEN3D-JOB] Failed to load 3D-RE-GEN outputs: %s", e)
         return 1
 
+    valid_objects = []
+    invalid_objects = []
+    flagged_objects = []
+    for obj in regen3d_output.objects:
+        validation = _validate_object_bounds(obj)
+        if not validation["is_valid"]:
+            invalid_objects.append({
+                "id": obj.id,
+                "category": obj.category,
+                "issues": validation["issues"],
+                "size": validation["size"],
+                "height": validation["height"],
+            })
+            logger.warning(
+                "[REGEN3D-JOB] Excluding object %s due to invalid bounds: %s",
+                obj.id,
+                ", ".join(validation["issues"]),
+            )
+            continue
+
+        if validation["is_flagged"]:
+            flagged_objects.append({
+                "id": obj.id,
+                "category": obj.category,
+                "flagged_reasons": validation["flagged_reasons"],
+                "size": validation["size"],
+                "height": validation["height"],
+            })
+            logger.warning(
+                "[REGEN3D-JOB] Object %s flagged for bounds outlier: %s",
+                obj.id,
+                ", ".join(validation["flagged_reasons"]),
+            )
+
+        valid_objects.append(obj)
+
+    if invalid_objects:
+        logger.warning(
+            "[REGEN3D-JOB] Removed %s objects with invalid bounds",
+            len(invalid_objects),
+        )
+
+    regen3d_output = Regen3DOutput(
+        scene_id=regen3d_output.scene_id,
+        objects=valid_objects,
+        background=regen3d_output.background,
+        camera_intrinsics=regen3d_output.camera_intrinsics,
+        camera_extrinsics=regen3d_output.camera_extrinsics,
+        image_size=regen3d_output.image_size,
+        coordinate_frame=regen3d_output.coordinate_frame,
+        meters_per_unit=regen3d_output.meters_per_unit,
+        depth_map_path=regen3d_output.depth_map_path,
+        source_image_path=regen3d_output.source_image_path,
+        overall_confidence=regen3d_output.overall_confidence,
+        reconstruction_method=regen3d_output.reconstruction_method,
+        version=regen3d_output.version,
+    )
+
     if not regen3d_output.objects:
         logger.warning("[REGEN3D-JOB] No objects found in 3D-RE-GEN output")
     else:
@@ -604,6 +732,15 @@ def run_regen3d_adapter_job(
             environment_type=environment_type,
             scale_factor=scale_factor,  # Apply scale_factor consistently
         )
+        manifest.setdefault("metadata", {})
+        manifest["metadata"]["bounds_validation"] = {
+            "invalid_count": len(invalid_objects),
+            "flagged_count": len(flagged_objects),
+            "invalid_objects": invalid_objects,
+            "flagged_objects": flagged_objects,
+            "policy": "excluded_invalid",
+            "checked_at": datetime.utcnow().isoformat() + "Z",
+        }
 
         # Validate manifest against schema
         logger.info("[REGEN3D-JOB] Validating manifest against schema...")
