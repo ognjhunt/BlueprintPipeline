@@ -2210,6 +2210,10 @@ class LocalPipelineRunner:
         firebase_upload_summary: Dict[str, Any] = {}
         firebase_upload_error: Dict[str, str] = {}
         firebase_upload_status = "skipped"
+        firebase_upload_required = parse_bool_env(
+            os.getenv("FIREBASE_UPLOAD_REQUIRED"),
+            default=resolve_production_mode(),
+        )
         import uuid
 
         job_id = f"local-{uuid.uuid4()}"
@@ -2436,6 +2440,44 @@ class LocalPipelineRunner:
         if local_run_results:
             firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
             from tools.firebase_upload import upload_episodes_to_firebase
+            from tools.firebase_upload.uploader import init_firebase
+
+            try:
+                init_firebase()
+            except Exception as exc:
+                firebase_upload_error["init"] = str(exc)
+                firebase_upload_status = "failed"
+                job_payload["firebase_upload_status"] = firebase_upload_status
+                submission_message = (
+                    "Local Genie Sim execution completed; Firebase upload initialization failed."
+                )
+                if firebase_upload_required:
+                    failure_reason = (
+                        "Firebase upload initialization failed: "
+                        f"{self._summarize_exception(exc)}"
+                    )
+                    job_status = "failed"
+                    job_payload["status"] = job_status
+                    job_payload["message"] = submission_message
+                    job_payload["failure_reason"] = failure_reason
+                    job_payload["failure_details"] = {"firebase_upload": failure_reason}
+                    job_path = self.geniesim_dir / "job.json"
+                    job_path.write_text(json.dumps(job_payload, indent=2))
+                    return StepResult(
+                        step=PipelineStep.GENIESIM_SUBMIT,
+                        success=False,
+                        duration_seconds=time.time() - start_time,
+                        message=submission_message,
+                        outputs={
+                            "job_id": job_id,
+                            "job_status": job_status,
+                            "job_payload": str(job_path),
+                        },
+                    )
+                self.log(
+                    f"Firebase upload init failed: {self._summarize_exception(exc)}",
+                    "WARNING",
+                )
 
             for current_robot, result in local_run_results.items():
                 if not result or not result.success:
@@ -2462,6 +2504,32 @@ class LocalPipelineRunner:
             elif firebase_upload_status_by_robot:
                 firebase_upload_status = "completed"
             job_payload["firebase_upload_status"] = firebase_upload_status
+
+            if firebase_upload_status == "failed" and firebase_upload_required:
+                failure_reason = (
+                    "Firebase upload failed: "
+                    f"{self._summarize_exception(Exception(firebase_upload_error))}"
+                )
+                job_status = "failed"
+                job_payload["status"] = job_status
+                job_payload["message"] = submission_message
+                job_payload["failure_reason"] = failure_reason
+                job_payload["failure_details"] = {
+                    "firebase_upload": firebase_upload_error or None
+                }
+                job_path = self.geniesim_dir / "job.json"
+                job_path.write_text(json.dumps(job_payload, indent=2))
+                return StepResult(
+                    step=PipelineStep.GENIESIM_SUBMIT,
+                    success=False,
+                    duration_seconds=time.time() - start_time,
+                    message=submission_message,
+                    outputs={
+                        "job_id": job_id,
+                        "job_status": job_status,
+                        "job_payload": str(job_path),
+                    },
+                )
 
         if firebase_upload_summary or firebase_upload_error:
             firebase_payload = {
@@ -2541,7 +2609,21 @@ class LocalPipelineRunner:
         if local_success is None:
             local_success = job_status == "completed"
         firebase_status = job_payload.get("firebase_upload_status")
+        firebase_upload_required = parse_bool_env(
+            os.getenv("FIREBASE_UPLOAD_REQUIRED"),
+            default=resolve_production_mode(),
+        )
         if firebase_status == "failed":
+            if firebase_upload_required:
+                return StepResult(
+                    step=PipelineStep.GENIESIM_IMPORT,
+                    success=False,
+                    duration_seconds=time.time() - start_time,
+                    message=(
+                        "Genie Sim Firebase upload failed and is required; "
+                        "aborting import."
+                    ),
+                )
             self.log(
                 "Genie Sim Firebase upload failed; continuing import with local recordings.",
                 "WARNING",
