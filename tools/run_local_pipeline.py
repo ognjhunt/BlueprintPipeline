@@ -2873,100 +2873,105 @@ class LocalPipelineRunner:
                 "Genie Sim Firebase upload failed; continuing import with local recordings.",
                 "WARNING",
             )
-        artifacts = job_payload.get("artifacts", {})
-        local_episodes_prefix = (
-            artifacts.get("episodes_prefix")
-            or artifacts.get("episodes_path")
-            or str(self.episodes_dir / f"geniesim_{job_id}")
-        )
 
-        output_dir = Path(local_episodes_prefix)
-        recordings_dir = output_dir / "recordings"
-        lerobot_dir = output_dir / "lerobot"
-        dataset_info_path = lerobot_dir / "dataset_info.json"
-        require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
+        robot_types = self._resolve_geniesim_robot_types()
+        multi_robot = len(robot_types) > 1
+        artifacts_by_robot = job_payload.get("artifacts_by_robot", {})
+        import_results = {}
+        all_success = True
+        errors = []
 
-        try:
-            if not local_success:
-                raise NonRetryableError(
-                    f"Genie Sim job status is {job_status}; import requires successful local execution"
-                )
-            if not recordings_dir.is_dir():
-                raise NonRetryableError(
-                    "Genie Sim recordings directory missing for job "
-                    f"{job_id}: expected {recordings_dir}"
-                )
-            episode_files = list(recordings_dir.rglob("*.json"))
-            if not episode_files:
-                raise NonRetryableError(
-                    "Genie Sim recordings missing for job "
-                    f"{job_id}: expected *.json episodes under {recordings_dir}"
-                )
-            if require_lerobot and (not lerobot_dir.is_dir() or not dataset_info_path.is_file()):
-                missing = []
-                if not lerobot_dir.is_dir():
-                    missing.append(str(lerobot_dir))
-                if not dataset_info_path.is_file():
-                    missing.append(str(dataset_info_path))
-                raise NonRetryableError(
-                    "Genie Sim lerobot artifacts missing for job "
-                    f"{job_id}: expected {', '.join(missing)}"
-                )
-        except NonRetryableError as exc:
-            return StepResult(
-                step=PipelineStep.GENIESIM_IMPORT,
-                success=False,
-                duration_seconds=time.time() - start_time,
-                message=str(exc),
-                outputs={
-                    "job_id": job_id,
-                    "job_status": job_status,
-                    "local_execution_success": bool(local_success),
-                    "output_dir": str(output_dir),
-                    "recordings_path": str(recordings_dir),
-                    "lerobot_path": str(lerobot_dir),
-                    "lerobot_dataset_info": str(dataset_info_path),
-                },
+        for current_robot in robot_types:
+            self.log(f"Importing episodes for robot: {current_robot}")
+            robot_artifacts = artifacts_by_robot.get(current_robot, {})
+            local_episodes_prefix = (
+                robot_artifacts.get("episodes_prefix")
+                or robot_artifacts.get("episodes_path")
             )
-        config = ImportConfig(
-            job_id=job_id,
-            output_dir=output_dir,
-            min_quality_score=float(os.getenv("MIN_QUALITY_SCORE", "0.85")),
-            enable_validation=parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True),
-            filter_low_quality=parse_bool_env(os.getenv("FILTER_LOW_QUALITY"), default=True),
-            require_lerobot=require_lerobot,
-            wait_for_completion=True,
-            poll_interval=0,
-            job_metadata_path=str(job_path),
-            local_episodes_prefix=local_episodes_prefix,
-        )
-        def _import_job() -> Any:
-            result = run_local_import_job(config, job_metadata=job_payload)
-            if not result or not result.success:
-                raise RetryableError("Genie Sim import failed")
-            return result
+            if not local_episodes_prefix:
+                if multi_robot:
+                    local_episodes_prefix = str(self.episodes_dir / current_robot / f"geniesim_{job_id}")
+                else:
+                    local_episodes_prefix = str(self.episodes_dir / f"geniesim_{job_id}")
 
-        try:
-            result = self._run_with_retry(PipelineStep.GENIESIM_IMPORT, _import_job)
-        except NonRetryableError as exc:
-            return StepResult(
-                step=PipelineStep.GENIESIM_IMPORT,
-                success=False,
-                duration_seconds=time.time() - start_time,
-                message=str(exc),
+            output_dir = Path(local_episodes_prefix)
+            recordings_dir = output_dir / "recordings"
+            lerobot_dir = output_dir / "lerobot"
+            dataset_info_path = lerobot_dir / "dataset_info.json"
+            require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
+
+            try:
+                if not local_success:
+                    raise NonRetryableError(
+                        f"Genie Sim job status is {job_status}; import requires successful local execution"
+                    )
+                if not recordings_dir.is_dir():
+                    raise NonRetryableError(
+                        f"Genie Sim recordings directory missing for robot {current_robot}: "
+                        f"expected {recordings_dir}"
+                    )
+                episode_files = list(recordings_dir.rglob("*.json"))
+                if not episode_files:
+                    raise NonRetryableError(
+                        f"Genie Sim recordings missing for robot {current_robot}: "
+                        f"expected *.json episodes under {recordings_dir}"
+                    )
+                if require_lerobot and (not lerobot_dir.is_dir() or not dataset_info_path.is_file()):
+                    missing = []
+                    if not lerobot_dir.is_dir():
+                        missing.append(str(lerobot_dir))
+                    if not dataset_info_path.is_file():
+                        missing.append(str(dataset_info_path))
+                    raise NonRetryableError(
+                        f"Genie Sim lerobot artifacts missing for robot {current_robot}: "
+                        f"expected {', '.join(missing)}"
+                    )
+            except NonRetryableError as exc:
+                self.log(str(exc), "ERROR")
+                all_success = False
+                errors.append(str(exc))
+                continue
+
+            config = ImportConfig(
+                job_id=job_id,
+                output_dir=output_dir,
+                min_quality_score=float(os.getenv("MIN_QUALITY_SCORE", "0.85")),
+                enable_validation=parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True),
+                filter_low_quality=parse_bool_env(os.getenv("FILTER_LOW_QUALITY"), default=True),
+                require_lerobot=require_lerobot,
+                wait_for_completion=True,
+                poll_interval=0,
+                job_metadata_path=str(job_path),
+                local_episodes_prefix=local_episodes_prefix,
             )
-        except Exception as exc:
+
+            def _import_job() -> Any:
+                result = run_local_import_job(config, job_metadata=job_payload)
+                if not result or not result.success:
+                    raise RetryableError(f"Genie Sim import failed for robot {current_robot}")
+                return result
+
+            try:
+                result = self._run_with_retry(PipelineStep.GENIESIM_IMPORT, _import_job)
+                import_results[current_robot] = result
+            except Exception as exc:
+                self.log(f"Import failed for robot {current_robot}: {exc}", "ERROR")
+                all_success = False
+                errors.append(str(exc))
+
+        if not import_results:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
                 duration_seconds=time.time() - start_time,
-                message=f"Genie Sim import failed: {self._summarize_exception(exc)}",
+                message=f"Genie Sim import failed: {'; '.join(errors)}",
             )
 
         marker_path = None
-        if result.success:
+        if all_success:
             marker_path = self.geniesim_dir / ".geniesim_import_complete"
             self._write_marker(marker_path, status="completed")
+
         duration_seconds = time.time() - start_time
         local_execution = job_payload.get("local_execution", {})
         local_execution["import_duration_seconds"] = duration_seconds
@@ -2977,20 +2982,38 @@ class LocalPipelineRunner:
             context="geniesim import job payload",
         )
 
+        # For backward compatibility, populate top-level keys from the first robot's result
+        primary_robot = robot_types[0]
+        primary_res = import_results.get(primary_robot)
+
+        outputs = {
+            "job_id": job_id,
+            "import_results": {
+                robot: {
+                    "import_manifest": str(res.import_manifest_path) if res.import_manifest_path else None,
+                    "output_dir": str(res.output_dir),
+                }
+                for robot, res in import_results.items()
+            },
+            "completion_marker": str(marker_path) if all_success else None,
+        }
+
+        if primary_res:
+            outputs.update({
+                "import_manifest": str(primary_res.import_manifest_path) if primary_res.import_manifest_path else None,
+                "output_dir": str(primary_res.output_dir),
+                # recordings_dir and others were derived from output_dir in the original code
+                "recordings_path": str(primary_res.output_dir / "recordings"),
+                "lerobot_path": str(primary_res.output_dir / "lerobot"),
+                "lerobot_dataset_info": str(primary_res.output_dir / "lerobot" / "dataset_info.json"),
+            })
+
         return StepResult(
             step=PipelineStep.GENIESIM_IMPORT,
-            success=result.success,
+            success=all_success,
             duration_seconds=duration_seconds,
-            message="Genie Sim import completed" if result.success else "Genie Sim import failed",
-            outputs={
-                "job_id": job_id,
-                "import_manifest": str(result.import_manifest_path) if result.import_manifest_path else None,
-                "output_dir": str(output_dir),
-                "recordings_path": str(recordings_dir),
-                "lerobot_path": str(lerobot_dir),
-                "lerobot_dataset_info": str(dataset_info_path),
-                "completion_marker": str(marker_path) if result.success else None,
-            },
+            message="Genie Sim import completed" if all_success else "Genie Sim import partially failed",
+            outputs=outputs,
         )
 
     def _run_dwm(self) -> StepResult:

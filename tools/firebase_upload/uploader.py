@@ -80,7 +80,7 @@ def upload_episodes_to_firebase(
     init_firebase()
     bucket = storage.bucket()
 
-    concurrency = int(os.getenv("FIREBASE_UPLOAD_CONCURRENCY", "8"))
+    concurrency = int(os.getenv("FIREBASE_UPLOAD_CONCURRENCY", "16"))
     if concurrency < 1:
         raise ValueError("FIREBASE_UPLOAD_CONCURRENCY must be >= 1")
 

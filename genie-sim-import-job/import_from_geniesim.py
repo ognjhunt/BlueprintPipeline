@@ -1285,6 +1285,15 @@ def run_local_import_job(
     if not episode_metadata_list:
         result.errors.append(f"No local episode files found under {recordings_dir}")
         return result
+
+    # Check for minimum episode count if configured
+    min_episodes = int(os.getenv("MIN_EPISODES_REQUIRED", "1"))
+    if len(episode_metadata_list) < min_episodes:
+        result.errors.append(
+            f"Insufficient episodes generated: found {len(episode_metadata_list)}, "
+            f"required {min_episodes}"
+        )
+        return result
     if parse_failure_count > 0:
         parse_failure_message = (
             f"{parse_failure_count} local episode files failed to parse"
@@ -1972,84 +1981,113 @@ def main():
     print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}")
     print(f"[GENIE-SIM-IMPORT]   Fail on Partial Error: {fail_on_partial_error}\n")
 
-    # Setup paths
-    output_dir = _resolve_local_output_dir(
-        bucket=bucket,
-        output_prefix=output_prefix,
-        job_id=job_id,
-        local_episodes_prefix=local_episodes_prefix,
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    gcs_output_path = _resolve_gcs_output_path(
-        output_dir,
-        bucket=bucket,
-        output_prefix=output_prefix,
-        job_id=job_id,
-        explicit_gcs_output_path=explicit_gcs_output_path,
-    )
+    # Determine import targets (multi-robot support)
+    import_targets = []
+    artifacts_by_robot = job_metadata.get("artifacts_by_robot") if job_metadata else None
 
-    # Create configuration
-    config = ImportConfig(
-        job_id=job_id,
-        output_dir=output_dir,
-        gcs_output_path=gcs_output_path,
-        enable_gcs_uploads=not disable_gcs_upload,
-        min_quality_score=min_quality_score,
-        enable_validation=enable_validation,
-        filter_low_quality=filter_low_quality,
-        require_lerobot=require_lerobot,
-        lerobot_skip_rate_max=lerobot_skip_rate_max,
-        poll_interval=poll_interval,
-        wait_for_completion=wait_for_completion,
-        fail_on_partial_error=fail_on_partial_error,
-        job_metadata_path=job_metadata_path,
-        local_episodes_prefix=local_episodes_prefix,
-    )
+    if artifacts_by_robot:
+        print(f"[GENIE-SIM-IMPORT] Multi-robot detected: {list(artifacts_by_robot.keys())}")
+        for robot_type, artifacts in artifacts_by_robot.items():
+            robot_episodes_prefix = artifacts.get("episodes_prefix") or artifacts.get("episodes_path")
+            target_output_dir = _resolve_local_path(bucket, robot_episodes_prefix)
+            import_targets.append((robot_type, target_output_dir, robot_episodes_prefix))
+    else:
+        # Single robot fallback
+        output_dir = _resolve_local_output_dir(
+            bucket=bucket,
+            output_prefix=output_prefix,
+            job_id=job_id,
+            local_episodes_prefix=local_episodes_prefix,
+        )
+        import_targets.append((os.getenv("ROBOT_TYPE", "unknown"), output_dir, local_episodes_prefix))
 
     if enable_firebase_upload and not _preflight_firebase_upload():
         sys.exit(1)
 
-    # Run import
-    try:
-        metrics = get_metrics()
-        with metrics.track_job("genie-sim-import-job", scene_id):
-            result = run_local_import_job(config, job_metadata=job_metadata)
+    overall_success = True
+    metrics = get_metrics()
+
+    for robot_type, output_dir, episodes_prefix in import_targets:
+        print(f"\n[GENIE-SIM-IMPORT] >>> Importing episodes for robot: {robot_type}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        gcs_output_path = _resolve_gcs_output_path(
+            output_dir,
+            bucket=bucket,
+            output_prefix=output_prefix,
+            job_id=job_id,
+            explicit_gcs_output_path=explicit_gcs_output_path,
+        )
+
+        # Create configuration
+        config = ImportConfig(
+            job_id=job_id,
+            output_dir=output_dir,
+            gcs_output_path=gcs_output_path,
+            enable_gcs_uploads=not disable_gcs_upload,
+            min_quality_score=min_quality_score,
+            enable_validation=enable_validation,
+            filter_low_quality=filter_low_quality,
+            require_lerobot=require_lerobot,
+            lerobot_skip_rate_max=lerobot_skip_rate_max,
+            poll_interval=poll_interval,
+            wait_for_completion=wait_for_completion,
+            fail_on_partial_error=fail_on_partial_error,
+            job_metadata_path=job_metadata_path,
+            local_episodes_prefix=episodes_prefix,
+        )
+
+        # Run import
         try:
-            _emit_import_quality_gate(result, scene_id)
-        except Exception as exc:
-            print(f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}")
+            with metrics.track_job(f"genie-sim-import-job-{robot_type}", scene_id):
+                result = run_local_import_job(config, job_metadata=job_metadata)
 
-        if result.success:
-            print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")
-            print(f"[GENIE-SIM-IMPORT] Episodes imported: {result.episodes_passed_validation}")
-            print(f"[GENIE-SIM-IMPORT] Average quality: {result.average_quality_score:.2f}")
-            if enable_firebase_upload:
-                from tools.firebase_upload.uploader import (
-                    init_firebase,
-                    upload_episodes_to_firebase,
-                )
+            try:
+                _emit_import_quality_gate(result, scene_id)
+            except Exception as exc:
+                print(f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed for {robot_type}: {exc}")
 
-                print("[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage...")
-                try:
-                    init_firebase()
-                    upload_summary = upload_episodes_to_firebase(
-                        result.output_dir,
-                        scene_id,
-                        prefix=firebase_upload_prefix,
+            if result.success:
+                print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded for {robot_type}")
+                print(f"[GENIE-SIM-IMPORT] Episodes imported: {result.episodes_passed_validation}")
+
+                if enable_firebase_upload:
+                    from tools.firebase_upload.uploader import (
+                        init_firebase,
+                        upload_episodes_to_firebase,
                     )
-                except Exception as exc:
-                    print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
-                    raise
-                print(
-                    "[GENIE-SIM-IMPORT] Firebase upload complete: "
-                    f"{upload_summary['uploaded']}/{upload_summary['total_files']} files"
-                )
-            sys.exit(0)
-        else:
-            print(f"[GENIE-SIM-IMPORT] ❌ Import failed")
-            for error in result.errors:
-                print(f"[GENIE-SIM-IMPORT]   - {error}")
-            sys.exit(1)
+
+                    print(f"[GENIE-SIM-IMPORT] Uploading {robot_type} episodes to Firebase Storage...")
+                    try:
+                        init_firebase()
+                        upload_summary = upload_episodes_to_firebase(
+                            result.output_dir,
+                            scene_id,
+                            prefix=firebase_upload_prefix,
+                        )
+                        print(
+                            f"[GENIE-SIM-IMPORT] Firebase upload complete for {robot_type}: "
+                            f"{upload_summary['uploaded']}/{upload_summary['total_files']} files"
+                        )
+                    except Exception as exc:
+                        print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed for {robot_type}: {exc}")
+                        overall_success = False
+            else:
+                print(f"[GENIE-SIM-IMPORT] ❌ Import failed for {robot_type}")
+                for error in result.errors:
+                    print(f"[GENIE-SIM-IMPORT]   - {error}")
+                overall_success = False
+
+        except Exception as exc:
+            print(f"[GENIE-SIM-IMPORT] ❌ Unexpected error importing {robot_type}: {exc}")
+            traceback.print_exc()
+            overall_success = False
+
+    if not overall_success:
+        sys.exit(1)
+
+    print("\n[GENIE-SIM-IMPORT] ✅ All imports completed successfully")
+    sys.exit(0)
 
 
 
