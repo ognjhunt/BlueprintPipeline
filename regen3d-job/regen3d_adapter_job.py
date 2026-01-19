@@ -65,7 +65,13 @@ from tools.regen3d_adapter import (
     layout_from_regen3d,
     Regen3DOutput,
 )
-from tools.quality_gates.quality_gate import QualityGateCheckpoint, QualityGateRegistry
+from tools.quality_gates.quality_gate import (
+    QualityGate,
+    QualityGateCheckpoint,
+    QualityGateRegistry,
+    QualityGateResult,
+    QualityGateSeverity,
+)
 from tools.scale_authority.authority import REFERENCE_DIMENSIONS
 from tools.scene_manifest.validate_manifest import validate_manifest
 from tools.workflow.failure_markers import FailureMarkerWriter
@@ -94,6 +100,51 @@ def _gate_report_path(root: Path, scene_id: str) -> Path:
     report_path = root / f"scenes/{scene_id}/{JOB_NAME}/quality_gate_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     return report_path
+
+
+def _emit_reconstruction_quality_gate(
+    registry: QualityGateRegistry,
+    scene_id: str,
+    report_path: Path,
+    context: Dict[str, Any],
+) -> None:
+    checkpoint = QualityGateCheckpoint.RECONSTRUCTION_COMPLETE
+
+    def _check_reconstruction(ctx: Dict[str, Any]) -> QualityGateResult:
+        passed = ctx["success"]
+        severity = QualityGateSeverity.INFO if passed else QualityGateSeverity.ERROR
+        message = (
+            "3D-RE-GEN reconstruction completed successfully"
+            if passed
+            else "3D-RE-GEN reconstruction completed with errors"
+        )
+        details = {
+            "scene_id": ctx["scene_id"],
+            "reconstruction_output_paths": ctx["reconstruction_output_paths"],
+            "confidence_metrics": ctx["confidence_metrics"],
+            "warnings": ctx["warnings"],
+            "errors": ctx["errors"],
+        }
+        return QualityGateResult(
+            gate_id="reconstruction_complete",
+            checkpoint=checkpoint,
+            passed=passed,
+            severity=severity,
+            message=message,
+            details=details,
+        )
+
+    registry.register(QualityGate(
+        id="reconstruction_complete",
+        name="Reconstruction Complete",
+        checkpoint=checkpoint,
+        severity=QualityGateSeverity.INFO,
+        description="Emit a completion gate for 3D-RE-GEN reconstruction output.",
+        check_fn=_check_reconstruction,
+    ))
+
+    registry.run_checkpoint(checkpoint, context)
+    registry.save_report(scene_id, report_path)
 
 
 # =============================================================================
@@ -616,6 +667,9 @@ def run_regen3d_adapter_job(
     regen3d_dir = root / regen3d_prefix
     assets_dir = root / assets_prefix
     layout_dir = root / layout_prefix
+    inventory_path: Optional[Path] = None
+    warnings: List[str] = []
+    errors: List[str] = []
 
     # Check 3D-RE-GEN outputs exist
     if not regen3d_dir.is_dir():
@@ -679,6 +733,9 @@ def run_regen3d_adapter_job(
             "[REGEN3D-JOB] Removed %s objects with invalid bounds",
             len(invalid_objects),
         )
+        warnings.append(f"Removed {len(invalid_objects)} objects with invalid bounds")
+    if flagged_objects:
+        warnings.append(f"Flagged {len(flagged_objects)} objects for bounds outlier")
 
     regen3d_output = Regen3DOutput(
         scene_id=regen3d_output.scene_id,
@@ -698,6 +755,7 @@ def run_regen3d_adapter_job(
 
     if not regen3d_output.objects:
         logger.warning("[REGEN3D-JOB] No objects found in 3D-RE-GEN output")
+        warnings.append("No objects found in 3D-RE-GEN output")
     else:
         try:
             calibration = _auto_calibrate_scale(regen3d_output)
@@ -785,6 +843,7 @@ def run_regen3d_adapter_job(
 
     # 4. Generate semantic inventory (for replicator/policy targeting)
     # Make inventory generation failures fatal - required for downstream jobs
+    gemini_failed = False
     if not skip_inventory:
         logger.info("[REGEN3D-JOB] Generating semantic inventory...")
         try:
@@ -819,6 +878,9 @@ def run_regen3d_adapter_job(
             inventory_path.write_text(json.dumps(inventory, indent=2))
             logger.info("[REGEN3D-JOB] Wrote inventory: %s", inventory_path)
 
+            if gemini_failed:
+                warnings.append("Gemini enrichment attempted but failed")
+
             if gemini_failed and os.getenv("GEMINI_ENRICHMENT_REQUIRED", "").lower() in {
                 "1",
                 "true",
@@ -837,6 +899,8 @@ def run_regen3d_adapter_job(
             return 1  # Fail the job - inventory is critical for replicator/policy targeting
 
     # 5. Run quality gates before writing completion marker
+    quality_gates: Optional[QualityGateRegistry] = None
+    report_path = _gate_report_path(root, scene_id)
     if _should_bypass_quality_gates():
         logger.warning(
             "[REGEN3D-JOB] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates"
@@ -847,7 +911,6 @@ def run_regen3d_adapter_job(
             QualityGateCheckpoint.MANIFEST_VALIDATED,
             context={"manifest": manifest, "scene_id": scene_id},
         )
-        report_path = _gate_report_path(root, scene_id)
         quality_gates.save_report(scene_id, report_path)
 
         if not quality_gates.can_proceed():
@@ -899,6 +962,57 @@ def run_regen3d_adapter_job(
     primary_marker_path = assets_dir / ".regen3d_complete"
     primary_marker_path.write_text(json.dumps(marker_content, indent=2))
     logger.info("[REGEN3D-JOB] Wrote completion marker: %s", primary_marker_path)
+
+    if quality_gates is not None:
+        object_confidences = [
+            obj.reconstruction_confidence for obj in regen3d_output.objects
+        ]
+        mesh_quality_scores = [
+            obj.mesh_quality_score
+            for obj in regen3d_output.objects
+            if obj.mesh_quality_score is not None
+        ]
+        average_object_confidence = (
+            sum(object_confidences) / len(object_confidences)
+            if object_confidences
+            else None
+        )
+        average_mesh_quality_score = (
+            sum(mesh_quality_scores) / len(mesh_quality_scores)
+            if mesh_quality_scores
+            else None
+        )
+
+        reconstruction_context = {
+            "scene_id": scene_id,
+            "success": True,
+            "reconstruction_output_paths": {
+                "regen3d_dir": str(regen3d_dir),
+                "assets_dir": str(assets_dir),
+                "layout_dir": str(layout_dir),
+                "manifest_path": str(manifest_path),
+                "layout_path": str(layout_path),
+                "inventory_path": str(inventory_path) if inventory_path else None,
+                "source_image_path": regen3d_output.source_image_path,
+                "depth_map_path": regen3d_output.depth_map_path,
+                "asset_paths": [str(path) for path in asset_paths],
+            },
+            "confidence_metrics": {
+                "overall_confidence": regen3d_output.overall_confidence,
+                "average_object_confidence": average_object_confidence,
+                "average_mesh_quality_score": average_mesh_quality_score,
+                "object_confidences": object_confidences,
+                "mesh_quality_scores": mesh_quality_scores,
+            },
+            "warnings": warnings,
+            "errors": errors,
+        }
+        _emit_reconstruction_quality_gate(
+            quality_gates,
+            scene_id,
+            report_path,
+            reconstruction_context,
+        )
 
     logger.info("[REGEN3D-JOB] 3D-RE-GEN adapter completed successfully")
     logger.info("[REGEN3D-JOB]   Objects: %s", len(regen3d_output.objects))
