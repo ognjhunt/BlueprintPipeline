@@ -29,6 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tools.lerobot_format import LeRobotExportFormat
+
 from .scene_graph import SceneGraphConverter, GenieSimSceneGraph
 from .asset_index import AssetIndexBuilder, GenieSimAssetIndex
 from .task_config import TaskConfigGenerator, GenieSimTaskConfig
@@ -91,6 +93,7 @@ class GenieSimExportConfig:
     # Output options
     pretty_json: bool = True
     include_metadata: bool = True
+    lerobot_export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2
 
     def get_multi_robot_config(self) -> MultiRobotConfig:
         """Get multi-robot configuration, using default if not specified."""
@@ -430,7 +433,7 @@ geniesim:
 
   # Export settings
   export:
-    format: "lerobot_v0.3.3"
+    format: "lerobot_v2"
     include_visual_obs: true
     include_depth: true
 
@@ -514,6 +517,7 @@ source:
                 "embedding_model": config.embedding_model if config.generate_embeddings else None,
                 "filter_commercial_only": config.filter_commercial_only,
                 "max_tasks": config.max_tasks,
+                "lerobot_export_format": config.lerobot_export_format.value,
             },
             "result": result.to_dict(),
             "geniesim_compatibility": {
