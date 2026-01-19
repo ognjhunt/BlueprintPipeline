@@ -34,11 +34,11 @@ terraform {
     }
   }
 
-  # Uncomment for remote state (recommended for production)
-  # backend "gcs" {
-  #   bucket = "blueprint-terraform-state"
-  #   prefix = "terraform/state"
-  # }
+  # Remote state (recommended for production)
+  backend "gcs" {
+    bucket = var.tf_state_bucket
+    prefix = var.tf_state_prefix
+  }
 }
 
 # =============================================================================
