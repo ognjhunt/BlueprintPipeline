@@ -38,6 +38,20 @@ image → 3D-RE-GEN → regen3d-job → simready-job → usd-assembly-job → re
 
 ## Quick Start
 
+## Pre-commit
+
+Install the hooks once per clone:
+
+```bash
+pre-commit install
+```
+
+Run all hooks across the repo:
+
+```bash
+pre-commit run --all-files
+```
+
 ### Local Testing (Without GCS/Cloud Run)
 
 Genie Sim is the **default** episode-generation backend when `USE_GENIESIM` is
