@@ -240,6 +240,10 @@ class SceneGraphRelationInferenceConfig:
     vertical_proximity_threshold: float = 0.05
     horizontal_proximity_threshold: float = 0.15
     alignment_angle_threshold: float = 5.0
+    enable_physics_validation: bool = False
+    physics_contact_depth_threshold: float = 0.001
+    physics_containment_ratio_threshold: float = 0.8
+    heuristic_confidence_scale: float = 0.6
 
 
 @dataclass
@@ -925,6 +929,22 @@ class ConfigLoader:
                     alignment_angle_threshold=scene_graph.get("relation_inference", {}).get(
                         "alignment_angle_threshold",
                         5.0,
+                    ),
+                    enable_physics_validation=scene_graph.get("relation_inference", {}).get(
+                        "enable_physics_validation",
+                        False,
+                    ),
+                    physics_contact_depth_threshold=scene_graph.get("relation_inference", {}).get(
+                        "physics_contact_depth_threshold",
+                        0.001,
+                    ),
+                    physics_containment_ratio_threshold=scene_graph.get("relation_inference", {}).get(
+                        "physics_containment_ratio_threshold",
+                        0.8,
+                    ),
+                    heuristic_confidence_scale=scene_graph.get("relation_inference", {}).get(
+                        "heuristic_confidence_scale",
+                        0.6,
                     ),
                 ),
                 streaming=SceneGraphStreamingConfig(
