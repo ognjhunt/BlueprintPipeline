@@ -112,6 +112,15 @@ try:
         StartRecordingRequest, StartRecordingResponse,
         StopRecordingRequest, StopRecordingResponse,
         ResetRequest, ResetResponse,
+        GetEEPoseRequest, GetEEPoseResponse,
+        GetGripperStateRequest, GetGripperStateResponse,
+        SetGripperStateRequest, SetGripperStateResponse,
+        GetObjectPoseRequest, GetObjectPoseResponse,
+        SetObjectPoseRequest, SetObjectPoseResponse,
+        AttachObjectRequest, AttachObjectResponse,
+        DetachObjectRequest, DetachObjectResponse,
+        InitRobotRequest, InitRobotResponse,
+        AddCameraRequest, AddCameraResponse,
         CommandType as GrpcCommandType,
     )
     from geniesim_grpc_pb2_grpc import GenieSimServiceStub, is_grpc_available, create_channel
@@ -766,29 +775,101 @@ class GenieSimGRPCClient:
 
         return result
 
+    @staticmethod
+    def _vector3_from(value: Optional[Union[Dict[str, Any], Sequence[float]]]) -> Vector3:
+        if isinstance(value, Vector3):
+            return value
+        if isinstance(value, dict):
+            return Vector3(
+                x=float(value.get("x", 0.0)),
+                y=float(value.get("y", 0.0)),
+                z=float(value.get("z", 0.0)),
+            )
+        if isinstance(value, (list, tuple)) and len(value) >= 3:
+            return Vector3(x=float(value[0]), y=float(value[1]), z=float(value[2]))
+        return Vector3()
+
+    @staticmethod
+    def _quaternion_from(value: Optional[Union[Dict[str, Any], Sequence[float]]]) -> Quaternion:
+        if isinstance(value, Quaternion):
+            return value
+        if isinstance(value, dict):
+            return Quaternion(
+                w=float(value.get("w", 1.0)),
+                x=float(value.get("x", 0.0)),
+                y=float(value.get("y", 0.0)),
+                z=float(value.get("z", 0.0)),
+            )
+        if isinstance(value, (list, tuple)) and len(value) >= 4:
+            return Quaternion(
+                w=float(value[0]),
+                x=float(value[1]),
+                y=float(value[2]),
+                z=float(value[3]),
+            )
+        return Quaternion(w=1.0, x=0.0, y=0.0, z=0.0)
+
+    @classmethod
+    def _pose_from_data(cls, pose: Optional[Any]) -> Optional[GrpcPose]:
+        if isinstance(pose, GrpcPose):
+            return pose
+        if pose is None:
+            return None
+        if isinstance(pose, (list, tuple)) and len(pose) == 2:
+            position, orientation = pose
+        elif isinstance(pose, dict):
+            position = pose.get("position") or pose.get("pos") or pose.get("translation")
+            orientation = pose.get("orientation") or pose.get("rotation") or pose.get("quat")
+        else:
+            return None
+        return GrpcPose(
+            position=cls._vector3_from(position),
+            orientation=cls._quaternion_from(orientation),
+        )
+
+    @staticmethod
+    def _pose_to_dict(pose: Optional[GrpcPose]) -> Optional[Dict[str, Any]]:
+        if pose is None:
+            return None
+        return {
+            "position": {
+                "x": pose.position.x,
+                "y": pose.position.y,
+                "z": pose.position.z,
+            },
+            "orientation": {
+                "w": pose.orientation.w,
+                "x": pose.orientation.x,
+                "y": pose.orientation.y,
+                "z": pose.orientation.z,
+            },
+        }
+
     def stream_observations(
         self,
         *,
         include_images: bool = True,
         include_depth: bool = True,
         include_semantic: bool = False,
+        camera_ids: Optional[Sequence[str]] = None,
         timeout: Optional[float] = None,
-    ) -> Optional[Any]:
+    ) -> Any:
         """
         Stream observations from the simulation.
 
         Uses real gRPC StreamObservations call.
 
         Returns:
-            Stream iterator or None if unavailable
+            Generator yielding observation dictionaries.
         """
         if not self._have_grpc or self._stub is None:
-            return None
+            return
 
         request = GetObservationRequest(
             include_images=include_images,
             include_depth=include_depth,
             include_semantic=include_semantic,
+            camera_ids=list(camera_ids) if camera_ids else [],
         )
 
         def _request() -> Any:
@@ -799,7 +880,21 @@ class GenieSimGRPCClient:
             _request,
             None,
         )
-        return stream
+        if stream is None:
+            return
+        try:
+            for response in stream:
+                if not response.success:
+                    logger.warning("StreamObservations yielded unsuccessful response")
+                    yield {"success": False}
+                    continue
+                formatted = self._format_observation_response(response)
+                self._latest_observation = formatted
+                yield formatted
+        except Exception as exc:
+            if self._circuit_breaker:
+                self._circuit_breaker.record_failure(exc)
+            logger.error("Genie Sim gRPC StreamObservations iteration failed: %s", exc)
 
     def set_joint_position(self, positions: List[float]) -> bool:
         """
@@ -857,6 +952,359 @@ class GenieSimGRPCClient:
             return response.joint_state.positions
 
         return None
+
+    def get_ee_pose(self, ee_link_name: str = "") -> Optional[Dict[str, Any]]:
+        """
+        Get current end-effector pose.
+
+        Uses real gRPC GetEEPose call.
+
+        Args:
+            ee_link_name: Optional end-effector link name
+
+        Returns:
+            Pose dict or None
+        """
+        if not self._have_grpc or self._stub is None:
+            return None
+
+        def _request() -> GetEEPoseResponse:
+            request = GetEEPoseRequest(ee_link_name=ee_link_name)
+            return self._stub.GetEEPose(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "GetEEPose",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        if response and response.success:
+            return self._pose_to_dict(response.pose)
+        return None
+
+    def get_gripper_state(self) -> Optional[Dict[str, Any]]:
+        """
+        Get current gripper state.
+
+        Uses real gRPC GetGripperState call.
+
+        Returns:
+            Dict with width, force, and grasping state
+        """
+        if not self._have_grpc or self._stub is None:
+            return None
+
+        def _request() -> GetGripperStateResponse:
+            request = GetGripperStateRequest()
+            return self._stub.GetGripperState(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "GetGripperState",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        if response and response.success:
+            return {
+                "width": response.width,
+                "force": response.force,
+                "is_grasping": response.is_grasping,
+            }
+        return None
+
+    def set_gripper_state(
+        self,
+        width: float,
+        force: float = 0.0,
+        wait_for_completion: bool = True,
+    ) -> bool:
+        """
+        Set gripper state.
+
+        Uses real gRPC SetGripperState call.
+
+        Args:
+            width: Target gripper width
+            force: Grasping force
+            wait_for_completion: Wait for gripper action to complete
+
+        Returns:
+            True if successful
+        """
+        if not self._have_grpc or self._stub is None:
+            return False
+
+        def _request() -> SetGripperStateResponse:
+            request = SetGripperStateRequest(
+                width=width,
+                force=force,
+                wait_for_completion=wait_for_completion,
+            )
+            return self._stub.SetGripperState(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "SetGripperState",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
+
+    def get_object_pose(self, object_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get an object's pose.
+
+        Uses real gRPC GetObjectPose call.
+
+        Args:
+            object_id: Object identifier
+
+        Returns:
+            Pose dict or None
+        """
+        if not self._have_grpc or self._stub is None:
+            return None
+
+        def _request() -> GetObjectPoseResponse:
+            request = GetObjectPoseRequest(object_id=object_id)
+            return self._stub.GetObjectPose(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "GetObjectPose",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        if response and response.success:
+            return self._pose_to_dict(response.pose)
+        return None
+
+    def set_object_pose(self, object_id: str, pose: Dict[str, Any]) -> bool:
+        """
+        Set an object's pose.
+
+        Uses real gRPC SetObjectPose call.
+
+        Args:
+            object_id: Object identifier
+            pose: Pose dict
+
+        Returns:
+            True if successful
+        """
+        if not self._have_grpc or self._stub is None:
+            return False
+
+        pose_message = self._pose_from_data(pose) or GrpcPose()
+
+        def _request() -> SetObjectPoseResponse:
+            request = SetObjectPoseRequest(object_id=object_id, pose=pose_message)
+            return self._stub.SetObjectPose(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "SetObjectPose",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
+
+    def attach_object(self, object_id: str, link_name: str) -> bool:
+        """
+        Attach an object to a robot link.
+
+        Uses real gRPC AttachObject call.
+
+        Args:
+            object_id: Object identifier
+            link_name: Robot link name
+
+        Returns:
+            True if successful
+        """
+        if not self._have_grpc or self._stub is None:
+            return False
+
+        def _request() -> AttachObjectResponse:
+            request = AttachObjectRequest(object_id=object_id, link_name=link_name)
+            return self._stub.AttachObject(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "AttachObject",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
+
+    def detach_object(self, object_id: str) -> bool:
+        """
+        Detach an object from the robot.
+
+        Uses real gRPC DetachObject call.
+
+        Args:
+            object_id: Object identifier
+
+        Returns:
+            True if successful
+        """
+        if not self._have_grpc or self._stub is None:
+            return False
+
+        def _request() -> DetachObjectResponse:
+            request = DetachObjectRequest(object_id=object_id)
+            return self._stub.DetachObject(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "DetachObject",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
+
+    def init_robot(
+        self,
+        robot_type: str,
+        urdf_path: str = "",
+        base_pose: Optional[Dict[str, Any]] = None,
+        initial_joint_positions: Optional[Sequence[float]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Initialize the robot in the simulation.
+
+        Uses real gRPC InitRobot call.
+
+        Args:
+            robot_type: Robot type identifier
+            urdf_path: Optional URDF path
+            base_pose: Optional base pose
+            initial_joint_positions: Optional initial joint positions
+
+        Returns:
+            Dict with joint metadata or None
+        """
+        if not self._have_grpc or self._stub is None:
+            return None
+
+        pose_message = self._pose_from_data(base_pose) or GrpcPose()
+
+        def _request() -> InitRobotResponse:
+            request = InitRobotRequest(
+                robot_type=robot_type,
+                urdf_path=urdf_path,
+                base_pose=pose_message,
+                initial_joint_positions=list(initial_joint_positions or []),
+            )
+            return self._stub.InitRobot(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "InitRobot",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        if response and response.success:
+            return {
+                "num_joints": response.num_joints,
+                "joint_names": list(response.joint_names),
+            }
+        return None
+
+    def reset(
+        self,
+        *,
+        reset_robot: bool = True,
+        reset_objects: bool = True,
+        scene_path: str = "",
+    ) -> bool:
+        """
+        Reset the simulation environment.
+
+        Uses real gRPC Reset call.
+
+        Args:
+            reset_robot: Reset robot state
+            reset_objects: Reset objects
+            scene_path: Optional scene path override
+
+        Returns:
+            True if reset successful
+        """
+        if not self._have_grpc or self._stub is None:
+            return False
+
+        def _request() -> ResetResponse:
+            request = ResetRequest(
+                reset_robot=reset_robot,
+                reset_objects=reset_objects,
+                scene_path=scene_path,
+            )
+            return self._stub.Reset(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "Reset",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
+
+    def add_camera(
+        self,
+        camera_id: str,
+        pose: Optional[Dict[str, Any]] = None,
+        parent_link: str = "",
+        width: int = 640,
+        height: int = 480,
+        fov: float = 60.0,
+        near_clip: float = 0.01,
+        far_clip: float = 10.0,
+    ) -> bool:
+        """
+        Add a camera to the simulation.
+
+        Uses real gRPC AddCamera call.
+
+        Args:
+            camera_id: Camera identifier
+            pose: Camera pose
+            parent_link: Parent link name (empty for world)
+            width: Image width
+            height: Image height
+            fov: Field of view
+            near_clip: Near clipping plane
+            far_clip: Far clipping plane
+
+        Returns:
+            True if successful
+        """
+        if not self._have_grpc or self._stub is None:
+            return False
+
+        pose_message = self._pose_from_data(pose) or GrpcPose()
+
+        def _request() -> AddCameraResponse:
+            request = AddCameraRequest(
+                camera_id=camera_id,
+                pose=pose_message,
+                parent_link=parent_link,
+                width=width,
+                height=height,
+                fov=fov,
+                near_clip=near_clip,
+                far_clip=far_clip,
+            )
+            return self._stub.AddCamera(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "AddCamera",
+            _request,
+            None,
+            success_checker=lambda resp: resp.success,
+        )
+        return bool(response and response.success)
 
     def get_camera_data(self, camera_id: str = "wrist") -> Optional[Dict[str, Any]]:
         """
@@ -1106,23 +1554,7 @@ class GenieSimGRPCClient:
         Returns:
             True if reset successful
         """
-        if not self._have_grpc or self._stub is None:
-            return False
-
-        def _request() -> ResetResponse:
-            request = ResetRequest(
-                reset_robot=True,
-                reset_objects=True,
-            )
-            return self._stub.Reset(request, timeout=self.timeout)
-
-        response = self._call_grpc(
-            "Reset",
-            _request,
-            None,
-            success_checker=lambda resp: resp.success,
-        )
-        return bool(response and response.success)
+        return self.reset(reset_robot=True, reset_objects=True)
 
 
 # =============================================================================
