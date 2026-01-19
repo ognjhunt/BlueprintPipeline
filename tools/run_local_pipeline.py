@@ -47,17 +47,21 @@ References:
 """
 
 import argparse
+import importlib.util
 import json
 import re
 import os
 import subprocess
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import numpy as np
 
 from tools.checkpoint import load_checkpoint, should_skip_step, write_checkpoint
 from tools.cost_tracking.estimate import (
@@ -828,18 +832,206 @@ class LocalPipelineRunner:
 
     def _run_scale(self) -> StepResult:
         """Run scale calibration (optional)."""
-        # For local testing, we trust the 3D-RE-GEN scale
-        self.log("Scale calibration: using 3D-RE-GEN scale (trusted)")
+        start_time = time.time()
+        production_mode = self.environment == "production"
         marker_path = self.assets_dir / ".scale_complete"
-        self._write_marker(marker_path, status="completed")
+        report_path = self.assets_dir / "scale_report.json"
+        warnings: List[str] = []
 
-        return StepResult(
-            step=PipelineStep.SCALE,
-            success=True,
-            duration_seconds=0,
-            message="Using 3D-RE-GEN scale",
-            outputs={"completion_marker": str(marker_path)},
-        )
+        try:
+            scale_module_path = REPO_ROOT / "scale-job" / "run_scale_from_layout.py"
+            spec = importlib.util.spec_from_file_location("run_scale_from_layout", scale_module_path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f"Unable to load scale module at {scale_module_path}")
+            scale_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(scale_module)
+
+            layout_path = self.layout_dir / "scene_layout.json"
+            if not layout_path.is_file():
+                message = f"Scale calibration failed: missing layout at {layout_path}"
+                if production_mode:
+                    return StepResult(
+                        step=PipelineStep.SCALE,
+                        success=False,
+                        duration_seconds=time.time() - start_time,
+                        message=message,
+                        outputs={"completion_marker": str(marker_path), "warnings": [message]},
+                    )
+                warnings.append(message)
+                return StepResult(
+                    step=PipelineStep.SCALE,
+                    success=True,
+                    duration_seconds=time.time() - start_time,
+                    message=message,
+                    outputs={"completion_marker": str(marker_path), "warnings": warnings},
+                )
+
+            layout = json.loads(layout_path.read_text())
+            objects = layout.get("objects", [])
+            room_box = layout.get("room_box")
+
+            manifest_path = self.assets_dir / "scene_manifest.json"
+            manifest = None
+            if manifest_path.is_file():
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                except json.JSONDecodeError:
+                    warnings.append(f"Failed to parse manifest at {manifest_path}")
+
+            metric_metadata, metadata_path = scale_module.load_metric_metadata(self.layout_dir)
+
+            scales: List[float] = []
+            used_samples: List[dict] = []
+
+            ref_scales, ref_samples = scale_module.gather_reference_scales(metric_metadata, objects)
+            scales.extend(ref_scales)
+            used_samples.extend(ref_samples)
+
+            metric_scales, metric_samples = scale_module.gather_scene_metric_scales(metric_metadata, room_box)
+            scales.extend(metric_scales)
+            used_samples.extend(metric_samples)
+
+            up_axis = 1
+            for obj in objects:
+                name = obj.get("class_name", "")
+                prior_h = scale_module.get_prior_for_class(name)
+                obb = obj.get("obb")
+
+                if prior_h is None or obb is None:
+                    continue
+
+                extents = obb.get("extents")
+                if not isinstance(extents, list) or len(extents) != 3:
+                    continue
+
+                measured_h = 2.0 * float(extents[up_axis])
+                if measured_h <= 1e-6:
+                    continue
+
+                scale_sample = prior_h / measured_h
+                scales.append(scale_sample)
+                used_samples.append(
+                    {
+                        "source": "class_prior",
+                        "class_name": name,
+                        "prior_h_m": prior_h,
+                        "measured_h_units": measured_h,
+                        "scale_sample": scale_sample,
+                    }
+                )
+
+            scale_factor = 1.0
+            confidence = 0.0
+            outliers: List[dict] = []
+
+            if not scales:
+                warnings.append("No scale cues available; defaulting to scale factor 1.0.")
+            else:
+                scales_arr = np.array(scales, dtype=np.float32)
+                scale_factor = float(np.median(scales_arr))
+                if scale_factor <= 0:
+                    warnings.append("Computed non-positive scale factor; defaulting to 1.0.")
+                    scale_factor = 1.0
+                else:
+                    rel_dev = np.abs(scales_arr - scale_factor) / scale_factor
+                    outlier_mask = rel_dev > 0.25
+                    for idx in np.where(outlier_mask)[0].tolist():
+                        sample = dict(used_samples[idx])
+                        sample["relative_deviation"] = float(rel_dev[idx])
+                        outliers.append(sample)
+
+                cv = float(np.std(scales_arr) / scale_factor) if scale_factor > 0 else 1.0
+                sample_factor = min(1.0, len(scales) / 5.0)
+                confidence = max(0.0, min(1.0, sample_factor * (1.0 - min(cv, 1.0))))
+
+            if outliers:
+                warnings.append(f"{len(outliers)} outlier scale samples detected.")
+
+            low_confidence = confidence < 0.5
+            if low_confidence:
+                warnings.append(f"Low scale confidence ({confidence:.2f}).")
+
+            report = {
+                "scale_factor": scale_factor,
+                "confidence": confidence,
+                "n_samples": len(scales),
+                "reference_samples": [
+                    sample for sample in used_samples if sample.get("source") != "class_prior"
+                ],
+                "class_prior_samples": [
+                    sample for sample in used_samples if sample.get("source") == "class_prior"
+                ],
+                "outliers": outliers,
+                "warnings": warnings,
+                "layout_path": str(layout_path),
+                "metadata_path": str(metadata_path) if metadata_path else None,
+                "manifest_path": str(manifest_path) if manifest is not None else None,
+                "manifest_summary": {
+                    "object_count": len(manifest.get("objects", [])) if isinstance(manifest, dict) else None,
+                },
+            }
+
+            report_path.write_text(json.dumps(report, indent=2))
+            self._write_marker(marker_path, status="completed")
+
+            if low_confidence or not scales:
+                message = "Scale calibration warnings detected."
+                if production_mode:
+                    return StepResult(
+                        step=PipelineStep.SCALE,
+                        success=False,
+                        duration_seconds=time.time() - start_time,
+                        message=message,
+                        outputs={
+                            "completion_marker": str(marker_path),
+                            "scale_report": str(report_path),
+                            "scale_factor": scale_factor,
+                            "reference_samples": report["reference_samples"],
+                            "warnings": warnings,
+                        },
+                    )
+                return StepResult(
+                    step=PipelineStep.SCALE,
+                    success=True,
+                    duration_seconds=time.time() - start_time,
+                    message=message,
+                    outputs={
+                        "completion_marker": str(marker_path),
+                        "scale_report": str(report_path),
+                        "scale_factor": scale_factor,
+                        "reference_samples": report["reference_samples"],
+                        "warnings": warnings,
+                    },
+                )
+
+            return StepResult(
+                step=PipelineStep.SCALE,
+                success=True,
+                duration_seconds=time.time() - start_time,
+                message="Scale calibration report generated",
+                outputs={
+                    "completion_marker": str(marker_path),
+                    "scale_report": str(report_path),
+                    "scale_factor": scale_factor,
+                    "reference_samples": report["reference_samples"],
+                    "warnings": warnings,
+                },
+            )
+        except Exception as exc:
+            self._log_exception_traceback("Scale calibration failed", exc)
+            message = f"Scale calibration failed: {self._summarize_exception(exc)}"
+            success = not production_mode
+            return StepResult(
+                step=PipelineStep.SCALE,
+                success=success,
+                duration_seconds=time.time() - start_time,
+                message=message,
+                outputs={
+                    "completion_marker": str(marker_path),
+                    "scale_report": str(report_path),
+                    "warnings": [message],
+                },
+            )
 
     def _run_interactive(self) -> StepResult:
         """Run interactive asset processing."""
