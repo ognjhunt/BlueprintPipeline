@@ -306,7 +306,11 @@ export SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `FIRESTORE_PROJECT` | str | `blueprint-8c1ca` | Firestore project ID for pipeline configuration and metadata |
-| `BUCKET` | str | `blueprint-8c1ca.appspot.com` | Firebase Storage bucket used for scene assets and pipeline artifacts |
+| `BUCKET` | str | `blueprint-8c1ca.appspot.com` | GCS bucket used for scene assets and pipeline artifacts (not the Firebase Storage upload target) |
+| `FIREBASE_STORAGE_BUCKET` | str | None | Firebase Storage bucket used for Firebase upload jobs (e.g., `blueprint-8c1ca.appspot.com`) |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | str | None | JSON payload for Firebase service account credentials |
+| `FIREBASE_SERVICE_ACCOUNT_PATH` | path | None | Path to Firebase service account JSON credentials |
+| `FIREBASE_UPLOAD_PREFIX` | str | `datasets` | Firebase upload prefix for episode artifacts |
 
 Scene asset input path example (GCS):
 ```
@@ -348,6 +352,7 @@ Feature flags allow opt-in/opt-out of capabilities.
 | `ENABLE_AUDIO_NARRATION` | bool | "0" | Enable audio narration |
 | `ENABLE_SUBTITLE_GENERATION` | bool | "0" | Enable subtitle generation |
 | `ENABLE_INVENTORY_ENRICHMENT` | bool | "0" | Enable inventory enrichment before replicator generation |
+| `ENABLE_FIREBASE_UPLOAD` | bool | "0" | Enable Firebase Storage uploads for episode artifacts |
 
 **Example**:
 ```bash
