@@ -644,10 +644,22 @@ def main() -> int:
         os.getenv("ALLOW_MISSING_ASSET_PROVENANCE"),
         default=False,
     )
+    allow_noncommercial_data = parse_bool_env(
+        os.getenv("ALLOW_NONCOMMERCIAL_DATA"),
+        default=False,
+    )
     asset_provenance_blob = f"{geniesim_prefix}/legal/asset_provenance.json"
     asset_provenance_exists = (
         storage_client.bucket(bucket).blob(asset_provenance_blob).exists()
     )
+    asset_provenance_payload = None
+    provenance_gate = {
+        "status": "missing",
+        "commercial_use_ok": None,
+        "commercial_blockers": [],
+        "allow_noncommercial_override": allow_noncommercial_data,
+        "asset_provenance_path": f"gs://{bucket}/{asset_provenance_blob}",
+    }
 
     task_config_hash = _hash_payload(task_config)
     export_manifest_hash = _hash_payload(export_manifest)
@@ -699,7 +711,49 @@ def main() -> int:
     use_gcs_fuse = False
     local_root: Optional[Path] = None
     skip_local_run = False
-    if not asset_provenance_exists and not allow_missing_asset_provenance:
+    if asset_provenance_exists:
+        asset_provenance_payload = _read_json_blob(
+            storage_client,
+            bucket,
+            asset_provenance_blob,
+        )
+        license_info = asset_provenance_payload.get("license", {})
+        commercial_use_ok = bool(license_info.get("commercial_ok", False))
+        blockers = license_info.get("blockers") or []
+        provenance_gate.update(
+            {
+                "status": "passed" if commercial_use_ok and not blockers else "blocked",
+                "commercial_use_ok": commercial_use_ok,
+                "commercial_blockers": blockers,
+            }
+        )
+        logger.info(
+            "[GENIESIM-SUBMIT-JOB] Asset provenance gate: commercial_ok=%s blockers=%d",
+            commercial_use_ok,
+            len(blockers),
+        )
+        if (not commercial_use_ok or blockers) and not allow_noncommercial_data:
+            skip_local_run = True
+            submission_message = (
+                "Asset provenance gate blocked submission due to non-commercial or unknown licenses."
+            )
+            failure_reason = "Asset provenance blocked submission"
+            failure_details = {
+                "error": submission_message,
+                "asset_provenance_path": provenance_gate["asset_provenance_path"],
+                "commercial_use_ok": commercial_use_ok,
+                "commercial_blockers": blockers,
+                "allow_noncommercial_override": allow_noncommercial_data,
+            }
+            job_status = "failed"
+        elif (not commercial_use_ok or blockers) and allow_noncommercial_data:
+            provenance_gate["status"] = "override"
+            logger.warning(
+                "[GENIESIM-SUBMIT-JOB] ALLOW_NONCOMMERCIAL_DATA override enabled; "
+                "continuing despite provenance blockers: %s",
+                blockers[:5],
+            )
+    elif not allow_missing_asset_provenance:
         skip_local_run = True
         asset_provenance_uri = f"gs://{bucket}/{asset_provenance_blob}"
         submission_message = (
@@ -715,6 +769,11 @@ def main() -> int:
             "allow_missing_asset_provenance": allow_missing_asset_provenance,
         }
         job_status = "failed"
+    else:
+        logger.warning(
+            "[GENIESIM-SUBMIT-JOB] Asset provenance missing; continuing due to "
+            "ALLOW_MISSING_ASSET_PROVENANCE=1."
+        )
     try:
         scene_manifest = _read_json_blob(
             storage_client,
@@ -1059,6 +1118,7 @@ def main() -> int:
             "task_config": f"gs://{bucket}/{geniesim_prefix}/task_config.json",
             "asset_provenance": f"gs://{bucket}/{geniesim_prefix}/legal/asset_provenance.json",
         },
+        "provenance_gate": provenance_gate,
         "generation_params": {
             "robot_type": robot_type,
             "robot_types": robot_types,

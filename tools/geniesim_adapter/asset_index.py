@@ -28,6 +28,7 @@ from urllib import request as url_request
 
 import numpy as np
 
+from tools.quality_reports import COMMERCIAL_OK_LICENSES, LicenseType
 from tools.validation import ALLOWED_ASSET_CATEGORIES, ValidationError, validate_category
 
 
@@ -547,11 +548,12 @@ class AssetIndexBuilder:
                 # Assume collision hull is derived from mesh
                 collision_hull_path = usd_path.replace(".usdz", "_collision.usda")
 
-            # Determine commercial status
-            # Assets from BlueprintPipeline are assumed commercial OK
-            # unless explicitly marked otherwise
             asset_source = asset_data.get("source", "blueprintpipeline")
-            commercial_ok = asset_source not in ["geniesim_assets", "external_nc"]
+            commercial_ok, license_value = self._resolve_commercial_status(
+                obj=obj,
+                asset_data=asset_data,
+                asset_source=asset_source,
+            )
 
             # Preserve BP metadata
             bp_metadata = {
@@ -571,7 +573,7 @@ class AssetIndexBuilder:
                 collision_hull_path=collision_hull_path,
                 texture_variants=texture_variants,
                 commercial_ok=commercial_ok,
-                license="proprietary" if commercial_ok else "unknown",
+                license=license_value,
                 source=asset_source,
                 bp_metadata=bp_metadata,
             )
@@ -584,6 +586,77 @@ class AssetIndexBuilder:
         except Exception as e:
             self.log(f"Failed to build asset for {obj.get('id', 'unknown')}: {e}", "WARNING")
             return None
+
+    @staticmethod
+    def _parse_license_value(value: Optional[str]) -> Optional[LicenseType]:
+        if not value:
+            return None
+        normalized = str(value).strip().lower()
+        license_map = {
+            "cc0": LicenseType.CC0,
+            "cc-by": LicenseType.CC_BY,
+            "cc by": LicenseType.CC_BY,
+            "cc-by-sa": LicenseType.CC_BY_SA,
+            "cc-by-nc": LicenseType.CC_BY_NC,
+            "cc-by-nc-sa": LicenseType.CC_BY_NC_SA,
+            "academic-only": LicenseType.ACADEMIC_ONLY,
+            "research-only": LicenseType.RESEARCH_ONLY,
+            "mit": LicenseType.MIT,
+            "apache": LicenseType.APACHE_2,
+            "apache-2.0": LicenseType.APACHE_2,
+            "proprietary-commercial": LicenseType.PROPRIETARY_COMMERCIAL,
+            "proprietary": LicenseType.PROPRIETARY_COMMERCIAL,
+            "nvidia-omniverse": LicenseType.NVIDIA_OMNIVERSE,
+            "nvidia": LicenseType.NVIDIA_OMNIVERSE,
+            "simready": LicenseType.SIMREADY,
+        }
+        for key, license_type in license_map.items():
+            if key in normalized:
+                return license_type
+        return None
+
+    def _resolve_commercial_status(
+        self,
+        *,
+        obj: Dict[str, Any],
+        asset_data: Dict[str, Any],
+        asset_source: str,
+    ) -> tuple[bool, str]:
+        license_raw = asset_data.get("license") or obj.get("license")
+        provenance = asset_data.get("provenance") or obj.get("provenance")
+        if not license_raw and isinstance(provenance, dict):
+            provenance_license = provenance.get("license")
+            if isinstance(provenance_license, dict):
+                license_raw = provenance_license.get("type") or license_raw
+            elif isinstance(provenance_license, str):
+                license_raw = provenance_license
+
+        license_type = self._parse_license_value(license_raw)
+        commercial_ok: Optional[bool] = None
+        if license_type is not None:
+            commercial_ok = license_type in COMMERCIAL_OK_LICENSES
+
+        if commercial_ok is None and isinstance(provenance, dict):
+            provenance_license = provenance.get("license")
+            if isinstance(provenance_license, dict) and "commercial_ok" in provenance_license:
+                commercial_ok = bool(provenance_license.get("commercial_ok"))
+            elif "commercial_ok" in provenance:
+                commercial_ok = bool(provenance.get("commercial_ok"))
+
+        if commercial_ok is None and isinstance(asset_data.get("commercial_ok"), bool):
+            commercial_ok = bool(asset_data.get("commercial_ok"))
+
+        if commercial_ok is None:
+            commercial_ok = asset_source not in ["geniesim_assets", "external_nc"]
+
+        if license_type is not None:
+            license_value = license_type.value
+        elif license_raw:
+            license_value = str(license_raw)
+        else:
+            license_value = "proprietary" if commercial_ok else "unknown"
+
+        return commercial_ok, license_value
 
     def _generate_embeddings(self, assets: List[GenieSimAsset]) -> Dict[str, Any]:
         """Generate embeddings for all assets."""
