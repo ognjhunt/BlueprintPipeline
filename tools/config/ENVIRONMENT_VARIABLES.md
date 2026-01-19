@@ -379,6 +379,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 |----------|------|---------|-------------|
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
 | `GENIESIM_ENV` | str | `development` | Environment toggle for Genie Sim integrations (`production` disables mock/fallback behavior). |
+| `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (disallow placeholder embeddings). |
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework). |
 | `GENIESIM_ROOT` | path | `/opt/geniesim` | Genie Sim repository root (local framework) |
