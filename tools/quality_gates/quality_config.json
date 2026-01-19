@@ -85,8 +85,8 @@
     "description": "Human-in-the-loop approval workflow settings (auto-approve on timeout requires explicit non-production allowance; production always expires)"
   },
   "approval_store": {
-    "backend": "filesystem",
-    "filesystem_path": "/tmp/blueprintpipeline/approvals",
+    "backend": "firestore",
+    "filesystem_path": "/var/lib/blueprintpipeline/approvals",
     "firestore_collection": "quality_gate_approvals",
     "migrate_from_filesystem": false,
     "description": "Storage backend configuration for approval requests"
