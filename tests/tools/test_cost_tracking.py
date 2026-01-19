@@ -82,3 +82,36 @@ def test_get_period_cost_includes_recent_entries(tmp_path: Path) -> None:
     assert report["scene_count"] == 2
     assert report["total"] > 0
     assert report["top_scenes"][0]["scene_id"] in {"scene-1", "scene-2"}
+
+
+@pytest.mark.unit
+def test_cost_tracker_rejects_missing_pricing_in_production(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BP_ENV", "production")
+    monkeypatch.delenv("GENIESIM_JOB_COST", raising=False)
+    monkeypatch.delenv("GENIESIM_EPISODE_COST", raising=False)
+
+    with pytest.raises(RuntimeError, match="Genie Sim pricing environment variables"):
+        tracker.CostTracker(data_dir=tmp_path, enable_logging=False)
+
+
+@pytest.mark.unit
+def test_cost_tracker_uses_defaults_in_non_prod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BP_ENV", raising=False)
+    monkeypatch.delenv("GENIESIM_ENV", raising=False)
+    monkeypatch.delenv("GENIESIM_JOB_COST", raising=False)
+    monkeypatch.delenv("GENIESIM_EPISODE_COST", raising=False)
+
+    cost_tracker = tracker.CostTracker(data_dir=tmp_path, enable_logging=False)
+
+    assert cost_tracker.pricing["geniesim_job"] == pytest.approx(
+        tracker.PLACEHOLDER_GENIESIM_JOB_COST
+    )
+    assert cost_tracker.pricing["geniesim_episode"] == pytest.approx(
+        tracker.PLACEHOLDER_GENIESIM_EPISODE_COST
+    )
