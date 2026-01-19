@@ -1757,6 +1757,8 @@ class GenieSimLocalFramework:
 
         Now uses actual cuRobo GPU-accelerated motion planning
         for collision-free trajectories instead of linear interpolation.
+        Fallback planning uses task-aware targets, workspace bounds, and
+        bounded joint interpolation when IK fails.
 
         Args:
             task: Task specification
@@ -1829,7 +1831,11 @@ class GenieSimLocalFramework:
                 "(not collision-aware).",
                 "WARNING",
             )
-            return self._generate_linear_fallback_trajectory(initial_joints)
+            return self._generate_linear_fallback_trajectory(
+                task=task,
+                initial_obs=initial_obs,
+                obstacles=obstacles,
+            )
 
         self.log(
             "  ❌ IK fallback failed; set GENIESIM_ALLOW_IK_FAILURE_FALLBACK=1 to allow "
@@ -1869,6 +1875,190 @@ class GenieSimLocalFramework:
         below = joints[finite_mask] < (lower[finite_mask] - tolerance)
         above = joints[finite_mask] > (upper[finite_mask] + tolerance)
         return not (np.any(below) or np.any(above))
+
+    def _clamp_joints_to_limits(
+        self,
+        joints: np.ndarray,
+        robot_config: Any,
+    ) -> np.ndarray:
+        lower = robot_config.joint_limits_lower
+        upper = robot_config.joint_limits_upper
+        finite_mask = np.isfinite(lower) & np.isfinite(upper)
+        if np.any(finite_mask):
+            joints = joints.copy()
+            joints[finite_mask] = np.clip(joints[finite_mask], lower[finite_mask], upper[finite_mask])
+        return joints
+
+    def _resolve_workspace_bounds(
+        self,
+        task: Dict[str, Any],
+    ) -> Optional[np.ndarray]:
+        bounds = task.get("workspace_bounds")
+        if bounds is None:
+            bounds = task.get("robot_config", {}).get("workspace_bounds")
+        if bounds is None:
+            return None
+        if isinstance(bounds, dict):
+            try:
+                min_pt = np.array([bounds["x"][0], bounds["y"][0], bounds["z"][0]], dtype=float)
+                max_pt = np.array([bounds["x"][1], bounds["y"][1], bounds["z"][1]], dtype=float)
+                return np.stack([min_pt, max_pt], axis=0)
+            except (KeyError, TypeError, ValueError):
+                self.log("  ⚠️  Invalid workspace_bounds dict; ignoring", "WARNING")
+                return None
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+            try:
+                return np.array(bounds, dtype=float)
+            except (TypeError, ValueError):
+                self.log("  ⚠️  Invalid workspace_bounds list; ignoring", "WARNING")
+                return None
+        self.log("  ⚠️  Unsupported workspace_bounds format; ignoring", "WARNING")
+        return None
+
+    def _apply_workspace_bounds(
+        self,
+        position: np.ndarray,
+        bounds: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, bool]:
+        if bounds is None:
+            return position, False
+        min_pt = bounds[0]
+        max_pt = bounds[1]
+        clamped = np.minimum(np.maximum(position, min_pt), max_pt)
+        return clamped, not np.allclose(clamped, position)
+
+    def _find_target_position_from_obs(
+        self,
+        task: Dict[str, Any],
+        initial_obs: Dict[str, Any],
+    ) -> Optional[np.ndarray]:
+        scene_state = initial_obs.get("scene_state", {})
+        objects = scene_state.get("objects", [])
+        target_ids = [
+            task.get("target_object_id"),
+            task.get("target_object"),
+            task.get("target_object_name"),
+        ]
+        for target_id in target_ids:
+            if not target_id:
+                continue
+            for obj in objects:
+                obj_id = obj.get("object_id") or obj.get("id") or obj.get("name")
+                if obj_id == target_id:
+                    position = obj.get("pose", {}).get("position")
+                    if position is not None:
+                        return np.array(position, dtype=float)
+        target_objects = task.get("target_objects", [])
+        if target_objects:
+            position = target_objects[0].get("position")
+            if position is not None:
+                return np.array(position, dtype=float)
+        return None
+
+    def _resolve_task_waypoints(
+        self,
+        task: Dict[str, Any],
+        initial_obs: Dict[str, Any],
+        workspace_bounds: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        target_position = task.get("target_position")
+        if target_position is not None:
+            target_position = np.array(target_position, dtype=float)
+        else:
+            target_position = self._find_target_position_from_obs(task, initial_obs)
+
+        if target_position is None:
+            if workspace_bounds is not None:
+                target_position = (workspace_bounds[0] + workspace_bounds[1]) / 2.0
+                self.log("  ⚠️  No target position; using workspace center.", "WARNING")
+            else:
+                target_position = np.array([0.5, 0.0, 0.8], dtype=float)
+                self.log("  ⚠️  No target position; using default fallback target.", "WARNING")
+
+        place_position = task.get("place_position")
+        if place_position is not None:
+            place_position = np.array(place_position, dtype=float)
+        else:
+            task_key = (task.get("task_type") or task.get("task_name") or "").lower()
+            template_offsets = {
+                "pick_place": np.array([0.25, 0.0, 0.0]),
+                "pick-place": np.array([0.25, 0.0, 0.0]),
+                "place": np.array([0.2, 0.0, 0.0]),
+                "organize": np.array([-0.2, 0.2, 0.0]),
+                "stack": np.array([0.0, 0.0, 0.1]),
+            }
+            for key, offset in template_offsets.items():
+                if key in task_key:
+                    place_position = target_position + offset
+                    self.log(
+                        f"  ℹ️  Derived place position using template '{key}'.",
+                        "INFO",
+                    )
+                    break
+
+        target_position, target_clamped = self._apply_workspace_bounds(
+            target_position, workspace_bounds
+        )
+        if target_clamped:
+            self.log("  ⚠️  Target position clamped to workspace bounds.", "WARNING")
+
+        if place_position is not None:
+            place_position, place_clamped = self._apply_workspace_bounds(
+                place_position, workspace_bounds
+            )
+            if place_clamped:
+                self.log("  ⚠️  Place position clamped to workspace bounds.", "WARNING")
+
+        return target_position, place_position
+
+    def _compute_fk_positions(
+        self,
+        robot_config: Any,
+        trajectory: List[Dict[str, Any]],
+    ) -> Optional[List[np.ndarray]]:
+        if not IK_PLANNING_AVAILABLE:
+            return None
+        ik_solver = IKSolver(robot_config, verbose=False)
+        if not hasattr(ik_solver, "_forward_kinematics"):
+            return None
+        positions = []
+        for waypoint in trajectory:
+            joints = np.array(waypoint.get("joint_positions", []), dtype=float)
+            try:
+                pos, _ = ik_solver._forward_kinematics(joints)
+            except Exception:
+                return None
+            positions.append(pos)
+        return positions
+
+    def _trajectory_violates_clearance(
+        self,
+        positions: Sequence[np.ndarray],
+        obstacles: List[Dict[str, Any]],
+        clearance: float,
+    ) -> bool:
+        for pos in positions:
+            for obstacle in obstacles:
+                center = np.array(obstacle.get("position", [0.0, 0.0, 0.0]), dtype=float)
+                dims = np.array(obstacle.get("dimensions", [0.1, 0.1, 0.1]), dtype=float)
+                half_extents = dims / 2.0 + clearance
+                if np.all(np.abs(pos - center) <= half_extents):
+                    return True
+        return False
+
+    def _trajectory_within_workspace(
+        self,
+        positions: Sequence[np.ndarray],
+        workspace_bounds: Optional[np.ndarray],
+    ) -> bool:
+        if workspace_bounds is None:
+            return True
+        min_pt = workspace_bounds[0]
+        max_pt = workspace_bounds[1]
+        for pos in positions:
+            if np.any(pos < min_pt) or np.any(pos > max_pt):
+                return False
+        return True
 
     def _build_ik_fallback_waypoints(
         self,
@@ -2051,25 +2241,166 @@ class GenieSimLocalFramework:
 
     def _generate_linear_fallback_trajectory(
         self,
-        initial_joints: Sequence[float],
+        task: Dict[str, Any],
+        initial_obs: Dict[str, Any],
+        obstacles: Optional[List[Dict[str, Any]]] = None,
         num_waypoints: int = 100,
         fps: float = 30.0,
-    ) -> List[Dict[str, Any]]:
-        trajectory = []
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Generate a task-aware fallback trajectory when planning fails.
 
+        Attempts IK-based waypoint planning first using task targets and workspace
+        bounds. If IK fails, falls back to bounded joint-space interpolation
+        with reachability and collision heuristics.
+        """
+        if obstacles is None:
+            obstacles = self._get_scene_obstacles(task, initial_obs)
+
+        robot_config = ROBOT_CONFIGS.get(self.config.robot_type, ROBOT_CONFIGS.get("franka"))
+        if robot_config is None:
+            self.log(
+                f"  ⚠️  No robot config for type '{self.config.robot_type}'; "
+                "using minimal bounded interpolation.",
+                "WARNING",
+            )
+
+        workspace_bounds = self._resolve_workspace_bounds(task)
+        target_position, place_position = self._resolve_task_waypoints(
+            task=task,
+            initial_obs=initial_obs,
+            workspace_bounds=workspace_bounds,
+        )
+
+        initial_joints = self._client.get_joint_position()
+        if initial_joints is None:
+            if robot_config is not None:
+                initial_joints = robot_config.default_joint_positions.tolist()
+            else:
+                initial_joints = [0.0] * 7
+            self.log("  ⚠️  Missing joint state; using default joint seed.", "WARNING")
+
+        initial_joints = np.array(initial_joints, dtype=float)
+
+        if IK_PLANNING_AVAILABLE and robot_config is not None:
+            self.log(
+                "  ℹ️  Attempting task-aware IK fallback before joint interpolation.",
+                "INFO",
+            )
+            ik_trajectory = self._generate_ik_fallback_trajectory(
+                task=task,
+                initial_joints=initial_joints,
+                target_position=target_position,
+                place_position=place_position,
+                obstacles=obstacles,
+                fps=fps,
+            )
+            if ik_trajectory is not None:
+                positions = self._compute_fk_positions(robot_config, ik_trajectory)
+                if positions is not None:
+                    if not self._trajectory_within_workspace(positions, workspace_bounds):
+                        self.log(
+                            "  ⚠️  IK fallback trajectory leaves workspace bounds; rejecting.",
+                            "WARNING",
+                        )
+                    elif self._trajectory_violates_clearance(positions, obstacles, clearance=0.05):
+                        self.log(
+                            "  ⚠️  IK fallback trajectory violates obstacle clearance; rejecting.",
+                            "WARNING",
+                        )
+                    else:
+                        self.log("  ✅ IK fallback accepted with clearance checks.")
+                        return ik_trajectory
+                else:
+                    self.log(
+                        "  ℹ️  IK fallback accepted (FK unavailable for clearance checks).",
+                        "INFO",
+                    )
+                    return ik_trajectory
+
+        self.log(
+            "  ⚠️  Using bounded joint-space interpolation fallback.",
+            "WARNING",
+        )
+
+        if robot_config is None:
+            num_joints = len(initial_joints)
+            lower = np.full(num_joints, -np.pi)
+            upper = np.full(num_joints, np.pi)
+        else:
+            lower = robot_config.joint_limits_lower
+            upper = robot_config.joint_limits_upper
+
+        initial_joints = np.clip(initial_joints, lower, upper)
+        if robot_config is not None:
+            goal_joints = robot_config.default_joint_positions.copy()
+            if goal_joints.shape != initial_joints.shape:
+                goal_joints = initial_joints.copy()
+        else:
+            goal_joints = initial_joints.copy()
+
+        goal_joints = np.clip(goal_joints, lower, upper)
+
+        trajectory: List[Dict[str, Any]] = []
         for i in range(num_waypoints):
-            t = i / (num_waypoints - 1)
-            joint_pos = [
-                initial_joints[j] + (np.sin(t * np.pi) * 0.1)
-                for j in range(len(initial_joints))
-            ]
+            t = i / max(1, num_waypoints - 1)
+            joint_pos = (1 - t) * initial_joints + t * goal_joints
+            if robot_config is not None:
+                joint_pos = self._clamp_joints_to_limits(joint_pos, robot_config)
             trajectory.append(
                 {
-                    "joint_positions": joint_pos,
+                    "joint_positions": joint_pos.tolist(),
                     "timestamp": i / fps,
                 }
             )
 
+        positions = None
+        if robot_config is not None and IK_PLANNING_AVAILABLE:
+            positions = self._compute_fk_positions(robot_config, trajectory)
+
+        if positions is not None:
+            if not self._trajectory_within_workspace(positions, workspace_bounds):
+                self.log(
+                    "  ❌ Joint-space fallback rejected: end-effector leaves workspace bounds.",
+                    "ERROR",
+                )
+                return None
+            if self._trajectory_violates_clearance(positions, obstacles, clearance=0.05):
+                self.log(
+                    "  ❌ Joint-space fallback rejected: obstacle clearance violated.",
+                    "ERROR",
+                )
+                return None
+        elif workspace_bounds is not None:
+            if np.any(target_position < workspace_bounds[0]) or np.any(
+                target_position > workspace_bounds[1]
+            ):
+                self.log(
+                    "  ❌ Joint-space fallback rejected: target outside workspace bounds.",
+                    "ERROR",
+                )
+                return None
+            self.log(
+                "  ℹ️  Reachability verified via workspace bounds (FK unavailable).",
+                "INFO",
+            )
+        else:
+            self.log(
+                "  ℹ️  Reachability unchecked (no FK or workspace bounds).",
+                "INFO",
+            )
+
+        if robot_config is not None and not self._within_joint_limits(goal_joints, robot_config):
+            self.log(
+                "  ❌ Joint-space fallback rejected: target joints violate limits.",
+                "ERROR",
+            )
+            return None
+
+        self.log(
+            "  ✅ Joint-space fallback generated with bounds and clearance heuristics.",
+            "INFO",
+        )
         return trajectory
 
     def _get_scene_obstacles(
