@@ -17,12 +17,13 @@ Kubernetes manifests for deploying pipeline jobs and supporting infrastructure.
 - Apply manifests with `kubectl apply -f <file>.yaml` after configuring cluster access.
 
 ## Episode generation via Kustomize
-The episode generation job uses Kustomize variables for `PROJECT_ID`, `SCENE_ID`, and
-`BUCKET`, plus an image override for the Isaac Sim episode generator.
+The episode generation job reads `SCENE_ID` and `BUCKET` from the `episode-gen-runtime`
+ConfigMap, plus an image override for the Isaac Sim episode generator.
 
-1. Update defaults in `kustomization.yaml`:
-   - `configMapGenerator` literals for `PROJECT_ID`, `SCENE_ID`, and `BUCKET`.
-   - `images` to point at the correct GCR image name/tag.
+1. Supply runtime values:
+   - With Kustomize: update `configMapGenerator` literals for `SCENE_ID` and `BUCKET`
+     in `kustomization.yaml`.
+   - With kubectl: `kubectl create configmap episode-gen-runtime --from-literal=SCENE_ID=example-scene --from-literal=BUCKET=example-bucket -n blueprint`
 2. Render or apply:
    - Render: `kustomize build k8s`
    - Apply: `kubectl apply -k k8s`
