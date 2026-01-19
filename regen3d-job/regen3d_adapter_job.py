@@ -768,21 +768,11 @@ def main() -> int:
     logger.info("[REGEN3D-JOB]   Bucket: %s", bucket)
     logger.info("[REGEN3D-JOB]   Scene ID: %s", scene_id)
 
-    exit_code = run_regen3d_adapter_job(
-        root=GCS_ROOT,
-        bucket=bucket,
-        scene_id=scene_id,
-        regen3d_prefix=regen3d_prefix,
-        assets_prefix=assets_prefix,
-        layout_prefix=layout_prefix,
-        environment_type=environment_type,
-        scale_factor=scale_factor,
-        skip_inventory=skip_inventory,
-    )
     metrics = get_metrics()
     with metrics.track_job("regen3d-job", scene_id):
         exit_code = run_regen3d_adapter_job(
             root=GCS_ROOT,
+            bucket=bucket,
             scene_id=scene_id,
             regen3d_prefix=regen3d_prefix,
             assets_prefix=assets_prefix,
