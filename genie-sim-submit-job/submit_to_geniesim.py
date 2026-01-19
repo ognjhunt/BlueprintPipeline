@@ -682,6 +682,7 @@ def main() -> int:
     failure_details: Dict[str, Any] = {}
     firebase_upload_summary: Optional[Dict[str, Any]] = None
     firebase_upload_error: Optional[str] = None
+    firebase_upload_status = "skipped"
     episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
     submitted_at = datetime.utcnow().isoformat() + "Z"
     original_submitted_at = submitted_at
@@ -925,18 +926,17 @@ def main() -> int:
                 scene_id=scene_id,
                 prefix=firebase_prefix,
             )
+            firebase_upload_status = "completed"
         except Exception as exc:
             firebase_upload_error = str(exc)
-            failure_details = {
-                **failure_details,
-                "firebase_upload_error": firebase_upload_error,
-                "firebase_upload_prefix": firebase_prefix,
-            }
             submission_message = (
-                "Local Genie Sim execution completed with Firebase upload failures."
+                "Local Genie Sim execution completed; Firebase upload failed."
             )
-            job_status = "failed"
-            failure_reason = failure_reason or "Firebase upload failed"
+            firebase_upload_status = "failed"
+            logger.warning(
+                "[GENIESIM-SUBMIT-JOB] Firebase upload failed: %s",
+                firebase_upload_error,
+            )
 
     metrics = get_metrics()
     metrics_summary = {
@@ -985,6 +985,7 @@ def main() -> int:
         "local_execution": {
             "preflight": preflight_report,
         },
+        "firebase_upload_status": firebase_upload_status,
     }
     try:
         metrics_builder = LocalJobMetricsBuilder(
