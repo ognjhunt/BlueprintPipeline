@@ -19,6 +19,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tools.geniesim_adapter.config import (
+    get_geniesim_task_confidence_threshold,
+    get_geniesim_task_max_per_object,
+    get_geniesim_task_size_large_threshold,
+    get_geniesim_task_size_small_threshold,
+)
 
 # =============================================================================
 # Data Models
@@ -175,6 +181,10 @@ class TaskConfigGenerator:
 
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
+        self.task_confidence_threshold = get_geniesim_task_confidence_threshold()
+        self.task_size_small_threshold = get_geniesim_task_size_small_threshold()
+        self.task_size_large_threshold = get_geniesim_task_size_large_threshold()
+        self.task_max_per_object = get_geniesim_task_max_per_object()
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -451,9 +461,9 @@ class TaskConfigGenerator:
                 dimensions.get("depth", 0.1),
                 dimensions.get("height", 0.1),
             )
-            if size < 0.05:
+            if size < self.task_size_small_threshold:
                 base_difficulty += 0.2  # Small objects are harder
-            elif size > 0.3:
+            elif size > self.task_size_large_threshold:
                 base_difficulty += 0.1  # Large objects are harder
 
         # Adjust based on constraints
@@ -489,7 +499,7 @@ class TaskConfigGenerator:
         for aff in semantics.get("affordances", []):
             if isinstance(aff, dict):
                 confidence = aff.get("confidence", 0.5)
-                if confidence > 0.8:
+                if confidence > self.task_confidence_threshold:
                     priority += 1
 
         return min(priority, 5)  # Cap at 5
@@ -547,7 +557,7 @@ class TaskConfigGenerator:
 
         for task in tasks:
             obj_count = seen_objects.get(task.target_object, 0)
-            if obj_count < 3:  # Max 3 tasks per object
+            if obj_count < self.task_max_per_object:
                 diverse_tasks.append(task)
                 seen_objects[task.target_object] = obj_count + 1
 

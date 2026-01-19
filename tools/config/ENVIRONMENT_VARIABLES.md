@@ -412,6 +412,10 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (disallow placeholder embeddings). |
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework). |
+| `GENIESIM_GRPC_TIMEOUT_S` | float | 30.0 | gRPC request timeout for Genie Sim adapters (seconds). Falls back to legacy `GENIESIM_TIMEOUT` if set. |
+| `GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | int | 3 | Failures before the Genie Sim gRPC circuit breaker opens. |
+| `GENIESIM_CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | int | 2 | Successes required to close the circuit breaker after half-open. |
+| `GENIESIM_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_S` | float | 30.0 | Recovery timeout (seconds) before the circuit breaker probes again. |
 | `GENIESIM_ROOT` | path | `/opt/geniesim` | Genie Sim repository root (local framework) |
 | `ISAACSIM_REQUIRED` | bool | false | Require Isaac Sim + Genie Sim installs when using the local framework (enforces `GENIESIM_ROOT` and `ISAAC_SIM_PATH/python.sh`). |
 | `CUROBO_REQUIRED` | bool | false | Require cuRobo planning support when using the local framework. |
@@ -421,6 +425,10 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_STALL_TIMEOUT_S` | float | 30 | Abort/reset an episode if observation progress stalls longer than this timeout (seconds). |
 | `GENIESIM_MAX_STALLS` | int | 2 | Max stalled episodes before the local framework restarts the Genie Sim server. |
 | `GENIESIM_STALL_BACKOFF_S` | float | 5 | Backoff (seconds) to wait after a stall or restart before resuming data collection. |
+| `GENIESIM_TASK_CONFIDENCE_THRESHOLD` | float | 0.8 | Affordance confidence threshold for boosting task priority in task generation. |
+| `GENIESIM_TASK_SIZE_SMALL_THRESHOLD` | float | 0.05 | Object size threshold (meters) below which tasks are treated as harder. |
+| `GENIESIM_TASK_SIZE_LARGE_THRESHOLD` | float | 0.3 | Object size threshold (meters) above which tasks are treated as harder. |
+| `GENIESIM_TASK_MAX_PER_OBJECT` | int | 3 | Maximum number of suggested tasks retained per object. |
 | `GENIESIM_COLLECTION_TIMEOUT_S` | float | unset | Abort local Genie Sim data collection if total runtime exceeds this timeout (seconds). |
 | `ISAAC_SIM_ENDPOINT` | url | `http://localhost:8011` | Isaac Sim endpoint |
 | `ISAAC_SIM_PATH` | path | `/isaac-sim` | Isaac Sim installation path (local framework) |

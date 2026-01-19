@@ -51,7 +51,7 @@ Usage:
 Environment Variables:
     GENIESIM_HOST: Genie Sim gRPC server host (default: localhost)
     GENIESIM_PORT: Genie Sim gRPC server port (default: adapter default port)
-    GENIESIM_TIMEOUT: Connection timeout in seconds (default: 30)
+    GENIESIM_GRPC_TIMEOUT_S: Connection timeout in seconds (default: 30; legacy: GENIESIM_TIMEOUT)
     GENIESIM_ROOT: Path to Genie Sim installation (default: /opt/geniesim)
     ISAAC_SIM_PATH: Path to Isaac Sim installation (default: /isaac-sim)
     ISAACSIM_REQUIRED: Enforce Isaac Sim + Genie Sim installation checks (default: false)
@@ -95,6 +95,10 @@ if str(ADAPTER_ROOT) not in sys.path:
 from tools.logging_config import init_logging
 from tools.error_handling import CircuitBreaker
 from tools.geniesim_adapter.config import (
+    get_geniesim_circuit_breaker_failure_threshold,
+    get_geniesim_circuit_breaker_recovery_timeout_s,
+    get_geniesim_circuit_breaker_success_threshold,
+    get_geniesim_grpc_timeout_s,
     get_geniesim_host,
     get_geniesim_port,
 )
@@ -261,7 +265,7 @@ class GenieSimConfig:
     # Connection settings
     host: str = field(default_factory=get_geniesim_host)
     port: int = field(default_factory=get_geniesim_port)
-    timeout: float = 30.0
+    timeout: float = field(default_factory=get_geniesim_grpc_timeout_s)
     max_retries: int = 3
 
     # Installation paths
@@ -330,7 +334,7 @@ class GenieSimConfig:
         return cls(
             host=get_geniesim_host(),
             port=get_geniesim_port(),
-            timeout=float(os.getenv("GENIESIM_TIMEOUT", "30")),
+            timeout=get_geniesim_grpc_timeout_s(),
             geniesim_root=Path(os.getenv("GENIESIM_ROOT", "/opt/geniesim")),
             isaac_sim_path=Path(os.getenv("ISAAC_SIM_PATH", "/isaac-sim")),
             isaacsim_required=_parse_bool(os.getenv("ISAACSIM_REQUIRED"), default=False),
@@ -425,7 +429,7 @@ class GenieSimGRPCClient:
         self,
         host: Optional[str] = None,
         port: Optional[int] = None,
-        timeout: float = 30.0,
+        timeout: Optional[float] = None,
     ):
         """
         Initialize gRPC client.
@@ -437,15 +441,15 @@ class GenieSimGRPCClient:
         """
         self.host = host or get_geniesim_host()
         self.port = port if port is not None else get_geniesim_port()
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else get_geniesim_grpc_timeout_s()
         self._channel = None
         self._stub = None
         self._connected = False
         self._circuit_breaker = CircuitBreaker(
             f"geniesim-grpc-{self.host}:{self.port}",
-            failure_threshold=3,
-            success_threshold=2,
-            recovery_timeout=30.0,
+            failure_threshold=get_geniesim_circuit_breaker_failure_threshold(),
+            success_threshold=get_geniesim_circuit_breaker_success_threshold(),
+            recovery_timeout=get_geniesim_circuit_breaker_recovery_timeout_s(),
             on_open=self._on_circuit_open,
             on_half_open=self._on_circuit_half_open,
             on_close=self._on_circuit_closed,
