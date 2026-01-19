@@ -162,7 +162,15 @@ except ImportError:
     AUDIO_NARRATION_AVAILABLE = False
 
 JOB_NAME = "genie-sim-export-job"
-COMMERCIAL_LICENSE_ALLOWLIST = {"CC0", "CC-BY", "MIT", "Apache-2.0"}
+COMMERCIAL_LICENSE_ALLOWLIST = {"cc0", "cc-by", "mit", "apache-2.0"}
+
+
+def _normalize_license_type(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def _is_commercial_license(license_type: Optional[str]) -> bool:
+    return _normalize_license_type(license_type) in COMMERCIAL_LICENSE_ALLOWLIST
 
 
 def parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -469,7 +477,7 @@ def run_geniesim_export_job(
                     non_commercial_assets = []
                     for obj in raw_variation_objects:
                         license_type = obj.get("asset", {}).get("license", "unknown")
-                        license_is_commercial = license_type in COMMERCIAL_LICENSE_ALLOWLIST
+                        license_is_commercial = _is_commercial_license(license_type)
                         if production_mode:
                             is_commercial = license_is_commercial
                         else:

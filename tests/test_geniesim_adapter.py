@@ -8,6 +8,7 @@ Tests the conversion from BlueprintPipeline manifest to Genie Sim format:
 - Commercial asset filtering
 """
 
+import importlib.util
 import json
 import os
 import tempfile
@@ -47,6 +48,15 @@ from tools.geniesim_adapter.task_config import (
     SuggestedTask,
 )
 from tools.validation import ValidationError
+
+
+def _load_export_to_geniesim_module():
+    export_path = Path(__file__).parent.parent / "genie-sim-export-job" / "export_to_geniesim.py"
+    spec = importlib.util.spec_from_file_location("export_to_geniesim", export_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 # =============================================================================
@@ -482,6 +492,15 @@ class TestAssetIndexBuilder:
         builder = AssetIndexBuilder(verbose=False, strict_category_validation=True)
         with pytest.raises(ValidationError):
             builder.build(manifest)
+
+
+def test_mixed_case_license_is_commercial_ok():
+    export_module = _load_export_to_geniesim_module()
+
+    assert export_module._is_commercial_license("Cc-By")
+    assert export_module._is_commercial_license("mIt")
+    assert export_module._is_commercial_license("ApAcHe-2.0")
+    assert export_module._is_commercial_license("cC0")
 
 
 # =============================================================================
