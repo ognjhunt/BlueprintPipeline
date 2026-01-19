@@ -50,6 +50,7 @@ main:
           - primaryRegion: ${default(sys.get_env("PRIMARY_WORKFLOW_REGION"), "us-central1")}
           - secondaryRegion: ${default(sys.get_env("SECONDARY_WORKFLOW_REGION"), "us-east1")}
           - region: ${primaryRegion}
+          - enableDream2flow: '${sys.get_env("ENABLE_DREAM2FLOW") != null and text.lower(sys.get_env("ENABLE_DREAM2FLOW")) == "true"}'
         next: filter_completion_markers
 
     # Filter for .regen3d_complete marker files
@@ -80,7 +81,26 @@ main:
           - dream2flowLegacyFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_failed"}'
           - dream2flowInferenceFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.failed"}'
           - dream2flowInferenceLegacyFailedMarker: '${"scenes/" + sceneId + "/dream2flow/.dream2flow_inference_failed"}'
-        next: init_region_health
+        next: check_dream2flow_enabled
+
+    - check_dream2flow_enabled:
+        switch:
+          - condition: ${enableDream2flow}
+            next: init_region_health
+        next: log_dream2flow_disabled
+
+    - log_dream2flow_disabled:
+        call: sys.log
+        args:
+          text: '${"Dream2Flow disabled for scene " + sceneId + " (ENABLE_DREAM2FLOW not set)"}'
+          severity: "INFO"
+        next: skip_dream2flow_disabled
+
+    - skip_dream2flow_disabled:
+        return:
+          status: "SKIPPED"
+          scene_id: ${sceneId}
+          message: '${"Dream2Flow disabled for scene " + sceneId}'
 
     - init_region_health:
         assign:
