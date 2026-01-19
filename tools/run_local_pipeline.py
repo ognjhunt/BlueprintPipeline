@@ -72,6 +72,12 @@ from tools.cost_tracking.estimate import (
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
+from tools.error_handling import (
+    NonRetryableError,
+    RetryConfig,
+    RetryableError,
+    retry_with_backoff,
+)
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
@@ -205,6 +211,7 @@ class LocalPipelineRunner:
         self._path_redaction_regex = re.compile(r"(?:[A-Za-z]:\\\\|/)[^\\s]+")
         self._quality_gates = QualityGateRegistry(verbose=self.verbose)
         self._quality_gate_report_path = self._resolve_quality_gate_report_path()
+        self.retry_config = self._resolve_retry_config()
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -221,6 +228,65 @@ class LocalPipelineRunner:
         if sanitized_message:
             return f"{type(exc).__name__}: {sanitized_message}"
         return type(exc).__name__
+
+    def _resolve_retry_config(self) -> RetryConfig:
+        max_retries = self._parse_env_int("PIPELINE_RETRY_MAX", default=3)
+        base_delay = self._parse_env_float("PIPELINE_RETRY_BASE_DELAY", default=1.0)
+        max_delay = self._parse_env_float("PIPELINE_RETRY_MAX_DELAY", default=60.0)
+        return RetryConfig(
+            max_retries=max_retries,
+            base_delay=base_delay,
+            max_delay=max_delay,
+        )
+
+    def _parse_env_int(self, name: str, default: int) -> int:
+        raw = os.getenv(name)
+        if raw is None or raw == "":
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            self.log(f"Invalid {name} value '{raw}', defaulting to {default}", "WARNING")
+            return default
+
+    def _parse_env_float(self, name: str, default: float) -> float:
+        raw = os.getenv(name)
+        if raw is None or raw == "":
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            self.log(f"Invalid {name} value '{raw}', defaulting to {default}", "WARNING")
+            return default
+
+    def _run_with_retry(self, step: PipelineStep, action: Any) -> Any:
+        config = self.retry_config
+
+        def on_retry(attempt: int, exc: Exception, delay: float) -> None:
+            self.log(
+                (
+                    f"{step.value} retry {attempt}/{config.max_retries} after {delay:.2f}s: "
+                    f"{self._summarize_exception(exc)}"
+                ),
+                "WARNING",
+            )
+
+        def on_failure(attempt: int, exc: Exception) -> None:
+            self.log(
+                f"{step.value} failed after {attempt} attempts: {self._summarize_exception(exc)}",
+                "ERROR",
+            )
+
+        decorator = retry_with_backoff(
+            max_retries=config.max_retries,
+            base_delay=config.base_delay,
+            max_delay=config.max_delay,
+            backoff_factor=config.backoff_factor,
+            jitter=config.jitter,
+            on_retry=on_retry,
+            on_failure=on_failure,
+        )
+        return decorator(action)()
 
     def _log_exception_traceback(self, context: str, exc: Exception) -> None:
         self.log(f"{context}: {self._summarize_exception(exc)}", "ERROR")
@@ -2006,6 +2072,18 @@ class LocalPipelineRunner:
                 message=f"Import error (Genie Sim export job not found): {self._summarize_exception(e)}",
             )
 
+        manifest_path = self.assets_dir / "scene_manifest.json"
+        try:
+            if not manifest_path.is_file():
+                raise NonRetryableError("Manifest not found - run regen3d step first")
+        except NonRetryableError as exc:
+            return StepResult(
+                step=PipelineStep.GENIESIM_EXPORT,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=str(exc),
+            )
+
         root = self.scene_dir.parent
         assets_prefix = f"{self.scene_id}/assets"
         geniesim_prefix = f"{self.scene_id}/geniesim"
@@ -2014,22 +2092,35 @@ class LocalPipelineRunner:
         robot_type = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
         os.environ.setdefault("VARIATION_ASSETS_PREFIX", variation_assets_prefix)
 
-        exit_code = run_geniesim_export_job(
-            root=root,
-            scene_id=self.scene_id,
-            assets_prefix=assets_prefix,
-            geniesim_prefix=geniesim_prefix,
-            robot_type=robot_type,
-            variation_assets_prefix=variation_assets_prefix,
-            replicator_prefix=replicator_prefix,
-            copy_usd=True,
-        )
-        if exit_code != 0:
+        def _export_job() -> None:
+            exit_code = run_geniesim_export_job(
+                root=root,
+                scene_id=self.scene_id,
+                assets_prefix=assets_prefix,
+                geniesim_prefix=geniesim_prefix,
+                robot_type=robot_type,
+                variation_assets_prefix=variation_assets_prefix,
+                replicator_prefix=replicator_prefix,
+                copy_usd=True,
+            )
+            if exit_code != 0:
+                raise RetryableError(f"Genie Sim export failed with exit code {exit_code}")
+
+        try:
+            self._run_with_retry(PipelineStep.GENIESIM_EXPORT, _export_job)
+        except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_EXPORT,
                 success=False,
                 duration_seconds=time.time() - start_time,
-                message=f"Genie Sim export failed with exit code {exit_code}",
+                message=str(exc),
+            )
+        except Exception as exc:
+            return StepResult(
+                step=PipelineStep.GENIESIM_EXPORT,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=f"Genie Sim export failed: {self._summarize_exception(exc)}",
             )
 
         return StepResult(
@@ -2064,12 +2155,17 @@ class LocalPipelineRunner:
         scene_graph_path = self.geniesim_dir / "scene_graph.json"
         asset_index_path = self.geniesim_dir / "asset_index.json"
         task_config_path = self.geniesim_dir / "task_config.json"
-        if not scene_graph_path.is_file() or not asset_index_path.is_file() or not task_config_path.is_file():
+        try:
+            if not scene_graph_path.is_file() or not asset_index_path.is_file() or not task_config_path.is_file():
+                raise NonRetryableError(
+                    "Genie Sim export outputs missing - run genie-sim-export first"
+                )
+        except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_SUBMIT,
                 success=False,
                 duration_seconds=time.time() - start_time,
-                message="Genie Sim export outputs missing - run genie-sim-export first",
+                message=str(exc),
             )
 
         scene_graph = json.loads(scene_graph_path.read_text())
@@ -2093,15 +2189,20 @@ class LocalPipelineRunner:
             "genie-sim-local-runner",
             require_server=False,
         )
-        if not preflight_report.get("ok", False):
+        try:
+            if not preflight_report.get("ok", False):
+                raise NonRetryableError(
+                    format_geniesim_preflight_failure(
+                        "genie-sim-local-runner",
+                        preflight_report,
+                    )
+                )
+        except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_SUBMIT,
                 success=False,
                 duration_seconds=time.time() - start_time,
-                message=format_geniesim_preflight_failure(
-                    "genie-sim-local-runner",
-                    preflight_report,
-                ),
+                message=str(exc),
                 outputs={"preflight": preflight_report},
             )
 
@@ -2121,14 +2222,37 @@ class LocalPipelineRunner:
         scene_manifest_path.write_text(json.dumps(scene_manifest, indent=2))
         task_config_local_path.write_text(json.dumps(task_config, indent=2))
 
-        local_run_result = run_local_data_collection(
-            scene_manifest_path=scene_manifest_path,
-            task_config_path=task_config_local_path,
-            output_dir=output_dir,
-            robot_type=robot_type,
-            episodes_per_task=episodes_per_task,
-            verbose=True,
-        )
+        def _collect_data() -> Any:
+            result = run_local_data_collection(
+                scene_manifest_path=scene_manifest_path,
+                task_config_path=task_config_local_path,
+                output_dir=output_dir,
+                robot_type=robot_type,
+                episodes_per_task=episodes_per_task,
+                verbose=True,
+            )
+            if not result or not result.success:
+                raise RetryableError("Local Genie Sim execution failed")
+            return result
+
+        try:
+            local_run_result = self._run_with_retry(PipelineStep.GENIESIM_SUBMIT, _collect_data)
+        except NonRetryableError as exc:
+            return StepResult(
+                step=PipelineStep.GENIESIM_SUBMIT,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=str(exc),
+                outputs={"preflight": preflight_report},
+            )
+        except Exception as exc:
+            return StepResult(
+                step=PipelineStep.GENIESIM_SUBMIT,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=f"Genie Sim submit failed: {self._summarize_exception(exc)}",
+                outputs={"preflight": preflight_report},
+            )
         submission_message = (
             "Local Genie Sim execution completed."
             if local_run_result and local_run_result.success
@@ -2207,22 +2331,30 @@ class LocalPipelineRunner:
             )
 
         job_path = self.geniesim_dir / "job.json"
-        if not job_path.is_file():
+        try:
+            if not job_path.is_file():
+                raise NonRetryableError(
+                    "Genie Sim job metadata missing - run genie-sim-submit first"
+                )
+        except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
                 duration_seconds=time.time() - start_time,
-                message="Genie Sim job metadata missing - run genie-sim-submit first",
+                message=str(exc),
             )
 
         job_payload = json.loads(job_path.read_text())
-        job_id = job_payload.get("job_id")
-        if not job_id:
+        try:
+            job_id = job_payload.get("job_id")
+            if not job_id:
+                raise NonRetryableError("Genie Sim job metadata missing job_id")
+        except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
                 duration_seconds=time.time() - start_time,
-                message="Genie Sim job metadata missing job_id",
+                message=str(exc),
             )
         job_status = job_payload.get("status", "submitted")
         artifacts = job_payload.get("artifacts", {})
@@ -2232,71 +2364,47 @@ class LocalPipelineRunner:
             or str(self.episodes_dir / f"geniesim_{job_id}")
         )
 
-        if job_status != "completed":
-            return StepResult(
-                step=PipelineStep.GENIESIM_IMPORT,
-                success=False,
-                duration_seconds=time.time() - start_time,
-                message=f"Genie Sim job status is {job_status}; import requires completed job",
-                outputs={"job_id": job_id, "job_status": job_status},
-            )
-
         output_dir = Path(local_episodes_prefix)
         recordings_dir = output_dir / "recordings"
         lerobot_dir = output_dir / "lerobot"
         dataset_info_path = lerobot_dir / "dataset_info.json"
         require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
-        if not recordings_dir.is_dir():
-            return StepResult(
-                step=PipelineStep.GENIESIM_IMPORT,
-                success=False,
-                duration_seconds=time.time() - start_time,
-                message=(
+
+        try:
+            if job_status != "completed":
+                raise NonRetryableError(
+                    f"Genie Sim job status is {job_status}; import requires completed job"
+                )
+            if not recordings_dir.is_dir():
+                raise NonRetryableError(
                     "Genie Sim recordings directory missing for job "
                     f"{job_id}: expected {recordings_dir}"
-                ),
-                outputs={
-                    "job_id": job_id,
-                    "output_dir": str(output_dir),
-                    "recordings_path": str(recordings_dir),
-                    "lerobot_path": str(lerobot_dir),
-                    "lerobot_dataset_info": str(dataset_info_path),
-                },
-            )
-        episode_files = list(recordings_dir.rglob("*.json"))
-        if not episode_files:
-            return StepResult(
-                step=PipelineStep.GENIESIM_IMPORT,
-                success=False,
-                duration_seconds=time.time() - start_time,
-                message=(
+                )
+            episode_files = list(recordings_dir.rglob("*.json"))
+            if not episode_files:
+                raise NonRetryableError(
                     "Genie Sim recordings missing for job "
                     f"{job_id}: expected *.json episodes under {recordings_dir}"
-                ),
-                outputs={
-                    "job_id": job_id,
-                    "output_dir": str(output_dir),
-                    "recordings_path": str(recordings_dir),
-                    "lerobot_path": str(lerobot_dir),
-                    "lerobot_dataset_info": str(dataset_info_path),
-                },
-            )
-        if require_lerobot and (not lerobot_dir.is_dir() or not dataset_info_path.is_file()):
-            missing = []
-            if not lerobot_dir.is_dir():
-                missing.append(str(lerobot_dir))
-            if not dataset_info_path.is_file():
-                missing.append(str(dataset_info_path))
+                )
+            if require_lerobot and (not lerobot_dir.is_dir() or not dataset_info_path.is_file()):
+                missing = []
+                if not lerobot_dir.is_dir():
+                    missing.append(str(lerobot_dir))
+                if not dataset_info_path.is_file():
+                    missing.append(str(dataset_info_path))
+                raise NonRetryableError(
+                    "Genie Sim lerobot artifacts missing for job "
+                    f"{job_id}: expected {', '.join(missing)}"
+                )
+        except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
                 duration_seconds=time.time() - start_time,
-                message=(
-                    "Genie Sim lerobot artifacts missing for job "
-                    f"{job_id}: expected {', '.join(missing)}"
-                ),
+                message=str(exc),
                 outputs={
                     "job_id": job_id,
+                    "job_status": job_status,
                     "output_dir": str(output_dir),
                     "recordings_path": str(recordings_dir),
                     "lerobot_path": str(lerobot_dir),
@@ -2315,7 +2423,28 @@ class LocalPipelineRunner:
             job_metadata_path=str(job_path),
             local_episodes_prefix=local_episodes_prefix,
         )
-        result = run_local_import_job(config, job_metadata=job_payload)
+        def _import_job() -> Any:
+            result = run_local_import_job(config, job_metadata=job_payload)
+            if not result or not result.success:
+                raise RetryableError("Genie Sim import failed")
+            return result
+
+        try:
+            result = self._run_with_retry(PipelineStep.GENIESIM_IMPORT, _import_job)
+        except NonRetryableError as exc:
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=str(exc),
+            )
+        except Exception as exc:
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=f"Genie Sim import failed: {self._summarize_exception(exc)}",
+            )
 
         marker_path = None
         if result.success:
