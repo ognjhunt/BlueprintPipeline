@@ -721,7 +721,7 @@ class ConfigLoader:
                 backend=config.get("approval_store", {}).get("backend", "filesystem"),
                 filesystem_path=config.get("approval_store", {}).get(
                     "filesystem_path",
-                    "/tmp/blueprintpipeline/approvals",
+                    ApprovalStoreConfig().filesystem_path,
                 ),
                 firestore_collection=config.get("approval_store", {}).get(
                     "firestore_collection",
