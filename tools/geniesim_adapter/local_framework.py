@@ -299,6 +299,17 @@ class GenieSimConfig:
             if allow_ik_failure_env is not None
             else allow_linear_fallback
         )
+        if environment == "production":
+            if allow_linear_fallback_in_production:
+                raise RuntimeError(
+                    "Refusing to enable linear fallback in production. "
+                    "GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD is ignored in production."
+                )
+            if allow_linear_fallback or allow_ik_failure_fallback:
+                raise RuntimeError(
+                    "Refusing to enable linear fallback in production. "
+                    "Unset GENIESIM_ALLOW_LINEAR_FALLBACK and GENIESIM_ALLOW_IK_FAILURE_FALLBACK."
+                )
         return cls(
             host=get_geniesim_host(),
             port=get_geniesim_port(),
@@ -1623,6 +1634,18 @@ class GenieSimLocalFramework:
         production_mode = self.config.environment == "production"
         curobo_enabled = CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo
         allow_fallback_in_prod = self.config.allow_linear_fallback_in_production
+
+        if production_mode and (
+            self.config.allow_linear_fallback_in_production
+            or self.config.allow_linear_fallback
+            or self.config.allow_ik_failure_fallback
+        ):
+            raise RuntimeError(
+                "Linear fallback is not permitted in production. "
+                "Disable GENIESIM_ALLOW_LINEAR_FALLBACK, "
+                "GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD, and "
+                "GENIESIM_ALLOW_IK_FAILURE_FALLBACK."
+            )
 
         if self.config.curobo_required and not curobo_enabled:
             raise RuntimeError(
