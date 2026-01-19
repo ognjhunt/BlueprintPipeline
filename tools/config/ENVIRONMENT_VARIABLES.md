@@ -429,6 +429,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_TASK_SIZE_SMALL_THRESHOLD` | float | 0.05 | Object size threshold (meters) below which tasks are treated as harder. |
 | `GENIESIM_TASK_SIZE_LARGE_THRESHOLD` | float | 0.3 | Object size threshold (meters) above which tasks are treated as harder. |
 | `GENIESIM_TASK_MAX_PER_OBJECT` | int | 3 | Maximum number of suggested tasks retained per object. |
+| `GENIESIM_COLLECTION_TIMEOUT_S` | float | unset | Abort local Genie Sim data collection if total runtime exceeds this timeout (seconds). |
 | `ISAAC_SIM_ENDPOINT` | url | `http://localhost:8011` | Isaac Sim endpoint |
 | `ISAAC_SIM_PATH` | path | `/isaac-sim` | Isaac Sim installation path (local framework) |
 | `OMNIVERSE_HOST` | str | `localhost` | Omniverse host used to resolve USD asset paths |
