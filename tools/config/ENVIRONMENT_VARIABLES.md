@@ -388,6 +388,9 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_MOCK_MODE` | bool | false | Enable mock mode for Genie Sim clients in non-production runs (requires `ALLOW_GENIESIM_MOCK=1` or an explicit code flag; ignored in production). |
 | `ALLOW_GENIESIM_MOCK` | bool | 0 | Allow Genie Sim mock mode in non-production environments (`1` to enable; production always disables mock mode). |
 | `GENIESIM_ALLOW_LINEAR_FALLBACK` | bool | unset | Allow linear interpolation fallback when cuRobo is unavailable (`1` to enable, `0` to disable). In non-production, the local framework auto-enables this fallback if cuRobo is missing and this variable is unset; in production, cuRobo is required and the framework fails fast. |
+| `GENIESIM_STALL_TIMEOUT_S` | float | 30 | Abort/reset an episode if observation progress stalls longer than this timeout (seconds). |
+| `GENIESIM_MAX_STALLS` | int | 2 | Max stalled episodes before the local framework restarts the Genie Sim server. |
+| `GENIESIM_STALL_BACKOFF_S` | float | 5 | Backoff (seconds) to wait after a stall or restart before resuming data collection. |
 | `ISAAC_SIM_ENDPOINT` | url | `http://localhost:8011` | Isaac Sim endpoint |
 | `ISAAC_SIM_PATH` | path | `/isaac-sim` | Isaac Sim installation path (local framework) |
 | `OMNIVERSE_HOST` | str | `localhost` | Omniverse host used to resolve USD asset paths |
