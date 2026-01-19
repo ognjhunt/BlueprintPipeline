@@ -155,6 +155,20 @@ except ImportError:
 # =============================================================================
 
 
+DEFAULT_OBSERVATION_SCHEMA = {
+    "required_keys": ["robot_state", "camera_frames"],
+}
+DEFAULT_ACTION_BOUNDS = {
+    "lower": [-3.1416] * 7,
+    "upper": [3.1416] * 7,
+}
+DEFAULT_SUCCESS_SCHEMA = {
+    "success_keys": ["success", "task_success", "is_success"],
+    "grasp_keys": ["grasped", "is_grasping", "gripper_closed"],
+    "release_keys": ["released", "gripper_open", "is_released"],
+}
+
+
 class GenieSimServerStatus(str, Enum):
     """Status of the Genie Sim server."""
     NOT_RUNNING = "not_running"
@@ -2670,19 +2684,141 @@ class GenieSimLocalFramework:
         task: Dict[str, Any],
     ) -> float:
         """Calculate quality score for an episode."""
-        # Simple quality heuristics
-        score = 1.0
+        if not frames:
+            logger.warning("Quality check failed: no frames recorded.")
+            return 0.0
 
-        # Check frame count
-        if len(frames) < 10:
-            score *= 0.5
+        task_obs_schema = task.get("observation_schema") or {}
+        required_keys = task_obs_schema.get("required_keys") or task.get("required_observation_keys")
+        if not required_keys:
+            required_keys = DEFAULT_OBSERVATION_SCHEMA["required_keys"]
 
-        # Check for missing data
-        missing_obs = sum(1 for f in frames if not f.get("observation"))
-        if missing_obs > 0:
-            score *= (1 - missing_obs / len(frames))
+        task_action_bounds = task.get("action_bounds") or task.get("joint_limits") or {}
+        lower_bounds = (
+            task_action_bounds.get("lower")
+            or task_action_bounds.get("min")
+            or DEFAULT_ACTION_BOUNDS["lower"]
+        )
+        upper_bounds = (
+            task_action_bounds.get("upper")
+            or task_action_bounds.get("max")
+            or DEFAULT_ACTION_BOUNDS["upper"]
+        )
+        success_schema = task.get("success_schema") or {}
+        success_keys = success_schema.get("success_keys") or task.get("success_keys")
+        if not success_keys:
+            success_keys = DEFAULT_SUCCESS_SCHEMA["success_keys"]
+        grasp_keys = success_schema.get("grasp_keys") or DEFAULT_SUCCESS_SCHEMA["grasp_keys"]
+        release_keys = success_schema.get("release_keys") or DEFAULT_SUCCESS_SCHEMA["release_keys"]
 
-        return min(1.0, max(0.0, score))
+        total_frames = len(frames)
+
+        missing_obs_count = 0
+        missing_fields_count = 0
+        action_invalid_count = 0
+        action_bounds_mismatch = False
+        success_flag_detected = False
+        success_flag_value = False
+        grasp_frame_index = None
+        release_frame_index = None
+
+        for idx, frame in enumerate(frames):
+            obs = frame.get("observation")
+            if not obs:
+                missing_obs_count += 1
+                missing_fields_count += 1
+            else:
+                missing_fields = [key for key in required_keys if key not in obs]
+                if missing_fields:
+                    missing_fields_count += 1
+
+            action = frame.get("action")
+            if not isinstance(action, (list, tuple, np.ndarray)):
+                action_invalid_count += 1
+            else:
+                action_array = np.array(action, dtype=float)
+                lower = np.array(lower_bounds, dtype=float)
+                upper = np.array(upper_bounds, dtype=float)
+                if action_array.shape != lower.shape or action_array.shape != upper.shape:
+                    action_invalid_count += 1
+                    action_bounds_mismatch = True
+                else:
+                    if np.any(action_array < lower) or np.any(action_array > upper):
+                        action_invalid_count += 1
+
+            if obs:
+                for key in success_keys:
+                    if key in obs or key in frame:
+                        success_flag_detected = True
+                        success_flag_value = success_flag_value or bool(obs.get(key, frame.get(key)))
+                        break
+
+                if grasp_frame_index is None:
+                    for key in grasp_keys:
+                        if bool(obs.get(key, frame.get(key))):
+                            grasp_frame_index = idx
+                            break
+                if grasp_frame_index is not None and release_frame_index is None:
+                    for key in release_keys:
+                        if bool(obs.get(key, frame.get(key))):
+                            release_frame_index = idx
+                            break
+
+        if missing_obs_count > 0:
+            logger.warning(
+                "Quality check: missing observation payloads in %d/%d frames.",
+                missing_obs_count,
+                total_frames,
+            )
+        if missing_fields_count > 0:
+            logger.warning(
+                "Quality check: missing required observation fields in %d/%d frames (required=%s).",
+                missing_fields_count,
+                total_frames,
+                required_keys,
+            )
+        if action_invalid_count > 0:
+            if action_bounds_mismatch:
+                logger.warning(
+                    "Quality check: action bounds mismatch for %d/%d frames (bounds length mismatch).",
+                    action_invalid_count,
+                    total_frames,
+                )
+            else:
+                logger.warning(
+                    "Quality check: action out of bounds in %d/%d frames.",
+                    action_invalid_count,
+                    total_frames,
+                )
+
+        data_completeness_score = 1.0 - (missing_fields_count / total_frames)
+        action_validity_score = 1.0 - (action_invalid_count / total_frames)
+
+        if success_flag_detected:
+            success_score = 1.0 if success_flag_value else 0.0
+            if not success_flag_value:
+                logger.warning("Quality check: task success flag is false.")
+        else:
+            success_score = 1.0 if (
+                grasp_frame_index is not None
+                and release_frame_index is not None
+                and release_frame_index >= grasp_frame_index
+            ) else 0.0
+            if success_score == 0.0:
+                logger.warning(
+                    "Quality check: task success heuristic not satisfied (grasp/release milestones)."
+                )
+
+        frame_count_score = 1.0 if total_frames >= 10 else 0.5
+
+        weighted_score = (
+            0.45 * data_completeness_score
+            + 0.35 * action_validity_score
+            + 0.15 * success_score
+            + 0.05 * frame_count_score
+        )
+
+        return min(1.0, max(0.0, weighted_score))
 
     # =========================================================================
     # Export
