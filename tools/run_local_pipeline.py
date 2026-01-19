@@ -101,6 +101,15 @@ def _load_json(path: Path, context: str) -> Any:
         ) from exc
 
 
+def _safe_write_text(path: Path, payload: str, context: str) -> None:
+    try:
+        path.write_text(payload)
+    except Exception as exc:
+        raise NonRetryableError(
+            f"Failed to write {context} to {path}: {exc}"
+        ) from exc
+
+
 class PipelineStep(str, Enum):
     """Pipeline steps in execution order."""
     REGEN3D = "regen3d"
@@ -323,11 +332,15 @@ class LocalPipelineRunner:
 
     def _write_marker(self, marker_path: Path, status: str) -> None:
         """Write a simple JSON marker file."""
-        marker_path.write_text(json.dumps({
-            "status": status,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "scene_id": self.scene_id,
-        }, indent=2))
+        _safe_write_text(
+            marker_path,
+            json.dumps({
+                "status": status,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "scene_id": self.scene_id,
+            }, indent=2),
+            context="marker file",
+        )
 
     def _resolve_quality_gate_report_path(self) -> Path:
         report_dir = self.scene_dir / "quality_gates"
@@ -853,7 +866,11 @@ class LocalPipelineRunner:
             "reason": "DISABLE_ARTICULATED_ASSETS=true",
         }
         manifest["metadata"] = metadata
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        _safe_write_text(
+            manifest_path,
+            json.dumps(manifest, indent=2),
+            context="articulation-disabled manifest",
+        )
 
     def _run_step(self, step: PipelineStep) -> StepResult:
         """Run a single pipeline step."""
@@ -943,14 +960,22 @@ class LocalPipelineRunner:
             environment_type=self.environment_type,
         )
         manifest_path = self.assets_dir / "scene_manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        _safe_write_text(
+            manifest_path,
+            json.dumps(manifest, indent=2),
+            context="scene manifest",
+        )
         manifest = self._annotate_articulation_requirements(manifest, manifest_path)
         self.log(f"Wrote manifest: {manifest_path}")
 
         # Generate layout
         layout = adapter.create_layout(regen3d_output, apply_scale_factor=1.0)
         layout_path = self.layout_dir / "scene_layout_scaled.json"
-        layout_path.write_text(json.dumps(layout, indent=2))
+        _safe_write_text(
+            layout_path,
+            json.dumps(layout, indent=2),
+            context="scene layout",
+        )
         self.log(f"Wrote layout: {layout_path}")
 
         # Copy assets
@@ -964,7 +989,11 @@ class LocalPipelineRunner:
         # Generate inventory
         inventory = self._generate_inventory(regen3d_output)
         inventory_path = self.seg_dir / "inventory.json"
-        inventory_path.write_text(json.dumps(inventory, indent=2))
+        _safe_write_text(
+            inventory_path,
+            json.dumps(inventory, indent=2),
+            context="inventory",
+        )
         self.log(f"Wrote inventory: {inventory_path}")
 
         # Write completion marker
@@ -975,7 +1004,11 @@ class LocalPipelineRunner:
             "objects_count": len(regen3d_output.objects),
             "completed_at": datetime.utcnow().isoformat() + "Z",
         }
-        marker_path.write_text(json.dumps(marker_content, indent=2))
+        _safe_write_text(
+            marker_path,
+            json.dumps(marker_content, indent=2),
+            context="regen3d completion marker",
+        )
 
         return StepResult(
             step=PipelineStep.REGEN3D,
@@ -1042,7 +1075,11 @@ class LocalPipelineRunner:
             "source": "heuristic",
         }
         manifest["metadata"] = metadata
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        _safe_write_text(
+            manifest_path,
+            json.dumps(manifest, indent=2),
+            context="articulation-annotated manifest",
+        )
 
         if required_ids:
             self.log(f"Detected {len(required_ids)} articulated objects requiring interactive processing")
@@ -1253,7 +1290,11 @@ class LocalPipelineRunner:
                 },
             }
 
-            report_path.write_text(json.dumps(report, indent=2))
+            _safe_write_text(
+                report_path,
+                json.dumps(report, indent=2),
+                context="scale report",
+            )
             self._write_marker(marker_path, status="completed")
 
             if low_confidence or not scales:
@@ -1561,7 +1602,11 @@ class LocalPipelineRunner:
         # Generate a minimal scene.usda
         usda_content = self._generate_usda(manifest, layout)
         usda_path = self.usd_dir / "scene.usda"
-        usda_path.write_text(usda_content)
+        _safe_write_text(
+            usda_path,
+            usda_content,
+            context="scene usda",
+        )
         self._write_marker(self.assets_dir / ".usd_assembly_complete", status="completed")
 
         self.log(f"Generated USD: {usda_path}")
@@ -1692,30 +1737,42 @@ class LocalPipelineRunner:
             "policies": ["manipulation", "navigation"],
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
-        (self.replicator_dir / "bundle_metadata.json").write_text(
-            json.dumps(bundle_metadata, indent=2)
+        _safe_write_text(
+            self.replicator_dir / "bundle_metadata.json",
+            json.dumps(bundle_metadata, indent=2),
+            context="replicator bundle metadata",
         )
 
-        configs_dir.joinpath("default_policy.json").write_text(json.dumps({
-            "policy_id": "default_policy",
-            "capture_config": {
-                "cameras": ["wrist", "overhead"],
-                "resolution": [1280, 720],
-                "modalities": ["rgb", "depth"],
-                "stream_ids": ["rgb", "depth", "segmentation"],
-            },
-        }, indent=2))
+        _safe_write_text(
+            configs_dir / "default_policy.json",
+            json.dumps({
+                "policy_id": "default_policy",
+                "capture_config": {
+                    "cameras": ["wrist", "overhead"],
+                    "resolution": [1280, 720],
+                    "modalities": ["rgb", "depth"],
+                    "stream_ids": ["rgb", "depth", "segmentation"],
+                },
+            }, indent=2),
+            context="default policy config",
+        )
 
         # Generate minimal placement regions
         placement_regions = self._generate_placement_regions(manifest)
-        (self.replicator_dir / "placement_regions.usda").write_text(placement_regions)
+        _safe_write_text(
+            self.replicator_dir / "placement_regions.usda",
+            placement_regions,
+            context="placement regions",
+        )
 
         # Generate variation asset manifest
         variation_dir = self.replicator_dir / "variation_assets"
         variation_dir.mkdir(parents=True, exist_ok=True)
         variation_manifest = self._generate_variation_manifest(manifest, inventory)
-        (variation_dir / "manifest.json").write_text(
-            json.dumps(variation_manifest, indent=2)
+        _safe_write_text(
+            variation_dir / "manifest.json",
+            json.dumps(variation_manifest, indent=2),
+            context="variation asset manifest",
         )
         self._write_marker(self.replicator_dir / ".replicator_complete", status="completed")
 
@@ -1919,7 +1976,11 @@ class LocalPipelineRunner:
                 "generation_type": "variation_assets",
             },
         }
-        (output_dir / "variation_assets.json").write_text(json.dumps(payload, indent=2))
+        _safe_write_text(
+            output_dir / "variation_assets.json",
+            json.dumps(payload, indent=2),
+            context="variation assets manifest",
+        )
 
     def _ensure_gcs_scene_link(self) -> Optional[Path]:
         gcs_root = Path("/mnt/gcs")
@@ -1985,7 +2046,11 @@ class LocalPipelineRunner:
             "source": "variation-asset-pipeline",
             "objects": objects,
         }
-        output_path.write_text(json.dumps(payload, indent=2))
+        _safe_write_text(
+            output_path,
+            json.dumps(payload, indent=2),
+            context="variation assets export manifest",
+        )
 
     def _generate_placement_regions(self, manifest: Dict) -> str:
         """Generate minimal placement_regions.usda."""
@@ -2323,8 +2388,16 @@ class LocalPipelineRunner:
 
             scene_manifest_path = config_dir / "scene_manifest.json"
             task_config_local_path = config_dir / "task_config.json"
-            scene_manifest_path.write_text(json.dumps(scene_manifest, indent=2))
-            task_config_local_path.write_text(json.dumps(task_config, indent=2))
+            _safe_write_text(
+                scene_manifest_path,
+                json.dumps(scene_manifest, indent=2),
+                context="geniesim scene manifest",
+            )
+            _safe_write_text(
+                task_config_local_path,
+                json.dumps(task_config, indent=2),
+                context="geniesim task config",
+            )
 
             def _collect_data(
                 scene_manifest_path: Path = scene_manifest_path,
@@ -2526,7 +2599,11 @@ class LocalPipelineRunner:
                     job_payload["failure_reason"] = failure_reason
                     job_payload["failure_details"] = {"firebase_upload": failure_reason}
                     job_path = self.geniesim_dir / "job.json"
-                    job_path.write_text(json.dumps(job_payload, indent=2))
+                    _safe_write_text(
+                        job_path,
+                        json.dumps(job_payload, indent=2),
+                        context="geniesim job payload",
+                    )
                     return StepResult(
                         step=PipelineStep.GENIESIM_SUBMIT,
                         success=False,
@@ -2582,7 +2659,11 @@ class LocalPipelineRunner:
                     "firebase_upload": firebase_upload_error or None
                 }
                 job_path = self.geniesim_dir / "job.json"
-                job_path.write_text(json.dumps(job_payload, indent=2))
+                _safe_write_text(
+                    job_path,
+                    json.dumps(job_payload, indent=2),
+                    context="geniesim job payload",
+                )
                 return StepResult(
                     step=PipelineStep.GENIESIM_SUBMIT,
                     success=False,
@@ -2613,7 +2694,11 @@ class LocalPipelineRunner:
             job_payload["failure_details"] = failure_details or None
 
         job_path = self.geniesim_dir / "job.json"
-        job_path.write_text(json.dumps(job_payload, indent=2))
+        _safe_write_text(
+            job_path,
+            json.dumps(job_payload, indent=2),
+            context="geniesim job payload",
+        )
 
         return StepResult(
             step=PipelineStep.GENIESIM_SUBMIT,
@@ -2790,7 +2875,11 @@ class LocalPipelineRunner:
         local_execution = job_payload.get("local_execution", {})
         local_execution["import_duration_seconds"] = duration_seconds
         job_payload["local_execution"] = local_execution
-        job_path.write_text(json.dumps(job_payload, indent=2))
+        _safe_write_text(
+            job_path,
+            json.dumps(job_payload, indent=2),
+            context="geniesim import job payload",
+        )
 
         return StepResult(
             step=PipelineStep.GENIESIM_IMPORT,
