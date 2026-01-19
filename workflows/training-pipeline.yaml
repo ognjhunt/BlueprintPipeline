@@ -524,11 +524,13 @@ main:
         args:
           text: ${"Training job completed successfully for " + job_id}
           severity: INFO
+        next: parse_training_output
 
     # Extract training results (model path)
     - parse_training_output:
         assign:
           - model_path: ${text.replace_all(default(training_status.body.status.logUri, ""), "gs://" + bucket + "/", "")}
+        next: return_success
 
     # Return success
     - return_success:
