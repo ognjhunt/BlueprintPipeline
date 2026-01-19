@@ -45,6 +45,21 @@ LeRobot Dataset Structure (v2.0):
         │   └── contacts/
         └── ...
 
+LeRobot Dataset Structure (v3.0):
+    dataset/
+    ├── meta/
+    │   ├── info.json
+    │   ├── tasks.jsonl
+    │   ├── episodes.jsonl
+    │   └── episode_index.json   # Episode row-group index (v3)
+    ├── data/
+    │   └── chunk-000/
+    │       └── episodes.parquet # Multi-episode Parquet file
+    ├── videos/                  # Video data (RGB per camera)
+    │   └── chunk-000/
+    └── ground_truth/            # Ground-truth labels (Plus/Full packs)
+        └── chunk-000/
+
 See: https://github.com/huggingface/lerobot
 """
 
@@ -71,6 +86,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from tools.config.env import parse_bool_env
+from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 
 from trajectory_solver import JointTrajectory, JointState, RobotConfig, ROBOT_CONFIGS
 
@@ -190,6 +206,7 @@ class LeRobotEpisode:
     dropped_frames_total: int = 0
     parquet_row_count: Optional[int] = None
     parquet_path: Optional[str] = None
+    parquet_row_group: Optional[int] = None
 
 
 @dataclass
@@ -229,6 +246,9 @@ class LeRobotDatasetConfig:
     # Output paths
     output_dir: Path = Path("./lerobot_dataset")
 
+    # Export format
+    export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2
+
     # Tier compliance enforcement
     tier_compliance_action: str = "fail"  # "fail" or "drop"
 
@@ -252,6 +272,7 @@ class LeRobotDatasetConfig:
         output_dir: Path = Path("./lerobot_dataset"),
         strict_alignment: Optional[bool] = None,
         tier_compliance_action: str = "fail",
+        export_format: Optional[Union[str, LeRobotExportFormat]] = None,
     ) -> "LeRobotDatasetConfig":
         """Create config from data pack tier."""
         camera_types = ["wrist"]
@@ -272,6 +293,10 @@ class LeRobotDatasetConfig:
             output_dir=output_dir,
             strict_alignment=strict_alignment if strict_alignment is not None else True,
             tier_compliance_action=tier_compliance_action,
+            export_format=parse_lerobot_export_format(
+                export_format,
+                default=LeRobotExportFormat.LEROBOT_V2,
+            ),
         )
 
         # Configure based on tier
@@ -324,6 +349,10 @@ class LeRobotExporter:
         """
         self.config = config
         self.verbose = verbose
+        self.export_format = parse_lerobot_export_format(
+            config.export_format,
+            default=LeRobotExportFormat.LEROBOT_V2,
+        )
         self.robot_config = ROBOT_CONFIGS.get(config.robot_type, ROBOT_CONFIGS["franka"])
         self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
         self._path_redaction_regex = re.compile(r"(?:[A-Za-z]:\\\\|/)[^\\s]+")
@@ -351,6 +380,10 @@ class LeRobotExporter:
         self._backup_output_dir: Optional[Path] = None
         self._export_output_dir: Optional[Path] = None
         self.dropped_frames_total: int = 0
+        self._v3_episode_index: Dict[str, Any] = {}
+
+    def _is_v3_export(self) -> bool:
+        return self.export_format == LeRobotExportFormat.LEROBOT_V3
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -1555,51 +1588,76 @@ class LeRobotExporter:
                 errors = []
 
                 try:
-                    # Try to read the file
-                    table = pq.read_table(parquet_path)
+                    if self._is_v3_export() and parquet_path.name == "episodes.parquet":
+                        parquet_file = pq.ParquetFile(parquet_path)
+                        schema = parquet_file.schema_arrow
+                        required_columns = {"observation.state", "action", "episode_index"}
+                        missing_columns = required_columns - set(schema.names)
+                        if missing_columns:
+                            errors.append(f"Missing columns: {missing_columns}")
 
-                    # Check for expected columns
-                    required_columns = {"observation.state", "action"}
-                    missing_columns = required_columns - set(table.column_names)
-                    if missing_columns:
-                        errors.append(f"Missing columns: {missing_columns}")
-
-                    # Check for NaN/None in critical columns
-                    for col_name in ["observation.state", "action"]:
-                        if col_name in table.column_names:
-                            col = table[col_name].to_numpy()
-                            nan_count = np.isnan(col).sum() if col.dtype == np.float32 else 0
-                            if nan_count > 0:
-                                errors.append(f"Column '{col_name}': {nan_count} NaN values")
-
-                    # Check row count (should match trajectory length for episode)
-                    num_rows = table.num_rows
-                    if num_rows == 0:
-                        errors.append("Table is empty (0 rows)")
-                    episode_match = re.search(r"episode_(\d+)\.parquet$", parquet_path.name)
-                    if episode_match:
-                        episode_index = int(episode_match.group(1))
-                        expected_length = expected_lengths.get(episode_index)
-                        if expected_length is None:
+                        num_row_groups = parquet_file.metadata.num_row_groups
+                        if num_row_groups != len(self.episodes):
                             errors.append(
-                                f"No episode metadata found for index {episode_index}"
+                                f"Row group count {num_row_groups} does not match expected "
+                                f"{len(self.episodes)} episodes"
                             )
-                        elif num_rows != expected_length:
-                            errors.append(
-                                f"Row count {num_rows} does not match expected "
-                                f"{expected_length} frames for episode {episode_index}"
-                            )
-
-                        expected_row_count = expected_row_counts.get(episode_index)
-                        if expected_row_count is not None and num_rows != expected_row_count:
-                            errors.append(
-                                f"Row count {num_rows} does not match recorded metadata "
-                                f"{expected_row_count} for episode {episode_index}"
-                            )
+                        for idx, episode in enumerate(self.episodes):
+                            if idx >= num_row_groups:
+                                break
+                            row_group_rows = parquet_file.metadata.row_group(idx).num_rows
+                            expected_length = expected_lengths.get(episode.episode_index)
+                            if expected_length is not None and row_group_rows != expected_length:
+                                errors.append(
+                                    f"Row group {idx} has {row_group_rows} rows but expected "
+                                    f"{expected_length} for episode {episode.episode_index}"
+                                )
                     else:
-                        errors.append(
-                            f"Unable to determine episode index from filename {parquet_path.name}"
-                        )
+                        # Try to read the file
+                        table = pq.read_table(parquet_path)
+
+                        # Check for expected columns
+                        required_columns = {"observation.state", "action"}
+                        missing_columns = required_columns - set(table.column_names)
+                        if missing_columns:
+                            errors.append(f"Missing columns: {missing_columns}")
+
+                        # Check for NaN/None in critical columns
+                        for col_name in ["observation.state", "action"]:
+                            if col_name in table.column_names:
+                                col = table[col_name].to_numpy()
+                                nan_count = np.isnan(col).sum() if col.dtype == np.float32 else 0
+                                if nan_count > 0:
+                                    errors.append(f"Column '{col_name}': {nan_count} NaN values")
+
+                        # Check row count (should match trajectory length for episode)
+                        num_rows = table.num_rows
+                        if num_rows == 0:
+                            errors.append("Table is empty (0 rows)")
+                        episode_match = re.search(r"episode_(\d+)\.parquet$", parquet_path.name)
+                        if episode_match:
+                            episode_index = int(episode_match.group(1))
+                            expected_length = expected_lengths.get(episode_index)
+                            if expected_length is None:
+                                errors.append(
+                                    f"No episode metadata found for index {episode_index}"
+                                )
+                            elif num_rows != expected_length:
+                                errors.append(
+                                    f"Row count {num_rows} does not match expected "
+                                    f"{expected_length} frames for episode {episode_index}"
+                                )
+
+                            expected_row_count = expected_row_counts.get(episode_index)
+                            if expected_row_count is not None and num_rows != expected_row_count:
+                                errors.append(
+                                    f"Row count {num_rows} does not match recorded metadata "
+                                    f"{expected_row_count} for episode {episode_index}"
+                                )
+                        else:
+                            errors.append(
+                                f"Unable to determine episode index from filename {parquet_path.name}"
+                            )
 
                     checksum = _checksum_file(parquet_path, self.checksum_algorithm)
                     if self.output_dir is None:
@@ -1899,6 +1957,7 @@ class LeRobotExporter:
                 self._write_info(meta_dir)
                 self._write_tasks(meta_dir)
                 self._write_episodes_meta(meta_dir)
+                self._write_episode_index(meta_dir)
             except Exception as exc:
                 self._cleanup_failed_export("Failed to write metadata", exc)
                 raise
@@ -1985,6 +2044,10 @@ class LeRobotExporter:
     def _write_episodes(self, data_dir: Path) -> None:
         """Write episode data to Parquet files."""
         try:
+            if self._is_v3_export():
+                self._write_episodes_v3(data_dir)
+                return
+
             chunk_idx = 0
             chunk_dir = data_dir / f"chunk-{chunk_idx:03d}"
             chunk_dir.mkdir(exist_ok=True)
@@ -2019,6 +2082,62 @@ class LeRobotExporter:
         except Exception as exc:
             self._cleanup_failed_export("Failed during episode write", exc)
             raise
+
+    def _write_episodes_v3(self, data_dir: Path) -> None:
+        """Write multi-episode Parquet file for LeRobot v3 layout."""
+        if not HAVE_PYARROW:
+            raise RuntimeError(
+                "pyarrow is required for LeRobot v3 export (multi-episode Parquet)."
+            )
+
+        chunk_dir = data_dir / "chunk-000"
+        chunk_dir.mkdir(exist_ok=True)
+        episode_path = chunk_dir / "episodes.parquet"
+        self._v3_episode_index = {}
+
+        def write_parquet(tmp_path: Path) -> None:
+            parquet_writer = None
+            row_group_index = 0
+
+            for episode in self.episodes:
+                episode_data = self._trajectory_to_arrow_table(episode)
+                if parquet_writer is None:
+                    parquet_writer = pq.ParquetWriter(
+                        tmp_path,
+                        schema=episode_data.schema,
+                        compression="zstd",
+                    )
+                parquet_writer.write_table(episode_data)
+                episode.parquet_row_count = episode_data.num_rows
+                episode.parquet_row_group = row_group_index
+                if self.output_dir:
+                    episode.parquet_path = episode_path.resolve().relative_to(
+                        self.output_dir.resolve()
+                    ).as_posix()
+
+                episode_id = f"episode_{episode.episode_index:06d}"
+                self._v3_episode_index[episode_id] = {
+                    "episode_index": episode.episode_index,
+                    "frames": episode.trajectory.num_frames,
+                    "row_group": row_group_index,
+                    "task_index": episode.task_index,
+                    "task": episode.task_description,
+                    "scene_id": episode.scene_id,
+                    "variation_index": episode.variation_index,
+                    "success": episode.success,
+                    "quality_score": episode.quality_score,
+                    "parquet_path": f"data/chunk-000/{episode_path.name}",
+                }
+                row_group_index += 1
+
+            if parquet_writer:
+                parquet_writer.close()
+
+        self._atomic_write(
+            episode_path,
+            write_parquet,
+            fsync_target=True,
+        )
 
     def _validate_lerobot_schema(
         self,
@@ -2165,6 +2284,38 @@ class LeRobotExporter:
                         f"This trajectory may not be executable on real hardware."
                     )
 
+    def _validate_lerobot_v3_schema(
+        self,
+        timestamps: List[float],
+        state_data: List[List[float]],
+        action_data: List[List[float]],
+        frame_indices: List[int],
+        episode_index: int,
+    ) -> None:
+        """Validate LeRobot v3 schema (extends v2 checks with layout invariants)."""
+        self._validate_lerobot_schema(
+            timestamps=timestamps,
+            state_data=state_data,
+            action_data=action_data,
+            episode_index=episode_index,
+        )
+        expected_length = len(state_data)
+        if len(action_data) != expected_length or len(timestamps) != expected_length:
+            raise ValueError(
+                f"Episode {episode_index}: mismatched frame counts for v3 export. "
+                f"states={len(state_data)}, actions={len(action_data)}, timestamps={len(timestamps)}"
+            )
+        if frame_indices and frame_indices[0] != 0:
+            raise ValueError(
+                f"Episode {episode_index}: frame indices must start at 0 for v3 export."
+            )
+        for i, frame_index in enumerate(frame_indices):
+            if frame_index != i:
+                raise ValueError(
+                    f"Episode {episode_index}: non-contiguous frame index at {i} "
+                    f"(got {frame_index}, expected {i})"
+                )
+
     def _trajectory_to_arrow_table(self, episode: LeRobotEpisode) -> Union[Any, Dict]:
         """Convert trajectory to PyArrow table."""
 
@@ -2191,13 +2342,22 @@ class LeRobotExporter:
                 action = list(s.joint_positions) + [s.gripper_position]
             action_data.append(action)
 
-        # Validate LeRobot v2.0 schema compliance
-        self._validate_lerobot_schema(
-            timestamps=timestamps,
-            state_data=state_data,
-            action_data=action_data,
-            episode_index=episode.episode_index,
-        )
+        # Validate LeRobot schema compliance
+        if self._is_v3_export():
+            self._validate_lerobot_v3_schema(
+                timestamps=timestamps,
+                state_data=state_data,
+                action_data=action_data,
+                frame_indices=frame_indices,
+                episode_index=episode.episode_index,
+            )
+        else:
+            self._validate_lerobot_schema(
+                timestamps=timestamps,
+                state_data=state_data,
+                action_data=action_data,
+                episode_index=episode.episode_index,
+            )
 
         # Validate ee_position is not None (cannot use [0,0,0] as it's a valid position)
         for i, s in enumerate(states):
@@ -2294,6 +2454,14 @@ class LeRobotExporter:
             stats_path,
             lambda tmp_path: tmp_path.write_text(json.dumps(self.stats, indent=2)),
         )
+
+    def _get_chunk_dir(self, base_dir: Path, episode_index: int) -> Path:
+        """Resolve chunk directory for an episode based on export format."""
+        if self._is_v3_export():
+            chunk_idx = 0
+        else:
+            chunk_idx = episode_index // self.config.chunk_size
+        return base_dir / f"chunk-{chunk_idx:03d}"
 
     def _summarize_alignment_mismatches(
         self,
@@ -2416,6 +2584,12 @@ class LeRobotExporter:
         episode_index: int,
         camera_ids: List[str],
     ) -> None:
+        if self._is_v3_export():
+            self.log(
+                "  Skipping episode file drop for v3 export (multi-episode parquet cannot be pruned).",
+                "WARNING",
+            )
+            return
         chunk_idx = episode_index // self.config.chunk_size
         data_chunk_dir = output_dir / "data" / f"chunk-{chunk_idx:03d}"
         for suffix in (".parquet", ".json"):
@@ -2528,15 +2702,22 @@ class LeRobotExporter:
         lineage = self._get_lineage_info(data_source_info)
         self._validate_lineage_requirements(lineage, data_source_info.get("production_mode", False))
 
+        total_episodes = len(self.episodes)
+        total_chunks = 1 if self._is_v3_export() else (total_episodes - 1) // self.config.chunk_size + 1
+        chunk_size = total_episodes if self._is_v3_export() else self.config.chunk_size
+
         info = {
+            "format": "lerobot",
+            "export_format": self.export_format.value,
+            "version": "3.0" if self._is_v3_export() else "2.0",
             "codebase_version": "v2.0",
             "robot_type": self.config.robot_type,
             "fps": self.config.fps,
-            "total_episodes": len(self.episodes),
+            "total_episodes": total_episodes,
             "total_frames": sum(ep.trajectory.num_frames for ep in self.episodes),
             "total_tasks": len(self.tasks),
-            "total_chunks": (len(self.episodes) - 1) // self.config.chunk_size + 1,
-            "chunks_size": self.config.chunk_size,
+            "total_chunks": total_chunks,
+            "chunks_size": chunk_size,
             "data_path": "data",
             "videos_path": "videos" if self.config.include_images else None,
             "ground_truth_path": "ground_truth" if any([
@@ -2603,6 +2784,23 @@ class LeRobotExporter:
                 "coverage": "all files under dataset root excluding meta/checksums.json",
             },
         }
+        if self._is_v3_export():
+            info.update(
+                {
+                    "layout": "multi-episode",
+                    "chunking": {
+                        "strategy": "aggregated",
+                        "chunk_dir": "chunk-000",
+                        "files": [
+                            {
+                                "path": "chunk-000/episodes.parquet",
+                                "episodes": total_episodes,
+                            }
+                        ],
+                    },
+                    "episode_index": "meta/episode_index.json",
+                }
+            )
 
         info_path = meta_dir / "info.json"
         self._atomic_write(
@@ -2654,10 +2852,22 @@ class LeRobotExporter:
                         meta["parquet_row_count"] = episode.parquet_row_count
                     if episode.parquet_path is not None:
                         meta["parquet_path"] = episode.parquet_path
+                    if episode.parquet_row_group is not None:
+                        meta["parquet_row_group"] = episode.parquet_row_group
                     meta["lineage_ref"] = "meta/info.json#/lineage"
                     f.write(json.dumps(meta) + "\n")
 
         self._atomic_write(episodes_path, write_episodes)
+
+    def _write_episode_index(self, meta_dir: Path) -> None:
+        """Write v3 episode index JSON."""
+        if not self._is_v3_export():
+            return
+        episode_index_path = meta_dir / "episode_index.json"
+        self._atomic_write(
+            episode_index_path,
+            lambda tmp_path: tmp_path.write_text(json.dumps(self._v3_episode_index, indent=2)),
+        )
 
     def _write_checksums_manifest(self, meta_dir: Path) -> None:
         """Write checksums manifest for generated files."""
@@ -2677,16 +2887,11 @@ class LeRobotExporter:
         try:
             videos_dir = output_dir / "videos"
 
-            chunk_idx = 0
             dropped_frames_entries: List[Dict[str, Any]] = []
             is_production = self._is_production_mode()
 
             for episode in self.episodes:
-                # Determine chunk
-                if episode.episode_index > 0 and episode.episode_index % self.config.chunk_size == 0:
-                    chunk_idx += 1
-
-                chunk_dir = videos_dir / f"chunk-{chunk_idx:03d}"
+                chunk_dir = self._get_chunk_dir(videos_dir, episode.episode_index)
 
                 if episode.sensor_data is not None:
                     self._write_episode_videos(episode, chunk_dir)
@@ -2731,10 +2936,16 @@ class LeRobotExporter:
                     f"  Dropping {len(dropped_episode_ids)} episodes due to dropped RGB frames.",
                     "WARNING",
                 )
-                self.episodes = [
-                    episode for episode in self.episodes
-                    if episode.episode_index not in dropped_episode_ids
-                ]
+                if not self._is_v3_export():
+                    self.episodes = [
+                        episode for episode in self.episodes
+                        if episode.episode_index not in dropped_episode_ids
+                    ]
+                else:
+                    self.log(
+                        "  v3 export retains episodes with dropped frames; see invalid_episodes.json.",
+                        "WARNING",
+                    )
         except Exception as exc:
             self._cleanup_failed_export("Failed during visual observations write", exc)
             raise
@@ -2877,13 +3088,9 @@ class LeRobotExporter:
             return
         try:
             gt_dir = output_dir / "ground_truth"
-            chunk_idx = 0
 
             for episode in self.episodes:
-                if episode.episode_index > 0 and episode.episode_index % self.config.chunk_size == 0:
-                    chunk_idx += 1
-
-                chunk_dir = gt_dir / f"chunk-{chunk_idx:03d}"
+                chunk_dir = self._get_chunk_dir(gt_dir, episode.episode_index)
 
                 if episode.sensor_data is not None:
                     self._write_episode_ground_truth(episode, chunk_dir)
