@@ -25,6 +25,8 @@ data:
   WAIT_FOR_COMPLETION: "true"
   FAIL_ON_PARTIAL_ERROR: "false"
   DISABLE_GCS_UPLOAD: "false"
+  ENABLE_FIREBASE_UPLOAD: "true"
+  FIREBASE_STORAGE_BUCKET: "${FIREBASE_STORAGE_BUCKET}"
 
 ---
 apiVersion: batch/v1
@@ -72,6 +74,8 @@ spec:
               value: "scenes/$(SCENE_ID)/episodes"
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /secrets/gcs/key.json
+            - name: FIREBASE_SERVICE_ACCOUNT_PATH
+              value: /secrets/firebase/service-account.json
             - name: JOB_METADATA_PATH
               valueFrom:
                 configMapKeyRef:
@@ -115,6 +119,9 @@ spec:
             - name: gcs-credentials
               mountPath: /secrets/gcs
               readOnly: true
+            - name: firebase-credentials
+              mountPath: /secrets/firebase
+              readOnly: true
             - name: gcs-mount
               mountPath: /mnt/gcs
 
@@ -122,5 +129,8 @@ spec:
         - name: gcs-credentials
           secret:
             secretName: gcs-service-account
+        - name: firebase-credentials
+          secret:
+            secretName: firebase-service-account
         - name: gcs-mount
           emptyDir: {}
