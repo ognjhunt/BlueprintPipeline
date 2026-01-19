@@ -21,6 +21,21 @@ jobs:
           - image: genie-sim-gpu-job
             context: genie-sim-gpu-job
             dockerfile: genie-sim-gpu-job/Dockerfile
+          - image: genie-sim-import-job
+            context: genie-sim-import-job
+            dockerfile: genie-sim-import-job/Dockerfile
+          - image: genie-sim-export-job
+            context: genie-sim-export-job
+            dockerfile: genie-sim-export-job/Dockerfile
+          - image: genie-sim-submit-job
+            context: genie-sim-submit-job
+            dockerfile: genie-sim-submit-job/Dockerfile
+          - image: genie-sim-local-job
+            context: genie-sim-local-job
+            dockerfile: genie-sim-local-job/Dockerfile
+          - image: genie-sim-import-webhook
+            context: genie-sim-import-webhook
+            dockerfile: genie-sim-import-webhook/Dockerfile
           - image: episode-generation-job
             context: episode-generation-job
             dockerfile: episode-generation-job/Dockerfile
