@@ -2191,6 +2191,7 @@ class LocalPipelineRunner:
         failure_reason = None
         firebase_upload_summary = None
         firebase_upload_error = None
+        firebase_upload_status = "skipped"
         import uuid
 
         job_id = f"local-{uuid.uuid4()}"
@@ -2310,6 +2311,7 @@ class LocalPipelineRunner:
             "preflight": preflight_report,
             "generation_duration_seconds": time.time() - start_time,
         }
+        job_payload["firebase_upload_status"] = firebase_upload_status
 
         if local_run_result and local_run_result.success:
             firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
@@ -2321,18 +2323,18 @@ class LocalPipelineRunner:
                     scene_id=self.scene_id,
                     prefix=firebase_prefix,
                 )
+                firebase_upload_status = "completed"
             except Exception as exc:
                 firebase_upload_error = str(exc)
-                failure_details = {
-                    **failure_details,
-                    "firebase_upload_error": firebase_upload_error,
-                    "firebase_upload_prefix": firebase_prefix,
-                }
                 submission_message = (
-                    "Local Genie Sim execution completed with Firebase upload failures."
+                    "Local Genie Sim execution completed; Firebase upload failed."
                 )
-                job_status = "failed"
-                failure_reason = failure_reason or "Firebase upload failed"
+                firebase_upload_status = "failed"
+                self.log(
+                    f"Firebase upload failed: {self._summarize_exception(exc)}",
+                    "WARNING",
+                )
+            job_payload["firebase_upload_status"] = firebase_upload_status
 
         if firebase_upload_summary or firebase_upload_error:
             job_payload["firebase_upload"] = {
@@ -2340,6 +2342,9 @@ class LocalPipelineRunner:
                 "summary": firebase_upload_summary,
                 "error": firebase_upload_error,
             }
+
+        job_payload["message"] = submission_message or job_payload.get("message")
+        job_payload["status"] = job_status
 
         if job_status == "failed":
             job_payload["failure_reason"] = failure_reason or "Genie Sim submission failed"
@@ -2401,6 +2406,16 @@ class LocalPipelineRunner:
                 message=str(exc),
             )
         job_status = job_payload.get("status", "submitted")
+        local_execution = job_payload.get("local_execution", {}) if isinstance(job_payload, dict) else {}
+        local_success = local_execution.get("success")
+        if local_success is None:
+            local_success = job_status == "completed"
+        firebase_status = job_payload.get("firebase_upload_status")
+        if firebase_status == "failed":
+            self.log(
+                "Genie Sim Firebase upload failed; continuing import with local recordings.",
+                "WARNING",
+            )
         artifacts = job_payload.get("artifacts", {})
         local_episodes_prefix = (
             artifacts.get("episodes_prefix")
@@ -2415,9 +2430,9 @@ class LocalPipelineRunner:
         require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
 
         try:
-            if job_status != "completed":
+            if not local_success:
                 raise NonRetryableError(
-                    f"Genie Sim job status is {job_status}; import requires completed job"
+                    f"Genie Sim job status is {job_status}; import requires successful local execution"
                 )
             if not recordings_dir.is_dir():
                 raise NonRetryableError(
@@ -2449,6 +2464,7 @@ class LocalPipelineRunner:
                 outputs={
                     "job_id": job_id,
                     "job_status": job_status,
+                    "local_execution_success": bool(local_success),
                     "output_dir": str(output_dir),
                     "recordings_path": str(recordings_dir),
                     "lerobot_path": str(lerobot_dir),
