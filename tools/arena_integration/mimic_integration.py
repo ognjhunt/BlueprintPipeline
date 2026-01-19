@@ -46,6 +46,7 @@ from typing import Any, Optional
 import numpy as np
 
 from .components import ArenaScene, ArenaTask
+from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 
 
 # =============================================================================
@@ -97,7 +98,7 @@ class MimicConfig:
     collision_check: bool = True                    # Check for collisions
 
     # Output format
-    output_format: str = "lerobot_v2"               # lerobot_v2, hdf5, parquet
+    output_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2  # lerobot_v2, lerobot_v3, parquet
     include_original: bool = True                   # Include original demo
 
     # Resource settings
@@ -688,28 +689,99 @@ class MimicAugmenter:
         """Load demonstrations from Genie Sim output."""
         demos = []
 
+        dataset_root = self._resolve_lerobot_root(genie_sim_dir)
+        if dataset_root is None:
+            return demos
+
+        meta_dir = dataset_root / "meta"
+        data_dir = dataset_root / "data"
+
+        info = self._load_lerobot_info(meta_dir / "info.json")
+        format_value = info.get("export_format") or info.get("format")
+        if format_value in (None, "lerobot"):
+            export_format = (
+                LeRobotExportFormat.LEROBOT_V3
+                if str(info.get("version", "")).startswith("3")
+                else LeRobotExportFormat.LEROBOT_V2
+            )
+        else:
+            export_format = parse_lerobot_export_format(
+                format_value,
+                default=LeRobotExportFormat.LEROBOT_V2,
+            )
+
         # Look for episode files
-        episode_files = list(genie_sim_dir.glob("*.parquet"))
+        episode_files = list(data_dir.glob("*.parquet"))
         if not episode_files:
-            episode_files = list(genie_sim_dir.glob("data/*.parquet"))
+            episode_files = list((data_dir / "chunk-000").glob("*.parquet"))
 
         # Also check for JSON episode metadata
-        meta_file = genie_sim_dir / "meta" / "episodes.json"
+        meta_file = meta_dir / "episodes.json"
         if meta_file.exists():
             with open(meta_file) as f:
                 episode_meta = json.load(f)
         else:
             episode_meta = {}
 
-        # Load each episode
+        if export_format == LeRobotExportFormat.LEROBOT_V3:
+            demos.extend(self._load_v3_episodes(episode_files, episode_meta))
+        else:
+            # Load each episode
+            for ep_file in episode_files:
+                try:
+                    demo = self._load_parquet_episode(ep_file, episode_meta)
+                    if demo:
+                        demos.append(demo)
+                except Exception as e:
+                    print(f"Warning: Failed to load {ep_file}: {e}")
+
+        return demos
+
+    def _resolve_lerobot_root(self, genie_sim_dir: Path) -> Optional[Path]:
+        """Resolve the LeRobot dataset root directory."""
+        if (genie_sim_dir / "meta" / "info.json").exists():
+            return genie_sim_dir
+        candidate = genie_sim_dir / "episodes" / "lerobot"
+        if (candidate / "meta" / "info.json").exists():
+            return candidate
+        return None
+
+    @staticmethod
+    def _load_lerobot_info(path: Path) -> dict[str, Any]:
+        if path.exists():
+            with open(path) as f:
+                return json.load(f)
+        return {}
+
+    def _load_v3_episodes(
+        self,
+        episode_files: list[Path],
+        episode_meta: dict[str, Any],
+    ) -> list[Demonstration]:
+        """Load LeRobot v3 multi-episode parquet files."""
+        demos: list[Demonstration] = []
+        if not episode_files:
+            return demos
+        try:
+            import pandas as pd
+        except ImportError:
+            return demos
+
         for ep_file in episode_files:
             try:
+                df = pd.read_parquet(ep_file)
+            except Exception as e:
+                print(f"Warning: Failed to load {ep_file}: {e}")
+                continue
+            if "episode_id" not in df.columns:
                 demo = self._load_parquet_episode(ep_file, episode_meta)
                 if demo:
                     demos.append(demo)
-            except Exception as e:
-                print(f"Warning: Failed to load {ep_file}: {e}")
-
+                continue
+            for episode_id, group in df.groupby("episode_id", sort=False):
+                demo = self._build_demo_from_dataframe(group, str(episode_id), episode_meta)
+                if demo:
+                    demos.append(demo)
         return demos
 
     def _load_parquet_episode(
@@ -721,58 +793,77 @@ class MimicAugmenter:
         try:
             import pandas as pd
             df = pd.read_parquet(path)
-
-            # Extract observations
-            obs_columns = [c for c in df.columns if c.startswith("observation.")]
-            observations = {}
-            for col in obs_columns:
-                key = col.replace("observation.", "")
-                observations[key] = df[col].values
-
-            # Extract actions
-            action_columns = [c for c in df.columns if c.startswith("action.")]
-            if action_columns:
-                actions = np.stack([df[c].values for c in sorted(action_columns)], axis=1)
-            else:
-                actions = np.zeros((len(df), 7))  # Default action dim
-
-            # Extract rewards
-            if "reward" in df.columns:
-                rewards = df["reward"].values
-            else:
-                rewards = np.zeros(len(df))
-
-            # Timestamps
-            if "timestamp" in df.columns:
-                timestamps = df["timestamp"].values
-            else:
-                timestamps = np.arange(len(df)) / 120.0  # Assume 120Hz
-
-            # Get metadata
             ep_id = path.stem
-            meta = episode_meta.get(ep_id, {})
-
-            metadata = DemonstrationMetadata(
-                demo_id=ep_id,
-                source="genie_sim",
-                task_id=meta.get("task_id", "unknown"),
-                embodiment=meta.get("robot", "franka"),
-                episode_length=len(df),
-                success=meta.get("success", True),
-                quality_score=meta.get("quality_score", 0.9),
-            )
-
-            return Demonstration(
-                metadata=metadata,
-                observations=observations,
-                actions=actions,
-                rewards=rewards,
-                timestamps=timestamps,
-                language_instruction=meta.get("language_instruction"),
-            )
+            return self._build_demo_from_dataframe(df, ep_id, episode_meta)
 
         except Exception:
             return None
+
+    def _build_demo_from_dataframe(
+        self,
+        df: Any,
+        episode_id: str,
+        episode_meta: dict[str, Any],
+    ) -> Optional[Demonstration]:
+        """Build a demonstration from a dataframe."""
+        observations = self._extract_observations(df)
+        actions = self._extract_actions(df)
+
+        rewards = df["reward"].values if "reward" in df.columns else np.zeros(len(df))
+        timestamps = (
+            df["timestamp"].values
+            if "timestamp" in df.columns
+            else np.arange(len(df)) / 120.0
+        )
+
+        meta = episode_meta.get(episode_id, {})
+        metadata = DemonstrationMetadata(
+            demo_id=episode_id,
+            source="genie_sim",
+            task_id=meta.get("task_id", "unknown"),
+            embodiment=meta.get("robot", "franka"),
+            episode_length=len(df),
+            success=meta.get("success", True),
+            quality_score=meta.get("quality_score", 0.9),
+        )
+
+        return Demonstration(
+            metadata=metadata,
+            observations=observations,
+            actions=actions,
+            rewards=rewards,
+            timestamps=timestamps,
+            language_instruction=meta.get("language_instruction"),
+        )
+
+    @staticmethod
+    def _extract_observations(df: Any) -> dict[str, np.ndarray]:
+        if "observation" in df.columns:
+            obs_list = [json.loads(v) if isinstance(v, str) else v for v in df["observation"]]
+            observations: dict[str, list[Any]] = {}
+            for entry in obs_list:
+                if isinstance(entry, dict):
+                    for key, value in entry.items():
+                        observations.setdefault(key, []).append(value)
+            return {key: np.array(values) for key, values in observations.items()}
+
+        obs_columns = [c for c in df.columns if c.startswith("observation.")]
+        observations = {}
+        for col in obs_columns:
+            key = col.replace("observation.", "")
+            observations[key] = df[col].values
+        return observations
+
+    @staticmethod
+    def _extract_actions(df: Any) -> np.ndarray:
+        if "action" in df.columns:
+            action_list = [json.loads(v) if isinstance(v, str) else v for v in df["action"]]
+            return np.array(action_list)
+
+        action_columns = [c for c in df.columns if c.startswith("action.")]
+        if action_columns:
+            return np.stack([df[c].values for c in sorted(action_columns)], axis=1)
+        return np.zeros((len(df), 7))
 
     def _save_augmented_demos(
         self,
@@ -781,16 +872,19 @@ class MimicAugmenter:
     ) -> None:
         """Save augmented demonstrations."""
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        if self.config.output_format == "lerobot_v2":
-            self._save_lerobot_format(demos, output_dir)
+        export_format = parse_lerobot_export_format(self.config.output_format)
+        if export_format in (LeRobotExportFormat.LEROBOT_V2, LeRobotExportFormat.LEROBOT_V0_3_3):
+            self._save_lerobot_format(demos, output_dir, export_format=export_format)
+        elif export_format == LeRobotExportFormat.LEROBOT_V3:
+            self._save_lerobot_v3_format(demos, output_dir)
         else:
             self._save_parquet_format(demos, output_dir)
 
     def _save_lerobot_format(
         self,
         demos: list[Demonstration],
-        output_dir: Path
+        output_dir: Path,
+        export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2,
     ) -> None:
         """Save in LeRobot v2.0 format."""
         import pandas as pd
@@ -850,10 +944,98 @@ class MimicAugmenter:
         # Save info
         info = {
             "codebase_version": "2.0",
+            "format": "lerobot",
+            "export_format": export_format.value,
+            "version": "0.3.3" if export_format == LeRobotExportFormat.LEROBOT_V0_3_3 else "2.0",
             "total_episodes": len(demos),
             "total_frames": sum(len(d) for d in demos),
             "fps": 120,
             "robot_type": demos[0].metadata.embodiment if demos else "unknown",
+        }
+        with open(meta_dir / "info.json", "w") as f:
+            json.dump(info, f, indent=2)
+
+    def _save_lerobot_v3_format(
+        self,
+        demos: list[Demonstration],
+        output_dir: Path,
+    ) -> None:
+        """Save in LeRobot v3 multi-episode format."""
+        import pandas as pd
+
+        def _to_json_serializable(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {k: _to_json_serializable(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_to_json_serializable(v) for v in value]
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if isinstance(value, (np.floating, np.integer)):
+                return value.item()
+            return value
+
+        data_dir = output_dir / "data" / "chunk-000"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        meta_dir = output_dir / "meta"
+        meta_dir.mkdir(exist_ok=True)
+
+        episode_index = {}
+        rows = []
+        for i, demo in enumerate(demos):
+            episode_id = f"episode_{i:06d}"
+            episode_index[episode_id] = {
+                "demo_id": demo.metadata.demo_id,
+                "task_id": demo.metadata.task_id,
+                "embodiment": demo.metadata.embodiment,
+                "success": demo.metadata.success,
+                "quality_score": demo.metadata.quality_score,
+                "source": demo.metadata.source,
+                "augmentation_history": demo.metadata.augmentation_history,
+                "language_instruction": demo.language_instruction,
+                "frame_count": len(demo),
+            }
+            for frame_index in range(len(demo)):
+                observation_payload = {
+                    k: _to_json_serializable(v[frame_index]) for k, v in demo.observations.items()
+                }
+                rows.append(
+                    {
+                        "episode_id": episode_id,
+                        "frame_index": frame_index,
+                        "timestamp": float(demo.timestamps[frame_index]),
+                        "observation": json.dumps(observation_payload),
+                        "action": json.dumps(_to_json_serializable(demo.actions[frame_index])),
+                        "reward": float(demo.rewards[frame_index]),
+                        "done": bool(frame_index == len(demo) - 1),
+                        "task_id": demo.metadata.task_id,
+                        "task_name": demo.metadata.task_id,
+                    }
+                )
+
+        df = pd.DataFrame(rows)
+        df.to_parquet(data_dir / "episodes.parquet")
+
+        with open(meta_dir / "episode_index.json", "w") as f:
+            json.dump(episode_index, f, indent=2)
+
+        info = {
+            "codebase_version": "2.0",
+            "format": "lerobot",
+            "export_format": LeRobotExportFormat.LEROBOT_V3.value,
+            "version": "3.0",
+            "layout": "multi-episode",
+            "total_episodes": len(demos),
+            "total_frames": sum(len(d) for d in demos),
+            "fps": 120,
+            "robot_type": demos[0].metadata.embodiment if demos else "unknown",
+            "data_path": "data",
+            "chunking": {
+                "strategy": "aggregated",
+                "chunk_dir": "chunk-000",
+                "files": [{"path": "chunk-000/episodes.parquet", "episodes": len(demos)}],
+            },
+            "episode_index": "meta/episode_index.json",
         }
         with open(meta_dir / "info.json", "w") as f:
             json.dump(info, f, indent=2)
