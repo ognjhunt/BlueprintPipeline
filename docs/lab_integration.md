@@ -21,9 +21,10 @@ scenes/{scene_id}/
     ├── meta/
     │   ├── info.json
     │   ├── tasks.jsonl
-    │   └── episodes.jsonl
+    │   ├── episodes.jsonl
+    │   └── episode_index.json (v3)
     ├── data/
-    │   └── chunk-*/episode_*.parquet
+    │   └── chunk-*/episode_*.parquet (v2) or chunk-000/episodes.parquet (v3)
     └── videos/
         └── chunk-*/observation.images.*/*.mp4
 ```
@@ -54,11 +55,13 @@ Each line includes fields like:
 The field requirements for episode entries mirror the dataset info schema used for local Genie Sim
 imports.【F:fixtures/contracts/geniesim_local_dataset_info.schema.json†L17-L62】
 
-### `episode_*.parquet`
+### `episode_*.parquet` / `episodes.parquet`
 
-Parquet files store the per-step (frame) data for each episode. The import job writes
-`episode_000000.parquet`, `episode_000001.parquet`, etc., during LeRobot conversion and records the
-file name back into `dataset_info.json` and `episodes.jsonl`.【F:genie-sim-import-job/import_from_geniesim.py†L718-L746】【F:genie-sim-import-job/import_from_geniesim.py†L869-L881】
+Parquet files store the per-step (frame) data for each episode. The LeRobot v2 layout writes
+`episode_000000.parquet`, `episode_000001.parquet`, etc., and records the file name back into
+`dataset_info.json` and `episodes.jsonl`. LeRobot v3 instead aggregates all episodes into a single
+`chunk-000/episodes.parquet` file and writes `meta/episode_index.json` to map each episode to a
+row group index.【F:genie-sim-import-job/import_from_geniesim.py†L718-L746】【F:genie-sim-import-job/import_from_geniesim.py†L869-L881】【F:episode-generation-job/lerobot_exporter.py†L1980-L2132】
 
 ### `dataset_info.json`
 
@@ -116,6 +119,18 @@ episode = pq.read_table("/path/to/scenes/{scene_id}/episodes/lerobot/episode_000
 print(episode.schema)
 ```
 
+Minimal load example (LeRobot v3 aggregated Parquet):
+
+```python
+import pyarrow.parquet as pq
+
+parquet_file = pq.ParquetFile(
+    "/path/to/scenes/{scene_id}/episodes/lerobot/data/chunk-000/episodes.parquet"
+)
+first_episode = parquet_file.read_row_group(0)
+print(first_episode.schema)
+```
+
 ## Quality metrics
 
 Quality gates read thresholds from `tools/quality_gates/quality_config.json` and enforce them in
@@ -141,4 +156,3 @@ Provenance is captured at both export and import stages:
    `asset_provenance_path` in the bundle.【F:genie-sim-import-job/import_from_geniesim.py†L1249-L1364】
 3. **Checksums** are embedded in both manifests and include a self-checksum entry computed from a
    canonical JSON representation to preserve lineage integrity.【F:tools/geniesim_adapter/exporter.py†L432-L536】【F:genie-sim-import-job/import_manifest_utils.py†L24-L33】
-

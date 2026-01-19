@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from tools.lerobot_format import LeRobotExportFormat
 
 
 @pytest.mark.unit
@@ -123,3 +124,69 @@ def test_lerobot_exporter_requires_complete_episodes(load_job_module, tmp_path: 
 
     with pytest.raises(ValueError, match="Incomplete episodes detected"):
         exporter.finalize()
+
+
+@pytest.mark.unit
+def test_lerobot_exporter_writes_v3_layout(load_job_module, tmp_path: Path) -> None:
+    trajectory_solver = load_job_module("episode_generation", "trajectory_solver.py")
+    lerobot_exporter = load_job_module("episode_generation", "lerobot_exporter.py")
+
+    if not lerobot_exporter.HAVE_PYARROW:
+        pytest.skip("pyarrow not available for v3 export test")
+
+    robot_config = trajectory_solver.ROBOT_CONFIGS["franka"]
+    states = [
+        trajectory_solver.JointState(
+            frame_idx=0,
+            timestamp=0.0,
+            joint_positions=robot_config.default_joint_positions.copy(),
+            joint_velocities=np.zeros(robot_config.num_joints),
+            gripper_position=0.0,
+            ee_position=np.array([0.4, 0.0, 0.7]),
+            phase=trajectory_solver.MotionPhase.APPROACH,
+        ),
+        trajectory_solver.JointState(
+            frame_idx=1,
+            timestamp=1.0 / 30.0,
+            joint_positions=robot_config.default_joint_positions.copy() + 0.01,
+            joint_velocities=np.zeros(robot_config.num_joints),
+            gripper_position=0.02,
+            ee_position=np.array([0.45, 0.05, 0.72]),
+            phase=trajectory_solver.MotionPhase.PLACE,
+        ),
+    ]
+
+    trajectory = trajectory_solver.JointTrajectory(
+        trajectory_id="traj_test",
+        robot_type="franka",
+        robot_config=robot_config,
+        states=states,
+        source_plan_id="plan_001",
+        fps=30.0,
+        total_duration=1.0 / 30.0,
+    )
+
+    config = lerobot_exporter.LeRobotDatasetConfig(
+        dataset_name="unit_test_dataset",
+        robot_type="franka",
+        output_dir=tmp_path / "lerobot_dataset",
+        export_format=LeRobotExportFormat.LEROBOT_V3,
+    )
+    exporter = lerobot_exporter.LeRobotExporter(config, verbose=False)
+    exporter.add_episode(trajectory, "Pick and place test")
+    exporter.add_episode(trajectory, "Pick and place test 2")
+
+    output_dir = exporter.finalize()
+    meta_dir = output_dir / "meta"
+    data_dir = output_dir / "data" / "chunk-000"
+
+    info = json.loads((meta_dir / "info.json").read_text())
+    assert info["export_format"] == LeRobotExportFormat.LEROBOT_V3.value
+    assert info["layout"] == "multi-episode"
+    assert info["episode_index"] == "meta/episode_index.json"
+    assert (data_dir / "episodes.parquet").exists()
+
+    episode_index = json.loads((meta_dir / "episode_index.json").read_text())
+    assert "episode_000000" in episode_index
+    assert episode_index["episode_000000"]["row_group"] == 0
+    assert episode_index["episode_000001"]["row_group"] == 1

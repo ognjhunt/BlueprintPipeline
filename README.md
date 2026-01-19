@@ -110,6 +110,11 @@ export LEROBOT_EXPORT_FORMAT=lerobot_v3
 export LEROBOT_REQUIRE_V3=1
 ```
 
+LeRobot v3 exports use a single multi-episode `data/chunk-000/episodes.parquet` file with
+`meta/episode_index.json` for row-group offsets, while v2 exports keep per-episode Parquet files
+under chunked directories. This allows streaming-friendly reads without changing the rest of the
+dataset metadata layout.
+
 ```bash
 USE_GENIESIM=true \
 python tools/run_local_pipeline.py \
