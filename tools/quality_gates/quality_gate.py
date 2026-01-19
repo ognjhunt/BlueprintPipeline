@@ -13,6 +13,7 @@ This module now supports:
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -194,7 +195,7 @@ class ApprovalStore(Protocol):
 class FilesystemApprovalStore:
     """Filesystem-backed approval store."""
 
-    DEFAULT_APPROVALS_DIR = Path("/tmp/blueprintpipeline/approvals")
+    DEFAULT_APPROVALS_DIR = Path("/var/lib/blueprintpipeline/approvals")
 
     def __init__(self, scene_id: str, base_dir: Optional[Path] = None) -> None:
         self.scene_id = scene_id
@@ -727,32 +728,61 @@ class HumanApprovalManager:
         if self.config and hasattr(self.config, "approval_store"):
             store_config = self.config.approval_store
             store_backend = store_config.backend
-        if not store_backend:
-            store_backend = os.getenv("BP_QUALITY_APPROVAL_STORE_BACKEND") or os.getenv(
-                "APPROVAL_STORE_BACKEND",
-                "filesystem",
+        env_backend = os.getenv("BP_QUALITY_APPROVAL_STORE_BACKEND") or os.getenv(
+            "APPROVAL_STORE_BACKEND",
+        )
+        if env_backend:
+            store_backend = env_backend
+
+        backend = str(store_backend).lower() if store_backend else None
+        firestore_available = self._firestore_available()
+        if not backend or backend == "auto":
+            backend = (
+                "firestore"
+                if firestore_available and not self._is_local_mode()
+                else "filesystem"
             )
 
-        backend = str(store_backend).lower()
         if backend == "firestore":
-            from .approval_store_firestore import FirestoreApprovalStore
+            if not firestore_available:
+                if self._is_local_mode():
+                    self.log(
+                        "Firestore backend requested but unavailable; falling back to filesystem for local runs.",
+                        "WARNING",
+                    )
+                    backend = "filesystem"
+                else:
+                    raise RuntimeError(
+                        "Firestore backend requested but google-cloud-firestore is not available."
+                    )
+            if backend == "firestore":
+                from .approval_store_firestore import FirestoreApprovalStore
 
-            collection = "quality_gate_approvals"
-            if store_config and store_config.firestore_collection:
-                collection = store_config.firestore_collection
-            collection = os.getenv("BP_QUALITY_APPROVAL_STORE_FIRESTORE_COLLECTION", collection)
-            return FirestoreApprovalStore(scene_id=scene_id, collection=collection)
+                collection = "quality_gate_approvals"
+                if store_config and store_config.firestore_collection:
+                    collection = store_config.firestore_collection
+                collection = os.getenv(
+                    "BP_QUALITY_APPROVAL_STORE_FIRESTORE_COLLECTION",
+                    collection,
+                )
+                return FirestoreApprovalStore(scene_id=scene_id, collection=collection)
+        elif backend != "filesystem":
+            raise ValueError(f"Unknown approval store backend: {backend}")
 
         base_dir = FilesystemApprovalStore.DEFAULT_APPROVALS_DIR
         if store_config and store_config.filesystem_path:
             base_dir = Path(store_config.filesystem_path)
         base_dir = Path(
             os.getenv(
-                "BP_QUALITY_APPROVAL_STORE_FILESYSTEM_PATH",
-                os.getenv("APPROVAL_STORE_FILESYSTEM_PATH", str(base_dir)),
+                "QUALITY_APPROVAL_PATH",
+                os.getenv(
+                    "BP_QUALITY_APPROVAL_STORE_FILESYSTEM_PATH",
+                    os.getenv("APPROVAL_STORE_FILESYSTEM_PATH", str(base_dir)),
+                ),
             )
         )
         return FilesystemApprovalStore(scene_id=scene_id, base_dir=base_dir)
+
 
     def _run_store_migration_if_needed(self) -> None:
         if not self.config or not hasattr(self.config, "approval_store"):
@@ -839,6 +869,18 @@ class HumanApprovalManager:
         except ValueError:
             return False
         return True
+
+    def _firestore_available(self) -> bool:
+        try:
+            return importlib.util.find_spec("google.cloud.firestore") is not None
+        except (ModuleNotFoundError, ValueError):
+            return False
+
+    def _is_local_mode(self) -> bool:
+        pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
+        bp_env = os.getenv("BP_ENV", "").lower()
+        local_envs = {"local", "development", "dev", "test"}
+        return pipeline_env in local_envs or bp_env in local_envs
 
     def _is_production_mode(self) -> bool:
         """Return True when running in production mode."""

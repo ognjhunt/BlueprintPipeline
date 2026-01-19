@@ -26,3 +26,17 @@ You can override notification configuration without editing JSON:
 
 Email delivery relies on standard provider configuration (e.g. `SENDGRID_API_KEY`
 or SMTP settings) as described in `notification_service.py`.
+
+## Approval storage (production)
+Production deployments should use the Firestore approval store and a persistent
+filesystem path for any local fallback or migration data. The loader prefers
+Firestore when available and only falls back to filesystem storage for local
+runs. Configure a writable directory and set:
+
+```bash
+export QUALITY_APPROVAL_PATH=/var/lib/blueprintpipeline/approvals
+```
+
+`QUALITY_APPROVAL_PATH` overrides `approval_store.filesystem_path` from
+`tools/quality_gates/quality_config.json` and should point to persistent storage
+in production.
