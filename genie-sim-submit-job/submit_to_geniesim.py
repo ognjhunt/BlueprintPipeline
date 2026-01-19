@@ -59,6 +59,17 @@ from tools.config.env import parse_bool_env
 from tools.logging_config import init_logging
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
+try:
+    from tools.quality_gates.quality_gate import (
+        ApprovalStatus,
+        HumanApprovalManager,
+        QualityGateCheckpoint,
+        QualityGateRegistry,
+    )
+    HAVE_QUALITY_GATES = True
+except ImportError:
+    HAVE_QUALITY_GATES = False
+
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
 EXPECTED_GENIESIM_SERVER_VERSION = "3.0.0"
 REQUIRED_GENIESIM_CAPABILITIES = {
@@ -74,6 +85,92 @@ CONTRACT_SCHEMAS = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+def _is_production_mode() -> bool:
+    pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
+    bp_env = os.getenv("BP_ENV", "").lower()
+    return (
+        parse_bool_env(os.getenv("PRODUCTION_MODE"), default=False)
+        or pipeline_env == "production"
+        or bp_env == "production"
+    )
+
+
+def _load_override_metadata() -> Optional[Dict[str, Any]]:
+    override_payload = os.getenv("BP_QUALITY_OVERRIDE_METADATA")
+    if not override_payload:
+        return None
+    try:
+        metadata = json.loads(override_payload)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "[GENIESIM-SUBMIT] Invalid BP_QUALITY_OVERRIDE_METADATA JSON: %s",
+            exc,
+        )
+        return None
+    if "timestamp" not in metadata:
+        metadata["timestamp"] = datetime.utcnow().isoformat() + "Z"
+    return metadata
+
+
+def _run_geniesim_ik_gate(
+    *,
+    scene_id: str,
+    task_config: Dict[str, Any],
+    robot_type: str,
+) -> bool:
+    if not HAVE_QUALITY_GATES:
+        logger.info("[GENIESIM-SUBMIT] Quality gates unavailable; skipping IK reachability gate.")
+        return True
+
+    registry = QualityGateRegistry(verbose=True)
+    context = {
+        "scene_id": scene_id,
+        "task_config": task_config,
+        "robot_type": robot_type,
+    }
+    results, can_proceed = registry.run_checkpoint_with_approval(
+        checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+        context=context,
+        scene_id=scene_id,
+        wait_for_approval=False,
+    )
+
+    failures = [result for result in results if not result.passed]
+    if not failures:
+        return True
+
+    if not _is_production_mode():
+        logger.warning(
+            "[GENIESIM-SUBMIT] IK reachability gate failed in non-production; proceeding."
+        )
+        return True
+
+    approval_manager = registry.approval_manager or HumanApprovalManager(
+        scene_id=scene_id,
+        config=registry.config,
+        verbose=True,
+    )
+    override_metadata = _load_override_metadata()
+    if override_metadata:
+        pending_requests = approval_manager.list_pending()
+        override_success = True
+        for request in pending_requests:
+            if request.status != ApprovalStatus.PENDING:
+                continue
+            if not approval_manager.override(request.request_id, override_metadata):
+                override_success = False
+        if override_success and not approval_manager.list_pending():
+            logger.warning(
+                "[GENIESIM-SUBMIT] IK reachability gate overridden via approval workflow."
+            )
+            return True
+
+    logger.error(
+        "[GENIESIM-SUBMIT] IK reachability gate failed in production; blocking submission."
+    )
+    return False
 
 
 @dataclass(frozen=True)
@@ -679,6 +776,13 @@ def main() -> int:
             f"for {location_hint}."
         )
         return 0
+
+    if not _run_geniesim_ik_gate(
+        scene_id=scene_id,
+        task_config=task_config,
+        robot_type=robot_type,
+    ):
+        return 1
 
     job_id = f"local-{uuid.uuid4()}"
     submission_message = "Local Genie Sim execution started."
