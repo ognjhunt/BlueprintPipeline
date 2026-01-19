@@ -26,6 +26,7 @@ import logging
 import os
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -765,16 +766,21 @@ def main() -> int:
         logger = logging.getLogger("genie-sim-submit-job")
         manifest_entries: list[dict[str, Any]] = []
         manifest_local_path = output_dir / "upload_manifest.json"
-        for file_path in output_dir.rglob("*"):
-            if file_path.is_file() and file_path != manifest_local_path:
-                relative_path = file_path.relative_to(local_root)
-                manifest_entries.append(
-                    {
-                        "path": str(relative_path),
-                        "size": file_path.stat().st_size,
-                        "md5": calculate_file_md5_base64(file_path),
-                    }
-                )
+        file_paths = sorted(
+            (path for path in output_dir.rglob("*") if path.is_file()),
+            key=lambda path: str(path.relative_to(local_root)),
+        )
+        for file_path in file_paths:
+            if file_path == manifest_local_path:
+                continue
+            relative_path = file_path.relative_to(local_root)
+            manifest_entries.append(
+                {
+                    "path": str(relative_path),
+                    "size": file_path.stat().st_size,
+                    "md5": calculate_file_md5_base64(file_path),
+                }
+            )
 
         manifest_payload = {
             "scene_id": scene_id,
@@ -805,25 +811,58 @@ def main() -> int:
                 }
             )
 
-        for file_path in output_dir.rglob("*"):
-            if file_path.is_file() and file_path != manifest_local_path:
-                relative_path = file_path.relative_to(local_root)
-                blob = storage_client.bucket(bucket).blob(str(relative_path))
-                gcs_uri = f"gs://{bucket}/{relative_path}"
-                result = upload_blob_from_filename(
-                    blob,
-                    file_path,
-                    gcs_uri,
-                    logger=logger,
-                    verify_upload=True,
-                )
-                if not result.success:
-                    upload_failures.append(
-                        {
-                            "path": str(relative_path),
-                            "error": result.error or "unknown error",
-                        }
-                    )
+        max_workers = min(8, max(1, os.cpu_count() or 1), max(1, len(manifest_entries)))
+
+        def _upload_and_verify(entry: dict[str, Any]) -> Optional[dict[str, str]]:
+            relative_path = entry["path"]
+            file_path = local_root / relative_path
+            blob = storage_client.bucket(bucket).blob(relative_path)
+            gcs_uri = f"gs://{bucket}/{relative_path}"
+            result = upload_blob_from_filename(
+                blob,
+                file_path,
+                gcs_uri,
+                logger=logger,
+                verify_upload=True,
+            )
+            if not result.success:
+                return {
+                    "path": relative_path,
+                    "error": result.error or "unknown error",
+                }
+            verified, failure_reason = verify_blob_upload(
+                blob,
+                gcs_uri=gcs_uri,
+                expected_size=entry["size"],
+                expected_md5=entry["md5"],
+                logger=logger,
+            )
+            if not verified:
+                return {
+                    "path": relative_path,
+                    "error": failure_reason or "upload verification failed",
+                }
+            return None
+
+        if manifest_entries:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_upload_and_verify, entry): entry["path"]
+                    for entry in manifest_entries
+                }
+                for future in as_completed(futures):
+                    try:
+                        failure = future.result()
+                    except Exception as exc:
+                        upload_failures.append(
+                            {
+                                "path": futures[future],
+                                "error": str(exc),
+                            }
+                        )
+                        continue
+                    if failure:
+                        upload_failures.append(failure)
         if manifest_upload.success:
             verified, failure_reason = verify_blob_upload(
                 manifest_blob,
@@ -840,23 +879,6 @@ def main() -> int:
                     }
                 )
 
-        for entry in manifest_entries:
-            blob = storage_client.bucket(bucket).blob(entry["path"])
-            gcs_uri = f"gs://{bucket}/{entry['path']}"
-            verified, failure_reason = verify_blob_upload(
-                blob,
-                gcs_uri=gcs_uri,
-                expected_size=entry["size"],
-                expected_md5=entry["md5"],
-                logger=logger,
-            )
-            if not verified:
-                manifest_mismatches.append(
-                    {
-                        "path": entry["path"],
-                        "error": failure_reason or "upload verification failed",
-                    }
-                )
 
         if upload_failures or manifest_mismatches:
             failure_details = {
