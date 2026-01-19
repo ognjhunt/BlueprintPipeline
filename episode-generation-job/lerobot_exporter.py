@@ -1137,11 +1137,20 @@ class LeRobotExporter:
 
                 # Check for contacts
                 if self.config.include_contacts:
+                    contacts_unavailable = any(
+                        getattr(frame, "contacts_available", None) is False
+                        for frame in episode.sensor_data.frames
+                    )
+                    if contacts_unavailable:
+                        errors.append(
+                            "Tier 'full' requires contacts but contact capture was unavailable"
+                        )
+
                     has_contacts = any(
                         len(frame.contacts) > 0
                         for frame in episode.sensor_data.frames
                     )
-                    if not has_contacts:
+                    if not has_contacts and not contacts_unavailable:
                         errors.append(f"Tier 'full' requires contacts but episode has none")
 
                 # Check for privileged state
@@ -3307,6 +3316,7 @@ class LeRobotExporter:
                 "frame_index": frame.frame_index,
                 "timestamp": frame.timestamp,
                 "contacts": frame.contacts if hasattr(frame, 'contacts') else [],
+                "contacts_available": getattr(frame, "contacts_available", None),
             }
             contact_data["frames"].append(frame_contacts)
 
