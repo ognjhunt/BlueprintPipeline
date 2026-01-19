@@ -73,6 +73,7 @@ class GenieSimExportConfig:
     # Export options
     generate_embeddings: bool = False
     embedding_model: str = "qwen-text-embedding-v4"
+    require_embeddings: bool = False
     max_tasks: int = 50
 
     # USD handling
@@ -185,6 +186,7 @@ class GenieSimExporter:
         self.asset_index_builder = AssetIndexBuilder(
             generate_embeddings=self.config.generate_embeddings,
             embedding_model=self.config.embedding_model,
+            require_embeddings=self.config.require_embeddings,
             verbose=verbose,
         )
         self.task_config_generator = TaskConfigGenerator(verbose=verbose)
@@ -515,6 +517,7 @@ source:
                 "robot_type": config.robot_type,
                 "generate_embeddings": config.generate_embeddings,
                 "embedding_model": config.embedding_model if config.generate_embeddings else None,
+                "require_embeddings": config.require_embeddings,
                 "filter_commercial_only": config.filter_commercial_only,
                 "max_tasks": config.max_tasks,
                 "lerobot_export_format": config.lerobot_export_format.value,
