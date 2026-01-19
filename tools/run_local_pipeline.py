@@ -242,6 +242,8 @@ class LocalPipelineRunner:
         self._quality_gates = QualityGateRegistry(verbose=self.verbose)
         self._quality_gate_report_path = self._resolve_quality_gate_report_path()
         self.retry_config = self._resolve_retry_config()
+        self._geniesim_local_run_results: Dict[str, Any] = {}
+        self._geniesim_output_dirs: Dict[str, Path] = {}
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -549,6 +551,34 @@ class LocalPipelineRunner:
             "dwm_ready": self._dir_has_files(self.dwm_dir),
         }
 
+    @staticmethod
+    def _resolve_episode_metadata_path(lerobot_dir: Path) -> Path:
+        preferred = lerobot_dir / "meta" / "info.json"
+        if preferred.is_file():
+            return preferred
+        fallback = lerobot_dir / "metadata.json"
+        if fallback.is_file():
+            return fallback
+        return preferred
+
+    @staticmethod
+    def _build_episode_stats(result: Any) -> Dict[str, Any]:
+        episodes_collected = getattr(result, "episodes_collected", 0) if result else 0
+        episodes_passed = getattr(result, "episodes_passed", 0) if result else 0
+        episode_stats = {
+            "total_generated": episodes_collected,
+            "passed_quality_filter": episodes_passed,
+        }
+        if result is None:
+            return episode_stats
+        average_quality = getattr(result, "average_quality_score", None)
+        if average_quality is not None:
+            episode_stats["average_quality_score"] = float(average_quality)
+        collision_free_rate = getattr(result, "collision_free_rate", None)
+        if collision_free_rate is not None:
+            episode_stats["collision_free_rate"] = float(collision_free_rate)
+        return episode_stats
+
     def _quality_gate_context_for_step(
         self,
         step: PipelineStep,
@@ -625,6 +655,29 @@ class LocalPipelineRunner:
                     "readiness_checklist": self._build_readiness_checklist(),
                 },
             }
+        if step == PipelineStep.GENIESIM_SUBMIT:
+            if not self._geniesim_output_dirs:
+                return None
+            contexts: List[Dict[str, Any]] = []
+            for robot, output_dir in self._geniesim_output_dirs.items():
+                if not output_dir:
+                    continue
+                lerobot_dir = output_dir / "lerobot"
+                metadata_path = self._resolve_episode_metadata_path(lerobot_dir)
+                result = self._geniesim_local_run_results.get(robot)
+                contexts.append({
+                    "scene_id": self.scene_id,
+                    "episode_stats": self._build_episode_stats(result),
+                    "lerobot_dataset_path": str(lerobot_dir),
+                    "episode_metadata_path": str(metadata_path),
+                    "robot_type": robot,
+                })
+            if not contexts:
+                return None
+            return {
+                "checkpoint": QualityGateCheckpoint.EPISODES_GENERATED,
+                "context": contexts[0] if len(contexts) == 1 else contexts,
+            }
         return None
 
     def _apply_quality_gates(self, step: PipelineStep, result: StepResult) -> StepResult:
@@ -654,10 +707,20 @@ class LocalPipelineRunner:
             outputs["quality_gate_skipped"] = True
             return result
 
-        gate_results = self._quality_gates.run_checkpoint(
-            checkpoint=checkpoint,
-            context=context,
-        )
+        if isinstance(context, list):
+            gate_results = []
+            for entry in context:
+                gate_results.extend(
+                    self._quality_gates.run_checkpoint(
+                        checkpoint=checkpoint,
+                        context=entry,
+                    )
+                )
+        else:
+            gate_results = self._quality_gates.run_checkpoint(
+                checkpoint=checkpoint,
+                context=context,
+            )
         self._quality_gates.save_report(self.scene_id, self._quality_gate_report_path)
         report = self._quality_gates.to_report(self.scene_id)
         outputs["quality_gate_summary"] = report.get("summary", {})
@@ -3083,6 +3146,8 @@ class LocalPipelineRunner:
             json.dumps(job_payload, indent=2),
             context="geniesim job payload",
         )
+        self._geniesim_local_run_results = local_run_results
+        self._geniesim_output_dirs = output_dirs
 
         return StepResult(
             step=PipelineStep.GENIESIM_SUBMIT,
