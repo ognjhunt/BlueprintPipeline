@@ -240,6 +240,25 @@ def _read_parquet_dataframe(
             "Parquet validation requires pyarrow; install pyarrow or allow a fallback reader."
         )
 
+    if parse_bool_env("PARQUET_STREAM_VALIDATE_ONLY", False):
+        raise RuntimeError(
+            "Parquet validation fallback disabled by PARQUET_STREAM_VALIDATE_ONLY=1."
+        )
+
+    max_bytes_raw = os.getenv("PARQUET_PANDAS_FALLBACK_MAX_BYTES", "268435456")
+    try:
+        max_bytes = int(max_bytes_raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Invalid PARQUET_PANDAS_FALLBACK_MAX_BYTES value: {max_bytes_raw}"
+        ) from exc
+    file_size = episode_file.stat().st_size
+    if file_size > max_bytes:
+        raise RuntimeError(
+            "Parquet validation fallback refused: "
+            f"{file_size} bytes exceeds PARQUET_PANDAS_FALLBACK_MAX_BYTES={max_bytes}."
+        )
+
     if importlib.util.find_spec("pandas") is None:
         raise RuntimeError(
             "Parquet validation fallback requires pandas and fastparquet."
@@ -250,6 +269,241 @@ def _read_parquet_dataframe(
         )
     pd = importlib.import_module("pandas")
     return pd.read_parquet(episode_file, engine="fastparquet")
+
+
+def _collect_parquet_column_names(schema: Any) -> List[str]:
+    if schema is None:
+        return []
+    try:
+        pa = importlib.import_module("pyarrow")
+    except ImportError:
+        return list(getattr(schema, "names", []))
+    column_names = set(getattr(schema, "names", []))
+    for field in schema:
+        if pa.types.is_struct(field.type):
+            for child in field.type:
+                column_names.add(f"{field.name}.{child.name}")
+    return sorted(column_names)
+
+
+def _stream_parquet_validation(
+    episode_file: Path,
+    require_parquet_validation: bool,
+) -> Dict[str, Any]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    batch_count = 0
+    row_count = 0
+    mode = "streaming"
+
+    if importlib.util.find_spec("pyarrow.parquet") is not None:
+        pq = importlib.import_module("pyarrow.parquet")
+        pf = pq.ParquetFile(episode_file)
+        schema = pf.schema_arrow
+        column_names = _collect_parquet_column_names(schema)
+        batch_size_raw = os.getenv("PARQUET_VALIDATE_BATCH_SIZE", "65536")
+        try:
+            batch_size = int(batch_size_raw)
+        except ValueError:
+            batch_size = 65536
+
+        required_fields = ["observation", "action"]
+        for field in required_fields:
+            field_variations = [field, f"observation.{field}", f"{field}s"]
+            if not any(
+                variation in column_names
+                or any(variation in col for col in column_names)
+                for variation in field_variations
+            ):
+                errors.append(f"Missing required field: {field}")
+
+        timestamp_cols = [
+            col
+            for col in column_names
+            if "timestamp" in col.lower() or "time" in col.lower()
+        ]
+        obs_cols = [col for col in column_names if col.startswith("observation")]
+        action_cols = [col for col in column_names if "action" in col.lower()]
+
+        nan_columns: set[str] = set()
+        inf_columns: set[str] = set()
+        timestamp_errors: set[str] = set()
+        last_timestamps: Dict[str, Optional[float]] = {col: None for col in timestamp_cols}
+        obs_shapes: Dict[str, set] = {col: set() for col in obs_cols}
+        action_max_abs: Dict[str, Optional[float]] = {col: None for col in action_cols}
+
+        for batch in pf.iter_batches(batch_size=batch_size):
+            batch_count += 1
+            row_count += batch.num_rows
+            df = batch.to_pandas()
+
+            for col in df.columns:
+                series = df[col]
+                if np.issubdtype(series.dtype, np.floating):
+                    if col not in nan_columns and series.isna().any():
+                        nan_columns.add(col)
+                        errors.append(f"Column '{col}' contains NaN values")
+                    if col not in inf_columns and np.isinf(series.to_numpy()).any():
+                        inf_columns.add(col)
+                        errors.append(f"Column '{col}' contains Inf values")
+
+            for ts_col in timestamp_cols:
+                if ts_col not in df.columns or ts_col in timestamp_errors:
+                    continue
+                series = df[ts_col]
+                if not np.issubdtype(series.dtype, np.number):
+                    continue
+                numeric_series = series.dropna()
+                if numeric_series.empty:
+                    continue
+                last_value = last_timestamps.get(ts_col)
+                if last_value is not None and numeric_series.iloc[0] < last_value:
+                    timestamp_errors.add(ts_col)
+                    errors.append(f"Timestamps in '{ts_col}' are not monotonic")
+                    continue
+                if not numeric_series.is_monotonic_increasing:
+                    timestamp_errors.add(ts_col)
+                    errors.append(f"Timestamps in '{ts_col}' are not monotonic")
+                    continue
+                last_timestamps[ts_col] = float(numeric_series.iloc[-1])
+
+            for obs_col in obs_cols:
+                if obs_col not in df.columns:
+                    continue
+                series = df[obs_col]
+                for value in series:
+                    if hasattr(value, "__len__"):
+                        try:
+                            obs_shapes[obs_col].add(np.array(value).shape)
+                        except Exception:
+                            continue
+
+            for action_col in action_cols:
+                if action_col not in df.columns:
+                    continue
+                series = df[action_col]
+                current_max = action_max_abs.get(action_col)
+                if np.issubdtype(series.dtype, np.number):
+                    values = series.to_numpy()
+                    if values.size:
+                        batch_max = float(np.nanmax(np.abs(values)))
+                        if current_max is None or batch_max > current_max:
+                            action_max_abs[action_col] = batch_max
+                    continue
+                for value in series:
+                    if value is None:
+                        continue
+                    try:
+                        arr = np.array(value)
+                        if arr.size == 0:
+                            continue
+                        batch_max = float(np.nanmax(np.abs(arr)))
+                    except Exception:
+                        try:
+                            batch_max = abs(float(value))
+                        except Exception:
+                            continue
+                    if current_max is None or batch_max > current_max:
+                        current_max = batch_max
+                        action_max_abs[action_col] = current_max
+
+        for obs_col, shapes in obs_shapes.items():
+            if len(shapes) > 1:
+                warnings.append(f"Inconsistent shapes in '{obs_col}': {sorted(shapes)}")
+
+        for action_col, max_abs in action_max_abs.items():
+            if max_abs is not None and max_abs > 10.0:
+                warnings.append(
+                    "Action values in "
+                    f"'{action_col}' exceed reasonable bounds (max: {max_abs:.2f})"
+                )
+
+        warnings.append(
+            "Parquet validation used streaming mode; "
+            f"inspected {row_count} rows across {batch_count} batch(es)."
+        )
+        return {
+            "errors": errors,
+            "warnings": warnings,
+            "batch_count": batch_count,
+            "row_count": row_count,
+            "mode": mode,
+        }
+
+    mode = "pandas-fallback"
+    df = _read_parquet_dataframe(
+        episode_file,
+        allow_fallback=require_parquet_validation,
+    )
+
+    required_fields = ["observation", "action"]
+    for field in required_fields:
+        field_variations = [field, f"observation.{field}", f"{field}s"]
+        if not any(
+            variation in df.columns or any(variation in col for col in df.columns)
+            for variation in field_variations
+        ):
+            errors.append(f"Missing required field: {field}")
+
+    for col in df.columns:
+        if df[col].dtype in [np.float32, np.float64]:
+            if df[col].isna().any():
+                errors.append(f"Column '{col}' contains NaN values")
+            if np.isinf(df[col]).any():
+                errors.append(f"Column '{col}' contains Inf values")
+
+    timestamp_cols = [
+        col
+        for col in df.columns
+        if "timestamp" in col.lower() or "time" in col.lower()
+    ]
+    for ts_col in timestamp_cols:
+        if df[ts_col].dtype in [np.float32, np.float64, np.int32, np.int64]:
+            if not df[ts_col].is_monotonic_increasing:
+                errors.append(f"Timestamps in '{ts_col}' are not monotonic")
+
+    obs_cols = [col for col in df.columns if col.startswith("observation")]
+    for obs_col in obs_cols:
+        if df[obs_col].apply(lambda x: hasattr(x, "__len__")).any():
+            shapes = df[obs_col].apply(
+                lambda x: np.array(x).shape if hasattr(x, "__len__") else None
+            )
+            unique_shapes = shapes.dropna().unique()
+            if len(unique_shapes) > 1:
+                warnings.append(f"Inconsistent shapes in '{obs_col}': {unique_shapes}")
+
+    action_cols = [col for col in df.columns if "action" in col.lower()]
+    for action_col in action_cols:
+        if df[action_col].dtype in [np.float32, np.float64]:
+            action_values = df[action_col].values
+            if hasattr(action_values[0], "__len__"):
+                action_arr = np.array([np.array(a) for a in action_values])
+                max_abs = np.abs(action_arr).max()
+                if max_abs > 10.0:
+                    warnings.append(
+                        "Action values in "
+                        f"'{action_col}' exceed reasonable bounds (max: {max_abs:.2f})"
+                    )
+            else:
+                max_abs = np.abs(action_values).max()
+                if max_abs > 10.0:
+                    warnings.append(
+                        "Action values in "
+                        f"'{action_col}' exceed reasonable bounds (max: {max_abs:.2f})"
+                    )
+
+    warnings.append(
+        "Parquet validation used pandas fallback mode; "
+        f"inspected {len(df)} rows in 1 batch."
+    )
+
+    return {
+        "errors": errors,
+        "warnings": warnings,
+        "batch_count": 1,
+        "row_count": len(df),
+        "mode": mode,
+    }
 
 
 def _build_dataset_info(
@@ -903,60 +1157,12 @@ class ImportedEpisodeValidator:
 
         # Load and validate episode data structure
         try:
-            df = _read_parquet_dataframe(
+            parquet_results = _stream_parquet_validation(
                 episode_file,
-                allow_fallback=self.require_parquet_validation,
+                require_parquet_validation=self.require_parquet_validation,
             )
-
-            # Check required fields
-            required_fields = ["observation", "action"]
-            optional_fields = ["reward", "done", "timestamp"]
-
-            for field in required_fields:
-                # Check variations of field names
-                field_variations = [field, f"observation.{field}", f"{field}s"]
-                if not any(variation in df.columns or any(variation in col for col in df.columns) for variation in field_variations):
-                    errors.append(f"Missing required field: {field}")
-
-            # Check for NaN/Inf values
-            for col in df.columns:
-                if df[col].dtype in [np.float32, np.float64]:
-                    if df[col].isna().any():
-                        errors.append(f"Column '{col}' contains NaN values")
-                    if np.isinf(df[col]).any():
-                        errors.append(f"Column '{col}' contains Inf values")
-
-            # Check timestamp monotonicity
-            timestamp_cols = [col for col in df.columns if 'timestamp' in col.lower() or 'time' in col.lower()]
-            for ts_col in timestamp_cols:
-                if df[ts_col].dtype in [np.float32, np.float64, np.int32, np.int64]:
-                    if not df[ts_col].is_monotonic_increasing:
-                        errors.append(f"Timestamps in '{ts_col}' are not monotonic")
-
-            # Check observation shapes are consistent
-            obs_cols = [col for col in df.columns if col.startswith('observation')]
-            for obs_col in obs_cols:
-                if df[obs_col].apply(lambda x: hasattr(x, '__len__')).any():
-                    shapes = df[obs_col].apply(lambda x: np.array(x).shape if hasattr(x, '__len__') else None)
-                    unique_shapes = shapes.dropna().unique()
-                    if len(unique_shapes) > 1:
-                        warnings.append(f"Inconsistent shapes in '{obs_col}': {unique_shapes}")
-
-            # Check action bounds are reasonable
-            action_cols = [col for col in df.columns if 'action' in col.lower()]
-            for action_col in action_cols:
-                if df[action_col].dtype in [np.float32, np.float64]:
-                    action_values = df[action_col].values
-                    if hasattr(action_values[0], '__len__'):
-                        # Multi-dimensional action
-                        action_arr = np.array([np.array(a) for a in action_values])
-                        if np.abs(action_arr).max() > 10.0:  # Reasonable joint limits
-                            warnings.append(f"Action values in '{action_col}' exceed reasonable bounds (max: {np.abs(action_arr).max():.2f})")
-                    else:
-                        # Scalar action
-                        if np.abs(action_values).max() > 10.0:
-                            warnings.append(f"Action values in '{action_col}' exceed reasonable bounds (max: {np.abs(action_values).max():.2f})")
-
+            errors.extend(parquet_results["errors"])
+            warnings.extend(parquet_results["warnings"])
         except RuntimeError as exc:
             errors.append(str(exc))
         except Exception as e:
