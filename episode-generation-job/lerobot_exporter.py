@@ -64,6 +64,8 @@ See: https://github.com/huggingface/lerobot
 """
 
 import hashlib
+import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -258,6 +260,9 @@ class LeRobotDatasetConfig:
             os.getenv("REQUIRE_COMPLETE_EPISODES"),
             default=False,
         )
+    )
+    parquet_verification_mode: str = field(
+        default_factory=lambda: os.getenv("PARQUET_VERIFICATION_MODE", "required").lower()
     )
 
     @classmethod
@@ -1560,9 +1565,27 @@ class LeRobotExporter:
         Returns:
             List of (file_path, errors) tuples for problematic files
         """
-        if not HAVE_PYARROW:
-            self.log("  Skipping Parquet verification (pyarrow not available)", "DEBUG")
+        mode = (self.config.parquet_verification_mode or "required").lower()
+        if mode not in {"required", "allow_fallback", "disabled"}:
+            raise ValueError(
+                "PARQUET_VERIFICATION_MODE must be one of: required, allow_fallback, disabled."
+            )
+        if mode == "disabled":
+            self.log("  Skipping Parquet verification (disabled by config)", "DEBUG")
             return []
+
+        backend = "pyarrow"
+        if not HAVE_PYARROW:
+            if mode == "required":
+                raise RuntimeError(
+                    "Parquet verification requires pyarrow. Install pyarrow or "
+                    "set PARQUET_VERIFICATION_MODE=allow_fallback."
+                )
+            if importlib.util.find_spec("pandas") is None or importlib.util.find_spec("fastparquet") is None:
+                raise RuntimeError(
+                    "Parquet verification fallback requires pandas and fastparquet."
+                )
+            backend = "fastparquet"
 
         verification_errors = []
 
@@ -1589,49 +1612,120 @@ class LeRobotExporter:
 
                 try:
                     if self._is_v3_export() and parquet_path.name == "episodes.parquet":
-                        parquet_file = pq.ParquetFile(parquet_path)
-                        schema = parquet_file.schema_arrow
-                        required_columns = {"observation.state", "action", "episode_index"}
-                        missing_columns = required_columns - set(schema.names)
-                        if missing_columns:
-                            errors.append(f"Missing columns: {missing_columns}")
+                        if backend == "pyarrow":
+                            parquet_file = pq.ParquetFile(parquet_path)
+                            schema = parquet_file.schema_arrow
+                            required_columns = {"observation.state", "action", "episode_index"}
+                            missing_columns = required_columns - set(schema.names)
+                            if missing_columns:
+                                errors.append(f"Missing columns: {missing_columns}")
 
-                        num_row_groups = parquet_file.metadata.num_row_groups
-                        if num_row_groups != len(self.episodes):
-                            errors.append(
-                                f"Row group count {num_row_groups} does not match expected "
-                                f"{len(self.episodes)} episodes"
-                            )
-                        for idx, episode in enumerate(self.episodes):
-                            if idx >= num_row_groups:
-                                break
-                            row_group_rows = parquet_file.metadata.row_group(idx).num_rows
-                            expected_length = expected_lengths.get(episode.episode_index)
-                            if expected_length is not None and row_group_rows != expected_length:
+                            num_row_groups = parquet_file.metadata.num_row_groups
+                            if num_row_groups != len(self.episodes):
                                 errors.append(
-                                    f"Row group {idx} has {row_group_rows} rows but expected "
-                                    f"{expected_length} for episode {episode.episode_index}"
+                                    f"Row group count {num_row_groups} does not match expected "
+                                    f"{len(self.episodes)} episodes"
                                 )
+                            for idx, episode in enumerate(self.episodes):
+                                if idx >= num_row_groups:
+                                    break
+                                row_group_rows = parquet_file.metadata.row_group(idx).num_rows
+                                expected_length = expected_lengths.get(episode.episode_index)
+                                if expected_length is not None and row_group_rows != expected_length:
+                                    errors.append(
+                                        f"Row group {idx} has {row_group_rows} rows but expected "
+                                        f"{expected_length} for episode {episode.episode_index}"
+                                    )
+                            table = parquet_file.read()
+                            for col_name in ["observation.state", "action"]:
+                                if col_name in table.column_names:
+                                    col = table[col_name].to_numpy()
+                                    if np.issubdtype(col.dtype, np.floating):
+                                        nan_count = np.isnan(col).sum()
+                                        inf_count = np.isinf(col).sum()
+                                        if nan_count > 0:
+                                            errors.append(f"Column '{col_name}': {nan_count} NaN values")
+                                        if inf_count > 0:
+                                            errors.append(f"Column '{col_name}': {inf_count} Inf values")
+                        else:
+                            fastparquet = importlib.import_module("fastparquet")
+                            pd = importlib.import_module("pandas")
+                            parquet_file = fastparquet.ParquetFile(parquet_path)
+                            schema_names = set(parquet_file.columns)
+                            required_columns = {"observation.state", "action", "episode_index"}
+                            missing_columns = required_columns - schema_names
+                            if missing_columns:
+                                errors.append(f"Missing columns: {missing_columns}")
+
+                            num_row_groups = len(parquet_file.row_groups or [])
+                            if num_row_groups != len(self.episodes):
+                                errors.append(
+                                    f"Row group count {num_row_groups} does not match expected "
+                                    f"{len(self.episodes)} episodes"
+                                )
+                            for idx, episode in enumerate(self.episodes):
+                                if idx >= num_row_groups:
+                                    break
+                                row_group = parquet_file.row_groups[idx]
+                                row_group_rows = getattr(row_group, "num_rows", None)
+                                if row_group_rows is None:
+                                    row_group_rows = row_group.num_rows
+                                expected_length = expected_lengths.get(episode.episode_index)
+                                if expected_length is not None and row_group_rows != expected_length:
+                                    errors.append(
+                                        f"Row group {idx} has {row_group_rows} rows but expected "
+                                        f"{expected_length} for episode {episode.episode_index}"
+                                    )
+                            df = parquet_file.to_pandas()
+                            for col_name in ["observation.state", "action"]:
+                                if col_name in df.columns:
+                                    col = df[col_name].to_numpy()
+                                    if np.issubdtype(col.dtype, np.floating):
+                                        nan_count = np.isnan(col).sum()
+                                        inf_count = np.isinf(col).sum()
+                                        if nan_count > 0:
+                                            errors.append(f"Column '{col_name}': {nan_count} NaN values")
+                                        if inf_count > 0:
+                                            errors.append(f"Column '{col_name}': {inf_count} Inf values")
                     else:
                         # Try to read the file
-                        table = pq.read_table(parquet_path)
+                        if backend == "pyarrow":
+                            table = pq.read_table(parquet_path)
+                            column_names = set(table.column_names)
+                        else:
+                            pd = importlib.import_module("pandas")
+                            df = pd.read_parquet(parquet_path, engine="fastparquet")
+                            column_names = set(df.columns)
 
                         # Check for expected columns
                         required_columns = {"observation.state", "action"}
-                        missing_columns = required_columns - set(table.column_names)
+                        missing_columns = required_columns - column_names
                         if missing_columns:
                             errors.append(f"Missing columns: {missing_columns}")
 
                         # Check for NaN/None in critical columns
                         for col_name in ["observation.state", "action"]:
-                            if col_name in table.column_names:
+                            if backend == "pyarrow" and col_name in table.column_names:
                                 col = table[col_name].to_numpy()
-                                nan_count = np.isnan(col).sum() if col.dtype == np.float32 else 0
-                                if nan_count > 0:
-                                    errors.append(f"Column '{col_name}': {nan_count} NaN values")
+                                if np.issubdtype(col.dtype, np.floating):
+                                    nan_count = np.isnan(col).sum()
+                                    inf_count = np.isinf(col).sum()
+                                    if nan_count > 0:
+                                        errors.append(f"Column '{col_name}': {nan_count} NaN values")
+                                    if inf_count > 0:
+                                        errors.append(f"Column '{col_name}': {inf_count} Inf values")
+                            elif backend == "fastparquet" and col_name in df.columns:
+                                col = df[col_name].to_numpy()
+                                if np.issubdtype(col.dtype, np.floating):
+                                    nan_count = np.isnan(col).sum()
+                                    inf_count = np.isinf(col).sum()
+                                    if nan_count > 0:
+                                        errors.append(f"Column '{col_name}': {nan_count} NaN values")
+                                    if inf_count > 0:
+                                        errors.append(f"Column '{col_name}': {inf_count} Inf values")
 
                         # Check row count (should match trajectory length for episode)
-                        num_rows = table.num_rows
+                        num_rows = table.num_rows if backend == "pyarrow" else len(df)
                         if num_rows == 0:
                             errors.append("Table is empty (0 rows)")
                         episode_match = re.search(r"episode_(\d+)\.parquet$", parquet_path.name)
