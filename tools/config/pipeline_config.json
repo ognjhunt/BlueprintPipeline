@@ -163,6 +163,10 @@
       "vertical_proximity_threshold": 0.05,
       "horizontal_proximity_threshold": 0.15,
       "alignment_angle_threshold": 5.0,
+      "enable_physics_validation": false,
+      "physics_contact_depth_threshold": 0.001,
+      "physics_containment_ratio_threshold": 0.8,
+      "heuristic_confidence_scale": 0.6,
       "description": "Thresholds for inferring spatial relations (meters/degrees)."
     },
     "streaming": {

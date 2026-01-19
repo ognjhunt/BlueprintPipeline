@@ -126,6 +126,7 @@ class GenieSimEdge:
     target: str  # target object asset_id
     relation: str  # on, in, adjacent, aligned, stacked
     confidence: float = 1.0  # Confidence of inferred relation
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -133,6 +134,7 @@ class GenieSimEdge:
             "target": self.target,
             "relation": self.relation,
             "confidence": self.confidence,
+            "metadata": self.metadata,
         }
 
 
@@ -178,6 +180,10 @@ class SceneGraphRuntimeConfig:
     horizontal_proximity_threshold: float
     alignment_angle_threshold: float
     streaming_batch_size: int
+    enable_physics_validation: bool
+    physics_contact_depth_threshold: float
+    physics_containment_ratio_threshold: float
+    heuristic_confidence_scale: float
 
 
 _SCENE_GRAPH_CONFIG: Optional[SceneGraphRuntimeConfig] = None
@@ -205,6 +211,19 @@ def _parse_env_int(key: str, default: int) -> int:
         return default
 
 
+def _parse_env_bool(key: str, default: bool) -> bool:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    logger.warning("Invalid %s=%s; using default %s", key, raw, default)
+    return default
+
+
 def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
     global _SCENE_GRAPH_CONFIG
     if _SCENE_GRAPH_CONFIG is not None:
@@ -217,11 +236,19 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         vertical_default = relation_config.vertical_proximity_threshold
         horizontal_default = relation_config.horizontal_proximity_threshold
         alignment_default = relation_config.alignment_angle_threshold
+        physics_validation_default = relation_config.enable_physics_validation
+        contact_depth_default = relation_config.physics_contact_depth_threshold
+        containment_ratio_default = relation_config.physics_containment_ratio_threshold
+        heuristic_confidence_default = relation_config.heuristic_confidence_scale
         batch_default = streaming_config.batch_size
     else:
         vertical_default = 0.05
         horizontal_default = 0.15
         alignment_default = 5.0
+        physics_validation_default = False
+        contact_depth_default = 0.001
+        containment_ratio_default = 0.8
+        heuristic_confidence_default = 0.6
         batch_default = 100
 
     config = SceneGraphRuntimeConfig(
@@ -241,15 +268,37 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
             "BP_SCENE_GRAPH_STREAMING_BATCH_SIZE",
             batch_default,
         ),
+        enable_physics_validation=_parse_env_bool(
+            "BP_SCENE_GRAPH_ENABLE_PHYSICS_VALIDATION",
+            physics_validation_default,
+        ),
+        physics_contact_depth_threshold=_parse_env_float(
+            "BP_SCENE_GRAPH_PHYSICS_CONTACT_DEPTH_THRESHOLD",
+            contact_depth_default,
+        ),
+        physics_containment_ratio_threshold=_parse_env_float(
+            "BP_SCENE_GRAPH_PHYSICS_CONTAINMENT_RATIO_THRESHOLD",
+            containment_ratio_default,
+        ),
+        heuristic_confidence_scale=_parse_env_float(
+            "BP_SCENE_GRAPH_HEURISTIC_CONFIDENCE_SCALE",
+            heuristic_confidence_default,
+        ),
     )
 
     logger.info(
         "Scene graph config: vertical_proximity_threshold=%.3f, horizontal_proximity_threshold=%.3f, "
-        "alignment_angle_threshold=%.3f, streaming_batch_size=%d",
+        "alignment_angle_threshold=%.3f, streaming_batch_size=%d, "
+        "enable_physics_validation=%s, physics_contact_depth_threshold=%.4f, "
+        "physics_containment_ratio_threshold=%.3f, heuristic_confidence_scale=%.2f",
         config.vertical_proximity_threshold,
         config.horizontal_proximity_threshold,
         config.alignment_angle_threshold,
         config.streaming_batch_size,
+        config.enable_physics_validation,
+        config.physics_contact_depth_threshold,
+        config.physics_containment_ratio_threshold,
+        config.heuristic_confidence_scale,
     )
 
     _SCENE_GRAPH_CONFIG = config
@@ -341,6 +390,10 @@ class RelationInferencer:
         self.vertical_proximity_threshold = self.config.vertical_proximity_threshold
         self.horizontal_proximity_threshold = self.config.horizontal_proximity_threshold
         self.alignment_angle_threshold = self.config.alignment_angle_threshold
+        self.enable_physics_validation = self.config.enable_physics_validation
+        self.physics_contact_depth_threshold = self.config.physics_contact_depth_threshold
+        self.physics_containment_ratio_threshold = self.config.physics_containment_ratio_threshold
+        self.heuristic_confidence_scale = self.config.heuristic_confidence_scale
         self._cache: "OrderedDict[Tuple[str, str], List[GenieSimEdge]]" = OrderedDict()
         self.last_cache_hit = False
         self._cache_hits = 0
@@ -506,12 +559,13 @@ class RelationInferencer:
             if abs(a_bottom - b_top) < self.vertical_proximity_threshold:
                 # Check horizontal overlap
                 if self._has_horizontal_overlap(node_a, node_b):
-                    return GenieSimEdge(
+                    edge = GenieSimEdge(
                         source=node_a.asset_id,
                         target=node_b.asset_id,
                         relation="on",
                         confidence=0.8,
                     )
+                    return self._apply_physics_validation(edge, node_a, node_b)
 
         # Check if B is above A
         elif vertical_diff < 0:
@@ -520,12 +574,13 @@ class RelationInferencer:
 
             if abs(b_bottom - a_top) < self.vertical_proximity_threshold:
                 if self._has_horizontal_overlap(node_a, node_b):
-                    return GenieSimEdge(
+                    edge = GenieSimEdge(
                         source=node_b.asset_id,
                         target=node_a.asset_id,
                         relation="on",
                         confidence=0.8,
                     )
+                    return self._apply_physics_validation(edge, node_b, node_a)
 
         return None
 
@@ -541,21 +596,23 @@ class RelationInferencer:
 
         # Check if A is inside B (with margin)
         if self._is_inside(bounds_a, bounds_b, self.CONTAINMENT_MARGIN):
-            return GenieSimEdge(
+            edge = GenieSimEdge(
                 source=node_a.asset_id,
                 target=node_b.asset_id,
                 relation="in",
                 confidence=0.9,
             )
+            return self._apply_physics_validation(edge, node_a, node_b)
 
         # Check if B is inside A
         if self._is_inside(bounds_b, bounds_a, self.CONTAINMENT_MARGIN):
-            return GenieSimEdge(
+            edge = GenieSimEdge(
                 source=node_b.asset_id,
                 target=node_a.asset_id,
                 relation="in",
                 confidence=0.9,
             )
+            return self._apply_physics_validation(edge, node_b, node_a)
 
         return None
 
@@ -661,6 +718,202 @@ class RelationInferencer:
             np.all(inner_min >= outer_min - margin) and
             np.all(inner_max <= outer_max + margin)
         )
+
+    def _apply_physics_validation(
+        self,
+        edge: GenieSimEdge,
+        source_node: GenieSimNode,
+        target_node: GenieSimNode,
+    ) -> Optional[GenieSimEdge]:
+        if edge.relation not in {"on", "in"}:
+            return edge
+        if not self.enable_physics_validation:
+            return self._mark_heuristic(edge)
+
+        validation = self._validate_relation_with_physics(edge, source_node, target_node)
+        if validation is None:
+            return self._mark_heuristic(edge)
+        if not validation:
+            return None
+        edge.metadata["inference_method"] = "physics"
+        return edge
+
+    def _mark_heuristic(self, edge: GenieSimEdge) -> GenieSimEdge:
+        edge.confidence *= self.heuristic_confidence_scale
+        edge.metadata["inference_method"] = "heuristic"
+        return edge
+
+    def _validate_relation_with_physics(
+        self,
+        edge: GenieSimEdge,
+        source_node: GenieSimNode,
+        target_node: GenieSimNode,
+    ) -> Optional[bool]:
+        if edge.relation == "on":
+            return self._validate_on_with_physics(source_node, target_node)
+        if edge.relation == "in":
+            return self._validate_in_with_physics(source_node, target_node)
+        return None
+
+    def _validate_on_with_physics(
+        self,
+        source_node: GenieSimNode,
+        target_node: GenieSimNode,
+    ) -> Optional[bool]:
+        entries_source = self._extract_contact_entries(source_node)
+        entries_target = self._extract_contact_entries(target_node)
+        if not entries_source and not entries_target:
+            return None
+
+        depth_source = self._contact_depth(entries_source, target_node.asset_id)
+        depth_target = self._contact_depth(entries_target, source_node.asset_id)
+
+        if depth_source is None and depth_target is None:
+            return False
+
+        depth_values = [
+            depth for depth in [depth_source, depth_target]
+            if depth is not None
+        ]
+        if not depth_values:
+            return False
+        max_depth = max(depth_values)
+        return max_depth >= self.physics_contact_depth_threshold
+
+    def _validate_in_with_physics(
+        self,
+        source_node: GenieSimNode,
+        target_node: GenieSimNode,
+    ) -> Optional[bool]:
+        contained_entries = self._extract_containment_entries(
+            source_node,
+            include_contained_in=True,
+            include_contains=False,
+        )
+        contains_entries = self._extract_containment_entries(
+            target_node,
+            include_contained_in=False,
+            include_contains=True,
+        )
+        if not contained_entries and not contains_entries:
+            return None
+
+        if self._match_containment_entry(
+            contained_entries,
+            target_node.asset_id,
+            self.physics_containment_ratio_threshold,
+        ):
+            return True
+        if self._match_containment_entry(
+            contains_entries,
+            source_node.asset_id,
+            self.physics_containment_ratio_threshold,
+        ):
+            return True
+        return False
+
+    def _extract_contact_entries(self, node: GenieSimNode) -> List[Any]:
+        metadata = node.bp_metadata or {}
+        entries: List[Any] = []
+        entries += self._normalize_list(metadata.get("contacts"))
+        entries += self._normalize_list(metadata.get("collisions"))
+
+        physics = metadata.get("physics", {})
+        if isinstance(physics, dict):
+            entries += self._normalize_list(physics.get("contacts"))
+            entries += self._normalize_list(physics.get("collisions"))
+        return entries
+
+    def _contact_depth(self, entries: List[Any], other_id: str) -> Optional[float]:
+        for entry in entries:
+            if isinstance(entry, str):
+                if entry == other_id:
+                    return self.physics_contact_depth_threshold
+                continue
+            if not isinstance(entry, dict):
+                continue
+            other = (
+                entry.get("other_id")
+                or entry.get("object_id")
+                or entry.get("id")
+                or entry.get("target_id")
+            )
+            if other != other_id:
+                continue
+            depth = (
+                entry.get("depth")
+                or entry.get("penetration_depth")
+                or entry.get("contact_depth")
+            )
+            if depth is None:
+                return self.physics_contact_depth_threshold
+            try:
+                return float(depth)
+            except (TypeError, ValueError):
+                return self.physics_contact_depth_threshold
+        return None
+
+    def _extract_containment_entries(
+        self,
+        node: GenieSimNode,
+        include_contained_in: bool,
+        include_contains: bool,
+    ) -> List[Any]:
+        metadata = node.bp_metadata or {}
+        entries: List[Any] = []
+
+        if include_contained_in:
+            entries += self._normalize_list(metadata.get("contained_in"))
+        if include_contains:
+            entries += self._normalize_list(metadata.get("contains"))
+
+        entries += self._normalize_list(metadata.get("containment"))
+        physics = metadata.get("physics", {})
+        if isinstance(physics, dict):
+            entries += self._normalize_list(physics.get("containment"))
+        return entries
+
+    def _match_containment_entry(
+        self,
+        entries: List[Any],
+        other_id: str,
+        ratio_threshold: float,
+    ) -> bool:
+        for entry in entries:
+            if isinstance(entry, str):
+                if entry == other_id:
+                    return True
+                continue
+            if not isinstance(entry, dict):
+                continue
+            other = (
+                entry.get("container_id")
+                or entry.get("contained_id")
+                or entry.get("other_id")
+                or entry.get("object_id")
+                or entry.get("id")
+            )
+            if other != other_id:
+                continue
+            ratio = (
+                entry.get("ratio")
+                or entry.get("containment_ratio")
+                or entry.get("overlap_ratio")
+            )
+            if ratio is None:
+                return True
+            try:
+                return float(ratio) >= ratio_threshold
+            except (TypeError, ValueError):
+                return True
+        return False
+
+    def _normalize_list(self, value: Any) -> List[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
 
 
 # =============================================================================
@@ -912,6 +1165,13 @@ class SceneGraphConverter:
                 "affordances": obj.get("semantics", {}).get("affordances", []),
                 "articulation": obj.get("articulation", {}),
                 "placement_region": obj.get("placement_region"),
+                "physics": obj.get("physics", {}),
+                "physics_hints": obj.get("physics_hints", {}),
+                "contacts": obj.get("contacts", obj.get("physics", {}).get("contacts", [])),
+                "collisions": obj.get("collisions", obj.get("physics", {}).get("collisions", [])),
+                "containment": obj.get("containment", obj.get("physics", {}).get("containment", [])),
+                "contained_in": obj.get("contained_in"),
+                "contains": obj.get("contains"),
             }
 
             return GenieSimNode(
