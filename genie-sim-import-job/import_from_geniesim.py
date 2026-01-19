@@ -186,6 +186,30 @@ def _resolve_skip_rate_max(raw_value: Optional[str]) -> float:
     return skip_rate
 
 
+def _preflight_firebase_upload() -> bool:
+    bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
+    service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+
+    if not bucket_name or (not service_account_json and not service_account_path):
+        print(
+            "[GENIE-SIM-IMPORT] ERROR: Firebase upload preflight failed. Set "
+            "FIREBASE_STORAGE_BUCKET and either FIREBASE_SERVICE_ACCOUNT_JSON or "
+            "FIREBASE_SERVICE_ACCOUNT_PATH."
+        )
+        return False
+
+    try:
+        from tools.firebase_upload.uploader import init_firebase
+
+        init_firebase()
+    except Exception as exc:
+        print(f"[GENIE-SIM-IMPORT] ERROR: Firebase upload preflight failed: {exc}")
+        return False
+
+    return True
+
+
 def _read_parquet_dataframe(
     episode_file: Path,
     allow_fallback: bool,
@@ -1982,6 +2006,9 @@ def main():
         local_episodes_prefix=local_episodes_prefix,
     )
 
+    if enable_firebase_upload and not _preflight_firebase_upload():
+        sys.exit(1)
+
     # Run import
     try:
         metrics = get_metrics()
@@ -1997,10 +2024,14 @@ def main():
             print(f"[GENIE-SIM-IMPORT] Episodes imported: {result.episodes_passed_validation}")
             print(f"[GENIE-SIM-IMPORT] Average quality: {result.average_quality_score:.2f}")
             if enable_firebase_upload:
-                from tools.firebase_upload.uploader import upload_episodes_to_firebase
+                from tools.firebase_upload.uploader import (
+                    init_firebase,
+                    upload_episodes_to_firebase,
+                )
 
                 print("[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage...")
                 try:
+                    init_firebase()
                     upload_summary = upload_episodes_to_firebase(
                         result.output_dir,
                         scene_id,
