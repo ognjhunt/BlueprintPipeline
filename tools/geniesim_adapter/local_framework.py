@@ -540,7 +540,15 @@ class GenieSimGRPCClient:
                 self._stub = GenieSimServiceStub(self._channel)
 
             # Test connection with a simple call (with timeout)
-            import grpc
+            try:
+                import grpc
+            except ImportError as exc:
+                logger.warning(
+                    "gRPC import failed (%s). Please install grpcio to enable gRPC connectivity.",
+                    exc,
+                )
+                self._connected = False
+                return False
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=self.timeout)
                 self._connected = True
