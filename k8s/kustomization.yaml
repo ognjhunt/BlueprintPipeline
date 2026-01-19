@@ -3,6 +3,10 @@ kind: Kustomization
 
 resources:
   - episode-generation-job.yaml
+  - genie-sim-export-job.yaml
+  - genie-sim-submit-job.yaml
+  - genie-sim-local-job.yaml
+  - genie-sim-import-webhook.yaml
 
 configMapGenerator:
   - name: episode-gen-runtime
