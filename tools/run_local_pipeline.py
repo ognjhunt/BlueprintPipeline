@@ -70,9 +70,11 @@ from tools.cost_tracking.estimate import (
     load_estimate_config,
 )
 from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
+from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
 
 # Add repository root to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -195,6 +197,8 @@ class LocalPipelineRunner:
         self._geniesim_preflight_report: Optional[Dict[str, Any]] = None
         self._pending_articulation_preflight = False
         self._path_redaction_regex = re.compile(r"(?:[A-Za-z]:\\\\|/)[^\\s]+")
+        self._quality_gates = QualityGateRegistry(verbose=self.verbose)
+        self._quality_gate_report_path = self._resolve_quality_gate_report_path()
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -224,6 +228,137 @@ class LocalPipelineRunner:
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "scene_id": self.scene_id,
         }, indent=2))
+
+    def _resolve_quality_gate_report_path(self) -> Path:
+        report_dir = self.scene_dir / "quality_gates"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        return report_dir / "quality_gate_report.json"
+
+    def _should_skip_quality_gates(self) -> bool:
+        if not parse_bool_env(os.getenv("SKIP_QUALITY_GATES"), default=False):
+            return False
+        if resolve_production_mode():
+            self.log(
+                "SKIP_QUALITY_GATES requested but production mode detected; "
+                "quality gates will still run.",
+                "WARNING",
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _dir_has_files(path: Path) -> bool:
+        return path.is_dir() and any(path.iterdir())
+
+    def _build_readiness_checklist(self) -> Dict[str, bool]:
+        steps_success = {result.step.value: result.success for result in self.results}
+        return {
+            "usd_valid": (self.usd_dir / "scene.usda").exists(),
+            "physics_stable": steps_success.get(PipelineStep.SIMREADY.value, False),
+            "episodes_generated": self._dir_has_files(self.episodes_dir),
+            "replicator_ready": self._dir_has_files(self.replicator_dir),
+            "isaac_lab_ready": self._dir_has_files(self.isaac_lab_dir),
+            "dwm_ready": self._dir_has_files(self.dwm_dir),
+        }
+
+    def _quality_gate_context_for_step(
+        self,
+        step: PipelineStep,
+    ) -> Optional[Dict[str, Any]]:
+        if step == PipelineStep.REGEN3D:
+            manifest_path = self.assets_dir / "scene_manifest.json"
+            if not manifest_path.is_file():
+                return None
+            return {
+                "checkpoint": QualityGateCheckpoint.MANIFEST_VALIDATED,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "manifest": json.loads(manifest_path.read_text()),
+                },
+            }
+        if step == PipelineStep.SIMREADY:
+            manifest_path = self.assets_dir / "scene_manifest.json"
+            if not manifest_path.is_file():
+                return None
+            manifest = json.loads(manifest_path.read_text())
+            physics_objects = []
+            for obj in manifest.get("objects", []):
+                physics = obj.get("physics", {}) or {}
+                physics_objects.append({
+                    "id": obj.get("id"),
+                    "mass": physics.get("mass_kg", 0.0),
+                    "friction": physics.get("friction_static", physics.get("friction_dynamic", 0.0)),
+                })
+            return {
+                "checkpoint": QualityGateCheckpoint.SIMREADY_COMPLETE,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "physics_properties": {"objects": physics_objects},
+                },
+            }
+        if step == PipelineStep.USD:
+            usd_path = self.usd_dir / "scene.usda"
+            return {
+                "checkpoint": QualityGateCheckpoint.USD_ASSEMBLED,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "usd_path": str(usd_path),
+                },
+            }
+        if step == PipelineStep.ISAAC_LAB:
+            return {
+                "checkpoint": QualityGateCheckpoint.ISAAC_LAB_GENERATED,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "isaac_lab_dir": str(self.isaac_lab_dir),
+                },
+            }
+        if step == PipelineStep.GENIESIM_IMPORT:
+            return {
+                "checkpoint": QualityGateCheckpoint.SCENE_READY,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "readiness_checklist": self._build_readiness_checklist(),
+                },
+            }
+        return None
+
+    def _apply_quality_gates(self, step: PipelineStep, result: StepResult) -> StepResult:
+        gate_payload = self._quality_gate_context_for_step(step)
+        if not gate_payload:
+            return result
+
+        checkpoint = gate_payload["checkpoint"]
+        context = gate_payload["context"]
+        outputs = result.outputs
+        outputs["quality_gate_checkpoint"] = checkpoint.value
+        outputs["quality_gate_report"] = str(self._quality_gate_report_path)
+
+        if self._should_skip_quality_gates():
+            self.log(
+                f"SKIP_QUALITY_GATES enabled - skipping quality gates for {checkpoint.value}",
+                "WARNING",
+            )
+            self._quality_gates.save_report(self.scene_id, self._quality_gate_report_path)
+            report = self._quality_gates.to_report(self.scene_id)
+            outputs["quality_gate_summary"] = report.get("summary", {})
+            outputs["quality_gate_skipped"] = True
+            return result
+
+        gate_results = self._quality_gates.run_checkpoint(
+            checkpoint=checkpoint,
+            context=context,
+        )
+        self._quality_gates.save_report(self.scene_id, self._quality_gate_report_path)
+        report = self._quality_gates.to_report(self.scene_id)
+        outputs["quality_gate_summary"] = report.get("summary", {})
+
+        blocked = any((not entry.passed and entry.severity == "error") for entry in gate_results)
+        if blocked:
+            result.success = False
+            result.message = f"Quality gates blocked at {checkpoint.value}"
+            outputs["quality_gate_blocked"] = True
+        return result
 
     def run(
         self,
@@ -317,6 +452,8 @@ class LocalPipelineRunner:
             started_at = datetime.utcnow().isoformat() + "Z"
             result = self._run_step(step)
             completed_at = datetime.utcnow().isoformat() + "Z"
+            if result.success:
+                result = self._apply_quality_gates(step, result)
             self.results.append(result)
 
             if not result.success:
