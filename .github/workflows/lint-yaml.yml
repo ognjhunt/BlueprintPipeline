@@ -1,0 +1,31 @@
+name: Lint YAML
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/*.yml
+      - k8s/**/*.yaml
+
+jobs:
+  lint-yaml:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint GitHub workflows
+        uses: rhysd/actionlint@v1
+        with:
+          files: .github/workflows/*.yml
+
+      - name: Install kubeconform
+        run: |
+          curl -L -o /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.4/kubeconform-linux-amd64.tar.gz
+          tar -C /tmp -xzf /tmp/kubeconform.tar.gz
+          sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
+
+      - name: Validate Kubernetes manifests
+        run: |
+          shopt -s globstar
+          kubeconform -strict -summary -output json k8s/**/*.yaml
