@@ -349,6 +349,7 @@ Feature flags allow opt-in/opt-out of capabilities.
 | `ENABLE_VLA_FINETUNING` | bool | "0" | Enable VLA fine-tuning data |
 | `ENABLE_SIM2REAL_VALIDATION` | bool | "0" | Enable sim-to-real checks |
 | `ENABLE_DWM_CONDITIONING` | bool | "0" | Enable DWM-style conditioning |
+| `ENABLE_DREAM2FLOW` | bool | "0" | Enable Dream2Flow preparation and inference workflows |
 | `ENABLE_AUDIO_NARRATION` | bool | "0" | Enable audio narration |
 | `ENABLE_SUBTITLE_GENERATION` | bool | "0" | Enable subtitle generation |
 | `ENABLE_INVENTORY_ENRICHMENT` | bool | "0" | Enable inventory enrichment before replicator generation |
