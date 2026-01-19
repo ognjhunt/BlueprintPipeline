@@ -361,7 +361,7 @@ class TestSceneGraphConverter:
         ]
         called = {}
 
-        def fake_infer(self, nodes, scene_id=None):
+        def fake_infer(self, nodes, scene_id=None, **kwargs):
             called["count"] = len(nodes)
             return expected_edges
 

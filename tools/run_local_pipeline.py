@@ -126,12 +126,16 @@ class StepResult:
 class LocalPipelineRunner:
     """Run BlueprintPipeline locally for testing."""
 
-    # Default step order (free/default workflow)
+    # Default step order (production genie-sim workflow)
     DEFAULT_STEPS = [
         PipelineStep.REGEN3D,
         PipelineStep.SIMREADY,
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
+        PipelineStep.VARIATION_GEN,
+        PipelineStep.GENIESIM_EXPORT,
+        PipelineStep.GENIESIM_SUBMIT,
+        PipelineStep.GENIESIM_IMPORT,
     ]
 
     DWM_STEPS = [
@@ -1422,57 +1426,65 @@ class LocalPipelineRunner:
         )
 
     def _run_simready(self) -> StepResult:
-        """Run simready preparation."""
-        # Load manifest
+        """Run simready preparation using the actual simready-job logic."""
+        start_time = time.time()
+        try:
+            sys.path.insert(0, str(REPO_ROOT / "simready-job"))
+            from prepare_simready_assets import prepare_simready_assets_job
+        except ImportError as e:
+            return StepResult(
+                step=PipelineStep.SIMREADY,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=f"Import error (simready job not found): {self._summarize_exception(e)}",
+            )
+
         manifest_path = self.assets_dir / "scene_manifest.json"
         if not manifest_path.is_file():
             return StepResult(
                 step=PipelineStep.SIMREADY,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message="Manifest not found - run regen3d step first",
             )
 
+        # Set required environment variables for the simready job
+        os.environ["BUCKET"] = "local"
+        os.environ["SCENE_ID"] = self.scene_id
+        os.environ["ASSETS_PREFIX"] = str(self.assets_dir.relative_to(self.scene_dir.parent))
+        os.environ["SIMREADY_ALLOW_HEURISTIC_FALLBACK"] = "1"
+
+        # Use the real job logic instead of the mock
+        exit_code = prepare_simready_assets_job(
+            bucket="local",
+            scene_id=self.scene_id,
+            assets_prefix=os.environ["ASSETS_PREFIX"],
+            root=self.scene_dir.parent,
+            allow_heuristic_fallback=True,
+            production_mode=(self.environment == "production")
+        )
+
+        if exit_code != 0:
+            return StepResult(
+                step=PipelineStep.SIMREADY,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=f"SimReady job failed with exit code {exit_code}",
+            )
+
+        # Reload manifest to get updated physics
         manifest = json.loads(manifest_path.read_text())
-
-        # For local testing, add basic physics properties to each object
-        for obj in manifest.get("objects", []):
-            if not obj.get("physics"):
-                mass = self._estimate_mass(obj)
-                friction_static = 0.5
-                friction_dynamic = 0.4
-                restitution = 0.1
-
-                obj["physics"] = {
-                    "dynamic": obj.get("sim_role") in ["manipulable_object", "clutter"],
-                    "mass_kg": mass,
-                    "friction_static": friction_static,
-                    "friction_dynamic": friction_dynamic,
-                    "restitution": restitution,
-                    "center_of_mass_offset": [0.0, 0.0, 0.0],
-                    # Sim2Real distribution ranges for domain randomization
-                    "mass_kg_range": [mass * 0.8, mass * 1.2],
-                    "friction_static_range": [friction_static * 0.85, min(1.5, friction_static * 1.15)],
-                    "friction_dynamic_range": [friction_dynamic * 0.85, min(1.2, friction_dynamic * 1.15)],
-                    "restitution_range": [max(0.0, restitution * 0.7), min(1.0, restitution * 1.3)],
-                    "center_of_mass_noise": [0.005, 0.005, 0.005],
-                }
-
-        # Write updated manifest
-        manifest_path.write_text(json.dumps(manifest, indent=2))
-
-        # Write simready completion marker
-        marker_path = self.assets_dir / ".simready_complete"
-        marker_path.write_text(f"completed at {datetime.utcnow().isoformat()}Z\n")
-
-        self.log(f"Added physics to {len(manifest.get('objects', []))} objects")
+        self.log(f"Added realistic physics to {len(manifest.get('objects', []))} objects")
 
         return StepResult(
             step=PipelineStep.SIMREADY,
             success=True,
-            duration_seconds=0,
-            message="SimReady preparation completed",
-            outputs={"objects_processed": len(manifest.get("objects", []))},
+            duration_seconds=time.time() - start_time,
+            message="SimReady preparation completed (production-grade)",
+            outputs={
+                "objects_processed": len(manifest.get("objects", [])),
+                "completion_marker": str(self.assets_dir / ".simready_complete"),
+            },
         )
 
     def _estimate_mass(self, obj: Dict[str, Any]) -> float:

@@ -34,6 +34,7 @@ from tools.lerobot_format import LeRobotExportFormat
 from .scene_graph import SceneGraphConverter, GenieSimSceneGraph
 from .asset_index import AssetIndexBuilder, GenieSimAssetIndex
 from .task_config import TaskConfigGenerator, GenieSimTaskConfig
+from tools.legal.provenance_generator import AssetProvenanceGenerator
 from .multi_robot_config import (
     MultiRobotConfig,
     RobotType,
@@ -188,6 +189,7 @@ class GenieSimExporter:
             verbose=verbose,
         )
         self.task_config_generator = TaskConfigGenerator(verbose=verbose)
+        self.provenance_generator = AssetProvenanceGenerator(verbose=verbose)
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -330,16 +332,21 @@ class GenieSimExporter:
                 self.log(f"  Bimanual enabled: {multi_robot_config.enable_bimanual}")
                 self.log(f"  Multi-robot coordination: {multi_robot_config.enable_multi_robot_coordination}")
 
-            # Step 7: Generate enhanced features configuration
-            self.log("\nStep 7: Generating enhanced features configuration...")
+            # Step 7: Generate asset provenance report
+            self.log("\nStep 7: Generating legal provenance report...")
+            provenance_path = output_dir / "legal" / "asset_provenance.json"
+            self.provenance_generator.generate(manifest, provenance_path)
+
+            # Step 8: Generate enhanced features configuration
+            self.log("\nStep 8: Generating enhanced features configuration...")
             enhanced_features_path = output_dir / "enhanced_features.json"
             self._write_enhanced_features_config(
                 manifest=manifest,
                 output_path=enhanced_features_path,
             )
 
-            # Step 8: Write export manifest
-            self.log("\nStep 8: Writing export manifest...")
+            # Step 9: Write export manifest
+            self.log("\nStep 9: Writing export manifest...")
             export_manifest_path = output_dir / "export_manifest.json"
             self._write_export_manifest(
                 result=result,
