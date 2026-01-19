@@ -284,11 +284,13 @@ class AssetProvenanceGenerator:
         scene_id: Optional[str] = None,
         pipeline_version: str = "1.0.0",
         verbose: bool = True,
+        manifest_path: Optional[Path] = None,
     ):
         self.scene_dir = Path(scene_dir)
         self.scene_id = scene_id or self.scene_dir.name
         self.pipeline_version = pipeline_version
         self.verbose = verbose
+        self.manifest_path = manifest_path
 
     def log(self, msg: str) -> None:
         if self.verbose:
@@ -324,7 +326,10 @@ class AssetProvenanceGenerator:
 
     def _load_manifest(self) -> Dict[str, Any]:
         """Load scene manifest."""
-        manifest_path = self.scene_dir / "assets" / "scene_manifest.json"
+        manifest_path = self.manifest_path
+        if manifest_path is None:
+            manifest_path = self.scene_dir / "assets" / "scene_manifest.json"
+
         if manifest_path.exists():
             with open(manifest_path) as f:
                 return json.load(f)
@@ -535,6 +540,7 @@ def generate_asset_provenance(
     output_path: Optional[Path] = None,
     scene_id: Optional[str] = None,
     verbose: bool = True,
+    manifest_path: Optional[Path] = None,
 ) -> SceneProvenance:
     """
     Convenience function to generate asset provenance.
@@ -544,11 +550,17 @@ def generate_asset_provenance(
         output_path: Optional path to save provenance (defaults to scene_dir/legal/asset_provenance.json)
         scene_id: Optional scene ID
         verbose: Print progress
+        manifest_path: Optional path to manifest file
 
     Returns:
         SceneProvenance
     """
-    generator = AssetProvenanceGenerator(scene_dir, scene_id, verbose=verbose)
+    generator = AssetProvenanceGenerator(
+        scene_dir,
+        scene_id,
+        verbose=verbose,
+        manifest_path=manifest_path
+    )
     provenance = generator.generate()
 
     if output_path is None:
