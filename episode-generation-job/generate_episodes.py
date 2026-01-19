@@ -64,10 +64,12 @@ import gc
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 import traceback
 import uuid
+from math import ceil
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -137,6 +139,130 @@ def _compute_collision_free_rate(
         )
         return fallback_rate
 
+
+def _format_bytes(num_bytes: int) -> str:
+    if num_bytes < 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(num_bytes)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    return f"{value:.2f} {units[-1]}"
+
+
+def _parse_headroom_pct() -> float:
+    raw = os.getenv("EXPORT_DISK_HEADROOM_PCT")
+    if not raw:
+        return 0.15
+    try:
+        pct = float(raw)
+        if pct > 1:
+            pct /= 100.0
+        return max(pct, 0.0)
+    except ValueError:
+        logger.warning(
+            "[EPISODE-GEN-JOB] Invalid EXPORT_DISK_HEADROOM_PCT value %r; using default.",
+            raw,
+        )
+        return 0.15
+
+
+def _estimate_export_requirements(
+    episodes: List["GeneratedEpisode"],
+    config: "EpisodeGenerationConfig",
+) -> Dict[str, Any]:
+    expected_episodes = len(episodes)
+    resolution = config.image_resolution
+    width, height = resolution
+    num_cameras = max(config.num_cameras, 1)
+
+    frame_counts = []
+    for episode in episodes:
+        if not episode.trajectory:
+            continue
+        if getattr(episode.trajectory, "num_frames", 0):
+            frame_counts.append(int(episode.trajectory.num_frames))
+        elif getattr(episode.trajectory, "total_duration", 0):
+            frame_counts.append(int(ceil(episode.trajectory.total_duration * config.fps)))
+
+    if frame_counts:
+        frames_per_episode = max(frame_counts)
+        episode_seconds = frames_per_episode / max(config.fps, 1.0)
+    else:
+        episode_seconds = 10.0
+        frames_per_episode = int(ceil(episode_seconds * max(config.fps, 1.0)))
+
+    bytes_per_pixel = {
+        "core": 3,  # RGB
+        "plus": 8,  # RGB + depth + segmentation
+        "full": 16,  # RGB + depth + segmentation + normals/metadata
+    }.get(config.data_pack_tier.lower(), 3)
+
+    pixels_per_frame = width * height
+    per_frame_overhead = 64 * 1024  # metadata, state, compression overhead
+    per_episode_overhead = 5 * 1024 * 1024  # manifests, metadata, stats
+    bytes_per_frame = num_cameras * pixels_per_frame * bytes_per_pixel + per_frame_overhead
+    required_bytes = expected_episodes * (frames_per_episode * bytes_per_frame + per_episode_overhead)
+
+    return {
+        "required_bytes": required_bytes,
+        "expected_episodes": expected_episodes,
+        "frames_per_episode": frames_per_episode,
+        "episode_seconds": episode_seconds,
+        "num_cameras": num_cameras,
+        "resolution": resolution,
+        "bytes_per_pixel": bytes_per_pixel,
+        "bytes_per_frame": bytes_per_frame,
+        "per_frame_overhead": per_frame_overhead,
+        "per_episode_overhead": per_episode_overhead,
+    }
+
+
+def _ensure_disk_space(output_dir: Path, required_bytes: int) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(output_dir)
+    free_bytes = usage.free
+
+    headroom_pct = _parse_headroom_pct()
+    min_free_gb = os.getenv("EXPORT_DISK_FREE_GB")
+    min_free_bytes = 0
+    if min_free_gb:
+        try:
+            min_free_bytes = int(float(min_free_gb) * 1024**3)
+        except ValueError:
+            logger.warning(
+                "[EPISODE-GEN-JOB] Invalid EXPORT_DISK_FREE_GB value %r; ignoring.",
+                min_free_gb,
+            )
+
+    required_with_headroom = int(required_bytes * (1 + headroom_pct))
+    required_threshold = max(required_with_headroom, min_free_bytes)
+
+    logger.info(
+        "[EPISODE-GEN-JOB] Export disk check: estimated=%s, headroom=%.1f%%, "
+        "required_with_headroom=%s, min_free=%s, threshold=%s, free=%s, path=%s",
+        _format_bytes(required_bytes),
+        headroom_pct * 100,
+        _format_bytes(required_with_headroom),
+        _format_bytes(min_free_bytes),
+        _format_bytes(required_threshold),
+        _format_bytes(free_bytes),
+        output_dir,
+    )
+
+    if free_bytes < required_threshold:
+        message = (
+            "Insufficient disk space for LeRobot export. "
+            f"Required {_format_bytes(required_threshold)} "
+            f"(estimated payload {_format_bytes(required_bytes)}, "
+            f"headroom {headroom_pct:.0%}, "
+            f"min free {_format_bytes(min_free_bytes)}), "
+            f"available {_format_bytes(free_bytes)} at {output_dir}."
+        )
+        logger.error("[EPISODE-GEN-JOB] %s", message)
+        raise RuntimeError(message)
 # Core imports
 from motion_planner import AIMotionPlanner, MotionPlan
 from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS, TrajectoryIKError
@@ -1461,6 +1587,18 @@ class EpisodeGenerator:
             output_dir=self.config.output_dir / "lerobot",
             strict_alignment=self._is_production_quality_level(),
         )
+        export_estimate = _estimate_export_requirements(valid_episodes, self.config)
+        self.log(
+            "  Estimated export size: "
+            f"{_format_bytes(export_estimate['required_bytes'])} "
+            f"({export_estimate['expected_episodes']} episodes, "
+            f"{export_estimate['frames_per_episode']} frames/episode "
+            f"~{export_estimate['episode_seconds']:.1f}s, "
+            f"{export_estimate['num_cameras']} cameras @ "
+            f"{export_estimate['resolution'][0]}x{export_estimate['resolution'][1]}, "
+            f"{export_estimate['bytes_per_pixel']} B/pixel)"
+        )
+        _ensure_disk_space(lerobot_config.output_dir, export_estimate["required_bytes"])
         exporter = LeRobotExporter(lerobot_config, verbose=False)
 
         for episode in valid_episodes:
