@@ -945,9 +945,12 @@ def main() -> int:
             failure_reason = failure_reason or "GCS upload failed"
 
     firebase_upload_status_by_robot: Dict[str, str] = {}
+    firebase_upload_prefix = None
     if not skip_local_run and output_dirs:
         firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
         from tools.firebase_upload import FirebaseUploadError, upload_episodes_to_firebase
+        firebase_upload_prefix = f"{firebase_prefix}/{scene_id}"
+        from tools.firebase_upload import upload_episodes_to_firebase
 
         for current_robot, output_dir in output_dirs.items():
             local_result = local_run_results.get(current_robot)
@@ -976,6 +979,55 @@ def main() -> int:
             firebase_upload_status = "failed"
         elif firebase_upload_status_by_robot:
             firebase_upload_status = "completed"
+        if firebase_upload_status == "failed":
+            if job_status != "failed":
+                job_status = "failed"
+            failure_reason = failure_reason or "Firebase upload failed"
+            firebase_failure_details: Dict[str, Any] = {
+                "status_by_robot": firebase_upload_status_by_robot,
+                "errors_by_robot": firebase_upload_error,
+                "failing_robots": sorted(firebase_upload_error.keys()),
+                "local_output_dirs": {
+                    robot: str(output_dirs.get(robot))
+                    for robot in firebase_upload_error.keys()
+                },
+                "remote_prefix": firebase_upload_prefix,
+                "cleanup_task_prefix": firebase_upload_prefix,
+            }
+            uploaded_blob_names: list[str] = []
+            cleanup_error = None
+            list_error = None
+            cleanup_attempted = False
+            if firebase_upload_prefix:
+                try:
+                    from tools.firebase_upload.uploader import init_firebase
+                    from firebase_admin import storage as firebase_storage
+
+                    init_firebase()
+                    bucket = firebase_storage.bucket()
+                    uploaded_blob_names = [
+                        blob.name for blob in bucket.list_blobs(prefix=firebase_upload_prefix)
+                    ]
+                    if uploaded_blob_names:
+                        cleanup_attempted = True
+                        for blob_name in uploaded_blob_names:
+                            bucket.blob(blob_name).delete()
+                except Exception as exc:
+                    if not cleanup_attempted:
+                        list_error = str(exc)
+                    else:
+                        cleanup_error = str(exc)
+            firebase_failure_details["uploaded_blobs"] = uploaded_blob_names
+            if list_error:
+                firebase_failure_details["list_error"] = list_error
+            if cleanup_attempted:
+                firebase_failure_details["cleanup_attempted"] = True
+                if cleanup_error:
+                    firebase_failure_details["cleanup_error"] = cleanup_error
+            failure_details = {
+                **failure_details,
+                "firebase_upload": firebase_failure_details,
+            }
 
     metrics = get_metrics()
     metrics_summary = {
