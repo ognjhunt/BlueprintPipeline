@@ -196,6 +196,9 @@ MIN_QUALITY_SCORE=0.8 \
 | `MIN_QUALITY_SCORE` | Min quality threshold | `0.7` | No |
 | `ENABLE_VALIDATION` | Physics validation | `true` | No |
 | `OUTPUT_DIR` | Episode output directory | `./output` | No |
+| `PARQUET_VERIFICATION_MODE` | Parquet verification (`required`, `allow_fallback`, `disabled`) | `required` | No |
+
+**Parquet dependency note:** Production exports run Parquet verification by default. Install `pyarrow` in production, or set `PARQUET_VERIFICATION_MODE=allow_fallback` with `pandas` + `fastparquet` installed if you need an alternate reader.
 
 ## Kubernetes Deployment (Production)
 

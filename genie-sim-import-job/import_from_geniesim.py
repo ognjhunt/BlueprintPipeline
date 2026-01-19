@@ -29,6 +29,8 @@ Environment Variables:
 """
 
 import hashlib
+import importlib
+import importlib.util
 import json
 import os
 import logging
@@ -71,6 +73,13 @@ from tools.dataset_regression.metrics import compute_regression_metrics
 from tools.error_handling.retry import NonRetryableError, RetryConfig, RetryContext
 from tools.geniesim_adapter.local_framework import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.quality_gates.quality_gate import (
+    QualityGate,
+    QualityGateCheckpoint,
+    QualityGateRegistry,
+    QualityGateResult,
+    QualityGateSeverity,
+)
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
@@ -230,6 +239,30 @@ def _classify_conversion_error_message(message: str) -> str:
     if "schema" in normalized or "column" in normalized:
         return "parquet_missing_column"
     return "lerobot_conversion_error"
+def _read_parquet_dataframe(
+    episode_file: Path,
+    allow_fallback: bool,
+) -> "pd.DataFrame":
+    if importlib.util.find_spec("pyarrow.parquet") is not None:
+        pq = importlib.import_module("pyarrow.parquet")
+        table = pq.read_table(episode_file)
+        return table.to_pandas()
+
+    if not allow_fallback:
+        raise RuntimeError(
+            "Parquet validation requires pyarrow; install pyarrow or allow a fallback reader."
+        )
+
+    if importlib.util.find_spec("pandas") is None:
+        raise RuntimeError(
+            "Parquet validation fallback requires pandas and fastparquet."
+        )
+    if importlib.util.find_spec("fastparquet") is None:
+        raise RuntimeError(
+            "Parquet validation fallback requires fastparquet (pip install fastparquet)."
+        )
+    pd = importlib.import_module("pandas")
+    return pd.read_parquet(episode_file, engine="fastparquet")
 
 
 def _build_dataset_info(
@@ -688,7 +721,11 @@ class ImportResult:
 class ImportedEpisodeValidator:
     """Validates imported episodes from Genie Sim."""
 
-    def __init__(self, min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE):
+    def __init__(
+        self,
+        min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE,
+        require_parquet_validation: bool = True,
+    ):
         """
         Initialize validator.
 
@@ -696,6 +733,7 @@ class ImportedEpisodeValidator:
             min_quality_score: Minimum quality score to pass
         """
         self.min_quality_score = min_quality_score
+        self.require_parquet_validation = require_parquet_validation
 
     def validate_episode(
         self,
@@ -745,9 +783,10 @@ class ImportedEpisodeValidator:
 
         # Load and validate episode data structure
         try:
-            import pyarrow.parquet as pq
-            table = pq.read_table(episode_file)
-            df = table.to_pandas()
+            df = _read_parquet_dataframe(
+                episode_file,
+                allow_fallback=self.require_parquet_validation,
+            )
 
             # Check required fields
             required_fields = ["observation", "action"]
@@ -798,8 +837,8 @@ class ImportedEpisodeValidator:
                         if np.abs(action_values).max() > 10.0:
                             warnings.append(f"Action values in '{action_col}' exceed reasonable bounds (max: {np.abs(action_values).max():.2f})")
 
-        except ImportError:
-            warnings.append("PyArrow not available - skipping detailed validation")
+        except RuntimeError as exc:
+            errors.append(str(exc))
         except Exception as e:
             warnings.append(f"Failed to load episode data for validation: {e}")
 
@@ -1267,7 +1306,10 @@ def run_local_import_job(
         result.errors.append(f"No local episode files found under {recordings_dir}")
         return result
 
-    validator = ImportedEpisodeValidator(min_quality_score=config.min_quality_score)
+    validator = ImportedEpisodeValidator(
+        min_quality_score=config.min_quality_score,
+        require_parquet_validation=config.enable_validation,
+    )
     validation_summary = validator.validate_batch(episode_metadata_list, recordings_dir)
     for entry in validation_summary["episode_results"]:
         metrics.episode_quality_score.observe(
@@ -1808,6 +1850,63 @@ def run_local_import_job(
 # =============================================================================
 
 
+def _emit_import_quality_gate(result: ImportResult, scene_id: str) -> None:
+    checkpoint = QualityGateCheckpoint.GENIESIM_IMPORT_COMPLETE
+    registry = QualityGateRegistry(verbose=True)
+
+    def _check_import(ctx: Dict[str, Any]) -> QualityGateResult:
+        passed = ctx["success"]
+        severity = QualityGateSeverity.INFO if passed else QualityGateSeverity.ERROR
+        message = (
+            "Genie Sim import completed successfully"
+            if passed
+            else "Genie Sim import completed with errors"
+        )
+        details = {
+            "episodes_passed_validation": ctx["episodes_passed_validation"],
+            "episodes_filtered": ctx["episodes_filtered"],
+            "average_quality_score": ctx["average_quality_score"],
+            "import_manifest_path": ctx["import_manifest_path"],
+            "errors": ctx["errors"],
+            "warnings": ctx["warnings"],
+            "checksum_verification_passed": ctx["checksum_verification_passed"],
+            "upload_status": ctx["upload_status"],
+        }
+        return QualityGateResult(
+            gate_id="import_complete",
+            checkpoint=checkpoint,
+            passed=passed,
+            severity=severity,
+            message=message,
+            details=details,
+        )
+
+    registry.register(QualityGate(
+        id="import_complete",
+        name="Genie Sim Import Complete",
+        checkpoint=checkpoint,
+        severity=QualityGateSeverity.INFO,
+        description="Emit a completion gate for Genie Sim import validation.",
+        check_fn=_check_import,
+    ))
+
+    context = {
+        "scene_id": scene_id,
+        "success": result.success,
+        "episodes_passed_validation": result.episodes_passed_validation,
+        "episodes_filtered": result.episodes_filtered,
+        "average_quality_score": result.average_quality_score,
+        "import_manifest_path": str(result.import_manifest_path)
+        if result.import_manifest_path
+        else None,
+        "errors": result.errors,
+        "warnings": result.warnings,
+        "checksum_verification_passed": result.checksum_verification_passed,
+        "upload_status": result.upload_status,
+    }
+    registry.run_checkpoint(checkpoint, context)
+
+
 def main():
     """Main entry point for import job."""
     print("\n[GENIE-SIM-IMPORT] Starting import job...")
@@ -1946,6 +2045,10 @@ def main():
         metrics = get_metrics()
         with metrics.track_job("genie-sim-import-job", scene_id):
             result = run_local_import_job(config, job_metadata=job_metadata)
+        try:
+            _emit_import_quality_gate(result, scene_id)
+        except Exception as exc:
+            print(f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}")
 
         if result.success:
             print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")

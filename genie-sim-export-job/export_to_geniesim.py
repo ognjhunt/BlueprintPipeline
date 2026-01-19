@@ -598,11 +598,7 @@ def run_geniesim_export_job(
     if HAVE_QUALITY_GATES:
         print("\n[GENIESIM-EXPORT-JOB] Running quality gates before export...")
         try:
-            checkpoint = getattr(
-                QualityGateCheckpoint,
-                "GENIESIM_EXPORT_READY",
-                QualityGateCheckpoint.REPLICATOR_COMPLETE,
-            )
+            checkpoint = QualityGateCheckpoint.GENIESIM_EXPORT_READY
             registry = QualityGateRegistry(verbose=True)
 
             def _build_result(
