@@ -203,7 +203,7 @@ class CommandType(int, Enum):
     """
     # Camera Commands
     GET_CAMERA_DATA = 1
-    GET_SEMANTIC_DATA = 1
+    GET_SEMANTIC_DATA = 10  # Local unique ID; mapped to GET_CAMERA_DATA for gRPC.
 
     # Motion Commands
     LINEAR_MOVE = 2
@@ -234,8 +234,8 @@ class CommandType(int, Enum):
 
     # Observation & Recording
     GET_OBSERVATION = 11
-    START_RECORDING = 11
-    STOP_RECORDING = 11
+    START_RECORDING = 15  # Local unique ID; mapped to GET_OBSERVATION for gRPC.
+    STOP_RECORDING = 20  # Local unique ID; mapped to GET_OBSERVATION for gRPC.
 
     # System Commands
     RESET = 12
@@ -720,7 +720,12 @@ class GenieSimGRPCClient:
         # Real gRPC implementation
         def _request() -> SendCommandResponse:
             # Convert to gRPC command type
-            grpc_command = GrpcCommandType(command.value)
+            if command == CommandType.GET_SEMANTIC_DATA:
+                grpc_command = GrpcCommandType.GET_CAMERA_DATA
+            elif command in (CommandType.START_RECORDING, CommandType.STOP_RECORDING):
+                grpc_command = GrpcCommandType.GET_OBSERVATION
+            else:
+                grpc_command = GrpcCommandType(command.value)
 
             # Create request
             request = CommandRequest(
