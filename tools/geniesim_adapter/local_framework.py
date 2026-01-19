@@ -733,6 +733,11 @@ class GenieSimGRPCClient:
         if not response.success:
             return {"success": False}
 
+        result = self._format_observation_response(response)
+        self._latest_observation = result
+        return result
+
+    def _format_observation_response(self, response: GetObservationResponse) -> Dict[str, Any]:
         result = {
             "success": True,
             "robot_state": response.robot_state.to_dict() if response.robot_state else {},
@@ -759,8 +764,42 @@ class GenieSimGRPCClient:
         else:
             result["camera_observation"] = {"images": []}
 
-        self._latest_observation = result
         return result
+
+    def stream_observations(
+        self,
+        *,
+        include_images: bool = True,
+        include_depth: bool = True,
+        include_semantic: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Optional[Any]:
+        """
+        Stream observations from the simulation.
+
+        Uses real gRPC StreamObservations call.
+
+        Returns:
+            Stream iterator or None if unavailable
+        """
+        if not self._have_grpc or self._stub is None:
+            return None
+
+        request = GetObservationRequest(
+            include_images=include_images,
+            include_depth=include_depth,
+            include_semantic=include_semantic,
+        )
+
+        def _request() -> Any:
+            return self._stub.StreamObservations(request, timeout=timeout or self.timeout)
+
+        stream = self._call_grpc(
+            "StreamObservations",
+            _request,
+            None,
+        )
+        return stream
 
     def set_joint_position(self, positions: List[float]) -> bool:
         """
@@ -1690,37 +1729,98 @@ class GenieSimLocalFramework:
                 result["error"] = "Motion planning failed"
                 return result
 
-            # Execute trajectory and collect data
-            frames = []
-            for step_idx, waypoint in enumerate(trajectory):
-                # Set joint positions
-                self._client.set_joint_position(waypoint["joint_positions"])
+            timed_trajectory = self._ensure_trajectory_timestamps(trajectory)
 
-                # Get observation
-                obs = self._client.get_observation()
+            collector_state = {
+                "observations": [],
+                "error": None,
+                "mode": "streaming",
+                "start_time": None,
+            }
+            start_event = threading.Event()
+            timestamps = [waypoint["timestamp"] for waypoint in timed_trajectory]
 
-                # Capture camera data
-                for camera_id in ["wrist", "overhead", "side"]:
-                    try:
-                        camera_data = self._client.get_camera_data(camera_id)
-                        if camera_data is not None:
-                            obs.setdefault("camera_frames", {})[camera_id] = camera_data
-                    except Exception:
-                        logger.warning(
-                            "Camera capture failed (camera_id=%s, episode_id=%s, task_name=%s, task_id=%s).",
-                            camera_id,
-                            episode_id,
-                            task.get("task_name"),
-                            task.get("task_id"),
-                            exc_info=True,
-                        )
+            def _collect_streaming() -> None:
+                try:
+                    stream = self._client.stream_observations()
+                    if stream is None:
+                        collector_state["mode"] = "polling"
+                        _collect_polling()
+                        return
+                    for response in stream:
+                        if not response.success:
+                            collector_state["error"] = (
+                                "Observation stream returned unsuccessful response."
+                            )
+                            break
+                        obs_frame = self._client._format_observation_response(response)
+                        collector_state["observations"].append(obs_frame)
+                except Exception as exc:
+                    collector_state["error"] = (
+                        f"Observation stream failed after "
+                        f"{len(collector_state['observations'])} frames: {exc}"
+                    )
 
-                frames.append({
-                    "step": step_idx,
-                    "observation": obs,
-                    "action": waypoint["joint_positions"],
-                    "timestamp": step_idx / 30.0,  # Assuming 30Hz
-                })
+            def _collect_polling() -> None:
+                try:
+                    start_event.wait()
+                    start_time = collector_state["start_time"] or time.time()
+                    for planned_timestamp in timestamps:
+                        target_time = start_time + planned_timestamp
+                        sleep_for = target_time - time.time()
+                        if sleep_for > 0:
+                            time.sleep(sleep_for)
+                        obs_frame = self._client.get_observation()
+                        if not obs_frame.get("success"):
+                            collector_state["error"] = (
+                                "Timed observation polling returned unsuccessful response."
+                            )
+                            break
+                        obs_frame["planned_timestamp"] = planned_timestamp
+                        collector_state["observations"].append(obs_frame)
+                except Exception as exc:
+                    collector_state["error"] = (
+                        f"Timed observation polling failed after "
+                        f"{len(collector_state['observations'])} frames: {exc}"
+                    )
+
+            collector_thread = threading.Thread(target=_collect_streaming, daemon=True)
+            collector_thread.start()
+
+            collector_state["start_time"] = time.time()
+            start_event.set()
+
+            execution_success = self._client.execute_trajectory(timed_trajectory)
+            trajectory_duration = (timestamps[-1] - timestamps[0]) if timestamps else 0.0
+            collector_thread.join(timeout=trajectory_duration + 10.0)
+
+            if collector_thread.is_alive():
+                collector_state["error"] = (
+                    "Observation collection did not complete before timeout."
+                )
+
+            if not execution_success:
+                result["error"] = "Trajectory execution failed"
+                return result
+
+            if collector_state["error"]:
+                result["error"] = collector_state["error"]
+                return result
+
+            aligned_observations = self._align_observations_to_trajectory(
+                timed_trajectory,
+                collector_state["observations"],
+            )
+            if aligned_observations is None:
+                result["error"] = "Failed to align observations with trajectory."
+                return result
+
+            frames = self._build_frames_from_trajectory(
+                timed_trajectory,
+                aligned_observations,
+                task=task,
+                episode_id=episode_id,
+            )
 
             # Stop recording
             self._client.stop_recording()
@@ -1760,6 +1860,113 @@ class GenieSimLocalFramework:
             self._client.stop_recording()
 
         return result
+
+    def _ensure_trajectory_timestamps(
+        self,
+        trajectory: List[Dict[str, Any]],
+        fps: float = 30.0,
+    ) -> List[Dict[str, Any]]:
+        timed_trajectory: List[Dict[str, Any]] = []
+        current_time = 0.0
+        dt = 1.0 / fps
+        for index, waypoint in enumerate(trajectory):
+            waypoint = dict(waypoint)
+            timestamp = waypoint.get("timestamp")
+            if timestamp is None:
+                timestamp = current_time if index == 0 else current_time + dt
+            else:
+                try:
+                    timestamp = float(timestamp)
+                except (TypeError, ValueError):
+                    timestamp = current_time if index == 0 else current_time + dt
+            if index > 0 and timestamp <= current_time:
+                timestamp = current_time + dt
+            waypoint["timestamp"] = timestamp
+            current_time = timestamp
+            timed_trajectory.append(waypoint)
+        return timed_trajectory
+
+    def _align_observations_to_trajectory(
+        self,
+        trajectory: List[Dict[str, Any]],
+        observations: List[Dict[str, Any]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not observations:
+            return None
+
+        def _obs_timestamp(obs: Dict[str, Any], index: int) -> float:
+            timestamp = obs.get("timestamp")
+            if timestamp is None:
+                timestamp = obs.get("planned_timestamp")
+            if timestamp is None:
+                return float(index)
+            try:
+                return float(timestamp)
+            except (TypeError, ValueError):
+                return float(index)
+
+        indexed_obs = [
+            (idx, obs, _obs_timestamp(obs, idx)) for idx, obs in enumerate(observations)
+        ]
+        indexed_obs.sort(key=lambda item: item[2])
+        obs_list = [item[1] for item in indexed_obs]
+        obs_times = [item[2] for item in indexed_obs]
+
+        aligned = []
+        obs_index = 0
+        for waypoint in trajectory:
+            target_time = float(waypoint["timestamp"])
+            while obs_index + 1 < len(obs_times) and obs_times[obs_index + 1] <= target_time:
+                obs_index += 1
+            if obs_index + 1 < len(obs_times):
+                prev_time = obs_times[obs_index]
+                next_time = obs_times[obs_index + 1]
+                if abs(next_time - target_time) < abs(target_time - prev_time):
+                    obs_index += 1
+            aligned.append(obs_list[obs_index])
+        return aligned
+
+    def _build_frames_from_trajectory(
+        self,
+        trajectory: List[Dict[str, Any]],
+        observations: List[Dict[str, Any]],
+        *,
+        task: Dict[str, Any],
+        episode_id: str,
+    ) -> List[Dict[str, Any]]:
+        frames: List[Dict[str, Any]] = []
+        for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
+            self._attach_camera_frames(obs, episode_id=episode_id, task=task)
+            frames.append({
+                "step": step_idx,
+                "observation": obs,
+                "action": waypoint["joint_positions"],
+                "timestamp": waypoint["timestamp"],
+            })
+        return frames
+
+    def _attach_camera_frames(
+        self,
+        obs: Dict[str, Any],
+        *,
+        episode_id: str,
+        task: Dict[str, Any],
+    ) -> None:
+        setattr(self._client, "_latest_observation", obs)
+        for camera_id in ["wrist", "overhead", "side"]:
+            try:
+                camera_data = self._client.get_camera_data(camera_id)
+                if camera_data is not None:
+                    obs.setdefault("camera_frames", {})[camera_id] = camera_data
+            except Exception:
+                logger.warning(
+                    "Camera capture failed (camera_id=%s, episode_id=%s, task_name=%s, task_id=%s).",
+                    camera_id,
+                    episode_id,
+                    task.get("task_name"),
+                    task.get("task_id"),
+                    exc_info=True,
+                )
 
     def _generate_trajectory(
         self,
