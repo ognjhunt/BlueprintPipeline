@@ -1382,8 +1382,14 @@ class EpisodeGenerator:
 
     def _enforce_physics_backed_qc(self, validated_episodes: List[GeneratedEpisode]) -> None:
         """Ensure production exports only use physics-backed QC results."""
-        if not self._is_production_quality_level():
+        enforcement_reasons = []
+        if resolve_production_mode():
+            enforcement_reasons.append("production environment (resolve_production_mode)")
+        if self._is_production_quality_level():
+            enforcement_reasons.append("production data quality level (DATA_QUALITY_LEVEL=production)")
+        if not enforcement_reasons:
             return
+        enforcement_label = ", ".join(enforcement_reasons)
 
         if not HAVE_QUALITY_SYSTEM:
             raise RuntimeError(
@@ -1393,7 +1399,8 @@ class EpisodeGenerator:
         if not self.validator or not self.validator.is_using_real_physics():
             raise ProductionDataQualityError(
                 "Production exports require physics-backed QC results. "
-                "Run with Isaac Sim or Isaac Lab + PhysX enabled."
+                "Run with Isaac Sim or Isaac Lab + PhysX enabled. "
+                f"(Enforced by {enforcement_label}.)"
             )
 
         non_physics = [
@@ -1405,7 +1412,8 @@ class EpisodeGenerator:
         if non_physics:
             raise ProductionDataQualityError(
                 "Production exports require physics-backed QC results for every episode. "
-                f"Found {len(non_physics)} episodes without physics-backed validation."
+                f"Found {len(non_physics)} episodes without physics-backed validation. "
+                f"(Enforced by {enforcement_label}.)"
             )
 
     def _apply_camera_capture_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
