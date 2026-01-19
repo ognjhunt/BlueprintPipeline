@@ -74,7 +74,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
@@ -87,6 +87,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.config.env import parse_bool_env
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
+from tools.metrics.pipeline_metrics import get_metrics
 
 from trajectory_solver import JointTrajectory, JointState, RobotConfig, ROBOT_CONFIGS
 
@@ -158,6 +159,45 @@ def _checksum_file(path: Path, algo: str = "sha256") -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _classify_export_validation_error(message: str) -> Optional[str]:
+    normalized = message.lower()
+    if "missing camera" in normalized or "requires rgb" in normalized:
+        return "camera_missing"
+    if "requires depth" in normalized or "depth maps" in normalized:
+        return "depth_missing"
+    if "segmentation" in normalized and "requires" in normalized:
+        return "segmentation_missing"
+    if "trajectory" in normalized and "missing" in normalized:
+        return "trajectory_missing"
+    if "frame" in normalized and ("mismatch" in normalized or "misaligned" in normalized):
+        return "frame_mismatch"
+    if "calibration" in normalized:
+        return "camera_calibration_invalid"
+    return None
+
+
+def _collect_export_validation_error_types(errors: List[str]) -> List[str]:
+    error_types: Set[str] = set()
+    for message in errors:
+        error_type = _classify_export_validation_error(message)
+        if error_type:
+            error_types.add(error_type)
+    return sorted(error_types)
+
+
+def _classify_export_failure_message(message: str) -> str:
+    normalized = message.lower()
+    if "parquet" in normalized:
+        return "parquet_write_failed"
+    if "visual" in normalized or "video" in normalized:
+        return "visual_export_failed"
+    if "ground-truth" in normalized or "ground truth" in normalized:
+        return "ground_truth_export_failed"
+    if "checksum" in normalized:
+        return "checksum_write_failed"
+    return "lerobot_export_failed"
 
 
 @dataclass
@@ -356,6 +396,8 @@ class LeRobotExporter:
         self.robot_config = ROBOT_CONFIGS.get(config.robot_type, ROBOT_CONFIGS["franka"])
         self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
         self._path_redaction_regex = re.compile(r"(?:[A-Za-z]:\\\\|/)[^\\s]+")
+        self._metrics = get_metrics()
+        self._metrics_labels = self._build_metrics_labels()
 
         # Episode storage
         self.episodes: List[LeRobotEpisode] = []
@@ -381,6 +423,18 @@ class LeRobotExporter:
         self._export_output_dir: Optional[Path] = None
         self.dropped_frames_total: int = 0
         self._v3_episode_index: Dict[str, Any] = {}
+
+    def _build_metrics_labels(self) -> Dict[str, str]:
+        job_name = os.getenv("JOB_NAME", "episode-generation-job")
+        scene_id = os.getenv("SCENE_ID", "unknown")
+        labels = {
+            "job": job_name,
+            "scene_id": scene_id,
+        }
+        job_id = os.getenv("JOB_ID") or os.getenv("RUN_ID")
+        if job_id:
+            labels["job_id"] = job_id
+        return labels
 
     def _is_v3_export(self) -> bool:
         return self.export_format == LeRobotExportFormat.LEROBOT_V3
@@ -474,6 +528,11 @@ class LeRobotExporter:
             self._log_export_state(f"{message}: {error_message}", "ERROR")
         else:
             self._log_export_state(message, "ERROR")
+        self._metrics.lerobot_conversion_fail_total.inc(labels={
+            **self._metrics_labels,
+            "status": "failure",
+            "error_type": _classify_export_failure_message(message),
+        })
         temp_dir = self._temp_export_dir
         if temp_dir is None:
             return
@@ -1011,6 +1070,10 @@ class LeRobotExporter:
             camera_error_counts=camera_error_counts,
         )
 
+        self._metrics.episode_quality_score.observe(
+            quality_score,
+            labels=self._metrics_labels,
+        )
         self.episodes.append(episode)
 
         # Log with visual observation info if present
@@ -1728,10 +1791,32 @@ class LeRobotExporter:
         data_dir.mkdir(exist_ok=True)
 
         try:
+            metrics = self._metrics
+            metrics_labels = dict(self._metrics_labels)
+            failed_episode_ids: Set[int] = set()
+            failed_error_types: Dict[int, Set[str]] = {}
+
+            def record_validation_failures(
+                entries: List[Tuple[int, List[str]]],
+                fallback_type: str,
+            ) -> None:
+                for episode_index, errors in entries:
+                    error_types = _collect_export_validation_error_types(errors)
+                    if not error_types:
+                        error_types = [fallback_type]
+                    failed_error_types.setdefault(episode_index, set()).update(error_types)
+                    if episode_index not in failed_episode_ids:
+                        metrics.episode_validation_fail_total.inc(labels={
+                            **metrics_labels,
+                            "status": "failure",
+                        })
+                        failed_episode_ids.add(episode_index)
+
             # Validate episode completeness before export
             self.log("Validating episode completeness...")
             incomplete = self._validate_episode_completeness()
             if incomplete:
+                record_validation_failures(incomplete, "episode_incomplete")
                 sample_limit = 5
                 self.log(
                     "  ERROR: Incomplete episodes detected "
@@ -1774,6 +1859,7 @@ class LeRobotExporter:
             self.log("Validating data pack tier compliance...")
             non_compliant = self._validate_data_pack_tier_compliance()
             if non_compliant:
+                record_validation_failures(non_compliant, "tier_non_compliant")
                 self.log(
                     f"  Found {len(non_compliant)} tier-non-compliant episodes:",
                     "WARNING",
@@ -1844,6 +1930,13 @@ class LeRobotExporter:
             self.log("Validating trajectory-sensor frame alignment...")
             alignment_errors = self._validate_trajectory_sensor_alignment()
             if alignment_errors:
+                record_validation_failures(
+                    [
+                        (entry["episode_index"], entry["errors"])
+                        for entry in alignment_errors
+                    ],
+                    "trajectory_alignment_failed",
+                )
                 self.log(f"  Found {len(alignment_errors)} episodes with alignment issues:", "WARNING")
                 for entry in alignment_errors[:5]:  # Show first 5 episodes
                     self.log(f"    Episode {entry['episode_index']}:", "WARNING")
@@ -1887,6 +1980,22 @@ class LeRobotExporter:
                 ]
             else:
                 self.log("  All episodes have aligned trajectory-sensor frames")
+
+            if failed_error_types:
+                for error_types in failed_error_types.values():
+                    for error_type in error_types:
+                        metrics.episode_validation_error_total.inc(labels={
+                            **metrics_labels,
+                            "status": "failure",
+                            "error_type": error_type,
+                        })
+
+            for episode in self.episodes:
+                if episode.episode_index not in failed_episode_ids:
+                    metrics.episode_validation_pass_total.inc(labels={
+                        **metrics_labels,
+                        "status": "success",
+                    })
 
             # Step 1: Write episode data (joint-space trajectories)
             self.log("Writing episode data...")
