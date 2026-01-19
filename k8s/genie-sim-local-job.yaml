@@ -1,0 +1,129 @@
+# =============================================================================
+# Kubernetes Job: Genie Sim Local Submit
+# =============================================================================
+# Runs Genie Sim submit workflow against a local gRPC service.
+#
+# Apply:
+#   JOB_NAME=genie-sim-local \
+#   SCENE_ID=scene_123 \
+#   BUCKET=example-bucket \
+#   envsubst < k8s/genie-sim-local-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: genie-sim-local-config
+  namespace: blueprint
+data:
+  EPISODES_PER_TASK: "10"
+  NUM_VARIATIONS: "5"
+  ROBOT_TYPE: "franka"
+  GENIESIM_HOST: "localhost"
+  GENIESIM_PORT: "50051"
+  GENIESIM_ROOT: "/opt/geniesim"
+  ISAAC_SIM_PATH: "/isaac-sim"
+  GENIESIM_FORCE_LOCAL: "true"
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: genie-sim-local
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: genie-sim-local
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: genie-sim-local
+          image: gcr.io/${PROJECT_ID}/blueprint-genie-sim-local:latest
+          imagePullPolicy: Always
+
+          command: ["python", "/app/genie-sim-submit-job/submit_to_geniesim.py"]
+
+          envFrom:
+            - configMapRef:
+                name: genie-sim-local-config
+
+          env:
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: ROBOT_TYPE
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-local-overrides
+                  key: ROBOT_TYPE
+                  optional: true
+            - name: GENIESIM_PREFIX
+              value: "scenes/$(SCENE_ID)/geniesim"
+            - name: JOB_OUTPUT_PATH
+              value: "scenes/$(SCENE_ID)/geniesim/job.json"
+            - name: OUTPUT_PREFIX
+              value: "scenes/$(SCENE_ID)/episodes"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: FIREBASE_STORAGE_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-local-overrides
+                  key: FIREBASE_STORAGE_BUCKET
+                  optional: true
+            - name: FIREBASE_SERVICE_ACCOUNT_JSON
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-local-overrides
+                  key: FIREBASE_SERVICE_ACCOUNT_JSON
+                  optional: true
+            - name: FIREBASE_SERVICE_ACCOUNT_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-local-overrides
+                  key: FIREBASE_SERVICE_ACCOUNT_PATH
+                  optional: true
+            - name: FIREBASE_EPISODE_PREFIX
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-local-overrides
+                  key: FIREBASE_EPISODE_PREFIX
+                  optional: true
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}

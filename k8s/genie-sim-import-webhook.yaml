@@ -1,0 +1,99 @@
+# =============================================================================
+# Kubernetes Deployment: Genie Sim Import Webhook
+# =============================================================================
+# Webhook service for ingesting Genie Sim import completion events.
+#
+# Apply:
+#   PROJECT_ID=example-project envsubst < k8s/genie-sim-import-webhook.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: genie-sim-import-webhook-config
+  namespace: blueprint
+data:
+  PORT: "8080"
+  WORKFLOW_NAME: "genie-sim-import-pipeline"
+  WORKFLOW_REGION: "us-central1"
+  FIRESTORE_DEDUP_COLLECTION: "webhook_dedup"
+  ENV: "production"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genie-sim-import-webhook
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: genie-sim-import-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blueprint-pipeline
+      component: genie-sim-import-webhook
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: genie-sim-import-webhook
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      serviceAccountName: blueprint-pipeline-sa
+      containers:
+        - name: genie-sim-import-webhook
+          image: gcr.io/${PROJECT_ID}/blueprint-genie-sim-import-webhook:latest
+          imagePullPolicy: Always
+          command: ["gunicorn", "-b", ":8080", "main:app"]
+          envFrom:
+            - configMapRef:
+                name: genie-sim-import-webhook-config
+          env:
+            - name: PROJECT_ID
+              value: "${PROJECT_ID}"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "${PROJECT_ID}"
+            - name: WEBHOOK_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: genie-sim-import-webhook-secrets
+                  key: WEBHOOK_HMAC_SECRET
+                  optional: true
+            - name: WEBHOOK_OIDC_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: genie-sim-import-webhook-secrets
+                  key: WEBHOOK_OIDC_AUDIENCE
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: genie-sim-import-webhook
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: genie-sim-import-webhook
+spec:
+  type: ClusterIP
+  selector:
+    app: blueprint-pipeline
+    component: genie-sim-import-webhook
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

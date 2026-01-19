@@ -1,0 +1,112 @@
+# =============================================================================
+# Kubernetes Job: Genie Sim Export
+# =============================================================================
+# Exports BlueprintPipeline scenes to Genie Sim format.
+#
+# Apply:
+#   JOB_NAME=genie-sim-export \
+#   SCENE_ID=scene_123 \
+#   BUCKET=example-bucket \
+#   envsubst < k8s/genie-sim-export-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: genie-sim-export-config
+  namespace: blueprint
+data:
+  MAX_TASKS: "50"
+  GENERATE_EMBEDDINGS: "false"
+  REQUIRE_EMBEDDINGS: "false"
+  FILTER_COMMERCIAL: "true"
+  COPY_USD: "true"
+  ENABLE_MULTI_ROBOT: "true"
+  ENABLE_BIMANUAL: "true"
+  ENABLE_VLA_PACKAGES: "true"
+  ENABLE_RICH_ANNOTATIONS: "true"
+  ENABLE_PREMIUM_ANALYTICS: "true"
+  REQUIRE_QUALITY_GATES: "true"
+  STRICT_PREMIUM_FEATURES: "false"
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: genie-sim-export
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: genie-sim-export
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: genie-sim-export
+          image: gcr.io/${PROJECT_ID}/blueprint-genie-sim-export:latest
+          imagePullPolicy: Always
+
+          command: ["python", "export_to_geniesim.py"]
+          workingDir: /app/genie-sim-export-job
+
+          envFrom:
+            - configMapRef:
+                name: genie-sim-export-config
+
+          env:
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: ASSETS_PREFIX
+              value: "scenes/$(SCENE_ID)/assets"
+            - name: GENIESIM_PREFIX
+              value: "scenes/$(SCENE_ID)/geniesim"
+            - name: VARIATION_ASSETS_PREFIX
+              value: "scenes/$(SCENE_ID)/variation-assets"
+            - name: REPLICATOR_PREFIX
+              value: "scenes/$(SCENE_ID)/replicator"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: URDF_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-export-overrides
+                  key: URDF_PATH
+                  optional: true
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
