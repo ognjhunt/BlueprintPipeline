@@ -563,12 +563,28 @@ main:
         assign:
           - buildPollStartTime: '${time.format(sys.now())}'
           - buildPollAttempt: 0
+          - maxPollIntervalSeconds: 300
+        next: compute_build_poll_sleep
+
+    - compute_build_poll_sleep:
+        assign:
+          - buildPollSleepBaseSeconds: '${if(30 * math.pow(2, buildPollAttempt) > maxPollIntervalSeconds, maxPollIntervalSeconds, 30 * math.pow(2, buildPollAttempt))}'
+          - buildPollSleepJitterFactor: '${(sys.random() * 0.2) - 0.1}'
+          - buildPollSleepSecondsRaw: '${int(buildPollSleepBaseSeconds * (1 + buildPollSleepJitterFactor))}'
+          - buildPollSleepSeconds: '${if(buildPollSleepSecondsRaw < 1, 1, buildPollSleepSecondsRaw)}'
+        next: log_build_poll_sleep
+
+    - log_build_poll_sleep:
+        call: sys.log
+        args:
+          text: '${"Waiting " + string(buildPollSleepSeconds) + "s before polling build status (attempt " + string(buildPollAttempt) + ") for scene " + sceneId}'
+          severity: "INFO"
         next: wait_for_build
 
     - wait_for_build:
         call: sys.sleep
         args:
-          seconds: 30
+          seconds: ${buildPollSleepSeconds}
         next: check_build_status
 
     - check_build_status:
@@ -598,13 +614,7 @@ main:
         switch:
           - condition: '${buildPollElapsedSeconds >= buildPollTimeoutSeconds}'
             next: build_poll_timeout_failed
-        next: wait_for_build_poll
-
-    - wait_for_build_poll:
-        call: sys.sleep
-        args:
-          seconds: 30
-        next: check_build_status
+        next: compute_build_poll_sleep
 
     - build_poll_timeout_failed:
         assign:
