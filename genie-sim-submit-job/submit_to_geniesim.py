@@ -947,7 +947,7 @@ def main() -> int:
     firebase_upload_status_by_robot: Dict[str, str] = {}
     if not skip_local_run and output_dirs:
         firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
-        from tools.firebase_upload import upload_episodes_to_firebase
+        from tools.firebase_upload import FirebaseUploadError, upload_episodes_to_firebase
 
         for current_robot, output_dir in output_dirs.items():
             local_result = local_run_results.get(current_robot)
@@ -961,6 +961,8 @@ def main() -> int:
                 )
                 firebase_upload_status_by_robot[current_robot] = "completed"
             except Exception as exc:
+                if isinstance(exc, FirebaseUploadError):
+                    firebase_upload_summary[current_robot] = exc.summary
                 firebase_upload_error[current_robot] = str(exc)
                 submission_message = (
                     "Local Genie Sim execution completed; Firebase upload failed."
