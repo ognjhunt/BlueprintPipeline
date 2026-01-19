@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
+from tools.config.production_mode import resolve_production_mode
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
@@ -121,6 +122,18 @@ def _parse_int_env(var_name: str, default: int) -> int:
         return default
     try:
         return int(value)
+    except ValueError:
+        logger.warning("[USD] Invalid %s=%s; using %s", var_name, value, default)
+        return default
+
+
+def _parse_float_env(var_name: str, default: float) -> float:
+    """Parse float environment values with fallback."""
+    value = os.getenv(var_name)
+    if value is None:
+        return default
+    try:
+        return float(value)
     except ValueError:
         logger.warning("[USD] Invalid %s=%s; using %s", var_name, value, default)
         return default
@@ -1304,6 +1317,11 @@ def build_scene(
         "true",
         "yes",
     )
+    allow_synthetic_layout = os.getenv("ALLOW_SYNTHETIC_LAYOUT", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
     metadata_cache = SizedCache(metadata_cache_size)
     usdz_cache = SizedCache(usdz_cache_size)
 
@@ -1369,6 +1387,46 @@ def build_scene(
                     )
                     break
 
+        spatial_threshold = _parse_float_env("USD_LAYOUT_SPATIAL_THRESHOLD", 0.7)
+        layout_objects_list = layout.get("objects", [])
+        total_layout_objects = len(layout_objects_list)
+        objects_with_spatial = sum(
+            1
+            for obj in layout_objects_list
+            if obj.get("obb") is not None or obj.get("center3d") is not None
+        )
+        percent_with_spatial = (
+            objects_with_spatial / total_layout_objects if total_layout_objects else 0.0
+        )
+        below_threshold = (
+            total_layout_objects > 0 and percent_with_spatial < spatial_threshold
+        )
+        layout_spatial_quality = {
+            "layout_path": str(layout_used_path),
+            "total_objects": total_layout_objects,
+            "objects_with_spatial": objects_with_spatial,
+            "percent_with_spatial": round(percent_with_spatial, 4),
+            "threshold": spatial_threshold,
+            "below_threshold": below_threshold,
+            "allow_synthetic_layout": allow_synthetic_layout,
+        }
+
+        if below_threshold:
+            logger.warning(
+                "[USD] WARNING: Spatial data coverage %.1f%% (%s/%s) below threshold %.1f%% "
+                "for layout %s",
+                percent_with_spatial * 100,
+                objects_with_spatial,
+                total_layout_objects,
+                spatial_threshold * 100,
+                layout_used_path,
+            )
+            if resolve_production_mode() and not allow_synthetic_layout:
+                raise ValueError(
+                    "Spatial data coverage below threshold in production mode. "
+                    "Set ALLOW_SYNTHETIC_LAYOUT=true to override."
+                )
+
         # Flag to track if we need to generate synthetic positions
         using_synthetic_positions = False
 
@@ -1381,6 +1439,7 @@ def build_scene(
                 ", ".join(tried_paths),
             )
             using_synthetic_positions = True
+        layout_spatial_quality["using_synthetic_positions"] = using_synthetic_positions
 
         if layout_used_path != layout_path:
             logger.info("[USD] Layout override: using %s", layout_used_path)
@@ -1544,6 +1603,11 @@ def build_scene(
     with timed_phase("prim creation"):
         builder.add_cameras(cameras)
         builder.add_objects(objects, layout_objects, room_box)
+
+    root_layer = stage.GetRootLayer()
+    custom_data = dict(root_layer.customLayerData or {})
+    custom_data["layout_spatial_quality"] = layout_spatial_quality
+    root_layer.customLayerData = custom_data
 
     # Save stage
     stage.GetRootLayer().Save()
