@@ -2579,8 +2579,37 @@ class LocalPipelineRunner:
             from tools.firebase_upload import upload_episodes_to_firebase
             from tools.firebase_upload.uploader import init_firebase
 
+            def _run_firebase_with_retry(label: str, action: Any) -> Any:
+                config = self.retry_config
+
+                def on_retry(attempt: int, exc: Exception, delay: float) -> None:
+                    self.log(
+                        (
+                            f"{label} retry {attempt}/{config.max_retries} after {delay:.2f}s: "
+                            f"{self._summarize_exception(exc)}"
+                        ),
+                        "WARNING",
+                    )
+
+                def on_failure(attempt: int, exc: Exception) -> None:
+                    self.log(
+                        f"{label} failed after {attempt} attempts: {self._summarize_exception(exc)}",
+                        "ERROR",
+                    )
+
+                decorator = retry_with_backoff(
+                    max_retries=config.max_retries,
+                    base_delay=config.base_delay,
+                    max_delay=config.max_delay,
+                    backoff_factor=config.backoff_factor,
+                    jitter=config.jitter,
+                    on_retry=on_retry,
+                    on_failure=on_failure,
+                )
+                return decorator(action)()
+
             try:
-                init_firebase()
+                _run_firebase_with_retry("firebase init", init_firebase)
             except Exception as exc:
                 firebase_upload_error["init"] = str(exc)
                 firebase_upload_status = "failed"
@@ -2624,10 +2653,13 @@ class LocalPipelineRunner:
                 if not result or not result.success:
                     continue
                 try:
-                    firebase_upload_summary[current_robot] = upload_episodes_to_firebase(
-                        episodes_dir=output_dirs[current_robot],
-                        scene_id=self.scene_id,
-                        prefix=firebase_prefix,
+                    firebase_upload_summary[current_robot] = _run_firebase_with_retry(
+                        f"firebase upload ({current_robot})",
+                        lambda: upload_episodes_to_firebase(
+                            episodes_dir=output_dirs[current_robot],
+                            scene_id=self.scene_id,
+                            prefix=firebase_prefix,
+                        ),
                     )
                     firebase_upload_status_by_robot[current_robot] = "completed"
                 except Exception as exc:
