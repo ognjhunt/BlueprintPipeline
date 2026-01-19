@@ -57,6 +57,9 @@ class QualityGateCheckpoint(str, Enum):
     SIMREADY_COMPLETE = "simready_complete"
     USD_ASSEMBLED = "usd_assembled"
     REPLICATOR_COMPLETE = "replicator_complete"
+    # Genie Sim Integration
+    GENIESIM_EXPORT_READY = "geniesim_export_ready"
+    GENIESIM_IMPORT_COMPLETE = "geniesim_import_complete"
     ISAAC_LAB_GENERATED = "isaac_lab_generated"
 
     # Episode Generation Pipeline

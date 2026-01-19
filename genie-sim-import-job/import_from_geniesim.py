@@ -71,6 +71,13 @@ from tools.dataset_regression.metrics import compute_regression_metrics
 from tools.error_handling.retry import NonRetryableError, RetryConfig, RetryContext
 from tools.geniesim_adapter.local_framework import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.quality_gates.quality_gate import (
+    QualityGate,
+    QualityGateCheckpoint,
+    QualityGateRegistry,
+    QualityGateResult,
+    QualityGateSeverity,
+)
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
@@ -1711,6 +1718,63 @@ def run_local_import_job(
 # =============================================================================
 
 
+def _emit_import_quality_gate(result: ImportResult, scene_id: str) -> None:
+    checkpoint = QualityGateCheckpoint.GENIESIM_IMPORT_COMPLETE
+    registry = QualityGateRegistry(verbose=True)
+
+    def _check_import(ctx: Dict[str, Any]) -> QualityGateResult:
+        passed = ctx["success"]
+        severity = QualityGateSeverity.INFO if passed else QualityGateSeverity.ERROR
+        message = (
+            "Genie Sim import completed successfully"
+            if passed
+            else "Genie Sim import completed with errors"
+        )
+        details = {
+            "episodes_passed_validation": ctx["episodes_passed_validation"],
+            "episodes_filtered": ctx["episodes_filtered"],
+            "average_quality_score": ctx["average_quality_score"],
+            "import_manifest_path": ctx["import_manifest_path"],
+            "errors": ctx["errors"],
+            "warnings": ctx["warnings"],
+            "checksum_verification_passed": ctx["checksum_verification_passed"],
+            "upload_status": ctx["upload_status"],
+        }
+        return QualityGateResult(
+            gate_id="import_complete",
+            checkpoint=checkpoint,
+            passed=passed,
+            severity=severity,
+            message=message,
+            details=details,
+        )
+
+    registry.register(QualityGate(
+        id="import_complete",
+        name="Genie Sim Import Complete",
+        checkpoint=checkpoint,
+        severity=QualityGateSeverity.INFO,
+        description="Emit a completion gate for Genie Sim import validation.",
+        check_fn=_check_import,
+    ))
+
+    context = {
+        "scene_id": scene_id,
+        "success": result.success,
+        "episodes_passed_validation": result.episodes_passed_validation,
+        "episodes_filtered": result.episodes_filtered,
+        "average_quality_score": result.average_quality_score,
+        "import_manifest_path": str(result.import_manifest_path)
+        if result.import_manifest_path
+        else None,
+        "errors": result.errors,
+        "warnings": result.warnings,
+        "checksum_verification_passed": result.checksum_verification_passed,
+        "upload_status": result.upload_status,
+    }
+    registry.run_checkpoint(checkpoint, context)
+
+
 def main():
     """Main entry point for import job."""
     print("\n[GENIE-SIM-IMPORT] Starting import job...")
@@ -1849,6 +1913,10 @@ def main():
         metrics = get_metrics()
         with metrics.track_job("genie-sim-import-job", scene_id):
             result = run_local_import_job(config, job_metadata=job_metadata)
+        try:
+            _emit_import_quality_gate(result, scene_id)
+        except Exception as exc:
+            print(f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}")
 
         if result.success:
             print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")
