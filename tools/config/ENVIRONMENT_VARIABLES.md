@@ -311,6 +311,7 @@ export SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | str | None | JSON payload for Firebase service account credentials |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | path | None | Path to Firebase service account JSON credentials |
 | `FIREBASE_UPLOAD_PREFIX` | str | `datasets` | Firebase upload prefix for episode artifacts |
+| `FIREBASE_EPISODE_PREFIX` | str | `datasets` | Firebase upload prefix for Genie Sim episode artifacts |
 
 Scene asset input path example (GCS):
 ```
