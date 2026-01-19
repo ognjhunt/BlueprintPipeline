@@ -121,6 +121,14 @@ DATASET_INFO_SCHEMA_VERSION = "1.0.0"
 MIN_EPISODES_REQUIRED = 1
 
 
+def _is_service_mode() -> bool:
+    return (
+        os.getenv("SERVICE_MODE", "").lower() in {"1", "true", "yes", "y", "on"}
+        or os.getenv("K_SERVICE") is not None
+        or os.getenv("KUBERNETES_SERVICE_HOST") is not None
+    )
+
+
 def _sha256_file(path: Path) -> str:
     hasher = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -215,9 +223,9 @@ def _preflight_firebase_upload() -> bool:
         )
         return False
 
-    try:
-        from tools.firebase_upload.uploader import init_firebase
+    from tools.firebase_upload.uploader import init_firebase
 
+    try:
         init_firebase()
     except Exception as exc:
         print(f"[GENIE-SIM-IMPORT] ERROR: Firebase upload preflight failed: {exc}")
@@ -2273,8 +2281,15 @@ def main():
     filter_low_quality = parse_bool_env(os.getenv("FILTER_LOW_QUALITY"), default=True)
     require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
     disable_gcs_upload = parse_bool_env(os.getenv("DISABLE_GCS_UPLOAD"), default=False)
-    enable_firebase_upload = parse_bool_env(os.getenv("ENABLE_FIREBASE_UPLOAD"), default=False)
+    production_mode = resolve_production_mode()
+    service_mode = _is_service_mode()
+    enable_firebase_upload = parse_bool_env(
+        os.getenv("ENABLE_FIREBASE_UPLOAD"),
+        default=production_mode or service_mode,
+    )
     firebase_upload_prefix = os.getenv("FIREBASE_UPLOAD_PREFIX", "datasets")
+    if enable_firebase_upload and not _preflight_firebase_upload():
+        sys.exit(1)
     try:
         lerobot_skip_rate_max = _resolve_skip_rate_max(
             os.getenv("LEROBOT_SKIP_RATE_MAX")
@@ -2364,9 +2379,6 @@ def main():
         job_metadata_path=job_metadata_path,
         local_episodes_prefix=local_episodes_prefix,
     )
-
-    if enable_firebase_upload and not _preflight_firebase_upload():
-        sys.exit(1)
 
     artifacts_by_robot = _resolve_artifacts_by_robot(job_metadata, artifacts_by_robot_env)
 
