@@ -17,6 +17,7 @@ Environment Variables:
     GENIE_SIM_JOB_ID: Job ID to import (if monitoring specific job)
     GENIE_SIM_POLL_INTERVAL: Polling interval in seconds (default: 30)
     OUTPUT_PREFIX: Output path for imported episodes (default: scenes/{scene_id}/episodes)
+    MIN_EPISODES_REQUIRED: Minimum number of episodes required for import (default: 1)
     MIN_QUALITY_SCORE: Minimum quality score for import (default: from quality_config.json)
     ENABLE_VALIDATION: Enable quality validation (default: true)
     REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: false)
@@ -117,6 +118,7 @@ except ImportError:
 # =============================================================================
 
 DATASET_INFO_SCHEMA_VERSION = "1.0.0"
+MIN_EPISODES_REQUIRED = 1
 
 
 def _sha256_file(path: Path) -> str:
@@ -186,6 +188,18 @@ def _resolve_skip_rate_max(raw_value: Optional[str]) -> float:
     if skip_rate < 0.0:
         raise ValueError("LEROBOT_SKIP_RATE_MAX must be >= 0")
     return skip_rate
+
+
+def _resolve_min_episodes_required(raw_value: Optional[str]) -> int:
+    if raw_value is None:
+        return MIN_EPISODES_REQUIRED
+    try:
+        min_episodes = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid MIN_EPISODES_REQUIRED value: {raw_value}") from exc
+    if min_episodes < 1:
+        raise ValueError("MIN_EPISODES_REQUIRED must be >= 1")
+    return min_episodes
 
 
 def _preflight_firebase_upload() -> bool:
@@ -571,6 +585,10 @@ def _write_combined_import_manifest(
             "download_errors": 0,
             "parse_failed": total_parse_failed,
             "parse_failures": [],
+            "min_required": min(
+                (entry["episodes"].get("min_required", MIN_EPISODES_REQUIRED) for entry in robot_entries),
+                default=MIN_EPISODES_REQUIRED,
+            ),
         },
         "quality": {
             "average_score": average_quality,
@@ -761,6 +779,7 @@ class ImportConfig:
 
     # Quality filtering
     min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE
+    min_episodes_required: int = MIN_EPISODES_REQUIRED
     enable_validation: bool = True
     filter_low_quality: bool = True
     require_lerobot: bool = False
@@ -1398,6 +1417,13 @@ def run_local_import_job(
     if not episode_metadata_list:
         result.errors.append(f"No local episode files found under {recordings_dir}")
         return result
+    result.total_episodes_downloaded = len(episode_metadata_list)
+    if result.total_episodes_downloaded < config.min_episodes_required:
+        result.errors.append(
+            "Insufficient episodes discovered for import: "
+            f"{result.total_episodes_downloaded} < {config.min_episodes_required}"
+        )
+        return result
     if parse_failure_count > 0:
         parse_failure_message = (
             f"{parse_failure_count} local episode files failed to parse"
@@ -1491,7 +1517,6 @@ def run_local_import_job(
     for episode_file in recordings_dir.rglob("*.json"):
         total_size_bytes += episode_file.stat().st_size
 
-    result.total_episodes_downloaded = len(episode_metadata_list)
     low_quality_episodes = [
         ep for ep in episode_metadata_list if ep.quality_score < config.min_quality_score
     ]
@@ -1668,6 +1693,7 @@ def run_local_import_job(
             "filter_low_quality": config.filter_low_quality,
             "require_lerobot": config.require_lerobot,
             "lerobot_skip_rate_max": config.lerobot_skip_rate_max,
+            "min_episodes_required": config.min_episodes_required,
             "poll_interval": config.poll_interval,
             "wait_for_completion": config.wait_for_completion,
             "fail_on_partial_error": config.fail_on_partial_error,
@@ -1718,6 +1744,7 @@ def run_local_import_job(
             "download_errors": 0,
             "parse_failed": result.episodes_parse_failed,
             "parse_failures": result.episode_parse_failures,
+            "min_required": config.min_episodes_required,
         },
         "quality": {
             "average_score": result.average_quality_score,
@@ -2049,6 +2076,13 @@ def main():
     except ValueError as exc:
         print(f"[GENIE-SIM-IMPORT] ERROR: {exc}")
         sys.exit(1)
+    try:
+        min_episodes_required = _resolve_min_episodes_required(
+            os.getenv("MIN_EPISODES_REQUIRED")
+        )
+    except ValueError as exc:
+        print(f"[GENIE-SIM-IMPORT] ERROR: {exc}")
+        sys.exit(1)
 
     # Polling configuration
     poll_interval = int(os.getenv("GENIE_SIM_POLL_INTERVAL", "30"))
@@ -2081,6 +2115,7 @@ def main():
         "[GENIE-SIM-IMPORT]   Quality Range: "
         f"{QUALITY_CONFIG.min_allowed} - {QUALITY_CONFIG.max_allowed}"
     )
+    print(f"[GENIE-SIM-IMPORT]   Min Episodes Required: {min_episodes_required}")
     print(f"[GENIE-SIM-IMPORT]   Enable Validation: {enable_validation}")
     print(f"[GENIE-SIM-IMPORT]   Require LeRobot: {require_lerobot}")
     print(f"[GENIE-SIM-IMPORT]   LeRobot Skip Rate Max: {lerobot_skip_rate_max:.2f}%")
@@ -2116,6 +2151,7 @@ def main():
         filter_low_quality=filter_low_quality,
         require_lerobot=require_lerobot,
         lerobot_skip_rate_max=lerobot_skip_rate_max,
+        min_episodes_required=min_episodes_required,
         poll_interval=poll_interval,
         wait_for_completion=wait_for_completion,
         fail_on_partial_error=fail_on_partial_error,
@@ -2154,6 +2190,7 @@ def main():
                             "download_errors": 0,
                             "parse_failed": 0,
                             "parse_failures": [],
+                            "min_required": min_episodes_required,
                         },
                         "quality": {
                             "average_score": 0.0,
@@ -2192,6 +2229,7 @@ def main():
                     filter_low_quality=filter_low_quality,
                     require_lerobot=require_lerobot,
                     lerobot_skip_rate_max=lerobot_skip_rate_max,
+                    min_episodes_required=min_episodes_required,
                     poll_interval=poll_interval,
                     wait_for_completion=wait_for_completion,
                     fail_on_partial_error=fail_on_partial_error,
@@ -2255,6 +2293,7 @@ def main():
                         "download_errors": 0,
                         "parse_failed": result.episodes_parse_failed,
                         "parse_failures": result.episode_parse_failures,
+                        "min_required": min_episodes_required,
                     },
                     "quality": {
                         "average_score": result.average_quality_score,
