@@ -2213,6 +2213,10 @@ class LocalPipelineRunner:
         submission_message = None
         local_run_result = None
         preflight_report = None
+        failure_details: Dict[str, Any] = {}
+        failure_reason = None
+        firebase_upload_summary = None
+        firebase_upload_error = None
         import uuid
 
         job_id = f"local-{uuid.uuid4()}"
@@ -2332,6 +2336,40 @@ class LocalPipelineRunner:
             "preflight": preflight_report,
             "generation_duration_seconds": time.time() - start_time,
         }
+
+        if local_run_result and local_run_result.success:
+            firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
+            from tools.firebase_upload import upload_episodes_to_firebase
+
+            try:
+                firebase_upload_summary = upload_episodes_to_firebase(
+                    episodes_dir=output_dir,
+                    scene_id=self.scene_id,
+                    prefix=firebase_prefix,
+                )
+            except Exception as exc:
+                firebase_upload_error = str(exc)
+                failure_details = {
+                    **failure_details,
+                    "firebase_upload_error": firebase_upload_error,
+                    "firebase_upload_prefix": firebase_prefix,
+                }
+                submission_message = (
+                    "Local Genie Sim execution completed with Firebase upload failures."
+                )
+                job_status = "failed"
+                failure_reason = failure_reason or "Firebase upload failed"
+
+        if firebase_upload_summary or firebase_upload_error:
+            job_payload["firebase_upload"] = {
+                "prefix": os.getenv("FIREBASE_EPISODE_PREFIX", "datasets"),
+                "summary": firebase_upload_summary,
+                "error": firebase_upload_error,
+            }
+
+        if job_status == "failed":
+            job_payload["failure_reason"] = failure_reason or "Genie Sim submission failed"
+            job_payload["failure_details"] = failure_details or None
 
         job_path = self.geniesim_dir / "job.json"
         job_path.write_text(json.dumps(job_payload, indent=2))
