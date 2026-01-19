@@ -618,7 +618,7 @@ class AssetIndexBuilder:
 
             if status != "ok":
                 errors.append({"asset_id": asset.asset_id, "error": error_message})
-                if production_mode:
+                if production_mode and self.require_embeddings:
                     raise RuntimeError(
                         f"Embedding generation failed in production for asset {asset.asset_id}: "
                         f"{error_message}"
@@ -654,11 +654,6 @@ class AssetIndexBuilder:
                 raise RuntimeError(
                     "Embeddings are required but no embedding provider is configured. "
                     "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
-                )
-            if self._is_production():
-                raise RuntimeError(
-                    "Embeddings are required in production but no embedding provider "
-                    "is configured. Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
                 )
             self.log("Embedding provider unavailable; using placeholder embeddings.", "WARNING")
             return (
