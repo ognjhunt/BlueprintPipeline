@@ -29,6 +29,8 @@ Environment Variables:
 """
 
 import hashlib
+import importlib
+import importlib.util
 import json
 import os
 import logging
@@ -175,6 +177,32 @@ def _resolve_skip_rate_max(raw_value: Optional[str]) -> float:
     if skip_rate < 0.0:
         raise ValueError("LEROBOT_SKIP_RATE_MAX must be >= 0")
     return skip_rate
+
+
+def _read_parquet_dataframe(
+    episode_file: Path,
+    allow_fallback: bool,
+) -> "pd.DataFrame":
+    if importlib.util.find_spec("pyarrow.parquet") is not None:
+        pq = importlib.import_module("pyarrow.parquet")
+        table = pq.read_table(episode_file)
+        return table.to_pandas()
+
+    if not allow_fallback:
+        raise RuntimeError(
+            "Parquet validation requires pyarrow; install pyarrow or allow a fallback reader."
+        )
+
+    if importlib.util.find_spec("pandas") is None:
+        raise RuntimeError(
+            "Parquet validation fallback requires pandas and fastparquet."
+        )
+    if importlib.util.find_spec("fastparquet") is None:
+        raise RuntimeError(
+            "Parquet validation fallback requires fastparquet (pip install fastparquet)."
+        )
+    pd = importlib.import_module("pandas")
+    return pd.read_parquet(episode_file, engine="fastparquet")
 
 
 def _build_dataset_info(
@@ -633,7 +661,11 @@ class ImportResult:
 class ImportedEpisodeValidator:
     """Validates imported episodes from Genie Sim."""
 
-    def __init__(self, min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE):
+    def __init__(
+        self,
+        min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE,
+        require_parquet_validation: bool = True,
+    ):
         """
         Initialize validator.
 
@@ -641,6 +673,7 @@ class ImportedEpisodeValidator:
             min_quality_score: Minimum quality score to pass
         """
         self.min_quality_score = min_quality_score
+        self.require_parquet_validation = require_parquet_validation
 
     def validate_episode(
         self,
@@ -690,9 +723,10 @@ class ImportedEpisodeValidator:
 
         # Load and validate episode data structure
         try:
-            import pyarrow.parquet as pq
-            table = pq.read_table(episode_file)
-            df = table.to_pandas()
+            df = _read_parquet_dataframe(
+                episode_file,
+                allow_fallback=self.require_parquet_validation,
+            )
 
             # Check required fields
             required_fields = ["observation", "action"]
@@ -743,8 +777,8 @@ class ImportedEpisodeValidator:
                         if np.abs(action_values).max() > 10.0:
                             warnings.append(f"Action values in '{action_col}' exceed reasonable bounds (max: {np.abs(action_values).max():.2f})")
 
-        except ImportError:
-            warnings.append("PyArrow not available - skipping detailed validation")
+        except RuntimeError as exc:
+            errors.append(str(exc))
         except Exception as e:
             warnings.append(f"Failed to load episode data for validation: {e}")
 
@@ -1201,7 +1235,10 @@ def run_local_import_job(
         result.errors.append(f"No local episode files found under {recordings_dir}")
         return result
 
-    validator = ImportedEpisodeValidator(min_quality_score=config.min_quality_score)
+    validator = ImportedEpisodeValidator(
+        min_quality_score=config.min_quality_score,
+        require_parquet_validation=config.enable_validation,
+    )
     validation_summary = validator.validate_batch(episode_metadata_list, recordings_dir)
     failed_episode_ids = [
         entry["episode_id"]
