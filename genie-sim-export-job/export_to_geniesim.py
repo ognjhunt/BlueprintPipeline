@@ -283,8 +283,9 @@ def run_geniesim_export_job(
         if not filter_commercial:
             print(
                 "[GENIESIM-EXPORT-JOB] Production mode enabled; "
-                "commercial licensing checks enforced even though FILTER_COMMERCIAL=false."
+                "FILTER_COMMERCIAL override rejected and commercial licensing checks enforced."
             )
+        filter_commercial = True
     else:
         if require_quality_gates is False or env_override is False:
             print(
