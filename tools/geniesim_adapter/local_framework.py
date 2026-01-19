@@ -59,6 +59,9 @@ Environment Variables:
     ALLOW_GENIESIM_MOCK: Allow local mock gRPC server when GENIESIM_ROOT is missing (default: 0)
     GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD: Allow non-collision-aware linear fallback in production (default: 0; risky)
     GENIESIM_ALLOW_IK_FAILURE_FALLBACK: Allow linear fallback if IK planning fails (default: 0)
+    GENIESIM_STALL_TIMEOUT_S: Abort/reset episode if observations stall (default: 30)
+    GENIESIM_MAX_STALLS: Max stalled episodes before server restart (default: 2)
+    GENIESIM_STALL_BACKOFF_S: Backoff between stall handling attempts (default: 5)
 """
 
 import base64
@@ -274,6 +277,9 @@ class GenieSimConfig:
     allow_linear_fallback: bool = False
     allow_linear_fallback_in_production: bool = False
     allow_ik_failure_fallback: bool = False
+    stall_timeout_s: float = 30.0
+    max_stalls: int = 2
+    stall_backoff_s: float = 5.0
 
     # Output settings
     recording_dir: Path = Path("/tmp/geniesim_recordings")
@@ -324,6 +330,9 @@ class GenieSimConfig:
             allow_linear_fallback=allow_linear_fallback,
             allow_linear_fallback_in_production=allow_linear_fallback_in_production,
             allow_ik_failure_fallback=allow_ik_failure_fallback,
+            stall_timeout_s=float(os.getenv("GENIESIM_STALL_TIMEOUT_S", "30")),
+            max_stalls=int(os.getenv("GENIESIM_MAX_STALLS", "2")),
+            stall_backoff_s=float(os.getenv("GENIESIM_STALL_BACKOFF_S", "5")),
             lerobot_export_format=parse_lerobot_export_format(
                 os.getenv("LEROBOT_EXPORT_FORMAT"),
                 default=LeRobotExportFormat.LEROBOT_V2,
@@ -1624,6 +1633,7 @@ class GenieSimLocalFramework:
 
         self._server_process: Optional[subprocess.Popen] = None
         self._status = GenieSimServerStatus.NOT_RUNNING
+        self._stall_count = 0
 
         # Ensure directories exist
         self.config.recording_dir.mkdir(parents=True, exist_ok=True)
@@ -1981,13 +1991,14 @@ class GenieSimLocalFramework:
             task_name=task_config.get("name", "unknown"),
         )
 
+        scene_usd_path = None
+        if scene_config:
+            scene_usd_path = scene_config.get("usd_path") or scene_config.get("scene_usd_path")
+        if scene_usd_path:
+            scene_usd_path = Path(scene_usd_path)
+
         # Ensure server is running (bootstrap if needed)
         if not self.is_server_running():
-            scene_usd_path = None
-            if scene_config:
-                scene_usd_path = scene_config.get("usd_path") or scene_config.get("scene_usd_path")
-            if scene_usd_path:
-                scene_usd_path = Path(scene_usd_path)
             if not self.start_server(scene_usd_path=scene_usd_path):
                 result.errors.append("Failed to start Genie Sim server")
                 return result
@@ -2060,6 +2071,30 @@ class GenieSimLocalFramework:
                         total_frames += episode_result.get("frame_count", 0)
                         quality_scores.append(episode_result.get("quality_score", 0.0))
                     else:
+                        stall_info = episode_result.get("stall_info") or {}
+                        if stall_info.get("stall_detected"):
+                            self._stall_count += 1
+                            stall_message = (
+                                f"Episode {ep_idx} of {task_name} stalled after "
+                                f"{stall_info.get('last_progress_age_s', 0.0):.1f}s "
+                                f"(stall {self._stall_count}/{self.config.max_stalls})"
+                            )
+                            result.warnings.append(stall_message)
+                            if self._stall_count > self.config.max_stalls:
+                                error_message = (
+                                    f"{stall_message}; restarting Genie Sim server "
+                                    f"after exceeding max stalls ({self.config.max_stalls})."
+                                )
+                                result.errors.append(error_message)
+                                self.log(error_message, "ERROR")
+                                self.stop_server()
+                                if not self.start_server(scene_usd_path=scene_usd_path):
+                                    result.errors.append(
+                                        "Failed to restart Genie Sim server after stall."
+                                    )
+                                    return result
+                                if self.config.stall_backoff_s > 0:
+                                    time.sleep(self.config.stall_backoff_s)
                         result.warnings.append(
                             f"Episode {ep_idx} of {task_name} failed: {episode_result.get('error', 'unknown')}"
                         )
@@ -2176,11 +2211,21 @@ class GenieSimLocalFramework:
             "success": False,
             "frame_count": 0,
             "quality_score": 0.0,
+            "stall_info": {
+                "stall_detected": False,
+                "stall_timeout_s": self.config.stall_timeout_s,
+                "stall_backoff_s": self.config.stall_backoff_s,
+                "max_stalls": self.config.max_stalls,
+            },
         }
+
+        recording_started = False
+        recording_stopped = False
 
         try:
             # Start recording
             self._client.start_recording(episode_id)
+            recording_started = True
 
             # Get initial observation
             obs = self._client.get_observation()
@@ -2199,9 +2244,19 @@ class GenieSimLocalFramework:
                 "error": None,
                 "mode": "streaming",
                 "start_time": None,
+                "last_progress_time": time.time(),
+                "last_observation_timestamp": None,
             }
             start_event = threading.Event()
             timestamps = [waypoint["timestamp"] for waypoint in timed_trajectory]
+            abort_event = threading.Event()
+
+            def _note_progress(obs_frame: Dict[str, Any]) -> None:
+                collector_state["last_progress_time"] = time.time()
+                collector_state["last_observation_timestamp"] = (
+                    obs_frame.get("timestamp")
+                    or obs_frame.get("planned_timestamp")
+                )
 
             def _collect_streaming() -> None:
                 try:
@@ -2211,6 +2266,8 @@ class GenieSimLocalFramework:
                         _collect_polling()
                         return
                     for response in stream:
+                        if abort_event.is_set():
+                            break
                         if not response.success:
                             collector_state["error"] = (
                                 "Observation stream returned unsuccessful response."
@@ -2218,6 +2275,7 @@ class GenieSimLocalFramework:
                             break
                         obs_frame = self._client._format_observation_response(response)
                         collector_state["observations"].append(obs_frame)
+                        _note_progress(obs_frame)
                 except Exception as exc:
                     collector_state["error"] = (
                         f"Observation stream failed after "
@@ -2229,6 +2287,8 @@ class GenieSimLocalFramework:
                     start_event.wait()
                     start_time = collector_state["start_time"] or time.time()
                     for planned_timestamp in timestamps:
+                        if abort_event.is_set():
+                            break
                         target_time = start_time + planned_timestamp
                         sleep_for = target_time - time.time()
                         if sleep_for > 0:
@@ -2241,6 +2301,7 @@ class GenieSimLocalFramework:
                             break
                         obs_frame["planned_timestamp"] = planned_timestamp
                         collector_state["observations"].append(obs_frame)
+                        _note_progress(obs_frame)
                 except Exception as exc:
                     collector_state["error"] = (
                         f"Timed observation polling failed after "
@@ -2253,16 +2314,69 @@ class GenieSimLocalFramework:
             collector_state["start_time"] = time.time()
             start_event.set()
 
-            execution_success = self._client.execute_trajectory(timed_trajectory)
+            execution_state: Dict[str, Any] = {"success": False, "error": None}
+
+            def _execute_trajectory() -> None:
+                try:
+                    execution_state["success"] = self._client.execute_trajectory(timed_trajectory)
+                except Exception as exc:
+                    execution_state["error"] = f"Trajectory execution failed: {exc}"
+
+            execution_thread = threading.Thread(target=_execute_trajectory, daemon=True)
+            execution_thread.start()
+
+            stall_timeout_s = self.config.stall_timeout_s
+            stall_detected = False
+            while execution_thread.is_alive():
+                if stall_timeout_s > 0:
+                    last_progress_time = collector_state.get("last_progress_time")
+                    if last_progress_time:
+                        progress_age = time.time() - last_progress_time
+                        if progress_age >= stall_timeout_s:
+                            stall_detected = True
+                            result["stall_info"].update({
+                                "stall_detected": True,
+                                "last_progress_age_s": progress_age,
+                                "observations_collected": len(collector_state["observations"]),
+                                "last_observation_timestamp": (
+                                    collector_state.get("last_observation_timestamp")
+                                ),
+                            })
+                            stall_message = (
+                                f"No observation progress for {progress_age:.1f}s "
+                                f"(timeout {stall_timeout_s:.1f}s); aborting episode."
+                            )
+                            collector_state["error"] = stall_message
+                            self.log(stall_message, "WARNING")
+                            abort_event.set()
+                            try:
+                                self._client.reset_environment()
+                            except Exception as exc:
+                                self.log(f"Failed to reset after stall: {exc}", "WARNING")
+                            if self.config.stall_backoff_s > 0:
+                                time.sleep(self.config.stall_backoff_s)
+                            break
+                time.sleep(0.5)
+
+            execution_thread.join(timeout=5.0)
             trajectory_duration = (timestamps[-1] - timestamps[0]) if timestamps else 0.0
-            collector_thread.join(timeout=trajectory_duration + 10.0)
+            collector_timeout = 5.0 if stall_detected else trajectory_duration + 10.0
+            collector_thread.join(timeout=collector_timeout)
 
             if collector_thread.is_alive():
                 collector_state["error"] = (
                     "Observation collection did not complete before timeout."
                 )
 
-            if not execution_success:
+            if execution_state.get("error"):
+                result["error"] = execution_state["error"]
+                return result
+
+            if stall_detected:
+                result["error"] = collector_state["error"] or "Episode stalled"
+                return result
+
+            if not execution_state.get("success"):
                 result["error"] = "Trajectory execution failed"
                 return result
 
@@ -2287,6 +2401,7 @@ class GenieSimLocalFramework:
 
             # Stop recording
             self._client.stop_recording()
+            recording_stopped = True
 
             # Calculate quality score
             quality_score = self._calculate_quality_score(frames, task)
@@ -2310,6 +2425,7 @@ class GenieSimLocalFramework:
                     "frame_count": len(frames),
                     "quality_score": quality_score,
                     "validation_passed": validation_passed,
+                    "stall_info": result["stall_info"],
                 }, f, default=_json_default)
 
             result["success"] = True
@@ -2320,7 +2436,15 @@ class GenieSimLocalFramework:
 
         except Exception as e:
             result["error"] = str(e)
-            self._client.stop_recording()
+            if recording_started and not recording_stopped:
+                self._client.stop_recording()
+                recording_stopped = True
+        finally:
+            if recording_started and not recording_stopped:
+                try:
+                    self._client.stop_recording()
+                except Exception:
+                    self.log("Failed to stop recording after episode error.", "WARNING")
 
         return result
 
