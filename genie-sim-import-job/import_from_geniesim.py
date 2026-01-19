@@ -26,8 +26,10 @@ Environment Variables:
     FIREBASE_SERVICE_ACCOUNT_JSON: Service account JSON payload for Firebase
     FIREBASE_SERVICE_ACCOUNT_PATH: Path to service account JSON for Firebase
     FIREBASE_UPLOAD_PREFIX: Remote prefix for Firebase uploads (default: datasets)
+    ARTIFACTS_BY_ROBOT: JSON map of robot type to artifacts payload for multi-robot imports
 """
 
+import copy
 import hashlib
 import importlib
 import importlib.util
@@ -482,6 +484,115 @@ def _resolve_job_idempotency(job_metadata: Optional[Dict[str, Any]]) -> Optional
     return idempotency if isinstance(idempotency, dict) else None
 
 
+def _resolve_artifacts_by_robot(
+    job_metadata: Optional[Dict[str, Any]],
+    artifacts_by_robot_env: Optional[str],
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    if job_metadata:
+        artifacts_by_robot = job_metadata.get("artifacts_by_robot")
+        if isinstance(artifacts_by_robot, dict):
+            return artifacts_by_robot
+    if artifacts_by_robot_env:
+        try:
+            payload = json.loads(artifacts_by_robot_env)
+        except json.JSONDecodeError as exc:
+            raise ValueError("ARTIFACTS_BY_ROBOT is not valid JSON") from exc
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _build_robot_job_metadata(
+    job_metadata: Optional[Dict[str, Any]],
+    robot_type: str,
+    artifacts: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if job_metadata is None:
+        return None
+    payload = copy.deepcopy(job_metadata)
+    payload["robot_type"] = robot_type
+    payload["artifacts"] = artifacts
+    return payload
+
+
+def _resolve_gcs_path(path: Optional[Path]) -> Optional[str]:
+    if not path:
+        return None
+    path_str = str(path)
+    if path_str.startswith("/mnt/gcs/"):
+        return "gs://" + path_str[len("/mnt/gcs/"):]
+    return path_str
+
+
+def _write_combined_import_manifest(
+    output_dir: Path,
+    job_id: str,
+    gcs_output_path: Optional[str],
+    job_metadata: Optional[Dict[str, Any]],
+    robot_entries: List[Dict[str, Any]],
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    total_downloaded = sum(entry["episodes"]["downloaded"] for entry in robot_entries)
+    total_passed = sum(entry["episodes"]["passed_validation"] for entry in robot_entries)
+    total_filtered = sum(entry["episodes"]["filtered"] for entry in robot_entries)
+    total_parse_failed = sum(entry["episodes"]["parse_failed"] for entry in robot_entries)
+
+    weighted_quality_sum = 0.0
+    quality_weight_total = 0
+    min_quality_scores = []
+    max_quality_scores = []
+    for entry in robot_entries:
+        quality = entry["quality"]
+        episodes_downloaded = entry["episodes"]["downloaded"]
+        weighted_quality_sum += quality["average_score"] * episodes_downloaded
+        quality_weight_total += episodes_downloaded
+        if episodes_downloaded > 0:
+            min_quality_scores.append(quality["min_score"])
+            max_quality_scores.append(quality["max_score"])
+
+    average_quality = (
+        weighted_quality_sum / quality_weight_total if quality_weight_total else 0.0
+    )
+    min_quality = min(min_quality_scores) if min_quality_scores else 0.0
+    max_quality = max(max_quality_scores) if max_quality_scores else 0.0
+
+    import_manifest = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "schema_definition": MANIFEST_SCHEMA_DEFINITION,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "job_id": job_id,
+        "output_dir": str(output_dir),
+        "gcs_output_path": gcs_output_path,
+        "success": all(entry["success"] for entry in robot_entries),
+        "episodes": {
+            "downloaded": total_downloaded,
+            "passed_validation": total_passed,
+            "filtered": total_filtered,
+            "download_errors": 0,
+            "parse_failed": total_parse_failed,
+            "parse_failures": [],
+        },
+        "quality": {
+            "average_score": average_quality,
+            "min_score": min_quality,
+            "max_score": max_quality,
+            "threshold": min(
+                (entry["quality"]["threshold"] for entry in robot_entries),
+                default=0.0,
+            ),
+            "validation_enabled": any(
+                entry["quality"]["validation_enabled"] for entry in robot_entries
+            ),
+        },
+        "robots": robot_entries,
+        "job_metadata": job_metadata or {},
+    }
+
+    manifest_path = output_dir / "import_manifest.json"
+    write_json_atomic(manifest_path, import_manifest, indent=2)
+    return manifest_path
+
+
 def _resolve_gcs_upload_target(gcs_output_path: str) -> Dict[str, str]:
     parsed = _parse_gcs_uri(gcs_output_path)
     if not parsed or not parsed.get("bucket"):
@@ -683,6 +794,8 @@ class ImportResult:
     # Quality metrics
     average_quality_score: float = 0.0
     quality_distribution: Dict[str, int] = field(default_factory=dict)
+    quality_min_score: float = 0.0
+    quality_max_score: float = 0.0
 
     # Output
     output_dir: Optional[Path] = None
@@ -1388,6 +1501,8 @@ def run_local_import_job(
     result.average_quality_score = float(np.mean(quality_scores)) if quality_scores else 0.0
     quality_min_score = float(np.min(quality_scores)) if quality_scores else 0.0
     quality_max_score = float(np.max(quality_scores)) if quality_scores else 0.0
+    result.quality_min_score = quality_min_score
+    result.quality_max_score = quality_max_score
 
     if low_quality_episodes:
         result.errors.append(
@@ -1897,13 +2012,15 @@ def main():
     explicit_gcs_output_path = os.getenv("GCS_OUTPUT_PATH") or None
     job_metadata_path = os.getenv("JOB_METADATA_PATH") or None
     local_episodes_prefix = os.getenv("LOCAL_EPISODES_PREFIX") or None
+    artifacts_by_robot_env = os.getenv("ARTIFACTS_BY_ROBOT") or None
 
     job_metadata = None
     if job_metadata_path:
         try:
             job_metadata = _load_local_job_metadata(bucket, job_metadata_path)
             artifacts = job_metadata.get("artifacts", {})
-            if not local_episodes_prefix:
+            artifacts_by_robot = job_metadata.get("artifacts_by_robot")
+            if not local_episodes_prefix and not isinstance(artifacts_by_robot, dict):
                 local_episodes_prefix = artifacts.get("episodes_prefix")
         except FileNotFoundError as e:
             print(f"[GENIE-SIM-IMPORT] WARNING: {e}")
@@ -2009,9 +2126,188 @@ def main():
     if enable_firebase_upload and not _preflight_firebase_upload():
         sys.exit(1)
 
+    artifacts_by_robot = _resolve_artifacts_by_robot(job_metadata, artifacts_by_robot_env)
+
     # Run import
     try:
         metrics = get_metrics()
+        if artifacts_by_robot:
+            robot_entries = []
+            overall_success = True
+            for robot_type, artifacts in sorted(artifacts_by_robot.items()):
+                episodes_prefix = artifacts.get("episodes_prefix") or artifacts.get("episodes_path")
+                if not episodes_prefix:
+                    error_result = ImportResult(success=False, job_id=job_id)
+                    error_result.errors.append(
+                        f"Missing episodes_prefix for robot {robot_type}"
+                    )
+                    robot_entries.append({
+                        "robot_type": robot_type,
+                        "success": False,
+                        "output_dir": None,
+                        "gcs_output_path": None,
+                        "import_manifest_path": None,
+                        "episodes": {
+                            "downloaded": 0,
+                            "passed_validation": 0,
+                            "filtered": 0,
+                            "download_errors": 0,
+                            "parse_failed": 0,
+                            "parse_failures": [],
+                        },
+                        "quality": {
+                            "average_score": 0.0,
+                            "min_score": 0.0,
+                            "max_score": 0.0,
+                            "threshold": min_quality_score,
+                            "validation_enabled": enable_validation,
+                        },
+                        "errors": error_result.errors,
+                        "warnings": [],
+                    })
+                    overall_success = False
+                    continue
+
+                robot_output_dir = _resolve_local_output_dir(
+                    bucket=bucket,
+                    output_prefix=output_prefix,
+                    job_id=job_id,
+                    local_episodes_prefix=episodes_prefix,
+                )
+                robot_output_dir.mkdir(parents=True, exist_ok=True)
+                robot_gcs_output_path = _resolve_gcs_output_path(
+                    robot_output_dir,
+                    bucket=bucket,
+                    output_prefix=output_prefix,
+                    job_id=job_id,
+                    explicit_gcs_output_path=explicit_gcs_output_path,
+                )
+                robot_config = ImportConfig(
+                    job_id=job_id,
+                    output_dir=robot_output_dir,
+                    gcs_output_path=robot_gcs_output_path,
+                    enable_gcs_uploads=not disable_gcs_upload,
+                    min_quality_score=min_quality_score,
+                    enable_validation=enable_validation,
+                    filter_low_quality=filter_low_quality,
+                    require_lerobot=require_lerobot,
+                    lerobot_skip_rate_max=lerobot_skip_rate_max,
+                    poll_interval=poll_interval,
+                    wait_for_completion=wait_for_completion,
+                    fail_on_partial_error=fail_on_partial_error,
+                    job_metadata_path=job_metadata_path,
+                    local_episodes_prefix=episodes_prefix,
+                )
+                robot_job_metadata = _build_robot_job_metadata(
+                    job_metadata,
+                    robot_type,
+                    artifacts,
+                )
+                with metrics.track_job("genie-sim-import-job", scene_id):
+                    result = run_local_import_job(
+                        robot_config,
+                        job_metadata=robot_job_metadata,
+                    )
+                try:
+                    _emit_import_quality_gate(result, scene_id)
+                except Exception as exc:
+                    print(
+                        f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}"
+                    )
+
+                firebase_summary = None
+                if enable_firebase_upload and result.success:
+                    from tools.firebase_upload.uploader import (
+                        init_firebase,
+                        upload_episodes_to_firebase,
+                    )
+
+                    print(
+                        "[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage "
+                        f"for robot {robot_type}..."
+                    )
+                    try:
+                        init_firebase()
+                        firebase_summary = upload_episodes_to_firebase(
+                            result.output_dir,
+                            scene_id,
+                            prefix=f"{firebase_upload_prefix}/{robot_type}",
+                        )
+                    except Exception as exc:
+                        print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
+                        raise
+                    print(
+                        "[GENIE-SIM-IMPORT] Firebase upload complete: "
+                        f"{firebase_summary['uploaded']}/{firebase_summary['total_files']} files"
+                    )
+
+                overall_success = overall_success and result.success
+                robot_entries.append({
+                    "robot_type": robot_type,
+                    "success": result.success,
+                    "output_dir": str(result.output_dir) if result.output_dir else None,
+                    "gcs_output_path": robot_gcs_output_path,
+                    "import_manifest_path": _resolve_gcs_path(result.import_manifest_path),
+                    "episodes": {
+                        "downloaded": result.total_episodes_downloaded,
+                        "passed_validation": result.episodes_passed_validation,
+                        "filtered": result.episodes_filtered,
+                        "download_errors": 0,
+                        "parse_failed": result.episodes_parse_failed,
+                        "parse_failures": result.episode_parse_failures,
+                    },
+                    "quality": {
+                        "average_score": result.average_quality_score,
+                        "min_score": result.quality_min_score,
+                        "max_score": result.quality_max_score,
+                        "threshold": min_quality_score,
+                        "validation_enabled": enable_validation,
+                    },
+                    "errors": result.errors,
+                    "warnings": result.warnings,
+                    "upload_status": result.upload_status,
+                    "upload_failures": result.upload_failures,
+                    "firebase_upload": firebase_summary,
+                })
+
+            combined_output_dir = _resolve_local_output_dir(
+                bucket=bucket,
+                output_prefix=output_prefix,
+                job_id=job_id,
+                local_episodes_prefix=None,
+            )
+            combined_gcs_output_path = _resolve_gcs_output_path(
+                combined_output_dir,
+                bucket=bucket,
+                output_prefix=output_prefix,
+                job_id=job_id,
+                explicit_gcs_output_path=explicit_gcs_output_path,
+            )
+            combined_manifest_path = _write_combined_import_manifest(
+                combined_output_dir,
+                job_id,
+                combined_gcs_output_path,
+                job_metadata,
+                robot_entries,
+            )
+            print(
+                "[GENIE-SIM-IMPORT] Combined import manifest: "
+                f"{combined_manifest_path}"
+            )
+
+            if overall_success:
+                print(f"[GENIE-SIM-IMPORT] ✅ Multi-robot import succeeded")
+                sys.exit(0)
+            print(f"[GENIE-SIM-IMPORT] ❌ Multi-robot import failed")
+            for entry in robot_entries:
+                if entry["errors"]:
+                    print(
+                        "[GENIE-SIM-IMPORT]   - "
+                        f"{entry['robot_type']}: {', '.join(entry['errors'])}"
+                    )
+            sys.exit(1)
+
+        result = None
         with metrics.track_job("genie-sim-import-job", scene_id):
             result = run_local_import_job(config, job_metadata=job_metadata)
         try:

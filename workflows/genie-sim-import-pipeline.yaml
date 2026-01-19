@@ -32,6 +32,7 @@ main:
           - bucket: ${default(sys.get_env("PRIMARY_BUCKET"), sys.get_env("GCS_BUCKET", "blueprintpipeline-data"))}
           - firebase_bucket: ${default(sys.get_env("FIREBASE_STORAGE_BUCKET"), "")}
           - firebase_service_account_path: ${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_PATH"), "/secrets/firebase/service-account.json")}
+          - artifacts_by_robot: null
 
     - extract_event:
         switch:
@@ -149,7 +150,8 @@ main:
     - parse_import_job_metadata:
         assign:
           - importJobMetadata: ${json.decode(importJobMetadataRaw)}
-          - local_episodes_prefix: ${default(map.get(map.get(importJobMetadata, "artifacts", {}), "episodes_prefix"), default(map.get(map.get(importJobMetadata, "artifacts", {}), "episodes_path"), local_episodes_prefix))}
+          - artifacts_by_robot: ${default(map.get(importJobMetadata, "artifacts_by_robot"), null)}
+          - local_episodes_prefix: ${artifacts_by_robot == null ? default(map.get(map.get(importJobMetadata, "artifacts", {}), "episodes_prefix"), default(map.get(map.get(importJobMetadata, "artifacts", {}), "episodes_path"), local_episodes_prefix)) : local_episodes_prefix}
         next: init_quality_gate_preflight
 
     # Preflight quality gate check (downstream guardrail)
@@ -381,6 +383,8 @@ main:
                         value: ${default(job_metadata_path, "")}
                       - name: LOCAL_EPISODES_PREFIX
                         value: ${default(local_episodes_prefix, "")}
+                      - name: ARTIFACTS_BY_ROBOT
+                        value: ${artifacts_by_robot != null ? json.encode(artifacts_by_robot) : ""}
                       - name: ENABLE_FIREBASE_UPLOAD
                         value: "true"
                       - name: FIREBASE_STORAGE_BUCKET
