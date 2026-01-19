@@ -5,34 +5,10 @@ resources:
   - episode-generation-job.yaml
 
 configMapGenerator:
-  - name: episode-generation-vars
+  - name: episode-gen-runtime
     literals:
-      - PROJECT_ID=example-project
       - SCENE_ID=example-scene
       - BUCKET=example-bucket
-
-vars:
-  - name: PROJECT_ID
-    objref:
-      apiVersion: v1
-      kind: ConfigMap
-      name: episode-generation-vars
-    fieldref:
-      fieldpath: data.PROJECT_ID
-  - name: SCENE_ID
-    objref:
-      apiVersion: v1
-      kind: ConfigMap
-      name: episode-generation-vars
-    fieldref:
-      fieldpath: data.SCENE_ID
-  - name: BUCKET
-    objref:
-      apiVersion: v1
-      kind: ConfigMap
-      name: episode-generation-vars
-    fieldref:
-      fieldpath: data.BUCKET
 
 images:
   - name: gcr.io/blueprint-project/blueprint-episode-gen
