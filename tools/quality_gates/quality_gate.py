@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 # Import configuration
 try:
     from tools.config import load_quality_config, QualityConfig
-    from tools.config.env import parse_bool_env
+    from tools.config.env import parse_bool_env, parse_float_env
     from tools.quality_gates.notification_validation import ensure_production_notification_channels
     HAVE_CONFIG = True
 except ImportError:
@@ -328,7 +328,12 @@ class HumanApprovalManager:
                 self.config.human_approval.allow_auto_approve_on_timeout_non_production
             )
         else:
-            self.timeout_hours = float(os.getenv("APPROVAL_TIMEOUT_HOURS", "24"))
+            self.timeout_hours = parse_float_env(
+                os.getenv("APPROVAL_TIMEOUT_HOURS"),
+                default=24,
+                min_value=0,
+                name="APPROVAL_TIMEOUT_HOURS",
+            )
             auto_approve_on_timeout = parse_bool_env(os.getenv("AUTO_APPROVE_ON_TIMEOUT"), default=False)
             allow_auto_approve_non_prod = (
                 parse_bool_env(os.getenv("ALLOW_AUTO_APPROVE_ON_TIMEOUT_NON_PROD"), default=False)
@@ -1283,10 +1288,30 @@ class QualityGateRegistry:
                 friction_min = self.config.physics.friction_min
                 friction_max = self.config.physics.friction_max
             else:
-                mass_min = float(os.getenv("BP_QUALITY_PHYSICS_MASS_MIN_KG", "0.01"))
-                mass_max = float(os.getenv("BP_QUALITY_PHYSICS_MASS_MAX_KG", "500"))
-                friction_min = float(os.getenv("BP_QUALITY_PHYSICS_FRICTION_MIN", "0"))
-                friction_max = float(os.getenv("BP_QUALITY_PHYSICS_FRICTION_MAX", "2.0"))
+                mass_min = parse_float_env(
+                    os.getenv("BP_QUALITY_PHYSICS_MASS_MIN_KG"),
+                    default=0.01,
+                    min_value=0,
+                    name="BP_QUALITY_PHYSICS_MASS_MIN_KG",
+                )
+                mass_max = parse_float_env(
+                    os.getenv("BP_QUALITY_PHYSICS_MASS_MAX_KG"),
+                    default=500,
+                    min_value=0,
+                    name="BP_QUALITY_PHYSICS_MASS_MAX_KG",
+                )
+                friction_min = parse_float_env(
+                    os.getenv("BP_QUALITY_PHYSICS_FRICTION_MIN"),
+                    default=0,
+                    min_value=0,
+                    name="BP_QUALITY_PHYSICS_FRICTION_MIN",
+                )
+                friction_max = parse_float_env(
+                    os.getenv("BP_QUALITY_PHYSICS_FRICTION_MAX"),
+                    default=2.0,
+                    min_value=0,
+                    name="BP_QUALITY_PHYSICS_FRICTION_MAX",
+                )
 
             warnings = []
             for obj in objects:
