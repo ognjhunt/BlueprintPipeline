@@ -14,6 +14,7 @@ Environment Variables:
     EPISODES_PER_TASK: Episodes per task (default: tools/config/pipeline_config.json)
     NUM_VARIATIONS: Scene variations (default: 5)
     MIN_QUALITY_SCORE: Minimum quality score (default: 0.85)
+    ALLOW_MISSING_ASSET_PROVENANCE: Allow missing asset provenance report (default: false)
     FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name (required for Firebase uploads)
     FIREBASE_SERVICE_ACCOUNT_JSON: Firebase service account JSON payload
     FIREBASE_SERVICE_ACCOUNT_PATH: Firebase service account JSON path
@@ -627,6 +628,15 @@ def main() -> int:
     )
     _validate_export_marker(export_marker)
 
+    allow_missing_asset_provenance = parse_bool_env(
+        os.getenv("ALLOW_MISSING_ASSET_PROVENANCE"),
+        default=False,
+    )
+    asset_provenance_blob = f"{geniesim_prefix}/legal/asset_provenance.json"
+    asset_provenance_exists = (
+        storage_client.bucket(bucket).blob(asset_provenance_blob).exists()
+    )
+
     generation_params = LocalGenerationParams(
         episodes_per_task=episodes_per_task,
         num_variations=num_variations,
@@ -682,6 +692,19 @@ def main() -> int:
     output_dir: Optional[Path] = None
     use_gcs_fuse = False
     local_root = None
+    skip_local_run = False
+    if not asset_provenance_exists and not allow_missing_asset_provenance:
+        skip_local_run = True
+        submission_message = (
+            "Asset provenance missing — export job incomplete or legal report deleted."
+        )
+        failure_reason = "Asset provenance missing"
+        failure_details = {
+            "error": "asset provenance missing — export job incomplete or legal report deleted",
+            "asset_provenance_path": f"gs://{bucket}/{asset_provenance_blob}",
+            "allow_missing_asset_provenance": allow_missing_asset_provenance,
+        }
+        job_status = "failed"
     try:
         scene_manifest = _read_json_blob(
             storage_client,
@@ -701,66 +724,67 @@ def main() -> int:
         canary_percent=canary_percent,
     )
 
-    gcs_root = Path("/mnt/gcs") / bucket
-    use_gcs_fuse = gcs_root.exists()
-    local_root = gcs_root if use_gcs_fuse else Path("/tmp") / "geniesim-local"
-    output_dir = local_root / episodes_output_prefix / f"geniesim_{job_id}"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if not skip_local_run:
+        gcs_root = Path("/mnt/gcs") / bucket
+        use_gcs_fuse = gcs_root.exists()
+        local_root = gcs_root if use_gcs_fuse else Path("/tmp") / "geniesim-local"
+        output_dir = local_root / episodes_output_prefix / f"geniesim_{job_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    config_dir = output_dir / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    scene_manifest_path = config_dir / "scene_manifest.json"
-    task_config_path = config_dir / "task_config.json"
-    scene_usd_path = _find_scene_usd_path(
-        scene_manifest=scene_manifest,
-        scene_id=scene_id,
-        geniesim_prefix=geniesim_prefix,
-        gcs_root=gcs_root,
-        local_root=local_root,
-        use_gcs_fuse=use_gcs_fuse,
-    )
-    if scene_usd_path:
-        scene_manifest["usd_path"] = str(scene_usd_path)
-        logger.info("[GENIESIM-SUBMIT-JOB] Using USD scene path: %s", scene_usd_path)
-    _write_local_json(scene_manifest_path, scene_manifest)
-    _write_local_json(task_config_path, task_config_local)
-
-    local_run_result = _run_local_data_collection_with_handshake(
-        scene_manifest=scene_manifest,
-        task_config=task_config_local,
-        output_dir=output_dir,
-        robot_type=robot_type,
-        episodes_per_task=episodes_per_task,
-        verbose=True,
-        expected_server_version=EXPECTED_GENIESIM_SERVER_VERSION,
-        required_capabilities=REQUIRED_GENIESIM_CAPABILITIES,
-    )
-    local_run_end = datetime.utcnow()
-    server_info = getattr(local_run_result, "server_info", {})
-    if server_info:
-        logger.info(
-            "[GENIESIM-SUBMIT-JOB] Genie Sim server info: "
-            f"version={server_info.get('version')}, "
-            f"capabilities={server_info.get('capabilities')}"
+        config_dir = output_dir / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        scene_manifest_path = config_dir / "scene_manifest.json"
+        task_config_path = config_dir / "task_config.json"
+        scene_usd_path = _find_scene_usd_path(
+            scene_manifest=scene_manifest,
+            scene_id=scene_id,
+            geniesim_prefix=geniesim_prefix,
+            gcs_root=gcs_root,
+            local_root=local_root,
+            use_gcs_fuse=use_gcs_fuse,
         )
-    if local_run_result and local_run_result.success:
-        submission_message = "Local Genie Sim execution completed."
-        job_status = "completed"
-    else:
-        submission_message = "Local Genie Sim execution failed."
-        failure_reason = "Local Genie Sim execution failed"
-        failure_details = {
-            "episodes_collected": getattr(local_run_result, "episodes_collected", 0)
-            if local_run_result
-            else 0,
-            "episodes_passed": getattr(local_run_result, "episodes_passed", 0)
-            if local_run_result
-            else 0,
-            "errors": getattr(local_run_result, "errors", []) if local_run_result else [],
-        }
-        job_status = "failed"
+        if scene_usd_path:
+            scene_manifest["usd_path"] = str(scene_usd_path)
+            logger.info("[GENIESIM-SUBMIT-JOB] Using USD scene path: %s", scene_usd_path)
+        _write_local_json(scene_manifest_path, scene_manifest)
+        _write_local_json(task_config_path, task_config_local)
 
-    if output_dir and local_root and not use_gcs_fuse:
+        local_run_result = _run_local_data_collection_with_handshake(
+            scene_manifest=scene_manifest,
+            task_config=task_config_local,
+            output_dir=output_dir,
+            robot_type=robot_type,
+            episodes_per_task=episodes_per_task,
+            verbose=True,
+            expected_server_version=EXPECTED_GENIESIM_SERVER_VERSION,
+            required_capabilities=REQUIRED_GENIESIM_CAPABILITIES,
+        )
+        local_run_end = datetime.utcnow()
+        server_info = getattr(local_run_result, "server_info", {})
+        if server_info:
+            logger.info(
+                "[GENIESIM-SUBMIT-JOB] Genie Sim server info: "
+                f"version={server_info.get('version')}, "
+                f"capabilities={server_info.get('capabilities')}"
+            )
+        if local_run_result and local_run_result.success:
+            submission_message = "Local Genie Sim execution completed."
+            job_status = "completed"
+        else:
+            submission_message = "Local Genie Sim execution failed."
+            failure_reason = "Local Genie Sim execution failed"
+            failure_details = {
+                "episodes_collected": getattr(local_run_result, "episodes_collected", 0)
+                if local_run_result
+                else 0,
+                "episodes_passed": getattr(local_run_result, "episodes_passed", 0)
+                if local_run_result
+                else 0,
+                "errors": getattr(local_run_result, "errors", []) if local_run_result else [],
+            }
+            job_status = "failed"
+
+    if not skip_local_run and output_dir and local_root and not use_gcs_fuse:
         upload_failures: list[dict[str, str]] = []
         manifest_mismatches: list[dict[str, str]] = []
         logger = logging.getLogger("genie-sim-submit-job")
@@ -891,7 +915,7 @@ def main() -> int:
                 job_status = "failed"
             failure_reason = failure_reason or "GCS upload failed"
 
-    if local_run_result and local_run_result.success and output_dir:
+    if not skip_local_run and local_run_result and local_run_result.success and output_dir:
         firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
         from tools.firebase_upload import upload_episodes_to_firebase
 
