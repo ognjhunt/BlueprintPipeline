@@ -1,4 +1,7 @@
 import json
+import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,7 @@ def test_write_and_load_checkpoint_round_trip(tmp_path: Path) -> None:
     payload = json.loads(path.read_text())
     assert payload["step"] == "step-a"
     assert payload["output_paths"] == [str(output_path)]
+    assert payload["output_hashes"] == {}
 
     loaded = store.load_checkpoint(tmp_path, "step-a")
     assert loaded is not None
@@ -62,6 +66,67 @@ def test_should_skip_step_requires_outputs(tmp_path: Path) -> None:
         "step-b",
         expected_outputs=[expected_output],
     ) is False
+
+
+@pytest.mark.unit
+def test_should_skip_step_validates_hashes(tmp_path: Path) -> None:
+    output_path = tmp_path / "outputs" / "artifact.txt"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text("initial")
+
+    store.write_checkpoint(
+        tmp_path,
+        "step-hash",
+        status="completed",
+        started_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T00:02:00Z",
+        output_paths=[output_path],
+        store_output_hashes=True,
+    )
+
+    assert store.should_skip_step(tmp_path, "step-hash") is True
+
+    output_path.write_text("modified")
+    assert store.should_skip_step(tmp_path, "step-hash") is False
+
+
+@pytest.mark.unit
+def test_should_skip_step_validates_freshness_and_metadata(tmp_path: Path) -> None:
+    output_path = tmp_path / "outputs" / "artifact.bin"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text("data")
+
+    sidecar = Path(f"{output_path}.metadata.json")
+    sidecar.write_text("{}")
+
+    future_time = time.time() + 3600
+    completed_at = datetime.fromtimestamp(future_time, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    store.write_checkpoint(
+        tmp_path,
+        "step-fresh",
+        status="completed",
+        started_at="2024-01-01T00:00:00Z",
+        completed_at=completed_at,
+        output_paths=[output_path],
+    )
+
+    assert store.should_skip_step(
+        tmp_path,
+        "step-fresh",
+        require_nonempty=True,
+        require_fresh_outputs=True,
+        validate_sidecar_metadata=True,
+    ) is False
+
+    os.utime(output_path, (future_time + 10, future_time + 10))
+    assert store.should_skip_step(
+        tmp_path,
+        "step-fresh",
+        require_nonempty=True,
+        require_fresh_outputs=True,
+        validate_sidecar_metadata=True,
+    ) is True
 
 
 @pytest.mark.unit
