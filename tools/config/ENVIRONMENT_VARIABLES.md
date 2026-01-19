@@ -421,6 +421,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_STALL_TIMEOUT_S` | float | 30 | Abort/reset an episode if observation progress stalls longer than this timeout (seconds). |
 | `GENIESIM_MAX_STALLS` | int | 2 | Max stalled episodes before the local framework restarts the Genie Sim server. |
 | `GENIESIM_STALL_BACKOFF_S` | float | 5 | Backoff (seconds) to wait after a stall or restart before resuming data collection. |
+| `GENIESIM_COLLECTION_TIMEOUT_S` | float | unset | Abort local Genie Sim data collection if total runtime exceeds this timeout (seconds). |
 | `ISAAC_SIM_ENDPOINT` | url | `http://localhost:8011` | Isaac Sim endpoint |
 | `ISAAC_SIM_PATH` | path | `/isaac-sim` | Isaac Sim installation path (local framework) |
 | `OMNIVERSE_HOST` | str | `localhost` | Omniverse host used to resolve USD asset paths |
