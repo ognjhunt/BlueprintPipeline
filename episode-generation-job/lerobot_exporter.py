@@ -162,6 +162,32 @@ def _checksum_file(path: Path, algo: str = "sha256") -> str:
     return hasher.hexdigest()
 
 
+def _parse_optional_int_env(var_name: str) -> Optional[int]:
+    raw_value = os.getenv(var_name)
+    if raw_value is None:
+        return None
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{var_name} must be an integer") from exc
+    if value < 0:
+        raise ValueError(f"{var_name} must be >= 0")
+    return value
+
+
+def _parse_optional_float_env(var_name: str) -> Optional[float]:
+    raw_value = os.getenv(var_name)
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{var_name} must be a float") from exc
+    if value < 0.0:
+        raise ValueError(f"{var_name} must be >= 0")
+    return value
+
+
 @dataclass
 class LeRobotEpisode:
     """A single episode in LeRobot format."""
@@ -260,6 +286,12 @@ class LeRobotDatasetConfig:
             os.getenv("REQUIRE_COMPLETE_EPISODES"),
             default=False,
         )
+    )
+    max_dropped_episodes: Optional[int] = field(
+        default_factory=lambda: _parse_optional_int_env("MAX_DROPPED_EPISODES")
+    )
+    max_dropped_episode_pct: Optional[float] = field(
+        default_factory=lambda: _parse_optional_float_env("MAX_DROPPED_EPISODE_PCT")
     )
     parquet_verification_mode: str = field(
         default_factory=lambda: os.getenv("PARQUET_VERIFICATION_MODE", "required").lower()
@@ -386,6 +418,11 @@ class LeRobotExporter:
         self._export_output_dir: Optional[Path] = None
         self.dropped_frames_total: int = 0
         self._v3_episode_index: Dict[str, Any] = {}
+        self.incomplete_episode_summary: Dict[str, Any] = {
+            "total_incomplete": 0,
+            "dropped_episode_ids": [],
+            "reason_counts": {},
+        }
 
     def _is_v3_export(self) -> bool:
         return self.export_format == LeRobotExportFormat.LEROBOT_V3
@@ -1084,6 +1121,51 @@ class LeRobotExporter:
                 incomplete_episodes.append((episode.episode_index, errors))
 
         return incomplete_episodes
+
+    def _summarize_incomplete_episodes(
+        self,
+        incomplete: List[Tuple[int, List[str]]],
+    ) -> Dict[str, Any]:
+        reason_counts: Dict[str, int] = {}
+        for _, errors in incomplete:
+            for error in errors:
+                reason_counts[error] = reason_counts.get(error, 0) + 1
+        return {
+            "total_incomplete": len(incomplete),
+            "dropped_episode_ids": [episode_id for episode_id, _ in incomplete],
+            "reason_counts": reason_counts,
+        }
+
+    def _enforce_dropped_episode_threshold(
+        self,
+        dropped_count: int,
+        *,
+        total_candidate_episodes: int,
+        phase: str,
+    ) -> None:
+        if dropped_count == 0:
+            return
+
+        max_dropped = self.config.max_dropped_episodes
+        max_pct = self.config.max_dropped_episode_pct
+        if max_dropped is None and max_pct is None:
+            return
+
+        pct = (dropped_count / total_candidate_episodes) * 100.0 if total_candidate_episodes else 0.0
+        over_count = max_dropped is not None and dropped_count > max_dropped
+        over_pct = max_pct is not None and pct > max_pct
+        if over_count or over_pct:
+            limits = []
+            if max_dropped is not None:
+                limits.append(f"count>{max_dropped}")
+            if max_pct is not None:
+                limits.append(f"percent>{max_pct:.2f}%")
+            limit_str = " or ".join(limits)
+            raise ValueError(
+                "Dropped episode threshold exceeded during "
+                f"{phase}: dropped {dropped_count}/{total_candidate_episodes} "
+                f"({pct:.2f}%), limit {limit_str}."
+            )
 
     def _validate_data_pack_tier_compliance(self) -> List[Tuple[int, List[str]]]:
         """
@@ -1835,6 +1917,7 @@ class LeRobotExporter:
             self.log("Validating episode completeness...")
             incomplete = self._validate_episode_completeness()
             if incomplete:
+                self.incomplete_episode_summary = self._summarize_incomplete_episodes(incomplete)
                 sample_limit = 5
                 self.log(
                     "  ERROR: Incomplete episodes detected "
@@ -1866,12 +1949,22 @@ class LeRobotExporter:
                     episode for episode in self.episodes
                     if episode.episode_index not in dropped_episode_ids
                 ]
+                self._enforce_dropped_episode_threshold(
+                    len(dropped_episode_ids),
+                    total_candidate_episodes=len(self.episodes) + len(dropped_episode_ids),
+                    phase="episode_completeness",
+                )
                 if not self.episodes:
                     raise ValueError(
                         "All episodes were incomplete; aborting export after validation."
                     )
             else:
                 self.log("  All episodes are complete")
+                self.incomplete_episode_summary = {
+                    "total_incomplete": 0,
+                    "dropped_episode_ids": [],
+                    "reason_counts": {},
+                }
 
             # Validate data pack tier compliance
             self.log("Validating data pack tier compliance...")
@@ -1911,6 +2004,11 @@ class LeRobotExporter:
                 self.log(
                     f"  Dropping {len(dropped_episode_ids)} tier-non-compliant episodes before export.",
                     "WARNING",
+                )
+                self._enforce_dropped_episode_threshold(
+                    len(dropped_episode_ids),
+                    total_candidate_episodes=len(self.episodes),
+                    phase="tier_compliance",
                 )
                 self.episodes = [
                     episode for episode in self.episodes
@@ -1983,6 +2081,11 @@ class LeRobotExporter:
                 self.log(
                     f"  Dropping {len(dropped_episode_ids)} episodes due to alignment errors.",
                     "WARNING",
+                )
+                self._enforce_dropped_episode_threshold(
+                    len(dropped_episode_ids),
+                    total_candidate_episodes=len(self.episodes),
+                    phase="trajectory_sensor_alignment",
                 )
                 self.episodes = [
                     episode for episode in self.episodes
@@ -2847,7 +2950,10 @@ class LeRobotExporter:
             "export_controls": {
                 "require_complete_episodes": self.config.require_complete_episodes,
                 "require_complete_episodes_source": "env:REQUIRE_COMPLETE_EPISODES",
+                "max_dropped_episodes": self.config.max_dropped_episodes,
+                "max_dropped_episode_pct": self.config.max_dropped_episode_pct,
             },
+            "episode_completeness": dict(self.incomplete_episode_summary),
             # Data quality and source information
             "data_quality": {
                 "physics_validated": data_source_info["physics_validated"],

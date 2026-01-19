@@ -566,9 +566,12 @@ def _upload_output_dir(
 
 def _collect_local_episode_metadata(
     recordings_dir: Path,
-) -> List[GeneratedEpisodeMetadata]:
+) -> Dict[str, Any]:
     episode_metadata_list: List[GeneratedEpisodeMetadata] = []
+    parse_failures: List[Dict[str, str]] = []
+    total_files = 0
     for episode_file in sorted(recordings_dir.rglob("*.json")):
+        total_files += 1
         try:
             with open(episode_file, "r") as handle:
                 payload = json.load(handle)
@@ -593,8 +596,20 @@ def _collect_local_episode_metadata(
                 )
             )
         except Exception as exc:
+            error_message = f"{type(exc).__name__}: {exc}"
+            parse_failures.append(
+                {
+                    "file": episode_file.as_posix(),
+                    "error": error_message,
+                }
+            )
             print(f"[IMPORT] ⚠️  Failed to parse local episode {episode_file}: {exc}")
-    return episode_metadata_list
+    return {
+        "episodes": episode_metadata_list,
+        "parse_failures": parse_failures,
+        "parse_failure_count": len(parse_failures),
+        "total_files": total_files,
+    }
 
 
 @dataclass
@@ -638,6 +653,8 @@ class ImportResult:
     total_episodes_downloaded: int = 0
     episodes_passed_validation: int = 0
     episodes_filtered: int = 0
+    episodes_parse_failed: int = 0
+    episode_parse_failures: List[Dict[str, str]] = field(default_factory=list)
 
     # Quality metrics
     average_quality_score: float = 0.0
@@ -1237,10 +1254,24 @@ def run_local_import_job(
             )
         )
 
-    episode_metadata_list = _collect_local_episode_metadata(recordings_dir)
+    episode_metadata_payload = _collect_local_episode_metadata(recordings_dir)
+    episode_metadata_list = episode_metadata_payload["episodes"]
+    parse_failure_count = episode_metadata_payload["parse_failure_count"]
+    parse_failures = episode_metadata_payload["parse_failures"]
     if not episode_metadata_list:
         result.errors.append(f"No local episode files found under {recordings_dir}")
         return result
+    if parse_failure_count > 0:
+        parse_failure_message = (
+            f"{parse_failure_count} local episode files failed to parse"
+        )
+        if config.fail_on_partial_error:
+            result.errors.append(parse_failure_message)
+            result.success = False
+            return result
+        result.warnings.append(parse_failure_message)
+    result.episodes_parse_failed = parse_failure_count
+    result.episode_parse_failures = parse_failures
 
     validator = ImportedEpisodeValidator(
         min_quality_score=config.min_quality_score,
@@ -1546,6 +1577,8 @@ def run_local_import_job(
             "passed_validation": result.episodes_passed_validation,
             "filtered": result.episodes_filtered,
             "download_errors": 0,
+            "parse_failed": result.episodes_parse_failed,
+            "parse_failures": result.episode_parse_failures,
         },
         "quality": {
             "average_score": result.average_quality_score,
@@ -1739,6 +1772,8 @@ def run_local_import_job(
     print("LOCAL IMPORT COMPLETE")
     print("=" * 80)
     print(f"{'✅' if result.success else '❌'} Imported {result.episodes_passed_validation} local episodes")
+    if result.episodes_parse_failed:
+        print(f"[IMPORT] ⚠️  Episode parse failures: {result.episodes_parse_failed}")
     print(f"Output directory: {result.output_dir}")
     print(f"Manifest: {result.import_manifest_path}")
     print(
@@ -1770,6 +1805,7 @@ def _emit_import_quality_gate(result: ImportResult, scene_id: str) -> None:
         details = {
             "episodes_passed_validation": ctx["episodes_passed_validation"],
             "episodes_filtered": ctx["episodes_filtered"],
+            "episodes_parse_failed": ctx["episodes_parse_failed"],
             "average_quality_score": ctx["average_quality_score"],
             "import_manifest_path": ctx["import_manifest_path"],
             "errors": ctx["errors"],
@@ -1800,6 +1836,7 @@ def _emit_import_quality_gate(result: ImportResult, scene_id: str) -> None:
         "success": result.success,
         "episodes_passed_validation": result.episodes_passed_validation,
         "episodes_filtered": result.episodes_filtered,
+        "episodes_parse_failed": result.episodes_parse_failed,
         "average_quality_score": result.average_quality_score,
         "import_manifest_path": str(result.import_manifest_path)
         if result.import_manifest_path
