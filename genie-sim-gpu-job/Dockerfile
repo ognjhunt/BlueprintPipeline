@@ -13,9 +13,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ARG GENIESIM_REPO=https://github.com/AgibotTech/genie_sim.git
-ARG GENIESIM_REF=4208030d556b3d025b8b1de4e8acf09f66c494bc
+ARG GENIESIM_REF
 
-RUN git clone --no-checkout ${GENIESIM_REPO} ${GENIESIM_ROOT} \
+COPY GENIESIM_REF /tmp/GENIESIM_REF
+
+RUN GENIESIM_REF=${GENIESIM_REF:-$(cat /tmp/GENIESIM_REF)} \
+    && git clone --no-checkout ${GENIESIM_REPO} ${GENIESIM_ROOT} \
     && cd ${GENIESIM_ROOT} \
     && git fetch --depth 1 origin ${GENIESIM_REF} \
     && git checkout ${GENIESIM_REF}
