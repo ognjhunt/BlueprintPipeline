@@ -9,5 +9,8 @@ pyarrow==14.0.2
 requests==2.32.3
 aiohttp==3.9.5
 
+# Firebase uploads
+firebase-admin==6.5.0
+
 # Optional: API response validation
 pydantic==2.8.2
