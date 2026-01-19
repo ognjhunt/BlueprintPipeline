@@ -75,6 +75,8 @@ def _build_quality_context(
     quality_manifest: Dict[str, Any],
     generation_manifest: Dict[str, Any],
     config: Any,
+    episode_metadata_path: Optional[Path] = None,
+    lerobot_dataset_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     episodes = quality_manifest.get("episodes", [])
     total = len(episodes)
@@ -117,6 +119,8 @@ def _build_quality_context(
             "physics_validation_rate": physics_validation_rate,
             "physics_backends": sorted(set(physics_backends)),
         },
+        "episode_metadata_path": str(episode_metadata_path) if episode_metadata_path else None,
+        "lerobot_dataset_path": str(lerobot_dataset_path) if lerobot_dataset_path else None,
     }
 
 
@@ -182,7 +186,26 @@ def main() -> int:
     )
 
     config = load_quality_config()
-    quality_context = _build_quality_context(quality_manifest, generation_manifest, config)
+    episode_metadata_path = None
+    lerobot_dataset_path = None
+    if scene_dir:
+        lerobot_candidate = scene_dir / "episodes" / "lerobot"
+        if lerobot_candidate.is_dir():
+            lerobot_dataset_path = lerobot_candidate
+        info_candidate = lerobot_candidate / "meta" / "info.json" if lerobot_candidate else None
+        metadata_candidate = lerobot_candidate / "metadata.json" if lerobot_candidate else None
+        if info_candidate and info_candidate.is_file():
+            episode_metadata_path = info_candidate
+        elif metadata_candidate and metadata_candidate.is_file():
+            episode_metadata_path = metadata_candidate
+
+    quality_context = _build_quality_context(
+        quality_manifest,
+        generation_manifest,
+        config,
+        episode_metadata_path=episode_metadata_path,
+        lerobot_dataset_path=lerobot_dataset_path,
+    )
 
     _emit_metrics(args.scene_id, quality_context, quality_manifest)
 

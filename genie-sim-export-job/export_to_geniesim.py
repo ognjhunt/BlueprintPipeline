@@ -756,6 +756,7 @@ def run_geniesim_export_job(
                 "manifest": manifest,
                 "assets_dir": assets_dir,
                 "scene_id": scene_id,
+                "replicator_bundle_dir": str(root / replicator_prefix) if replicator_prefix else None,
             }
             results = registry.run_checkpoint(checkpoint, context)
             found_gate_ids = {result.gate_id for result in results}
