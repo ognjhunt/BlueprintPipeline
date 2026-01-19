@@ -108,11 +108,24 @@ def _is_production_run() -> bool:
 
 def _mock_capture_disallowed() -> bool:
     """Block mock capture in production or staging environments."""
-    return (
-        os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
-        or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
-        or parse_bool_env(os.getenv("ISAAC_SIM_REQUIRED"), default=False)
-    )
+    return _is_production_run()
+
+
+def _mock_capture_block_reason() -> str:
+    """Return the first production flag that disallows mock capture."""
+    if parse_bool_env(os.getenv("REQUIRE_REAL_PHYSICS"), default=False):
+        return "REQUIRE_REAL_PHYSICS=true"
+    if os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production":
+        return "DATA_QUALITY_LEVEL=production"
+    if parse_bool_env(os.getenv("PRODUCTION_MODE"), default=False):
+        return "PRODUCTION_MODE=true"
+    if parse_bool_env(os.getenv("ISAAC_SIM_REQUIRED"), default=False):
+        return "ISAAC_SIM_REQUIRED=true"
+    if parse_bool_env(os.getenv("PRODUCTION"), default=False):
+        return "PRODUCTION=true"
+    if os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}:
+        return "LABS_STAGING=true"
+    return "production environment detected"
 
 
 def _log_mock_capture_blocked(
@@ -1556,8 +1569,10 @@ class MockSensorCapture(IsaacSimSensorCapture):
     _warning_shown = False
 
     def __init__(self, config: SensorDataConfig, verbose: bool = True):
+        # Direct instantiation is blocked whenever production is detected.
         if _mock_capture_disallowed():
-            _log_mock_capture_blocked("MockSensorCapture initialization", None)
+            reason = f"MockSensorCapture initialization blocked by {_mock_capture_block_reason()}"
+            _log_mock_capture_blocked(reason, None)
             raise RuntimeError(
                 "MockSensorCapture is not allowed when DATA_QUALITY_LEVEL=production, "
                 "LABS_STAGING is enabled, or ISAAC_SIM_REQUIRED=true. "
