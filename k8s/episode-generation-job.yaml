@@ -56,56 +56,25 @@ data:
 ---
 # LABS-BLOCKER-004 FIX: K8s Secrets Configuration
 # =============================================================================
-# CRITICAL: These secrets MUST be configured before deploying to production.
-# Empty values will cause jobs to fail silently.
+# CRITICAL: Create the secret out-of-band (do NOT commit secret manifests).
+# Required keys in the secret named "episode-gen-secrets" (namespace: blueprint):
+#   - GEMINI_API_KEY
+#   - OPENAI_API_KEY
+# Optional key:
+#   - SECRETS_CONFIGURED (set to "true" after configuring real API keys)
 #
-# Configuration Options:
-#
-# Option 1: Use kubectl create secret (RECOMMENDED for production)
+# Create the secret (example):
 #   kubectl create secret generic episode-gen-secrets \
 #     --namespace=blueprint \
 #     --from-literal=GEMINI_API_KEY='your-gemini-key-here' \
-#     --from-literal=OPENAI_API_KEY='your-openai-key-here'
+#     --from-literal=OPENAI_API_KEY='your-openai-key-here' \
+#     --from-literal=SECRETS_CONFIGURED='true'
 #
-# Option 2: Use Google Secret Manager (BEST for GKE production)
-#   1. Store secrets in Google Secret Manager:
-#      gcloud secrets create gemini-api-key --data-file=- <<< 'your-key'
-#      gcloud secrets create openai-api-key --data-file=- <<< 'your-key'
-#
-#   2. Grant access to GKE service account:
-#      gcloud secrets add-iam-policy-binding gemini-api-key \
-#        --member="serviceAccount:blueprint-pipeline-sa@PROJECT_ID.iam.gserviceaccount.com" \
-#        --role="roles/secretmanager.secretAccessor"
-#
-#   3. Update deployment to use Secret Manager (see tools/secrets.py)
-#
-# Option 3: Edit this YAML (NOT recommended - secrets in version control)
-#   Replace REPLACE_WITH_YOUR_* placeholders below with actual values
-#
-# Testing Secret Configuration:
+# Verify:
 #   kubectl get secret episode-gen-secrets -n blueprint -o yaml
 #   kubectl describe secret episode-gen-secrets -n blueprint
-#
 # =============================================================================
-apiVersion: v1
-kind: Secret
-metadata:
-  name: episode-gen-secrets
-  namespace: blueprint
-  annotations:
-    description: "API keys for LLM services used in episode generation"
-type: Opaque
-stringData:
-  # LABS-BLOCKER-004 FIX: Replaced empty strings with clear placeholders
-  # Jobs will fail with clear error messages if these are not set
-  GEMINI_API_KEY: "REPLACE_WITH_YOUR_GEMINI_API_KEY"
-  OPENAI_API_KEY: "REPLACE_WITH_YOUR_OPENAI_API_KEY"
 
-  # Optional: Add validation flag to detect misconfiguration
-  # Set to "true" after configuring real API keys
-  SECRETS_CONFIGURED: "false"
-
----
 apiVersion: batch/v1
 kind: Job
 metadata:
