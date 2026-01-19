@@ -32,6 +32,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from blueprint_sim.assembly import assemble_from_env
+from tools.metrics.pipeline_metrics import get_metrics
 from tools.quality_gates.quality_gate import QualityGateCheckpoint, QualityGateRegistry
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
@@ -54,7 +55,6 @@ def _gate_report_path(scene_id: str) -> Path:
     report_path = GCS_ROOT / f"scenes/{scene_id}/{JOB_NAME}/quality_gate_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     return report_path
-from tools.metrics.pipeline_metrics import get_metrics
 
 
 def main() -> None:
