@@ -1,6 +1,6 @@
 {
   "default_min_quality_score": 0.85,
-  "min_allowed": 0.0,
-  "max_allowed": 1.0,
-  "description": "Minimum acceptable quality score for Genie Sim imports. Override via MIN_QUALITY_SCORE if within allowed range."
+  "min_allowed": 0.5,
+  "max_allowed": 0.95,
+  "description": "Minimum acceptable quality score for Genie Sim imports. Override via MIN_QUALITY_SCORE if within allowed range (0.5 - 0.95)."
 }
