@@ -163,8 +163,11 @@ def upload_episodes_to_firebase(
 
     total_files = 0
     uploaded_files = 0
+    skipped_files = 0
+    reuploaded_files = 0
     failures = []
     verification_failed = []
+    file_statuses = []
 
     file_paths = [
         file_path
@@ -177,9 +180,51 @@ def upload_episodes_to_firebase(
         path: Path,
         remote_path: str,
         content_type: Optional[str],
-    ) -> Optional[dict]:
+    ) -> dict:
         blob = bucket.blob(remote_path)
         local_hashes = _calculate_file_hashes(path)
+        status_payload = {
+            "local_path": str(path),
+            "remote_path": remote_path,
+        }
+
+        if blob.exists():
+            verified, verification_detail = _verify_blob_checksum(
+                blob,
+                path,
+                local_hashes=local_hashes,
+            )
+            if verified:
+                return {
+                    **status_payload,
+                    "status": "skipped",
+                }
+
+            blob.delete()
+            _set_blob_sha256_metadata(blob, local_hashes["sha256_hex"])
+            _upload_file(blob, path, content_type)
+            verified, verification_detail = _verify_blob_checksum(
+                blob,
+                path,
+                local_hashes=local_hashes,
+            )
+            if not verified:
+                verification_detail = {
+                    "local_path": str(path),
+                    "remote_path": remote_path,
+                    **verification_detail,
+                }
+                return {
+                    **status_payload,
+                    "status": "failed",
+                    "error": "reupload verification failed",
+                    "verification": verification_detail,
+                }
+            return {
+                **status_payload,
+                "status": "reuploaded",
+            }
+
         _set_blob_sha256_metadata(blob, local_hashes["sha256_hex"])
         _upload_file(blob, path, content_type)
         verified, verification_detail = _verify_blob_checksum(
@@ -194,12 +239,15 @@ def upload_episodes_to_firebase(
                 **verification_detail,
             }
             return {
-                "local_path": str(path),
-                "remote_path": remote_path,
+                **status_payload,
+                "status": "failed",
                 "error": "upload verification failed",
                 "verification": verification_detail,
             }
-        return None
+        return {
+            **status_payload,
+            "status": "uploaded",
+        }
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {}
@@ -216,12 +264,21 @@ def upload_episodes_to_firebase(
         for future in as_completed(futures):
             info = futures[future]
             try:
-                verification_failure = future.result()
-                if verification_failure:
-                    failures.append(verification_failure)
-                    verification_failed.append(verification_failure["verification"])
+                status_result = future.result()
+                status = status_result.get("status")
+                file_statuses.append(status_result)
+                if status == "failed":
+                    failures.append(status_result)
+                    verification = status_result.get("verification")
+                    if verification:
+                        verification_failed.append(verification)
                     continue
-                uploaded_files += 1
+                if status == "uploaded":
+                    uploaded_files += 1
+                elif status == "skipped":
+                    skipped_files += 1
+                elif status == "reuploaded":
+                    reuploaded_files += 1
             except Exception as exc:
                 logger.error(
                     "Failed to upload %s to %s: %s",
@@ -229,27 +286,37 @@ def upload_episodes_to_firebase(
                     info["remote_path"],
                     exc,
                 )
-                failures.append({
+                failure = {
                     "local_path": info["local_path"],
                     "remote_path": info["remote_path"],
+                    "status": "failed",
                     "error": str(exc),
-                })
+                }
+                failures.append(failure)
+                file_statuses.append(failure)
 
     failures.sort(key=lambda failure: failure["local_path"])
     verification_failed.sort(key=lambda failure: failure["local_path"])
+    file_statuses.sort(key=lambda status: status["local_path"])
 
     summary = {
         "total_files": total_files,
         "uploaded": uploaded_files,
+        "skipped": skipped_files,
+        "reuploaded": reuploaded_files,
         "failed": len(failures),
+        "file_statuses": file_statuses,
         "failures": failures,
         "verification_failed": verification_failed,
         "verification_strategy": "sha256_metadata+md5_base64",
     }
 
     logger.info(
-        "Firebase upload summary: %s/%s files uploaded",
+        "Firebase upload summary: %s uploaded, %s skipped, %s reuploaded, %s failed (%s total)",
         uploaded_files,
+        skipped_files,
+        reuploaded_files,
+        len(failures),
         total_files,
     )
 
