@@ -578,6 +578,21 @@ def run_geniesim_export_job(
         json.dump(manifest, f, indent=2)
     print(f"[GENIESIM-EXPORT-JOB] Wrote merged manifest to: {merged_manifest_path}")
 
+    print("[GENIESIM-EXPORT-JOB] Validating merged manifest...")
+    try:
+        validate_scene_manifest(merged_manifest_path, label="[GENIESIM-EXPORT-JOB]")
+    except SystemExit as exc:
+        print(
+            "[GENIESIM-EXPORT-JOB] ❌ ERROR: Merged manifest validation failed; "
+            "aborting export.",
+        )
+        print(
+            f"[GENIESIM-EXPORT-JOB] ❌ ERROR: "
+            f"validate_scene_manifest exited with code {exc.code}",
+        )
+        return 1
+    print("[GENIESIM-EXPORT-JOB] ✅ Merged manifest validation passed.")
+
     print("\n[GENIESIM-EXPORT-JOB] Generating asset provenance...")
     provenance_scene_root = _resolve_scene_root_for_provenance(assets_dir)
     asset_provenance_path = output_dir / "legal" / "asset_provenance.json"
