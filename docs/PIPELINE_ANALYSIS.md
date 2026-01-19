@@ -14,9 +14,9 @@
 ## Pipeline Architecture Overview
 
 ```
-Source Image → 3D-RE-GEN → regen3d-job → [interactive-job] → simready-job → usd-assembly-job → replicator-job → isaac-lab-job → [dwm-preparation-job]
-                  ↓              ↓              ↓                  ↓                ↓                  ↓                 ↓                ↓
-            (external)      manifest      articulated         physics           scene.usda        placement       RL training        DWM videos
+Source Image → 3D-RE-GEN → regen3d-job → [interactive-job] → simready-job → usd-assembly-job → replicator-job → isaac-lab-job
+                  ↓              ↓              ↓                  ↓                ↓                  ↓                 ↓
+            (external)      manifest      articulated         physics           scene.usda        placement       RL training
                              layout          URDF              props                              regions           package
 ```
 
@@ -206,33 +206,6 @@ Source Image → 3D-RE-GEN → regen3d-job → [interactive-job] → simready-jo
 
 ---
 
-### 8. **DWM Preparation Job** (`dwm-preparation-job/`)
-
-| Status | Feature |
-|--------|---------|
-| ✅ READY | Camera trajectory generation |
-| ✅ READY | Hand trajectory generation |
-| ✅ READY | MANO hand model integration |
-| ✅ READY | Scene renderer interface |
-| ✅ READY | Bundle packaging |
-| ⚠️ INCOMPLETE | Isaac Sim render backend (mock only) |
-| ⚠️ INCOMPLETE | Physics ground-truth rollouts (stub) |
-| 🚫 BLOCKED | DWM inference (model not publicly available) |
-
-**Code Location:** `dwm-preparation-job/prepare_dwm_bundle.py`
-
-**Gap Analysis:**
-- Scene rendering requires Isaac Sim backend - currently only mock renderer works
-- Hand trajectories are generated but not validated against object geometry
-- DWM model (arXiv:2512.17907) is not publicly released - inference job is blocked
-
-**What's Needed for 100%:**
-1. Implement Isaac Sim render backend for production use
-2. Add collision-aware hand trajectory validation
-3. Await DWM model release or implement alternative video diffusion
-
----
-
 ## Cloud Infrastructure Analysis
 
 ### Current Architecture
@@ -270,7 +243,6 @@ EventArc (GCS trigger) → Cloud Workflows → Cloud Run Jobs (sequential)
 | USD Assembly | 1-3 min | Highly parallel | ~500-1500/day |
 | Replicator | 2-5 min | Parallel | ~500-1000/day |
 | Isaac Lab | 1-2 min | Highly parallel | ~1000+/day |
-| DWM Prep | 5-15 min | GPU-bound | ~100-300/day |
 
 ### Bottleneck Analysis
 
@@ -297,10 +269,6 @@ EventArc (GCS trigger) → Cloud Workflows → Cloud Run Jobs (sequential)
    - **Solution**: Use regional buckets, Cloud CDN for reads
    - **Impact**: Reduce latency 2-5×
 
-6. **DWM Rendering**: Requires Isaac Sim GPU
-   - **Solution**: Defer to post-processing, separate GPU cluster
-   - **Impact**: Don't block core pipeline
-
 ---
 
 ## Gaps for 100% Functionality
@@ -312,7 +280,6 @@ EventArc (GCS trigger) → Cloud Workflows → Cloud Run Jobs (sequential)
 | 1 | **simready-job has 3 undefined functions** - job cannot run | simready-job | 2-4 hours |
 | 2 | 3D-RE-GEN code unavailable | Input | External (Q1 2025) |
 | 3 | URDF validation missing | interactive-job | 1 day |
-| 4 | Isaac Sim render backend stub | dwm-preparation-job | 2-3 days |
 | 5 | Generated code validation | isaac-lab-job | 1 day |
 
 ### 🟡 Important (Should Fix)
@@ -357,7 +324,6 @@ EventArc (GCS trigger) → Cloud Workflows → Cloud Run Jobs (sequential)
 3. **Deploy PhysX/Particulate with min-instances=1** to avoid cold starts
 4. **Add request queuing** (Cloud Tasks) for Gemini API calls
 5. **Implement caching layer** for repeat asset physics estimation
-6. **Defer DWM to separate pipeline** - don't block core flow
 
 ### Infrastructure Changes
 
@@ -385,6 +351,45 @@ main:
             - isaac_lab:
                 call: run_isaac_lab_job
 ```
+
+---
+
+## Appendix A: Experimental/Optional Pipelines (Disabled by Default)
+
+The following steps are **not part of the default/core pipeline** and require
+explicit enablement (`--enable-dwm`, `--enable-dream2flow`, or a shared
+experimental flag).
+
+### A.1 **DWM Preparation Job** (`dwm-preparation-job/`)
+
+| Status | Feature |
+|--------|---------|
+| ✅ READY | Camera trajectory generation |
+| ✅ READY | Hand trajectory generation |
+| ✅ READY | MANO hand model integration |
+| ✅ READY | Scene renderer interface |
+| ✅ READY | Bundle packaging |
+| ⚠️ INCOMPLETE | Isaac Sim render backend (mock only) |
+| ⚠️ INCOMPLETE | Physics ground-truth rollouts (stub) |
+| 🚫 BLOCKED | DWM inference (model not publicly available) |
+
+**Code Location:** `dwm-preparation-job/prepare_dwm_bundle.py`
+
+**Gap Analysis:**
+- Scene rendering requires Isaac Sim backend - currently only mock renderer works
+- Hand trajectories are generated but not validated against object geometry
+- DWM model (arXiv:2512.17907) is not publicly released - inference job is blocked
+
+**What's Needed for 100%:**
+1. Implement Isaac Sim render backend for production use
+2. Add collision-aware hand trajectory validation
+3. Await DWM model release or implement alternative video diffusion
+
+### A.2 **Dream2Flow Preparation** (`dream2flow-preparation-job/`)
+
+Dream2Flow is experimental and disabled by default pending model availability.
+Use it only when explicitly enabled and when the downstream model checkpoints
+are available.
 
 ---
 

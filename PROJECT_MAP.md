@@ -93,11 +93,12 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 │                                                                              │
 │  Option B: episode-generation-job                                            │
 │            (BlueprintPipeline native generation)                             │
-│                                                                              │
-│  ──▶ dream2flow-preparation-job (egocentric videos)                         │
-│  ──▶ dwm-preparation-job (dexterous world models)                           │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Experimental add-ons (disabled by default):**
+- `dream2flow-preparation-job` for egocentric video/flow bundles.
+- `dwm-preparation-job` for dexterous world model conditioning bundles.
 
 ---
 
@@ -124,13 +125,15 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 │   ├── variation-asset-pipeline-job/  # Variation asset generation
 │   ├── scene-generation-job/     # Synthetic scene generation
 │   ├── arena-export-job/         # Arena integration export
-│   ├── dream2flow-preparation-job/   # Dream2Flow bundle prep
-│   ├── dwm-preparation-job/      # DWM egocentric video generation
 │   ├── meshy-job/                # 3D mesh generation
 │   ├── objects-job/              # Object detection/segmentation
 │   ├── dataset-delivery-job/     # Dataset packaging
 │   ├── particulate-service/      # Articulation microservice
 │   └── smart-placement-engine-job/   # Placement optimization
+│
+├── EXPERIMENTAL / OPTIONAL JOBS (disabled by default)
+│   ├── dream2flow-preparation-job/   # Dream2Flow bundle prep
+│   └── dwm-preparation-job/          # DWM egocentric video generation
 │
 ├── SHARED TOOLS (tools/)
 │   ├── run_local_pipeline.py     # Main local orchestrator (2600+ lines)
@@ -177,12 +180,14 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 │   ├── genie-sim-export-pipeline.yaml   # Genie Sim export
 │   ├── genie-sim-import-pipeline.yaml   # Episode import
 │   ├── genie-sim-import-poller.yaml     # Import fallback polling
-│   ├── dream2flow-preparation-pipeline.yaml
-│   ├── dwm-preparation-pipeline.yaml
 │   ├── arena-export-pipeline.yaml
 │   ├── training-pipeline.yaml
 │   ├── variation-assets-pipeline.yaml
 │   └── [18+ more workflows...]
+│
+│   EXPERIMENTAL WORKFLOWS (disabled by default)
+│   ├── dream2flow-preparation-pipeline.yaml
+│   └── dwm-preparation-pipeline.yaml
 │
 ├── TESTING
 │   ├── tests/                    # Test suite
@@ -291,6 +296,11 @@ Steps: regen3d → scale → interactive → simready → usd → replicator →
 | `genie-sim-import-job` | Import episodes | `import_from_geniesim.py` | quality_gates |
 | `genie-sim-gpu-job` | GPU execution | Dockerfile-based | Isaac Sim, cuRobo |
 | `episode-generation-job` | Native episode gen | `generate_episodes.py` | Isaac Sim |
+
+### Experimental / Optional Jobs (Disabled by Default)
+
+| Job | Purpose | Entry Point | Key Dependencies |
+|-----|---------|-------------|------------------|
 | `dream2flow-preparation-job` | Egocentric videos | `prepare_dream2flow_bundle.py` | - |
 | `dwm-preparation-job` | DWM conditioning | `prepare_dwm_bundle.py` | - |
 
@@ -341,7 +351,7 @@ Workflows are YAML files in `/workflows/` that orchestrate Cloud Run jobs.
 ### EventArc Triggers
 
 Workflows auto-trigger on GCS completion markers:
-- `.regen3d_complete` → usd-assembly, dream2flow, dwm (parallel)
+- `.regen3d_complete` → usd-assembly (core); dream2flow/dwm only when explicitly enabled
 - `.usd_complete` → episode-generation
 - `.variation_pipeline_complete` → genie-sim-export
 - `.geniesim_complete` → arena-export

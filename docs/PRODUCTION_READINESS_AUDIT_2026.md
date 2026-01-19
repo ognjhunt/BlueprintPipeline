@@ -58,9 +58,7 @@ This audit identified **~300+ issues** across 10 categories. Issues are ranked b
 
 | Feature | Files | Status | Impact |
 |---------|-------|--------|--------|
-| **Dream2Flow model** | `dream2flow-preparation-job/*` | NOT RELEASED | "Placeholder video - model not yet available" |
 | **3D-RE-GEN code** | `tools/regen3d_adapter/__init__.py` | PENDING (~Q1 2025) | Public release pending |
-| **MANO hand model** | `dwm-preparation-job/hand_motion/` | PLACEHOLDER | Uses SimpleHandMesh fallback |
 | **NotImplementedError** | 12 files | BLOCKING | Various methods raise NotImplementedError |
 | **50+ P0/P1/P2 FIX comments** | Throughout codebase | KNOWN ISSUES | Marked but unfixed |
 | **LABS-BLOCKER issues** | `genie-sim-import-job/` | BLOCKING | Quality threshold workarounds |
@@ -178,7 +176,7 @@ This audit identified **~300+ issues** across 10 categories. Issues are ranked b
 | **Version conflicts** | pytest: `==8.3.4` vs `>=7.4.0` across files |
 
 **Files Lacking Lock Files:**
-- `arena-export-job`, `dream2flow-preparation-job`, `dwm-preparation-job`
+- `arena-export-job`
 - `episode-generation-job`, `scene-generation-job`, `smart-placement-engine-job`
 - `tools/tracing`, `ultrashape`, `variation-asset-pipeline-job`
 
@@ -229,6 +227,19 @@ This audit identified **~300+ issues** across 10 categories. Issues are ranked b
 | **Documentation** | 100+ gaps | LOW | LOW |
 
 ---
+
+## Appendix: Experimental / Optional Pipelines (Disabled by Default)
+
+These items refer to experimental workflows and jobs that are **not part of the
+default pipeline** and should only be considered when explicitly enabled.
+
+| Feature | Files | Status | Impact |
+|---------|-------|--------|--------|
+| **Dream2Flow model** | `dream2flow-preparation-job/*` | NOT RELEASED | "Placeholder video - model not yet available" |
+| **MANO hand model** | `dwm-preparation-job/hand_motion/` | PLACEHOLDER | Uses SimpleHandMesh fallback |
+
+**Experimental job dependency gaps:**
+- Missing lock files for `dream2flow-preparation-job` and `dwm-preparation-job` (disabled by default).
 
 ## Recommended Action Plan
 
