@@ -1,0 +1,62 @@
+name: Build Docker Images
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: genie-sim-gpu-job
+            context: genie-sim-gpu-job
+            dockerfile: genie-sim-gpu-job/Dockerfile
+          - image: episode-generation-job
+            context: episode-generation-job
+            dockerfile: episode-generation-job/Dockerfile
+          - image: scene-generation-job
+            context: scene-generation-job
+            dockerfile: scene-generation-job/Dockerfile
+          - image: objects-job
+            context: objects-job
+            dockerfile: objects-job/Dockerfile
+          - image: scale-job
+            context: scale-job
+            dockerfile: scale-job/Dockerfile
+          - image: replicator-job
+            context: replicator-job
+            dockerfile: replicator-job/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ matrix.image }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/${{ matrix.image }}:latest
