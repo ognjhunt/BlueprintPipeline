@@ -14,6 +14,11 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
 - [ ] **Genie Sim repo path** set locally via `GENIESIM_ROOT` when running the pipeline outside CI.
 - [ ] **gRPC Python dependency** (`grpcio`) installed in the Python environment used by the adapter.
 - [ ] **Production deployments** explicitly set `GENIESIM_ENV=production` and enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks.
+- [ ] **Firebase uploads (submit/import)** have credentials available in production or service mode:
+  - `FIREBASE_STORAGE_BUCKET`
+  - `FIREBASE_SERVICE_ACCOUNT_JSON` or `FIREBASE_SERVICE_ACCOUNT_PATH`
+  - Optional prefixes: `FIREBASE_EPISODE_PREFIX` (submit) and `FIREBASE_UPLOAD_PREFIX` (import).
+  - `ENABLE_FIREBASE_UPLOAD=true` to force uploads outside production/service mode (import defaults to enabled in production/service mode).
 
 ## Secure gRPC configuration
 
