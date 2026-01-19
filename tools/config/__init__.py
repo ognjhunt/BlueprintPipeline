@@ -70,6 +70,55 @@ class SimulationThresholds:
 
 
 @dataclass
+class UsdThresholds:
+    """USD validation thresholds."""
+    max_usd_size_bytes: int = 500_000_000
+    max_broken_references: int = 0
+    require_physics_scene: bool = True
+    require_header_validation: bool = True
+
+
+@dataclass
+class ReplicatorThresholds:
+    """Replicator bundle validation thresholds."""
+    required_sensor_fields: Dict[str, List[str]] = field(default_factory=lambda: {
+        "camera_list": ["cameras", "camera_list"],
+        "resolution": ["resolution"],
+        "modalities": ["modalities", "annotations"],
+        "stream_ids": ["stream_ids", "streams"],
+    })
+
+
+@dataclass
+class EpisodeMetadataThresholds:
+    """Episode metadata validation thresholds."""
+    required_fields: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
+        "dataset_name": {"paths": ["dataset_name", "name"], "type": "string"},
+        "scene_id": {"paths": ["scene_id", "scene.scene_id"], "type": "string"},
+        "robot_type": {"paths": ["robot_type", "robot.type"], "type": "string"},
+        "camera_specs": {
+            "paths": ["camera_specs", "data_pack.cameras", "cameras"],
+            "type": "array_or_object",
+        },
+        "fps": {"paths": ["fps"], "type": "number"},
+        "action_space": {"paths": ["action_space", "action_space_info"], "type": "array_or_object"},
+        "episode_stats": {"paths": ["episode_stats", "stats"], "type": "object"},
+    })
+
+
+@dataclass
+class DwmThresholds:
+    """DWM bundle validation thresholds."""
+    required_files: List[str] = field(default_factory=lambda: [
+        "manifest.json",
+        "static_scene_video.mp4",
+        "camera_trajectory.json",
+        "metadata/scene_info.json",
+        "metadata/prompt.txt",
+    ])
+
+
+@dataclass
 class HumanApprovalConfig:
     """Human approval workflow configuration."""
     enabled: bool = True
@@ -122,6 +171,10 @@ class QualityConfig:
     episodes: EpisodeThresholds = field(default_factory=EpisodeThresholds)
     data_quality: DataQualityThresholds = field(default_factory=DataQualityThresholds)
     simulation: SimulationThresholds = field(default_factory=SimulationThresholds)
+    usd: UsdThresholds = field(default_factory=UsdThresholds)
+    replicator: ReplicatorThresholds = field(default_factory=ReplicatorThresholds)
+    episode_metadata: EpisodeMetadataThresholds = field(default_factory=EpisodeMetadataThresholds)
+    dwm: DwmThresholds = field(default_factory=DwmThresholds)
     human_approval: HumanApprovalConfig = field(default_factory=HumanApprovalConfig)
     approval_store: ApprovalStoreConfig = field(default_factory=ApprovalStoreConfig)
     gate_overrides: GateOverrideConfig = field(default_factory=GateOverrideConfig)
@@ -570,6 +623,10 @@ class ConfigLoader:
         # Parse into dataclass
         thresholds = config.get("thresholds", {})
         data_quality = thresholds.get("data_quality", {})
+        usd_thresholds = thresholds.get("usd", {})
+        replicator_thresholds = thresholds.get("replicator", {})
+        episode_metadata_thresholds = thresholds.get("episode_metadata", {})
+        dwm_thresholds = thresholds.get("dwm", {})
 
         return QualityConfig(
             physics=PhysicsThresholds(
@@ -602,6 +659,52 @@ class ConfigLoader:
                 min_stable_steps=thresholds.get("simulation", {}).get("min_stable_steps", 20),
                 max_penetration_depth_m=thresholds.get("simulation", {}).get("max_penetration_depth_m", 0.005),
                 physics_stability_timeout_s=thresholds.get("simulation", {}).get("physics_stability_timeout_s", 30.0),
+            ),
+            usd=UsdThresholds(
+                max_usd_size_bytes=usd_thresholds.get("max_usd_size_bytes", 500_000_000),
+                max_broken_references=usd_thresholds.get("max_broken_references", 0),
+                require_physics_scene=usd_thresholds.get("require_physics_scene", True),
+                require_header_validation=usd_thresholds.get("require_header_validation", True),
+            ),
+            replicator=ReplicatorThresholds(
+                required_sensor_fields=replicator_thresholds.get(
+                    "required_sensor_fields",
+                    {
+                        "camera_list": ["cameras", "camera_list"],
+                        "resolution": ["resolution"],
+                        "modalities": ["modalities", "annotations"],
+                        "stream_ids": ["stream_ids", "streams"],
+                    },
+                ),
+            ),
+            episode_metadata=EpisodeMetadataThresholds(
+                required_fields=episode_metadata_thresholds.get(
+                    "required_fields",
+                    {
+                        "dataset_name": {"paths": ["dataset_name", "name"], "type": "string"},
+                        "scene_id": {"paths": ["scene_id", "scene.scene_id"], "type": "string"},
+                        "robot_type": {"paths": ["robot_type", "robot.type"], "type": "string"},
+                        "camera_specs": {
+                            "paths": ["camera_specs", "data_pack.cameras", "cameras"],
+                            "type": "array_or_object",
+                        },
+                        "fps": {"paths": ["fps"], "type": "number"},
+                        "action_space": {"paths": ["action_space", "action_space_info"], "type": "array_or_object"},
+                        "episode_stats": {"paths": ["episode_stats", "stats"], "type": "object"},
+                    },
+                ),
+            ),
+            dwm=DwmThresholds(
+                required_files=dwm_thresholds.get(
+                    "required_files",
+                    [
+                        "manifest.json",
+                        "static_scene_video.mp4",
+                        "camera_trajectory.json",
+                        "metadata/scene_info.json",
+                        "metadata/prompt.txt",
+                    ],
+                ),
             ),
             human_approval=HumanApprovalConfig(
                 enabled=config.get("human_approval", {}).get("enabled", True),

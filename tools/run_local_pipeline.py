@@ -377,12 +377,28 @@ class LocalPipelineRunner:
                     "usd_path": str(usd_path),
                 },
             }
+        if step == PipelineStep.REPLICATOR:
+            return {
+                "checkpoint": QualityGateCheckpoint.REPLICATOR_COMPLETE,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "replicator_bundle_dir": str(self.replicator_dir),
+                },
+            }
         if step == PipelineStep.ISAAC_LAB:
             return {
                 "checkpoint": QualityGateCheckpoint.ISAAC_LAB_GENERATED,
                 "context": {
                     "scene_id": self.scene_id,
                     "isaac_lab_dir": str(self.isaac_lab_dir),
+                },
+            }
+        if step == PipelineStep.DWM:
+            return {
+                "checkpoint": QualityGateCheckpoint.DWM_PREPARED,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "dwm_output_dir": str(self.dwm_dir),
                 },
             }
         if step == PipelineStep.GENIESIM_IMPORT:
@@ -1624,6 +1640,8 @@ class LocalPipelineRunner:
         # Create replicator directories
         policies_dir = self.replicator_dir / "policies"
         policies_dir.mkdir(parents=True, exist_ok=True)
+        configs_dir = self.replicator_dir / "configs"
+        configs_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate bundle metadata
         bundle_metadata = {
@@ -1635,6 +1653,16 @@ class LocalPipelineRunner:
         (self.replicator_dir / "bundle_metadata.json").write_text(
             json.dumps(bundle_metadata, indent=2)
         )
+
+        configs_dir.joinpath("default_policy.json").write_text(json.dumps({
+            "policy_id": "default_policy",
+            "capture_config": {
+                "cameras": ["wrist", "overhead"],
+                "resolution": [1280, 720],
+                "modalities": ["rgb", "depth"],
+                "stream_ids": ["rgb", "depth", "segmentation"],
+            },
+        }, indent=2))
 
         # Generate minimal placement regions
         placement_regions = self._generate_placement_regions(manifest)
