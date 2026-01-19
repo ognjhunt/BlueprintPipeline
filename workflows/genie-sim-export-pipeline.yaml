@@ -122,7 +122,40 @@ main:
           - geniesimJobMetadataPath: '${"scenes/" + sceneId + "/geniesim/job.json"}'
           - geniesimFailedMarker: '${"scenes/" + sceneId + "/geniesim/.failed"}'
           - geniesimLegacyFailedMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_failed"}'
-        next: init_region_health
+          - canaryRollbackObject: ${if(canaryRollbackMarker == "", geniesimPrefix + "/.canary_rollback", canaryRollbackMarker)}
+        next: check_rollback_marker
+
+    - check_rollback_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${canaryRollbackObject}
+        next: rollback_marker_found
+        except:
+          as: rollbackError
+          steps:
+            - rollback_marker_not_found:
+                switch:
+                  - condition: ${rollbackError.code == 404}
+                    next: init_region_health
+                next: log_rollback_marker_error
+            - log_rollback_marker_error:
+                call: sys.log
+                args:
+                  text: '${"Unable to check rollback marker " + canaryRollbackObject + ": " + rollbackError.message}'
+                  severity: "WARNING"
+                next: init_region_health
+
+    - rollback_marker_found:
+        call: sys.log
+        args:
+          text: '${"Rollback marker present at " + canaryRollbackObject + ". Skipping Genie Sim export."}'
+          severity: "ERROR"
+        next: stop_for_rollback
+
+    - stop_for_rollback:
+        return: ${"Rollback marker present at " + canaryRollbackObject + ". Skipping Genie Sim export."}
 
     - init_region_health:
         assign:
