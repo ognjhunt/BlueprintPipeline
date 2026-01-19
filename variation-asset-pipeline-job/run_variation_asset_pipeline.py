@@ -130,6 +130,31 @@ QUALITY_PRESETS = {
 # Category-based complexity hints for auto backend selection
 SIMPLE_CATEGORIES = {"dishes", "utensils", "cans", "bottles", "boxes", "containers"}
 COMPLEX_CATEGORIES = {"clothing", "food", "produce", "tools", "electronics", "lab_equipment"}
+GENERIC_CATEGORIES = {"", "generic", "misc", "miscellaneous", "unknown", "other"}
+
+COMPLEXITY_KEYWORDS = {
+    "intricate": 2,
+    "detailed": 2,
+    "complex": 2,
+    "layered": 2,
+    "mechanical": 2,
+    "electronics": 2,
+    "circuit": 2,
+    "buttons": 1,
+    "knobs": 1,
+    "switches": 1,
+    "hinges": 1,
+    "folds": 1,
+    "fabric": 1,
+    "textured": 1,
+    "patterned": 1,
+    "transparent": 1,
+    "reflective": 1,
+    "glass": 1,
+    "metallic": 1,
+    "multiple parts": 2,
+}
+COMPLEXITY_SCORE_THRESHOLD = 2
 
 # Physics defaults by category
 PHYSICS_DEFAULTS = {
@@ -905,23 +930,67 @@ def generate_reference_image_gemini(
 # 3D Conversion (SAM3D / Hunyuan)
 # ============================================================================
 
-def select_3d_backend(asset: AssetSpec, config: PipelineConfig) -> str:
+def score_complexity_from_keywords(text: str) -> Tuple[int, List[str]]:
+    """Score complexity based on keyword hits in the provided text."""
+    if not text:
+        return 0, []
+    text_lower = text.lower()
+    score = 0
+    hits = []
+    for keyword, weight in COMPLEXITY_KEYWORDS.items():
+        if keyword in text_lower:
+            score += weight
+            hits.append(keyword)
+    return score, hits
+
+
+def build_generic_complexity_text(asset: AssetSpec) -> str:
+    """Build a text bundle for complexity scoring when category is generic."""
+    parts = [
+        asset.description,
+        asset.semantic_class,
+        asset.material_hint,
+        asset.generation_prompt_hint,
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def select_3d_backend(asset: AssetSpec, config: PipelineConfig) -> Tuple[str, Dict[str, Any]]:
     """
     Select 3D backend based on asset complexity and config.
     """
+    category_lower = asset.category.strip().lower()
+    decision_metadata = {
+        "category": asset.category,
+        "keyword_hits": [],
+        "complexity_score": 0,
+    }
+
     if config.backend_3d != Backend3D.AUTO:
-        return config.backend_3d.value
+        decision_metadata["selection"] = config.backend_3d.value
+        return config.backend_3d.value, decision_metadata
 
     # Auto selection based on category
-    category_lower = asset.category.lower()
-
     if category_lower in SIMPLE_CATEGORIES:
-        return "sam3d"
-    elif category_lower in COMPLEX_CATEGORIES:
-        return "hunyuan"
-    else:
-        # Default to SAM3D for speed
-        return "sam3d"
+        decision_metadata["selection"] = "sam3d"
+        return "sam3d", decision_metadata
+    if category_lower in COMPLEX_CATEGORIES:
+        decision_metadata["selection"] = "hunyuan"
+        return "hunyuan", decision_metadata
+
+    # For generic/empty categories, use keyword-based scoring on descriptive fields
+    if category_lower in GENERIC_CATEGORIES:
+        complexity_text = build_generic_complexity_text(asset)
+        score, hits = score_complexity_from_keywords(complexity_text)
+        decision_metadata["complexity_score"] = score
+        decision_metadata["keyword_hits"] = hits
+        backend = "hunyuan" if score >= COMPLEXITY_SCORE_THRESHOLD else "sam3d"
+        decision_metadata["selection"] = backend
+        return backend, decision_metadata
+
+    # Default to SAM3D for speed
+    decision_metadata["selection"] = "sam3d"
+    return "sam3d", decision_metadata
 
 
 def run_sam3d_reconstruction(
@@ -1436,6 +1505,7 @@ def process_single_asset(
         )
 
     if config.dry_run:
+        backend, backend_selection_metadata = select_3d_backend(asset, config)
         return AssetResult(
             name=asset.name,
             success=True,
@@ -1444,11 +1514,12 @@ def process_single_asset(
             asset_dir=str(asset_out_dir),
             reference_image=str(image_path) if image_path else None,
             timings=timings,
+            metadata={"backend_selection": backend_selection_metadata},
         )
 
     # Stage 2: Convert to 3D
     start_3d = time.time()
-    backend = select_3d_backend(asset, config)
+    backend, backend_selection_metadata = select_3d_backend(asset, config)
 
     preset = QUALITY_PRESETS.get(config.quality_mode, QUALITY_PRESETS["balanced"])
 
@@ -1492,6 +1563,7 @@ def process_single_asset(
             stage_completed="3d",
             error=error,
             timings=timings,
+            metadata={"backend_selection": backend_selection_metadata},
         )
 
     # Stage 3: Add physics properties
@@ -1529,7 +1601,10 @@ def process_single_asset(
         stage_completed="complete",
         output_path=str(usdz_path if usdz_success else glb_path),
         timings=timings,
-        metadata={"physics": physics},
+        metadata={
+            "physics": physics,
+            "backend_selection": backend_selection_metadata,
+        },
         asset_dir=str(asset_out_dir),
         reference_image=str(image_path) if image_path else None,
         metadata_path=str(meta_path),
