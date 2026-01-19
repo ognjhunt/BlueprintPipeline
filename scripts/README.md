@@ -6,6 +6,10 @@ Operational scripts for deploying and running pipeline components.
 ## Primary entrypoints
 - `deploy-episode-generation.sh`
 - `deploy-genie-sim-gpu-job.sh`
+- `deploy-genie-sim-export-job.sh`
+- `deploy-genie-sim-submit-job.sh`
+- `deploy-genie-sim-local-job.sh`
+- `deploy-genie-sim-import-webhook.sh`
 - `enable_pipeline.sh`
 - `run-isaacsim-local.sh`
 - `run_production_e2e_validation.py`
@@ -20,3 +24,77 @@ Operational scripts for deploying and running pipeline components.
 ## How to run locally
 - Run scripts directly, for example: `./deploy-episode-generation.sh` or `python run_production_e2e_validation.py`.
 
+## Genie Sim deployment scripts
+All Genie Sim deploy scripts expect GKE access (`gcloud`, `kubectl`) and use `envsubst` to apply manifests.
+
+### `deploy-genie-sim-export-job.sh`
+**Required environment variables**
+- `SCENE_ID` (scene identifier to export)
+- `PROJECT_ID` (optional if `gcloud config` is set; otherwise required)
+
+**Optional environment variables**
+- `BUCKET` (defaults to `${PROJECT_ID}-blueprint-scenes`)
+- `GKE_CLUSTER` (defaults to `blueprint-cluster`)
+- `ZONE` (defaults to `${REGION}-a`)
+- `REGION` (defaults to `us-central1`)
+- `NAMESPACE` (defaults to `blueprint`)
+- `JOB_NAME` (defaults to `genie-sim-export-${SCENE_ID}-<timestamp>`)
+
+**Example**
+```bash
+SCENE_ID=scene_123 PROJECT_ID=example-project ./deploy-genie-sim-export-job.sh
+```
+
+### `deploy-genie-sim-submit-job.sh`
+**Required environment variables**
+- `SCENE_ID`
+- `PROJECT_ID` (optional if `gcloud config` is set; otherwise required)
+
+**Optional environment variables**
+- `BUCKET` (defaults to `${PROJECT_ID}-blueprint-scenes`)
+- `GKE_CLUSTER` (defaults to `blueprint-cluster`)
+- `ZONE` (defaults to `${REGION}-a`)
+- `REGION` (defaults to `us-central1`)
+- `NAMESPACE` (defaults to `blueprint`)
+- `JOB_NAME` (defaults to `genie-sim-submit-${SCENE_ID}-<timestamp>`)
+
+**Example**
+```bash
+SCENE_ID=scene_123 PROJECT_ID=example-project ./deploy-genie-sim-submit-job.sh
+```
+
+### `deploy-genie-sim-local-job.sh`
+**Required environment variables**
+- `SCENE_ID`
+- `PROJECT_ID` (optional if `gcloud config` is set; otherwise required)
+
+**Optional environment variables**
+- `BUCKET` (defaults to `${PROJECT_ID}-blueprint-scenes`)
+- `GKE_CLUSTER` (defaults to `blueprint-cluster`)
+- `ZONE` (defaults to `${REGION}-a`)
+- `REGION` (defaults to `us-central1`)
+- `NAMESPACE` (defaults to `blueprint`)
+- `JOB_NAME` (defaults to `genie-sim-local-${SCENE_ID}-<timestamp>`)
+
+**Example**
+```bash
+SCENE_ID=scene_123 PROJECT_ID=example-project ./deploy-genie-sim-local-job.sh
+```
+
+### `deploy-genie-sim-import-webhook.sh`
+**Required environment variables**
+- `SCENE_ID`
+- `PROJECT_ID` (optional if `gcloud config` is set; otherwise required)
+
+**Optional environment variables**
+- `BUCKET` (defaults to `${PROJECT_ID}-blueprint-scenes`)
+- `GKE_CLUSTER` (defaults to `blueprint-cluster`)
+- `ZONE` (defaults to `${REGION}-a`)
+- `REGION` (defaults to `us-central1`)
+- `NAMESPACE` (defaults to `blueprint`)
+- `JOB_NAME` (defaults to `genie-sim-import-webhook-${SCENE_ID}-<timestamp>`)
+
+**Example**
+```bash
+SCENE_ID=scene_123 PROJECT_ID=example-project ./deploy-genie-sim-import-webhook.sh
+```
