@@ -33,7 +33,9 @@ try:
     HAVE_PROFILE_SELECTOR = True
 except ImportError:
     HAVE_PROFILE_SELECTOR = False
-    print("[SIMREADY] WARNING: Physics profile selector unavailable", file=sys.stderr)
+    logger.warning(
+        "[SIMREADY] Physics profile selector unavailable; defaulting to generic physics profile metadata."
+    )
 
 import numpy as np
 from PIL import Image  # type: ignore
@@ -53,7 +55,9 @@ else:  # pragma: no cover
     infer_material_type = None
     MATERIAL_PHYSICS = {}
     MaterialType = None
-    print("[SIMREADY] WARNING: Material transfer module unavailable; using generic physics", file=sys.stderr)
+    logger.warning(
+        "[SIMREADY] Material transfer module unavailable; falling back to generic physics defaults."
+    )
 
 # Secret Manager for secure API key storage
 try:
@@ -63,7 +67,9 @@ except ImportError:  # pragma: no cover
     HAVE_SECRET_MANAGER = False
     get_secret_or_env = None
     SecretIds = None
-    print("[SIMREADY] WARNING: Secret Manager not available - using env vars only", file=sys.stderr)
+    logger.warning(
+        "[SIMREADY] Secret Manager not available; falling back to env vars only."
+    )
 
 SECRET_ID_GEMINI = SecretIds.GEMINI_API_KEY if SecretIds else "gemini-api-key"
 SECRET_ID_OPENAI = SecretIds.OPENAI_API_KEY if SecretIds else "openai-api-key"
@@ -92,7 +98,9 @@ try:
     HAVE_PARALLEL_PROCESSING = True
 except ImportError:  # pragma: no cover
     HAVE_PARALLEL_PROCESSING = False
-    print("[SIMREADY] WARNING: Parallel processing not available - will use sequential processing", file=sys.stderr)
+    logger.warning(
+        "[SIMREADY] Parallel processing not available; falling back to sequential processing."
+    )
 
 GCS_ROOT = Path("/mnt/gcs")
 JOB_NAME = "simready-job"
@@ -235,7 +243,11 @@ def load_image_for_gemini(image_path: Path) -> Optional["Image.Image"]:
     try:
         return Image.open(str(image_path)).convert("RGB")
     except Exception as exc:  # pragma: no cover - image decoding errors
-        print(f"[SIMREADY] WARNING: failed to load reference image {image_path}: {exc}", file=sys.stderr)
+        logger.warning(
+            "[SIMREADY] Failed to load reference image %s: %s; continuing without Gemini image input.",
+            image_path,
+            exc,
+        )
         return None
 
 
@@ -279,7 +291,10 @@ def load_object_metadata(
             if catalog_meta:
                 return catalog_meta
         except Exception as exc:  # pragma: no cover - network errors
-            print(f"[SIMREADY] WARNING: catalog lookup failed: {exc}", file=sys.stderr)
+            logger.warning(
+                "[SIMREADY] Catalog lookup failed: %s; continuing without catalog metadata.",
+                exc,
+            )
 
     metadata_rel = obj.get("metadata_path")
     if metadata_rel:
@@ -1179,9 +1194,9 @@ def call_gemini_for_dimensions(
     try:
         model_name = _get_env_value("GEMINI_MODEL", "gemini-3-pro-preview")
         if model_name.startswith("gemini-1") or model_name.startswith("gemini-2"):
-            print(
-                f"[SIMREADY] Overriding legacy Gemini model '{model_name}' with gemini-3-pro-preview",
-                file=sys.stderr,
+            logger.warning(
+                "[SIMREADY] Overriding legacy Gemini model '%s' with gemini-3-pro-preview.",
+                model_name,
             )
             model_name = "gemini-3-pro-preview"
 
@@ -1232,7 +1247,13 @@ def call_gemini_for_dimensions(
 
         # Sanity checks: dimensions should be reasonable (1mm to 10m)
         if not (0.001 <= width <= 10.0 and 0.001 <= height <= 10.0 and 0.001 <= depth <= 10.0):
-            print(f"[SIMREADY] WARNING: Gemini dimension estimate out of range: {width}x{height}x{depth}m", file=sys.stderr)
+            logger.warning(
+                "[SIMREADY] Gemini dimension estimate out of range: %sx%sx%sm; "
+                "continuing with metadata/heuristic bounds.",
+                width,
+                height,
+                depth,
+            )
             return None
 
         print(f"[SIMREADY] Gemini estimated dimensions: {width:.3f}x{height:.3f}x{depth:.3f}m (confidence: {confidence})")
@@ -1242,7 +1263,10 @@ def call_gemini_for_dimensions(
         return [width, height, depth]
 
     except Exception as e:
-        print(f"[SIMREADY] WARNING: Gemini dimension estimation failed: {e}", file=sys.stderr)
+        logger.warning(
+            "[SIMREADY] Gemini dimension estimation failed: %s; continuing with metadata/heuristic bounds.",
+            e,
+        )
         return None
 
 
@@ -1578,7 +1602,11 @@ def call_gemini_for_object(
         return merged
 
     except Exception as e:  # pragma: no cover
-        print(f"[SIMREADY] WARNING: Gemini failed for obj {oid}: {e}", file=sys.stderr)
+        logger.warning(
+            "[SIMREADY] Gemini failed for obj %s: %s; falling back to base physics config.",
+            oid,
+            e,
+        )
         return base_cfg
 
 
@@ -1632,10 +1660,10 @@ def build_physics_config(
                 }
             return physics_cfg
         except Exception as e:
-            print(f"[SIMREADY] WARNING: Gemini physics estimation failed: {e}", file=sys.stderr)
             logger.warning(
-                "[SIMREADY] Falling back to heuristic physics estimates for obj %s due to Gemini failure.",
+                "[SIMREADY] Gemini physics estimation failed for obj %s: %s; falling back to heuristic physics.",
                 obj.get("id"),
+                e,
             )
 
     if deterministic_physics:
@@ -2068,6 +2096,13 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _physics_profile_info(selector_available: bool, profile_used: Optional[str]) -> Dict[str, Any]:
+    return {
+        "selector_available": bool(selector_available),
+        "profile_used": profile_used or "generic",
+    }
+
+
 def load_progress_marker(path: Optional[Path]) -> Optional[Dict[str, Any]]:
     if path is None or not path.is_file():
         return None
@@ -2116,7 +2151,7 @@ def prepare_simready_assets_job(
     production_mode: Optional[bool] = None,
 ) -> int:
     if not assets_prefix:
-        print("[SIMREADY] ASSETS_PREFIX is required", file=sys.stderr)
+        logger.warning("[SIMREADY] ASSETS_PREFIX is required; aborting run.")
         return 1
 
     assets_root = root / assets_prefix
@@ -2172,9 +2207,8 @@ def prepare_simready_assets_job(
     scene_assets = load_manifest_or_scene_assets(assets_root)
     if scene_assets is None:
         legacy_path = assets_root / "scene_assets.json"
-        print(
+        logger.warning(
             f"[SIMREADY] scene manifest missing at {manifest_path} and {legacy_path}",
-            file=sys.stderr,
         )
         return 1
     objects = scene_assets.get("objects", [])
@@ -2203,12 +2237,23 @@ def prepare_simready_assets_job(
 
     # GAP-PHYSICS-011 FIX: Initialize physics profile selector
     profile_selector = None
+    profile_selector_available = False
     if HAVE_PROFILE_SELECTOR:
         try:
             profile_selector = create_profile_selector()
+            profile_selector_available = True
             print("[SIMREADY] Physics profile selector initialized")
         except Exception as e:
-            print(f"[SIMREADY] WARNING: Failed to initialize profile selector: {e}", file=sys.stderr)
+            logger.warning(
+                "[SIMREADY] Failed to initialize profile selector: %s; "
+                "falling back to generic physics profile metadata.",
+                e,
+            )
+    if production_mode and not profile_selector_available:
+        logger.warning(
+            "[SIMREADY] Production mode detected but physics profile selection is unavailable; "
+            "continuing with generic physics profile metadata."
+        )
 
     if production_mode and allow_heuristic_fallback:
         logger.warning(
@@ -2281,11 +2326,14 @@ def prepare_simready_assets_job(
     fallback_stats = {"total": 0, "covered": 0}
     quality_stats = {"total": 0, "passed": 0}
     fallback_mode = use_deterministic_physics
+    profiles_used: set[str] = set()
 
     # GAP-PERF-002 FIX: Process objects in parallel for 10-50x speedup
-    def process_single_object(obj: Dict[str, Any]) -> Optional[Tuple[str, str, str, bool, Optional[bool]]]:
+    def process_single_object(
+        obj: Dict[str, Any],
+    ) -> Optional[Tuple[str, str, str, bool, Optional[bool], str]]:
         """
-        Process a single object. Returns (oid, sim_rel, sim_path, fallback_covered, quality_passed)
+        Process a single object. Returns (oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used)
         or None on failure.
 
         This function is thread-safe and can be called in parallel.
@@ -2297,7 +2345,10 @@ def prepare_simready_assets_job(
         try:
             visual = choose_static_visual_asset(assets_root, oid)
             if visual is None:
-                print(f"[SIMREADY] WARNING: no visual asset found for obj {oid}", file=sys.stderr)
+                logger.warning(
+                    "[SIMREADY] No visual asset found for obj %s; skipping simready generation.",
+                    oid,
+                )
                 return None
 
             visual_path, visual_rel = visual
@@ -2344,10 +2395,11 @@ def prepare_simready_assets_job(
             if use_deterministic_physics:
                 quality_passed, reasons = _validate_non_llm_physics_quality(physics_cfg, bounds)
                 if not quality_passed:
-                    print(
-                        f"[SIMREADY] WARNING: deterministic physics quality check failed for obj {oid}: "
-                        + ", ".join(reasons),
-                        file=sys.stderr,
+                    logger.warning(
+                        "[SIMREADY] Deterministic physics quality check failed for obj %s: %s; "
+                        "continuing with heuristic defaults.",
+                        oid,
+                        ", ".join(reasons),
                     )
 
             # Compute sim2real distribution ranges for domain randomization
@@ -2355,13 +2407,24 @@ def prepare_simready_assets_job(
             physics_cfg.update(physics_distributions)
 
             # GAP-PHYSICS-011 FIX: Apply physics profile based on scene/task characteristics
+            profile_used = "generic"
             if profile_selector:
                 try:
                     # Get task/scene hint from object metadata or use default
                     task_hint = obj.get("task") or scene_assets.get("task") or obj.get("category", "unknown")
-                    physics_cfg = profile_selector.apply_profile_to_physics(physics_cfg, profile_selector.select_profile(task_hint))
+                    profile_used = profile_selector.select_profile(task_hint)
+                    physics_cfg = profile_selector.apply_profile_to_physics(physics_cfg, profile_used)
                 except Exception as e:
-                    logger.warning(f"[SIMREADY] Failed to apply physics profile for obj {oid}: {e}")
+                    logger.warning(
+                        "[SIMREADY] Failed to apply physics profile for obj %s: %s; "
+                        "continuing with generic physics profile metadata.",
+                        oid,
+                        e,
+                    )
+                    profile_used = "generic"
+
+            physics_profile_block = _physics_profile_info(profile_selector_available, profile_used)
+            physics_cfg["physics_profile_info"] = physics_profile_block
 
             # Emit the simready USD with physics
             sim_path = emit_usd(visual_path, physics_cfg, bounds)
@@ -2376,14 +2439,16 @@ def prepare_simready_assets_job(
                         "mesh_bounds": {"export": export_bounds},
                         "physics": physics_cfg,
                         "material_name": physics_cfg.get("material_name"),
+                        "physics_profile": physics_profile_block,
                     }
                     catalog_client.publish_metadata(
                         oid, catalog_payload, asset_path=catalog_payload["asset_path"]
                     )
                 except Exception as exc:  # pragma: no cover - network errors
-                    print(
-                        f"[SIMREADY] WARNING: failed to publish catalog metadata for obj {oid}: {exc}",
-                        file=sys.stderr,
+                    logger.warning(
+                        "[SIMREADY] Failed to publish catalog metadata for obj %s: %s; continuing.",
+                        oid,
+                        exc,
                     )
 
             sim_rel = f"{assets_prefix}/obj_{oid}/simready.usda"
@@ -2391,10 +2456,14 @@ def prepare_simready_assets_job(
                 sim_rel = f"{assets_prefix}/static/obj_{oid}/simready.usda"
 
             print(f"[SIMREADY] ✓ Processed obj {oid}")
-            return (oid, sim_rel, str(sim_path), fallback_covered, quality_passed)
+            return (oid, sim_rel, str(sim_path), fallback_covered, quality_passed, profile_used)
 
         except Exception as e:
-            print(f"[SIMREADY] ERROR: Failed to process obj {oid}: {e}", file=sys.stderr)
+            logger.warning(
+                "[SIMREADY] Failed to process obj %s: %s; skipping.",
+                oid,
+                e,
+            )
             return None
 
     # Use parallel processing if available
@@ -2409,9 +2478,10 @@ def prepare_simready_assets_job(
         # Collect successful results
         for success_item in result.successful_results:
             if success_item:
-                oid, sim_rel, sim_path, fallback_covered, quality_passed = success_item
+                oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used = success_item
                 simready_paths[oid] = sim_rel
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
+                profiles_used.add(profile_used)
                 if fallback_mode:
                     fallback_stats["total"] += 1
                     if fallback_covered:
@@ -2423,7 +2493,11 @@ def prepare_simready_assets_job(
 
         # Report failures
         if result.failed_count > 0:
-            print(f"[SIMREADY] WARNING: {result.failed_count}/{result.total_count} objects failed", file=sys.stderr)
+            logger.warning(
+                "[SIMREADY] %s/%s objects failed; continuing with successful results.",
+                result.failed_count,
+                result.total_count,
+            )
 
         print(f"[SIMREADY] Parallel processing complete: {result.success_count}/{result.total_count} succeeded")
 
@@ -2433,9 +2507,10 @@ def prepare_simready_assets_job(
         for obj in objects:
             result = process_single_object(obj)
             if result:
-                oid, sim_rel, sim_path, fallback_covered, quality_passed = result
+                oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used = result
                 simready_paths[oid] = sim_rel
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
+                profiles_used.add(profile_used)
                 if fallback_mode:
                     fallback_stats["total"] += 1
                     if fallback_covered:
@@ -2476,11 +2551,16 @@ def prepare_simready_assets_job(
             return 4
 
     marker_path = assets_root / ".simready_complete"
+    profiles_used_summary = (
+        next(iter(profiles_used)) if len(profiles_used) == 1 else "mixed" if profiles_used else "generic"
+    )
+    physics_profile_block = _physics_profile_info(profile_selector_available, profiles_used_summary)
     if simready_paths:
         marker_content = {
             "status": "complete",
             "simready_assets": simready_paths,
             "count": len(simready_paths),
+            "physics_profile": physics_profile_block,
         }
         marker_path.write_text(json.dumps(marker_content, indent=2), encoding="utf-8")
         print(f"[SIMREADY] Created completion marker at {marker_path}")
@@ -2491,11 +2571,11 @@ def prepare_simready_assets_job(
             "simready_assets": {},
             "count": 0,
             "note": "No objects required simready processing (no visual assets found)",
+            "physics_profile": physics_profile_block,
         }
         marker_path.write_text(json.dumps(marker_content, indent=2), encoding="utf-8")
-        print(
-            "[SIMREADY] No simready assets were created; created completion marker anyway",
-            file=sys.stderr,
+        logger.warning(
+            "[SIMREADY] No simready assets were created; completion marker still written."
         )
 
     try:
@@ -2512,13 +2592,17 @@ def prepare_simready_assets_job(
                 "simready_updated_at": datetime.datetime.utcnow().isoformat() + "Z",
                 "scene_id": progress_data.get("scene_id") or scene_id,
                 "assets_prefix": progress_data.get("assets_prefix") or assets_prefix,
+                "physics_profile": physics_profile_block,
             }
         )
         progress_marker_path.parent.mkdir(parents=True, exist_ok=True)
         progress_marker_path.write_text(json.dumps(progress_data, indent=2), encoding="utf-8")
         print(f"[SIMREADY] Updated progress marker at {progress_marker_path}")
     except Exception as exc:  # pragma: no cover - progress marker is best-effort
-        print(f"[SIMREADY] WARNING: failed to update progress marker: {exc}", file=sys.stderr)
+        logger.warning(
+            "[SIMREADY] Failed to update progress marker: %s; continuing without progress update.",
+            exc,
+        )
 
     return 0
 
@@ -2555,9 +2639,8 @@ def main() -> None:
 
     def _write_failure_marker(exc: Exception, failed_step: str) -> None:
         if not bucket or not scene_id:
-            print(
-                "[SIMREADY] WARNING: Skipping failure marker; BUCKET/SCENE_ID missing.",
-                file=sys.stderr,
+            logger.warning(
+                "[SIMREADY] Skipping failure marker; BUCKET/SCENE_ID missing (continuing without failure marker)."
             )
             return
         FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
