@@ -48,6 +48,11 @@ Environment Variables:
     SCENE_ID: Scene identifier
     ASSETS_PREFIX: Path to scene assets (scene_manifest.json)
     EPISODES_PREFIX: Output path for episodes
+    ENABLE_FIREBASE_UPLOAD: Enable Firebase Storage upload of generated episodes
+    FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name for uploads
+    FIREBASE_SERVICE_ACCOUNT_JSON: Service account JSON payload for Firebase
+    FIREBASE_SERVICE_ACCOUNT_PATH: Path to service account JSON for Firebase
+    FIREBASE_UPLOAD_PREFIX: Remote prefix for Firebase uploads (default: datasets)
     ROBOT_TYPE: Robot type (franka, ur10, fetch) - default: franka
     EPISODES_PER_VARIATION: Episodes per variation - default: 10
     MAX_VARIATIONS: Max variations to process - default: all
@@ -168,6 +173,21 @@ def _parse_headroom_pct() -> float:
             raw,
         )
         return 0.15
+
+
+def _is_production_run() -> bool:
+    if resolve_production_mode():
+        return True
+    if HAVE_QUALITY_SYSTEM:
+        try:
+            return get_data_quality_level().value == "production"
+        except Exception:
+            logger.warning(
+                "[EPISODE-GEN-JOB] Failed to determine data quality level; "
+                "falling back to production env flags.",
+                exc_info=True,
+            )
+    return False
 
 
 def _estimate_export_requirements(
@@ -559,6 +579,8 @@ class EpisodeGenerationOutput:
     lerobot_dataset_path: Optional[Path] = None
     manifest_path: Optional[Path] = None
     validation_report_path: Optional[Path] = None
+    firebase_upload_summary: Optional[Dict[str, Any]] = None
+    firebase_upload_error: Optional[str] = None
 
     # Timing
     generation_time_seconds: float = 0.0
@@ -2771,6 +2793,8 @@ def run_episode_generation_job(
     scene_id: str,
     assets_prefix: str,
     episodes_prefix: str,
+    enable_firebase_upload: bool = False,
+    firebase_upload_prefix: str = "datasets",
     robot_type: str = "franka",
     episodes_per_variation: int = 10,
     max_variations: Optional[int] = None,
@@ -2797,6 +2821,8 @@ def run_episode_generation_job(
         scene_id: Scene identifier
         assets_prefix: Path to scene assets
         episodes_prefix: Output path for episodes
+        enable_firebase_upload: Enable Firebase Storage upload of generated episodes
+        firebase_upload_prefix: Remote prefix for Firebase uploads
         robot_type: Robot type
         episodes_per_variation: Episodes to generate per variation
         max_variations: Max variations to process (None = all)
@@ -2823,6 +2849,7 @@ def run_episode_generation_job(
     logger.info("[EPISODE-GEN-JOB] Bundle tier: %s", bundle_tier)
     logger.info("[EPISODE-GEN-JOB] Assets prefix: %s", assets_prefix)
     logger.info("[EPISODE-GEN-JOB] Episodes prefix: %s", episodes_prefix)
+    logger.info("[EPISODE-GEN-JOB] Firebase upload enabled: %s", enable_firebase_upload)
     logger.info("[EPISODE-GEN-JOB] Robot type: %s", robot_type)
     logger.info("[EPISODE-GEN-JOB] Episodes per variation: %s", episodes_per_variation)
     logger.info("[EPISODE-GEN-JOB] CP-Gen augmentation: %s", use_cpgen)
@@ -2984,6 +3011,63 @@ def run_episode_generation_job(
                         "[EPISODE-GEN-JOB] Upsell post-processing failed: %s", e
                     )
                     # Don't fail the job for upsell errors
+
+            if enable_firebase_upload:
+                firebase_bucket = os.getenv("FIREBASE_STORAGE_BUCKET")
+                firebase_service_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+                firebase_service_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+                missing_firebase = []
+                if not firebase_bucket:
+                    missing_firebase.append("FIREBASE_STORAGE_BUCKET")
+                if not firebase_service_json and not firebase_service_path:
+                    missing_firebase.append(
+                        "FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH"
+                    )
+                if missing_firebase:
+                    message = (
+                        "Firebase upload requested but missing required configuration: "
+                        + ", ".join(missing_firebase)
+                    )
+                    if _is_production_run():
+                        logger.error("[EPISODE-GEN-JOB] %s", message)
+                        output.errors.append(message)
+                        return 1
+                    logger.warning("[EPISODE-GEN-JOB] %s", message)
+                    output.warnings.append(message)
+                else:
+                    logger.info(
+                        "[EPISODE-GEN-JOB] Uploading episodes to Firebase Storage..."
+                    )
+                    try:
+                        from tools.firebase_upload.uploader import (
+                            upload_episodes_to_firebase,
+                        )
+
+                        if output.output_dir is None:
+                            raise RuntimeError(
+                                "Output directory missing; cannot upload episodes."
+                            )
+
+                        upload_summary = upload_episodes_to_firebase(
+                            output.output_dir,
+                            scene_id,
+                            prefix=firebase_upload_prefix,
+                        )
+                        output.firebase_upload_summary = upload_summary
+                        logger.info(
+                            "[EPISODE-GEN-JOB] Firebase upload complete: %s/%s files",
+                            upload_summary["uploaded"],
+                            upload_summary["total_files"],
+                        )
+                    except Exception as exc:
+                        error_message = f"Firebase upload failed: {exc}"
+                        output.firebase_upload_error = error_message
+                        if _is_production_run():
+                            logger.error("[EPISODE-GEN-JOB] %s", error_message)
+                            output.errors.append(error_message)
+                            return 1
+                        logger.warning("[EPISODE-GEN-JOB] %s", error_message)
+                        output.warnings.append(error_message)
 
             if _should_bypass_quality_gates():
                 logger.warning(
@@ -3350,6 +3434,11 @@ def _run_main():
     # Prefixes with defaults
     assets_prefix = os.getenv("ASSETS_PREFIX", f"scenes/{scene_id}/assets")
     episodes_prefix = os.getenv("EPISODES_PREFIX", f"scenes/{scene_id}/episodes")
+    enable_firebase_upload = parse_bool_env(
+        os.getenv("ENABLE_FIREBASE_UPLOAD"),
+        default=False,
+    )
+    firebase_upload_prefix = os.getenv("FIREBASE_UPLOAD_PREFIX", "datasets")
 
     # Configuration with validation
     robot_type = os.getenv("ROBOT_TYPE", "franka")
@@ -3438,6 +3527,9 @@ def _run_main():
     logger.info("[EPISODE-GEN-JOB]   Pipeline: SOTA (CP-Gen + Validation)")
     logger.info("[EPISODE-GEN-JOB]   Data Pack: %s", data_pack_tier)
     logger.info("[EPISODE-GEN-JOB]   Bundle Tier: %s", bundle_tier)
+    logger.info(
+        "[EPISODE-GEN-JOB]   Firebase Uploads Enabled: %s", enable_firebase_upload
+    )
     if lerobot_export_format:
         logger.info("[EPISODE-GEN-JOB]   LeRobot export format: %s", lerobot_export_format)
     logger.info("[EPISODE-GEN-JOB]   Cameras: %s", num_cameras)
@@ -3455,6 +3547,8 @@ def _run_main():
         scene_id=scene_id,
         assets_prefix=assets_prefix,
         episodes_prefix=episodes_prefix,
+        enable_firebase_upload=enable_firebase_upload,
+        firebase_upload_prefix=firebase_upload_prefix,
         robot_type=robot_type,
         episodes_per_variation=episodes_per_variation,
         max_variations=max_variations,
@@ -3476,9 +3570,12 @@ def _run_main():
     with metrics.track_job("episode-generation-job", scene_id):
         exit_code = run_episode_generation_job(
             root=GCS_ROOT,
+            bucket=bucket,
             scene_id=scene_id,
             assets_prefix=assets_prefix,
             episodes_prefix=episodes_prefix,
+            enable_firebase_upload=enable_firebase_upload,
+            firebase_upload_prefix=firebase_upload_prefix,
             robot_type=robot_type,
             episodes_per_variation=episodes_per_variation,
             max_variations=max_variations,
@@ -3523,6 +3620,8 @@ def main() -> None:
         "scene_id": scene_id,
         "assets_prefix": assets_prefix,
         "episodes_prefix": episodes_prefix,
+        "enable_firebase_upload": os.getenv("ENABLE_FIREBASE_UPLOAD"),
+        "firebase_upload_prefix": os.getenv("FIREBASE_UPLOAD_PREFIX", "datasets"),
         "robot_type": os.getenv("ROBOT_TYPE", "franka"),
         "episodes_per_variation": os.getenv("EPISODES_PER_VARIATION", "10"),
         "max_variations": os.getenv("MAX_VARIATIONS"),

@@ -44,6 +44,18 @@ For labs staging/production-quality runs, cuRobo collision planning is required:
 Missing these dependencies causes a hard failure in labs/production runs to
 avoid generating collision-unsafe trajectories.
 
+## Optional Firebase Uploads
+
+The job can optionally upload generated episodes to Firebase Storage after the
+dataset export step.
+
+Set the following environment variables to enable uploads:
+
+- `ENABLE_FIREBASE_UPLOAD=true`
+- `FIREBASE_STORAGE_BUCKET` (e.g., `blueprint-8c1ca.appspot.com`)
+- `FIREBASE_SERVICE_ACCOUNT_JSON` **or** `FIREBASE_SERVICE_ACCOUNT_PATH`
+- `FIREBASE_UPLOAD_PREFIX` (optional, default: `datasets`)
+
 ## Useful References
 
 - `episode-generation-job/Dockerfile.isaacsim`
