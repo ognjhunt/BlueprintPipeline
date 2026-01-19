@@ -1994,6 +1994,7 @@ class LocalPipelineRunner:
 
     def _run_geniesim_export(self) -> StepResult:
         """Run Genie Sim export job locally."""
+        start_time = time.time()
         try:
             sys.path.insert(0, str(REPO_ROOT / "genie-sim-export-job"))
             from export_to_geniesim import run_geniesim_export_job
@@ -2001,7 +2002,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_EXPORT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message=f"Import error (Genie Sim export job not found): {self._summarize_exception(e)}",
             )
 
@@ -2027,14 +2028,14 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_EXPORT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message=f"Genie Sim export failed with exit code {exit_code}",
             )
 
         return StepResult(
             step=PipelineStep.GENIESIM_EXPORT,
             success=True,
-            duration_seconds=0,
+            duration_seconds=time.time() - start_time,
             message="Genie Sim export completed",
             outputs={
                 "geniesim_dir": str(self.geniesim_dir),
@@ -2045,6 +2046,7 @@ class LocalPipelineRunner:
 
     def _run_geniesim_submit(self) -> StepResult:
         """Submit Genie Sim generation (API or local framework)."""
+        start_time = time.time()
         try:
             from tools.geniesim_adapter.local_framework import (
                 format_geniesim_preflight_failure,
@@ -2055,7 +2057,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_SUBMIT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message=f"Import error (Genie Sim submit dependencies not found): {self._summarize_exception(e)}",
             )
 
@@ -2066,7 +2068,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_SUBMIT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message="Genie Sim export outputs missing - run genie-sim-export first",
             )
 
@@ -2095,7 +2097,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_SUBMIT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message=format_geniesim_preflight_failure(
                     "genie-sim-local-runner",
                     preflight_report,
@@ -2172,6 +2174,7 @@ class LocalPipelineRunner:
             "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
             "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
             "preflight": preflight_report,
+            "generation_duration_seconds": time.time() - start_time,
         }
 
         job_path = self.geniesim_dir / "job.json"
@@ -2180,7 +2183,7 @@ class LocalPipelineRunner:
         return StepResult(
             step=PipelineStep.GENIESIM_SUBMIT,
             success=job_status != "failed",
-            duration_seconds=0,
+            duration_seconds=time.time() - start_time,
             message=submission_message or "Genie Sim submission completed",
             outputs={
                 "job_id": job_id,
@@ -2191,6 +2194,7 @@ class LocalPipelineRunner:
 
     def _run_geniesim_import(self) -> StepResult:
         """Import Genie Sim episodes into the local bundle."""
+        start_time = time.time()
         try:
             sys.path.insert(0, str(REPO_ROOT / "genie-sim-import-job"))
             from import_from_geniesim import ImportConfig, run_local_import_job
@@ -2198,7 +2202,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message=f"Import error (Genie Sim import job not found): {self._summarize_exception(e)}",
             )
 
@@ -2207,7 +2211,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message="Genie Sim job metadata missing - run genie-sim-submit first",
             )
 
@@ -2217,7 +2221,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message="Genie Sim job metadata missing job_id",
             )
         job_status = job_payload.get("status", "submitted")
@@ -2232,7 +2236,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message=f"Genie Sim job status is {job_status}; import requires completed job",
                 outputs={"job_id": job_id, "job_status": job_status},
             )
@@ -2246,7 +2250,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message=(
                     "Genie Sim recordings directory missing for job "
                     f"{job_id}: expected {recordings_dir}"
@@ -2264,7 +2268,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message=(
                     "Genie Sim recordings missing for job "
                     f"{job_id}: expected *.json episodes under {recordings_dir}"
@@ -2286,7 +2290,7 @@ class LocalPipelineRunner:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
                 success=False,
-                duration_seconds=0,
+                duration_seconds=time.time() - start_time,
                 message=(
                     "Genie Sim lerobot artifacts missing for job "
                     f"{job_id}: expected {', '.join(missing)}"
@@ -2317,11 +2321,16 @@ class LocalPipelineRunner:
         if result.success:
             marker_path = self.geniesim_dir / ".geniesim_import_complete"
             self._write_marker(marker_path, status="completed")
+        duration_seconds = time.time() - start_time
+        local_execution = job_payload.get("local_execution", {})
+        local_execution["import_duration_seconds"] = duration_seconds
+        job_payload["local_execution"] = local_execution
+        job_path.write_text(json.dumps(job_payload, indent=2))
 
         return StepResult(
             step=PipelineStep.GENIESIM_IMPORT,
             success=result.success,
-            duration_seconds=0,
+            duration_seconds=duration_seconds,
             message="Genie Sim import completed" if result.success else "Genie Sim import failed",
             outputs={
                 "job_id": job_id,
