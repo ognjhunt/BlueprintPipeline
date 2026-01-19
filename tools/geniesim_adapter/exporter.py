@@ -265,11 +265,13 @@ class GenieSimExporter:
             if nc_assets:
                 nc_sources = set(a.source for a in nc_assets)
                 if self.config.filter_commercial_only:
-                    result.warnings.append(
-                        f"Filtered out {len(nc_assets)} non-commercial assets from sources: {nc_sources}"
+                    sample_assets = [
+                        a.asset_id for a in nc_assets[:5]
+                    ]
+                    raise RuntimeError(
+                        "Non-commercial assets detected while filter_commercial_only is enabled. "
+                        f"Sources: {sorted(nc_sources)}; sample assets: {sample_assets}"
                     )
-                    asset_index = asset_index.filter_commercial()
-                    self.log(f"  Filtered to commercial-only: {len(asset_index.assets)} assets")
                 else:
                     # WARN: Non-commercial assets included
                     warning_msg = (

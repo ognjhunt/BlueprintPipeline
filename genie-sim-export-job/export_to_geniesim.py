@@ -633,6 +633,59 @@ def run_geniesim_export_job(
     except Exception as exc:
         print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: Failed to generate asset provenance: {exc}")
         return 1
+    provenance_gate = {}
+    try:
+        asset_provenance_payload = json.loads(asset_provenance_path.read_text())
+        license_info = asset_provenance_payload.get("license", {})
+        commercial_use_ok = bool(license_info.get("commercial_ok", False))
+        blockers = license_info.get("blockers") or []
+        provenance_gate = {
+            "commercial_use_ok": commercial_use_ok,
+            "commercial_blockers": blockers,
+        }
+        print(
+            "[GENIESIM-EXPORT-JOB] Asset provenance gate: "
+            f"commercial_use_ok={commercial_use_ok}, blockers={len(blockers)}"
+        )
+        if production_mode or service_mode:
+            if not commercial_use_ok or blockers:
+                message = (
+                    "Asset provenance gate failed for commercial export; "
+                    "non-commercial or unknown licenses detected."
+                )
+                print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
+                if blockers:
+                    print(
+                        "[GENIESIM-EXPORT-JOB] ❌ ERROR: Commercial blockers: "
+                        f"{blockers[:5]}"
+                    )
+                if bucket and scene_id:
+                    FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+                        exception=RuntimeError(message),
+                        failed_step="asset_provenance_gate",
+                        input_params={
+                            "scene_id": scene_id,
+                            "assets_prefix": assets_prefix,
+                            "geniesim_prefix": geniesim_prefix,
+                            "filter_commercial": filter_commercial,
+                            "service_mode": service_mode,
+                            "production_mode": production_mode,
+                        },
+                        partial_results={
+                            "asset_provenance_path": str(asset_provenance_path),
+                            "commercial_use_ok": commercial_use_ok,
+                            "commercial_blockers": blockers,
+                        },
+                        recommendations=[
+                            "Remove or replace non-commercial assets.",
+                            "Update asset license metadata for unknown licenses.",
+                        ],
+                        error_code="asset_provenance_blocked",
+                    )
+                return 1
+    except Exception as exc:
+        print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: Failed to evaluate asset provenance: {exc}")
+        return 1
 
     # Run quality gates before export
     gate_names = [
