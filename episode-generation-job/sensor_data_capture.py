@@ -833,6 +833,9 @@ class IsaacSimSensorCapture:
         self._isaac_sim_available = is_isaac_sim_available()
         self._replicator_available = is_replicator_available()
         self._require_contacts = parse_bool_env(os.getenv("REQUIRE_CONTACTS"), default=False)
+        self._require_sim_object_poses = parse_bool_env(
+            os.getenv("REQUIRE_SIM_OBJECT_POSES"), default=False
+        )
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -1244,6 +1247,14 @@ class IsaacSimSensorCapture:
             self.log(
                 "All object poses from input fallback (not from simulation)",
                 "WARNING"
+            )
+
+        if fallback_used and (_is_production_run() or self._require_sim_object_poses):
+            raise RuntimeError(
+                "Object pose capture used input fallback data. "
+                "Production runs require simulation-derived object poses. "
+                "Ensure Isaac Sim provides object poses or set REQUIRE_SIM_OBJECT_POSES=false "
+                "outside production."
             )
 
         return poses
