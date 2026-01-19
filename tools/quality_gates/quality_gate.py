@@ -30,8 +30,9 @@ if TYPE_CHECKING:
 
 # Import configuration
 try:
-from tools.config import load_quality_config, QualityConfig
-from tools.config.env import parse_bool_env
+    from tools.config import load_quality_config, QualityConfig
+    from tools.config.env import parse_bool_env
+    from tools.quality_gates.notification_validation import ensure_production_notification_channels
     HAVE_CONFIG = True
 except ImportError:
     HAVE_CONFIG = False
@@ -923,6 +924,9 @@ class QualityGateRegistry:
             self.config = load_quality_config(overrides=config_overrides)
         else:
             self.config = None
+
+        if HAVE_CONFIG:
+            ensure_production_notification_channels(self.config)
 
         # Register default gates with configurable thresholds
         self._register_default_gates()

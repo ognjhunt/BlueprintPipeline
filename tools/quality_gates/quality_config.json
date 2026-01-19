@@ -81,7 +81,7 @@
     "default_approvers": [],
     "escalation_after_hours": 12,
     "escalation_contacts": [],
-    "notification_channels": ["email", "console"],
+    "notification_channels": [],
     "description": "Human-in-the-loop approval workflow settings (auto-approve on timeout requires explicit non-production allowance; production always expires)"
   },
   "approval_store": {
