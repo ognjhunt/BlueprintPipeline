@@ -23,7 +23,9 @@ logger = logging.getLogger(__name__)
 
 
 # Pricing constants (as of January 2026)
-# Note: Update these based on actual pricing
+# Note: Update these based on actual pricing.
+# These defaults are intended for development only; production must provide
+# a full pricing configuration.
 PLACEHOLDER_GENIESIM_JOB_COST = 0.10
 PLACEHOLDER_GENIESIM_EPISODE_COST = 0.002
 
@@ -68,20 +70,19 @@ DEFAULT_GENIESIM_GPU_RATES = {
 }
 
 
-def _parse_float(value: str, *, env_var: str) -> float:
+REQUIRED_PRICING_FIELDS = frozenset(PRICING.keys())
+
+
+def _parse_float(value: Any, *, env_var: str) -> float:
     try:
         return float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid float for {env_var}: {value!r}") from exc
 
 
-def _parse_pricing_json(payload: str, *, source: str) -> Dict[str, float]:
-    try:
-        parsed = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid pricing JSON in {source}: {exc}") from exc
+def _sanitize_pricing_payload(parsed: Any, *, source: str) -> Dict[str, float]:
     if not isinstance(parsed, dict):
-        raise ValueError(f"Pricing data in {source} must be a JSON object.")
+        raise ValueError(f"Pricing data in {source} must be a mapping.")
     sanitized: Dict[str, float] = {}
     for key, value in parsed.items():
         if not isinstance(key, str):
@@ -90,17 +91,65 @@ def _parse_pricing_json(payload: str, *, source: str) -> Dict[str, float]:
     return sanitized
 
 
-def _load_custom_pricing_from_env() -> Dict[str, float]:
+def _parse_pricing_payload(payload: str, *, source: str) -> Dict[str, float]:
+    try:
+        parsed = json.loads(payload)
+        return _sanitize_pricing_payload(parsed, source=source)
+    except json.JSONDecodeError:
+        pass
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ValueError(
+            f"Pricing data in {source} is not valid JSON and PyYAML is not available."
+        ) from exc
+    try:
+        parsed = yaml.safe_load(payload)
+    except Exception as exc:  # pragma: no cover - yaml errors are library-specific
+        raise ValueError(f"Invalid pricing YAML in {source}: {exc}") from exc
+    return _sanitize_pricing_payload(parsed, source=source)
+
+
+def _validate_pricing_config(pricing: Dict[str, float], *, source: str) -> None:
+    missing_fields = REQUIRED_PRICING_FIELDS - pricing.keys()
+    if missing_fields:
+        missing_list = ", ".join(sorted(missing_fields))
+        raise ValueError(f"Pricing config in {source} is missing fields: {missing_list}.")
+    _validate_pricing_values(pricing, source=source, required_fields=REQUIRED_PRICING_FIELDS)
+
+
+def _validate_pricing_values(
+    pricing: Dict[str, float],
+    *,
+    source: str,
+    required_fields: Optional[frozenset[str]] = None,
+) -> None:
+    required = required_fields or frozenset(pricing.keys())
+    missing_fields = required - pricing.keys()
+    if missing_fields:
+        missing_list = ", ".join(sorted(missing_fields))
+        raise ValueError(f"Pricing data from {source} is missing fields: {missing_list}.")
+    negative_fields = [key for key, value in pricing.items() if value < 0]
+    if negative_fields:
+        negative_list = ", ".join(sorted(negative_fields))
+        raise ValueError(f"Pricing data from {source} has negative values for: {negative_list}.")
+
+
+def _load_custom_pricing_from_env() -> tuple[Dict[str, float], Optional[str]]:
     pricing_json = os.getenv(COST_TRACKING_PRICING_ENV)
     pricing_path = os.getenv(COST_TRACKING_PRICING_PATH_ENV)
     if pricing_json:
-        return _parse_pricing_json(pricing_json, source=COST_TRACKING_PRICING_ENV)
+        pricing = _parse_pricing_payload(pricing_json, source=COST_TRACKING_PRICING_ENV)
+        _validate_pricing_config(pricing, source=COST_TRACKING_PRICING_ENV)
+        return pricing, COST_TRACKING_PRICING_ENV
     if pricing_path:
         path = Path(pricing_path)
         if not path.exists():
             raise FileNotFoundError(f"Pricing config not found: {pricing_path}")
-        return _parse_pricing_json(path.read_text(), source=pricing_path)
-    return {}
+        pricing = _parse_pricing_payload(path.read_text(), source=pricing_path)
+        _validate_pricing_config(pricing, source=pricing_path)
+        return pricing, pricing_path
+    return {}, None
 
 
 def _is_production_env() -> bool:
@@ -126,13 +175,28 @@ def _load_geniesim_pricing_from_env() -> Dict[str, float]:
 
 
 def _validate_geniesim_pricing(pricing: Dict[str, float]) -> None:
-    job_cost = pricing.get("geniesim_job", PLACEHOLDER_GENIESIM_JOB_COST)
-    episode_cost = pricing.get("geniesim_episode", PLACEHOLDER_GENIESIM_EPISODE_COST)
+    _validate_pricing_values(
+        {
+            "geniesim_job": pricing.get("geniesim_job", PLACEHOLDER_GENIESIM_JOB_COST),
+            "geniesim_episode": pricing.get(
+                "geniesim_episode",
+                PLACEHOLDER_GENIESIM_EPISODE_COST,
+            ),
+        },
+        source="geniesim pricing",
+    )
+
+
+def _require_geniesim_env_vars_in_production() -> None:
     if _is_production_env():
-        if job_cost == PLACEHOLDER_GENIESIM_JOB_COST or episode_cost == PLACEHOLDER_GENIESIM_EPISODE_COST:
+        missing_env_vars = [
+            env_var for env_var in GENIESIM_PRICING_ENV_VARS if not os.getenv(env_var)
+        ]
+        if missing_env_vars:
+            missing_list = ", ".join(missing_env_vars)
             raise RuntimeError(
-                "Genie Sim pricing is still set to placeholder defaults in production. "
-                "Set GENIESIM_JOB_COST and GENIESIM_EPISODE_COST to real values."
+                "Missing required Genie Sim pricing environment variables in production: "
+                f"{missing_list}."
             )
 
 
@@ -331,6 +395,7 @@ class CostTracker:
         self,
         data_dir: Optional[Path] = None,
         custom_pricing: Optional[Dict[str, float]] = None,
+        pricing_source: Optional[str] = None,
         enable_logging: bool = True,
     ):
         """Initialize cost tracker.
@@ -338,18 +403,41 @@ class CostTracker:
         Args:
             data_dir: Directory for storing cost data
             custom_pricing: Override default pricing
+            pricing_source: Optional description of pricing source
             enable_logging: Whether to log cost tracking
         """
         self.data_dir = Path(data_dir or os.getenv("COST_DATA_DIR", "./cost_data"))
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
+        if custom_pricing and not pricing_source:
+            pricing_source = "custom pricing"
+
+        _require_geniesim_env_vars_in_production()
+
+        if _is_production_env() and not custom_pricing:
+            raise RuntimeError(
+                "Cost tracking defaults are dev-only. Provide a full pricing config via "
+                f"{COST_TRACKING_PRICING_ENV} or {COST_TRACKING_PRICING_PATH_ENV} in production."
+            )
+
         self.pricing = PRICING.copy()
-        self.pricing.update(_load_geniesim_pricing_from_env())
         if custom_pricing:
+            _validate_pricing_config(custom_pricing, source=pricing_source or "custom pricing")
             self.pricing.update(custom_pricing)
+        geniesim_overrides = _load_geniesim_pricing_from_env()
+        if geniesim_overrides:
+            self.pricing.update(geniesim_overrides)
+            pricing_source = (
+                f"{pricing_source} + geniesim env"
+                if pricing_source
+                else "dev defaults + geniesim env"
+            )
+
+        _validate_pricing_values(self.pricing, source="effective pricing", required_fields=REQUIRED_PRICING_FIELDS)
         _validate_geniesim_pricing(self.pricing)
 
         self.enable_logging = enable_logging
+        logger.info("Cost tracking pricing source: %s", pricing_source or "dev defaults")
 
         # In-memory cache
         self.entries: List[CostEntry] = []
@@ -848,6 +936,9 @@ def get_cost_tracker() -> CostTracker:
     """
     global _cost_tracker
     if _cost_tracker is None:
-        custom_pricing = _load_custom_pricing_from_env()
-        _cost_tracker = CostTracker(custom_pricing=custom_pricing or None)
+        custom_pricing, pricing_source = _load_custom_pricing_from_env()
+        _cost_tracker = CostTracker(
+            custom_pricing=custom_pricing or None,
+            pricing_source=pricing_source,
+        )
     return _cost_tracker
