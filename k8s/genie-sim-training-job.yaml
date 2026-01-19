@@ -1,0 +1,129 @@
+# =============================================================================
+# Kubernetes Job: Genie Sim Training
+# =============================================================================
+# Trains a policy from Genie Sim LeRobot datasets.
+#
+# Apply:
+#   JOB_NAME=genie-sim-training \
+#   SCENE_ID=scene_123 \
+#   BUCKET=example-bucket \
+#   OUTPUT_PATH=scenes/scene_123/episodes \
+#   EPISODE_COUNT=100 \
+#   envsubst < k8s/genie-sim-training-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: genie-sim-training-config
+  namespace: blueprint
+data:
+  TRAINING_MODE: "lerobot"
+  MODEL_ARCHITECTURE: "act"
+  TRAINING_EPOCHS: "100"
+  BATCH_SIZE: "32"
+  LEARNING_RATE: "0.0001"
+  CHECKPOINT_INTERVAL: "10"
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: genie-sim-training
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 21600
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: genie-sim-training
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-tesla-t4
+
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      initContainers:
+        - name: gpu-check
+          image: nvidia/cuda:12.1.0-base-ubuntu22.04
+          command:
+            - sh
+            - -c
+            - |
+              echo "Checking GPU availability for training..."
+              nvidia-smi
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+
+      containers:
+        - name: genie-sim-training
+          image: gcr.io/${PROJECT_ID}/blueprint-genie-sim-training:latest
+          imagePullPolicy: Always
+
+          envFrom:
+            - configMapRef:
+                name: genie-sim-training-config
+
+          env:
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: OUTPUT_PATH
+              value: "${OUTPUT_PATH}"
+            - name: EPISODE_COUNT
+              value: "${EPISODE_COUNT}"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+              nvidia.com/gpu: 1
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+            - name: dshm
+              mountPath: /dev/shm
+            - name: workspace
+              mountPath: /workspace
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        - name: workspace
+          emptyDir:
+            sizeLimit: 50Gi
