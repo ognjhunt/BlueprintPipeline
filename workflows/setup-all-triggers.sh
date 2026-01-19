@@ -13,8 +13,8 @@
 #   4. arena-export-pipeline (3 triggers for different sources)
 #   5. objects-pipeline
 #   6. genie-sim-import-poller (fallback)
-#   7. dream2flow-preparation-pipeline (manual)
-#   8. dwm-preparation-pipeline (manual)
+#   7. dream2flow-preparation-pipeline (manual, disabled unless enabled)
+#   8. dwm-preparation-pipeline (manual, disabled unless enabled)
 #
 # Usage:
 #   ./setup-all-triggers.sh <project_id> [bucket_name] [region]
@@ -139,8 +139,8 @@ if [ ${fail_count} -eq 0 ]; then
     echo ""
     echo "Manual Setup Still Required:"
     echo "  • Episode Generation: Uses GKE directly (see episode-generation-job/scripts/setup_eventarc_trigger.sh)"
-    echo "  • Dream2Flow Preparation: See dream2flow-preparation-pipeline.yaml for trigger spec"
-    echo "  • DWM Preparation: See dwm-preparation-pipeline.yaml for trigger spec"
+    echo "  • Dream2Flow Preparation (disabled by default): See dream2flow-preparation-pipeline.yaml for trigger spec"
+    echo "  • DWM Preparation (disabled by default): See dwm-preparation-pipeline.yaml for trigger spec"
     echo ""
     echo "To test a trigger manually:"
     echo "  echo '{}' | gsutil cp - gs://${BUCKET}/scenes/test_scene/usd/.regen3d_complete"

@@ -134,7 +134,6 @@ Based on [NVIDIA Isaac Lab-Arena](https://github.com/isaac-sim/IsaacLab-Arena):
 | **regen3d-job** | 0 | ~600+ | CRITICAL - First pipeline stage |
 | **genie-sim-export-job** | 0 | ~3,500+ | HIGH - External integration |
 | **episode-generation-job** | 5/21 | ~15,000+ | 24% coverage only |
-| **dwm-preparation-job** | 0 | ~2,500+ | MEDIUM |
 | **smart-placement-engine-job** | 0 | ~1,500+ | MEDIUM |
 
 **Total: 18/23 job directories have ZERO test coverage**
@@ -159,9 +158,7 @@ Based on [NVIDIA Isaac Lab-Arena](https://github.com/isaac-sim/IsaacLab-Arena):
 
 | Feature | Files | Status |
 |---------|-------|--------|
-| **Dream2Flow model** | `dream2flow-preparation-job/*` | NOT RELEASED - placeholder video |
 | **3D-RE-GEN code** | `tools/regen3d_adapter/__init__.py` | PENDING (~Q1 2025 release) |
-| **MANO hand model** | `dwm-preparation-job/hand_motion/` | PLACEHOLDER - SimpleHandMesh fallback |
 | **Tactile sensor simulation** | `data_pack_config.py:273-301` | CONFIGURED BUT NOT IMPLEMENTED |
 | **Inventory enrichment** | `tools/inventory_enrichment/enricher.py` | STUB MODE - pass-through |
 | **Cost tracking prices** | `tools/cost_tracking/tracker.py:44-46` | PLACEHOLDER - $0.10/job fake |
@@ -198,6 +195,23 @@ Based on [NVIDIA Isaac Lab-Arena](https://github.com/isaac-sim/IsaacLab-Arena):
 | Batch sizes | 10+ | 16, 32, 48, 64 scattered |
 
 ---
+
+## Appendix: Experimental / Optional Pipelines (Disabled by Default)
+
+These findings apply only when experimental workflows are explicitly enabled.
+
+### Testing Coverage (Experimental Jobs)
+
+| Module | Tests | Lines of Code | Status |
+|--------|-------|---------------|--------|
+| **dwm-preparation-job** | 0 | ~2,500+ | MEDIUM |
+
+### Experimental Placeholders
+
+| Feature | Files | Status |
+|---------|-------|--------|
+| **Dream2Flow model** | `dream2flow-preparation-job/*` | NOT RELEASED - placeholder video |
+| **MANO hand model** | `dwm-preparation-job/hand_motion/` | PLACEHOLDER - SimpleHandMesh fallback |
 
 ### 11. Logging & Observability Gaps
 

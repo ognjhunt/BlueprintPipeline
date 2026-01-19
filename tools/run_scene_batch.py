@@ -158,16 +158,23 @@ def _dir_has_files(path: Path) -> bool:
     return path.is_dir() and any(path.iterdir())
 
 
-def _build_readiness_checklist(scene_dir: Path, results: List[Any]) -> Dict[str, bool]:
+def _build_readiness_checklist(
+    scene_dir: Path,
+    results: List[Any],
+    *,
+    enable_dwm: bool,
+) -> Dict[str, bool]:
     steps_success = {result.step.value: result.success for result in results}
-    return {
+    checklist = {
         "usd_valid": (scene_dir / "usd" / "scene.usda").exists(),
         "physics_stable": steps_success.get(PipelineStep.SIMREADY.value, False),
         "episodes_generated": _dir_has_files(scene_dir / "episodes"),
         "replicator_ready": _dir_has_files(scene_dir / "replicator"),
         "isaac_lab_ready": _dir_has_files(scene_dir / "isaac_lab"),
-        "dwm_ready": _dir_has_files(scene_dir / "dwm"),
     }
+    if enable_dwm:
+        checklist["dwm_ready"] = _dir_has_files(scene_dir / "dwm")
+    return checklist
 
 
 def _run_quality_gates(
@@ -175,8 +182,10 @@ def _run_quality_gates(
     scene_dir: Path,
     results: List[Any],
     report_path: Path,
+    *,
+    enable_dwm: bool,
 ) -> Dict[str, Any]:
-    checklist = _build_readiness_checklist(scene_dir, results)
+    checklist = _build_readiness_checklist(scene_dir, results, enable_dwm=enable_dwm)
     registry = QualityGateRegistry(verbose=True)
     registry.run_checkpoint(
         checkpoint=QualityGateCheckpoint.SCENE_READY,
@@ -285,6 +294,7 @@ def _build_scene_processor(
                     scene.scene_dir,
                     runner.results,
                     report_path,
+                    enable_dwm=config.enable_dwm,
                 )
 
             if success:
@@ -385,6 +395,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-interactive", action="store_true", help="Skip interactive step.")
     parser.add_argument("--enable-dwm", action="store_true", help="Enable DWM steps by default.")
     parser.add_argument("--enable-dream2flow", action="store_true", help="Enable Dream2Flow steps by default.")
+    parser.add_argument(
+        "--enable-experimental",
+        action="store_true",
+        help="Enable experimental steps (DWM + Dream2Flow) by default.",
+    )
     parser.add_argument("--enable-inventory-enrichment", action="store_true")
     parser.add_argument("--disable-articulated-assets", action="store_true")
     parser.add_argument("--reports-dir", type=Path, default=Path("./batch_reports"))
@@ -399,6 +414,10 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+
+    if args.enable_experimental:
+        args.enable_dwm = True
+        args.enable_dream2flow = True
 
     scene_root = Path(args.scene_root).expanduser().resolve()
     items: List[SceneBatchItem] = []

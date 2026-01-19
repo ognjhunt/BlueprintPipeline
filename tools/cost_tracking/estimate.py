@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -15,7 +16,7 @@ DEFAULT_INSTANCE_RATES: Dict[str, Dict[str, float]] = {
     "a2-highgpu-1g": {"hourly_rate": 1.685, "gpu_count": 1},
 }
 
-DEFAULT_STEP_CONFIG: Dict[str, Dict[str, Any]] = {
+BASE_STEP_CONFIG: Dict[str, Dict[str, Any]] = {
     "regen3d": {
         "duration_minutes": 45,
         "instance_type": "g5.xlarge",
@@ -40,6 +41,9 @@ DEFAULT_STEP_CONFIG: Dict[str, Dict[str, Any]] = {
         "duration_minutes": 15,
         "instance_type": "g5.xlarge",
     },
+}
+
+DWM_STEP_CONFIG: Dict[str, Dict[str, Any]] = {
     "dwm": {
         "duration_minutes": 30,
         "instance_type": "g5.2xlarge",
@@ -48,6 +52,9 @@ DEFAULT_STEP_CONFIG: Dict[str, Dict[str, Any]] = {
         "duration_minutes": 120,
         "instance_type": "g5.12xlarge",
     },
+}
+
+DREAM2FLOW_STEP_CONFIG: Dict[str, Dict[str, Any]] = {
     "dream2flow": {
         "duration_minutes": 20,
         "instance_type": "g5.2xlarge",
@@ -59,6 +66,38 @@ DEFAULT_STEP_CONFIG: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _experimental_flags_from_env() -> Dict[str, bool]:
+    from tools.config.env import parse_bool_env
+
+    enable_experimental = parse_bool_env(
+        os.getenv("ENABLE_EXPERIMENTAL_PIPELINE"),
+        default=False,
+    ) is True
+    enable_dwm = enable_experimental or (
+        parse_bool_env(os.getenv("ENABLE_DWM"), default=False) is True
+    )
+    enable_dream2flow = enable_experimental or (
+        parse_bool_env(os.getenv("ENABLE_DREAM2FLOW"), default=False) is True
+    )
+    return {
+        "enable_dwm": enable_dwm,
+        "enable_dream2flow": enable_dream2flow,
+    }
+
+
+def build_step_config(
+    *,
+    include_dwm: bool,
+    include_dream2flow: bool,
+) -> Dict[str, Dict[str, Any]]:
+    step_config = BASE_STEP_CONFIG.copy()
+    if include_dwm:
+        step_config.update(DWM_STEP_CONFIG)
+    if include_dream2flow:
+        step_config.update(DREAM2FLOW_STEP_CONFIG)
+    return step_config
+
+
 @dataclass
 class EstimateConfig:
     """Configuration for GPU estimation."""
@@ -66,10 +105,16 @@ class EstimateConfig:
     instance_rates: Dict[str, Dict[str, float]] = field(
         default_factory=lambda: DEFAULT_INSTANCE_RATES.copy()
     )
-    step_config: Dict[str, Dict[str, Any]] = field(
-        default_factory=lambda: DEFAULT_STEP_CONFIG.copy()
-    )
+    step_config: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     default_instance_type: str = "g5.xlarge"
+
+    def __post_init__(self) -> None:
+        if not self.step_config:
+            flags = _experimental_flags_from_env()
+            self.step_config = build_step_config(
+                include_dwm=flags["enable_dwm"],
+                include_dream2flow=flags["enable_dream2flow"],
+            )
 
     def merge_overrides(self, overrides: Dict[str, Any]) -> None:
         """Merge overrides from JSON configuration."""
@@ -197,9 +242,26 @@ def estimate_gpu_costs(
     )
 
 
-def load_estimate_config(config_path: Optional[Path]) -> EstimateConfig:
+def load_estimate_config(
+    config_path: Optional[Path],
+    *,
+    include_dwm: Optional[bool] = None,
+    include_dream2flow: Optional[bool] = None,
+) -> EstimateConfig:
     """Load estimate configuration from JSON file."""
-    config = EstimateConfig()
+    if include_dwm is None or include_dream2flow is None:
+        flags = _experimental_flags_from_env()
+        include_dwm = flags["enable_dwm"] if include_dwm is None else include_dwm
+        include_dream2flow = (
+            flags["enable_dream2flow"] if include_dream2flow is None else include_dream2flow
+        )
+
+    config = EstimateConfig(
+        step_config=build_step_config(
+            include_dwm=bool(include_dwm),
+            include_dream2flow=bool(include_dream2flow),
+        )
+    )
     if not config_path:
         return config
 
@@ -286,6 +348,11 @@ def main() -> None:
         help="Include optional Dream2Flow steps when resolving default steps",
     )
     parser.add_argument(
+        "--enable-experimental",
+        action="store_true",
+        help="Enable experimental steps (DWM + Dream2Flow)",
+    )
+    parser.add_argument(
         "--config",
         type=str,
         help="Path to JSON configuration for rates and step durations",
@@ -297,6 +364,9 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if args.enable_experimental:
+        args.enable_dwm = True
+        args.enable_dream2flow = True
     scene_dir = Path(args.scene_dir).resolve()
     steps = _parse_steps(args.steps)
     resolved_steps = resolve_steps_for_scene(
@@ -305,7 +375,11 @@ def main() -> None:
         enable_dwm=args.enable_dwm,
         enable_dream2flow=args.enable_dream2flow,
     )
-    config = load_estimate_config(Path(args.config) if args.config else None)
+    config = load_estimate_config(
+        Path(args.config) if args.config else None,
+        include_dwm=args.enable_dwm,
+        include_dream2flow=args.enable_dream2flow,
+    )
     summary = estimate_gpu_costs(resolved_steps, config)
 
     if args.json:

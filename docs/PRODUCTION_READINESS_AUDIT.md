@@ -278,7 +278,7 @@ class QualityGateCheckpoint(str, Enum):
 | Dockerfiles | ✅ Pass | 27 Dockerfiles across jobs |
 | CI/CD | ✅ Pass | `.github/workflows/test-unit.yml`, `geniesim-staging-e2e.yml` |
 | Terraform IaC | ✅ Pass | `infrastructure/terraform/main.tf`, `gke.tf`, `variables.tf` |
-| K8s manifests | ✅ Pass | `k8s/genie-sim-gpu-job.yaml`, `k8s/dwm-preparation-job.yaml` |
+| K8s manifests | ✅ Pass | `k8s/genie-sim-gpu-job.yaml` |
 | Cloud Workflows | ✅ Pass | 16 workflow YAML files in `workflows/` |
 | Troubleshooting docs | ✅ Pass | `docs/troubleshooting.md` |
 | Rollback procedures | ✅ Pass | `docs/rollback.md` |
@@ -562,6 +562,14 @@ cat docs/data_retention.md
 ```
 
 ---
+
+## Appendix: Experimental / Optional Pipelines (Disabled by Default)
+
+These items apply only when experimental workflows are explicitly enabled.
+
+| Check | Status | Evidence |
+|-------|--------|----------|
+| K8s manifests (experimental) | ⚠️ Not part of core readiness | `k8s/dwm-preparation-job.yaml` |
 
 **Audit Complete**
 

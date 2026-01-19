@@ -13,8 +13,8 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 | Workflow | Trigger source | Marker file or scheduler |
 | --- | --- | --- |
 | `arena-export-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/usd/.usd_complete`, `scenes/*/isaac_lab/.isaac_lab_complete`, `scenes/*/geniesim/.geniesim_complete` |
-| `dream2flow-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` |
-| `dwm-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` |
+| `dream2flow-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` (disabled unless enabled) |
+| `dwm-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` (disabled unless enabled) |
 | `episode-generation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/usd/.usd_complete` |
 | `genie-sim-export-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/variation_assets/.variation_pipeline_complete` |
 | `genie-sim-import-pipeline.yaml` | Eventarc custom event / manual | Event type `manual.geniesim.job.completed` or direct workflow payload |
@@ -32,6 +32,10 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 
 ## Primary entrypoints
 - YAML workflow definitions and the `setup-*.sh` scripts.
+
+**Note:** Dream2Flow and DWM workflows are experimental and remain disabled by
+default unless explicitly enabled (e.g., `ENABLE_DREAM2FLOW=true`,
+`ENABLE_DWM=true`, or a shared experimental flag).
 
 ## Required inputs / outputs
 - **Inputs:** workflow parameters, referenced container images, and pipeline configuration.
