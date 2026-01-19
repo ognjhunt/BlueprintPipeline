@@ -579,6 +579,8 @@ class GenieSimServiceServicer:
     def __init__(self, joint_count: int = 7, delegate: Optional[Any] = None) -> None:
         self._delegate = delegate
         self._state_lock = threading.Lock()
+        self._task_registry_lock = threading.Lock()
+        self._task_registry = {}
         self._joint_positions = [0.0] * joint_count
         self._joint_velocities = [0.0] * joint_count
         self._joint_efforts = [0.0] * joint_count
@@ -701,10 +703,28 @@ class GenieSimServiceServicer:
         delegate = self._resolve_delegate("GetTaskStatus")
         if delegate:
             return self._call_delegate(delegate, request, context, TaskStatusResponse(success=False))
-        return self._unsupported_method(
-            "GetTaskStatus",
-            context,
-            TaskStatusResponse(success=False, status="unknown", progress=0.0, error_message="Task status unavailable"),
+        if not request.task_id:
+            self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "task_id is required")
+            return TaskStatusResponse(
+                success=False,
+                status="unknown",
+                progress=0.0,
+                error_message="task_id is required",
+            )
+        task = self._get_task_status(request.task_id)
+        if task is None:
+            self._set_context_status(context, self._grpc_status("NOT_FOUND"), "task_id not found")
+            return TaskStatusResponse(
+                success=False,
+                status="unknown",
+                progress=0.0,
+                error_message="task_id not found",
+            )
+        return TaskStatusResponse(
+            success=True,
+            status=task["status"],
+            progress=task["progress"],
+            error_message=task["error_message"],
         )
 
     def SetGripperState(
@@ -745,6 +765,9 @@ class GenieSimServiceServicer:
             )
         with self._state_lock:
             self._ee_pose = request.target_pose
+        task_id = getattr(request, "task_id", "")
+        if task_id:
+            self._set_task_status(task_id, "completed", 1.0, "")
         return LinearMoveResponse(
             success=True,
             planning_success=True,
@@ -867,6 +890,9 @@ class GenieSimServiceServicer:
                 self._joint_velocities = list(last_point.velocities) or [0.0] * len(self._joint_positions)
                 self._joint_efforts = [0.0] * len(self._joint_positions)
         execution_time = max(last_point.time_from_start, 0.0)
+        task_id = getattr(request, "task_id", "")
+        if task_id:
+            self._set_task_status(task_id, "completed", 1.0, "")
         return SetTrajectoryResponse(
             success=True,
             points_executed=len(request.points),
@@ -889,6 +915,7 @@ class GenieSimServiceServicer:
             recording_path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             self._set_context_status(context, self._grpc_status("INTERNAL"), "Failed to create recording directory")
+            self._set_task_status(episode_id, "failed", 0.0, str(exc))
             return StartRecordingResponse(success=False, error_message=str(exc))
         with self._state_lock:
             self._recording = {
@@ -897,6 +924,7 @@ class GenieSimServiceServicer:
                 "started_at": time.time(),
                 "frames_recorded": 0,
             }
+        self._set_task_status(episode_id, "running", 0.0, "")
         return StartRecordingResponse(success=True, recording_path=str(recording_path))
 
     def StopRecording(
@@ -915,6 +943,7 @@ class GenieSimServiceServicer:
             self._set_context_status(context, self._grpc_status("FAILED_PRECONDITION"), "No active recording")
             return StopRecordingResponse(success=False, error_message="No active recording")
         duration = max(time.time() - recording["started_at"], 0.0)
+        self._set_task_status(recording.get("episode_id", ""), "completed", 1.0, "")
         return StopRecordingResponse(
             success=True,
             frames_recorded=recording["frames_recorded"],
@@ -943,6 +972,7 @@ class GenieSimServiceServicer:
             self._attached_objects.clear()
             self._cameras.clear()
             self._recording = None
+        self._clear_task_registry()
         return ResetResponse(success=True)
 
     def AddCamera(
@@ -978,6 +1008,7 @@ class GenieSimServiceServicer:
                 self._set_context_status(context, self._grpc_status("INVALID_ARGUMENT"), "Invalid JSON payload")
                 return CommandResponse(success=False, error_message="Invalid JSON payload")
         command_type = request.command_type
+        task_id = payload_data.get("task_id", "")
         try:
             if command_type == CommandType.GET_OBSERVATION:
                 response = self.GetObservation(
@@ -1045,15 +1076,20 @@ class GenieSimServiceServicer:
                 )
             if command_type == CommandType.LINEAR_MOVE:
                 target_pose_payload = payload_data.get("target_pose")
+                linear_request = LinearMoveRequest(
+                    target_pose=self._pose_from_payload(target_pose_payload) if target_pose_payload else None,
+                    velocity=payload_data.get("velocity", 0.0),
+                    acceleration=payload_data.get("acceleration", 0.0),
+                    wait_for_completion=payload_data.get("wait_for_completion", False),
+                )
+                if task_id:
+                    setattr(linear_request, "task_id", task_id)
                 response = self.LinearMove(
-                    LinearMoveRequest(
-                        target_pose=self._pose_from_payload(target_pose_payload) if target_pose_payload else None,
-                        velocity=payload_data.get("velocity", 0.0),
-                        acceleration=payload_data.get("acceleration", 0.0),
-                        wait_for_completion=payload_data.get("wait_for_completion", False),
-                    ),
+                    linear_request,
                     context,
                 )
+                if task_id:
+                    self._set_task_status(task_id, "completed" if response.success else "failed", 1.0, response.error_message)
                 return CommandResponse(
                     success=response.success,
                     error_message=response.error_message,
@@ -1316,6 +1352,26 @@ class GenieSimServiceServicer:
             "progress": response.progress,
             "error_message": response.error_message,
         }
+
+    def _set_task_status(self, task_id: str, status: str, progress: float, error_message: str) -> None:
+        if not task_id:
+            return
+        with self._task_registry_lock:
+            self._task_registry[task_id] = {
+                "status": status,
+                "progress": float(progress),
+                "error_message": error_message or "",
+                "updated_at": time.time(),
+            }
+
+    def _get_task_status(self, task_id: str) -> Optional[dict]:
+        with self._task_registry_lock:
+            task = self._task_registry.get(task_id)
+            return dict(task) if task else None
+
+    def _clear_task_registry(self) -> None:
+        with self._task_registry_lock:
+            self._task_registry.clear()
 
     @staticmethod
     def _payload_for_init_robot(response: InitRobotResponse) -> dict:
