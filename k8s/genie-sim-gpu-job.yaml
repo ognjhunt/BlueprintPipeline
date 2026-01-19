@@ -74,7 +74,7 @@ spec:
 
       containers:
         - name: genie-sim-local
-          image: gcr.io/${PROJECT_ID}/blueprint-genie-sim:isaacsim
+          image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim:isaacsim
           imagePullPolicy: Always
 
           envFrom:

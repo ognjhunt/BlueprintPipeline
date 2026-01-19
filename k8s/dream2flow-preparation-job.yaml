@@ -102,7 +102,7 @@ spec:
 
       containers:
         - name: dream2flow-generator
-          image: gcr.io/${PROJECT_ID}/blueprint-dream2flow:isaacsim
+          image: ghcr.io/${PROJECT_ID}/blueprint-dream2flow:isaacsim
           imagePullPolicy: Always
 
           command: ["/entrypoint.sh", "generate"]
