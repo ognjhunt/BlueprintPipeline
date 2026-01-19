@@ -73,7 +73,7 @@ from tools.cost_tracking.estimate import (
     format_estimate_summary,
     load_estimate_config,
 )
-from tools.config.env import parse_bool_env
+from tools.config.env import parse_bool_env, parse_int_env
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
 from tools.error_handling import (
@@ -2325,8 +2325,18 @@ class LocalPipelineRunner:
         robot_types = self._resolve_geniesim_robot_types()
         robot_type = robot_types[0]
         multi_robot = len(robot_types) > 1
-        episodes_per_task = int(os.getenv("EPISODES_PER_TASK", "10"))
-        num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
+        episodes_per_task = parse_int_env(
+            os.getenv("EPISODES_PER_TASK"),
+            default=10,
+            min_value=1,
+            name="EPISODES_PER_TASK",
+        )
+        num_variations = parse_int_env(
+            os.getenv("NUM_VARIATIONS"),
+            default=5,
+            min_value=1,
+            name="NUM_VARIATIONS",
+        )
         min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
 
         job_id = None
