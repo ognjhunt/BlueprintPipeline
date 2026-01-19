@@ -45,6 +45,7 @@ def test_rlds_exporter_writes_split_files(load_job_module, sample_episodes: list
 
     assert (output_dir / "dataset_info.json").exists()
     assert (output_dir / "features.json").exists()
+    dataset_info = json.loads((output_dir / "dataset_info.json").read_text())
     split_dir = output_dir / "train"
 
     files = list(split_dir.iterdir())
@@ -52,6 +53,7 @@ def test_rlds_exporter_writes_split_files(load_job_module, sample_episodes: list
 
     if exporter._tf_available:
         assert any(file.suffix == ".tfrecord" for file in files)
+        assert dataset_info["export_status"]["used_json_fallback"] is False
     else:
         json_files = [file for file in files if file.suffix == ".json"]
         assert json_files
@@ -59,6 +61,7 @@ def test_rlds_exporter_writes_split_files(load_job_module, sample_episodes: list
         assert len(payload["steps"]) == len(sample_episodes[0]["frames"])
         assert payload["steps"][0]["is_first"] is True
         assert payload["steps"][1]["is_last"] is True
+        assert dataset_info["export_status"]["used_json_fallback"] is True
 
 
 @pytest.mark.unit

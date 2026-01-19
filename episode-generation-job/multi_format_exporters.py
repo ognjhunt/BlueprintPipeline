@@ -34,6 +34,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from tools.utils.atomic_write import write_json_atomic
+from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +109,18 @@ class RLDSExporter:
         dataset_name: str = "blueprint_robotics",
         version: str = "1.0.0",
         verbose: bool = True,
+        require_tensorflow: Optional[bool] = None,
     ):
         self.output_dir = Path(output_dir)
         self.dataset_name = dataset_name
         self.version = version
         self.verbose = verbose
+        self.require_tensorflow = (
+            require_tensorflow
+            if require_tensorflow is not None
+            else parse_bool_env(os.getenv("RLDS_REQUIRE_TENSORFLOW"), default=False)
+        )
+        self._used_json_fallback = False
 
         # Try to import TensorFlow (optional dependency)
         self._tf_available = False
@@ -120,6 +129,12 @@ class RLDSExporter:
             self._tf = tf
             self._tf_available = True
         except ImportError:
+            if self.require_tensorflow:
+                raise RuntimeError(
+                    "TensorFlow is required for RLDS export but is not available. "
+                    "Install tensorflow or set RLDS_REQUIRE_TENSORFLOW=false to allow "
+                    "JSON fallback output."
+                )
             if self.verbose:
                 logger.warning("[RLDS] TensorFlow not available, using fallback export")
 
@@ -259,6 +274,12 @@ class RLDSExporter:
         if self._tf_available:
             self._export_tfrecord(split_dir, episodes, features)
         else:
+            if self.require_tensorflow:
+                raise RuntimeError(
+                    "TensorFlow is required for RLDS export but is not available. "
+                    "Install tensorflow or set RLDS_REQUIRE_TENSORFLOW=false to allow "
+                    "JSON fallback output."
+                )
             self._export_json_fallback(split_dir, episodes, features)
 
     def _export_tfrecord(
@@ -377,6 +398,8 @@ class RLDSExporter:
             write_json_atomic(output_path, rlds_episode, indent=2, default=str)
 
             self.log(f"  Wrote {output_path.name} (JSON fallback)")
+        if episodes:
+            self._used_json_fallback = True
 
     def _write_dataset_info(
         self,
@@ -385,6 +408,11 @@ class RLDSExporter:
         robot_type: str,
     ) -> None:
         """Write dataset info files."""
+        export_status = {
+            "tensorflow_available": self._tf_available,
+            "require_tensorflow": self.require_tensorflow,
+            "used_json_fallback": self._used_json_fallback,
+        }
         # Dataset info
         dataset_info = {
             "name": self.dataset_name,
@@ -397,6 +425,7 @@ class RLDSExporter:
             "robot_type": robot_type,
             "created_at": datetime.now().isoformat(),
             "format": "rlds",
+            "export_status": export_status,
             "compatible_with": ["tensorflow_datasets", "jax", "open_x_embodiment"],
             "checksums": {
                 "algorithm": "sha256",
@@ -1064,10 +1093,16 @@ class MultiFormatExporter:
             fmt_lower = fmt.lower()
 
             if fmt_lower == "rlds":
+                require_tensorflow = parse_bool_env(
+                    os.getenv("RLDS_REQUIRE_TENSORFLOW"), default=None
+                )
+                if require_tensorflow is None:
+                    require_tensorflow = resolve_production_mode()
                 exporter = RLDSExporter(
                     output_dir=self.output_dir / "rlds",
                     dataset_name=dataset_name,
                     verbose=self.verbose,
+                    require_tensorflow=require_tensorflow,
                 )
                 outputs["rlds"] = exporter.export_episodes(
                     episodes, splits, robot_type
