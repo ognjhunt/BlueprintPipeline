@@ -7,6 +7,7 @@ cluster for regional failover.
 
 - Episode generation
 - Genie Sim GPU execution
+- Firebase cleanup
 - Dream2Flow preparation
 - DWM preparation
 
