@@ -30,7 +30,7 @@ def test_variation_gen_job_dry_run(tmp_path, monkeypatch):
 
     monkeypatch.setenv("VARIATION_GEN_MODE", "mock")
 
-    success = variation_gen.process_variation_assets(
+    outcome = variation_gen.process_variation_assets(
         root=tmp_path,
         scene_id="test_scene",
         replicator_prefix="replicator",
@@ -38,7 +38,7 @@ def test_variation_gen_job_dry_run(tmp_path, monkeypatch):
         dry_run=True,
     )
 
-    assert success is True
+    assert outcome.success is True
 
     asset_dir = tmp_path / "variation_assets" / "spatula_01"
     reference_image = asset_dir / "reference.png"

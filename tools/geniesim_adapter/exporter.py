@@ -265,17 +265,21 @@ class GenieSimExporter:
             if nc_assets:
                 nc_sources = set(a.source for a in nc_assets)
                 if self.config.filter_commercial_only:
-                    result.warnings.append(
-                        f"Filtered out {len(nc_assets)} non-commercial assets from sources: {nc_sources}"
+                    error_msg = (
+                        f"CRITICAL: {len(nc_assets)} non-commercial assets detected from {nc_sources}. "
+                        "Commercial filtering is enabled, but rather than producing an incomplete scene, "
+                        "the export is failing to ensure legal compliance for sellable data. "
+                        "Remove non-commercial assets or update their licenses before re-exporting."
                     )
-                    asset_index = asset_index.filter_commercial()
-                    self.log(f"  Filtered to commercial-only: {len(asset_index.assets)} assets")
+                    result.errors.append(error_msg)
+                    self.log(error_msg, "ERROR")
+                    return result
                 else:
                     # WARN: Non-commercial assets included
                     warning_msg = (
                         f"WARNING: {len(nc_assets)} non-commercial assets included from {nc_sources}. "
                         "Generated data CANNOT be sold commercially. "
-                        "Set filter_commercial_only=True to exclude these assets."
+                        "Set filter_commercial_only=True to strictly enforce commercial-safe assets."
                     )
                     result.warnings.append(warning_msg)
                     self.log(warning_msg, "WARNING")

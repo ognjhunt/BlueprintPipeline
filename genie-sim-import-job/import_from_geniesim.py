@@ -2564,6 +2564,21 @@ def main():
             print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")
             print(f"[GENIE-SIM-IMPORT] Episodes imported: {result.episodes_passed_validation}")
             print(f"[GENIE-SIM-IMPORT] Average quality: {result.average_quality_score:.2f}")
+
+        # Alert on low quality yield
+        min_expected_quality = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
+        if result.average_quality_score < min_expected_quality:
+            from monitoring.alerting import send_alert
+            send_alert(
+                event_type="geniesim_low_quality_yield",
+                summary=f"Low quality yield for scene {scene_id}",
+                details={
+                    "job_id": job_id,
+                    "average_quality": result.average_quality_score,
+                    "threshold": min_expected_quality
+                },
+                severity="warning"
+            )
             if enable_firebase_upload:
                 from tools.firebase_upload.uploader import (
                     init_firebase,
