@@ -1,0 +1,126 @@
+# =============================================================================
+# Kubernetes Job: Genie Sim Import
+# =============================================================================
+# Imports completed Genie Sim episodes, validates quality, and converts to
+# LeRobot format.
+#
+# Apply:
+#   JOB_NAME=genie-sim-import \
+#   GENIE_SIM_JOB_ID=geniesim-job-123 \
+#   SCENE_ID=scene_123 \
+#   BUCKET=example-bucket \
+#   envsubst < k8s/genie-sim-import-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: genie-sim-import-config
+  namespace: blueprint
+data:
+  GENIE_SIM_POLL_INTERVAL: "30"
+  ENABLE_VALIDATION: "true"
+  FILTER_LOW_QUALITY: "true"
+  REQUIRE_LEROBOT: "false"
+  WAIT_FOR_COMPLETION: "true"
+  FAIL_ON_PARTIAL_ERROR: "false"
+  DISABLE_GCS_UPLOAD: "false"
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: genie-sim-import
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: genie-sim-import
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: genie-sim-import
+          image: gcr.io/${PROJECT_ID}/blueprint-genie-sim-import:latest
+          imagePullPolicy: Always
+
+          envFrom:
+            - configMapRef:
+                name: genie-sim-import-config
+
+          env:
+            - name: GENIE_SIM_JOB_ID
+              value: "${GENIE_SIM_JOB_ID}"
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: OUTPUT_PREFIX
+              value: "scenes/$(SCENE_ID)/episodes"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: JOB_METADATA_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-import-overrides
+                  key: JOB_METADATA_PATH
+                  optional: true
+            - name: LOCAL_EPISODES_PREFIX
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-import-overrides
+                  key: LOCAL_EPISODES_PREFIX
+                  optional: true
+            - name: GCS_OUTPUT_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-import-overrides
+                  key: GCS_OUTPUT_PATH
+                  optional: true
+            - name: MIN_QUALITY_SCORE
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-import-overrides
+                  key: MIN_QUALITY_SCORE
+                  optional: true
+            - name: LEROBOT_SKIP_RATE_MAX
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-import-overrides
+                  key: LEROBOT_SKIP_RATE_MAX
+                  optional: true
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
