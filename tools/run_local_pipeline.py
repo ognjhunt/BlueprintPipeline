@@ -2238,14 +2238,74 @@ class LocalPipelineRunner:
             )
 
         output_dir = Path(local_episodes_prefix)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        recordings_dir = output_dir / "recordings"
+        lerobot_dir = output_dir / "lerobot"
+        dataset_info_path = lerobot_dir / "dataset_info.json"
+        require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
+        if not recordings_dir.is_dir():
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=0,
+                message=(
+                    "Genie Sim recordings directory missing for job "
+                    f"{job_id}: expected {recordings_dir}"
+                ),
+                outputs={
+                    "job_id": job_id,
+                    "output_dir": str(output_dir),
+                    "recordings_path": str(recordings_dir),
+                    "lerobot_path": str(lerobot_dir),
+                    "lerobot_dataset_info": str(dataset_info_path),
+                },
+            )
+        episode_files = list(recordings_dir.rglob("*.json"))
+        if not episode_files:
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=0,
+                message=(
+                    "Genie Sim recordings missing for job "
+                    f"{job_id}: expected *.json episodes under {recordings_dir}"
+                ),
+                outputs={
+                    "job_id": job_id,
+                    "output_dir": str(output_dir),
+                    "recordings_path": str(recordings_dir),
+                    "lerobot_path": str(lerobot_dir),
+                    "lerobot_dataset_info": str(dataset_info_path),
+                },
+            )
+        if require_lerobot and (not lerobot_dir.is_dir() or not dataset_info_path.is_file()):
+            missing = []
+            if not lerobot_dir.is_dir():
+                missing.append(str(lerobot_dir))
+            if not dataset_info_path.is_file():
+                missing.append(str(dataset_info_path))
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=0,
+                message=(
+                    "Genie Sim lerobot artifacts missing for job "
+                    f"{job_id}: expected {', '.join(missing)}"
+                ),
+                outputs={
+                    "job_id": job_id,
+                    "output_dir": str(output_dir),
+                    "recordings_path": str(recordings_dir),
+                    "lerobot_path": str(lerobot_dir),
+                    "lerobot_dataset_info": str(dataset_info_path),
+                },
+            )
         config = ImportConfig(
             job_id=job_id,
             output_dir=output_dir,
             min_quality_score=float(os.getenv("MIN_QUALITY_SCORE", "0.85")),
             enable_validation=parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True),
             filter_low_quality=parse_bool_env(os.getenv("FILTER_LOW_QUALITY"), default=True),
-            require_lerobot=parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False),
+            require_lerobot=require_lerobot,
             wait_for_completion=True,
             poll_interval=0,
             job_metadata_path=str(job_path),
@@ -2267,6 +2327,9 @@ class LocalPipelineRunner:
                 "job_id": job_id,
                 "import_manifest": str(result.import_manifest_path) if result.import_manifest_path else None,
                 "output_dir": str(output_dir),
+                "recordings_path": str(recordings_dir),
+                "lerobot_path": str(lerobot_dir),
+                "lerobot_dataset_info": str(dataset_info_path),
                 "completion_marker": str(marker_path) if result.success else None,
             },
         )
