@@ -15,6 +15,6 @@ configMapGenerator:
       - BUCKET=example-bucket
 
 images:
-  - name: gcr.io/blueprint-project/blueprint-episode-gen
-    newName: gcr.io/example-project/blueprint-episode-gen
+  - name: ghcr.io/blueprint-project/blueprint-episode-gen
+    newName: ghcr.io/example-project/blueprint-episode-gen
     newTag: isaacsim

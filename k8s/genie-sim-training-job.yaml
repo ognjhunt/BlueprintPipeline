@@ -74,7 +74,7 @@ spec:
 
       containers:
         - name: genie-sim-training
-          image: gcr.io/${PROJECT_ID}/blueprint-genie-sim-training:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-training:latest
           imagePullPolicy: Always
 
           envFrom:
