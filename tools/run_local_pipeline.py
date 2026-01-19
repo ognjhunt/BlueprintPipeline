@@ -62,6 +62,7 @@ import importlib.util
 import json
 import re
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -315,6 +316,135 @@ class LocalPipelineRunner:
             )
             return default
         return [width, height]
+
+    def _cleanup_local_output_dirs(
+        self,
+        output_dirs: Dict[str, Path],
+        robots: List[str],
+        *,
+        enabled: bool,
+    ) -> Dict[str, Dict[str, Any]]:
+        report = {
+            "cleaned": {},
+            "left_behind": {},
+        }
+        for robot in robots:
+            output_dir = output_dirs.get(robot)
+            output_path = str(output_dir) if output_dir else None
+            if not enabled:
+                report["left_behind"][robot] = {
+                    "path": output_path,
+                    "reason": "cleanup_disabled",
+                }
+                continue
+            if not output_dir:
+                report["left_behind"][robot] = {
+                    "path": None,
+                    "reason": "missing_output_dir",
+                }
+                continue
+            if not output_dir.exists():
+                report["left_behind"][robot] = {
+                    "path": output_path,
+                    "reason": "missing_path",
+                }
+                continue
+            try:
+                shutil.rmtree(output_dir)
+                report["cleaned"][robot] = {"path": output_path}
+            except Exception as exc:
+                report["left_behind"][robot] = {
+                    "path": output_path,
+                    "reason": str(exc),
+                }
+        return report
+
+    def _firebase_prefix_for_robot(
+        self,
+        firebase_prefix: str,
+        robot: str,
+        job_id: str,
+        *,
+        multi_robot: bool,
+    ) -> str:
+        if multi_robot:
+            return f"{firebase_prefix}/{self.scene_id}/{robot}/geniesim_{job_id}/"
+        return f"{firebase_prefix}/{self.scene_id}/geniesim_{job_id}/"
+
+    def _cleanup_firebase_artifacts(
+        self,
+        *,
+        firebase_prefix: str,
+        job_id: str,
+        robots: List[str],
+        upload_summaries: Dict[str, Any],
+        enabled: bool,
+        multi_robot: bool,
+    ) -> Dict[str, Dict[str, Any]]:
+        report = {
+            "cleaned": {},
+            "left_behind": {},
+        }
+        if not robots:
+            return report
+        if not enabled:
+            for robot in robots:
+                report["left_behind"][robot] = {
+                    "reason": "cleanup_disabled",
+                }
+            return report
+
+        from tools.firebase_upload.uploader import cleanup_firebase_paths
+
+        for robot in robots:
+            summary = upload_summaries.get(robot) or {}
+            file_statuses = summary.get("file_statuses", []) or []
+            recorded_paths = [
+                status.get("remote_path")
+                for status in file_statuses
+                if status.get("status") in {"uploaded", "reuploaded"}
+            ]
+            if recorded_paths:
+                cleanup_result = cleanup_firebase_paths(paths=recorded_paths)
+                report["cleaned"][robot] = cleanup_result
+                if cleanup_result.get("failed"):
+                    report["left_behind"][robot] = {
+                        "reason": "delete_failed",
+                        "details": cleanup_result.get("failed"),
+                    }
+                continue
+
+            prefix = self._firebase_prefix_for_robot(
+                firebase_prefix,
+                robot,
+                job_id,
+                multi_robot=multi_robot,
+            )
+            cleanup_result = cleanup_firebase_paths(prefix=prefix)
+            report["cleaned"][robot] = cleanup_result
+            if cleanup_result.get("failed"):
+                report["left_behind"][robot] = {
+                    "reason": "delete_failed",
+                    "details": cleanup_result.get("failed"),
+                }
+        return report
+
+    @staticmethod
+    def _merge_cleanup_reports(
+        base_report: Optional[Dict[str, Any]],
+        extra_report: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not base_report:
+            return extra_report
+        merged = {
+            "cleaned": {},
+            "left_behind": {},
+        }
+        merged["cleaned"].update(base_report.get("cleaned", {}))
+        merged["cleaned"].update(extra_report.get("cleaned", {}))
+        merged["left_behind"].update(base_report.get("left_behind", {}))
+        merged["left_behind"].update(extra_report.get("left_behind", {}))
+        return merged
 
     def _resolve_default_capture_config(self) -> Dict[str, Any]:
         default_cameras = ["wrist", "overhead"]
@@ -2485,6 +2615,11 @@ class LocalPipelineRunner:
         firebase_upload_summary: Dict[str, Any] = {}
         firebase_upload_error: Dict[str, str] = {}
         firebase_upload_status = "skipped"
+        cleanup_enabled = parse_bool_env(
+            os.getenv("GENIESIM_CLEANUP_ON_FAILURE"),
+            default=True,
+        )
+        cleanup_details: Dict[str, Any] = {"enabled": cleanup_enabled}
         firebase_upload_required = parse_bool_env(
             os.getenv("FIREBASE_UPLOAD_REQUIRED"),
             default=resolve_production_mode(),
@@ -2585,6 +2720,15 @@ class LocalPipelineRunner:
         if robot_failures:
             failure_details["by_robot"] = robot_failures
             failure_reason = "Local Genie Sim execution failed"
+            cleanup_details["local"] = self._merge_cleanup_reports(
+                cleanup_details.get("local"),
+                self._cleanup_local_output_dirs(
+                    output_dirs,
+                    list(robot_failures.keys()),
+                    enabled=cleanup_enabled,
+                ),
+            )
+            failure_details["cleanup"] = cleanup_details
         submission_message = (
             "Local Genie Sim execution completed."
             if all(result and result.success for result in local_run_results.values())
@@ -2730,7 +2874,10 @@ class LocalPipelineRunner:
         if local_run_results:
             firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
             from tools.firebase_upload import upload_episodes_to_firebase
-            from tools.firebase_upload.uploader import init_firebase
+            from tools.firebase_upload.uploader import (
+                FirebaseUploadError,
+                init_firebase,
+            )
 
             def _run_firebase_with_retry(label: str, action: Any) -> Any:
                 config = self.retry_config
@@ -2779,7 +2926,22 @@ class LocalPipelineRunner:
                     job_payload["status"] = job_status
                     job_payload["message"] = submission_message
                     job_payload["failure_reason"] = failure_reason
-                    job_payload["failure_details"] = {"firebase_upload": failure_reason}
+                    failure_details["firebase_upload"] = failure_reason
+                    successful_robots = [
+                        current_robot
+                        for current_robot, result in local_run_results.items()
+                        if result and result.success
+                    ]
+                    cleanup_details["local"] = self._merge_cleanup_reports(
+                        cleanup_details.get("local"),
+                        self._cleanup_local_output_dirs(
+                            output_dirs,
+                            successful_robots,
+                            enabled=cleanup_enabled,
+                        ),
+                    )
+                    failure_details["cleanup"] = cleanup_details
+                    job_payload["failure_details"] = failure_details or None
                     job_path = self.geniesim_dir / "job.json"
                     _write_idempotency_payload()
                     _safe_write_text(
@@ -2816,6 +2978,17 @@ class LocalPipelineRunner:
                         ),
                     )
                     firebase_upload_status_by_robot[current_robot] = "completed"
+                except FirebaseUploadError as exc:
+                    firebase_upload_summary[current_robot] = exc.summary
+                    firebase_upload_error[current_robot] = str(exc)
+                    submission_message = (
+                        "Local Genie Sim execution completed; Firebase upload failed."
+                    )
+                    firebase_upload_status_by_robot[current_robot] = "failed"
+                    self.log(
+                        f"Firebase upload failed: {self._summarize_exception(exc)}",
+                        "WARNING",
+                    )
                 except Exception as exc:
                     firebase_upload_error[current_robot] = str(exc)
                     submission_message = (
@@ -2841,9 +3014,33 @@ class LocalPipelineRunner:
                 job_payload["status"] = job_status
                 job_payload["message"] = submission_message
                 job_payload["failure_reason"] = failure_reason
-                job_payload["failure_details"] = {
-                    "firebase_upload": firebase_upload_error or None
-                }
+                failure_details["firebase_upload"] = firebase_upload_error or None
+                failed_upload_robots = [
+                    current_robot
+                    for current_robot, status in firebase_upload_status_by_robot.items()
+                    if status == "failed"
+                ]
+                cleanup_details["local"] = self._merge_cleanup_reports(
+                    cleanup_details.get("local"),
+                    self._cleanup_local_output_dirs(
+                        output_dirs,
+                        failed_upload_robots,
+                        enabled=cleanup_enabled,
+                    ),
+                )
+                cleanup_details["firebase"] = self._merge_cleanup_reports(
+                    cleanup_details.get("firebase"),
+                    self._cleanup_firebase_artifacts(
+                        firebase_prefix=firebase_prefix,
+                        job_id=job_id,
+                        robots=failed_upload_robots,
+                        upload_summaries=firebase_upload_summary,
+                        enabled=cleanup_enabled,
+                        multi_robot=multi_robot,
+                    ),
+                )
+                failure_details["cleanup"] = cleanup_details
+                job_payload["failure_details"] = failure_details or None
                 job_path = self.geniesim_dir / "job.json"
                 _write_idempotency_payload()
                 _safe_write_text(
