@@ -87,6 +87,7 @@ from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import set_global_seed
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.source_asset_checksums import verify_source_checksums
 
 REQUIRED_ISAAC_SIM_VERSION = "2024.1.0+"
 REQUIRED_ISAAC_SIM_CONTAINER = "nvcr.io/nvidia/isaac-sim:2024.1.0"
@@ -2692,6 +2693,32 @@ def run_episode_generation_job(
 
     assets_dir = root / assets_prefix
     output_dir = root / episodes_prefix
+
+    checksum_path = assets_dir / "source_checksums.json"
+    checksum_result = verify_source_checksums(checksum_path, assets_dir)
+    if not checksum_result["success"]:
+        logger.error(
+            "[EPISODE-GEN-JOB] Source asset checksum verification failed for %s",
+            checksum_path,
+        )
+        if checksum_result["errors"]:
+            logger.error("[EPISODE-GEN-JOB] Checksum errors: %s", checksum_result["errors"])
+        if checksum_result["missing_files"]:
+            logger.error(
+                "[EPISODE-GEN-JOB] Missing source assets: %s",
+                checksum_result["missing_files"][:5],
+            )
+        if checksum_result["checksum_mismatches"]:
+            logger.error(
+                "[EPISODE-GEN-JOB] Checksum mismatches: %s",
+                checksum_result["checksum_mismatches"][:3],
+            )
+        if checksum_result["size_mismatches"]:
+            logger.error(
+                "[EPISODE-GEN-JOB] Size mismatches: %s",
+                checksum_result["size_mismatches"][:3],
+            )
+        return 1
 
     # Load manifest
     manifest_path = assets_dir / "scene_manifest.json"
