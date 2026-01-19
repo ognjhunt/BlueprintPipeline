@@ -258,6 +258,12 @@ class LeRobotDatasetConfig:
     image_resolution: Tuple[int, int] = (640, 480)
     camera_types: List[str] = field(default_factory=lambda: ["wrist"])
     video_codec: str = "h264"
+    require_camera_calibration: Optional[bool] = field(
+        default_factory=lambda: parse_bool_env(
+            os.getenv("REQUIRE_CAMERA_CALIBRATION"),
+            default=None,
+        )
+    )
 
     # Data pack configuration (Core/Plus/Full)
     data_pack_tier: str = "core"  # "core", "plus", "full"
@@ -687,6 +693,14 @@ class LeRobotExporter:
 
     def _parse_bool_env(self, key: str) -> Optional[bool]:
         return parse_bool_env(os.getenv(key))
+
+    def _requires_camera_calibration(self) -> bool:
+        if self.config.require_camera_calibration is not None:
+            return bool(self.config.require_camera_calibration)
+        if not self.config.include_images:
+            return False
+        tier = self.config.data_pack_tier.lower()
+        return tier in {"core", "plus", "full"}
 
     def _is_production_mode(self) -> bool:
         return (
@@ -1254,7 +1268,7 @@ class LeRobotExporter:
 
         return non_compliant
 
-    def _validate_camera_calibration(self) -> List[Tuple[int, List[str]]]:
+    def _validate_camera_calibration(self) -> List[Dict[str, Any]]:
         """
         Validate camera calibration matrices.
 
@@ -1264,9 +1278,10 @@ class LeRobotExporter:
         3. Matrices are invertible (not singular)
 
         Returns:
-            List of (episode_index, errors) tuples for calibration issues
+            List of episode entries with calibration issues
         """
         invalid_calibrations = []
+        require_calibration = self._requires_camera_calibration()
 
         for episode in self.episodes:
             if episode.sensor_data is None:
@@ -1282,12 +1297,26 @@ class LeRobotExporter:
 
             # Get camera calibration from sensor config
             if not hasattr(episode.sensor_data, 'config') or episode.sensor_data.config is None:
+                if require_calibration:
+                    errors.append("Camera calibration config missing from sensor data")
+                if errors:
+                    invalid_calibrations.append({
+                        "episode_index": episode.episode_index,
+                        "errors": errors,
+                    })
                 continue
 
             camera_config = episode.sensor_data.config
 
             # Check for CameraCalibration config
             if not hasattr(camera_config, 'camera_calibration') or camera_config.camera_calibration is None:
+                if require_calibration:
+                    errors.append("Camera calibration missing from sensor config")
+                if errors:
+                    invalid_calibrations.append({
+                        "episode_index": episode.episode_index,
+                        "errors": errors,
+                    })
                 continue
 
             calibration = camera_config.camera_calibration
@@ -1346,7 +1375,10 @@ class LeRobotExporter:
                         errors.append(f"Extrinsic matrix: Last row is not [0, 0, 0, 1]")
 
             if errors:
-                invalid_calibrations.append((episode.episode_index, errors))
+                invalid_calibrations.append({
+                    "episode_index": episode.episode_index,
+                    "errors": errors,
+                })
 
         return invalid_calibrations
 
@@ -2032,12 +2064,28 @@ class LeRobotExporter:
             bad_calibrations = self._validate_camera_calibration()
             if bad_calibrations:
                 self.log(f"  WARNING: Found {len(bad_calibrations)} episodes with invalid calibrations:", "WARNING")
-                for ep_idx, errors in bad_calibrations[:3]:  # Show first 3
-                    self.log(f"    Episode {ep_idx}:", "WARNING")
-                    for error in errors[:2]:  # Show first 2 errors per episode
+                for entry in bad_calibrations[:3]:  # Show first 3
+                    self.log(f"    Episode {entry['episode_index']}:", "WARNING")
+                    for error in entry["errors"][:2]:  # Show first 2 errors per episode
                         self.log(f"      - {error}", "WARNING")
                 if len(bad_calibrations) > 3:
                     self.log(f"    ... and {len(bad_calibrations) - 3} more episodes", "WARNING")
+
+                missing_calibration_count = sum(
+                    1
+                    for entry in bad_calibrations
+                    if any("missing" in error.lower() for error in entry.get("errors", []))
+                )
+                self._write_invalid_episodes(
+                    meta_dir,
+                    bad_calibrations,
+                    reason="camera_calibration",
+                    summary={
+                        "missing_calibration_episodes": missing_calibration_count,
+                        "require_camera_calibration": self._requires_camera_calibration(),
+                    },
+                    export_blocked=False,
+                )
             else:
                 self.log("  All calibration matrices are valid")
 
