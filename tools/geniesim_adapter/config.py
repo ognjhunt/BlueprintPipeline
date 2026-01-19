@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional
 
+from tools.config.env import parse_int_env
 GENIESIM_HOST_ENV = "GENIESIM_HOST"
 GENIESIM_PORT_ENV = "GENIESIM_PORT"
 GENIESIM_TLS_CERT_ENV = "GENIESIM_TLS_CERT"
@@ -32,8 +33,13 @@ def get_geniesim_host(env: Optional[Mapping[str, str]] = None) -> str:
 def get_geniesim_port(env: Optional[Mapping[str, str]] = None) -> int:
     """Return the configured Genie Sim gRPC port."""
     source = env or os.environ
-    port_value = source.get(GENIESIM_PORT_ENV, str(DEFAULT_GENIESIM_PORT))
-    return int(port_value)
+    return parse_int_env(
+        source.get(GENIESIM_PORT_ENV),
+        default=DEFAULT_GENIESIM_PORT,
+        min_value=1,
+        max_value=65535,
+        name=GENIESIM_PORT_ENV,
+    )
 
 
 def get_geniesim_tls_cert_path(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
