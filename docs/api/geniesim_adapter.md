@@ -31,6 +31,7 @@ Local framework configuration uses environment variables when instantiating `Gen
 - `GENIESIM_HOST` (default: `localhost`)
 - `GENIESIM_PORT` (defaults to the adapter port; set this for non-local deployments to match the exposed gRPC port)
 - `GENIESIM_TIMEOUT` (default: `30` seconds)
+- `GENIESIM_COLLECTION_TIMEOUT_S` (default: unset; aborts local data collection after the configured number of seconds)
 - `GENIESIM_ROOT` (default: `/opt/geniesim`)
 - `ISAAC_SIM_PATH` (default: `/isaac-sim`)
 - `ALLOW_GENIESIM_MOCK` (default: `0`)
