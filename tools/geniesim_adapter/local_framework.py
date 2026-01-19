@@ -58,6 +58,7 @@ Environment Variables:
     CUROBO_REQUIRED: Enforce cuRobo availability checks (default: false)
     ALLOW_GENIESIM_MOCK: Allow local mock gRPC server when GENIESIM_ROOT is missing (default: 0)
     GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD: Allow non-collision-aware linear fallback in production (default: 0; risky)
+    GENIESIM_ALLOW_IK_FAILURE_FALLBACK: Allow linear fallback if IK planning fails (default: 0)
 """
 
 import json
@@ -130,6 +131,21 @@ except ImportError:
     CUROBO_INTEGRATION_AVAILABLE = False
     CuRoboMotionPlanner = None
     logger.warning("cuRobo planner not available - collision-aware planning disabled")
+
+# Import IK utilities from episode-generation-job
+try:
+    from trajectory_solver import IKSolver, ROBOT_CONFIGS
+    from motion_planner import Waypoint, MotionPhase
+    from collision_aware_planner import CollisionAwarePlanner
+    IK_PLANNING_AVAILABLE = True
+except ImportError:
+    IK_PLANNING_AVAILABLE = False
+    IKSolver = None
+    ROBOT_CONFIGS = {}
+    Waypoint = None
+    MotionPhase = None
+    CollisionAwarePlanner = None
+    logger.warning("IK utilities not available - IK fallback disabled")
 
 
 # =============================================================================
@@ -232,6 +248,7 @@ class GenieSimConfig:
     environment: str = "development"
     allow_linear_fallback: bool = False
     allow_linear_fallback_in_production: bool = False
+    allow_ik_failure_fallback: bool = False
 
     # Output settings
     recording_dir: Path = Path("/tmp/geniesim_recordings")
@@ -249,6 +266,12 @@ class GenieSimConfig:
         allow_linear_fallback_in_production = (
             os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD", "0") == "1"
         )
+        allow_ik_failure_env = os.getenv("GENIESIM_ALLOW_IK_FAILURE_FALLBACK")
+        allow_ik_failure_fallback = (
+            _parse_bool(allow_ik_failure_env, default=False)
+            if allow_ik_failure_env is not None
+            else allow_linear_fallback
+        )
         return cls(
             host=get_geniesim_host(),
             port=get_geniesim_port(),
@@ -262,6 +285,7 @@ class GenieSimConfig:
             environment=environment,
             allow_linear_fallback=allow_linear_fallback,
             allow_linear_fallback_in_production=allow_linear_fallback_in_production,
+            allow_ik_failure_fallback=allow_ik_failure_fallback,
         )
 
 
@@ -956,46 +980,40 @@ class GenieSimLocalFramework:
         """Apply cuRobo availability policy to config/runtime behavior."""
         production_mode = self.config.environment == "production"
         curobo_enabled = CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo
-        allow_fallback_env = os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK")
         allow_fallback_in_prod = self.config.allow_linear_fallback_in_production
 
-        if (production_mode or self.config.curobo_required) and not curobo_enabled:
-            if production_mode and allow_fallback_in_prod:
-                self.config.allow_linear_fallback = True
-                self.log(
-                    "cuRobo unavailable in production; linear interpolation fallback enabled via "
-                    "GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD. This is not collision-aware.",
-                    "WARNING",
-                )
-                return
+        if self.config.curobo_required and not curobo_enabled:
             raise RuntimeError(
-                "cuRobo motion planning is required (CUROBO_REQUIRED=1 or GENIESIM_ENV=production). "
+                "cuRobo motion planning is required (CUROBO_REQUIRED=1). "
                 "Install cuRobo (pip install nvidia-curobo) and enable use_curobo, "
-                "or set GENIESIM_ENV=development for local testing with linear fallback. "
-                "To override in production, set GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 "
-                "(non-collision-aware)."
+                "or disable CUROBO_REQUIRED for local testing."
             )
 
-        if not production_mode and not curobo_enabled:
-            if allow_fallback_env is None:
-                self.config.allow_linear_fallback = True
+        if not curobo_enabled:
+            if production_mode:
                 self.log(
-                    "cuRobo unavailable; enabling linear interpolation fallback by default "
-                    "for non-production. Set GENIESIM_ALLOW_LINEAR_FALLBACK=0 to disable.",
-                    "WARNING",
-                )
-            elif self.config.allow_linear_fallback:
-                self.log(
-                    "cuRobo unavailable; linear interpolation fallback explicitly enabled "
-                    "via GENIESIM_ALLOW_LINEAR_FALLBACK.",
+                    "cuRobo unavailable in production; using IK fallback with collision checks "
+                    "when available.",
                     "WARNING",
                 )
             else:
                 self.log(
-                    "cuRobo unavailable; linear interpolation fallback disabled via "
-                    "GENIESIM_ALLOW_LINEAR_FALLBACK=0.",
+                    "cuRobo unavailable; using IK fallback with collision checks when available.",
                     "WARNING",
                 )
+            if self.config.allow_ik_failure_fallback:
+                if production_mode and not allow_fallback_in_prod:
+                    self.log(
+                        "IK failure fallback to linear interpolation is disabled in production. "
+                        "Set GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 to allow.",
+                        "WARNING",
+                    )
+                else:
+                    self.log(
+                        "IK failure fallback to linear interpolation enabled via "
+                        "GENIESIM_ALLOW_IK_FAILURE_FALLBACK.",
+                        "WARNING",
+                    )
 
     def _validate_required_environment(self, stage: str) -> None:
         """Validate required runtime dependencies before launching or running."""
@@ -1608,19 +1626,11 @@ class GenieSimLocalFramework:
         # Use cuRobo for real motion planning
         # =====================================================================
         if production_mode and not (CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo):
-            if self.config.allow_linear_fallback_in_production:
-                self.log(
-                    "  ⚠️  cuRobo unavailable in production; falling back to linear interpolation "
-                    "(not collision-aware).",
-                    "WARNING",
-                )
-            else:
-                raise RuntimeError(
-                    "Collision-aware planner required in production; "
-                    "cuRobo integration is unavailable or disabled. "
-                    "To override, set GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 "
-                    "(non-collision-aware)."
-                )
+            self.log(
+                "  ⚠️  cuRobo unavailable in production; using IK fallback with collision checks "
+                "when available.",
+                "WARNING",
+            )
 
         if CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo:
             trajectory = self._generate_curobo_trajectory(
@@ -1633,53 +1643,276 @@ class GenieSimLocalFramework:
             if trajectory is not None:
                 self.log(f"  ✅ cuRobo trajectory: {len(trajectory)} waypoints")
                 return trajectory
-            elif production_mode:
-                if not self.config.allow_linear_fallback_in_production:
-                    raise RuntimeError(
-                        "Collision-aware planning failed in production; "
-                        "linear interpolation fallback is disabled. "
-                        "To override, set GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 "
-                        "(non-collision-aware)."
-                    )
-                self.log(
-                    "  ⚠️  cuRobo planning failed in production; falling back to linear interpolation "
-                    "(not collision-aware).",
-                    "WARNING",
-                )
             else:
                 self.log("  ⚠️  cuRobo planning failed", "WARNING")
 
         # =====================================================================
-        # Fallback: Linear interpolation (not collision-free!)
+        # Fallback: IK-based joint planning with collision awareness where possible
         # =====================================================================
-        if not self.config.allow_linear_fallback:
+        trajectory = self._generate_ik_fallback_trajectory(
+            task=task,
+            initial_joints=np.array(initial_joints),
+            target_position=np.array(target_pos),
+            place_position=np.array(place_pos) if place_pos else None,
+            obstacles=obstacles,
+        )
+        if trajectory is not None:
+            self.log(f"  ✅ IK fallback trajectory: {len(trajectory)} waypoints")
+            return trajectory
+
+        if self.config.allow_ik_failure_fallback:
+            if production_mode and not self.config.allow_linear_fallback_in_production:
+                self.log(
+                    "  ❌ IK fallback failed and linear interpolation fallback is disabled in production. "
+                    "Set GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 to override (not collision-aware).",
+                    "ERROR",
+                )
+                return None
             self.log(
-                "  ❌ Linear interpolation fallback disabled. "
-                "Set GENIESIM_ALLOW_LINEAR_FALLBACK=1 for dev-only runs or "
-                "GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 to override in production "
+                "  ⚠️  IK fallback failed; using linear interpolation fallback "
                 "(not collision-aware).",
-                "ERROR",
+                "WARNING",
             )
+            return self._generate_linear_fallback_trajectory(initial_joints)
+
+        self.log(
+            "  ❌ IK fallback failed; set GENIESIM_ALLOW_IK_FAILURE_FALLBACK=1 to allow "
+            "linear interpolation fallback (not collision-aware).",
+            "ERROR",
+        )
+        return None
+
+    def _resolve_task_orientation(
+        self,
+        task: Dict[str, Any],
+        key: str,
+        fallback: np.ndarray,
+    ) -> np.ndarray:
+        value = task.get(key)
+        if value is None:
+            return fallback
+        if isinstance(value, (list, tuple, np.ndarray)) and len(value) == 4:
+            orientation = np.array(value, dtype=float)
+            norm = np.linalg.norm(orientation)
+            if norm > 0:
+                return orientation / norm
+        self.log(f"  ⚠️  Invalid {key}; using default orientation", "WARNING")
+        return fallback
+
+    def _within_joint_limits(
+        self,
+        joints: np.ndarray,
+        robot_config: Any,
+        tolerance: float = 1e-4,
+    ) -> bool:
+        lower = robot_config.joint_limits_lower
+        upper = robot_config.joint_limits_upper
+        finite_mask = np.isfinite(lower) & np.isfinite(upper)
+        if not np.any(finite_mask):
+            return True
+        below = joints[finite_mask] < (lower[finite_mask] - tolerance)
+        above = joints[finite_mask] > (upper[finite_mask] + tolerance)
+        return not (np.any(below) or np.any(above))
+
+    def _build_ik_fallback_waypoints(
+        self,
+        target_position: np.ndarray,
+        place_position: Optional[np.ndarray],
+        target_orientation: np.ndarray,
+        place_orientation: np.ndarray,
+    ) -> List["Waypoint"]:
+        waypoints: List[Waypoint] = []
+        timestamp = 0.0
+
+        def _add_waypoint(
+            position: np.ndarray,
+            orientation: np.ndarray,
+            phase: "MotionPhase",
+            duration: float,
+            gripper_aperture: float = 1.0,
+        ) -> None:
+            nonlocal timestamp
+            waypoints.append(
+                Waypoint(
+                    position=position,
+                    orientation=orientation,
+                    gripper_aperture=gripper_aperture,
+                    timestamp=timestamp,
+                    duration_to_next=duration,
+                    phase=phase,
+                )
+            )
+            timestamp += duration
+
+        pre_grasp_position = target_position.copy()
+        pre_grasp_position[2] += 0.15
+        _add_waypoint(
+            pre_grasp_position,
+            target_orientation,
+            MotionPhase.APPROACH,
+            duration=1.0,
+        )
+
+        grasp_position = target_position.copy()
+        grasp_position[2] += 0.02
+        _add_waypoint(
+            grasp_position,
+            target_orientation,
+            MotionPhase.GRASP,
+            duration=0.6,
+        )
+
+        lift_position = target_position.copy()
+        lift_position[2] += 0.25
+        _add_waypoint(
+            lift_position,
+            target_orientation,
+            MotionPhase.LIFT,
+            duration=0.8,
+        )
+
+        if place_position is not None:
+            pre_place_position = place_position.copy()
+            pre_place_position[2] += 0.20
+            _add_waypoint(
+                pre_place_position,
+                place_orientation,
+                MotionPhase.TRANSPORT,
+                duration=1.2,
+            )
+
+            _add_waypoint(
+                place_position,
+                place_orientation,
+                MotionPhase.PLACE,
+                duration=0.6,
+            )
+
+        return waypoints
+
+    def _generate_ik_fallback_trajectory(
+        self,
+        task: Dict[str, Any],
+        initial_joints: np.ndarray,
+        target_position: np.ndarray,
+        place_position: Optional[np.ndarray],
+        obstacles: List[Dict[str, Any]],
+        fps: float = 30.0,
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not IK_PLANNING_AVAILABLE:
+            self.log("  ❌ IK utilities unavailable; cannot build IK fallback trajectory.", "ERROR")
             return None
 
-        self.log("  ⚠️  Using linear interpolation fallback (not collision-aware)", "WARNING")
+        robot_config = ROBOT_CONFIGS.get(self.config.robot_type, ROBOT_CONFIGS.get("franka"))
+        if robot_config is None:
+            self.log(f"  ❌ No robot config for type '{self.config.robot_type}'", "ERROR")
+            return None
 
-        num_waypoints = 100
+        default_orientation = np.array([1.0, 0.0, 0.0, 0.0])
+        target_orientation = self._resolve_task_orientation(
+            task, "target_orientation", default_orientation
+        )
+        place_orientation = self._resolve_task_orientation(
+            task, "place_orientation", target_orientation
+        )
+
+        waypoints = self._build_ik_fallback_waypoints(
+            target_position=target_position,
+            place_position=place_position,
+            target_orientation=target_orientation,
+            place_orientation=place_orientation,
+        )
+
+        planner = None
+        if CollisionAwarePlanner is not None:
+            try:
+                planner = CollisionAwarePlanner(
+                    robot_type=self.config.robot_type,
+                    scene_objects=obstacles,
+                    use_curobo=False,
+                    verbose=False,
+                )
+                planned_waypoints = planner.plan_waypoint_trajectory(waypoints)
+                if planned_waypoints is not None:
+                    waypoints = planned_waypoints
+            except Exception as exc:
+                self.log(f"  ⚠️  Collision-aware planner failed: {exc}", "WARNING")
+                planner = None
+
+        ik_solver = IKSolver(robot_config, verbose=False)
+        seed_joints = initial_joints.copy()
+
+        for wp in waypoints:
+            if planner is not None:
+                joints = planner.solve_ik_with_collision_check(
+                    wp.position, wp.orientation, seed_joints=seed_joints
+                )
+            else:
+                joints = ik_solver.solve(wp.position, wp.orientation, seed_joints)
+
+            if joints is None:
+                self.log(
+                    f"  ❌ IK failed for waypoint {wp.phase.value} at position {wp.position.tolist()}",
+                    "ERROR",
+                )
+                return None
+            if not self._within_joint_limits(joints, robot_config):
+                self.log(
+                    f"  ❌ IK solution violates joint limits for waypoint {wp.phase.value}",
+                    "ERROR",
+                )
+                return None
+
+            wp.joint_positions = joints
+            seed_joints = joints
+
+        trajectory: List[Dict[str, Any]] = []
+        current_joints = initial_joints.copy()
+        current_time = 0.0
+
+        for index, wp in enumerate(waypoints):
+            target_joints = wp.joint_positions
+            if target_joints is None:
+                continue
+            duration = max(0.2, float(wp.duration_to_next))
+            steps = max(2, int(round(duration * fps)))
+            start_step = 0 if index == 0 else 1
+
+            for step in range(start_step, steps):
+                t = step / (steps - 1)
+                joint_pos = (1 - t) * current_joints + t * target_joints
+                trajectory.append(
+                    {
+                        "joint_positions": joint_pos.tolist(),
+                        "timestamp": current_time + t * duration,
+                    }
+                )
+
+            current_time += duration
+            current_joints = target_joints
+
+        return trajectory
+
+    def _generate_linear_fallback_trajectory(
+        self,
+        initial_joints: Sequence[float],
+        num_waypoints: int = 100,
+        fps: float = 30.0,
+    ) -> List[Dict[str, Any]]:
         trajectory = []
 
         for i in range(num_waypoints):
             t = i / (num_waypoints - 1)
-
-            # Simple interpolation (not actual IK - placeholder)
             joint_pos = [
                 initial_joints[j] + (np.sin(t * np.pi) * 0.1)
                 for j in range(len(initial_joints))
             ]
-
-            trajectory.append({
-                "joint_positions": joint_pos,
-                "timestamp": i / 30.0,
-            })
+            trajectory.append(
+                {
+                    "joint_positions": joint_pos,
+                    "timestamp": i / fps,
+                }
+            )
 
         return trajectory
 
