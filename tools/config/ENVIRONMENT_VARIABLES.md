@@ -119,6 +119,21 @@ export PIPELINE_SEED=1234
 
 ---
 
+## Webhook Controls
+
+Controls for the Genie Sim import webhook.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WEBHOOK_RATE_LIMIT_PER_MIN` | int | 100 | Maximum webhook requests per minute per `scene_id` and IP address (falls back to IP-only when `scene_id` is missing). |
+
+**Example**:
+```bash
+export WEBHOOK_RATE_LIMIT_PER_MIN=100
+```
+
+---
+
 ## LLM Client Controls
 
 Controls for rate limiting, concurrency, and caching in `tools/llm_client`.
