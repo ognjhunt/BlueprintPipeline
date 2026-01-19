@@ -37,6 +37,7 @@ Environment Variables:
     SCALE_FACTOR: Optional scale factor for metric calibration (default: 1.0)
     SKIP_INVENTORY: If "true", skip semantic inventory generation
     BYPASS_QUALITY_GATES: If "true", skip quality gate evaluation (dev-only)
+    GEMINI_ENRICHMENT_REQUIRED: If "true", fail job when Gemini enrichment fails
 
 Reference:
     - Paper: https://arxiv.org/abs/2512.17459
@@ -290,6 +291,9 @@ def enrich_inventory_with_gemini(
             logger.info("[REGEN3D-JOB] No objects to enrich")
             return inventory
 
+        inventory.setdefault("metadata", {})
+        inventory["metadata"]["gemini_attempted"] = True
+
         # Build the enrichment prompt
         environment_type = inventory.get("environment_type", "generic")
         prompt = _build_gemini_enrichment_prompt(objects_for_prompt, environment_type)
@@ -360,9 +364,17 @@ def enrich_inventory_with_gemini(
 
     except ImportError as e:
         logger.warning("[REGEN3D-JOB] LLM client not available: %s", e)
+        inventory.setdefault("metadata", {})
+        inventory["metadata"]["gemini_attempted"] = True
+        inventory["metadata"]["gemini_enriched"] = False
+        inventory["metadata"]["gemini_error"] = str(e)
         return inventory
     except Exception as e:
         logger.error("[REGEN3D-JOB] Gemini enrichment failed: %s", e)
+        inventory.setdefault("metadata", {})
+        inventory["metadata"]["gemini_attempted"] = True
+        inventory["metadata"]["gemini_enriched"] = False
+        inventory["metadata"]["gemini_error"] = str(e)
         # Return original inventory on failure (non-fatal)
         return inventory
 
@@ -792,9 +804,31 @@ def run_regen3d_adapter_job(
                     regen3d_output.source_image_path,
                 )
 
+            gemini_metadata = inventory.get("metadata", {})
+            gemini_attempted = gemini_metadata.get("gemini_attempted", False)
+            gemini_failed = gemini_attempted and not gemini_metadata.get(
+                "gemini_enriched", False
+            )
+            if gemini_failed:
+                logger.warning(
+                    "[REGEN3D-JOB] Gemini enrichment attempted but failed: %s",
+                    gemini_metadata.get("gemini_error", "unknown error"),
+                )
+
             inventory_path = seg_dir / "inventory.json"
             inventory_path.write_text(json.dumps(inventory, indent=2))
             logger.info("[REGEN3D-JOB] Wrote inventory: %s", inventory_path)
+
+            if gemini_failed and os.getenv("GEMINI_ENRICHMENT_REQUIRED", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+            }:
+                logger.error(
+                    "[REGEN3D-JOB] Gemini enrichment failed and is required; failing job."
+                )
+                return 1
         except Exception as e:
             logger.exception(
                 "[REGEN3D-JOB] Failed to generate inventory (required for downstream jobs): %s",
