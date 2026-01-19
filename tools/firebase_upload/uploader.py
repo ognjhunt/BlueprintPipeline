@@ -6,6 +6,8 @@ import json
 import logging
 import mimetypes
 import os
+import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
@@ -18,6 +20,15 @@ from tools.error_handling.retry import retry_with_backoff
 logger = logging.getLogger(__name__)
 
 _FIREBASE_APP: Optional[firebase_admin.App] = None
+_SHA256_METADATA_KEY = "sha256"
+
+
+class FirebaseUploadError(RuntimeError):
+    """Raised when Firebase uploads complete with failures."""
+
+    def __init__(self, summary: dict, message: str) -> None:
+        super().__init__(message)
+        self.summary = summary
 
 
 def init_firebase() -> firebase_admin.App:
@@ -68,6 +79,72 @@ def _upload_file(blob, file_path: Path, content_type: Optional[str]) -> None:
         blob.upload_from_filename(str(file_path))
 
 
+def _calculate_file_hashes(file_path: Path, chunk_size: int = 8 * 1024 * 1024) -> dict:
+    md5_hash = hashlib.md5()
+    sha256_hash = hashlib.sha256()
+    with file_path.open("rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(chunk_size), b""):
+            md5_hash.update(chunk)
+            sha256_hash.update(chunk)
+    return {
+        "md5_base64": base64.b64encode(md5_hash.digest()).decode("utf-8"),
+        "sha256_hex": sha256_hash.hexdigest(),
+    }
+
+
+def _set_blob_sha256_metadata(blob, sha256_hex: str) -> None:
+    metadata = dict(blob.metadata or {})
+    metadata[_SHA256_METADATA_KEY] = sha256_hex
+    blob.metadata = metadata
+
+
+def _verify_blob_checksum(
+    blob,
+    file_path: Path,
+    *,
+    local_hashes: Optional[dict] = None,
+) -> tuple[bool, dict]:
+    if local_hashes is None:
+        local_hashes = _calculate_file_hashes(file_path)
+    local_md5 = local_hashes["md5_base64"]
+    local_sha256 = local_hashes["sha256_hex"]
+
+    blob.reload()
+    remote_md5 = blob.md5_hash
+    metadata = blob.metadata or {}
+    remote_sha256 = metadata.get(_SHA256_METADATA_KEY)
+
+    errors = []
+    if remote_sha256:
+        if remote_sha256 != local_sha256:
+            errors.append("sha256_mismatch")
+    if remote_md5:
+        if remote_md5 != local_md5:
+            errors.append("md5_mismatch")
+    if not remote_sha256 and not remote_md5:
+        errors.append("missing_remote_hashes")
+
+    if remote_sha256 and remote_md5:
+        strategy = "sha256_metadata+md5_base64"
+    elif remote_sha256:
+        strategy = "sha256_metadata"
+    elif remote_md5:
+        strategy = "md5_base64"
+    else:
+        strategy = "missing_remote_hashes"
+
+    detail = {
+        "expected_md5": local_md5,
+        "actual_md5": remote_md5,
+        "expected_sha256": local_sha256,
+        "actual_sha256": remote_sha256,
+        "hash_strategy": strategy,
+    }
+    if errors:
+        detail["error"] = ", ".join(errors)
+    return not errors, detail
+
+
 def upload_episodes_to_firebase(
     episodes_dir: Path,
     scene_id: str,
@@ -87,6 +164,7 @@ def upload_episodes_to_firebase(
     total_files = 0
     uploaded_files = 0
     failures = []
+    verification_failed = []
 
     file_paths = [
         file_path
@@ -95,9 +173,33 @@ def upload_episodes_to_firebase(
     ]
     total_files = len(file_paths)
 
-    def _upload_single(path: Path, remote_path: str, content_type: Optional[str]) -> None:
+    def _upload_single(
+        path: Path,
+        remote_path: str,
+        content_type: Optional[str],
+    ) -> Optional[dict]:
         blob = bucket.blob(remote_path)
+        local_hashes = _calculate_file_hashes(path)
+        _set_blob_sha256_metadata(blob, local_hashes["sha256_hex"])
         _upload_file(blob, path, content_type)
+        verified, verification_detail = _verify_blob_checksum(
+            blob,
+            path,
+            local_hashes=local_hashes,
+        )
+        if not verified:
+            verification_detail = {
+                "local_path": str(path),
+                "remote_path": remote_path,
+                **verification_detail,
+            }
+            return {
+                "local_path": str(path),
+                "remote_path": remote_path,
+                "error": "upload verification failed",
+                "verification": verification_detail,
+            }
+        return None
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {}
@@ -114,7 +216,11 @@ def upload_episodes_to_firebase(
         for future in as_completed(futures):
             info = futures[future]
             try:
-                future.result()
+                verification_failure = future.result()
+                if verification_failure:
+                    failures.append(verification_failure)
+                    verification_failed.append(verification_failure["verification"])
+                    continue
                 uploaded_files += 1
             except Exception as exc:
                 logger.error(
@@ -130,12 +236,15 @@ def upload_episodes_to_firebase(
                 })
 
     failures.sort(key=lambda failure: failure["local_path"])
+    verification_failed.sort(key=lambda failure: failure["local_path"])
 
     summary = {
         "total_files": total_files,
         "uploaded": uploaded_files,
         "failed": len(failures),
         "failures": failures,
+        "verification_failed": verification_failed,
+        "verification_strategy": "sha256_metadata+md5_base64",
     }
 
     logger.info(
@@ -145,7 +254,8 @@ def upload_episodes_to_firebase(
     )
 
     if failures:
-        raise RuntimeError(
+        raise FirebaseUploadError(
+            summary,
             f"Firebase upload failed for {len(failures)} of {total_files} files"
         )
 
