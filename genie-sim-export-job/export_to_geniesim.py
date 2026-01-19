@@ -586,6 +586,7 @@ def run_geniesim_export_job(
             scene_dir=provenance_scene_root,
             output_path=asset_provenance_path,
             scene_id=scene_id,
+            manifest_path=merged_manifest_path,
         )
         print(f"[GENIESIM-EXPORT-JOB] ✓ Asset provenance written: {asset_provenance_path}")
     except Exception as exc:
