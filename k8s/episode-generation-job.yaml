@@ -152,9 +152,15 @@ spec:
           env:
             # Scene-specific configuration (set via job parameters)
             - name: SCENE_ID
-              value: "$(SCENE_ID)"
+              valueFrom:
+                configMapKeyRef:
+                  name: episode-gen-runtime
+                  key: SCENE_ID
             - name: BUCKET
-              value: "$(BUCKET)"
+              valueFrom:
+                configMapKeyRef:
+                  name: episode-gen-runtime
+                  key: BUCKET
             - name: ASSETS_PREFIX
               value: "scenes/$(SCENE_ID)/assets"
             - name: EPISODES_PREFIX
@@ -248,10 +254,17 @@ spec:
                 - secretRef:
                     name: episode-gen-secrets
               env:
+                - name: JOB_ID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
                 - name: SCENE_ID
-                  value: "batch-${JOB_ID}"
+                  value: "batch-$(JOB_ID)"
                 - name: BUCKET
-                  value: "$(BUCKET)"
+                  valueFrom:
+                    configMapKeyRef:
+                      name: episode-gen-runtime
+                      key: BUCKET
               resources:
                 requests:
                   nvidia.com/gpu: 1
