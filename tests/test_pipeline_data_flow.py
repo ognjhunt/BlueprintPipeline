@@ -208,7 +208,12 @@ def test_pipeline_data_flow_entrypoints(
     monkeypatch.setattr(geniesim_job, "AUDIO_NARRATION_AVAILABLE", False)
     monkeypatch.setattr(geniesim_job, "get_metrics", lambda: DummyMetrics())
 
-    def fake_generate_asset_provenance(scene_dir: Path, output_path: Path, scene_id: str) -> None:
+    def fake_generate_asset_provenance(
+        scene_dir: Path,
+        output_path: Path,
+        scene_id: str,
+        manifest_path: Path | None = None,
+    ) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps({"scene_id": scene_id, "assets": []}, indent=2))
 
