@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -79,34 +80,56 @@ def upload_episodes_to_firebase(
     init_firebase()
     bucket = storage.bucket()
 
+    concurrency = int(os.getenv("FIREBASE_UPLOAD_CONCURRENCY", "8"))
+    if concurrency < 1:
+        raise ValueError("FIREBASE_UPLOAD_CONCURRENCY must be >= 1")
+
     total_files = 0
     uploaded_files = 0
     failures = []
 
-    for file_path in sorted(episodes_dir.rglob("*")):
-        if not file_path.is_file():
-            continue
-        total_files += 1
-        relative_path = file_path.relative_to(episodes_dir).as_posix()
-        remote_path = f"{prefix}/{scene_id}/{relative_path}"
-        content_type, _ = mimetypes.guess_type(file_path.name)
-        blob = bucket.blob(remote_path)
+    file_paths = [
+        file_path
+        for file_path in sorted(episodes_dir.rglob("*"))
+        if file_path.is_file()
+    ]
+    total_files = len(file_paths)
 
-        try:
-            _upload_file(blob, file_path, content_type)
-            uploaded_files += 1
-        except Exception as exc:
-            logger.error(
-                "Failed to upload %s to %s: %s",
-                file_path,
-                remote_path,
-                exc,
-            )
-            failures.append({
+    def _upload_single(path: Path, remote_path: str, content_type: Optional[str]) -> None:
+        blob = bucket.blob(remote_path)
+        _upload_file(blob, path, content_type)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {}
+        for file_path in file_paths:
+            relative_path = file_path.relative_to(episodes_dir).as_posix()
+            remote_path = f"{prefix}/{scene_id}/{relative_path}"
+            content_type, _ = mimetypes.guess_type(file_path.name)
+            future = executor.submit(_upload_single, file_path, remote_path, content_type)
+            futures[future] = {
                 "local_path": str(file_path),
                 "remote_path": remote_path,
-                "error": str(exc),
-            })
+            }
+
+        for future in as_completed(futures):
+            info = futures[future]
+            try:
+                future.result()
+                uploaded_files += 1
+            except Exception as exc:
+                logger.error(
+                    "Failed to upload %s to %s: %s",
+                    info["local_path"],
+                    info["remote_path"],
+                    exc,
+                )
+                failures.append({
+                    "local_path": info["local_path"],
+                    "remote_path": info["remote_path"],
+                    "error": str(exc),
+                })
+
+    failures.sort(key=lambda failure: failure["local_path"])
 
     summary = {
         "total_files": total_files,
