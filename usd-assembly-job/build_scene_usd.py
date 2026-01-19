@@ -139,6 +139,48 @@ def _parse_float_env(var_name: str, default: float) -> float:
         return default
 
 
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_physics_fields(obj: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    physics = dict(obj.get("physics") or {})
+    for key in (
+        "mass_kg",
+        "mass",
+        "friction",
+        "static_friction",
+        "dynamic_friction",
+        "restitution",
+    ):
+        if key in obj and obj.get(key) is not None:
+            physics[key] = obj.get(key)
+
+    mass = _coerce_float(physics.get("mass_kg") or physics.get("mass"))
+    friction = _coerce_float(physics.get("friction"))
+    static_friction = _coerce_float(physics.get("static_friction"))
+    dynamic_friction = _coerce_float(physics.get("dynamic_friction"))
+    restitution = _coerce_float(physics.get("restitution"))
+
+    if friction is not None:
+        if static_friction is None:
+            static_friction = friction
+        if dynamic_friction is None:
+            dynamic_friction = friction
+
+    return {
+        "mass_kg": mass,
+        "static_friction": static_friction,
+        "dynamic_friction": dynamic_friction,
+        "restitution": restitution,
+    }
+
+
 class SizedCache:
     """Thread-safe LRU cache with max entry count."""
 
@@ -1083,6 +1125,16 @@ class SceneBuilder:
                 obj["pipeline"]
             )
 
+        physics_fields = _extract_physics_fields(obj)
+        has_physics_fields = any(value is not None for value in physics_fields.values())
+        if has_physics_fields:
+            self._apply_physics_fields(prim, physics_fields, oid)
+        else:
+            logger.warning(
+                "[USD] obj_%s: no physics fields found in manifest; skipping physics setup",
+                oid,
+            )
+
         # Add geometry reference
         if oid in self.prefetched_usdz:
             usdz_rel = self.prefetched_usdz[oid]
@@ -1166,6 +1218,56 @@ class SceneBuilder:
                 raise ObjectAddFailures(failures)
             logger.warning("[WARN] %s", message)
 
+    def _apply_physics_fields(
+        self, prim: Usd.Prim, physics_fields: Dict[str, Optional[float]], oid: Any
+    ) -> None:
+        mass = physics_fields.get("mass_kg")
+        static_friction = physics_fields.get("static_friction")
+        dynamic_friction = physics_fields.get("dynamic_friction")
+        restitution = physics_fields.get("restitution")
+
+        if mass is not None:
+            UsdPhysics.RigidBodyAPI.Apply(prim)
+            mass_api = UsdPhysics.MassAPI.Apply(prim)
+            mass_api.CreateMassAttr().Set(float(mass))
+
+        if (
+            static_friction is not None
+            or dynamic_friction is not None
+            or restitution is not None
+        ):
+            material_path = f"{prim.GetPath()}/PhysicsMaterial"
+            material = UsdShade.Material.Define(self.stage, material_path)
+            material_prim = material.GetPrim()
+
+            physics_material_api = UsdPhysics.MaterialAPI.Apply(material_prim)
+            if static_friction is not None:
+                physics_material_api.CreateStaticFrictionAttr().Set(float(static_friction))
+            if dynamic_friction is not None:
+                physics_material_api.CreateDynamicFrictionAttr().Set(float(dynamic_friction))
+            if restitution is not None:
+                physics_material_api.CreateRestitutionAttr().Set(float(restitution))
+
+            if PHYSX_SCHEMA:
+                physx_material_api = PHYSX_SCHEMA.PhysxMaterialAPI.Apply(material_prim)
+                if static_friction is not None:
+                    physx_material_api.CreateStaticFrictionAttr().Set(float(static_friction))
+                if dynamic_friction is not None:
+                    physx_material_api.CreateDynamicFrictionAttr().Set(float(dynamic_friction))
+                if restitution is not None:
+                    physx_material_api.CreateRestitutionAttr().Set(float(restitution))
+
+            UsdShade.MaterialBindingAPI(prim).Bind(material, UsdShade.Tokens.physics)
+
+        logger.info(
+            "[USD] obj_%s: physics applied (mass=%s, static_friction=%s, dynamic_friction=%s, restitution=%s)",
+            oid,
+            mass,
+            static_friction,
+            dynamic_friction,
+            restitution,
+        )
+
 
 # -----------------------------------------------------------------------------
 # USD Stage Validation
@@ -1226,6 +1328,99 @@ def _validate_usd_stage(stage: Usd.Stage, output_path: Path, objects: List[Dict]
         )
 
     logger.info("[USD] Stage validation passed: %s", output_path)
+
+
+def _validate_physics_coverage(
+    stage: Usd.Stage, output_path: Path, objects: List[Dict]
+) -> Tuple[Dict[str, Any], Path]:
+    def _has_authored_attr(prim: Usd.Prim, attr_name: str) -> bool:
+        attr = prim.GetAttribute(attr_name)
+        return bool(attr and attr.HasAuthoredValueOpinion())
+
+    def _get_physics_material_prim(prim: Usd.Prim) -> Optional[Usd.Prim]:
+        binding_api = UsdShade.MaterialBindingAPI(prim)
+        binding = binding_api.GetDirectBinding(UsdShade.Tokens.physics)
+        material = binding.GetMaterial()
+        if material and material.GetPrim().IsValid():
+            return material.GetPrim()
+        return None
+
+    report: Dict[str, Any] = {
+        "total_objects": len(objects),
+        "objects_with_manifest_physics": 0,
+        "objects_with_usd_physics": 0,
+        "missing_physics": [],
+    }
+
+    for obj in objects:
+        oid = obj.get("id")
+        physics_fields = _extract_physics_fields(obj)
+        expected_fields = {
+            "mass_kg": physics_fields.get("mass_kg"),
+            "static_friction": physics_fields.get("static_friction"),
+            "dynamic_friction": physics_fields.get("dynamic_friction"),
+            "restitution": physics_fields.get("restitution"),
+        }
+        if not any(value is not None for value in expected_fields.values()):
+            continue
+
+        report["objects_with_manifest_physics"] += 1
+
+        prim = stage.GetPrimAtPath(f"/World/Objects/obj_{oid}")
+        missing: List[str] = []
+
+        if not prim or not prim.IsValid():
+            missing.extend([key for key, value in expected_fields.items() if value is not None])
+        else:
+            if expected_fields["mass_kg"] is not None and not _has_authored_attr(
+                prim, "physics:mass"
+            ):
+                missing.append("mass_kg")
+
+            material_prim = _get_physics_material_prim(prim)
+            if material_prim:
+                if expected_fields["static_friction"] is not None and not _has_authored_attr(
+                    material_prim, "physics:staticFriction"
+                ):
+                    missing.append("static_friction")
+                if expected_fields["dynamic_friction"] is not None and not _has_authored_attr(
+                    material_prim, "physics:dynamicFriction"
+                ):
+                    missing.append("dynamic_friction")
+                if expected_fields["restitution"] is not None and not _has_authored_attr(
+                    material_prim, "physics:restitution"
+                ):
+                    missing.append("restitution")
+            else:
+                for key in ("static_friction", "dynamic_friction", "restitution"):
+                    if expected_fields.get(key) is not None:
+                        missing.append(key)
+
+        if missing:
+            report["missing_physics"].append({"id": oid, "missing": missing})
+        else:
+            report["objects_with_usd_physics"] += 1
+
+    coverage = 0.0
+    if report["objects_with_manifest_physics"]:
+        coverage = report["objects_with_usd_physics"] / report["objects_with_manifest_physics"]
+    report["coverage_ratio"] = round(coverage, 4)
+
+    report_path = output_path.with_suffix(".physics_report.json")
+    with report_path.open("w") as report_file:
+        json.dump(report, report_file, indent=2, sort_keys=True)
+
+    if report["missing_physics"]:
+        logger.warning(
+            "[USD] Physics coverage missing for %s/%s manifest objects. Report: %s",
+            len(report["missing_physics"]),
+            report["objects_with_manifest_physics"],
+            report_path,
+        )
+    else:
+        logger.info("[USD] Physics coverage report written to %s", report_path)
+
+    return report, report_path
 
 
 def _prefetch_asset_data(
@@ -1607,6 +1802,11 @@ def build_scene(
     root_layer = stage.GetRootLayer()
     custom_data = dict(root_layer.customLayerData or {})
     custom_data["layout_spatial_quality"] = layout_spatial_quality
+    physics_report, physics_report_path = _validate_physics_coverage(
+        stage, output_path, objects
+    )
+    custom_data["physics_coverage_report"] = physics_report
+    custom_data["physics_coverage_report_path"] = str(physics_report_path)
     root_layer.customLayerData = custom_data
 
     # Save stage
