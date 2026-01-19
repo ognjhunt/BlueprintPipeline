@@ -626,6 +626,7 @@ class FrameSensorData:
 
     # Contact information: List[ContactData] - contact events at this frame
     contacts: List[Dict[str, Any]] = field(default_factory=list)
+    contacts_available: Optional[bool] = None
 
     # =========================================================================
     # Privileged State (full physics state, not observable by robot)
@@ -831,6 +832,7 @@ class IsaacSimSensorCapture:
         # Check Isaac Sim availability upfront
         self._isaac_sim_available = is_isaac_sim_available()
         self._replicator_available = is_replicator_available()
+        self._require_contacts = parse_bool_env(os.getenv("REQUIRE_CONTACTS"), default=False)
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -1063,7 +1065,9 @@ class IsaacSimSensorCapture:
 
         # Contact information (if enabled)
         if self.config.include_contact_info:
-            frame_data.contacts = self._capture_contacts()
+            contacts, contacts_available = self._capture_contacts()
+            frame_data.contacts = contacts
+            frame_data.contacts_available = contacts_available
 
         # Privileged state (if enabled)
         if self.config.include_privileged_state:
@@ -1244,34 +1248,48 @@ class IsaacSimSensorCapture:
 
         return poses
 
-    def _capture_contacts(self) -> List[Dict[str, Any]]:
+    def _handle_missing_contacts(self, reason: str) -> bool:
+        if _is_production_run():
+            raise RuntimeError(
+                "Contact capture unavailable in production mode: "
+                f"{reason}. Ensure PhysX contact reporting is available."
+            )
+        if self._require_contacts:
+            raise RuntimeError(
+                "Contact capture required but unavailable: "
+                f"{reason}. Set REQUIRE_CONTACTS=false to allow missing contacts."
+            )
+        self.log(f"Contact capture unavailable: {reason}", "WARNING")
+        return False
+
+    def _capture_contacts(self) -> Tuple[List[Dict[str, Any]], bool]:
         """
         Capture contact information from physics simulation.
 
         Returns:
-            List of contact dictionaries with body names, positions, normals, forces
+            Tuple of (contacts, contacts_available). When contacts_available is False,
+            contacts were not captured due to missing PhysX support.
         """
         contacts = []
 
         if self._omni is None:
-            self.log("Cannot capture contacts: omni not available", "DEBUG")
-            return contacts
+            return contacts, self._handle_missing_contacts("omni not available")
 
         try:
-            import omni.physx as physx
             from omni.physx import get_physx_interface
 
             physx_interface = get_physx_interface()
             if physx_interface is None:
-                self.log("PhysX interface not available for contact capture", "WARNING")
-                return contacts
+                return contacts, self._handle_missing_contacts(
+                    "PhysX interface not available for contact capture"
+                )
 
             # Get contact report
             contact_data = physx_interface.get_contact_report()
 
             if contact_data is None:
                 self.log("Contact report returned None", "DEBUG")
-                return contacts
+                return contacts, True
 
             for contact in contact_data:
                 try:
@@ -1293,15 +1311,18 @@ class IsaacSimSensorCapture:
             self.log(f"Captured {len(contacts)} contacts", "DEBUG")
 
         except ImportError as e:
-            self.log(f"PhysX import failed: {e}", "WARNING")
+            return contacts, self._handle_missing_contacts(f"PhysX import failed: {e}")
         except AttributeError as e:
-            self.log(f"PhysX API error: {e}", "WARNING")
+            return contacts, self._handle_missing_contacts(f"PhysX API error: {e}")
         except Exception as e:
             self.log(f"Unexpected error capturing contacts: {e}", "ERROR")
             import traceback
             self.log(traceback.format_exc(), "DEBUG")
+            return contacts, self._handle_missing_contacts(
+                f"Unexpected error capturing contacts: {e}"
+            )
 
-        return contacts
+        return contacts, True
 
     def _capture_privileged_state(
         self, scene_objects: Optional[List[Dict[str, Any]]] = None
@@ -1326,12 +1347,15 @@ class IsaacSimSensorCapture:
             "robot_state": {},
             "scene_state": {},
             "contacts": [],
+            "contacts_available": None,
             "data_source": "simulation" if self._omni is not None else "input_fallback",
             "is_mock": self.is_mock(),  # Explicit flag for mock data
         }
 
         # Capture contacts first
-        state["contacts"] = self._capture_contacts()
+        contacts, contacts_available = self._capture_contacts()
+        state["contacts"] = contacts
+        state["contacts_available"] = contacts_available
 
         # Check for active grasps based on contacts
         active_grasps = set()
@@ -1711,6 +1735,7 @@ class MockSensorCapture(IsaacSimSensorCapture):
                     "force_magnitude": 5.0,
                 }
             ]
+            frame_data.contacts_available = True
 
         # Mock privileged state
         if self.config.include_privileged_state:
@@ -1718,6 +1743,7 @@ class MockSensorCapture(IsaacSimSensorCapture):
                 "object_states": {},
                 "robot_state": {"gripper_force": 10.0},
                 "scene_state": {"gravity": [0, 0, -9.81]},
+                "contacts_available": frame_data.contacts_available,
             }
 
         return frame_data
@@ -1961,6 +1987,8 @@ class SensorDataExporter:
 
             if frame.contacts:
                 frame_gt["contacts"] = frame.contacts
+            if frame.contacts_available is not None:
+                frame_gt["contacts_available"] = frame.contacts_available
 
             if frame.privileged_state:
                 frame_gt["privileged_state"] = frame.privileged_state
