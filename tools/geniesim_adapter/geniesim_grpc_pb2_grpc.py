@@ -1585,11 +1585,20 @@ def create_channel(
         get_geniesim_tls_cert_path,
         get_geniesim_tls_key_path,
     )
+    from tools.config.production_mode import resolve_production_mode
 
     tls_cert_path = get_geniesim_tls_cert_path()
     tls_key_path = get_geniesim_tls_key_path()
     tls_ca_path = get_geniesim_tls_ca_path()
     use_tls = any([tls_cert_path, tls_key_path, tls_ca_path])
+    if resolve_production_mode() and not use_tls:
+        message = (
+            "Production mode requires TLS for Genie Sim gRPC. Set GENIESIM_TLS_CA to the "
+            "CA bundle path, and optionally GENIESIM_TLS_CERT/GENIESIM_TLS_KEY for client "
+            "certificates (mTLS)."
+        )
+        logger.error(message)
+        raise RuntimeError(message)
 
     if use_tls:
         root_certificates = _load_file_bytes(tls_ca_path)
