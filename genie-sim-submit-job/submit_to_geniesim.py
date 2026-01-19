@@ -701,13 +701,17 @@ def main() -> int:
     skip_local_run = False
     if not asset_provenance_exists and not allow_missing_asset_provenance:
         skip_local_run = True
+        asset_provenance_uri = f"gs://{bucket}/{asset_provenance_blob}"
         submission_message = (
-            "Asset provenance missing — export job incomplete or legal report deleted."
+            "Asset provenance missing — export job incomplete or legal report deleted. "
+            f"Expected asset provenance at {asset_provenance_uri}. "
+            "Remediation: rerun export job or regenerate legal report."
         )
         failure_reason = "Asset provenance missing"
         failure_details = {
-            "error": "asset provenance missing — export job incomplete or legal report deleted",
-            "asset_provenance_path": f"gs://{bucket}/{asset_provenance_blob}",
+            "error": submission_message,
+            "asset_provenance_path": asset_provenance_uri,
+            "submission_message": submission_message,
             "allow_missing_asset_provenance": allow_missing_asset_provenance,
         }
         job_status = "failed"
