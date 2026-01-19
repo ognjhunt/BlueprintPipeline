@@ -58,6 +58,7 @@ from tools.config import load_pipeline_config
 from tools.config.env import parse_bool_env
 from tools.logging_config import init_logging
 from tools.validation.entrypoint_checks import validate_required_env_vars
+from monitoring.alerting import send_alert
 
 EXPECTED_EXPORT_SCHEMA_VERSION = "1.0.0"
 EXPECTED_GENIESIM_SERVER_VERSION = "3.0.0"
@@ -1220,6 +1221,18 @@ def main() -> int:
     except Exception as exc:
         job_payload["job_metrics_error"] = str(exc)
     if job_status == "failed":
+        send_alert(
+            event_type="geniesim_submit_job_failed",
+            summary="Genie Sim submission job failed",
+            details={
+                "scene_id": scene_id,
+                "job_id": job_id,
+                "status": job_status,
+                "failure_reason": failure_reason,
+                "failure_details": failure_details,
+            },
+            severity=os.getenv("ALERT_JOB_FAILURE_SEVERITY", "error"),
+        )
         job_payload["failure_reason"] = failure_reason
         job_payload["failure_details"] = failure_details
         if canary_assignment["is_canary"]:
