@@ -29,12 +29,16 @@ Pipeline Steps:
     10. genie-sim-export - Export scene bundle for Genie Sim
     11. genie-sim-submit - Submit/run Genie Sim generation (API or local)
     12. genie-sim-import - Import Genie Sim episodes into local bundle
-    13. dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
-    14. dwm-inference - Run DWM model to generate interaction videos for each bundle
-    15. validate  - QA validation
+    13. validate  - QA validation
 
-Note: DWM and Dream2Flow steps are optional and only included by default when
---enable-dwm or --enable-dream2flow is set.
+Experimental Steps (disabled by default; enable with --enable-dwm,
+--enable-dream2flow, or --enable-experimental):
+    - dwm       - Generate DWM conditioning data (egocentric videos + hand meshes)
+    - dwm-inference - Run DWM model to generate interaction videos for each bundle
+    - dream2flow - Generate Dream2Flow conditioning bundles
+    - dream2flow-inference - Run Dream2Flow model inference
+
+Note: Experimental steps are hidden from default help and require explicit enablement.
 
 References:
 - 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
@@ -2943,6 +2947,11 @@ def main():
         help="Include optional Dream2Flow preparation/inference steps in the default pipeline",
     )
     parser.add_argument(
+        "--enable-experimental",
+        action="store_true",
+        help="Enable experimental steps (DWM + Dream2Flow) in the default pipeline",
+    )
+    parser.add_argument(
         "--disable-articulations",
         action="store_true",
         help="Explicitly disable articulated assets (avoids requiring PARTICULATE_ENDPOINT)",
@@ -2988,6 +2997,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.enable_experimental:
+        args.enable_dwm = True
+        args.enable_dream2flow = True
 
     if args.use_geniesim:
         os.environ["USE_GENIESIM"] = "true"
@@ -3049,7 +3062,11 @@ def main():
 
     if args.estimate_costs:
         config_path = Path(args.estimate_config) if args.estimate_config else None
-        config = load_estimate_config(config_path)
+        config = load_estimate_config(
+            config_path,
+            include_dwm=args.enable_dwm,
+            include_dream2flow=args.enable_dream2flow,
+        )
         resolved_steps = steps or runner._resolve_default_steps()
         step_names = [
             step.value if isinstance(step, PipelineStep) else str(step)
