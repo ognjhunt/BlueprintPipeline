@@ -1427,7 +1427,6 @@ class LocalPipelineRunner:
 
     def _run_simready(self) -> StepResult:
         """Run simready preparation."""
-        # Load manifest
         manifest_path = self.assets_dir / "scene_manifest.json"
         if not manifest_path.is_file():
             return StepResult(
@@ -1436,72 +1435,47 @@ class LocalPipelineRunner:
                 duration_seconds=0,
                 message="Manifest not found - run regen3d step first",
             )
+        try:
+            from blueprint_sim.simready import run_from_env
+        except ImportError as exc:
+            return StepResult(
+                step=PipelineStep.SIMREADY,
+                success=False,
+                duration_seconds=0,
+                message=f"SimReady dependencies missing: {self._summarize_exception(exc)}",
+            )
 
-        manifest = json.loads(manifest_path.read_text())
+        assets_prefix = "assets"
+        os.environ.setdefault("BUCKET", "local")
+        os.environ.setdefault("SCENE_ID", self.scene_id)
+        os.environ.setdefault("ASSETS_PREFIX", assets_prefix)
+        os.environ.setdefault("SIMREADY_PHYSICS_MODE", "deterministic")
+        os.environ.setdefault("SIMREADY_ALLOW_DETERMINISTIC_PHYSICS", "1")
+        os.environ.setdefault("SIMREADY_ALLOW_HEURISTIC_FALLBACK", "1")
+        os.environ.setdefault("SIMREADY_PRODUCTION_MODE", "0")
 
-        # For local testing, add basic physics properties to each object
-        for obj in manifest.get("objects", []):
-            if not obj.get("physics"):
-                mass = self._estimate_mass(obj)
-                friction_static = 0.5
-                friction_dynamic = 0.4
-                restitution = 0.1
+        return_code = run_from_env(root=self.scene_dir)
+        if return_code != 0:
+            return StepResult(
+                step=PipelineStep.SIMREADY,
+                success=False,
+                duration_seconds=0,
+                message=f"SimReady job failed with exit code {return_code}",
+                outputs={"exit_code": return_code},
+            )
 
-                obj["physics"] = {
-                    "dynamic": obj.get("sim_role") in ["manipulable_object", "clutter"],
-                    "mass_kg": mass,
-                    "friction_static": friction_static,
-                    "friction_dynamic": friction_dynamic,
-                    "restitution": restitution,
-                    "center_of_mass_offset": [0.0, 0.0, 0.0],
-                    # Sim2Real distribution ranges for domain randomization
-                    "mass_kg_range": [mass * 0.8, mass * 1.2],
-                    "friction_static_range": [friction_static * 0.85, min(1.5, friction_static * 1.15)],
-                    "friction_dynamic_range": [friction_dynamic * 0.85, min(1.2, friction_dynamic * 1.15)],
-                    "restitution_range": [max(0.0, restitution * 0.7), min(1.0, restitution * 1.3)],
-                    "center_of_mass_noise": [0.005, 0.005, 0.005],
-                }
-
-        # Write updated manifest
-        manifest_path.write_text(json.dumps(manifest, indent=2))
-
-        # Write simready completion marker
         marker_path = self.assets_dir / ".simready_complete"
-        marker_path.write_text(f"completed at {datetime.utcnow().isoformat()}Z\n")
-
-        self.log(f"Added physics to {len(manifest.get('objects', []))} objects")
-
+        outputs = {
+            "completion_marker": str(marker_path) if marker_path.exists() else None,
+            "assets_prefix": assets_prefix,
+        }
         return StepResult(
             step=PipelineStep.SIMREADY,
             success=True,
             duration_seconds=0,
             message="SimReady preparation completed",
-            outputs={"objects_processed": len(manifest.get("objects", []))},
+            outputs=outputs,
         )
-
-    def _estimate_mass(self, obj: Dict[str, Any]) -> float:
-        """Estimate mass from dimensions and material hints."""
-        dims = obj.get("dimensions_est", {})
-        volume = (
-            dims.get("width", 0.1) *
-            dims.get("height", 0.1) *
-            dims.get("depth", 0.1)
-        )
-
-        # Default density (like plastic)
-        density = 1000  # kg/m^3
-
-        material = obj.get("physics_hints", {}).get("material_type", "")
-        if material in ["metal", "steel"]:
-            density = 7800
-        elif material in ["wood"]:
-            density = 600
-        elif material in ["ceramic", "stone"]:
-            density = 2500
-        elif material in ["fabric", "plastic"]:
-            density = 200
-
-        return max(0.01, volume * density)  # Minimum 10g
 
     def _run_usd_assembly(self) -> StepResult:
         """Run USD assembly."""
