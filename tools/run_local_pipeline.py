@@ -40,6 +40,12 @@ Experimental Steps (disabled by default; enable with --enable-dwm,
 
 Note: Experimental steps are hidden from default help and require explicit enablement.
 
+Environment overrides:
+    - DEFAULT_CAMERA_IDS: Comma-separated camera IDs for replicator capture config.
+    - DEFAULT_CAMERA_RESOLUTION: Resolution as "WIDTHxHEIGHT" or "WIDTH,HEIGHT".
+    - DEFAULT_STREAM_IDS: Comma-separated stream IDs for replicator capture config.
+    - GCS_MOUNT_ROOT: Base path used for local GCS-style mount mapping.
+
 References:
 - 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
   Paper: https://arxiv.org/abs/2512.17459
@@ -286,6 +292,44 @@ class LocalPipelineRunner:
         if not value:
             return []
         return [item.strip() for item in value.split(",") if item.strip()]
+
+    def _parse_resolution_env(self, name: str, default: List[int]) -> List[int]:
+        raw = os.getenv(name)
+        if raw is None or raw == "":
+            return default
+        parts = [part.strip() for part in re.split(r"[x,]", raw) if part.strip()]
+        if len(parts) != 2:
+            self.log(
+                f"Invalid {name} value '{raw}', expected WIDTHxHEIGHT; defaulting to {default}",
+                "WARNING",
+            )
+            return default
+        try:
+            width = int(parts[0])
+            height = int(parts[1])
+        except ValueError:
+            self.log(
+                f"Invalid {name} value '{raw}', expected integers; defaulting to {default}",
+                "WARNING",
+            )
+            return default
+        return [width, height]
+
+    def _resolve_default_capture_config(self) -> Dict[str, Any]:
+        default_cameras = ["wrist", "overhead"]
+        default_resolution = [1280, 720]
+        default_stream_ids = ["rgb", "depth", "segmentation"]
+
+        cameras = self._parse_csv(os.getenv("DEFAULT_CAMERA_IDS")) or default_cameras
+        stream_ids = self._parse_csv(os.getenv("DEFAULT_STREAM_IDS")) or default_stream_ids
+        resolution = self._parse_resolution_env("DEFAULT_CAMERA_RESOLUTION", default_resolution)
+
+        return {
+            "cameras": cameras,
+            "resolution": resolution,
+            "modalities": ["rgb", "depth"],
+            "stream_ids": stream_ids,
+        }
 
     def _resolve_geniesim_robot_types(self) -> List[str]:
         raw_robot_types = os.getenv("ROBOT_TYPES") or os.getenv("GENIESIM_ROBOT_TYPES")
@@ -1743,15 +1787,21 @@ class LocalPipelineRunner:
             context="replicator bundle metadata",
         )
 
+        capture_config = self._resolve_default_capture_config()
+        self.log(
+            "Replicator capture config: "
+            f"cameras={capture_config['cameras']}, "
+            f"resolution={capture_config['resolution']}, "
+            f"stream_ids={capture_config['stream_ids']} "
+            "(override via DEFAULT_CAMERA_IDS, DEFAULT_CAMERA_RESOLUTION, DEFAULT_STREAM_IDS)",
+        )
+
         _safe_write_text(
             configs_dir / "default_policy.json",
             json.dumps({
                 "policy_id": "default_policy",
                 "capture_config": {
-                    "cameras": ["wrist", "overhead"],
-                    "resolution": [1280, 720],
-                    "modalities": ["rgb", "depth"],
-                    "stream_ids": ["rgb", "depth", "segmentation"],
+                    **capture_config,
                 },
             }, indent=2),
             context="default policy config",
@@ -1844,7 +1894,8 @@ class LocalPipelineRunner:
                 step=PipelineStep.VARIATION_GEN,
                 success=False,
                 duration_seconds=0,
-                message="Unable to prepare /mnt/gcs mapping for variation assets",
+                message="Unable to prepare GCS mount mapping for variation assets "
+                "(check GCS_MOUNT_ROOT)",
             )
 
         variation_assets_prefix = f"scenes/{self.scene_id}/variation_assets"
@@ -1983,14 +2034,17 @@ class LocalPipelineRunner:
         )
 
     def _ensure_gcs_scene_link(self) -> Optional[Path]:
-        gcs_root = Path("/mnt/gcs")
+        gcs_root = Path(os.getenv("GCS_MOUNT_ROOT", "/mnt/gcs"))
         gcs_scene_dir = gcs_root / "scenes" / self.scene_id
         try:
             gcs_scene_dir.parent.mkdir(parents=True, exist_ok=True)
             if not gcs_scene_dir.exists():
                 gcs_scene_dir.symlink_to(self.scene_dir)
         except OSError as exc:
-            self._log_exception_traceback("Failed to map /mnt/gcs for variation assets", exc)
+            self._log_exception_traceback(
+                f"Failed to map {gcs_root} for variation assets (set GCS_MOUNT_ROOT to override)",
+                exc,
+            )
             return None
         return gcs_scene_dir
 

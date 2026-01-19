@@ -52,8 +52,12 @@ from geniesim_grpc_pb2_grpc import (
     add_GenieSimServiceServicer_to_server,
 )
 from tools.geniesim_adapter.config import DEFAULT_GENIESIM_PORT, GENIESIM_PORT_ENV
+from tools.config.env import parse_int_env
 
 LOGGER = logging.getLogger("geniesim.server")
+
+GENIESIM_RECORDINGS_DIR_ENV = "GENIESIM_RECORDINGS_DIR"
+GENIESIM_DEFAULT_JOINT_COUNT_ENV = "GENIESIM_DEFAULT_JOINT_COUNT"
 
 DEFAULT_SERVER_VERSION = os.getenv("GENIESIM_SERVER_VERSION", "3.0.0")
 DEFAULT_SERVER_CAPABILITIES = [
@@ -94,6 +98,7 @@ class GenieSimLocalServicer(GenieSimServiceServicer):
         self._recording: Optional[RecordingSession] = None
         self._server_version = DEFAULT_SERVER_VERSION
         self._capabilities = list(DEFAULT_SERVER_CAPABILITIES)
+        self._default_recordings_dir = _resolve_default_recordings_dir()
 
     def GetObservation(
         self,
@@ -232,7 +237,15 @@ class GenieSimLocalServicer(GenieSimServiceServicer):
         context,
     ) -> StartRecordingResponse:
         episode_id = request.episode_id or f"episode-{int(time.time())}"
-        output_dir = Path(request.output_directory or "/tmp/geniesim_recordings")
+        if request.output_directory:
+            output_dir = Path(request.output_directory)
+        else:
+            output_dir = self._default_recordings_dir
+            LOGGER.info(
+                "Recording output directory not provided; using %s (override with %s)",
+                output_dir,
+                GENIESIM_RECORDINGS_DIR_ENV,
+            )
         recording_path = output_dir / episode_id
         recording_path.mkdir(parents=True, exist_ok=True)
         with self._lock:
@@ -355,6 +368,29 @@ def run_health_check(host: str, port: int, timeout: float = 5.0) -> bool:
     return True
 
 
+def _resolve_default_recordings_dir() -> Path:
+    raw = os.getenv(GENIESIM_RECORDINGS_DIR_ENV)
+    if raw:
+        return Path(raw).expanduser()
+    return Path("/tmp/geniesim_recordings")
+
+
+def _resolve_default_joint_count() -> int:
+    raw = os.getenv(GENIESIM_DEFAULT_JOINT_COUNT_ENV)
+    if raw is None or raw == "":
+        return 7
+    try:
+        return parse_int_env(
+            raw,
+            default=7,
+            min_value=1,
+            name=GENIESIM_DEFAULT_JOINT_COUNT_ENV,
+        ) or 7
+    except ValueError as exc:
+        LOGGER.warning("Invalid %s: %s Defaulting to 7.", GENIESIM_DEFAULT_JOINT_COUNT_ENV, exc)
+        return 7
+
+
 def serve(args: argparse.Namespace) -> None:
     _configure_logging(args.log_level)
     server = grpc.server(thread_pool=ThreadPoolExecutor(max_workers=args.max_workers))
@@ -383,7 +419,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument("--max-workers", type=int, default=10, help="gRPC worker threads")
-    parser.add_argument("--joint-count", type=int, default=7, help="Number of mock joints")
+    parser.add_argument(
+        "--joint-count",
+        type=int,
+        default=_resolve_default_joint_count(),
+        help=(
+            "Number of mock joints (defaults to $GENIESIM_DEFAULT_JOINT_COUNT or 7)"
+        ),
+    )
     parser.add_argument("--health-check", action="store_true", help="Run health check and exit")
     return parser.parse_args(argv)
 
