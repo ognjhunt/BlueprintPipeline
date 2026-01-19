@@ -62,6 +62,7 @@ Environment Variables:
     GENIESIM_STALL_TIMEOUT_S: Abort/reset episode if observations stall (default: 30)
     GENIESIM_MAX_STALLS: Max stalled episodes before server restart (default: 2)
     GENIESIM_STALL_BACKOFF_S: Backoff between stall handling attempts (default: 5)
+    GENIESIM_COLLECTION_TIMEOUT_S: Abort data collection if total runtime exceeds this timeout (default: unset)
 """
 
 import base64
@@ -280,6 +281,7 @@ class GenieSimConfig:
     stall_timeout_s: float = 30.0
     max_stalls: int = 2
     stall_backoff_s: float = 5.0
+    max_duration_seconds: Optional[float] = None
 
     # Output settings
     recording_dir: Path = Path("/tmp/geniesim_recordings")
@@ -305,6 +307,15 @@ class GenieSimConfig:
             if allow_ik_failure_env is not None
             else allow_linear_fallback
         )
+        collection_timeout_env = os.getenv("GENIESIM_COLLECTION_TIMEOUT_S")
+        max_duration_seconds = None
+        if collection_timeout_env not in (None, ""):
+            try:
+                max_duration_seconds = float(collection_timeout_env)
+            except ValueError:
+                logger.warning(
+                    "GENIESIM_COLLECTION_TIMEOUT_S must be a number of seconds; ignoring invalid value."
+                )
         if environment == "production":
             if allow_linear_fallback_in_production:
                 raise RuntimeError(
@@ -333,6 +344,7 @@ class GenieSimConfig:
             stall_timeout_s=float(os.getenv("GENIESIM_STALL_TIMEOUT_S", "30")),
             max_stalls=int(os.getenv("GENIESIM_MAX_STALLS", "2")),
             stall_backoff_s=float(os.getenv("GENIESIM_STALL_BACKOFF_S", "5")),
+            max_duration_seconds=max_duration_seconds,
             lerobot_export_format=parse_lerobot_export_format(
                 os.getenv("LEROBOT_EXPORT_FORMAT"),
                 default=LeRobotExportFormat.LEROBOT_V2,
@@ -360,6 +372,7 @@ class DataCollectionResult:
 
     success: bool
     task_name: str
+    timed_out: bool = False
     episodes_collected: int = 0
     episodes_passed: int = 0
     total_frames: int = 0
@@ -1957,6 +1970,7 @@ class GenieSimLocalFramework:
         task_config: Dict[str, Any],
         scene_config: Optional[Dict[str, Any]] = None,
         episodes_per_task: Optional[int] = None,
+        max_duration_seconds: Optional[float] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         expected_server_version: Optional[str] = None,
         required_capabilities: Optional[Sequence[str]] = None,
@@ -1974,6 +1988,7 @@ class GenieSimLocalFramework:
             task_config: Task configuration from BlueprintPipeline
             scene_config: Optional scene configuration
             episodes_per_task: Override episodes per task
+            max_duration_seconds: Abort data collection if total runtime exceeds this timeout
             progress_callback: Callback for progress updates (current, total, message)
 
         Returns:
@@ -1981,6 +1996,12 @@ class GenieSimLocalFramework:
         """
         self._validate_required_environment("geniesim-run-data-collection")
         start_time = time.time()
+        timeout_seconds = (
+            max_duration_seconds
+            if max_duration_seconds is not None
+            else self.config.max_duration_seconds
+        )
+        timed_out = False
 
         self.log("=" * 70)
         self.log("GENIE SIM DATA COLLECTION")
@@ -1990,6 +2011,25 @@ class GenieSimLocalFramework:
             success=False,
             task_name=task_config.get("name", "unknown"),
         )
+
+        def _timeout_exceeded() -> bool:
+            nonlocal timed_out
+            if timeout_seconds is None or timeout_seconds <= 0:
+                return False
+            elapsed = time.time() - start_time
+            if elapsed < timeout_seconds:
+                return False
+            timeout_message = (
+                "Genie Sim data collection exceeded max duration "
+                f"({elapsed:.1f}s >= {timeout_seconds:.1f}s); aborting."
+            )
+            if not timed_out:
+                timed_out = True
+                result.timed_out = True
+                result.success = False
+                result.errors.append(timeout_message)
+                self.log(timeout_message, "ERROR")
+            return True
 
         scene_usd_path = None
         if scene_config:
@@ -2041,6 +2081,8 @@ class GenieSimLocalFramework:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         for task_idx, task in enumerate(tasks):
+            if _timeout_exceeded():
+                break
             task_name = task.get("task_name", f"task_{task_idx}")
             self.log(f"\nTask {task_idx + 1}/{len(tasks)}: {task_name}")
 
@@ -2048,6 +2090,8 @@ class GenieSimLocalFramework:
             self._configure_task(task, scene_config)
 
             for ep_idx in range(episodes_target):
+                if _timeout_exceeded():
+                    break
                 if progress_callback:
                     current = task_idx * episodes_target + ep_idx + 1
                     total = len(tasks) * episodes_target
@@ -2103,6 +2147,9 @@ class GenieSimLocalFramework:
                     result.warnings.append(f"Episode {ep_idx} of {task_name} error: {e}")
                     self.log(f"  Episode {ep_idx} error: {e}", "WARNING")
 
+            if timed_out:
+                break
+
         # Calculate statistics
         result.episodes_collected = total_episodes
         result.episodes_passed = passed_episodes
@@ -2116,7 +2163,7 @@ class GenieSimLocalFramework:
         if total_episodes > 0:
             result.task_success_rate = passed_episodes / total_episodes
 
-        result.success = passed_episodes > 0
+        result.success = (passed_episodes > 0) and not timed_out
 
         self.log("\n" + "=" * 70)
         self.log("DATA COLLECTION COMPLETE")
@@ -3883,6 +3930,7 @@ def run_local_data_collection(
     output_dir: Path,
     robot_type: str = "franka",
     episodes_per_task: int = 100,
+    max_duration_seconds: Optional[float] = None,
     verbose: bool = True,
     expected_server_version: Optional[str] = None,
     required_capabilities: Optional[Sequence[str]] = None,
@@ -3896,6 +3944,7 @@ def run_local_data_collection(
         output_dir: Output directory
         robot_type: Robot type
         episodes_per_task: Episodes per task
+        max_duration_seconds: Abort data collection if total runtime exceeds this timeout
         verbose: Print progress
         expected_server_version: Expected Genie Sim API version
         required_capabilities: Required server capabilities
@@ -3915,11 +3964,22 @@ def run_local_data_collection(
     with open(task_config_path) as f:
         task_config = json.load(f)
 
+    collection_timeout_env = os.getenv("GENIESIM_COLLECTION_TIMEOUT_S")
+    effective_timeout = max_duration_seconds
+    if effective_timeout is None and collection_timeout_env not in (None, ""):
+        try:
+            effective_timeout = float(collection_timeout_env)
+        except ValueError:
+            logger.warning(
+                "GENIESIM_COLLECTION_TIMEOUT_S must be a number of seconds; ignoring invalid value."
+            )
+
     # Create framework
     config = GenieSimConfig(
         robot_type=robot_type,
         episodes_per_task=episodes_per_task,
         recording_dir=output_dir / "recordings",
+        max_duration_seconds=effective_timeout,
     )
 
     framework = GenieSimLocalFramework(config, verbose=verbose)
@@ -3931,6 +3991,7 @@ def run_local_data_collection(
         result = framework.run_data_collection(
             task_config,
             scene_manifest,
+            max_duration_seconds=effective_timeout,
             expected_server_version=expected_server_version,
             required_capabilities=required_capabilities,
         )
@@ -3942,6 +4003,7 @@ def run_local_data_collection(
             result = fw.run_data_collection(
                 task_config,
                 scene_manifest,
+                max_duration_seconds=effective_timeout,
                 expected_server_version=expected_server_version,
                 required_capabilities=required_capabilities,
             )
