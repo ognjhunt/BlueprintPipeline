@@ -15,6 +15,9 @@ Environment Variables:
     TWILIO_AUTH_TOKEN: Twilio auth token
     TWILIO_FROM_PHONE: Twilio phone number for sending SMS
 
+    # Slack
+    QA_SLACK_WEBHOOK_URL: Slack incoming webhook URL
+
     # Fallback (SMTP)
     SMTP_HOST: SMTP server hostname
     SMTP_PORT: SMTP server port (default: 587)
@@ -162,6 +165,36 @@ class NotificationPayload:
 
         return "\n".join(lines)
 
+    def to_slack_text(self) -> str:
+        """Convert to Slack-friendly text format."""
+        action_required = "Yes" if self.action_required else "No"
+        lines = [
+            f"*{self.subject}*",
+            f"*Scene ID:* {self.scene_id}",
+            f"*Checkpoint:* {self.checkpoint}",
+            f"*Severity:* {self.severity}",
+            f"*Action Required:* {action_required}",
+        ]
+
+        if self.body:
+            lines.extend(["", self.body])
+
+        if self.qa_context:
+            lines.append("")
+            lines.append("*QA Context:*")
+            for key, value in self.qa_context.items():
+                if isinstance(value, list):
+                    lines.append(f"• *{key}:*")
+                    for item in value:
+                        lines.append(f"    • {item}")
+                else:
+                    lines.append(f"• *{key}:* {value}")
+
+        if self.dashboard_url:
+            lines.extend(["", f"<{self.dashboard_url}|View in Dashboard>"])
+
+        return "\n".join(lines)
+
 
 class NotificationService:
     """Service for sending QA notifications via multiple channels."""
@@ -174,6 +207,7 @@ class NotificationService:
         self,
         email: Optional[str] = None,
         phone: Optional[str] = None,
+        slack_webhook_url: Optional[str] = None,
         channels: Optional[List[NotificationChannel]] = None,
         verbose: bool = True,
     ):
@@ -187,6 +221,11 @@ class NotificationService:
         self.twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
         self.twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
         self.twilio_from = os.getenv("TWILIO_FROM_PHONE")
+        self.slack_webhook_url = (
+            slack_webhook_url
+            or os.getenv("QA_SLACK_WEBHOOK_URL")
+            or os.getenv("BP_QUALITY_NOTIFICATIONS_SLACK_WEBHOOK_URL")
+        )
 
         # SMTP fallback
         self.smtp_host = os.getenv("SMTP_HOST")
@@ -207,6 +246,8 @@ class NotificationService:
                 result = self._send_email(payload)
             elif channel == NotificationChannel.SMS:
                 result = self._send_sms(payload)
+            elif channel == NotificationChannel.SLACK:
+                result = self._send_slack(payload)
             elif channel == NotificationChannel.CONSOLE:
                 result = self._send_console(payload)
             else:
@@ -374,6 +415,44 @@ class NotificationService:
                 success=False,
                 channel=NotificationChannel.SMS,
                 recipient=self.phone,
+                message=payload.subject,
+                error=str(e),
+            )
+
+    def _send_slack(self, payload: NotificationPayload) -> NotificationResult:
+        """Send Slack notification via incoming webhook."""
+        if not self.slack_webhook_url:
+            self.log(f"Slack notification (no webhook configured):\n{payload.to_slack_text()}")
+            return NotificationResult(
+                success=True,  # Console is "successful"
+                channel=NotificationChannel.SLACK,
+                recipient="slack-webhook",
+                message=payload.subject,
+                error="Slack webhook not configured - logged to console",
+            )
+
+        try:
+            data = {"text": payload.to_slack_text()}
+            req = urllib.request.Request(
+                self.slack_webhook_url,
+                data=json.dumps(data).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+
+            urllib.request.urlopen(req, timeout=30)
+
+            return NotificationResult(
+                success=True,
+                channel=NotificationChannel.SLACK,
+                recipient="slack-webhook",
+                message=payload.subject,
+            )
+
+        except Exception as e:
+            return NotificationResult(
+                success=False,
+                channel=NotificationChannel.SLACK,
+                recipient="slack-webhook",
                 message=payload.subject,
                 error=str(e),
             )
