@@ -100,6 +100,16 @@ Preflight command (recommended before running Genie Sim steps):
 python -m tools.geniesim_adapter.geniesim_healthcheck
 ```
 
+LeRobot export format control (default: v2 per-episode Parquet files):
+
+```bash
+# Opt into the aggregated, streaming-friendly v3 layout
+export LEROBOT_EXPORT_FORMAT=lerobot_v3
+
+# Emit a warning if v3 is required but not configured
+export LEROBOT_REQUIRE_V3=1
+```
+
 ```bash
 USE_GENIESIM=true \
 python tools/run_local_pipeline.py \

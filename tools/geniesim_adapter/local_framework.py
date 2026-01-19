@@ -93,6 +93,7 @@ from tools.geniesim_adapter.config import (
     get_geniesim_host,
     get_geniesim_port,
 )
+from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 
 # Configure logging
 init_logging()
@@ -253,6 +254,8 @@ class GenieSimConfig:
     # Output settings
     recording_dir: Path = Path("/tmp/geniesim_recordings")
     log_dir: Path = Path("/tmp/geniesim_logs")
+    lerobot_export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2
+    require_lerobot_v3: bool = False
 
     # Robot configuration
     robot_type: str = "franka"
@@ -286,6 +289,11 @@ class GenieSimConfig:
             allow_linear_fallback=allow_linear_fallback,
             allow_linear_fallback_in_production=allow_linear_fallback_in_production,
             allow_ik_failure_fallback=allow_ik_failure_fallback,
+            lerobot_export_format=parse_lerobot_export_format(
+                os.getenv("LEROBOT_EXPORT_FORMAT"),
+                default=LeRobotExportFormat.LEROBOT_V2,
+            ),
+            require_lerobot_v3=_parse_bool(os.getenv("LEROBOT_REQUIRE_V3"), default=False),
         )
 
 
@@ -2206,6 +2214,7 @@ class GenieSimLocalFramework:
         recording_dir: Path,
         output_dir: Path,
         min_quality_score: float = 0.7,
+        export_format: Optional[Union[str, LeRobotExportFormat]] = None,
     ) -> Dict[str, Any]:
         """
         Export collected episodes to LeRobot format.
@@ -2218,7 +2227,17 @@ class GenieSimLocalFramework:
         Returns:
             Export statistics
         """
-        self.log(f"Exporting to LeRobot format: {output_dir}")
+        resolved_format = parse_lerobot_export_format(
+            export_format or self.config.lerobot_export_format,
+            default=LeRobotExportFormat.LEROBOT_V2,
+        )
+        if self.config.require_lerobot_v3 and resolved_format != LeRobotExportFormat.LEROBOT_V3:
+            self.log(
+                "LeRobot v3 export required but not configured. Falling back to v2-compatible output.",
+                "WARNING",
+            )
+
+        self.log(f"Exporting to LeRobot format ({resolved_format.value}): {output_dir}")
 
         try:
             import pyarrow as pa
@@ -2271,6 +2290,15 @@ class GenieSimLocalFramework:
             ]
         )
 
+        parquet_writer = None
+        v3_output_file = None
+        episode_index: Dict[str, Any] = {}
+        row_group_index = 0
+
+        if resolved_format == LeRobotExportFormat.LEROBOT_V3:
+            v3_output_file = data_dir / "episodes.parquet"
+            parquet_writer = pq.ParquetWriter(v3_output_file, schema=schema, compression="zstd")
+
         for ep_file in episode_files:
             try:
                 with open(ep_file) as f:
@@ -2318,8 +2346,18 @@ class GenieSimLocalFramework:
                     columns["task_id"].append(task_id)
 
                 table = pa.Table.from_pydict(columns, schema=schema)
-                output_file = data_dir / f"episode_{episode_id}.parquet"
-                pq.write_table(table, output_file, compression="zstd")
+                if resolved_format == LeRobotExportFormat.LEROBOT_V3 and parquet_writer:
+                    parquet_writer.write_table(table)
+                    episode_index[episode_id] = {
+                        "frames": frame_count,
+                        "row_group": row_group_index,
+                        "task_id": task_id,
+                        "task_name": task_name,
+                    }
+                    row_group_index += 1
+                else:
+                    output_file = data_dir / f"episode_{episode_id}.parquet"
+                    pq.write_table(table, output_file, compression="zstd")
 
                 exported_count += 1
                 total_frames += frame_count
@@ -2329,28 +2367,62 @@ class GenieSimLocalFramework:
                 self.log(f"Failed to export {ep_file.name}: {e}", "WARNING")
                 skipped_count += 1
 
+        if parquet_writer:
+            parquet_writer.close()
+
         schema_description = [
             {"name": field.name, "type": str(field.type)} for field in schema
         ]
-        info = {
-            "format": "lerobot",
-            "version": "2.0",
-            "episodes": exported_count,
-            "skipped": skipped_count,
-            "total_frames": total_frames,
-            "exported_at": datetime.utcnow().isoformat() + "Z",
-            "data_path": "episodes/lerobot/data",
-            "chunking": {"strategy": "single", "chunk_dir": "chunk-000"},
-            "schema": schema_description,
-            "frame_counts": frame_counts,
-        }
+        if resolved_format == LeRobotExportFormat.LEROBOT_V3:
+            info = {
+                "format": "lerobot",
+                "export_format": resolved_format.value,
+                "version": "3.0",
+                "layout": "multi-episode",
+                "episodes": exported_count,
+                "skipped": skipped_count,
+                "total_frames": total_frames,
+                "exported_at": datetime.utcnow().isoformat() + "Z",
+                "data_path": "episodes/lerobot/data",
+                "chunking": {
+                    "strategy": "aggregated",
+                    "chunk_dir": "chunk-000",
+                    "files": [
+                        {
+                            "path": "chunk-000/episodes.parquet",
+                            "episodes": exported_count,
+                        }
+                    ],
+                },
+                "schema": schema_description,
+                "frame_counts": frame_counts,
+                "episode_index": "episodes/lerobot/meta/episode_index.json",
+            }
+        else:
+            info = {
+                "format": "lerobot",
+                "export_format": resolved_format.value,
+                "version": "0.3.3" if resolved_format == LeRobotExportFormat.LEROBOT_V0_3_3 else "2.0",
+                "episodes": exported_count,
+                "skipped": skipped_count,
+                "total_frames": total_frames,
+                "exported_at": datetime.utcnow().isoformat() + "Z",
+                "data_path": "episodes/lerobot/data",
+                "chunking": {"strategy": "single", "chunk_dir": "chunk-000"},
+                "schema": schema_description,
+                "frame_counts": frame_counts,
+            }
 
         with open(meta_dir / "info.json", "w") as f:
             json.dump(info, f, indent=2)
+        if resolved_format == LeRobotExportFormat.LEROBOT_V3:
+            with open(meta_dir / "episode_index.json", "w") as f:
+                json.dump(episode_index, f, indent=2)
 
         dataset_info = {
             "format": "lerobot",
-            "version": "2.0",
+            "export_format": resolved_format.value,
+            "version": info["version"],
             "episodes": exported_count,
             "skipped": skipped_count,
             "total_frames": total_frames,
