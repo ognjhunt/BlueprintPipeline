@@ -11,5 +11,6 @@ commonLabels:
 resources:
   - ../episode-generation-job.yaml
   - ../genie-sim-gpu-job.yaml
+  - ../firebase-cleanup-cronjob.yaml
   - ../dream2flow-preparation-job.yaml
   - ../dwm-preparation-job.yaml
