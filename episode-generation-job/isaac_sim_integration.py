@@ -90,12 +90,12 @@ _physx = None
 _usd_core = None
 _curobo = None
 
-def _check_isaac_sim_environment() -> Dict[str, bool]:
+def _check_isaac_sim_environment() -> Dict[str, Any]:
     """
     Check what Isaac Sim features are available.
 
     Returns:
-        Dict with availability status for each feature
+        Dict with availability status and error details for each feature
     """
     global _ISAAC_SIM_AVAILABLE, _OMNI_AVAILABLE, _PHYSX_AVAILABLE
     global _REPLICATOR_AVAILABLE, _CUROBO_AVAILABLE, _ISAAC_LAB_AVAILABLE
@@ -109,6 +109,12 @@ def _check_isaac_sim_environment() -> Dict[str, bool]:
         "curobo": False,
         "isaac_lab": False,
         "usd_core": False,
+        "omniverse_error": None,
+        "physx_error": None,
+        "replicator_error": None,
+        "curobo_error": None,
+        "isaac_lab_error": None,
+        "usd_core_error": None,
     }
 
     # Check for omni (indicates we're in Isaac Sim)
@@ -126,8 +132,9 @@ def _check_isaac_sim_environment() -> Dict[str, bool]:
         except ImportError:
             pass
 
-    except ImportError:
-        pass
+    except ImportError as exc:
+        status["omniverse_error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("Isaac Sim import failed for omni: %s", status["omniverse_error"])
 
     # Check for PhysX
     try:
@@ -135,8 +142,9 @@ def _check_isaac_sim_environment() -> Dict[str, bool]:
         _physx = omni.physx
         status["physx"] = True
         _PHYSX_AVAILABLE = True
-    except ImportError:
-        pass
+    except ImportError as exc:
+        status["physx_error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("Isaac Sim import failed for omni.physx: %s", status["physx_error"])
 
     # Check for Replicator
     try:
@@ -144,8 +152,11 @@ def _check_isaac_sim_environment() -> Dict[str, bool]:
         _rep = rep
         status["replicator"] = True
         _REPLICATOR_AVAILABLE = True
-    except ImportError:
-        pass
+    except ImportError as exc:
+        status["replicator_error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "Isaac Sim import failed for omni.replicator.core: %s", status["replicator_error"]
+        )
 
     # Check for cuRobo
     try:
@@ -153,24 +164,58 @@ def _check_isaac_sim_environment() -> Dict[str, bool]:
         _curobo = curobo
         status["curobo"] = True
         _CUROBO_AVAILABLE = True
-    except ImportError:
-        pass
+    except ImportError as exc:
+        status["curobo_error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("Isaac Sim import failed for curobo: %s", status["curobo_error"])
 
     # Check for Isaac Lab
     try:
         import omni.isaac.lab
         status["isaac_lab"] = True
         _ISAAC_LAB_AVAILABLE = True
-    except ImportError:
-        pass
+    except ImportError as exc:
+        status["isaac_lab_error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("Isaac Sim import failed for omni.isaac.lab: %s", status["isaac_lab_error"])
 
     # Check for USD core (can work outside Isaac Sim)
     try:
         from pxr import Usd, UsdGeom, UsdPhysics
         _usd_core = {"Usd": Usd, "UsdGeom": UsdGeom, "UsdPhysics": UsdPhysics}
         status["usd_core"] = True
-    except ImportError:
-        pass
+    except ImportError as exc:
+        status["usd_core_error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("Isaac Sim import failed for pxr: %s", status["usd_core_error"])
+
+    missing_modules = []
+    fallback_modes = []
+
+    if not status["omniverse"]:
+        missing_modules.append("omni")
+        fallback_modes.append("mock Isaac Sim environment")
+    if not status["physx"]:
+        missing_modules.append("omni.physx")
+        fallback_modes.append("mock physics simulation")
+    if not status["replicator"]:
+        missing_modules.append("omni.replicator.core")
+        fallback_modes.append("mock sensor capture")
+    if not status["curobo"]:
+        missing_modules.append("curobo")
+        fallback_modes.append("no cuRobo motion planning")
+    if not status["isaac_lab"]:
+        missing_modules.append("omni.isaac.lab")
+        fallback_modes.append("no Isaac Lab extensions")
+    if not status["usd_core"]:
+        missing_modules.append("pxr")
+        fallback_modes.append("USD core unavailable")
+
+    if missing_modules:
+        logger.info(
+            "Isaac Sim availability summary: missing modules=%s; fallbacks=%s",
+            ", ".join(missing_modules),
+            ", ".join(fallback_modes),
+        )
+    else:
+        logger.info("Isaac Sim availability summary: all modules available; no fallbacks needed")
 
     return status
 
@@ -204,7 +249,7 @@ def is_isaac_lab_available() -> bool:
     return _ISAAC_LAB_AVAILABLE
 
 
-def get_availability_status() -> Dict[str, bool]:
+def get_availability_status() -> Dict[str, Any]:
     """Get detailed availability status."""
     return _AVAILABILITY_STATUS.copy()
 
@@ -215,9 +260,24 @@ def print_availability_report() -> None:
     logger.info("ISAAC SIM INTEGRATION - AVAILABILITY REPORT")
     logger.info("%s", "=" * 60)
 
-    for feature, available in _AVAILABILITY_STATUS.items():
+    feature_keys = [
+        "isaac_sim",
+        "omniverse",
+        "physx",
+        "replicator",
+        "curobo",
+        "isaac_lab",
+        "usd_core",
+    ]
+
+    for feature in feature_keys:
+        available = _AVAILABILITY_STATUS.get(feature, False)
         status = "✅ AVAILABLE" if available else "❌ NOT AVAILABLE"
         logger.info("  %-20s: %s", feature, status)
+        error_key = f"{feature}_error"
+        error_detail = _AVAILABILITY_STATUS.get(error_key)
+        if not available and error_detail:
+            logger.info("    %-18s  %s", "error:", error_detail)
 
     if not _ISAAC_SIM_AVAILABLE:
         logger.warning("⚠️  WARNING: Not running inside Isaac Sim!")
