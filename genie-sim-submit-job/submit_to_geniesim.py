@@ -957,12 +957,23 @@ def main() -> int:
             if not local_result or not local_result.success:
                 continue
             try:
-                firebase_upload_summary[current_robot] = upload_episodes_to_firebase(
+                firebase_summary = upload_episodes_to_firebase(
                     episodes_dir=output_dir,
                     scene_id=scene_id,
                     prefix=firebase_prefix,
                 )
+                firebase_upload_summary[current_robot] = firebase_summary
                 firebase_upload_status_by_robot[current_robot] = "completed"
+                logger.info(
+                    "[GENIESIM-SUBMIT-JOB] Firebase upload summary for %s: "
+                    "uploaded=%s skipped=%s reuploaded=%s failed=%s total=%s",
+                    current_robot,
+                    firebase_summary.get("uploaded", 0),
+                    firebase_summary.get("skipped", 0),
+                    firebase_summary.get("reuploaded", 0),
+                    firebase_summary.get("failed", 0),
+                    firebase_summary.get("total_files", 0),
+                )
             except Exception as exc:
                 if isinstance(exc, FirebaseUploadError):
                     firebase_upload_summary[current_robot] = exc.summary

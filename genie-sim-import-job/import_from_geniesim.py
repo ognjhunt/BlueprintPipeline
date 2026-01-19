@@ -2482,7 +2482,11 @@ def main():
                         raise
                     print(
                         "[GENIE-SIM-IMPORT] Firebase upload complete: "
-                        f"{firebase_summary['uploaded']}/{firebase_summary['total_files']} files"
+                        f"uploaded={firebase_summary.get('uploaded', 0)} "
+                        f"skipped={firebase_summary.get('skipped', 0)} "
+                        f"reuploaded={firebase_summary.get('reuploaded', 0)} "
+                        f"failed={firebase_summary.get('failed', 0)} "
+                        f"total={firebase_summary.get('total_files', 0)}"
                     )
 
                 overall_success = overall_success and result.success
@@ -2583,7 +2587,11 @@ def main():
                     raise
                 print(
                     "[GENIE-SIM-IMPORT] Firebase upload complete: "
-                    f"{upload_summary['uploaded']}/{upload_summary['total_files']} files"
+                    f"uploaded={upload_summary.get('uploaded', 0)} "
+                    f"skipped={upload_summary.get('skipped', 0)} "
+                    f"reuploaded={upload_summary.get('reuploaded', 0)} "
+                    f"failed={upload_summary.get('failed', 0)} "
+                    f"total={upload_summary.get('total_files', 0)}"
                 )
             sys.exit(0)
         else:
