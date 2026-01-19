@@ -222,6 +222,18 @@ def _fail_variation_assets_requirement(
     )
     print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {reason}")
     print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {requirement_message}")
+    send_alert(
+        event_type="geniesim_export_commercial_gate_failed",
+        summary="Genie Sim export blocked by commercial asset gate",
+        details={
+            "scene_id": scene_id,
+            "variation_assets_prefix": variation_assets_prefix,
+            "reason": reason,
+            "filter_commercial": filter_commercial,
+            "service_mode": service_mode,
+        },
+        severity=os.getenv("ALERT_PROVENANCE_GATE_SEVERITY", "error"),
+    )
     FailureMarkerWriter(bucket, scene_id, "genie-sim-export-job").write_failure(
         exception=RuntimeError(requirement_message),
         failed_step="variation_assets_validation",
@@ -659,6 +671,20 @@ def run_geniesim_export_job(
                         "[GENIESIM-EXPORT-JOB] ❌ ERROR: Commercial blockers: "
                         f"{blockers[:5]}"
                     )
+                send_alert(
+                    event_type="geniesim_export_provenance_gate_failed",
+                    summary="Genie Sim export blocked by asset provenance gate",
+                    details={
+                        "scene_id": scene_id,
+                        "asset_provenance_path": str(asset_provenance_path),
+                        "commercial_use_ok": commercial_use_ok,
+                        "commercial_blockers": blockers,
+                        "filter_commercial": filter_commercial,
+                        "service_mode": service_mode,
+                        "production_mode": production_mode,
+                    },
+                    severity=os.getenv("ALERT_PROVENANCE_GATE_SEVERITY", "error"),
+                )
                 if bucket and scene_id:
                     FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
                         exception=RuntimeError(message),

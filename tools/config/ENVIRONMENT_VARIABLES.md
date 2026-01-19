@@ -41,6 +41,36 @@ Relevant job-level documentation includes:
 - [`smart-placement-engine-job/README.md`](../../smart-placement-engine-job/README.md)
 - [`variation-asset-pipeline-job/README.md`](../../variation-asset-pipeline-job/README.md)
 
+---
+
+## Alerting
+
+Alerting controls for `monitoring.alerting.send_alert`.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ALERT_BACKEND` | str | "none" | Alert backend (`none` to disable, `webhook` for webhook alerts). |
+| `ALERT_WEBHOOK_URL` | str | unset | Webhook URL for alert delivery when `ALERT_BACKEND=webhook`. |
+| `ALERT_SOURCE` | str | "blueprint_pipeline" | Source identifier included in alert payloads. |
+| `ALERT_MIN_SEVERITY` | str | "warning" | Minimum severity to emit (`debug`, `info`, `warning`, `error`, `critical`). |
+| `ALERT_JOB_FAILURE_SEVERITY` | str | "error" | Severity for Genie Sim submit job failures. |
+| `ALERT_LOW_QUALITY_SEVERITY` | str | "warning" | Severity for Genie Sim import low-quality alerts. |
+| `ALERT_FIREBASE_UPLOAD_SEVERITY` | str | "error" | Severity for Firebase upload failures in Genie Sim import. |
+| `ALERT_PROVENANCE_GATE_SEVERITY` | str | "error" | Severity for Genie Sim export commercial/provenance gate failures. |
+| `ALERT_JOB_EXCEPTION_SEVERITY` | str | "critical" | Severity for unhandled job exceptions. |
+
+**Example**:
+```bash
+export ALERT_BACKEND=webhook
+export ALERT_WEBHOOK_URL="https://example.com/alerts"
+export ALERT_MIN_SEVERITY=warning
+export ALERT_JOB_FAILURE_SEVERITY=critical
+export ALERT_LOW_QUALITY_SEVERITY=warning
+export ALERT_FIREBASE_UPLOAD_SEVERITY=error
+export ALERT_PROVENANCE_GATE_SEVERITY=error
+export ALERT_JOB_EXCEPTION_SEVERITY=critical
+```
+
 ## Configuration Overrides (BP_ Prefix)
 
 ### BP_SPLIT_* - Dataset Split Configuration
