@@ -81,7 +81,7 @@ class HumanApprovalConfig:
     default_approvers: List[str] = field(default_factory=list)
     escalation_after_hours: float = 12.0
     escalation_contacts: List[str] = field(default_factory=list)
-    notification_channels: List[str] = field(default_factory=lambda: ["email", "console"])
+    notification_channels: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -612,7 +612,7 @@ class ConfigLoader:
                     False,
                 ),
                 approval_methods=config.get("human_approval", {}).get("approval_methods", ["dashboard", "email", "api"]),
-                notification_channels=config.get("human_approval", {}).get("notification_channels", ["email", "console"]),
+                notification_channels=config.get("human_approval", {}).get("notification_channels", []),
             ),
             approval_store=ApprovalStoreConfig(
                 backend=config.get("approval_store", {}).get("backend", "filesystem"),
