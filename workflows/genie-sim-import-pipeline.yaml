@@ -31,7 +31,9 @@ main:
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - bucket: ${default(sys.get_env("PRIMARY_BUCKET"), sys.get_env("GCS_BUCKET", "blueprintpipeline-data"))}
           - firebase_bucket: ${default(sys.get_env("FIREBASE_STORAGE_BUCKET"), "")}
+          - firebase_service_account_json: ${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_JSON"), "")}
           - firebase_service_account_path: ${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_PATH"), "/secrets/firebase/service-account.json")}
+          - firebase_upload_prefix: ${default(sys.get_env("FIREBASE_UPLOAD_PREFIX"), "datasets")}
           - artifacts_by_robot: null
 
     - extract_event:
@@ -389,8 +391,12 @@ main:
                         value: "true"
                       - name: FIREBASE_STORAGE_BUCKET
                         value: ${firebase_bucket}
+                      - name: FIREBASE_SERVICE_ACCOUNT_JSON
+                        value: ${firebase_service_account_json}
                       - name: FIREBASE_SERVICE_ACCOUNT_PATH
                         value: ${firebase_service_account_path}
+                      - name: FIREBASE_UPLOAD_PREFIX
+                        value: ${firebase_upload_prefix}
                 timeout: "1800s"  # 30 minutes max
           result: import_job_execution
         retry:

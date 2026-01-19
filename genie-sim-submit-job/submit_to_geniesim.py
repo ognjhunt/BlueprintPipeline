@@ -228,6 +228,27 @@ def _resolve_robot_types(default_robot: str) -> list[str]:
     return [legacy_robot] if legacy_robot else [default_robot]
 
 
+def _preflight_firebase_upload() -> Optional[str]:
+    bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
+    service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+
+    if not bucket_name or (not service_account_json and not service_account_path):
+        return (
+            "Set FIREBASE_STORAGE_BUCKET and either FIREBASE_SERVICE_ACCOUNT_JSON or "
+            "FIREBASE_SERVICE_ACCOUNT_PATH."
+        )
+
+    from tools.firebase_upload.uploader import init_firebase
+
+    try:
+        init_firebase()
+    except Exception as exc:
+        return str(exc)
+
+    return None
+
+
 def _normalize_tags(tags: Any) -> list[str]:
     if isinstance(tags, list):
         return [str(tag).strip() for tag in tags if str(tag).strip()]
@@ -792,6 +813,27 @@ def main() -> int:
         canary_scene_ids=canary_scene_ids,
         canary_percent=canary_percent,
     )
+
+    if not skip_local_run:
+        firebase_preflight_error = _preflight_firebase_upload()
+        if firebase_preflight_error:
+            submission_message = (
+                "Firebase upload preflight failed; aborting local Genie Sim execution."
+            )
+            failure_reason = "Firebase upload preflight failed"
+            failure_details = {
+                **failure_details,
+                "firebase_preflight": {
+                    "error": firebase_preflight_error,
+                    "bucket": os.getenv("FIREBASE_STORAGE_BUCKET"),
+                },
+            }
+            job_status = "failed"
+            skip_local_run = True
+            logger.error(
+                "[GENIESIM-SUBMIT-JOB] Firebase upload preflight failed: %s",
+                firebase_preflight_error,
+            )
 
     if not skip_local_run:
         gcs_root = Path("/mnt/gcs") / bucket

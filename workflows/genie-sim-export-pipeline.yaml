@@ -90,6 +90,10 @@ main:
           - canarySceneIds: '${default(map.get(event, "canary_scene_ids"), "")}'
           - canaryPercent: '${default(map.get(event, "canary_percent"), default(sys.get_env("CANARY_PERCENT"), "0"))}'
           - canaryReleaseChannel: '${default(map.get(event, "canary_release_channel"), default(sys.get_env("CANARY_RELEASE_CHANNEL"), "stable"))}'
+          - firebaseBucket: '${default(sys.get_env("FIREBASE_STORAGE_BUCKET"), "")}'
+          - firebaseServiceAccountJson: '${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_JSON"), "")}'
+          - firebaseServiceAccountPath: '${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_PATH"), "/secrets/firebase/service-account.json")}'
+          - firebaseEpisodePrefix: '${default(sys.get_env("FIREBASE_EPISODE_PREFIX"), "datasets")}'
           - stableImageTag: '${default(sys.get_env("GENIESIM_IMAGE_TAG"), "isaacsim")}'
           - canaryImageTag: '${default(map.get(event, "canary_image_tag"), default(sys.get_env("GENIESIM_CANARY_IMAGE_TAG"), "isaacsim-canary"))}'
           - geniesimImageTag: ${if(canaryEnabled, canaryImageTag, stableImageTag)}
@@ -645,6 +649,14 @@ main:
                                     value: ${canaryReleaseChannel}
                                   - name: CANARY_ROLLBACK_MARKER
                                     value: ${if(canaryRollbackMarker == "", geniesimPrefix + "/.canary_rollback", canaryRollbackMarker)}
+                                  - name: FIREBASE_STORAGE_BUCKET
+                                    value: ${firebaseBucket}
+                                  - name: FIREBASE_SERVICE_ACCOUNT_JSON
+                                    value: ${firebaseServiceAccountJson}
+                                  - name: FIREBASE_SERVICE_ACCOUNT_PATH
+                                    value: ${firebaseServiceAccountPath}
+                                  - name: FIREBASE_EPISODE_PREFIX
+                                    value: ${firebaseEpisodePrefix}
                                 resources:
                                   requests:
                                     cpu: "4"
