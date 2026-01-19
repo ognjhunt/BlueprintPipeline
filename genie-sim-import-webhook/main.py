@@ -7,6 +7,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -418,6 +419,99 @@ def _dedup_collection_name() -> str:
     return os.getenv("FIRESTORE_DEDUP_COLLECTION", "webhook_dedup")
 
 
+def _rate_limit_collection_name() -> str:
+    return "webhook_rate_limits"
+
+
+def _get_rate_limit_per_min() -> int | None:
+    raw_limit = os.getenv("WEBHOOK_RATE_LIMIT_PER_MIN", "100")
+    try:
+        limit = int(raw_limit)
+    except ValueError as exc:
+        raise RuntimeError("WEBHOOK_RATE_LIMIT_PER_MIN must be an integer") from exc
+    if limit <= 0:
+        return None
+    return limit
+
+
+def _rate_limit_key(scene_id: str | None, remote_addr: str | None, minute_bucket: int) -> str:
+    scoped_scene = scene_id if scene_id else "ip-only"
+    scoped_ip = remote_addr if remote_addr else "unknown"
+    return f"{scoped_scene}:{scoped_ip}:{minute_bucket}"
+
+
+def _seconds_until_next_minute(now: datetime) -> int:
+    epoch_seconds = int(now.timestamp())
+    next_bucket = ((epoch_seconds // 60) + 1) * 60
+    return max(0, next_bucket - epoch_seconds)
+
+
+def _increment_rate_limit(payload: dict) -> dict:
+    limit = _get_rate_limit_per_min()
+    if limit is None:
+        return {"allowed": True, "limit": None, "remaining": None, "retry_after": None}
+
+    now = datetime.now(tz=timezone.utc)
+    minute_bucket = int(now.timestamp() // 60)
+    key = _rate_limit_key(payload.get("scene_id"), request.remote_addr, minute_bucket)
+
+    client = firestore.Client(project=_get_project_id())
+    collection = client.collection(_rate_limit_collection_name())
+    document = collection.document(key)
+    transaction = client.transaction()
+
+    @firestore.transactional
+    def _update_rate_limit(txn):
+        snapshot = document.get(transaction=txn)
+        current_count = snapshot.get("count", 0) if snapshot.exists else 0
+        new_count = current_count + 1
+        data = {
+            "count": new_count,
+            "limit": limit,
+            "minute_bucket": minute_bucket,
+            "scene_id": payload.get("scene_id"),
+            "remote_addr": request.remote_addr,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        if snapshot.exists:
+            txn.update(document, data)
+        else:
+            data["created_at"] = firestore.SERVER_TIMESTAMP
+            txn.set(document, data)
+        return new_count
+
+    new_count = _update_rate_limit(transaction)
+    remaining = max(limit - new_count, 0)
+    return {
+        "allowed": new_count <= limit,
+        "limit": limit,
+        "remaining": remaining,
+        "retry_after": _seconds_until_next_minute(now),
+    }
+
+
+def _rate_limit_headers(rate_limit: dict) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    limit = rate_limit.get("limit")
+    remaining = rate_limit.get("remaining")
+    if limit is not None:
+        headers["X-RateLimit-Limit"] = str(limit)
+        if remaining is not None:
+            headers["X-RateLimit-Remaining"] = str(remaining)
+    if not rate_limit.get("allowed", True):
+        retry_after = rate_limit.get("retry_after")
+        if retry_after is not None:
+            headers["Retry-After"] = str(retry_after)
+    return headers
+
+
+def _apply_rate_limit_headers(response, rate_limit: dict):  # type: ignore[override]
+    headers = _rate_limit_headers(rate_limit)
+    if headers:
+        response.headers.update(headers)
+    return response
+
+
 def _idempotency_key(payload: dict) -> str:
     header_key = request.headers.get("X-Request-Id") or request.headers.get("X-Correlation-Id")
     if header_key:
@@ -469,6 +563,27 @@ def handle_job_complete():
         google_exceptions.TooManyRequests,
         google_exceptions.InternalServerError,
     )
+
+    try:
+        rate_limit = _increment_rate_limit(payload)
+    except storage_transient_exceptions as exc:
+        app.logger.warning(
+            "Failed to update rate limit due to transient storage error: %s",
+            exc,
+        )
+        return jsonify({"error": "rate_limit_unavailable"}), 503
+    except Exception as exc:
+        app.logger.exception("Failed to update rate limit: %s", exc)
+        return jsonify({"error": "rate_limit_failed"}), 500
+
+    if not rate_limit.get("allowed", True):
+        response = jsonify({
+            "error": "rate_limited",
+            "retry_after": rate_limit.get("retry_after"),
+        })
+        response.status_code = 429
+        return _apply_rate_limit_headers(response, rate_limit)
+
     try:
         is_new_marker, marker = _reserve_dedup_marker(payload)
     except storage_transient_exceptions as exc:
@@ -476,18 +591,24 @@ def handle_job_complete():
             "Failed to reserve dedup marker due to transient storage error: %s",
             exc,
         )
-        return jsonify({"error": "dedup_unavailable"}), 503
+        response = jsonify({"error": "dedup_unavailable"})
+        response.status_code = 503
+        return _apply_rate_limit_headers(response, rate_limit)
     except Exception as exc:
         app.logger.exception("Failed to reserve dedup marker: %s", exc)
-        return jsonify({"error": "dedup_failed"}), 500
+        response = jsonify({"error": "dedup_failed"})
+        response.status_code = 500
+        return _apply_rate_limit_headers(response, rate_limit)
 
     if not is_new_marker:
         execution_name = marker.get("execution_name")
-        return jsonify({
+        response = jsonify({
             "status": "duplicate",
             "execution": execution_name,
             "idempotency_key": marker.get("idempotency_key"),
-        }), 200
+        })
+        response.status_code = 200
+        return _apply_rate_limit_headers(response, rate_limit)
 
     workflow_name = os.getenv("WORKFLOW_NAME", "genie-sim-import-pipeline")
     region = os.getenv("WORKFLOW_REGION", "us-central1")
@@ -537,13 +658,15 @@ def handle_job_complete():
         }
         app.logger.exception("Failed to create workflow execution | details=%s", error_details)
         status_code = 502 if isinstance(exc, transient_exceptions) else 500
-        return jsonify({
+        response = jsonify({
             "error": "execution_create_failed",
             "details": {
                 "message": str(exc),
                 "type": type(exc).__name__,
             },
-        }), status_code
+        })
+        response.status_code = status_code
+        return _apply_rate_limit_headers(response, rate_limit)
 
     try:
         firestore.Client(project=_get_project_id()).collection(
@@ -555,7 +678,9 @@ def handle_job_complete():
     except Exception:
         app.logger.warning("Failed to update dedup marker with execution name.")
 
-    return jsonify({"status": "triggered", "execution": response.name}), 202
+    response_body = jsonify({"status": "triggered", "execution": response.name})
+    response_body.status_code = 202
+    return _apply_rate_limit_headers(response_body, rate_limit)
 
 
 if __name__ == "__main__":
