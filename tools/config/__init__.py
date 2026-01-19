@@ -87,8 +87,8 @@ class HumanApprovalConfig:
 @dataclass
 class ApprovalStoreConfig:
     """Approval request storage configuration."""
-    backend: str = "filesystem"
-    filesystem_path: str = "/tmp/blueprintpipeline/approvals"
+    backend: str = "firestore"
+    filesystem_path: str = "/var/lib/blueprintpipeline/approvals"
     firestore_collection: str = "quality_gate_approvals"
     migrate_from_filesystem: bool = False
 
