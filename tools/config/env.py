@@ -59,3 +59,42 @@ def parse_int_env(
             f"{name} must be <= {max_value} (got {parsed})."
         )
     return parsed
+
+
+def parse_float_env(
+    value: Optional[str],
+    *,
+    default: Optional[float] = None,
+    min_value: Optional[float] = None,
+    max_value: Optional[float] = None,
+    name: str = "environment variable",
+    allow_default_on_invalid: bool = False,
+) -> Optional[float]:
+    """Parse a float-like environment variable with optional bounds.
+
+    Args:
+        value: Raw environment variable value.
+        default: Value to return when the env var is unset.
+        min_value: Optional minimum allowed value.
+        max_value: Optional maximum allowed value.
+        name: Name of the env var for error messages.
+        allow_default_on_invalid: Return default instead of raising on invalid values.
+    """
+    if value is None:
+        return default
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        if allow_default_on_invalid:
+            return default
+        raise ValueError(f"{name} must be a float (got {value!r}).") from exc
+
+    if min_value is not None and parsed < min_value:
+        raise ValueError(
+            f"{name} must be >= {min_value} (got {parsed})."
+        )
+    if max_value is not None and parsed > max_value:
+        raise ValueError(
+            f"{name} must be <= {max_value} (got {parsed})."
+        )
+    return parsed
