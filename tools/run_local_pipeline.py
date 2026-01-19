@@ -2414,6 +2414,16 @@ class LocalPipelineRunner:
             name="NUM_VARIATIONS",
         )
         min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
+        collection_timeout_env = os.getenv("GENIESIM_COLLECTION_TIMEOUT_S")
+        max_duration_seconds = None
+        if collection_timeout_env not in (None, ""):
+            try:
+                max_duration_seconds = float(collection_timeout_env)
+            except ValueError:
+                self.log(
+                    "GENIESIM_COLLECTION_TIMEOUT_S must be a number of seconds; ignoring invalid value.",
+                    "WARNING",
+                )
 
         idempotency_payload = {
             "scene_id": self.scene_id,
@@ -2547,8 +2557,14 @@ class LocalPipelineRunner:
                     output_dir=output_dir,
                     robot_type=current_robot,
                     episodes_per_task=episodes_per_task,
+                    max_duration_seconds=max_duration_seconds,
                     verbose=True,
                 )
+                if getattr(result, "timed_out", False):
+                    self.log(
+                        f"Genie Sim data collection timed out for robot {current_robot}.",
+                        "WARNING",
+                    )
                 if not result or not result.success:
                     raise RetryableError("Local Genie Sim execution failed")
                 return result
