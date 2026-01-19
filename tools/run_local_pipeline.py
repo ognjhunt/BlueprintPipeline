@@ -579,7 +579,28 @@ class LocalPipelineRunner:
                     "ERROR",
                 )
                 return False
-            steps = steps[steps.index(resume_from):]
+            resume_index = steps.index(resume_from)
+            prior_steps = steps[:resume_index]
+            for step in prior_steps:
+                expected_outputs = self._expected_output_paths(step)
+                if should_skip_step(
+                    self.scene_dir,
+                    step.value,
+                    expected_outputs=expected_outputs,
+                    require_nonempty=True,
+                    require_fresh_outputs=True,
+                    validate_sidecar_metadata=True,
+                ):
+                    continue
+                self.log(
+                    (
+                        "ERROR: resume-from requires a completed checkpoint and expected outputs "
+                        f"for prior step {step.value}"
+                    ),
+                    "ERROR",
+                )
+                return False
+            steps = steps[resume_index:]
 
         self.log("=" * 60)
         self.log("BlueprintPipeline Local Runner")
