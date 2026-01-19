@@ -305,6 +305,24 @@ class DWMBundlePackager:
         # Write text prompt
         (metadata_dir / "prompt.txt").write_text(bundle.text_prompt)
 
+        scene_info = {
+            "bundle_id": bundle.bundle_id,
+            "scene_id": bundle.scene_id,
+            "action_type": (
+                bundle.hand_trajectory.action_type.value
+                if bundle.hand_trajectory else "unknown"
+            ),
+            "fps": bundle.fps,
+            "resolution": list(bundle.resolution),
+            "num_frames": bundle.num_frames,
+            "target_object_id": (
+                bundle.camera_trajectory.target_object_id
+                if bundle.camera_trajectory else None
+            ),
+            "metadata": bundle.metadata,
+        }
+        (metadata_dir / "scene_info.json").write_text(json.dumps(scene_info, indent=2))
+
         # Write bundle metadata
         (metadata_dir / "bundle_info.json").write_text(json.dumps(
             bundle.metadata,

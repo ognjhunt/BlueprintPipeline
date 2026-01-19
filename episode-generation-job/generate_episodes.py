@@ -3005,7 +3005,16 @@ def run_episode_generation_job(
             quality_gates = QualityGateRegistry(verbose=True)
             quality_gates.run_checkpoint(
                 QualityGateCheckpoint.EPISODES_GENERATED,
-                context={"episode_stats": episode_stats, "scene_id": scene_id},
+                context={
+                    "episode_stats": episode_stats,
+                    "scene_id": scene_id,
+                    "lerobot_dataset_path": str(output.lerobot_dataset_path)
+                    if output.lerobot_dataset_path
+                    else None,
+                    "episode_metadata_path": str(output.lerobot_dataset_path / "meta" / "info.json")
+                    if output.lerobot_dataset_path
+                    else None,
+                },
             )
             report_path = _gate_report_path(root, scene_id)
             quality_gates.save_report(scene_id, report_path)

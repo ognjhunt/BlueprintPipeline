@@ -1201,6 +1201,32 @@ class QualityGateRegistry:
     def _register_default_gates(self) -> None:
         """Register default quality gates for the pipeline."""
 
+        def _parse_env_json(value: str) -> Optional[Any]:
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return None
+
+        def _parse_env_list(value: str) -> List[str]:
+            parsed = _parse_env_json(value)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+            return [item.strip() for item in value.split(",") if item.strip()]
+
+        def _get_nested_value(data: Dict[str, Any], path: str) -> Tuple[bool, Any]:
+            current: Any = data
+            for segment in path.split("."):
+                if not isinstance(current, dict) or segment not in current:
+                    return False, None
+                current = current[segment]
+            return True, current
+
+        def _resolve_first_key(data: Dict[str, Any], keys: List[str]) -> Tuple[Optional[str], Any]:
+            for key in keys:
+                if key in data:
+                    return key, data.get(key)
+            return None, None
+
         # QG-1: Manifest Validation
         def check_manifest(ctx: Dict[str, Any]) -> QualityGateResult:
             manifest = ctx.get("manifest", {})
@@ -1364,6 +1390,59 @@ class QualityGateRegistry:
             require_human_approval=True,  # Critical gate
         ))
 
+        # QG-8: USD File Size
+        def check_usd_size(ctx: Dict[str, Any]) -> QualityGateResult:
+            usd_path = ctx.get("usd_path")
+            if not usd_path or not Path(usd_path).is_file():
+                return QualityGateResult(
+                    gate_id="qg-8-usd-size",
+                    checkpoint=QualityGateCheckpoint.USD_ASSEMBLED,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="USD scene file not found for size validation",
+                    details={"usd_path": usd_path},
+                    recommendations=["Ensure USD assembly output is available before validating size"],
+                )
+
+            if self.config and hasattr(self.config, "usd"):
+                max_size_bytes = self.config.usd.max_usd_size_bytes
+            else:
+                max_size_bytes = int(os.getenv("BP_QUALITY_USD_MAX_USD_SIZE_BYTES", "500000000"))
+
+            size_bytes = Path(usd_path).stat().st_size
+            passed = size_bytes <= max_size_bytes
+            return QualityGateResult(
+                gate_id="qg-8-usd-size",
+                checkpoint=QualityGateCheckpoint.USD_ASSEMBLED,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    f"USD size {size_bytes} bytes within limit {max_size_bytes}"
+                    if passed
+                    else f"USD size {size_bytes} exceeds limit {max_size_bytes}"
+                ),
+                details={
+                    "usd_path": usd_path,
+                    "size_bytes": size_bytes,
+                    "max_size_bytes": max_size_bytes,
+                },
+                recommendations=[
+                    "Remove unused assets or layers from the USD stage",
+                    "Split large assets into referenced sublayers",
+                    "Adjust max_usd_size_bytes in quality_config.json or BP_QUALITY_USD_MAX_USD_SIZE_BYTES if justified",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-8-usd-size",
+            name="USD File Size",
+            checkpoint=QualityGateCheckpoint.USD_ASSEMBLED,
+            severity=QualityGateSeverity.ERROR,
+            description="Checks assembled USD file size against configured thresholds",
+            check_fn=check_usd_size,
+            notify_on_fail=True,
+        ))
+
         # QG-4: Isaac Lab Code Generation
         def check_isaac_lab(ctx: Dict[str, Any]) -> QualityGateResult:
             isaac_lab_dir = ctx.get("isaac_lab_dir")
@@ -1425,6 +1504,170 @@ class QualityGateRegistry:
             notify_on_fail=True,
         ))
 
+        # QG-9: Replicator Bundle Sensor Metadata
+        def check_replicator_bundle(ctx: Dict[str, Any]) -> QualityGateResult:
+            bundle_dir = ctx.get("replicator_bundle_dir")
+            if not bundle_dir or not Path(bundle_dir).is_dir():
+                return QualityGateResult(
+                    gate_id="qg-9-replicator-sensors",
+                    checkpoint=QualityGateCheckpoint.REPLICATOR_COMPLETE,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="Replicator bundle directory not found",
+                    details={"replicator_bundle_dir": bundle_dir},
+                    recommendations=[
+                        "Ensure replicator-job completed and bundle directory is available",
+                        "Provide replicator_bundle_dir in quality gate context",
+                    ],
+                )
+
+            bundle_dir = Path(bundle_dir)
+            missing_files = []
+            bundle_metadata_path = bundle_dir / "bundle_metadata.json"
+            if not bundle_metadata_path.is_file():
+                missing_files.append(str(bundle_metadata_path))
+
+            config_dir = bundle_dir / "configs"
+            config_files = sorted(config_dir.glob("*.json")) if config_dir.is_dir() else []
+            if not config_files:
+                missing_files.append(str(config_dir / "*.json"))
+
+            required_sensor_fields = None
+            if self.config and hasattr(self.config, "replicator"):
+                required_sensor_fields = self.config.replicator.required_sensor_fields
+            else:
+                env_value = os.getenv("BP_QUALITY_REPLICATOR_REQUIRED_SENSOR_FIELDS")
+                if env_value:
+                    parsed = _parse_env_json(env_value)
+                    if isinstance(parsed, dict):
+                        required_sensor_fields = parsed
+                    elif isinstance(parsed, list):
+                        required_sensor_fields = {item: [item] for item in parsed}
+
+            if not required_sensor_fields:
+                required_sensor_fields = {
+                    "camera_list": ["cameras", "camera_list"],
+                    "resolution": ["resolution"],
+                    "modalities": ["modalities", "annotations"],
+                    "stream_ids": ["stream_ids", "streams"],
+                }
+            if not isinstance(required_sensor_fields, dict):
+                required_sensor_fields = {
+                    "camera_list": ["cameras", "camera_list"],
+                    "resolution": ["resolution"],
+                    "modalities": ["modalities", "annotations"],
+                    "stream_ids": ["stream_ids", "streams"],
+                }
+
+            issues = []
+            config_issues: List[Dict[str, Any]] = []
+            if not missing_files:
+                for config_path in config_files:
+                    try:
+                        config_data = json.loads(config_path.read_text())
+                    except json.JSONDecodeError as exc:
+                        issues.append(f"Invalid JSON in {config_path.name}: {exc}")
+                        continue
+
+                    capture_config = config_data.get("capture_config", {})
+                    if not isinstance(capture_config, dict):
+                        issues.append(f"{config_path.name}: capture_config must be an object")
+                        continue
+
+                    config_missing = []
+                    config_invalid = []
+
+                    camera_key, camera_value = _resolve_first_key(
+                        capture_config, required_sensor_fields.get("camera_list", [])
+                    )
+                    if not camera_key:
+                        config_missing.append("camera_list")
+                    elif not isinstance(camera_value, list) or not camera_value:
+                        config_invalid.append("camera_list")
+
+                    resolution_key, resolution_value = _resolve_first_key(
+                        capture_config, required_sensor_fields.get("resolution", [])
+                    )
+                    if not resolution_key:
+                        config_missing.append("resolution")
+                    elif not (
+                        isinstance(resolution_value, (list, tuple))
+                        and len(resolution_value) == 2
+                        and all(isinstance(v, int) for v in resolution_value)
+                    ):
+                        config_invalid.append("resolution")
+
+                    modalities_key, modalities_value = _resolve_first_key(
+                        capture_config, required_sensor_fields.get("modalities", [])
+                    )
+                    if not modalities_key:
+                        config_missing.append("modalities")
+                    elif not (
+                        isinstance(modalities_value, list)
+                        and all(isinstance(v, str) for v in modalities_value)
+                    ):
+                        config_invalid.append("modalities")
+
+                    stream_key, stream_value = _resolve_first_key(
+                        capture_config, required_sensor_fields.get("stream_ids", [])
+                    )
+                    if not stream_key:
+                        config_missing.append("stream_ids")
+                    elif not (
+                        isinstance(stream_value, list)
+                        and all(isinstance(v, str) for v in stream_value)
+                    ):
+                        config_invalid.append("stream_ids")
+
+                    if config_missing or config_invalid:
+                        config_issues.append({
+                            "config": config_path.name,
+                            "missing_fields": config_missing,
+                            "invalid_fields": config_invalid,
+                        })
+
+            passed = not missing_files and not issues and not config_issues
+
+            recommendations = []
+            if missing_files:
+                recommendations.append("Regenerate replicator bundle metadata and configs")
+            if config_issues:
+                recommendations.append(
+                    "Update capture_config to include cameras, resolution, modalities, and stream IDs"
+                )
+            if issues:
+                recommendations.append("Fix invalid JSON in replicator config files")
+
+            return QualityGateResult(
+                gate_id="qg-9-replicator-sensors",
+                checkpoint=QualityGateCheckpoint.REPLICATOR_COMPLETE,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    "Replicator bundle sensor metadata validated"
+                    if passed
+                    else f"Replicator bundle sensor metadata issues: {len(missing_files) + len(issues) + len(config_issues)}"
+                ),
+                details={
+                    "replicator_bundle_dir": str(bundle_dir),
+                    "missing_files": missing_files,
+                    "config_issues": config_issues,
+                    "issues": issues,
+                    "required_sensor_fields": required_sensor_fields,
+                },
+                recommendations=recommendations,
+            )
+
+        self.register(QualityGate(
+            id="qg-9-replicator-sensors",
+            name="Replicator Bundle Sensor Metadata",
+            checkpoint=QualityGateCheckpoint.REPLICATOR_COMPLETE,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates Replicator bundle capture_config and sensor metadata completeness",
+            check_fn=check_replicator_bundle,
+            notify_on_fail=True,
+        ))
+
         # QG-5: Pre-Episode Simulation Check
         def check_pre_episode(ctx: Dict[str, Any]) -> QualityGateResult:
             sim_check = ctx.get("simulation_check", {})
@@ -1472,6 +1715,89 @@ class QualityGateRegistry:
             check_fn=check_pre_episode,
             notify_on_fail=True,
             require_human_approval=True,
+        ))
+
+        # QG-10: Pre-Episode Scene Reference Integrity
+        def check_pre_episode_references(ctx: Dict[str, Any]) -> QualityGateResult:
+            usd_path = ctx.get("usd_path")
+            manifest = ctx.get("manifest", {})
+            issues = []
+
+            if not usd_path or not Path(usd_path).is_file():
+                return QualityGateResult(
+                    gate_id="qg-10-pre-episode-refs",
+                    checkpoint=QualityGateCheckpoint.PRE_EPISODE_VALIDATION,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="USD scene file not found for reference integrity check",
+                    details={"usd_path": usd_path},
+                    recommendations=[
+                        "Ensure usd_path is provided and points to a valid USD file",
+                        "Re-run USD assembly if the file is missing",
+                    ],
+                )
+
+            usd_content = Path(usd_path).read_text()
+            refs = re.findall(r'references\s*=\s*@([^@]+)@', usd_content)
+            usd_dir = Path(usd_path).parent
+            missing_refs = []
+
+            for ref in refs:
+                ref_path = Path(ref)
+                if not ref_path.is_absolute():
+                    ref_path = (usd_dir / ref).resolve()
+                if not ref_path.is_file():
+                    missing_refs.append(ref)
+
+            missing_manifest_assets = []
+            for obj in manifest.get("objects", []) if isinstance(manifest, dict) else []:
+                asset_path = obj.get("asset", {}).get("path") if isinstance(obj, dict) else None
+                if not asset_path:
+                    continue
+                candidate = Path(asset_path)
+                if not candidate.is_absolute():
+                    candidate = (usd_dir / asset_path).resolve()
+                if not candidate.is_file():
+                    missing_manifest_assets.append(asset_path)
+
+            if missing_refs:
+                issues.append(f"Missing USD references: {len(missing_refs)}")
+            if missing_manifest_assets:
+                issues.append(f"Missing manifest assets: {len(missing_manifest_assets)}")
+
+            passed = not missing_refs and not missing_manifest_assets
+
+            return QualityGateResult(
+                gate_id="qg-10-pre-episode-refs",
+                checkpoint=QualityGateCheckpoint.PRE_EPISODE_VALIDATION,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    "Scene references resolved"
+                    if passed
+                    else f"Scene references missing: {len(missing_refs)} refs, {len(missing_manifest_assets)} assets"
+                ),
+                details={
+                    "usd_path": usd_path,
+                    "reference_count": len(refs),
+                    "missing_references": missing_refs,
+                    "missing_manifest_assets": missing_manifest_assets,
+                },
+                recommendations=[
+                    "Update USD references to valid asset paths",
+                    "Ensure manifest asset paths are synced with assembled USD",
+                    "Rebuild USD layers or copy required assets into the bundle",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-10-pre-episode-refs",
+            name="Pre-Episode Scene Reference Integrity",
+            checkpoint=QualityGateCheckpoint.PRE_EPISODE_VALIDATION,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates all USD references and manifest assets resolve before episode generation",
+            check_fn=check_pre_episode_references,
+            notify_on_fail=True,
         ))
 
         # QG-6: Episode Quality
@@ -1660,6 +1986,171 @@ class QualityGateRegistry:
             check_fn=check_episodes,
             notify_on_fail=True,
             notify_on_pass=True,  # Also notify on success for this one
+        ))
+
+        # QG-11: Episode Metadata Schema Completeness
+        def check_episode_metadata(ctx: Dict[str, Any]) -> QualityGateResult:
+            metadata_path = ctx.get("episode_metadata_path")
+            lerobot_dataset_path = ctx.get("lerobot_dataset_path")
+
+            candidate_paths = []
+            if metadata_path:
+                candidate_paths.append(Path(metadata_path))
+            if lerobot_dataset_path:
+                lerobot_path = Path(lerobot_dataset_path)
+                candidate_paths.extend([
+                    lerobot_path / "metadata.json",
+                    lerobot_path / "meta" / "info.json",
+                    lerobot_path / "info.json",
+                ])
+
+            metadata_file = next((path for path in candidate_paths if path and path.is_file()), None)
+            if not metadata_file:
+                return QualityGateResult(
+                    gate_id="qg-11-episode-metadata",
+                    checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="Episode metadata file not found",
+                    details={
+                        "episode_metadata_path": metadata_path,
+                        "lerobot_dataset_path": lerobot_dataset_path,
+                        "searched_paths": [str(p) for p in candidate_paths],
+                    },
+                    recommendations=[
+                        "Export episode metadata (metadata.json or meta/info.json) during episode generation",
+                        "Provide episode_metadata_path in quality gate context if stored elsewhere",
+                    ],
+                )
+
+            try:
+                metadata = json.loads(metadata_file.read_text())
+            except json.JSONDecodeError as exc:
+                return QualityGateResult(
+                    gate_id="qg-11-episode-metadata",
+                    checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message=f"Episode metadata JSON invalid: {exc}",
+                    details={"metadata_file": str(metadata_file)},
+                    recommendations=["Fix episode metadata JSON formatting and regenerate export"],
+                )
+
+            required_fields = None
+            if self.config and hasattr(self.config, "episode_metadata"):
+                required_fields = self.config.episode_metadata.required_fields
+            else:
+                env_value = os.getenv("BP_QUALITY_EPISODE_METADATA_REQUIRED_FIELDS")
+                if env_value:
+                    parsed = _parse_env_json(env_value)
+                    if isinstance(parsed, dict):
+                        required_fields = parsed
+
+            if not required_fields:
+                required_fields = {
+                    "dataset_name": {"paths": ["dataset_name", "name"], "type": "string"},
+                    "scene_id": {"paths": ["scene_id", "scene.scene_id"], "type": "string"},
+                    "robot_type": {"paths": ["robot_type", "robot.type"], "type": "string"},
+                    "camera_specs": {
+                        "paths": ["camera_specs", "data_pack.cameras", "cameras"],
+                        "type": "array_or_object",
+                    },
+                    "fps": {"paths": ["fps"], "type": "number"},
+                    "action_space": {"paths": ["action_space", "action_space_info"], "type": "array_or_object"},
+                    "episode_stats": {"paths": ["episode_stats", "stats"], "type": "object"},
+                }
+            if not isinstance(required_fields, dict):
+                required_fields = {
+                    "dataset_name": {"paths": ["dataset_name", "name"], "type": "string"},
+                    "scene_id": {"paths": ["scene_id", "scene.scene_id"], "type": "string"},
+                    "robot_type": {"paths": ["robot_type", "robot.type"], "type": "string"},
+                    "camera_specs": {
+                        "paths": ["camera_specs", "data_pack.cameras", "cameras"],
+                        "type": "array_or_object",
+                    },
+                    "fps": {"paths": ["fps"], "type": "number"},
+                    "action_space": {"paths": ["action_space", "action_space_info"], "type": "array_or_object"},
+                    "episode_stats": {"paths": ["episode_stats", "stats"], "type": "object"},
+                }
+
+            missing_fields = []
+            type_errors = []
+            for field_name, spec in required_fields.items():
+                paths = spec.get("paths", [])
+                expected_type = spec.get("type", "object")
+                found = False
+                value = None
+                for path in paths:
+                    has_value, value = _get_nested_value(metadata, path)
+                    if has_value:
+                        found = True
+                        break
+                if not found:
+                    missing_fields.append(field_name)
+                    continue
+
+                valid_type = False
+                if expected_type == "string":
+                    valid_type = isinstance(value, str)
+                elif expected_type == "number":
+                    valid_type = isinstance(value, (int, float))
+                elif expected_type == "object":
+                    valid_type = isinstance(value, dict)
+                elif expected_type == "array":
+                    valid_type = isinstance(value, list)
+                elif expected_type == "array_or_object":
+                    valid_type = isinstance(value, (list, dict))
+                elif expected_type == "boolean":
+                    valid_type = isinstance(value, bool)
+                else:
+                    valid_type = value is not None
+
+                if not valid_type:
+                    type_errors.append({
+                        "field": field_name,
+                        "expected_type": expected_type,
+                        "actual_type": type(value).__name__,
+                    })
+
+            passed = not missing_fields and not type_errors
+
+            recommendations = []
+            if missing_fields:
+                recommendations.append(
+                    f"Populate episode metadata fields: {', '.join(missing_fields)}"
+                )
+            if type_errors:
+                recommendations.append(
+                    "Ensure metadata fields match expected types (string/number/object)"
+                )
+
+            return QualityGateResult(
+                gate_id="qg-11-episode-metadata",
+                checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    "Episode metadata schema complete"
+                    if passed
+                    else f"Episode metadata missing {len(missing_fields)} fields and {len(type_errors)} type issues"
+                ),
+                details={
+                    "metadata_file": str(metadata_file),
+                    "missing_fields": missing_fields,
+                    "type_errors": type_errors,
+                    "required_fields": required_fields,
+                },
+                recommendations=recommendations,
+            )
+
+        self.register(QualityGate(
+            id="qg-11-episode-metadata",
+            name="Episode Metadata Schema Completeness",
+            checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates episode metadata contains required schema fields and types",
+            check_fn=check_episode_metadata,
+            notify_on_fail=True,
         ))
 
         # QG-6a: Average Quality Score SLI (blocking)
@@ -1922,6 +2413,163 @@ class QualityGateRegistry:
             severity=QualityGateSeverity.WARNING,
             description="Validates sim-to-real transfer fidelity for production deployment",
             check_fn=check_sim2real,
+            notify_on_fail=True,
+        ))
+
+        # QG-12: DWM Conditioning Data Format
+        def check_dwm_bundle(ctx: Dict[str, Any]) -> QualityGateResult:
+            dwm_output_dir = ctx.get("dwm_output_dir")
+            if not dwm_output_dir or not Path(dwm_output_dir).is_dir():
+                return QualityGateResult(
+                    gate_id="qg-12-dwm-format",
+                    checkpoint=QualityGateCheckpoint.DWM_PREPARED,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="DWM output directory not found",
+                    details={"dwm_output_dir": dwm_output_dir},
+                    recommendations=[
+                        "Ensure dwm-preparation-job produced bundles",
+                        "Provide dwm_output_dir in quality gate context",
+                    ],
+                )
+
+            if self.config and hasattr(self.config, "dwm"):
+                required_files = self.config.dwm.required_files
+            else:
+                env_value = os.getenv("BP_QUALITY_DWM_REQUIRED_FILES")
+                required_files = _parse_env_list(env_value) if env_value else []
+            if not required_files:
+                required_files = [
+                    "manifest.json",
+                    "static_scene_video.mp4",
+                    "camera_trajectory.json",
+                    "metadata/scene_info.json",
+                    "metadata/prompt.txt",
+                ]
+            if not isinstance(required_files, list):
+                required_files = [
+                    "manifest.json",
+                    "static_scene_video.mp4",
+                    "camera_trajectory.json",
+                    "metadata/scene_info.json",
+                    "metadata/prompt.txt",
+                ]
+
+            dwm_output_dir = Path(dwm_output_dir)
+            bundle_dirs = [path for path in dwm_output_dir.iterdir() if path.is_dir()]
+            if not bundle_dirs:
+                return QualityGateResult(
+                    gate_id="qg-12-dwm-format",
+                    checkpoint=QualityGateCheckpoint.DWM_PREPARED,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="No DWM bundles found in output directory",
+                    details={"dwm_output_dir": str(dwm_output_dir)},
+                    recommendations=[
+                        "Verify DWM bundle packager created bundle directories",
+                        "Check dwm-preparation-job logs for bundle generation errors",
+                    ],
+                )
+
+            missing_by_bundle = {}
+            manifest_issues = []
+            hand_required_missing = {}
+
+            for bundle_dir in bundle_dirs:
+                missing_files = []
+                for rel_path in required_files:
+                    if not (bundle_dir / rel_path).is_file():
+                        missing_files.append(rel_path)
+
+                manifest_path = bundle_dir / "manifest.json"
+                manifest_data = {}
+                if manifest_path.is_file():
+                    try:
+                        manifest_data = json.loads(manifest_path.read_text())
+                    except json.JSONDecodeError as exc:
+                        manifest_issues.append({
+                            "bundle": bundle_dir.name,
+                            "issue": f"Invalid manifest.json: {exc}",
+                        })
+
+                action_type = str(manifest_data.get("action_type", "unknown")).lower()
+                requires_hand = action_type not in {"none", "static", "unknown", "camera_only"}
+                if requires_hand:
+                    hand_missing = []
+                    if not (bundle_dir / "hand_mesh_video.mp4").is_file():
+                        hand_missing.append("hand_mesh_video.mp4")
+                    if not (bundle_dir / "hand_trajectory.json").is_file():
+                        hand_missing.append("hand_trajectory.json")
+                    if hand_missing:
+                        hand_required_missing[bundle_dir.name] = hand_missing
+
+                if manifest_data:
+                    static_video = manifest_data.get("static_scene_video")
+                    camera_file = manifest_data.get("camera_trajectory_file")
+                    hand_video = manifest_data.get("hand_mesh_video")
+                    hand_traj = manifest_data.get("hand_trajectory_file")
+
+                    if static_video and not (bundle_dir / static_video).is_file():
+                        manifest_issues.append({
+                            "bundle": bundle_dir.name,
+                            "issue": f"static_scene_video missing at {static_video}",
+                        })
+                    if camera_file and not (bundle_dir / camera_file).is_file():
+                        manifest_issues.append({
+                            "bundle": bundle_dir.name,
+                            "issue": f"camera_trajectory_file missing at {camera_file}",
+                        })
+                    if requires_hand and hand_video and not (bundle_dir / hand_video).is_file():
+                        manifest_issues.append({
+                            "bundle": bundle_dir.name,
+                            "issue": f"hand_mesh_video missing at {hand_video}",
+                        })
+                    if requires_hand and hand_traj and not (bundle_dir / hand_traj).is_file():
+                        manifest_issues.append({
+                            "bundle": bundle_dir.name,
+                            "issue": f"hand_trajectory_file missing at {hand_traj}",
+                        })
+
+                if missing_files:
+                    missing_by_bundle[bundle_dir.name] = missing_files
+
+            passed = not missing_by_bundle and not manifest_issues and not hand_required_missing
+
+            recommendations = []
+            if missing_by_bundle:
+                recommendations.append("Ensure DWM bundle packager writes all required files")
+            if hand_required_missing:
+                recommendations.append("Render hand mesh videos and trajectories for interactive actions")
+            if manifest_issues:
+                recommendations.append("Fix manifest.json entries to match actual bundle files")
+
+            return QualityGateResult(
+                gate_id="qg-12-dwm-format",
+                checkpoint=QualityGateCheckpoint.DWM_PREPARED,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    "DWM bundle structure validated"
+                    if passed
+                    else "DWM bundle structure issues detected"
+                ),
+                details={
+                    "dwm_output_dir": str(dwm_output_dir),
+                    "required_files": required_files,
+                    "missing_files": missing_by_bundle,
+                    "hand_required_missing": hand_required_missing,
+                    "manifest_issues": manifest_issues,
+                },
+                recommendations=recommendations,
+            )
+
+        self.register(QualityGate(
+            id="qg-12-dwm-format",
+            name="DWM Conditioning Data Format",
+            checkpoint=QualityGateCheckpoint.DWM_PREPARED,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates DWM conditioning bundle structure and manifest consistency",
+            check_fn=check_dwm_bundle,
             notify_on_fail=True,
         ))
 

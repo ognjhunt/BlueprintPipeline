@@ -60,10 +60,63 @@
       "description": "Simulation stability thresholds"
     },
     "usd": {
+      "max_usd_size_bytes": 500000000,
       "max_broken_references": 0,
       "require_physics_scene": true,
       "require_header_validation": true,
       "description": "USD scene validation thresholds"
+    },
+    "replicator": {
+      "required_sensor_fields": {
+        "camera_list": ["cameras", "camera_list"],
+        "resolution": ["resolution"],
+        "modalities": ["modalities", "annotations"],
+        "stream_ids": ["stream_ids", "streams"]
+      },
+      "description": "Replicator bundle sensor metadata requirements"
+    },
+    "episode_metadata": {
+      "required_fields": {
+        "dataset_name": {
+          "paths": ["dataset_name", "name"],
+          "type": "string"
+        },
+        "scene_id": {
+          "paths": ["scene_id", "scene.scene_id"],
+          "type": "string"
+        },
+        "robot_type": {
+          "paths": ["robot_type", "robot.type"],
+          "type": "string"
+        },
+        "camera_specs": {
+          "paths": ["camera_specs", "data_pack.cameras", "cameras"],
+          "type": "array_or_object"
+        },
+        "fps": {
+          "paths": ["fps"],
+          "type": "number"
+        },
+        "action_space": {
+          "paths": ["action_space", "action_space_info"],
+          "type": "array_or_object"
+        },
+        "episode_stats": {
+          "paths": ["episode_stats", "stats"],
+          "type": "object"
+        }
+      },
+      "description": "Episode metadata schema requirements"
+    },
+    "dwm": {
+      "required_files": [
+        "manifest.json",
+        "static_scene_video.mp4",
+        "camera_trajectory.json",
+        "metadata/scene_info.json",
+        "metadata/prompt.txt"
+      ],
+      "description": "DWM conditioning bundle structure requirements"
     },
     "isaac_lab": {
       "require_env_cfg": true,
