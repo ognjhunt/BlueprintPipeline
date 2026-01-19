@@ -25,6 +25,17 @@ Production entrypoints (Docker/Kubernetes) explicitly enforce real sensor captur
 
 Mock capture is intended **only** for local development/testing.
 
+## Camera Calibration Requirement
+
+LeRobot exports that include RGB observations will validate camera calibration
+matrices by default (inferred from `include_images` and the data pack tier).
+For development-only exports where calibration data is intentionally absent,
+disable the requirement with:
+
+```bash
+export REQUIRE_CAMERA_CALIBRATION=false
+```
+
 ## Lab Runs: Required Runtime + Fail-Fast Behavior
 
 Labs should run episode generation inside an Isaac Sim runtime (4.2.0) with
