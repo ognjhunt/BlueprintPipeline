@@ -1610,9 +1610,6 @@ class LocalPipelineRunner:
         variation_assets_dir = self.scene_dir / "variation_assets"
         variation_assets_dir.mkdir(parents=True, exist_ok=True)
 
-        variation_assets_prefix = f"{self.scene_id}/variation_assets"
-        os.environ.setdefault("VARIATION_ASSETS_PREFIX", variation_assets_prefix)
-
         manifest = json.loads(manifest_path.read_text())
         assets = manifest.get("assets", [])
         if not assets:
@@ -1623,18 +1620,99 @@ class LocalPipelineRunner:
                 message="Variation manifest contains no assets",
             )
 
-        self._generate_mock_variation_assets(assets, variation_assets_dir)
+        use_mock = parse_bool_env(os.getenv("VARIATION_GEN_USE_MOCK"), default=False)
+        if use_mock:
+            self._generate_mock_variation_assets(assets, variation_assets_dir)
+            marker_path = variation_assets_dir / ".variation_pipeline_complete"
+            self._write_marker(marker_path, status="completed")
+
+            return StepResult(
+                step=PipelineStep.VARIATION_GEN,
+                success=True,
+                duration_seconds=0,
+                message="Variation assets generated (mock)",
+                outputs={
+                    "variation_assets_manifest": str(variation_assets_dir / "variation_assets.json"),
+                    "variation_marker": str(marker_path),
+                },
+            )
+
+        gcs_scene_dir = self._ensure_gcs_scene_link()
+        if gcs_scene_dir is None:
+            return StepResult(
+                step=PipelineStep.VARIATION_GEN,
+                success=False,
+                duration_seconds=0,
+                message="Unable to prepare /mnt/gcs mapping for variation assets",
+            )
+
+        variation_assets_prefix = f"scenes/{self.scene_id}/variation_assets"
+        replicator_prefix = f"scenes/{self.scene_id}/replicator"
+        env = os.environ.copy()
+        env.update({
+            "SCENE_ID": self.scene_id,
+            "BUCKET": env.get("BUCKET", "local"),
+            "REPLICATOR_PREFIX": replicator_prefix,
+            "VARIATION_ASSETS_PREFIX": variation_assets_prefix,
+        })
+        env["PYTHONPATH"] = f"{REPO_ROOT}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
+
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "variation-asset-pipeline-job" / "run_variation_asset_pipeline.py"),
+                ],
+                check=True,
+                env=env,
+                cwd=str(REPO_ROOT),
+            )
+        except subprocess.CalledProcessError as exc:
+            return StepResult(
+                step=PipelineStep.VARIATION_GEN,
+                success=False,
+                duration_seconds=0,
+                message=f"Variation asset pipeline failed: {self._summarize_exception(exc)}",
+            )
+
+        variation_assets_json = variation_assets_dir / "variation_assets.json"
+        simready_assets_json = variation_assets_dir / "simready_assets.json"
+        pipeline_summary = variation_assets_dir / "pipeline_summary.json"
         marker_path = variation_assets_dir / ".variation_pipeline_complete"
-        self._write_marker(marker_path, status="completed")
+
+        if not variation_assets_json.is_file():
+            try:
+                self._write_variation_assets_manifest(
+                    variation_assets_json,
+                    simready_assets_json,
+                    gcs_scene_dir / "variation_assets",
+                )
+            except FileNotFoundError:
+                return StepResult(
+                    step=PipelineStep.VARIATION_GEN,
+                    success=False,
+                    duration_seconds=0,
+                    message="variation_assets.json missing after variation asset pipeline run",
+                )
+
+        if not marker_path.is_file():
+            self._write_marker(marker_path, status="completed")
+
+        usdz_assets = sorted(
+            asset_path.as_posix() for asset_path in variation_assets_dir.glob("*.usdz")
+        )
 
         return StepResult(
             step=PipelineStep.VARIATION_GEN,
             success=True,
             duration_seconds=0,
-            message="Variation assets generated (mock)",
+            message="Variation assets generated",
             outputs={
-                "variation_assets": str(variation_assets_dir / "variation_assets.json"),
+                "variation_assets_manifest": str(variation_assets_json),
+                "simready_assets_manifest": str(simready_assets_json),
+                "pipeline_summary": str(pipeline_summary),
                 "variation_marker": str(marker_path),
+                "variation_usdz_assets": usdz_assets,
             },
         )
 
@@ -1691,6 +1769,72 @@ class LocalPipelineRunner:
             },
         }
         (output_dir / "variation_assets.json").write_text(json.dumps(payload, indent=2))
+
+    def _ensure_gcs_scene_link(self) -> Optional[Path]:
+        gcs_root = Path("/mnt/gcs")
+        gcs_scene_dir = gcs_root / "scenes" / self.scene_id
+        try:
+            gcs_scene_dir.parent.mkdir(parents=True, exist_ok=True)
+            if not gcs_scene_dir.exists():
+                gcs_scene_dir.symlink_to(self.scene_dir)
+        except OSError as exc:
+            self._log_exception_traceback("Failed to map /mnt/gcs for variation assets", exc)
+            return None
+        return gcs_scene_dir
+
+    def _write_variation_assets_manifest(
+        self,
+        output_path: Path,
+        simready_manifest_path: Path,
+        gcs_variation_dir: Path,
+    ) -> None:
+        if not simready_manifest_path.is_file():
+            raise FileNotFoundError(str(simready_manifest_path))
+
+        simready_manifest = json.loads(simready_manifest_path.read_text())
+        objects: List[Dict[str, Any]] = []
+        for asset in simready_manifest.get("assets", []):
+            name = asset.get("name") or "variation_asset"
+            metadata = asset.get("metadata") or {}
+            category = metadata.get("category", "object")
+            description = metadata.get("description") or metadata.get("short_description") or ""
+            license_name = metadata.get("license", "CC0")
+            asset_path = asset.get("path")
+            resolved_path = None
+            if asset_path:
+                asset_path = Path(asset_path)
+                if asset_path.is_absolute():
+                    try:
+                        relative_path = asset_path.relative_to(gcs_variation_dir)
+                        resolved_path = f"variation_assets/{relative_path.as_posix()}"
+                    except ValueError:
+                        resolved_path = f"variation_assets/{asset_path.name}"
+                else:
+                    asset_str = asset_path.as_posix()
+                    if asset_str.startswith("variation_assets/"):
+                        resolved_path = asset_str
+                    else:
+                        resolved_path = f"variation_assets/{asset_str}"
+
+            objects.append({
+                "id": name,
+                "name": name,
+                "category": category,
+                "description": description,
+                "asset": {
+                    "path": resolved_path,
+                    "license": license_name,
+                    "commercial_ok": True,
+                },
+            })
+
+        payload = {
+            "scene_id": self.scene_id,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "source": "variation-asset-pipeline",
+            "objects": objects,
+        }
+        output_path.write_text(json.dumps(payload, indent=2))
 
     def _generate_placement_regions(self, manifest: Dict) -> str:
         """Generate minimal placement_regions.usda."""
