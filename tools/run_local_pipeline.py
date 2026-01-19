@@ -263,6 +263,21 @@ class LocalPipelineRunner:
             self.log(f"Invalid {name} value '{raw}', defaulting to {default}", "WARNING")
             return default
 
+    @staticmethod
+    def _parse_csv(value: Optional[str]) -> List[str]:
+        if not value:
+            return []
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    def _resolve_geniesim_robot_types(self) -> List[str]:
+        raw_robot_types = os.getenv("ROBOT_TYPES") or os.getenv("GENIESIM_ROBOT_TYPES")
+        if raw_robot_types is not None:
+            parsed = self._parse_csv(raw_robot_types)
+            if parsed:
+                return parsed
+        legacy_robot = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
+        return [legacy_robot] if legacy_robot else ["franka"]
+
     def _run_with_retry(self, step: PipelineStep, action: Any) -> Any:
         config = self.retry_config
 
@@ -2178,19 +2193,22 @@ class LocalPipelineRunner:
         asset_index = json.loads(asset_index_path.read_text())
         task_config = json.loads(task_config_path.read_text())
 
-        robot_type = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
+        robot_types = self._resolve_geniesim_robot_types()
+        robot_type = robot_types[0]
+        multi_robot = len(robot_types) > 1
         episodes_per_task = int(os.getenv("EPISODES_PER_TASK", "10"))
         num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
         min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
 
         job_id = None
         submission_message = None
-        local_run_result = None
+        local_run_results: Dict[str, Any] = {}
+        local_run_ends: Dict[str, datetime] = {}
         preflight_report = None
         failure_details: Dict[str, Any] = {}
         failure_reason = None
-        firebase_upload_summary = None
-        firebase_upload_error = None
+        firebase_upload_summary: Dict[str, Any] = {}
+        firebase_upload_error: Dict[str, str] = {}
         firebase_upload_status = "skipped"
         import uuid
 
@@ -2217,62 +2235,72 @@ class LocalPipelineRunner:
                 outputs={"preflight": preflight_report},
             )
 
-        output_dir = self.episodes_dir / f"geniesim_{job_id}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        config_dir = output_dir / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-
         merged_manifest_path = self.geniesim_dir / "merged_scene_manifest.json"
         if merged_manifest_path.is_file():
             scene_manifest = json.loads(merged_manifest_path.read_text())
         else:
             scene_manifest = {"scene_graph": scene_graph}
 
-        scene_manifest_path = config_dir / "scene_manifest.json"
-        task_config_local_path = config_dir / "task_config.json"
-        scene_manifest_path.write_text(json.dumps(scene_manifest, indent=2))
-        task_config_local_path.write_text(json.dumps(task_config, indent=2))
+        output_dirs: Dict[str, Path] = {}
+        robot_failures: Dict[str, Dict[str, Any]] = {}
+        for current_robot in robot_types:
+            if multi_robot:
+                output_dir = self.episodes_dir / current_robot / f"geniesim_{job_id}"
+            else:
+                output_dir = self.episodes_dir / f"geniesim_{job_id}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_dirs[current_robot] = output_dir
+            config_dir = output_dir / "config"
+            config_dir.mkdir(parents=True, exist_ok=True)
 
-        def _collect_data() -> Any:
-            result = run_local_data_collection(
-                scene_manifest_path=scene_manifest_path,
-                task_config_path=task_config_local_path,
-                output_dir=output_dir,
-                robot_type=robot_type,
-                episodes_per_task=episodes_per_task,
-                verbose=True,
-            )
-            if not result or not result.success:
-                raise RetryableError("Local Genie Sim execution failed")
-            return result
+            scene_manifest_path = config_dir / "scene_manifest.json"
+            task_config_local_path = config_dir / "task_config.json"
+            scene_manifest_path.write_text(json.dumps(scene_manifest, indent=2))
+            task_config_local_path.write_text(json.dumps(task_config, indent=2))
 
-        try:
-            local_run_result = self._run_with_retry(PipelineStep.GENIESIM_SUBMIT, _collect_data)
-        except NonRetryableError as exc:
-            return StepResult(
-                step=PipelineStep.GENIESIM_SUBMIT,
-                success=False,
-                duration_seconds=time.time() - start_time,
-                message=str(exc),
-                outputs={"preflight": preflight_report},
-            )
-        except Exception as exc:
-            return StepResult(
-                step=PipelineStep.GENIESIM_SUBMIT,
-                success=False,
-                duration_seconds=time.time() - start_time,
-                message=f"Genie Sim submit failed: {self._summarize_exception(exc)}",
-                outputs={"preflight": preflight_report},
-            )
+            def _collect_data(
+                scene_manifest_path: Path = scene_manifest_path,
+                task_config_local_path: Path = task_config_local_path,
+                output_dir: Path = output_dir,
+                current_robot: str = current_robot,
+            ) -> Any:
+                result = run_local_data_collection(
+                    scene_manifest_path=scene_manifest_path,
+                    task_config_path=task_config_local_path,
+                    output_dir=output_dir,
+                    robot_type=current_robot,
+                    episodes_per_task=episodes_per_task,
+                    verbose=True,
+                )
+                if not result or not result.success:
+                    raise RetryableError("Local Genie Sim execution failed")
+                return result
+
+            try:
+                local_run_results[current_robot] = self._run_with_retry(
+                    PipelineStep.GENIESIM_SUBMIT,
+                    _collect_data,
+                )
+                local_run_ends[current_robot] = datetime.utcnow()
+            except NonRetryableError as exc:
+                robot_failures[current_robot] = {"error": str(exc)}
+                local_run_results[current_robot] = None
+            except Exception as exc:
+                robot_failures[current_robot] = {"error": self._summarize_exception(exc)}
+                local_run_results[current_robot] = None
+
+        if robot_failures:
+            failure_details["by_robot"] = robot_failures
+            failure_reason = "Local Genie Sim execution failed"
         submission_message = (
             "Local Genie Sim execution completed."
-            if local_run_result and local_run_result.success
+            if all(result and result.success for result in local_run_results.values())
             else "Local Genie Sim execution failed."
         )
 
         job_status = (
             "completed"
-            if local_run_result and local_run_result.success
+            if all(result and result.success for result in local_run_results.values())
             else "failed"
         )
         if preflight_report and not preflight_report.get("ok", False):
@@ -2291,57 +2319,159 @@ class LocalPipelineRunner:
             },
             "generation_params": {
                 "robot_type": robot_type,
+                "robot_types": robot_types,
                 "episodes_per_task": episodes_per_task,
                 "num_variations": num_variations,
                 "min_quality_score": min_quality_score,
             },
         }
-
-        episodes_path = str(self.episodes_dir / f"geniesim_{job_id}")
-        job_payload["artifacts"] = {
-            "episodes_path": episodes_path,
-            "episodes_prefix": episodes_path,
-            "lerobot_path": str(Path(episodes_path) / "lerobot"),
-            "lerobot_prefix": str(Path(episodes_path) / "lerobot"),
+        task_count = len(task_config.get("tasks", [])) or 1
+        total_episodes_per_robot = max(1, episodes_per_task * task_count)
+        job_metrics_by_robot: Dict[str, Any] = {}
+        robot_failure_details = failure_details.get("by_robot", {})
+        for current_robot in robot_types:
+            result = local_run_results.get(current_robot)
+            episodes_collected = getattr(result, "episodes_collected", 0) if result else 0
+            episodes_passed = getattr(result, "episodes_passed", 0) if result else 0
+            job_metrics_by_robot[current_robot] = {
+                "job_id": job_id,
+                "status": "completed" if result and result.success else "failed",
+                "created_at": job_payload["submitted_at"],
+                "completed_at": (
+                    local_run_ends[current_robot].isoformat() + "Z"
+                    if current_robot in local_run_ends
+                    else None
+                ),
+                "total_episodes": total_episodes_per_robot,
+                "episodes_collected": episodes_collected,
+                "episodes_passed": episodes_passed,
+                "quality_pass_rate": (
+                    episodes_passed / episodes_collected if episodes_collected else None
+                ),
+                "failure_reason": failure_reason if current_robot in robot_failure_details else None,
+                "failure_details": robot_failure_details.get(current_robot),
+            }
+        job_payload["job_metrics_by_robot"] = job_metrics_by_robot
+        completed_times = [
+            metrics.get("completed_at")
+            for metrics in job_metrics_by_robot.values()
+            if metrics.get("completed_at")
+        ]
+        completed_at = max(completed_times) if completed_times else None
+        job_payload["job_metrics_summary"] = {
+            "job_id": job_id,
+            "status": job_status,
+            "created_at": job_payload["submitted_at"],
+            "completed_at": completed_at,
+            "duration_seconds": time.time() - start_time,
+            "total_episodes": total_episodes_per_robot * len(robot_types),
+            "episodes_collected": sum(
+                metrics.get("episodes_collected", 0) for metrics in job_metrics_by_robot.values()
+            ),
+            "episodes_passed": sum(
+                metrics.get("episodes_passed", 0) for metrics in job_metrics_by_robot.values()
+            ),
+            "quality_pass_rate": (
+                (
+                    sum(
+                        metrics.get("episodes_passed", 0)
+                        for metrics in job_metrics_by_robot.values()
+                    )
+                    / sum(
+                        metrics.get("episodes_collected", 0)
+                        for metrics in job_metrics_by_robot.values()
+                    )
+                )
+                if sum(
+                    metrics.get("episodes_collected", 0)
+                    for metrics in job_metrics_by_robot.values()
+                )
+                else None
+            ),
         }
-        job_payload["local_execution"] = {
-            "success": bool(local_run_result and local_run_result.success),
-            "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
-            "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
+        if not multi_robot:
+            job_payload["job_metrics"] = job_metrics_by_robot[robot_type]
+
+        artifacts_by_robot = {}
+        for current_robot, output_dir in output_dirs.items():
+            artifacts_by_robot[current_robot] = {
+                "episodes_path": str(output_dir),
+                "episodes_prefix": str(output_dir),
+                "lerobot_path": str(output_dir / "lerobot"),
+                "lerobot_prefix": str(output_dir / "lerobot"),
+            }
+        if multi_robot:
+            job_payload["artifacts_by_robot"] = artifacts_by_robot
+            job_payload["artifacts"] = artifacts_by_robot[robot_type]
+        else:
+            job_payload["artifacts"] = artifacts_by_robot[robot_type]
+
+        episodes_collected_total = sum(
+            metrics.get("episodes_collected", 0) for metrics in job_metrics_by_robot.values()
+        )
+        episodes_passed_total = sum(
+            metrics.get("episodes_passed", 0) for metrics in job_metrics_by_robot.values()
+        )
+        local_execution = {
+            "success": job_status == "completed",
+            "episodes_collected": episodes_collected_total,
+            "episodes_passed": episodes_passed_total,
             "preflight": preflight_report,
             "generation_duration_seconds": time.time() - start_time,
         }
+        if local_run_results:
+            local_execution["by_robot"] = {
+                current_robot: {
+                    "success": bool(result and result.success),
+                    "episodes_collected": getattr(result, "episodes_collected", 0) if result else 0,
+                    "episodes_passed": getattr(result, "episodes_passed", 0) if result else 0,
+                    "output_dir": str(output_dirs.get(current_robot)) if output_dirs else None,
+                }
+                for current_robot, result in local_run_results.items()
+            }
+        job_payload["local_execution"] = local_execution
         job_payload["firebase_upload_status"] = firebase_upload_status
 
-        if local_run_result and local_run_result.success:
+        firebase_upload_status_by_robot: Dict[str, str] = {}
+        if local_run_results:
             firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
             from tools.firebase_upload import upload_episodes_to_firebase
 
-            try:
-                firebase_upload_summary = upload_episodes_to_firebase(
-                    episodes_dir=output_dir,
-                    scene_id=self.scene_id,
-                    prefix=firebase_prefix,
-                )
-                firebase_upload_status = "completed"
-            except Exception as exc:
-                firebase_upload_error = str(exc)
-                submission_message = (
-                    "Local Genie Sim execution completed; Firebase upload failed."
-                )
+            for current_robot, result in local_run_results.items():
+                if not result or not result.success:
+                    continue
+                try:
+                    firebase_upload_summary[current_robot] = upload_episodes_to_firebase(
+                        episodes_dir=output_dirs[current_robot],
+                        scene_id=self.scene_id,
+                        prefix=firebase_prefix,
+                    )
+                    firebase_upload_status_by_robot[current_robot] = "completed"
+                except Exception as exc:
+                    firebase_upload_error[current_robot] = str(exc)
+                    submission_message = (
+                        "Local Genie Sim execution completed; Firebase upload failed."
+                    )
+                    firebase_upload_status_by_robot[current_robot] = "failed"
+                    self.log(
+                        f"Firebase upload failed: {self._summarize_exception(exc)}",
+                        "WARNING",
+                    )
+            if "failed" in firebase_upload_status_by_robot.values():
                 firebase_upload_status = "failed"
-                self.log(
-                    f"Firebase upload failed: {self._summarize_exception(exc)}",
-                    "WARNING",
-                )
+            elif firebase_upload_status_by_robot:
+                firebase_upload_status = "completed"
             job_payload["firebase_upload_status"] = firebase_upload_status
 
         if firebase_upload_summary or firebase_upload_error:
-            job_payload["firebase_upload"] = {
+            firebase_payload = {
                 "prefix": os.getenv("FIREBASE_EPISODE_PREFIX", "datasets"),
-                "summary": firebase_upload_summary,
-                "error": firebase_upload_error,
+                "summary": firebase_upload_summary.get(robot_type) if not multi_robot else firebase_upload_summary,
+                "error": firebase_upload_error.get(robot_type) if not multi_robot else firebase_upload_error,
             }
+            if multi_robot:
+                firebase_payload["status_by_robot"] = firebase_upload_status_by_robot
+            job_payload["firebase_upload"] = firebase_payload
 
         job_payload["message"] = submission_message or job_payload.get("message")
         job_payload["status"] = job_status

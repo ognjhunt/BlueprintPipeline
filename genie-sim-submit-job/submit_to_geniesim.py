@@ -11,6 +11,7 @@ Environment Variables:
     GENIESIM_PREFIX: Prefix where export bundle is stored (default: scenes/<scene>/geniesim)
     JOB_OUTPUT_PATH: GCS path to write job metadata (default: scenes/<scene>/geniesim/job.json)
     ROBOT_TYPE: Robot type (default: franka)
+    ROBOT_TYPES: Comma-separated robot types list (overrides ROBOT_TYPE)
     EPISODES_PER_TASK: Episodes per task (default: tools/config/pipeline_config.json)
     NUM_VARIATIONS: Scene variations (default: 5)
     MIN_QUALITY_SCORE: Minimum quality score (default: 0.85)
@@ -216,6 +217,15 @@ def _parse_csv_env(value: Optional[str]) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _resolve_robot_types(default_robot: str) -> list[str]:
+    robot_types_raw = os.getenv("ROBOT_TYPES")
+    if robot_types_raw is not None:
+        parsed = _parse_csv_env(robot_types_raw)
+        return parsed or [default_robot]
+    legacy_robot = os.getenv("ROBOT_TYPE", default_robot)
+    return [legacy_robot] if legacy_robot else [default_robot]
 
 
 def _normalize_tags(tags: Any) -> list[str]:
@@ -593,7 +603,9 @@ def main() -> int:
     geniesim_prefix = os.getenv("GENIESIM_PREFIX", f"scenes/{scene_id}/geniesim")
     job_output_path = os.getenv("JOB_OUTPUT_PATH", f"{geniesim_prefix}/job.json")
 
-    robot_type = os.getenv("ROBOT_TYPE", "franka")
+    robot_types = _resolve_robot_types("franka")
+    robot_type = robot_types[0]
+    multi_robot = len(robot_types) > 1
     episodes_per_task = _resolve_episodes_per_task()
     num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
     min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
@@ -637,13 +649,6 @@ def main() -> int:
         storage_client.bucket(bucket).blob(asset_provenance_blob).exists()
     )
 
-    generation_params = LocalGenerationParams(
-        episodes_per_task=episodes_per_task,
-        num_variations=num_variations,
-        robot_type=robot_type,
-        min_quality_score=min_quality_score,
-    )
-
     task_config_hash = _hash_payload(task_config)
     export_manifest_hash = _hash_payload(export_manifest)
     idempotency_key = _build_idempotency_key(scene_id, task_config_hash, export_manifest_hash)
@@ -677,22 +682,22 @@ def main() -> int:
 
     job_id = f"local-{uuid.uuid4()}"
     submission_message = "Local Genie Sim execution started."
-    local_run_result = None
+    local_run_results: Dict[str, Optional[DataCollectionResult]] = {}
     failure_reason = None
     failure_details: Dict[str, Any] = {}
-    firebase_upload_summary: Optional[Dict[str, Any]] = None
-    firebase_upload_error: Optional[str] = None
+    firebase_upload_summary: Dict[str, Any] = {}
+    firebase_upload_error: Dict[str, str] = {}
     firebase_upload_status = "skipped"
     episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
     submitted_at = datetime.utcnow().isoformat() + "Z"
     original_submitted_at = submitted_at
-    local_run_end = None
+    local_run_ends: Dict[str, Optional[datetime]] = {}
 
     job_status = "submitted"
-    server_info: Dict[str, Any] = {}
-    output_dir: Optional[Path] = None
+    server_info_by_robot: Dict[str, Dict[str, Any]] = {}
+    output_dirs: Dict[str, Path] = {}
     use_gcs_fuse = False
-    local_root = None
+    local_root: Optional[Path] = None
     skip_local_run = False
     if not asset_provenance_exists and not allow_missing_asset_provenance:
         skip_local_run = True
@@ -729,13 +734,6 @@ def main() -> int:
         gcs_root = Path("/mnt/gcs") / bucket
         use_gcs_fuse = gcs_root.exists()
         local_root = gcs_root if use_gcs_fuse else Path("/tmp") / "geniesim-local"
-        output_dir = local_root / episodes_output_prefix / f"geniesim_{job_id}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        config_dir = output_dir / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        scene_manifest_path = config_dir / "scene_manifest.json"
-        task_config_path = config_dir / "task_config.json"
         scene_usd_path = _find_scene_usd_path(
             scene_manifest=scene_manifest,
             scene_id=scene_id,
@@ -747,163 +745,189 @@ def main() -> int:
         if scene_usd_path:
             scene_manifest["usd_path"] = str(scene_usd_path)
             logger.info("[GENIESIM-SUBMIT-JOB] Using USD scene path: %s", scene_usd_path)
-        _write_local_json(scene_manifest_path, scene_manifest)
-        _write_local_json(task_config_path, task_config_local)
+        for current_robot in robot_types:
+            robot_output_prefix = episodes_output_prefix
+            if multi_robot:
+                robot_output_prefix = f"{episodes_output_prefix}/{current_robot}"
+            output_dir = local_root / robot_output_prefix / f"geniesim_{job_id}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_dirs[current_robot] = output_dir
 
-        local_run_result = _run_local_data_collection_with_handshake(
-            scene_manifest=scene_manifest,
-            task_config=task_config_local,
-            output_dir=output_dir,
-            robot_type=robot_type,
-            episodes_per_task=episodes_per_task,
-            verbose=True,
-            expected_server_version=EXPECTED_GENIESIM_SERVER_VERSION,
-            required_capabilities=REQUIRED_GENIESIM_CAPABILITIES,
-        )
-        local_run_end = datetime.utcnow()
-        server_info = getattr(local_run_result, "server_info", {})
-        if server_info:
-            logger.info(
-                "[GENIESIM-SUBMIT-JOB] Genie Sim server info: "
-                f"version={server_info.get('version')}, "
-                f"capabilities={server_info.get('capabilities')}"
+            config_dir = output_dir / "config"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            scene_manifest_path = config_dir / "scene_manifest.json"
+            task_config_path = config_dir / "task_config.json"
+            _write_local_json(scene_manifest_path, scene_manifest)
+            _write_local_json(task_config_path, task_config_local)
+
+            local_run_result = _run_local_data_collection_with_handshake(
+                scene_manifest=scene_manifest,
+                task_config=task_config_local,
+                output_dir=output_dir,
+                robot_type=current_robot,
+                episodes_per_task=episodes_per_task,
+                verbose=True,
+                expected_server_version=EXPECTED_GENIESIM_SERVER_VERSION,
+                required_capabilities=REQUIRED_GENIESIM_CAPABILITIES,
             )
-        if local_run_result and local_run_result.success:
-            submission_message = "Local Genie Sim execution completed."
-            job_status = "completed"
-        else:
+            local_run_results[current_robot] = local_run_result
+            local_run_ends[current_robot] = datetime.utcnow()
+            server_info = getattr(local_run_result, "server_info", {}) if local_run_result else {}
+            if server_info:
+                server_info_by_robot[current_robot] = server_info
+                logger.info(
+                    "[GENIESIM-SUBMIT-JOB] Genie Sim server info: "
+                    f"version={server_info.get('version')}, "
+                    f"capabilities={server_info.get('capabilities')} "
+                    f"(robot_type={current_robot})"
+                )
+
+        robot_failures = {
+            robot: {
+                "episodes_collected": getattr(result, "episodes_collected", 0) if result else 0,
+                "episodes_passed": getattr(result, "episodes_passed", 0) if result else 0,
+                "errors": getattr(result, "errors", []) if result else [],
+            }
+            for robot, result in local_run_results.items()
+            if not result or not result.success
+        }
+        if robot_failures:
             submission_message = "Local Genie Sim execution failed."
             failure_reason = "Local Genie Sim execution failed"
             failure_details = {
-                "episodes_collected": getattr(local_run_result, "episodes_collected", 0)
-                if local_run_result
-                else 0,
-                "episodes_passed": getattr(local_run_result, "episodes_passed", 0)
-                if local_run_result
-                else 0,
-                "errors": getattr(local_run_result, "errors", []) if local_run_result else [],
+                "by_robot": robot_failures,
             }
             job_status = "failed"
+        else:
+            submission_message = "Local Genie Sim execution completed."
+            job_status = "completed"
 
-    if not skip_local_run and output_dir and local_root and not use_gcs_fuse:
+    if not skip_local_run and local_root and not use_gcs_fuse and output_dirs:
         upload_failures: list[dict[str, str]] = []
         manifest_mismatches: list[dict[str, str]] = []
-        logger = logging.getLogger("genie-sim-submit-job")
-        manifest_entries: list[dict[str, Any]] = []
-        manifest_local_path = output_dir / "upload_manifest.json"
-        file_paths = sorted(
-            (path for path in output_dir.rglob("*") if path.is_file()),
-            key=lambda path: str(path.relative_to(local_root)),
-        )
-        for file_path in file_paths:
-            if file_path == manifest_local_path:
-                continue
-            relative_path = file_path.relative_to(local_root)
-            manifest_entries.append(
-                {
-                    "path": str(relative_path),
-                    "size": file_path.stat().st_size,
-                    "md5": calculate_file_md5_base64(file_path),
-                }
-            )
+        upload_logger = logging.getLogger("genie-sim-submit-job")
 
-        manifest_payload = {
-            "scene_id": scene_id,
-            "job_id": job_id,
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "entries": manifest_entries,
-        }
-        _write_local_json(manifest_local_path, manifest_payload)
-        manifest_relative_path = manifest_local_path.relative_to(local_root)
-        manifest_size = manifest_local_path.stat().st_size
-        manifest_md5 = calculate_file_md5_base64(manifest_local_path)
-
-        manifest_blob = storage_client.bucket(bucket).blob(str(manifest_relative_path))
-        manifest_gcs_uri = f"gs://{bucket}/{manifest_relative_path}"
-        manifest_upload = upload_blob_from_filename(
-            manifest_blob,
-            manifest_local_path,
-            manifest_gcs_uri,
-            logger=logger,
-            verify_upload=True,
-            content_type="application/json",
-        )
-        if not manifest_upload.success:
-            upload_failures.append(
-                {
-                    "path": str(manifest_relative_path),
-                    "error": manifest_upload.error or "unknown error",
-                }
+        for current_robot, output_dir in output_dirs.items():
+            manifest_entries: list[dict[str, Any]] = []
+            manifest_local_path = output_dir / "upload_manifest.json"
+            file_paths = sorted(
+                (path for path in output_dir.rglob("*") if path.is_file()),
+                key=lambda path: str(path.relative_to(local_root)),
             )
-
-        max_workers = min(8, max(1, os.cpu_count() or 1), max(1, len(manifest_entries)))
-
-        def _upload_and_verify(entry: dict[str, Any]) -> Optional[dict[str, str]]:
-            relative_path = entry["path"]
-            file_path = local_root / relative_path
-            blob = storage_client.bucket(bucket).blob(relative_path)
-            gcs_uri = f"gs://{bucket}/{relative_path}"
-            result = upload_blob_from_filename(
-                blob,
-                file_path,
-                gcs_uri,
-                logger=logger,
-                verify_upload=True,
-            )
-            if not result.success:
-                return {
-                    "path": relative_path,
-                    "error": result.error or "unknown error",
-                }
-            verified, failure_reason = verify_blob_upload(
-                blob,
-                gcs_uri=gcs_uri,
-                expected_size=entry["size"],
-                expected_md5=entry["md5"],
-                logger=logger,
-            )
-            if not verified:
-                return {
-                    "path": relative_path,
-                    "error": failure_reason or "upload verification failed",
-                }
-            return None
-
-        if manifest_entries:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(_upload_and_verify, entry): entry["path"]
-                    for entry in manifest_entries
-                }
-                for future in as_completed(futures):
-                    try:
-                        failure = future.result()
-                    except Exception as exc:
-                        upload_failures.append(
-                            {
-                                "path": futures[future],
-                                "error": str(exc),
-                            }
-                        )
-                        continue
-                    if failure:
-                        upload_failures.append(failure)
-        if manifest_upload.success:
-            verified, failure_reason = verify_blob_upload(
-                manifest_blob,
-                gcs_uri=manifest_gcs_uri,
-                expected_size=manifest_size,
-                expected_md5=manifest_md5,
-                logger=logger,
-            )
-            if not verified:
-                manifest_mismatches.append(
+            for file_path in file_paths:
+                if file_path == manifest_local_path:
+                    continue
+                relative_path = file_path.relative_to(local_root)
+                manifest_entries.append(
                     {
-                        "path": str(manifest_relative_path),
-                        "error": failure_reason or "manifest verification failed",
+                        "path": str(relative_path),
+                        "size": file_path.stat().st_size,
+                        "md5": calculate_file_md5_base64(file_path),
                     }
                 )
 
+            manifest_payload = {
+                "scene_id": scene_id,
+                "job_id": job_id,
+                "robot_type": current_robot,
+                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "entries": manifest_entries,
+            }
+            _write_local_json(manifest_local_path, manifest_payload)
+            manifest_relative_path = manifest_local_path.relative_to(local_root)
+            manifest_size = manifest_local_path.stat().st_size
+            manifest_md5 = calculate_file_md5_base64(manifest_local_path)
+
+            manifest_blob = storage_client.bucket(bucket).blob(str(manifest_relative_path))
+            manifest_gcs_uri = f"gs://{bucket}/{manifest_relative_path}"
+            manifest_upload = upload_blob_from_filename(
+                manifest_blob,
+                manifest_local_path,
+                manifest_gcs_uri,
+                logger=upload_logger,
+                verify_upload=True,
+                content_type="application/json",
+            )
+            if not manifest_upload.success:
+                upload_failures.append(
+                    {
+                        "path": str(manifest_relative_path),
+                        "robot_type": current_robot,
+                        "error": manifest_upload.error or "unknown error",
+                    }
+                )
+
+            max_workers = min(8, max(1, os.cpu_count() or 1), max(1, len(manifest_entries)))
+
+            def _upload_and_verify(entry: dict[str, Any]) -> Optional[dict[str, str]]:
+                relative_path = entry["path"]
+                file_path = local_root / relative_path
+                blob = storage_client.bucket(bucket).blob(relative_path)
+                gcs_uri = f"gs://{bucket}/{relative_path}"
+                result = upload_blob_from_filename(
+                    blob,
+                    file_path,
+                    gcs_uri,
+                    logger=upload_logger,
+                    verify_upload=True,
+                )
+                if not result.success:
+                    return {
+                        "path": relative_path,
+                        "robot_type": current_robot,
+                        "error": result.error or "unknown error",
+                    }
+                verified, failure_reason = verify_blob_upload(
+                    blob,
+                    gcs_uri=gcs_uri,
+                    expected_size=entry["size"],
+                    expected_md5=entry["md5"],
+                    logger=upload_logger,
+                )
+                if not verified:
+                    return {
+                        "path": relative_path,
+                        "robot_type": current_robot,
+                        "error": failure_reason or "upload verification failed",
+                    }
+                return None
+
+            if manifest_entries:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(_upload_and_verify, entry): entry["path"]
+                        for entry in manifest_entries
+                    }
+                    for future in as_completed(futures):
+                        try:
+                            failure = future.result()
+                        except Exception as exc:
+                            upload_failures.append(
+                                {
+                                    "path": futures[future],
+                                    "robot_type": current_robot,
+                                    "error": str(exc),
+                                }
+                            )
+                            continue
+                        if failure:
+                            upload_failures.append(failure)
+            if manifest_upload.success:
+                verified, failure_reason = verify_blob_upload(
+                    manifest_blob,
+                    gcs_uri=manifest_gcs_uri,
+                    expected_size=manifest_size,
+                    expected_md5=manifest_md5,
+                    logger=upload_logger,
+                )
+                if not verified:
+                    manifest_mismatches.append(
+                        {
+                            "path": str(manifest_relative_path),
+                            "robot_type": current_robot,
+                            "error": failure_reason or "manifest verification failed",
+                        }
+                    )
 
         if upload_failures or manifest_mismatches:
             failure_details = {
@@ -916,27 +940,36 @@ def main() -> int:
                 job_status = "failed"
             failure_reason = failure_reason or "GCS upload failed"
 
-    if not skip_local_run and local_run_result and local_run_result.success and output_dir:
+    firebase_upload_status_by_robot: Dict[str, str] = {}
+    if not skip_local_run and output_dirs:
         firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
         from tools.firebase_upload import upload_episodes_to_firebase
 
-        try:
-            firebase_upload_summary = upload_episodes_to_firebase(
-                episodes_dir=output_dir,
-                scene_id=scene_id,
-                prefix=firebase_prefix,
-            )
-            firebase_upload_status = "completed"
-        except Exception as exc:
-            firebase_upload_error = str(exc)
-            submission_message = (
-                "Local Genie Sim execution completed; Firebase upload failed."
-            )
+        for current_robot, output_dir in output_dirs.items():
+            local_result = local_run_results.get(current_robot)
+            if not local_result or not local_result.success:
+                continue
+            try:
+                firebase_upload_summary[current_robot] = upload_episodes_to_firebase(
+                    episodes_dir=output_dir,
+                    scene_id=scene_id,
+                    prefix=firebase_prefix,
+                )
+                firebase_upload_status_by_robot[current_robot] = "completed"
+            except Exception as exc:
+                firebase_upload_error[current_robot] = str(exc)
+                submission_message = (
+                    "Local Genie Sim execution completed; Firebase upload failed."
+                )
+                firebase_upload_status_by_robot[current_robot] = "failed"
+                logger.warning(
+                    "[GENIESIM-SUBMIT-JOB] Firebase upload failed: %s",
+                    firebase_upload_error[current_robot],
+                )
+        if "failed" in firebase_upload_status_by_robot.values():
             firebase_upload_status = "failed"
-            logger.warning(
-                "[GENIESIM-SUBMIT-JOB] Firebase upload failed: %s",
-                firebase_upload_error,
-            )
+        elif firebase_upload_status_by_robot:
+            firebase_upload_status = "completed"
 
     metrics = get_metrics()
     metrics_summary = {
@@ -970,6 +1003,7 @@ def main() -> int:
         },
         "generation_params": {
             "robot_type": robot_type,
+            "robot_types": robot_types,
             "episodes_per_task": episodes_per_task,
             "num_variations": num_variations,
             "min_quality_score": min_quality_score,
@@ -988,26 +1022,72 @@ def main() -> int:
         "firebase_upload_status": firebase_upload_status,
     }
     try:
-        metrics_builder = LocalJobMetricsBuilder(
-            generation_params=generation_params,
-            task_config=task_config,
-        )
-        job_payload["job_metrics"] = metrics_builder.build(
-            job_id=job_id,
-            created_at=submitted_at,
-            completed_at=(local_run_end.isoformat() + "Z") if local_run_end else None,
-            status="completed" if job_status == "completed" else "failed",
-            episodes_collected=(
-                getattr(local_run_result, "episodes_collected", 0)
-                if local_run_result
-                else 0
-            ),
-            episodes_passed=(
-                getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0
-            ),
-            failure_reason=failure_reason,
-            failure_details=failure_details if failure_details else None,
-        )
+        job_metrics_by_robot: Dict[str, Any] = {}
+        robot_failure_details = {}
+        if isinstance(failure_details.get("by_robot"), dict):
+            robot_failure_details = failure_details["by_robot"]
+        for current_robot in robot_types:
+            metrics_builder = LocalJobMetricsBuilder(
+                generation_params=LocalGenerationParams(
+                    episodes_per_task=episodes_per_task,
+                    num_variations=num_variations,
+                    robot_type=current_robot,
+                    min_quality_score=min_quality_score,
+                ),
+                task_config=task_config,
+            )
+            run_result = local_run_results.get(current_robot)
+            completed_at = local_run_ends.get(current_robot)
+            per_robot_failure = robot_failure_details.get(current_robot)
+            job_metrics_by_robot[current_robot] = metrics_builder.build(
+                job_id=job_id,
+                created_at=submitted_at,
+                completed_at=(completed_at.isoformat() + "Z") if completed_at else None,
+                status="completed" if run_result and run_result.success else "failed",
+                episodes_collected=(
+                    getattr(run_result, "episodes_collected", 0) if run_result else 0
+                ),
+                episodes_passed=(
+                    getattr(run_result, "episodes_passed", 0) if run_result else 0
+                ),
+                failure_reason=failure_reason if per_robot_failure else None,
+                failure_details=per_robot_failure,
+            )
+        job_payload["job_metrics_by_robot"] = job_metrics_by_robot
+        if not multi_robot:
+            job_payload["job_metrics"] = job_metrics_by_robot[robot_type]
+        else:
+            total_episodes = sum(
+                metrics.get("total_episodes") or 0 for metrics in job_metrics_by_robot.values()
+            )
+            episodes_collected = sum(
+                metrics.get("episodes_collected") or 0 for metrics in job_metrics_by_robot.values()
+            )
+            episodes_passed = sum(
+                metrics.get("episodes_passed") or 0 for metrics in job_metrics_by_robot.values()
+            )
+            completed_times = [
+                metrics.get("completed_at")
+                for metrics in job_metrics_by_robot.values()
+                if metrics.get("completed_at")
+            ]
+            completed_at = max(completed_times) if completed_times else None
+            job_payload["job_metrics_summary"] = {
+                "job_id": job_id,
+                "status": "completed" if job_status == "completed" else "failed",
+                "created_at": submitted_at,
+                "completed_at": completed_at,
+                "duration_seconds": LocalJobMetricsBuilder._duration_seconds(
+                    submitted_at,
+                    completed_at,
+                ),
+                "total_episodes": total_episodes,
+                "episodes_collected": episodes_collected,
+                "episodes_passed": episodes_passed,
+                "quality_pass_rate": (
+                    (episodes_passed / episodes_collected) if episodes_collected else None
+                ),
+            }
     except Exception as exc:
         job_payload["job_metrics_error"] = str(exc)
     if job_status == "failed":
@@ -1031,25 +1111,57 @@ def main() -> int:
                     "assignment": canary_assignment,
                 },
             )
-    job_payload["artifacts"] = {
-        "episodes_prefix": f"gs://{bucket}/{episodes_output_prefix}/geniesim_{job_id}",
-        "lerobot_prefix": (
-            f"gs://{bucket}/{episodes_output_prefix}/geniesim_{job_id}/lerobot"
-        ),
-    }
-    if firebase_upload_summary or firebase_upload_error:
-        job_payload["firebase_upload"] = {
-            "prefix": os.getenv("FIREBASE_EPISODE_PREFIX", "datasets"),
-            "summary": firebase_upload_summary,
-            "error": firebase_upload_error,
+    artifacts_by_robot = {}
+    for current_robot in robot_types:
+        robot_output_prefix = episodes_output_prefix
+        if multi_robot:
+            robot_output_prefix = f"{episodes_output_prefix}/{current_robot}"
+        episodes_prefix = f"gs://{bucket}/{robot_output_prefix}/geniesim_{job_id}"
+        artifacts_by_robot[current_robot] = {
+            "episodes_prefix": episodes_prefix,
+            "lerobot_prefix": f"{episodes_prefix}/lerobot",
         }
-    job_payload["local_execution"] = {
-        "success": bool(local_run_result and local_run_result.success),
-        "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
-        "episodes_passed": getattr(local_run_result, "episodes_passed", 0) if local_run_result else 0,
+    if multi_robot:
+        job_payload["artifacts_by_robot"] = artifacts_by_robot
+        job_payload["artifacts"] = artifacts_by_robot[robot_type]
+    else:
+        job_payload["artifacts"] = artifacts_by_robot[robot_type]
+    if firebase_upload_summary or firebase_upload_error:
+        firebase_payload = {
+            "prefix": os.getenv("FIREBASE_EPISODE_PREFIX", "datasets"),
+            "summary": firebase_upload_summary.get(robot_type) if not multi_robot else firebase_upload_summary,
+            "error": firebase_upload_error.get(robot_type) if not multi_robot else firebase_upload_error,
+        }
+        if multi_robot:
+            firebase_payload["status_by_robot"] = firebase_upload_status_by_robot
+        job_payload["firebase_upload"] = firebase_payload
+    episodes_collected_total = sum(
+        getattr(result, "episodes_collected", 0) if result else 0
+        for result in local_run_results.values()
+    )
+    episodes_passed_total = sum(
+        getattr(result, "episodes_passed", 0) if result else 0
+        for result in local_run_results.values()
+    )
+    local_execution = {
+        "success": job_status == "completed",
+        "episodes_collected": episodes_collected_total,
+        "episodes_passed": episodes_passed_total,
         "preflight": preflight_report,
-        "server_info": server_info if server_info else None,
+        "server_info": server_info_by_robot if multi_robot else server_info_by_robot.get(robot_type),
     }
+    if local_run_results:
+        local_execution["by_robot"] = {
+            current_robot: {
+                "success": bool(result and result.success),
+                "episodes_collected": getattr(result, "episodes_collected", 0) if result else 0,
+                "episodes_passed": getattr(result, "episodes_passed", 0) if result else 0,
+                "output_dir": str(output_dirs.get(current_robot)) if output_dirs else None,
+                "server_info": server_info_by_robot.get(current_robot),
+            }
+            for current_robot, result in local_run_results.items()
+        }
+    job_payload["local_execution"] = local_execution
 
     _write_json_blob(storage_client, bucket, job_output_path, job_payload)
     _write_json_blob(
