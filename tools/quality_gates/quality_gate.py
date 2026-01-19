@@ -26,6 +26,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from .notification_service import NotificationService, NotificationPayload
 
@@ -1468,6 +1470,313 @@ class QualityGateRegistry:
             severity=QualityGateSeverity.ERROR,
             description="Checks assembled USD file size against configured thresholds",
             check_fn=check_usd_size,
+            notify_on_fail=True,
+        ))
+
+        # QG-10: Genie Sim kinematic reachability
+        def check_geniesim_kinematic_reachability(ctx: Dict[str, Any]) -> QualityGateResult:
+            task_config = ctx.get("task_config") or {}
+            if not task_config:
+                return QualityGateResult(
+                    gate_id="qg-10-geniesim-ik",
+                    checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+                    passed=True,
+                    severity=QualityGateSeverity.INFO,
+                    message="Genie Sim IK reachability skipped: no task_config provided",
+                )
+
+            if self.config and hasattr(self.config, "geniesim_kinematic_reachability"):
+                thresholds = self.config.geniesim_kinematic_reachability
+                enabled = thresholds.enabled
+                min_reachability_rate = thresholds.min_reachability_rate
+                max_unreachable_targets = thresholds.max_unreachable_targets
+                check_place_targets = thresholds.check_place_targets
+            else:
+                enabled = parse_bool_env(
+                    os.getenv("BP_QUALITY_GENIESIM_IK_ENABLED"),
+                    default=True,
+                )
+                min_reachability_rate = parse_float_env(
+                    os.getenv("BP_QUALITY_GENIESIM_IK_MIN_RATE"),
+                    default=0.95,
+                    min_value=0.0,
+                    max_value=1.0,
+                    name="BP_QUALITY_GENIESIM_IK_MIN_RATE",
+                )
+                try:
+                    max_unreachable_targets = int(os.getenv("BP_QUALITY_GENIESIM_IK_MAX_UNREACHABLE", "0"))
+                except ValueError:
+                    max_unreachable_targets = 0
+                check_place_targets = parse_bool_env(
+                    os.getenv("BP_QUALITY_GENIESIM_IK_CHECK_PLACE_TARGETS"),
+                    default=True,
+                )
+
+            if not enabled:
+                return QualityGateResult(
+                    gate_id="qg-10-geniesim-ik",
+                    checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+                    passed=True,
+                    severity=QualityGateSeverity.INFO,
+                    message="Genie Sim IK reachability gate disabled by configuration",
+                    details={"enabled": False},
+                )
+
+            try:
+                from tools.geniesim_adapter.local_framework import (
+                    IK_PLANNING_AVAILABLE,
+                    IKSolver,
+                    ROBOT_CONFIGS,
+                )
+            except Exception as exc:
+                return QualityGateResult(
+                    gate_id="qg-10-geniesim-ik",
+                    checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message=f"Genie Sim IK reachability unavailable: {exc}",
+                    recommendations=[
+                        "Install IK planning dependencies or disable the gate in quality_config.json",
+                    ],
+                )
+
+            if not IK_PLANNING_AVAILABLE or IKSolver is None or not ROBOT_CONFIGS:
+                return QualityGateResult(
+                    gate_id="qg-10-geniesim-ik",
+                    checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="Genie Sim IK reachability unavailable: IK planner dependencies missing",
+                    recommendations=[
+                        "Install IK planning dependencies or disable the gate in quality_config.json",
+                    ],
+                )
+
+            def _parse_position(value: Any) -> Optional[np.ndarray]:
+                if value is None:
+                    return None
+                if isinstance(value, dict):
+                    try:
+                        return np.array([value["x"], value["y"], value["z"]], dtype=float)
+                    except (KeyError, TypeError, ValueError):
+                        return None
+                if isinstance(value, (list, tuple, np.ndarray)) and len(value) == 3:
+                    try:
+                        return np.array(value, dtype=float)
+                    except (TypeError, ValueError):
+                        return None
+                return None
+
+            def _parse_orientation(value: Any) -> Optional[np.ndarray]:
+                if value is None:
+                    return None
+                if isinstance(value, dict):
+                    if "w" in value and "x" in value and "y" in value and "z" in value:
+                        return np.array([value["w"], value["x"], value["y"], value["z"]], dtype=float)
+                    if "x" in value and "y" in value and "z" in value:
+                        return np.array([1.0, value["x"], value["y"], value["z"]], dtype=float)
+                if isinstance(value, (list, tuple, np.ndarray)):
+                    if len(value) == 4:
+                        try:
+                            return np.array(value, dtype=float)
+                        except (TypeError, ValueError):
+                            return None
+                    if len(value) == 7:
+                        try:
+                            return np.array(value[3:7], dtype=float)
+                        except (TypeError, ValueError):
+                            return None
+                return None
+
+            def _normalize_quaternion(value: Optional[np.ndarray]) -> np.ndarray:
+                if value is None:
+                    return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+                norm = np.linalg.norm(value)
+                if norm <= 0:
+                    return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+                return value / norm
+
+            def _extract_targets(task: Dict[str, Any]) -> List[Dict[str, Any]]:
+                targets: List[Dict[str, Any]] = []
+
+                if "target_pose" in task:
+                    pose = task.get("target_pose")
+                    position = None
+                    orientation = None
+                    if isinstance(pose, dict):
+                        position = _parse_position(pose.get("position") or pose.get("pos"))
+                        orientation = _parse_orientation(pose.get("orientation") or pose.get("quat"))
+                    elif isinstance(pose, (list, tuple, np.ndarray)) and len(pose) == 7:
+                        position = _parse_position(pose[:3])
+                        orientation = _parse_orientation(pose[3:7])
+                    if position is not None:
+                        targets.append({"label": "target_pose", "position": position, "orientation": orientation})
+
+                target_position = _parse_position(task.get("target_position"))
+                if target_position is not None:
+                    targets.append(
+                        {
+                            "label": "target_position",
+                            "position": target_position,
+                            "orientation": _parse_orientation(task.get("target_orientation")),
+                        }
+                    )
+
+                if check_place_targets:
+                    place_position = _parse_position(task.get("place_position"))
+                    if place_position is not None:
+                        targets.append(
+                            {
+                                "label": "place_position",
+                                "position": place_position,
+                                "orientation": _parse_orientation(task.get("place_orientation")),
+                            }
+                        )
+
+                    if "place_pose" in task:
+                        pose = task.get("place_pose")
+                        position = None
+                        orientation = None
+                        if isinstance(pose, dict):
+                            position = _parse_position(pose.get("position") or pose.get("pos"))
+                            orientation = _parse_orientation(pose.get("orientation") or pose.get("quat"))
+                        elif isinstance(pose, (list, tuple, np.ndarray)) and len(pose) == 7:
+                            position = _parse_position(pose[:3])
+                            orientation = _parse_orientation(pose[3:7])
+                        if position is not None:
+                            targets.append(
+                                {"label": "place_pose", "position": position, "orientation": orientation}
+                            )
+
+                return targets
+
+            tasks = task_config.get("tasks") or task_config.get("suggested_tasks") or []
+            if not isinstance(tasks, list):
+                return QualityGateResult(
+                    gate_id="qg-10-geniesim-ik",
+                    checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="Genie Sim IK reachability: task list is not a list",
+                    details={"task_type": type(tasks).__name__},
+                )
+
+            robot_type = (
+                task_config.get("robot_config", {}).get("type")
+                or ctx.get("robot_type")
+                or "franka"
+            )
+            robot_key = str(robot_type).strip().lower()
+            robot_config = ROBOT_CONFIGS.get(robot_key)
+            if robot_config is None:
+                return QualityGateResult(
+                    gate_id="qg-10-geniesim-ik",
+                    checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message=f"Genie Sim IK reachability: unknown robot type '{robot_type}'",
+                    details={"robot_type": robot_type, "available_robot_types": sorted(ROBOT_CONFIGS.keys())},
+                    recommendations=[
+                        "Update robot_config.type in task_config.json to a supported robot",
+                        "Extend ROBOT_CONFIGS in trajectory_solver.py if needed",
+                    ],
+                )
+
+            ik_solver = IKSolver(robot_config, verbose=False)
+            unreachable_targets: List[Dict[str, Any]] = []
+            invalid_targets: List[Dict[str, Any]] = []
+            total_targets = 0
+            reachable_targets = 0
+
+            for index, task in enumerate(tasks):
+                if not isinstance(task, dict):
+                    invalid_targets.append({"task_index": index, "error": "task entry is not a dict"})
+                    continue
+                for target in _extract_targets(task):
+                    total_targets += 1
+                    position = target.get("position")
+                    if position is None or not np.isfinite(position).all():
+                        invalid_targets.append(
+                            {
+                                "task_index": index,
+                                "task_name": task.get("task_name") or task.get("task_type"),
+                                "target_label": target.get("label"),
+                                "position": position.tolist() if isinstance(position, np.ndarray) else position,
+                            }
+                        )
+                        continue
+                    orientation = _normalize_quaternion(target.get("orientation"))
+                    solution = ik_solver.solve(position, orientation)
+                    if solution is None:
+                        unreachable_targets.append(
+                            {
+                                "task_index": index,
+                                "task_name": task.get("task_name") or task.get("task_type"),
+                                "target_label": target.get("label"),
+                                "position": position.tolist(),
+                                "orientation": orientation.tolist(),
+                            }
+                        )
+                    else:
+                        reachable_targets += 1
+
+            if total_targets == 0:
+                return QualityGateResult(
+                    gate_id="qg-10-geniesim-ik",
+                    checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+                    passed=True,
+                    severity=QualityGateSeverity.INFO,
+                    message="Genie Sim IK reachability skipped: no target poses found",
+                    details={"task_count": len(tasks), "robot_type": robot_type},
+                )
+
+            reachability_rate = reachable_targets / max(total_targets, 1)
+            passed = (
+                reachability_rate >= min_reachability_rate
+                and len(unreachable_targets) <= max_unreachable_targets
+                and not invalid_targets
+            )
+
+            return QualityGateResult(
+                gate_id="qg-10-geniesim-ik",
+                checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    f"Genie Sim IK reachability: {reachable_targets}/{total_targets} targets reachable"
+                    if passed
+                    else (
+                        f"Genie Sim IK reachability failed: {len(unreachable_targets)} unreachable "
+                        f"targets ({reachability_rate:.2%} reachable)"
+                    )
+                ),
+                details={
+                    "robot_type": robot_type,
+                    "targets_total": total_targets,
+                    "targets_reachable": reachable_targets,
+                    "reachability_rate": reachability_rate,
+                    "unreachable_targets": unreachable_targets,
+                    "invalid_targets": invalid_targets,
+                    "thresholds": {
+                        "min_reachability_rate": min_reachability_rate,
+                        "max_unreachable_targets": max_unreachable_targets,
+                        "check_place_targets": check_place_targets,
+                    },
+                },
+                recommendations=[
+                    "Adjust task target poses or robot base placement",
+                    "Verify the robot type matches the task_config robot_config",
+                    "Lower min_reachability_rate or increase max_unreachable_targets if needed",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-10-geniesim-ik",
+            name="Genie Sim Kinematic Reachability",
+            checkpoint=QualityGateCheckpoint.GENIESIM_EXPORT_READY,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates task target poses are reachable via IK for the configured robot",
+            check_fn=check_geniesim_kinematic_reachability,
             notify_on_fail=True,
         ))
 

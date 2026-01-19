@@ -27,6 +27,42 @@ You can override notification configuration without editing JSON:
 Email delivery relies on standard provider configuration (e.g. `SENDGRID_API_KEY`
 or SMTP settings) as described in `notification_service.py`.
 
+## Genie Sim kinematic reachability gate
+`geniesim_kinematic_reachability` validates that task target poses in
+`task_config.json` are reachable by the configured robot IK solver. Configure
+the thresholds in `tools/quality_gates/quality_config.json`:
+
+```json
+{
+  "thresholds": {
+    "geniesim_kinematic_reachability": {
+      "enabled": true,
+      "min_reachability_rate": 0.95,
+      "max_unreachable_targets": 0,
+      "check_place_targets": true
+    }
+  }
+}
+```
+
+In production, a failed reachability gate blocks submission unless a manual
+override is granted via the quality gate approval workflow. Ensure your override
+metadata complies with `gate_overrides` in `quality_config.json` (including
+`allowed_overriders`) so the audit entry is recorded.
+
+Automated override payloads can be provided via `BP_QUALITY_OVERRIDE_METADATA`
+as JSON. The payload must include `approver_id`, `category`, `ticket`, and
+`justification` (a timestamp is auto-filled when omitted). Example:
+
+```json
+{
+  "approver_id": "ops@example.com",
+  "category": "known_issue",
+  "ticket": "OPS-1234",
+  "justification": "Known IK modeling gap; reviewed by robotics team."
+}
+```
+
 ## Approval storage (production)
 Production deployments should use the Firestore approval store and a persistent
 filesystem path for any local fallback or migration data. The loader prefers
