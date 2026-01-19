@@ -1951,13 +1951,56 @@ class GenieSimLocalFramework:
         """
         self.log(f"Exporting to LeRobot format: {output_dir}")
 
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise RuntimeError(
+                "pyarrow is required to export LeRobot datasets. Install with "
+                "`pip install pyarrow` and retry."
+            ) from exc
+
         output_dir.mkdir(parents=True, exist_ok=True)
+        lerobot_root = output_dir / "episodes" / "lerobot"
+        data_dir = lerobot_root / "data" / "chunk-000"
+        meta_dir = lerobot_root / "meta"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        meta_dir.mkdir(parents=True, exist_ok=True)
 
         exported_count = 0
         skipped_count = 0
+        total_frames = 0
+        frame_counts: Dict[str, int] = {}
 
         # Find all episode files
         episode_files = list(recording_dir.glob("*.json"))
+
+        def _to_json_serializable(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {str(k): _to_json_serializable(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_to_json_serializable(v) for v in value]
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if isinstance(value, (np.floating, np.integer)):
+                return value.item()
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return value
+
+        schema = pa.schema(
+            [
+                ("episode_id", pa.string()),
+                ("frame_index", pa.int64()),
+                ("timestamp", pa.float64()),
+                ("observation", pa.large_string()),
+                ("action", pa.large_string()),
+                ("reward", pa.float64()),
+                ("done", pa.bool_()),
+                ("task_name", pa.string()),
+                ("task_id", pa.string()),
+            ]
+        )
 
         for ep_file in episode_files:
             try:
@@ -1969,34 +2012,82 @@ class GenieSimLocalFramework:
                     skipped_count += 1
                     continue
 
-                # Convert to LeRobot format
-                # (Simplified - actual implementation would use pyarrow)
-                lerobot_episode = {
-                    "episode_id": episode["episode_id"],
-                    "frames": episode["frames"],
-                    "metadata": {
-                        "task_name": episode.get("task_name"),
-                        "frame_count": episode.get("frame_count"),
-                    }
+                episode_id = str(episode.get("episode_id", ep_file.stem))
+                task_name = episode.get("task_name")
+                task_id = episode.get("task_id")
+                frames = episode.get("frames", [])
+                frame_count = len(frames)
+
+                columns: Dict[str, List[Any]] = {
+                    "episode_id": [],
+                    "frame_index": [],
+                    "timestamp": [],
+                    "observation": [],
+                    "action": [],
+                    "reward": [],
+                    "done": [],
+                    "task_name": [],
+                    "task_id": [],
                 }
 
-                output_file = output_dir / f"{episode['episode_id']}.json"
-                with open(output_file, "w") as f:
-                    json.dump(lerobot_episode, f)
+                for idx, frame in enumerate(frames):
+                    timestamp = frame.get("timestamp")
+                    if timestamp is None:
+                        timestamp = float(idx)
+                    columns["episode_id"].append(episode_id)
+                    columns["frame_index"].append(idx)
+                    columns["timestamp"].append(timestamp)
+                    columns["observation"].append(
+                        json.dumps(_to_json_serializable(frame.get("observation")))
+                    )
+                    columns["action"].append(
+                        json.dumps(_to_json_serializable(frame.get("action")))
+                    )
+                    columns["reward"].append(float(frame.get("reward", 0.0)))
+                    columns["done"].append(bool(frame.get("done", False)))
+                    columns["task_name"].append(task_name)
+                    columns["task_id"].append(task_id)
+
+                table = pa.Table.from_pydict(columns, schema=schema)
+                output_file = data_dir / f"episode_{episode_id}.parquet"
+                pq.write_table(table, output_file, compression="zstd")
 
                 exported_count += 1
+                total_frames += frame_count
+                frame_counts[episode_id] = frame_count
 
             except Exception as e:
                 self.log(f"Failed to export {ep_file.name}: {e}", "WARNING")
                 skipped_count += 1
 
-        # Write dataset info
-        dataset_info = {
+        schema_description = [
+            {"name": field.name, "type": str(field.type)} for field in schema
+        ]
+        info = {
             "format": "lerobot",
-            "version": "1.0",
+            "version": "2.0",
             "episodes": exported_count,
             "skipped": skipped_count,
+            "total_frames": total_frames,
             "exported_at": datetime.utcnow().isoformat() + "Z",
+            "data_path": "episodes/lerobot/data",
+            "chunking": {"strategy": "single", "chunk_dir": "chunk-000"},
+            "schema": schema_description,
+            "frame_counts": frame_counts,
+        }
+
+        with open(meta_dir / "info.json", "w") as f:
+            json.dump(info, f, indent=2)
+
+        dataset_info = {
+            "format": "lerobot",
+            "version": "2.0",
+            "episodes": exported_count,
+            "skipped": skipped_count,
+            "total_frames": total_frames,
+            "exported_at": datetime.utcnow().isoformat() + "Z",
+            "lerobot_info": "episodes/lerobot/meta/info.json",
+            "debug_json_output": False,
         }
 
         with open(output_dir / "dataset_info.json", "w") as f:
@@ -2008,6 +2099,7 @@ class GenieSimLocalFramework:
             "success": True,
             "exported": exported_count,
             "skipped": skipped_count,
+            "parquet_episodes": exported_count,
             "output_dir": output_dir,
         }
 
