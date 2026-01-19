@@ -47,7 +47,7 @@ The multi-robot adapter ships with built-in specs for humanoids (G2, GR1, Figure
 
 ### Exporter payloads
 
-- **Request**: `GenieSimExportConfig` controls export behavior such as robot selection, multi-robot behavior, task count, and metadata toggles. Key fields include `robot_type`, `enable_multi_robot`, `max_tasks`, and `filter_commercial_only`.【F:tools/geniesim_adapter/exporter.py†L46-L121】
+- **Request**: `GenieSimExportConfig` controls export behavior such as robot selection, multi-robot behavior, task count, and metadata toggles. Key fields include `robot_type`, `enable_multi_robot`, `max_tasks`, `filter_commercial_only`, and `require_embeddings` (fail if placeholder embeddings would be used).【F:tools/geniesim_adapter/exporter.py†L46-L122】
 - **Response**: `GenieSimExportResult` describes exported outputs and stats:
   - `scene_graph_path`, `asset_index_path`, `task_config_path`, `scene_config_path`
   - `num_nodes`, `num_edges`, `num_assets`, `num_tasks`

@@ -41,6 +41,7 @@ Environment Variables:
     ROBOT_TYPE: Primary robot type (franka, g2, ur10) - default: franka
     MAX_TASKS: Maximum suggested tasks - default: 50
     GENERATE_EMBEDDINGS: Generate semantic embeddings - default: false
+    REQUIRE_EMBEDDINGS: Require real embeddings (no placeholders) - default: false
     FILTER_COMMERCIAL: Only include commercial-use assets - default: true
     COPY_USD: Copy USD files to output - default: true
     ENABLE_MULTI_ROBOT: Generate for multiple robot types - default: true
@@ -227,6 +228,7 @@ def run_geniesim_export_job(
     urdf_path: Optional[str] = None,
     max_tasks: int = 50,
     generate_embeddings: bool = False,
+    require_embeddings: bool = False,
     filter_commercial: bool = True,  # Default TRUE for commercial use
     copy_usd: bool = True,
     enable_multi_robot: bool = True,  # DEFAULT: ENABLED
@@ -251,6 +253,7 @@ def run_geniesim_export_job(
         urdf_path: Custom URDF path for robot
         max_tasks: Maximum suggested tasks
         generate_embeddings: Generate semantic embeddings
+        require_embeddings: Require real embeddings (no placeholders)
         filter_commercial: Only include commercial-use assets (DEFAULT: True)
         copy_usd: Copy USD files to output
         enable_multi_robot: Generate for multiple robot types (DEFAULT: True)
@@ -301,6 +304,7 @@ def run_geniesim_export_job(
     print(f"[GENIESIM-EXPORT-JOB] Primary robot type: {robot_type}")
     print(f"[GENIESIM-EXPORT-JOB] Max tasks: {max_tasks}")
     print(f"[GENIESIM-EXPORT-JOB] Generate embeddings: {generate_embeddings}")
+    print(f"[GENIESIM-EXPORT-JOB] Require embeddings: {require_embeddings}")
     print(f"[GENIESIM-EXPORT-JOB] Filter commercial: {filter_commercial}")
     print(f"[GENIESIM-EXPORT-JOB] Copy USD: {copy_usd}")
     print(f"[GENIESIM-EXPORT-JOB] Multi-robot enabled: {enable_multi_robot}")
@@ -822,6 +826,7 @@ def run_geniesim_export_job(
         robot_type=robot_type,
         urdf_path=urdf_path,
         generate_embeddings=generate_embeddings,
+        require_embeddings=require_embeddings,
         max_tasks=max_tasks,
         copy_usd_files=copy_usd,
         filter_commercial_only=filter_commercial,
@@ -1174,6 +1179,7 @@ def main():
     urdf_path = os.getenv("URDF_PATH")  # Optional custom URDF
     max_tasks = int(os.getenv("MAX_TASKS", "50"))
     generate_embeddings = parse_bool_env(os.getenv("GENERATE_EMBEDDINGS"), default=False)
+    require_embeddings = parse_bool_env(os.getenv("REQUIRE_EMBEDDINGS"), default=False)
     filter_commercial = parse_bool_env(os.getenv("FILTER_COMMERCIAL"), default=True)
     copy_usd = parse_bool_env(os.getenv("COPY_USD"), default=True)
     enable_multi_robot = parse_bool_env(os.getenv("ENABLE_MULTI_ROBOT"), default=True)
@@ -1197,6 +1203,7 @@ def main():
         "urdf_path": urdf_path,
         "max_tasks": max_tasks,
         "generate_embeddings": generate_embeddings,
+        "require_embeddings": require_embeddings,
         "filter_commercial": filter_commercial,
         "copy_usd": copy_usd,
         "enable_multi_robot": enable_multi_robot,
@@ -1239,6 +1246,7 @@ def main():
         print(f"[GENIESIM-EXPORT-JOB]   Replicator Bundle: {replicator_prefix}")
         print(f"[GENIESIM-EXPORT-JOB]   Primary Robot Type: {robot_type}")
         print(f"[GENIESIM-EXPORT-JOB]   Max Tasks: {max_tasks}")
+        print(f"[GENIESIM-EXPORT-JOB]   Require Embeddings: {require_embeddings}")
         print(f"[GENIESIM-EXPORT-JOB]   Multi-Robot: {enable_multi_robot}")
         print(f"[GENIESIM-EXPORT-JOB]   Bimanual: {enable_bimanual}")
         print(f"[GENIESIM-EXPORT-JOB]   VLA Packages: {enable_vla_packages}")
@@ -1260,6 +1268,7 @@ def main():
                 urdf_path=urdf_path,
                 max_tasks=max_tasks,
                 generate_embeddings=generate_embeddings,
+                require_embeddings=require_embeddings,
                 filter_commercial=filter_commercial,
                 copy_usd=copy_usd,
                 # Enhanced features (DEFAULT: ENABLED)

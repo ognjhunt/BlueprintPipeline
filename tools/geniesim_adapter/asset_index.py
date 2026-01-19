@@ -304,6 +304,7 @@ class AssetIndexBuilder:
         embedding_provider: Optional[str] = None,
         verbose: bool = True,
         strict_category_validation: Optional[bool] = None,
+        require_embeddings: Optional[bool] = None,
     ):
         """
         Initialize asset index builder.
@@ -312,6 +313,7 @@ class AssetIndexBuilder:
             generate_embeddings: Whether to generate embeddings (requires model)
             embedding_model: Embedding model name (e.g., "qwen-text-embedding-v4")
             embedding_provider: Embedding provider ("openai" or "qwen")
+            require_embeddings: Require real embeddings (disallow placeholders)
             verbose: Print progress
         """
         self.verbose = verbose
@@ -325,6 +327,17 @@ class AssetIndexBuilder:
             self.strict_category_validation = strict_env.lower() in {"1", "true", "yes", "on"}
         else:
             self.strict_category_validation = strict_category_validation
+        if require_embeddings is None:
+            require_env = os.getenv("REQUIRE_EMBEDDINGS")
+            if require_env is None:
+                require_env = os.getenv("DISALLOW_PLACEHOLDER_EMBEDDINGS")
+            self.require_embeddings = (
+                require_env.strip().lower() in {"1", "true", "yes", "on"}
+                if require_env is not None
+                else False
+            )
+        else:
+            self.require_embeddings = require_embeddings
 
         # Embedding client (initialized lazily)
         self._embedding_client = None
@@ -365,6 +378,7 @@ class AssetIndexBuilder:
         embedding_errors: List[Dict[str, str]] = []
         embedding_failure_rate = 0.0
         embedding_failures = 0
+        placeholder_embeddings = 0
 
         # Generate embeddings if requested
         if self.generate_embeddings and assets:
@@ -372,6 +386,7 @@ class AssetIndexBuilder:
             embedding_errors = embedding_result["errors"]
             embedding_failure_rate = embedding_result["failure_rate"]
             embedding_failures = embedding_result["failure_count"]
+            placeholder_embeddings = embedding_result["placeholder_count"]
         else:
             for asset in assets:
                 asset.embedding_status = "not_requested"
@@ -385,6 +400,8 @@ class AssetIndexBuilder:
             "embedding_errors": embedding_errors,
             "embedding_failure_rate": embedding_failure_rate,
             "embedding_failures": embedding_failures,
+            "placeholder_embeddings_allowed": not self.require_embeddings,
+            "placeholder_embeddings_used": placeholder_embeddings,
         }
 
         if embedding_failures > 0 and not self._is_production():
@@ -573,6 +590,7 @@ class AssetIndexBuilder:
         self.log(f"Generating embeddings for {len(assets)} assets...")
         production_mode = self._is_production()
         errors: List[Dict[str, str]] = []
+        placeholder_count = 0
 
         for asset in assets:
             try:
@@ -580,6 +598,11 @@ class AssetIndexBuilder:
                     asset.semantic_description
                 )
             except Exception as e:
+                if self.require_embeddings:
+                    raise RuntimeError(
+                        f"Embedding generation failed with REQUIRE_EMBEDDINGS enabled for asset "
+                        f"{asset.asset_id}: {e}"
+                    ) from e
                 if production_mode:
                     raise RuntimeError(
                         f"Embedding generation failed in production for asset {asset.asset_id}: {e}"
@@ -590,6 +613,8 @@ class AssetIndexBuilder:
 
             asset.embedding = embedding
             asset.embedding_status = status
+            if status == "placeholder":
+                placeholder_count += 1
 
             if status != "ok":
                 errors.append({"asset_id": asset.asset_id, "error": error_message})
@@ -604,6 +629,10 @@ class AssetIndexBuilder:
         self.log(
             f"Embedding failure rate: {failure_rate:.2%} ({failure_count}/{len(assets)})"
         )
+        self.log(
+            "Placeholder embeddings allowed: "
+            f"{not self.require_embeddings}; used: {placeholder_count}"
+        )
         if failure_count > 0:
             self.log(
                 f"Embedding generation had {failure_count} failures", "WARNING"
@@ -615,11 +644,17 @@ class AssetIndexBuilder:
             "errors": errors,
             "failure_rate": failure_rate,
             "failure_count": failure_count,
+            "placeholder_count": placeholder_count,
         }
 
     def _get_embedding_with_status(self, text: str) -> tuple[List[float], str, str]:
         config = self._resolve_embedding_config()
         if not config:
+            if self.require_embeddings:
+                raise RuntimeError(
+                    "Embeddings are required but no embedding provider is configured. "
+                    "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
+                )
             if self._is_production():
                 raise RuntimeError(
                     "Embeddings are required in production but no embedding provider "
@@ -635,6 +670,11 @@ class AssetIndexBuilder:
         try:
             return self._request_embedding(text, config), "ok", ""
         except Exception as e:
+            if self.require_embeddings:
+                raise RuntimeError(
+                    "Embedding request failed while REQUIRE_EMBEDDINGS is enabled; "
+                    f"placeholder embeddings are disallowed. Error: {e}"
+                ) from e
             if self._is_production():
                 raise
             self.log(f"Embedding request failed; using placeholder embeddings: {e}", "WARNING")

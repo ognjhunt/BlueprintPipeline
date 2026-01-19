@@ -105,6 +105,7 @@ scenes/{scene_id}/geniesim/
 | `ROBOT_TYPE` | `franka` | Primary robot type: `franka`, `g2`, `ur10` |
 | `MAX_TASKS` | `50` | Maximum suggested tasks |
 | `GENERATE_EMBEDDINGS` | `false` | Generate semantic embeddings |
+| `REQUIRE_EMBEDDINGS` | `false` | Fail if real embeddings cannot be generated |
 | `FILTER_COMMERCIAL` | `true` | Only include commercial-use assets |
 | `COPY_USD` | `true` | Copy USD files to output |
 
