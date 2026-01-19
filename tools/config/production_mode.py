@@ -42,7 +42,8 @@ def resolve_production_mode(env: Optional[Mapping[str, str]] = None) -> bool:
 
     env = env or os.environ
     pipeline_env = (env.get("PIPELINE_ENV", "") or "").strip().lower()
-    if pipeline_env in {"prod", "production"}:
+    geniesim_env = (env.get("GENIESIM_ENV", "") or "").strip().lower()
+    if pipeline_env in {"prod", "production"} or geniesim_env == "production":
         return True
 
     data_quality_level = (env.get("DATA_QUALITY_LEVEL", "") or "").strip().lower()

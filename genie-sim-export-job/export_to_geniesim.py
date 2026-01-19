@@ -40,8 +40,8 @@ Environment Variables:
     GENIESIM_PREFIX: Output path for Genie Sim files
     ROBOT_TYPE: Primary robot type (franka, g2, ur10) - default: franka
     MAX_TASKS: Maximum suggested tasks - default: 50
-    GENERATE_EMBEDDINGS: Generate semantic embeddings - default: false
-    REQUIRE_EMBEDDINGS: Require real embeddings (no placeholders) - default: false
+    GENERATE_EMBEDDINGS: Generate semantic embeddings - default: false (true in production)
+    REQUIRE_EMBEDDINGS: Require real embeddings (no placeholders) - default: false (true in production)
     FILTER_COMMERCIAL: Only include commercial-use assets - default: true
     COPY_USD: Copy USD files to output - default: true
     ENABLE_MULTI_ROBOT: Generate for multiple robot types - default: true
@@ -1101,6 +1101,11 @@ def run_geniesim_export_job(
                     "variation_assets": len(variation_objects),
                 },
                 "metrics_summary": metrics_summary,
+                "embedding_requirements": {
+                    "generate_embeddings": generate_embeddings,
+                    "require_embeddings": require_embeddings,
+                    "production_mode": production_mode,
+                },
                 # Track which premium features were exported
                 "premium_features_exported": {
                     "sim2real_fidelity": SIM2REAL_AVAILABLE,
@@ -1176,11 +1181,18 @@ def main():
     )
 
     # Configuration
+    production_mode = resolve_production_mode()
     robot_type = os.getenv("ROBOT_TYPE", "franka")
     urdf_path = os.getenv("URDF_PATH")  # Optional custom URDF
     max_tasks = int(os.getenv("MAX_TASKS", "50"))
-    generate_embeddings = parse_bool_env(os.getenv("GENERATE_EMBEDDINGS"), default=False)
-    require_embeddings = parse_bool_env(os.getenv("REQUIRE_EMBEDDINGS"), default=False)
+    generate_embeddings = parse_bool_env(
+        os.getenv("GENERATE_EMBEDDINGS"),
+        default=production_mode,
+    )
+    require_embeddings = parse_bool_env(
+        os.getenv("REQUIRE_EMBEDDINGS"),
+        default=production_mode,
+    )
     filter_commercial = parse_bool_env(os.getenv("FILTER_COMMERCIAL"), default=True)
     copy_usd = parse_bool_env(os.getenv("COPY_USD"), default=True)
     enable_multi_robot = parse_bool_env(os.getenv("ENABLE_MULTI_ROBOT"), default=True)
@@ -1189,7 +1201,6 @@ def main():
     enable_rich_annotations = parse_bool_env(os.getenv("ENABLE_RICH_ANNOTATIONS"), default=True)
     enable_premium_analytics = parse_bool_env(os.getenv("ENABLE_PREMIUM_ANALYTICS"), default=True)
     require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
-    production_mode = resolve_production_mode()
     if production_mode and not require_quality_gates:
         require_quality_gates = True
 
@@ -1233,6 +1244,19 @@ def main():
             input_params=input_params,
             partial_results=partial_results,
         )
+
+    if production_mode and (generate_embeddings or require_embeddings):
+        has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
+        has_qwen_key = bool(os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"))
+        if not (has_openai_key or has_qwen_key):
+            message = (
+                "Production mode requires embeddings, but no embedding provider keys were found. "
+                "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY, or explicitly disable "
+                "GENERATE_EMBEDDINGS and REQUIRE_EMBEDDINGS."
+            )
+            print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
+            _write_failure_marker(RuntimeError(message), "embedding_provider_validation")
+            sys.exit(1)
 
     validated = False
     try:
