@@ -799,25 +799,38 @@ def main() -> int:
                 }
             )
 
-        for file_path in output_dir.rglob("*"):
-            if file_path.is_file() and file_path != manifest_local_path:
-                relative_path = file_path.relative_to(local_root)
-                blob = storage_client.bucket(bucket).blob(str(relative_path))
-                gcs_uri = f"gs://{bucket}/{relative_path}"
-                result = upload_blob_from_filename(
-                    blob,
-                    file_path,
-                    gcs_uri,
-                    logger=logger,
-                    verify_upload=True,
+        # Parallelize file uploads for better performance
+        from concurrent.futures import ThreadPoolExecutor
+
+        file_list = [
+            f for f in output_dir.rglob("*")
+            if f.is_file() and f.resolve() != manifest_local_path.resolve()
+        ]
+
+        def _upload_single_file(file_path):
+            relative_path = file_path.relative_to(local_root)
+            blob = storage_client.bucket(bucket).blob(str(relative_path))
+            gcs_uri = f"gs://{bucket}/{relative_path}"
+            return upload_blob_from_filename(
+                blob,
+                file_path,
+                gcs_uri,
+                logger=logger,
+                verify_upload=True,
+            )
+
+        logger.info(f"Parallel uploading {len(file_list)} files to gs://{bucket}...")
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            upload_results = list(executor.map(_upload_single_file, file_list))
+
+        for file_path, result in zip(file_list, upload_results):
+            if not result.success:
+                upload_failures.append(
+                    {
+                        "path": str(file_path.relative_to(local_root)),
+                        "error": result.error or "unknown error",
+                    }
                 )
-                if not result.success:
-                    upload_failures.append(
-                        {
-                            "path": str(relative_path),
-                            "error": result.error or "unknown error",
-                        }
-                    )
         if manifest_upload.success:
             verified, failure_reason = verify_blob_upload(
                 manifest_blob,

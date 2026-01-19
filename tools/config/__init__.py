@@ -1042,6 +1042,8 @@ class ConfigLoader:
                     eps = ep_gen["episodes_per_scene"]
                     if isinstance(eps, dict):
                         for tier, count in eps.items():
+                            if tier == "description":
+                                continue
                             if not isinstance(count, int) or count < 0:
                                 errors[f"episode_generation.episodes_per_scene.{tier}"] = "Must be non-negative integer"
 
