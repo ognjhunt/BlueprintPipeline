@@ -61,6 +61,7 @@ Environment Variables:
     GENIESIM_ALLOW_IK_FAILURE_FALLBACK: Allow linear fallback if IK planning fails (default: 0)
 """
 
+import base64
 import json
 import logging
 import os
@@ -710,12 +711,34 @@ class GenieSimGRPCClient:
         if not response.success:
             return {"success": False}
 
-        return {
+        result = {
             "success": True,
             "robot_state": response.robot_state.to_dict() if response.robot_state else {},
             "scene_state": response.scene_state.to_dict() if response.scene_state else {},
             "timestamp": response.timestamp,
         }
+        if response.camera_observation:
+            camera_images = []
+            for image in response.camera_observation.images:
+                camera_images.append({
+                    "camera_id": image.camera_id,
+                    "rgb_data": base64.b64encode(image.rgb_data).decode("ascii")
+                    if image.rgb_data
+                    else "",
+                    "depth_data": base64.b64encode(image.depth_data).decode("ascii")
+                    if image.depth_data
+                    else "",
+                    "width": image.width,
+                    "height": image.height,
+                    "encoding": image.encoding,
+                    "timestamp": image.timestamp,
+                })
+            result["camera_observation"] = {"images": camera_images}
+        else:
+            result["camera_observation"] = {"images": []}
+
+        self._latest_observation = result
+        return result
 
     def set_joint_position(self, positions: List[float]) -> bool:
         """
@@ -774,7 +797,7 @@ class GenieSimGRPCClient:
 
         return None
 
-    def get_camera_data(self, camera_id: str = "wrist") -> Optional[np.ndarray]:
+    def get_camera_data(self, camera_id: str = "wrist") -> Optional[Dict[str, Any]]:
         """
         Get camera image.
 
@@ -784,15 +807,133 @@ class GenieSimGRPCClient:
             camera_id: Camera identifier
 
         Returns:
-            Image as numpy array or None
+            Dict with decoded rgb/depth numpy arrays and metadata, or None
         """
-        obs = self.get_observation()
+        obs = getattr(self, "_latest_observation", None)
+        if obs is None or not obs.get("success"):
+            obs = self.get_observation()
         if not obs.get("success"):
             return None
 
-        # Extract camera data from observation
-        # (Implementation depends on how camera data is structured in observation)
-        return None  # Placeholder
+        camera_observation = obs.get("camera_observation") or {}
+        images = camera_observation.get("images", [])
+        if not images:
+            logger.warning("No camera images available in observation.")
+            return None
+
+        image_info = next(
+            (image for image in images if image.get("camera_id") == camera_id),
+            None,
+        )
+        if image_info is None:
+            available_ids = sorted({image.get("camera_id") for image in images if image.get("camera_id")})
+            logger.warning(
+                "Camera '%s' not found in observation. Available camera_ids=%s.",
+                camera_id,
+                available_ids,
+            )
+            return None
+
+        rgb_bytes = base64.b64decode(image_info.get("rgb_data") or b"")
+        depth_bytes = base64.b64decode(image_info.get("depth_data") or b"")
+        width = int(image_info.get("width") or 0)
+        height = int(image_info.get("height") or 0)
+        encoding = (image_info.get("encoding") or "").lower()
+
+        rgb_image = self._decode_rgb_data(rgb_bytes, width, height, encoding)
+        depth_image = self._decode_depth_data(depth_bytes, width, height, encoding)
+
+        return {
+            "camera_id": camera_id,
+            "rgb": rgb_image,
+            "depth": depth_image,
+            "width": width,
+            "height": height,
+            "encoding": encoding,
+            "timestamp": image_info.get("timestamp"),
+        }
+
+    @staticmethod
+    def _decode_rgb_data(
+        rgb_bytes: bytes,
+        width: int,
+        height: int,
+        encoding: str,
+    ) -> Optional[np.ndarray]:
+        if not rgb_bytes:
+            return None
+        if GenieSimLocalFramework._is_png_data(rgb_bytes) or "png" in encoding:
+            return GenieSimLocalFramework._decode_png(rgb_bytes)
+
+        normalized = encoding.lower()
+        channels = 3
+        dtype = np.uint8
+        if "rgba" in normalized:
+            channels = 4
+        elif "rgb" in normalized:
+            channels = 3
+        elif "bgr" in normalized:
+            channels = 3
+        elif "mono" in normalized or "8uc1" in normalized:
+            channels = 1
+        expected_size = width * height * channels
+        if expected_size == 0 or len(rgb_bytes) < expected_size:
+            logger.warning("RGB data size mismatch (expected=%s, actual=%s).", expected_size, len(rgb_bytes))
+            return None
+        image = np.frombuffer(rgb_bytes, dtype=dtype, count=expected_size)
+        image = image.reshape((height, width, channels)) if channels > 1 else image.reshape((height, width))
+        if "bgr" in normalized:
+            image = image[..., ::-1]
+        return image
+
+    @staticmethod
+    def _decode_depth_data(
+        depth_bytes: bytes,
+        width: int,
+        height: int,
+        encoding: str,
+    ) -> Optional[np.ndarray]:
+        if not depth_bytes:
+            return None
+        if GenieSimLocalFramework._is_png_data(depth_bytes) or "png" in encoding:
+            return GenieSimLocalFramework._decode_png(depth_bytes)
+
+        normalized = encoding.lower()
+        if "32f" in normalized or "float32" in normalized:
+            dtype = np.float32
+        elif "16u" in normalized or "uint16" in normalized or "16" in normalized:
+            dtype = np.uint16
+        else:
+            dtype = np.float32
+        expected_size = width * height
+        if expected_size == 0:
+            logger.warning("Depth data size mismatch (missing width/height).")
+            return None
+        image = np.frombuffer(depth_bytes, dtype=dtype, count=expected_size)
+        if image.size < expected_size:
+            logger.warning("Depth data size mismatch (expected=%s, actual=%s).", expected_size, image.size)
+            return None
+        return image.reshape((height, width))
+
+    @staticmethod
+    def _decode_png(data: bytes) -> Optional[np.ndarray]:
+        try:
+            from PIL import Image
+        except ImportError:
+            try:
+                import imageio.v3 as iio
+            except ImportError:
+                logger.warning("No PNG decoder available (PIL/imageio missing).")
+                return None
+            return iio.imread(data)
+        import io
+
+        with Image.open(io.BytesIO(data)) as image:
+            return np.array(image)
+
+    @staticmethod
+    def _is_png_data(data: bytes) -> bool:
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
 
     def execute_trajectory(self, trajectory: List[Dict[str, Any]]) -> bool:
         """
@@ -1539,9 +1680,9 @@ class GenieSimLocalFramework:
                 # Capture camera data
                 for camera_id in ["wrist", "overhead", "side"]:
                     try:
-                        img = self._client.get_camera_data(camera_id)
-                        if img is not None:
-                            obs[f"image_{camera_id}"] = img
+                        camera_data = self._client.get_camera_data(camera_id)
+                        if camera_data is not None:
+                            obs.setdefault("camera_frames", {})[camera_id] = camera_data
                     except Exception:
                         logger.warning(
                             "Camera capture failed (camera_id=%s, episode_id=%s, task_name=%s, task_id=%s).",
@@ -1569,6 +1710,13 @@ class GenieSimLocalFramework:
 
             # Save episode
             episode_path = output_dir / f"{episode_id}.json"
+            def _json_default(value: Any) -> Any:
+                if isinstance(value, np.ndarray):
+                    return value.tolist()
+                if isinstance(value, np.generic):
+                    return value.item()
+                return value
+
             with open(episode_path, "w") as f:
                 json.dump({
                     "episode_id": episode_id,
@@ -1577,7 +1725,7 @@ class GenieSimLocalFramework:
                     "frame_count": len(frames),
                     "quality_score": quality_score,
                     "validation_passed": validation_passed,
-                }, f)
+                }, f, default=_json_default)
 
             result["success"] = True
             result["frame_count"] = len(frames)
