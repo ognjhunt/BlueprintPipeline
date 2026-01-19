@@ -108,6 +108,14 @@ Prereqs for the default Genie Sim path:
 - `grpcio` is installed in the active Python environment.
 - Genie Sim gRPC server is running for local submit/import steps.
 
+#### Bumping the Genie Sim GPU image ref
+
+The Genie Sim GPU job is pinned to a specific Genie Sim git ref via
+`genie-sim-gpu-job/GENIESIM_REF`. Update that file to a new full SHA or release
+tag, then rebuild/publish the `genie-sim-gpu-job` image so deployments pull the
+new ref. CI will validate the ref format and pass it into the Docker build as
+`GENIESIM_REF`. See `genie-sim-gpu-job/GENIESIM_VERSION.md` for detailed steps.
+
 Preflight command (recommended before running Genie Sim steps):
 
 ```bash

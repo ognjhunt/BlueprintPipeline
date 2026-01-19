@@ -55,6 +55,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate Genie Sim ref
+        run: |
+          GENIESIM_REF="$(cat genie-sim-gpu-job/GENIESIM_REF)"
+          if [[ ! "${GENIESIM_REF}" =~ ^[0-9a-f]{40}$ && ! "${GENIESIM_REF}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
+            echo "GENIESIM_REF must be a full 40-character SHA or a tag-like value."
+            echo "Got: ${GENIESIM_REF}"
+            exit 1
+          fi
+
+      - name: Load Genie Sim ref
+        run: echo "GENIESIM_REF=$(cat genie-sim-gpu-job/GENIESIM_REF)" >> $GITHUB_ENV
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -72,6 +84,8 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: ${{ github.ref == 'refs/heads/main' }}
+          build-args: |
+            GENIESIM_REF=${{ env.GENIESIM_REF }}
           tags: |
             ghcr.io/${{ github.repository }}/${{ matrix.image }}:${{ github.sha }}
             ghcr.io/${{ github.repository }}/${{ matrix.image }}:latest
