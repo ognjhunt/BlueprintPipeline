@@ -41,7 +41,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 
@@ -186,6 +186,59 @@ def _resolve_skip_rate_max(raw_value: Optional[str]) -> float:
     return skip_rate
 
 
+def _classify_validation_error_message(message: str) -> Optional[str]:
+    normalized = message.lower()
+    if "json" in normalized and "parse" in normalized:
+        return "json_parse_failed"
+    if "episode file not found" in normalized or "missing" in normalized and "episode file" in normalized:
+        return "parquet_missing_file"
+    if "missing required field" in normalized or "missing columns" in normalized:
+        return "parquet_missing_column"
+    if "nan" in normalized:
+        return "parquet_nan"
+    if "inf" in normalized:
+        return "parquet_inf"
+    if "timestamp" in normalized and "monotonic" in normalized:
+        return "timestamp_not_monotonic"
+    if "failed to load episode data" in normalized or "failed to read parquet" in normalized:
+        return "parquet_read_failed"
+    if "episode failed genie sim validation" in normalized:
+        return "geniesim_validation_failed"
+    if "missing camera" in normalized:
+        return "camera_missing"
+    return None
+
+
+def _collect_validation_error_types(
+    result: Dict[str, Any],
+    *,
+    min_quality_score: float,
+) -> List[str]:
+    error_types: Set[str] = set()
+    for message in result.get("errors", []):
+        error_type = _classify_validation_error_message(message)
+        if error_type:
+            error_types.add(error_type)
+    for message in result.get("warnings", []):
+        error_type = _classify_validation_error_message(message)
+        if error_type:
+            error_types.add(error_type)
+    if result.get("quality_score", 0.0) < min_quality_score:
+        error_types.add("quality_below_threshold")
+    if not error_types and not result.get("passed", True):
+        error_types.add("validation_failed")
+    return sorted(error_types)
+
+
+def _classify_conversion_error_message(message: str) -> str:
+    normalized = message.lower()
+    if "missing" in normalized and "episode file" in normalized:
+        return "parquet_missing_file"
+    if "pyarrow" in normalized:
+        return "parquet_dependency_missing"
+    if "schema" in normalized or "column" in normalized:
+        return "parquet_missing_column"
+    return "lerobot_conversion_error"
 def _read_parquet_dataframe(
     episode_file: Path,
     allow_fallback: bool,
@@ -1202,6 +1255,12 @@ def run_local_import_job(
     )
     result.output_dir = config.output_dir
     scene_id = os.environ.get("SCENE_ID", "unknown")
+    metrics = get_metrics()
+    metrics_labels = {
+        "job": "genie-sim-import-job",
+        "scene_id": scene_id,
+        "job_id": config.job_id,
+    }
 
     idempotency = _resolve_job_idempotency(job_metadata)
     if idempotency:
@@ -1228,6 +1287,11 @@ def run_local_import_job(
             payload = _load_json_file(episode_file)
         except Exception as exc:
             schema_errors.append(f"recording {episode_file.relative_to(config.output_dir)}: {exc}")
+            metrics.episode_validation_error_total.inc(labels={
+                **metrics_labels,
+                "status": "failure",
+                "error_type": "json_parse_failed",
+            })
             continue
         schema_errors.extend(
             _validate_schema_payload(
@@ -1247,6 +1311,30 @@ def run_local_import_job(
         require_parquet_validation=config.enable_validation,
     )
     validation_summary = validator.validate_batch(episode_metadata_list, recordings_dir)
+    for entry in validation_summary["episode_results"]:
+        metrics.episode_quality_score.observe(
+            entry["quality_score"],
+            labels=metrics_labels,
+        )
+        if entry["passed"]:
+            metrics.episode_validation_pass_total.inc(labels={
+                **metrics_labels,
+                "status": "success",
+            })
+            continue
+        metrics.episode_validation_fail_total.inc(labels={
+            **metrics_labels,
+            "status": "failure",
+        })
+        for error_type in _collect_validation_error_types(
+            entry,
+            min_quality_score=config.min_quality_score,
+        ):
+            metrics.episode_validation_error_total.inc(labels={
+                **metrics_labels,
+                "status": "failure",
+                "error_type": error_type,
+            })
     failed_episode_ids = [
         entry["episode_id"]
         for entry in validation_summary["episode_results"]
@@ -1404,7 +1492,6 @@ def run_local_import_job(
     if not gcs_output_path and output_dir_str.startswith("/mnt/gcs/"):
         gcs_output_path = "gs://" + output_dir_str[len("/mnt/gcs/"):]
 
-    metrics = get_metrics()
     if lerobot_skipped_count > 0:
         metrics.geniesim_import_episodes_skipped_total.inc(
             lerobot_skipped_count,
@@ -1415,6 +1502,14 @@ def run_local_import_job(
                 "[METRICS] Genie Sim import skipped episodes: "
                 f"{lerobot_skipped_count} (scene: {scene_id}, job: {config.job_id})"
             )
+    if conversion_failures:
+        for failure in conversion_failures:
+            failure_error = failure.get("error", "unknown")
+            metrics.lerobot_conversion_fail_total.inc(labels={
+                **metrics_labels,
+                "status": "failure",
+                "error_type": _classify_conversion_error_message(str(failure_error)),
+            })
     metrics_summary = {
         "backend": metrics.backend.value,
         "stats": metrics.get_stats(),

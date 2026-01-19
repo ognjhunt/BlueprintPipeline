@@ -546,6 +546,8 @@ class PipelineMetricsCollector:
             "Total pipeline cost in USD",
             MetricType.COUNTER,
             "USD",
+        )
+
         # Cost metrics
         self.cost_per_scene = self._create_metric(
             "cost_per_scene",
@@ -564,6 +566,31 @@ class PipelineMetricsCollector:
         self.retries_total = self._create_metric(
             "retries_total",
             "Total number of retries",
+            MetricType.COUNTER,
+        )
+
+        # Episode validation + conversion metrics
+        self.episode_validation_pass_total = self._create_metric(
+            "episode_validation_pass_total",
+            "Total number of episodes that passed validation",
+            MetricType.COUNTER,
+        )
+
+        self.episode_validation_fail_total = self._create_metric(
+            "episode_validation_fail_total",
+            "Total number of episodes that failed validation",
+            MetricType.COUNTER,
+        )
+
+        self.episode_validation_error_total = self._create_metric(
+            "episode_validation_error_total",
+            "Total number of episode validation errors by type",
+            MetricType.COUNTER,
+        )
+
+        self.lerobot_conversion_fail_total = self._create_metric(
+            "lerobot_conversion_fail_total",
+            "Total number of LeRobot conversion failures",
             MetricType.COUNTER,
         )
 
