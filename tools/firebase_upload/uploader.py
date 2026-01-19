@@ -10,7 +10,7 @@ import base64
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 import firebase_admin
 from firebase_admin import credentials, storage
@@ -327,3 +327,49 @@ def upload_episodes_to_firebase(
         )
 
     return summary
+
+
+def cleanup_firebase_paths(
+    *,
+    prefix: Optional[str] = None,
+    paths: Optional[Iterable[str]] = None,
+) -> dict:
+    """Delete Firebase blobs by prefix or by explicit paths."""
+    if not prefix and not paths:
+        raise ValueError("cleanup_firebase_paths requires a prefix or paths to delete")
+
+    init_firebase()
+    bucket = storage.bucket()
+
+    deleted = []
+    failed = []
+    requested = []
+    mode = "paths" if paths else "prefix"
+
+    if paths:
+        for blob_path in paths:
+            if not blob_path:
+                continue
+            requested.append(blob_path)
+            blob = bucket.blob(blob_path)
+            try:
+                blob.delete()
+                deleted.append(blob_path)
+            except Exception as exc:
+                failed.append({"path": blob_path, "error": str(exc)})
+    elif prefix:
+        for blob in bucket.list_blobs(prefix=prefix):
+            requested.append(blob.name)
+            try:
+                blob.delete()
+                deleted.append(blob.name)
+            except Exception as exc:
+                failed.append({"path": blob.name, "error": str(exc)})
+
+    return {
+        "mode": mode,
+        "prefix": prefix,
+        "requested": requested,
+        "deleted": deleted,
+        "failed": failed,
+    }
