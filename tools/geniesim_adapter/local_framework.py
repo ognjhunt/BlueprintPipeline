@@ -57,6 +57,7 @@ Environment Variables:
     ISAACSIM_REQUIRED: Enforce Isaac Sim + Genie Sim installation checks (default: false)
     CUROBO_REQUIRED: Enforce cuRobo availability checks (default: false)
     ALLOW_GENIESIM_MOCK: Allow local mock gRPC server when GENIESIM_ROOT is missing (default: 0)
+    GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD: Allow non-collision-aware linear fallback in production (default: 0; risky)
 """
 
 import json
@@ -230,6 +231,7 @@ class GenieSimConfig:
     headless: bool = True
     environment: str = "development"
     allow_linear_fallback: bool = False
+    allow_linear_fallback_in_production: bool = False
 
     # Output settings
     recording_dir: Path = Path("/tmp/geniesim_recordings")
@@ -244,6 +246,9 @@ class GenieSimConfig:
         """Create configuration from environment variables."""
         environment = os.getenv("GENIESIM_ENV", os.getenv("BP_ENV", "development")).lower()
         allow_linear_fallback = os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK", "0") == "1"
+        allow_linear_fallback_in_production = (
+            os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD", "0") == "1"
+        )
         return cls(
             host=get_geniesim_host(),
             port=get_geniesim_port(),
@@ -256,6 +261,7 @@ class GenieSimConfig:
             robot_type=os.getenv("ROBOT_TYPE", "franka"),
             environment=environment,
             allow_linear_fallback=allow_linear_fallback,
+            allow_linear_fallback_in_production=allow_linear_fallback_in_production,
         )
 
 
@@ -951,12 +957,23 @@ class GenieSimLocalFramework:
         production_mode = self.config.environment == "production"
         curobo_enabled = CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo
         allow_fallback_env = os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK")
+        allow_fallback_in_prod = self.config.allow_linear_fallback_in_production
 
         if (production_mode or self.config.curobo_required) and not curobo_enabled:
+            if production_mode and allow_fallback_in_prod:
+                self.config.allow_linear_fallback = True
+                self.log(
+                    "cuRobo unavailable in production; linear interpolation fallback enabled via "
+                    "GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD. This is not collision-aware.",
+                    "WARNING",
+                )
+                return
             raise RuntimeError(
                 "cuRobo motion planning is required (CUROBO_REQUIRED=1 or GENIESIM_ENV=production). "
                 "Install cuRobo (pip install nvidia-curobo) and enable use_curobo, "
-                "or set GENIESIM_ENV=development for local testing with linear fallback."
+                "or set GENIESIM_ENV=development for local testing with linear fallback. "
+                "To override in production, set GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 "
+                "(non-collision-aware)."
             )
 
         if not production_mode and not curobo_enabled:
@@ -1591,10 +1608,19 @@ class GenieSimLocalFramework:
         # Use cuRobo for real motion planning
         # =====================================================================
         if production_mode and not (CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo):
-            raise RuntimeError(
-                "Collision-aware planner required in production; "
-                "cuRobo integration is unavailable or disabled."
-            )
+            if self.config.allow_linear_fallback_in_production:
+                self.log(
+                    "  ⚠️  cuRobo unavailable in production; falling back to linear interpolation "
+                    "(not collision-aware).",
+                    "WARNING",
+                )
+            else:
+                raise RuntimeError(
+                    "Collision-aware planner required in production; "
+                    "cuRobo integration is unavailable or disabled. "
+                    "To override, set GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 "
+                    "(non-collision-aware)."
+                )
 
         if CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo:
             trajectory = self._generate_curobo_trajectory(
@@ -1608,9 +1634,17 @@ class GenieSimLocalFramework:
                 self.log(f"  ✅ cuRobo trajectory: {len(trajectory)} waypoints")
                 return trajectory
             elif production_mode:
-                raise RuntimeError(
-                    "Collision-aware planning failed in production; "
-                    "linear interpolation fallback is disabled."
+                if not self.config.allow_linear_fallback_in_production:
+                    raise RuntimeError(
+                        "Collision-aware planning failed in production; "
+                        "linear interpolation fallback is disabled. "
+                        "To override, set GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 "
+                        "(non-collision-aware)."
+                    )
+                self.log(
+                    "  ⚠️  cuRobo planning failed in production; falling back to linear interpolation "
+                    "(not collision-aware).",
+                    "WARNING",
                 )
             else:
                 self.log("  ⚠️  cuRobo planning failed", "WARNING")
@@ -1621,7 +1655,9 @@ class GenieSimLocalFramework:
         if not self.config.allow_linear_fallback:
             self.log(
                 "  ❌ Linear interpolation fallback disabled. "
-                "Set GENIESIM_ALLOW_LINEAR_FALLBACK=1 for dev-only runs.",
+                "Set GENIESIM_ALLOW_LINEAR_FALLBACK=1 for dev-only runs or "
+                "GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 to override in production "
+                "(not collision-aware).",
                 "ERROR",
             )
             return None
