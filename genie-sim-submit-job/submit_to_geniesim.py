@@ -802,6 +802,13 @@ def main() -> int:
                 "by_robot": robot_failures,
             }
             job_status = "failed"
+            from monitoring.alerting import send_alert
+            send_alert(
+                event_type="geniesim_submission_failure",
+                summary=f"Genie Sim submission failed for scene {scene_id}",
+                details={"job_id": job_id, "robot_failures": robot_failures},
+                severity="error"
+            )
         else:
             submission_message = "Local Genie Sim execution completed."
             job_status = "completed"

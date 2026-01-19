@@ -180,6 +180,17 @@ def upload_episodes_to_firebase(
     ) -> Optional[dict]:
         blob = bucket.blob(remote_path)
         local_hashes = _calculate_file_hashes(path)
+
+        # Check if already exists and matches hashes (idempotency/resumability)
+        if blob.exists():
+            verified, _ = _verify_blob_checksum(
+                blob,
+                path,
+                local_hashes=local_hashes,
+            )
+            if verified:
+                return None  # Skip upload
+
         _set_blob_sha256_metadata(blob, local_hashes["sha256_hex"])
         _upload_file(blob, path, content_type)
         verified, verification_detail = _verify_blob_checksum(

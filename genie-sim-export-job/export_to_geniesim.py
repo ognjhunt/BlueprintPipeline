@@ -478,26 +478,28 @@ def run_geniesim_export_job(
 
                     variation_objects = filtered_variation_objects
                     if non_commercial_count > 0:
-                        if production_mode:
-                            print(
-                                "[GENIESIM-EXPORT-JOB] ❌ ERROR: Production mode ignores asset.commercial_ok. "
-                                "Non-permissive or missing licenses detected in variation assets."
-                            )
-                            print(
-                                "[GENIESIM-EXPORT-JOB] ❌ ERROR: Update asset.license to one of "
-                                f"{sorted(COMMERCIAL_LICENSE_ALLOWLIST)}, remove the asset, or rerun "
-                                "variation-gen-job with commercial-safe assets."
-                            )
-                            print(
-                                "[GENIESIM-EXPORT-JOB] ❌ ERROR: Example non-compliant assets: "
-                                f"{non_commercial_assets[:5]}"
-                            )
                         print(
                             f"[GENIESIM-EXPORT-JOB] ✓ Filtered out {non_commercial_count} NC-licensed variation assets"
                         )
                         print(
                             f"[GENIESIM-EXPORT-JOB] ✓ Retained {len(variation_objects)} commercial-safe variation assets"
                         )
+                        if production_mode:
+                            message = (
+                                "Production mode detected non-permissive or missing licenses in variation assets. "
+                                "Update asset.license to one of "
+                                f"{sorted(COMMERCIAL_LICENSE_ALLOWLIST)}, remove the asset, or rerun "
+                                "variation-gen-job with commercial-safe assets. "
+                                f"Non-compliant assets: {non_commercial_assets[:5]}"
+                            )
+                            print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
+                            FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+                                exception=RuntimeError(message),
+                                failed_step="variation_assets_commercial_validation",
+                                input_params=input_params,
+                                error_code="non_commercial_variation_assets",
+                            )
+                            return 1
                     if not variation_objects and commercial_checks_required:
                         return _fail_variation_assets_requirement(
                             bucket=bucket,
@@ -892,6 +894,50 @@ def run_geniesim_export_job(
     )
 
     try:
+        # Pre-flight reachability check
+        print("\n[GENIESIM-EXPORT-JOB] Running kinematic reachability pre-flight...")
+        try:
+            from trajectory_solver import TrajectorySolver, ROBOT_CONFIGS
+            from motion_planner import Waypoint, MotionPhase
+
+            robot_cfg = ROBOT_CONFIGS.get(robot_type)
+            if robot_cfg:
+                solver = TrajectorySolver(robot_type=robot_type, verbose=False)
+                reach_errors = []
+                # Check a few key points for reachability
+                for task in manifest.get("suggested_tasks", []):
+                    target_pos = task.get("target_position")
+                    if target_pos:
+                        try:
+                            # Use default orientation pointing down
+                            joints = solver.ik_solver.solve(
+                                target_position=np.array(target_pos),
+                                target_orientation=np.array([1.0, 0.0, 0.0, 0.0])
+                            )
+                            if joints is None:
+                                reach_errors.append(f"Task '{task.get('task_name')}' target {target_pos} out of reach")
+                        except Exception as e:
+                            print(f"[GENIESIM-EXPORT-JOB] Reachability check error for task: {e}")
+
+                if reach_errors:
+                    print(f"[GENIESIM-EXPORT-JOB] ⚠️  Reachability warnings ({len(reach_errors)} tasks impacted)")
+                    for err in reach_errors[:3]:
+                        print(f"[GENIESIM-EXPORT-JOB]   - {err}")
+                    if production_mode and len(reach_errors) > (len(manifest.get("suggested_tasks", [])) / 2):
+                        message = "Majority of tasks are kinematically unreachable. Aborting export."
+                        print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
+                        FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+                            exception=RuntimeError(message),
+                            failed_step="reachability_preflight",
+                            input_params=input_params,
+                            error_code="unreachable_tasks",
+                        )
+                        return 1
+            else:
+                print(f"[GENIESIM-EXPORT-JOB] ⚠️  No reachability config for robot type: {robot_type}")
+        except Exception as e:
+            print(f"[GENIESIM-EXPORT-JOB] ⚠️  Reachability pre-flight failed to run: {e}")
+
         exporter = GenieSimExporter(config, verbose=True)
         # Use merged manifest that includes YOUR variation assets
         result = exporter.export(

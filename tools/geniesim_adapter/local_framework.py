@@ -268,6 +268,8 @@ class GenieSimConfig:
 
     # Data collection settings
     episodes_per_task: int = 100
+    stall_timeout: float = 60.0
+    max_stalls: int = 3
     use_curobo: bool = True
     headless: bool = True
     environment: str = "development"
@@ -2029,6 +2031,7 @@ class GenieSimLocalFramework:
         run_dir = self.config.recording_dir / f"run_{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        stall_count = 0
         for task_idx, task in enumerate(tasks):
             task_name = task.get("task_name", f"task_{task_idx}")
             self.log(f"\nTask {task_idx + 1}/{len(tasks)}: {task_name}")
@@ -2052,6 +2055,24 @@ class GenieSimLocalFramework:
                         episode_id=f"{task_name}_ep{ep_idx:04d}",
                         output_dir=run_dir,
                     )
+
+                    if not episode_result.get("success"):
+                        error_msg = episode_result.get("error", "unknown")
+                        if "stalled" in error_msg or "timed out" in error_msg:
+                            stall_count += 1
+                            self.log(f"Simulation stall detected ({stall_count}/{self.config.max_stalls})", "WARNING")
+                            if stall_count >= self.config.max_stalls:
+                                self.log("Max stalls reached. Restarting Genie Sim server...", "ERROR")
+                                self.stop_server()
+                                if not self.start_server(
+                                    scene_usd_path=Path(scene_config.get("usd_path")) if scene_config and scene_config.get("usd_path") else None
+                                ):
+                                    result.errors.append("Failed to restart Genie Sim server after stalls")
+                                    return result
+                                stall_count = 0
+                                # Re-connect and re-configure
+                                self.connect()
+                                self._configure_task(task, scene_config)
 
                     total_episodes += 1
 
@@ -2199,6 +2220,7 @@ class GenieSimLocalFramework:
                 "error": None,
                 "mode": "streaming",
                 "start_time": None,
+                "last_heartbeat": time.time(),
             }
             start_event = threading.Event()
             timestamps = [waypoint["timestamp"] for waypoint in timed_trajectory]
@@ -2211,6 +2233,7 @@ class GenieSimLocalFramework:
                         _collect_polling()
                         return
                     for response in stream:
+                        collector_state["last_heartbeat"] = time.time()
                         if not response.success:
                             collector_state["error"] = (
                                 "Observation stream returned unsuccessful response."
@@ -2255,12 +2278,23 @@ class GenieSimLocalFramework:
 
             execution_success = self._client.execute_trajectory(timed_trajectory)
             trajectory_duration = (timestamps[-1] - timestamps[0]) if timestamps else 0.0
-            collector_thread.join(timeout=trajectory_duration + 10.0)
 
-            if collector_thread.is_alive():
-                collector_state["error"] = (
-                    "Observation collection did not complete before timeout."
-                )
+            # Watchdog loop
+            watchdog_timeout = self.config.stall_timeout
+            wait_start = time.time()
+            max_wait = trajectory_duration + 20.0 # Grace period
+
+            while collector_thread.is_alive():
+                now = time.time()
+                if now - collector_state.get("last_heartbeat", 0) > watchdog_timeout:
+                    collector_state["error"] = f"Simulation stalled: no heartbeat for {watchdog_timeout}s"
+                    break
+
+                if now - wait_start > max_wait:
+                    collector_state["error"] = f"Episode timed out after {max_wait}s"
+                    break
+
+                collector_thread.join(timeout=2.0)
 
             if not execution_success:
                 result["error"] = "Trajectory execution failed"
