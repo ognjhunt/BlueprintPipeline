@@ -176,6 +176,12 @@ class LocalPipelineRunner:
         self.disable_articulated_assets = disable_articulated_assets
         self.environment = os.getenv("BP_ENV", "development").lower()
         self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+        self.enable_checkpoint_hashes = os.getenv("BP_CHECKPOINT_HASHES", "0").lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+        }
 
         # Derive scene ID from directory name
         self.scene_id = self.scene_dir.name
@@ -365,6 +371,7 @@ class LocalPipelineRunner:
         steps: Optional[List[PipelineStep]] = None,
         run_validation: bool = False,
         resume_from: Optional[PipelineStep] = None,
+        force_rerun_steps: Optional[List[PipelineStep]] = None,
     ) -> bool:
         """Run the pipeline.
 
@@ -372,6 +379,7 @@ class LocalPipelineRunner:
             steps: Specific steps to run (default: all applicable)
             run_validation: Run QA validation at the end
             resume_from: Resume from the given step (skip completed steps with checkpoints)
+            force_rerun_steps: Steps to rerun even if checkpoints exist
 
         Returns:
             True if all steps succeeded
@@ -432,10 +440,20 @@ class LocalPipelineRunner:
 
         # Run each step
         all_success = True
+        forced_steps = set(force_rerun_steps or [])
         for step in steps:
             if resume_from is not None:
                 expected_outputs = self._expected_output_paths(step)
-                if should_skip_step(self.scene_dir, step.value, expected_outputs=expected_outputs):
+                if step in forced_steps:
+                    self.log(f"Force rerun requested for step {step.value}; skipping checkpoint.", "INFO")
+                elif should_skip_step(
+                    self.scene_dir,
+                    step.value,
+                    expected_outputs=expected_outputs,
+                    require_nonempty=True,
+                    require_fresh_outputs=True,
+                    validate_sidecar_metadata=True,
+                ):
                     checkpoint = load_checkpoint(self.scene_dir, step.value)
                     self.log(f"Skipping step {step.value} (checkpoint found)", "INFO")
                     self.results.append(
@@ -470,6 +488,7 @@ class LocalPipelineRunner:
                     outputs=result.outputs,
                     output_paths=self._expected_output_paths(step),
                     scene_id=self.scene_id,
+                    store_output_hashes=self.enable_checkpoint_hashes,
                 )
             if step == PipelineStep.REGEN3D and self._pending_articulation_preflight:
                 if not self._preflight_articulation_requirements(steps):
@@ -2566,6 +2585,15 @@ def main():
         help="Resume pipeline from the specified step (skip completed steps with checkpoints)",
     )
     parser.add_argument(
+        "--force-rerun",
+        action="append",
+        default=[],
+        help=(
+            "Comma-separated list of steps to rerun even if checkpoints exist. "
+            "Use 'all' to rerun every step. Can be provided multiple times."
+        ),
+    )
+    parser.add_argument(
         "--mock-geniesim",
         action="store_true",
         help="Run Genie Sim steps in mock mode (no external services required)",
@@ -2616,6 +2644,22 @@ def main():
                 print(f"Available: {[s.value for s in PipelineStep]}")
                 sys.exit(1)
 
+    force_rerun_steps: List[PipelineStep] = []
+    if args.force_rerun:
+        requested = []
+        for entry in args.force_rerun:
+            requested.extend([item.strip().lower() for item in entry.split(",") if item.strip()])
+        if "all" in requested:
+            force_rerun_steps = list(PipelineStep)
+        else:
+            for name in requested:
+                try:
+                    force_rerun_steps.append(PipelineStep(name))
+                except ValueError:
+                    print(f"Unknown force-rerun step: {name}")
+                    print(f"Available: {[s.value for s in PipelineStep]}")
+                    sys.exit(1)
+
     # Create and run pipeline
     runner = LocalPipelineRunner(
         scene_dir=args.scene_dir,
@@ -2645,6 +2689,7 @@ def main():
         steps=steps,
         run_validation=args.validate,
         resume_from=resume_from,
+        force_rerun_steps=force_rerun_steps,
     )
 
     sys.exit(0 if success else 1)
