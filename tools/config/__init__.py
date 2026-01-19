@@ -119,6 +119,15 @@ class DwmThresholds:
 
 
 @dataclass
+class GenieSimKinematicReachabilityThresholds:
+    """Genie Sim kinematic reachability validation thresholds."""
+    enabled: bool = True
+    min_reachability_rate: float = 0.95
+    max_unreachable_targets: int = 0
+    check_place_targets: bool = True
+
+
+@dataclass
 class HumanApprovalConfig:
     """Human approval workflow configuration."""
     enabled: bool = True
@@ -175,6 +184,9 @@ class QualityConfig:
     replicator: ReplicatorThresholds = field(default_factory=ReplicatorThresholds)
     episode_metadata: EpisodeMetadataThresholds = field(default_factory=EpisodeMetadataThresholds)
     dwm: DwmThresholds = field(default_factory=DwmThresholds)
+    geniesim_kinematic_reachability: GenieSimKinematicReachabilityThresholds = field(
+        default_factory=GenieSimKinematicReachabilityThresholds
+    )
     human_approval: HumanApprovalConfig = field(default_factory=HumanApprovalConfig)
     approval_store: ApprovalStoreConfig = field(default_factory=ApprovalStoreConfig)
     gate_overrides: GateOverrideConfig = field(default_factory=GateOverrideConfig)
@@ -631,6 +643,7 @@ class ConfigLoader:
         replicator_thresholds = thresholds.get("replicator", {})
         episode_metadata_thresholds = thresholds.get("episode_metadata", {})
         dwm_thresholds = thresholds.get("dwm", {})
+        geniesim_ik_thresholds = thresholds.get("geniesim_kinematic_reachability", {})
 
         return QualityConfig(
             physics=PhysicsThresholds(
@@ -709,6 +722,12 @@ class ConfigLoader:
                         "metadata/prompt.txt",
                     ],
                 ),
+            ),
+            geniesim_kinematic_reachability=GenieSimKinematicReachabilityThresholds(
+                enabled=geniesim_ik_thresholds.get("enabled", True),
+                min_reachability_rate=geniesim_ik_thresholds.get("min_reachability_rate", 0.95),
+                max_unreachable_targets=geniesim_ik_thresholds.get("max_unreachable_targets", 0),
+                check_place_targets=geniesim_ik_thresholds.get("check_place_targets", True),
             ),
             human_approval=HumanApprovalConfig(
                 enabled=config.get("human_approval", {}).get("enabled", True),
@@ -1219,6 +1238,23 @@ class ConfigLoader:
                                 val = data_quality[key]
                                 if not (0.0 <= val <= 1.0):
                                     errors[f"thresholds.data_quality.{key}"] = "Must be between 0.0 and 1.0"
+
+                # Genie Sim kinematic reachability thresholds
+                if "geniesim_kinematic_reachability" in thresholds:
+                    geniesim_ik = thresholds["geniesim_kinematic_reachability"]
+                    if isinstance(geniesim_ik, dict):
+                        if "min_reachability_rate" in geniesim_ik:
+                            val = geniesim_ik["min_reachability_rate"]
+                            if not (0.0 <= val <= 1.0):
+                                errors[
+                                    "thresholds.geniesim_kinematic_reachability.min_reachability_rate"
+                                ] = "Must be between 0.0 and 1.0"
+                        if "max_unreachable_targets" in geniesim_ik:
+                            val = geniesim_ik["max_unreachable_targets"]
+                            if not isinstance(val, int) or val < 0:
+                                errors[
+                                    "thresholds.geniesim_kinematic_reachability.max_unreachable_targets"
+                                ] = "Must be a non-negative integer"
 
         if "gate_overrides" in config:
             gate_overrides = config["gate_overrides"]

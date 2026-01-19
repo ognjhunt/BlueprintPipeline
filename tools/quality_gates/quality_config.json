@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Quality Gate Configuration",
   "description": "Configurable thresholds and settings for quality gates. Labs can customize these values for their specific use cases.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "thresholds": {
     "physics": {
       "mass_min_kg": 0.01,
@@ -123,6 +123,13 @@
       "require_task_files": true,
       "syntax_check_enabled": true,
       "description": "Isaac Lab code generation thresholds"
+    },
+    "geniesim_kinematic_reachability": {
+      "enabled": true,
+      "min_reachability_rate": 0.95,
+      "max_unreachable_targets": 0,
+      "check_place_targets": true,
+      "description": "Reachability requirements for Genie Sim task target poses"
     }
   },
   "human_approval": {
