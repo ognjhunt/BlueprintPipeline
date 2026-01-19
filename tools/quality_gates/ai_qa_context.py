@@ -160,6 +160,19 @@ Analyze the USD structure and identify:
 Focus on issues that would prevent the scene from loading or simulating correctly.
 """,
 
+        "geniesim_export_ready": """
+You are reviewing a Genie Sim export package generated from a BlueprintPipeline scene.
+The export should contain the converted scene graph, asset index, and task hints.
+
+Analyze the export output and identify:
+1. Missing or incomplete export artifacts (scene graph, assets index, task configs)
+2. References to assets that were not included in the export package
+3. Configuration flags that look inconsistent with the source manifest
+4. Metadata issues that would prevent Genie Sim ingestion
+
+Focus on issues that would block successful import into Genie Sim.
+""",
+
         "episodes_generated": """
 You are reviewing generated training episodes for robot learning.
 These episodes will be used to train manipulation policies.
@@ -171,6 +184,19 @@ Analyze the episode data and identify:
 4. Task completion patterns and success rates
 
 Focus on episode quality for sim-to-real transfer.
+""",
+
+        "geniesim_import_complete": """
+You are reviewing a Genie Sim import bundle after validation and conversion.
+The bundle should include validated episodes, metadata, and checksums.
+
+Analyze the import results and identify:
+1. Episodes filtered or failed during validation
+2. Missing or inconsistent metadata (dataset_info, episodes index)
+3. Checksum verification errors or missing artifacts
+4. Conversion issues that could affect downstream training
+
+Focus on the completeness and integrity of the imported dataset.
 """,
 
         "scene_ready": """
@@ -433,6 +459,22 @@ Return only valid JSON, no additional text.
                 estimated_time="5-10 minutes",
             ))
 
+        elif checkpoint == "geniesim_export_ready":
+            items.append(QAContextItem(
+                category="Export Artifacts",
+                title="Genie Sim Export Completeness",
+                description="Verify Genie Sim export artifacts are present and consistent",
+                priority="high",
+                what_to_check=[
+                    "Scene graph export exists and loads",
+                    "Asset index includes all referenced assets",
+                    "Task configuration hints are generated",
+                    "Output directory contains expected files",
+                ],
+                why_it_matters="Missing artifacts prevent Genie Sim ingestion",
+                estimated_time="3-5 minutes",
+            ))
+
         elif checkpoint == "episodes_generated":
             stats = context_data.get("episode_stats", {})
 
@@ -463,6 +505,22 @@ Return only valid JSON, no additional text.
                 ],
                 why_it_matters="Visual review catches issues metrics miss",
                 estimated_time="5-10 minutes",
+            ))
+
+        elif checkpoint == "geniesim_import_complete":
+            items.append(QAContextItem(
+                category="Import Integrity",
+                title="Imported Episode Verification",
+                description="Confirm imported episodes and metadata are complete",
+                priority="high",
+                what_to_check=[
+                    "Episode count matches expectations",
+                    "LeRobot bundle metadata is present",
+                    "Checksums verification succeeded",
+                    "Validation warnings are understood",
+                ],
+                why_it_matters="Incomplete imports degrade downstream training data",
+                estimated_time="3-5 minutes",
             ))
 
         elif checkpoint == "scene_ready":
