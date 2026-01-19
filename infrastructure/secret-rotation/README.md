@@ -2,6 +2,11 @@
 
 This directory contains the Cloud Run job used by the automated secret rotation scheduler.
 
+## Runbook
+
+Operational guidance for scheduling, validation, rollback, and incident response lives in
+[`docs/operations/secret-rotation.md`](../../docs/operations/secret-rotation.md).
+
 ## Build + push
 
 ```bash
