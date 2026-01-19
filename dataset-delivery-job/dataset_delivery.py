@@ -16,10 +16,78 @@ import sys
 import tempfile
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import requests
 from google.cloud import storage
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.quality_gates.quality_gate import (
+    QualityGate,
+    QualityGateCheckpoint,
+    QualityGateRegistry,
+    QualityGateResult,
+    QualityGateSeverity,
+)
+
+GCS_ROOT = Path("/mnt/gcs")
+JOB_NAME = "dataset-delivery-job"
+
+
+def _gate_report_path(root: Path, scene_id: str) -> Path:
+    report_path = root / f"scenes/{scene_id}/{JOB_NAME}/quality_gate_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    return report_path
+
+
+def _emit_delivery_quality_gate(
+    scene_id: str,
+    context: Dict[str, Any],
+    report_path: Path,
+) -> None:
+    checkpoint = QualityGateCheckpoint.DELIVERED
+    registry = QualityGateRegistry(verbose=True)
+
+    def _check_delivery(ctx: Dict[str, Any]) -> QualityGateResult:
+        passed = ctx["success"]
+        severity = QualityGateSeverity.INFO if passed else QualityGateSeverity.ERROR
+        message = (
+            "Dataset delivery completed successfully"
+            if passed
+            else "Dataset delivery completed with errors"
+        )
+        details = {
+            "scene_id": ctx["scene_id"],
+            "delivery_targets": ctx["delivery_targets"],
+            "artifact_counts": ctx["artifact_counts"],
+            "dataset_card_paths": ctx["dataset_card_paths"],
+            "warnings": ctx["warnings"],
+            "errors": ctx["errors"],
+        }
+        return QualityGateResult(
+            gate_id="dataset_delivered",
+            checkpoint=checkpoint,
+            passed=passed,
+            severity=severity,
+            message=message,
+            details=details,
+        )
+
+    registry.register(QualityGate(
+        id="dataset_delivered",
+        name="Dataset Delivered",
+        checkpoint=checkpoint,
+        severity=QualityGateSeverity.INFO,
+        description="Emit a completion gate for dataset delivery.",
+        check_fn=_check_delivery,
+    ))
+
+    registry.run_checkpoint(checkpoint, context)
+    registry.save_report(scene_id, report_path)
 
 
 def parse_mapping(value: str | None) -> Dict[str, str]:
@@ -220,10 +288,17 @@ def main() -> int:
         if not lab_delivery_buckets:
             raise ValueError("No delivery buckets configured; set LAB_DELIVERY_BUCKETS or DEFAULT_DELIVERY_BUCKET")
 
+        delivery_targets = []
+        delivery_warnings = []
+        delivery_errors = []
+        dataset_card_paths: Dict[str, Any] = {"local": None, "gcs": {}}
+        artifact_counts = {"total_artifacts": 0, "per_lab": {}}
+
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_card_path = os.path.join(tmpdir, "dataset_card.json")
             with open(dataset_card_path, "w", encoding="utf-8") as file_handle:
                 json.dump(dataset_card, file_handle, indent=2)
+            dataset_card_paths["local"] = dataset_card_path
 
             source_bucket_name, package_object = parse_gs_uri(package_uri)
             source_bucket = client.bucket(source_bucket_name)
@@ -240,6 +315,20 @@ def main() -> int:
 
                 dataset_card_url = f"gs://{dest_bucket_name}/{dataset_card_object_name}"
                 bundle_url = f"gs://{dest_bucket_name}/{package_object_name}"
+                delivery_targets.append(
+                    {
+                        "lab": lab,
+                        "bucket": dest_bucket_name,
+                        "delivery_prefix": delivery_prefix,
+                        "package_object": package_object_name,
+                        "dataset_card_object": dataset_card_object_name,
+                        "bundle_url": bundle_url,
+                        "dataset_card_url": dataset_card_url,
+                    }
+                )
+                dataset_card_paths["gcs"][lab] = dataset_card_url
+                artifact_counts["per_lab"][lab] = 2
+                artifact_counts["total_artifacts"] += 2
 
                 webhook_url = lab_webhook_urls.get(lab)
                 if webhook_url:
@@ -253,6 +342,21 @@ def main() -> int:
                             "bundle_url": bundle_url,
                         },
                     )
+
+        report_path = _gate_report_path(GCS_ROOT, scene_id)
+        _emit_delivery_quality_gate(
+            scene_id,
+            {
+                "scene_id": scene_id,
+                "success": True,
+                "delivery_targets": delivery_targets,
+                "artifact_counts": artifact_counts,
+                "dataset_card_paths": dataset_card_paths,
+                "warnings": delivery_warnings,
+                "errors": delivery_errors,
+            },
+            report_path,
+        )
 
         print("Dataset delivery completed")
         return 0
