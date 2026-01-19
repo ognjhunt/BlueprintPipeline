@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 # Import configuration
 try:
     from tools.config import load_quality_config, QualityConfig
-    from tools.config.env import parse_bool_env, parse_float_env
+    from tools.config.env import parse_bool_env, parse_float_env, parse_int_env
     from tools.quality_gates.notification_validation import ensure_production_notification_channels
     HAVE_CONFIG = True
 except ImportError:
@@ -1237,6 +1237,15 @@ class QualityGateRegistry:
                     return key, data.get(key)
             return None, None
 
+        def _get_min_stable_steps() -> int:
+            return parse_int_env(
+                os.getenv("BP_QUALITY_SIMULATION_MIN_STABLE_STEPS"),
+                default=50,
+                min_value=1,
+                max_value=10000,
+                name="BP_QUALITY_SIMULATION_MIN_STABLE_STEPS",
+            ) or 50
+
         # QG-1: Manifest Validation
         def check_manifest(ctx: Dict[str, Any]) -> QualityGateResult:
             manifest = ctx.get("manifest", {})
@@ -2027,7 +2036,8 @@ class QualityGateRegistry:
             physics_stable = sim_check.get("physics_stable", False)
             steps_completed = sim_check.get("steps_completed", 0)
 
-            passed = scene_loads and physics_stable and steps_completed >= 10
+            min_stable_steps = _get_min_stable_steps()
+            passed = scene_loads and physics_stable and steps_completed >= min_stable_steps
 
             return QualityGateResult(
                 gate_id="qg-5-pre-episode",
@@ -2035,7 +2045,7 @@ class QualityGateRegistry:
                 passed=passed,
                 severity=QualityGateSeverity.ERROR,
                 message=f"Simulation check: loads={scene_loads}, stable={physics_stable}, steps={steps_completed}",
-                details=sim_check,
+                details={**sim_check, "min_stable_steps_required": min_stable_steps},
                 recommendations=[
                     "Check for floating/exploding objects" if not physics_stable else "",
                     "Verify USD scene loads without errors" if not scene_loads else "",

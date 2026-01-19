@@ -217,7 +217,7 @@ Tier overrides are merged by data pack tier (`DATA_PACK_TIER` or per-scene `data
 **Simulation Thresholds**:
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `BP_QUALITY_SIMULATION_MIN_STABLE_STEPS` | int | 10 | Min stable simulation steps |
+| `BP_QUALITY_SIMULATION_MIN_STABLE_STEPS` | int | 50 | Min stable simulation steps (expected range: 1-10000) |
 | `BP_QUALITY_SIMULATION_MAX_PENETRATION_DEPTH_M` | float | 0.01 | Max penetration depth |
 | `BP_QUALITY_SIMULATION_PHYSICS_STABILITY_TIMEOUT_S` | float | 30.0 | Physics timeout |
 
