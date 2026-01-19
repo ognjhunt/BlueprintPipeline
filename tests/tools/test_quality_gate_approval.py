@@ -11,7 +11,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.config import GateOverrideConfig, HumanApprovalConfig, OverrideReasonSchema, QualityConfig
+from tools.config import (
+    ApprovalStoreConfig,
+    GateOverrideConfig,
+    HumanApprovalConfig,
+    OverrideReasonSchema,
+    QualityConfig,
+)
 from tools.quality_gates.quality_gate import (
     ApprovalStatus,
     HumanApprovalManager,
@@ -22,7 +28,10 @@ from tools.quality_gates.quality_gate import (
 
 
 def _build_manager(tmp_path, monkeypatch, config):
-    monkeypatch.setattr(HumanApprovalManager, "APPROVALS_DIR", tmp_path)
+    config.approval_store = ApprovalStoreConfig(
+        backend="filesystem",
+        filesystem_path=str(tmp_path),
+    )
     return HumanApprovalManager(scene_id="scene-123", config=config, verbose=False)
 
 
