@@ -14,6 +14,10 @@ Environment Variables:
     EPISODES_PER_TASK: Episodes per task (default: tools/config/pipeline_config.json)
     NUM_VARIATIONS: Scene variations (default: 5)
     MIN_QUALITY_SCORE: Minimum quality score (default: 0.85)
+    FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name (required for Firebase uploads)
+    FIREBASE_SERVICE_ACCOUNT_JSON: Firebase service account JSON payload
+    FIREBASE_SERVICE_ACCOUNT_PATH: Firebase service account JSON path
+    FIREBASE_EPISODE_PREFIX: Firebase prefix for Genie Sim episodes (default: datasets)
 """
 
 import hashlib
@@ -665,6 +669,8 @@ def main() -> int:
     local_run_result = None
     failure_reason = None
     failure_details: Dict[str, Any] = {}
+    firebase_upload_summary: Optional[Dict[str, Any]] = None
+    firebase_upload_error: Optional[str] = None
     episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
     submitted_at = datetime.utcnow().isoformat() + "Z"
     original_submitted_at = submitted_at
@@ -863,6 +869,29 @@ def main() -> int:
                 job_status = "failed"
             failure_reason = failure_reason or "GCS upload failed"
 
+    if local_run_result and local_run_result.success and output_dir:
+        firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
+        from tools.firebase_upload import upload_episodes_to_firebase
+
+        try:
+            firebase_upload_summary = upload_episodes_to_firebase(
+                episodes_dir=output_dir,
+                scene_id=scene_id,
+                prefix=firebase_prefix,
+            )
+        except Exception as exc:
+            firebase_upload_error = str(exc)
+            failure_details = {
+                **failure_details,
+                "firebase_upload_error": firebase_upload_error,
+                "firebase_upload_prefix": firebase_prefix,
+            }
+            submission_message = (
+                "Local Genie Sim execution completed with Firebase upload failures."
+            )
+            job_status = "failed"
+            failure_reason = failure_reason or "Firebase upload failed"
+
     metrics = get_metrics()
     metrics_summary = {
         "backend": metrics.backend.value,
@@ -961,6 +990,12 @@ def main() -> int:
             f"gs://{bucket}/{episodes_output_prefix}/geniesim_{job_id}/lerobot"
         ),
     }
+    if firebase_upload_summary or firebase_upload_error:
+        job_payload["firebase_upload"] = {
+            "prefix": os.getenv("FIREBASE_EPISODE_PREFIX", "datasets"),
+            "summary": firebase_upload_summary,
+            "error": firebase_upload_error,
+        }
     job_payload["local_execution"] = {
         "success": bool(local_run_result and local_run_result.success),
         "episodes_collected": getattr(local_run_result, "episodes_collected", 0) if local_run_result else 0,
