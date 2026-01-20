@@ -18,7 +18,8 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import math
+from typing import Any, Dict, List, Optional, Tuple
 
 from tools.geniesim_adapter.config import (
     get_geniesim_task_confidence_threshold,
@@ -26,6 +27,7 @@ from tools.geniesim_adapter.config import (
     get_geniesim_task_size_large_threshold,
     get_geniesim_task_size_small_threshold,
 )
+from tools.geniesim_adapter.multi_robot_config import ROBOT_SPECS, RobotType
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +208,7 @@ class TaskConfigGenerator:
         robot_type: str = "franka",
         urdf_path: Optional[str] = None,
         max_tasks: int = 50,
+        strict_reachability: bool = False,
     ) -> GenieSimTaskConfig:
         """
         Generate Genie Sim task configuration from manifest.
@@ -215,6 +218,7 @@ class TaskConfigGenerator:
             robot_type: Robot type (franka, g2, ur10)
             urdf_path: Optional custom URDF path
             max_tasks: Maximum number of suggested tasks
+            strict_reachability: Drop tasks if target positions are missing
 
         Returns:
             GenieSimTaskConfig ready for Genie Sim
@@ -249,6 +253,13 @@ class TaskConfigGenerator:
             objects=objects,
         )
 
+        tasks, reachability_metadata = self._filter_tasks_by_reachability(
+            tasks=tasks,
+            manifest=manifest,
+            robot_config=robot_config,
+            strict_reachability=strict_reachability,
+        )
+
         # Build metadata
         metadata = {
             "total_objects": len(objects),
@@ -260,6 +271,7 @@ class TaskConfigGenerator:
                 if o.get("sim_role") in ["articulated_furniture", "articulated_appliance"]
             ),
             "task_types": list(set(t.task_type for t in tasks)),
+            **reachability_metadata,
         }
 
         return GenieSimTaskConfig(
@@ -582,6 +594,81 @@ class TaskConfigGenerator:
 
         return diverse_tasks
 
+    def _filter_tasks_by_reachability(
+        self,
+        tasks: List[SuggestedTask],
+        manifest: Dict[str, Any],
+        robot_config: RobotConfig,
+        strict_reachability: bool,
+    ) -> Tuple[List[SuggestedTask], Dict[str, int]]:
+        """Filter tasks by robot reachability and workspace bounds."""
+        objects = manifest.get("objects", [])
+        object_positions = {
+            str(obj.get("id", "")): obj.get("transform", {}).get("position")
+            for obj in objects
+        }
+
+        reach_radius = None
+        try:
+            robot_spec = ROBOT_SPECS[RobotType(robot_config.robot_type)]
+            reach_radius = robot_spec.reach_radius
+        except (KeyError, ValueError):
+            self.log(
+                f"Unknown robot type '{robot_config.robot_type}' for reachability filter",
+                level="WARNING",
+            )
+
+        base_position = robot_config.base_position
+        workspace_bounds = robot_config.workspace_bounds
+
+        def within_bounds(position: List[float]) -> bool:
+            if len(position) < 3 or len(workspace_bounds) != 2:
+                return False
+            min_bounds, max_bounds = workspace_bounds
+            return all(
+                min_bounds[i] <= position[i] <= max_bounds[i]
+                for i in range(3)
+            )
+
+        filtered_tasks = []
+        filtered_unreachable = 0
+        filtered_missing_position = 0
+        missing_positions = 0
+
+        for task in tasks:
+            position = object_positions.get(task.target_object)
+            if not position or len(position) < 3:
+                missing_positions += 1
+                self.log(
+                    f"Missing position for object '{task.target_object}' in reachability filter",
+                    level="WARNING",
+                )
+                if strict_reachability:
+                    filtered_missing_position += 1
+                    continue
+                filtered_tasks.append(task)
+                continue
+
+            if not within_bounds(position):
+                filtered_unreachable += 1
+                continue
+
+            if reach_radius is not None:
+                distance = math.dist(base_position[:3], position[:3])
+                if distance > reach_radius:
+                    filtered_unreachable += 1
+                    continue
+
+            filtered_tasks.append(task)
+
+        return filtered_tasks, {
+            "tasks_total_before_reachability_filter": len(tasks),
+            "tasks_filtered_unreachable": filtered_unreachable,
+            "tasks_filtered_missing_position": filtered_missing_position,
+            "tasks_missing_position": missing_positions,
+            "tasks_total_after_reachability_filter": len(filtered_tasks),
+        }
+
     def _create_robot_config(
         self,
         robot_type: str,
@@ -628,6 +715,7 @@ def generate_task_config(
     output_path: Optional[Path] = None,
     robot_type: str = "franka",
     verbose: bool = True,
+    strict_reachability: bool = False,
 ) -> GenieSimTaskConfig:
     """
     Convenience function to generate task config from manifest file.
@@ -637,6 +725,7 @@ def generate_task_config(
         output_path: Optional path to save task_config.json
         robot_type: Robot type (franka, g2, ur10)
         verbose: Print progress
+        strict_reachability: Drop tasks if target positions are missing
 
     Returns:
         GenieSimTaskConfig
@@ -645,7 +734,11 @@ def generate_task_config(
         manifest = json.load(f)
 
     generator = TaskConfigGenerator(verbose=verbose)
-    config = generator.generate(manifest, robot_type=robot_type)
+    config = generator.generate(
+        manifest,
+        robot_type=robot_type,
+        strict_reachability=strict_reachability,
+    )
 
     if output_path:
         config.save(output_path)
