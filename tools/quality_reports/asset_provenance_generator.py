@@ -36,10 +36,17 @@ class LicenseType(str, Enum):
 
     # Commercial-friendly
     CC0 = "cc0"  # Public domain
+    CC0_1_0 = "cc0-1.0"  # SPDX identifier for CC0 1.0
     CC_BY = "cc-by"  # Attribution only
+    CC_BY_4_0 = "cc-by-4.0"  # SPDX identifier for CC-BY 4.0
     CC_BY_SA = "cc-by-sa"  # Attribution + ShareAlike
     MIT = "mit"
     APACHE_2 = "apache-2.0"
+    BSD_2_CLAUSE = "bsd-2-clause"
+    BSD_3_CLAUSE = "bsd-3-clause"
+    GPL_3_0 = "gpl-3.0"
+    LGPL_3_0 = "lgpl-3.0"
+    MPL_2_0 = "mpl-2.0"
     PROPRIETARY_COMMERCIAL = "proprietary-commercial"  # Our own, commercial OK
     NVIDIA_OMNIVERSE = "nvidia-omniverse"  # NVIDIA asset store
     SIMREADY = "simready"  # SimReady assets
@@ -55,10 +62,17 @@ class LicenseType(str, Enum):
 # Licenses that are OK for commercial use
 COMMERCIAL_OK_LICENSES = {
     LicenseType.CC0,
+    LicenseType.CC0_1_0,
     LicenseType.CC_BY,
+    LicenseType.CC_BY_4_0,
     LicenseType.CC_BY_SA,
     LicenseType.MIT,
     LicenseType.APACHE_2,
+    LicenseType.BSD_2_CLAUSE,
+    LicenseType.BSD_3_CLAUSE,
+    LicenseType.GPL_3_0,
+    LicenseType.LGPL_3_0,
+    LicenseType.MPL_2_0,
     LicenseType.PROPRIETARY_COMMERCIAL,
     LicenseType.NVIDIA_OMNIVERSE,
     LicenseType.SIMREADY,
