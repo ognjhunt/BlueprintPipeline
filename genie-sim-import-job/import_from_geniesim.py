@@ -2894,6 +2894,21 @@ def main():
             for error in result.errors:
                 print(f"[GENIE-SIM-IMPORT]   - {error}")
             sys.exit(1)
+    except Exception as exc:
+        print(f"[GENIE-SIM-IMPORT] ERROR: Import failed with exception: {exc}")
+        send_alert(
+            event_type="geniesim_import_job_fatal_exception",
+            summary="Genie Sim import job failed with an unhandled exception",
+            details={
+                "job": "genie-sim-import-job",
+                "job_id": job_id,
+                "scene_id": scene_id,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+            severity=os.getenv("ALERT_JOB_EXCEPTION_SEVERITY", "critical"),
+        )
+        sys.exit(1)
 
 
 
