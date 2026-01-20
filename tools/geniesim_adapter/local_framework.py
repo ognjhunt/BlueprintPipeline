@@ -53,8 +53,7 @@ Environment Variables:
     GENIESIM_PORT: Genie Sim gRPC server port (default: adapter default port)
     GENIESIM_GRPC_TIMEOUT_S: Connection timeout in seconds (default: 30; legacy: GENIESIM_TIMEOUT)
     GENIESIM_ROOT: Path to Genie Sim installation (default: /opt/geniesim)
-    GENIESIM_RECORDINGS_DIR: Directory for Genie Sim recordings (default: /tmp/geniesim_recordings)
-    GENIESIM_RECORDING_DIR: Legacy alias for GENIESIM_RECORDINGS_DIR
+    GENIESIM_RECORDINGS_DIR: Directory for Genie Sim recordings (default: /tmp/geniesim_recordings; legacy: GENIESIM_RECORDING_DIR)
     GENIESIM_LOG_DIR: Directory for Genie Sim logs (default: /tmp/geniesim_logs)
     ISAAC_SIM_PATH: Path to Isaac Sim installation (default: /isaac-sim)
     ISAACSIM_REQUIRED: Enforce Isaac Sim + Genie Sim installation checks (default: false)
@@ -113,6 +112,7 @@ if str(ADAPTER_ROOT) not in sys.path:
 
 from tools.logging_config import init_logging
 from tools.error_handling import CircuitBreaker
+from tools.config.production_mode import resolve_env_with_legacy, resolve_pipeline_environment
 from tools.geniesim_adapter.config import (
     get_geniesim_circuit_breaker_failure_threshold,
     get_geniesim_circuit_breaker_recovery_timeout_s,
@@ -327,12 +327,7 @@ class GenieSimConfig(BaseModel):
     def from_env(cls) -> "GenieSimConfig":
         """Create configuration from environment variables."""
         env = os.environ
-        environment = (
-            env.get("GENIESIM_ENV")
-            or env.get("PIPELINE_ENV")
-            or env.get("BP_ENV")
-            or "development"
-        )
+        environment = resolve_pipeline_environment(env=env)
         env_data: Dict[str, Any] = {
             "environment": environment,
         }
@@ -362,7 +357,13 @@ class GenieSimConfig(BaseModel):
                 env_data[key] = env.get(env_name)
         if "allow_ik_failure_fallback" not in env_data and "allow_linear_fallback" in env_data:
             env_data["allow_ik_failure_fallback"] = env_data["allow_linear_fallback"]
-        timeout_value = env.get("GENIESIM_GRPC_TIMEOUT_S") or env.get("GENIESIM_TIMEOUT")
+        timeout_value, _ = resolve_env_with_legacy(
+            canonical_names=("GENIESIM_GRPC_TIMEOUT_S",),
+            legacy_names=("GENIESIM_TIMEOUT",),
+            env=env,
+            preferred_name="GENIESIM_GRPC_TIMEOUT_S",
+            log=logger,
+        )
         if timeout_value not in (None, ""):
             env_data["timeout"] = timeout_value
         recording_dir = _resolve_recording_dir()
@@ -586,23 +587,13 @@ def _parse_version(version: str) -> tuple:
 
 
 def _resolve_recording_dir() -> Path:
-    raw = os.getenv(GENIESIM_RECORDINGS_DIR_ENV)
-    legacy = os.getenv(GENIESIM_RECORDING_DIR_ENV)
-    if raw and legacy and raw != legacy:
-        logger.warning(
-            "Both %s and %s are set; using %s=%s.",
-            GENIESIM_RECORDINGS_DIR_ENV,
-            GENIESIM_RECORDING_DIR_ENV,
-            GENIESIM_RECORDINGS_DIR_ENV,
-            raw,
-        )
-    if legacy and not raw:
-        logger.warning(
-            "%s is deprecated; use %s instead.",
-            GENIESIM_RECORDING_DIR_ENV,
-            GENIESIM_RECORDINGS_DIR_ENV,
-        )
-    resolved = raw or legacy
+    resolved, _ = resolve_env_with_legacy(
+        canonical_names=(GENIESIM_RECORDINGS_DIR_ENV,),
+        legacy_names=(GENIESIM_RECORDING_DIR_ENV,),
+        env=os.environ,
+        preferred_name=GENIESIM_RECORDINGS_DIR_ENV,
+        log=logger,
+    )
     if resolved:
         return Path(resolved).expanduser()
     return Path("/tmp/geniesim_recordings")

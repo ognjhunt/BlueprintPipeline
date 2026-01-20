@@ -90,7 +90,7 @@ from tools.cost_tracking.estimate import (
 )
 from tools.config import load_quality_config as load_quality_gate_config
 from tools.config.env import parse_bool_env, parse_int_env
-from tools.config.production_mode import resolve_production_mode
+from tools.config.production_mode import resolve_pipeline_environment, resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
 from tools.error_handling.errors import classify_exception
 from tools.error_handling.retry import (
@@ -234,7 +234,7 @@ class LocalPipelineRunner:
             )
         else:
             self.fail_fast = fail_fast
-        self.environment = os.getenv("BP_ENV", "development").lower()
+        self.environment = resolve_pipeline_environment()
         self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
         self.enable_checkpoint_hashes = resolve_checkpoint_hash_setting()
 

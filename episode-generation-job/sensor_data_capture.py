@@ -55,7 +55,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.config.env import parse_bool_env
-from tools.config.production_mode import resolve_production_mode
+from tools.config.production_mode import resolve_env_with_legacy, resolve_production_mode
 
 # Import Isaac Sim integration for availability checking
 try:
@@ -113,8 +113,14 @@ def _mock_capture_block_reason() -> str:
     geniesim_env = (os.getenv("GENIESIM_ENV", "") or "").strip().lower()
     if geniesim_env in {"prod", "production"}:
         return f"GENIESIM_ENV={geniesim_env}"
-    bp_env = (os.getenv("BP_ENV", "") or "").strip().lower()
-    if bp_env in {"prod", "production"}:
+    bp_env, _ = resolve_env_with_legacy(
+        canonical_names=(),
+        legacy_names=("BP_ENV",),
+        env=os.environ,
+        preferred_name="PIPELINE_ENV",
+        log=logger,
+    )
+    if (bp_env or "").strip().lower() in {"prod", "production"}:
         return f"BP_ENV={bp_env}"
     if parse_bool_env(os.getenv("REQUIRE_REAL_PHYSICS"), default=False):
         return "REQUIRE_REAL_PHYSICS=true"

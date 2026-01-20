@@ -6,6 +6,7 @@ import os
 from typing import Mapping, Optional
 
 from tools.config.env import parse_float_env, parse_int_env
+from tools.config.production_mode import resolve_env_with_legacy
 GENIESIM_HOST_ENV = "GENIESIM_HOST"
 GENIESIM_PORT_ENV = "GENIESIM_PORT"
 GENIESIM_TLS_CERT_ENV = "GENIESIM_TLS_CERT"
@@ -16,6 +17,7 @@ GENIESIM_AUTH_TOKEN_PATH_ENV = "GENIESIM_AUTH_TOKEN_PATH"
 GENIESIM_AUTH_CERT_ENV = "GENIESIM_AUTH_CERT"
 GENIESIM_AUTH_KEY_ENV = "GENIESIM_AUTH_KEY"
 GENIESIM_GRPC_TIMEOUT_S_ENV = "GENIESIM_GRPC_TIMEOUT_S"
+# Legacy alias for GENIESIM_GRPC_TIMEOUT_S_ENV.
 GENIESIM_TIMEOUT_LEGACY_ENV = "GENIESIM_TIMEOUT"
 GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD_ENV = "GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD"
 GENIESIM_CIRCUIT_BREAKER_SUCCESS_THRESHOLD_ENV = "GENIESIM_CIRCUIT_BREAKER_SUCCESS_THRESHOLD"
@@ -100,11 +102,14 @@ def get_geniesim_auth_key_path(env: Optional[Mapping[str, str]] = None) -> Optio
 
 
 def get_geniesim_grpc_timeout_s(env: Optional[Mapping[str, str]] = None) -> float:
-    """Return the configured gRPC timeout in seconds."""
+    """Return the configured gRPC timeout in seconds (legacy: GENIESIM_TIMEOUT)."""
     source = env or os.environ
-    value = source.get(GENIESIM_GRPC_TIMEOUT_S_ENV)
-    if value is None:
-        value = source.get(GENIESIM_TIMEOUT_LEGACY_ENV)
+    value, _ = resolve_env_with_legacy(
+        canonical_names=(GENIESIM_GRPC_TIMEOUT_S_ENV,),
+        legacy_names=(GENIESIM_TIMEOUT_LEGACY_ENV,),
+        env=source,
+        preferred_name=GENIESIM_GRPC_TIMEOUT_S_ENV,
+    )
     return parse_float_env(
         value,
         default=DEFAULT_GENIESIM_GRPC_TIMEOUT_S,
