@@ -68,6 +68,8 @@ import os
 import shutil
 import sys
 import traceback
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -317,6 +319,90 @@ def _resolve_embedding_model() -> Optional[str]:
     if os.getenv("OPENAI_API_KEY"):
         return "text-embedding-3-large"
     return "qwen-text-embedding-v4"
+
+
+def _request_json(
+    url: str,
+    *,
+    headers: Dict[str, str],
+    payload: Optional[Dict[str, Any]] = None,
+    timeout_seconds: int = 15,
+) -> tuple[int, str]:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method="POST" if data is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, body
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return exc.code, body
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Network error contacting {url}: {exc}") from exc
+
+
+def _validate_embedding_provider_credentials(
+    *,
+    generate_embeddings: bool,
+    require_embeddings: bool,
+    embedding_model: Optional[str],
+) -> tuple[bool, bool]:
+    if not generate_embeddings:
+        return generate_embeddings, require_embeddings
+
+    dashscope_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if dashscope_key:
+        provider = "dashscope"
+    elif openai_key:
+        provider = "openai"
+    else:
+        return generate_embeddings, require_embeddings
+
+    try:
+        if provider == "openai":
+            model = embedding_model or "text-embedding-3-large"
+            status, body = _request_json(
+                "https://api.openai.com/v1/embeddings",
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json",
+                },
+                payload={"model": model, "input": "ping"},
+            )
+        else:
+            model = embedding_model or "qwen-text-embedding-v4"
+            status, body = _request_json(
+                "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding",
+                headers={
+                    "Authorization": f"Bearer {dashscope_key}",
+                    "Content-Type": "application/json",
+                },
+                payload={"model": model, "input": {"texts": ["ping"]}},
+            )
+
+        if status >= 400:
+            raise RuntimeError(f"HTTP {status}: {body}")
+
+        print(f"[GENIESIM-EXPORT-JOB] ✅ {provider} embedding credentials validated")
+        return generate_embeddings, require_embeddings
+    except Exception as exc:
+        message = (
+            f"{provider} credential validation failed with response: {exc}"
+        )
+        if require_embeddings:
+            print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
+            raise RuntimeError(message) from exc
+        print(
+            "[GENIESIM-EXPORT-JOB] ⚠️  Embedding provider validation failed; "
+            f"disabling embeddings. {message}"
+        )
+        return False, False
 
 
 def _validate_export_consistency(
@@ -1875,6 +1961,19 @@ def main():
             "[GENIESIM-EXPORT-JOB] ⚠️  Embedding provider unavailable; "
             "placeholder embeddings will be used."
         )
+
+    if generate_embeddings and embedding_provider_available:
+        try:
+            generate_embeddings, require_embeddings = _validate_embedding_provider_credentials(
+                generate_embeddings=generate_embeddings,
+                require_embeddings=require_embeddings,
+                embedding_model=embedding_model,
+            )
+        except RuntimeError as exc:
+            _write_failure_marker(exc, "embedding_provider_validation")
+            sys.exit(1)
+        input_params["generate_embeddings"] = generate_embeddings
+        input_params["require_embeddings"] = require_embeddings
 
     validated = False
     try:
