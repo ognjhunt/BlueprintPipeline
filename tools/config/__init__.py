@@ -17,9 +17,18 @@ from typing import Any, Dict, List, Optional, Union
 from .constants import (
     DEFAULT_AVERAGE_QUALITY_SCORE_MIN,
     DEFAULT_COLLISION_FREE_RATE_MIN,
+    DEFAULT_INVENTORY_MIN_OBJECTS,
+    DEFAULT_INTERACTIVE_FALLBACK_RATE_MAX,
+    DEFAULT_INTERACTIVE_OK_RATE_MIN,
+    DEFAULT_INTERACTIVE_STABILITY_RATE_MIN,
     DEFAULT_PHYSICS_VALIDATION_RATE_MIN,
     DEFAULT_QUALITY_SCORE_MIN,
+    DEFAULT_SCALE_CONFIDENCE_MIN,
+    DEFAULT_SCALE_FACTOR_MAX,
+    DEFAULT_SCALE_FACTOR_MIN,
     DEFAULT_SENSOR_CAPTURE_RATE_MIN,
+    DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN,
+    DEFAULT_VARIATION_MIN_OBJECTS,
 )
 
 try:
@@ -130,6 +139,37 @@ class DwmThresholds:
 
 
 @dataclass
+class InventoryEnrichmentThresholds:
+    """Inventory enrichment validation thresholds."""
+    min_object_count: int = DEFAULT_INVENTORY_MIN_OBJECTS
+    require_enrichment_metadata: bool = True
+    allowed_statuses: List[str] = field(default_factory=lambda: ["success", "stub"])
+
+
+@dataclass
+class VariationAssetsThresholds:
+    """Variation asset generation validation thresholds."""
+    min_object_count: int = DEFAULT_VARIATION_MIN_OBJECTS
+    min_3d_success_rate: float = DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN
+
+
+@dataclass
+class ScaleThresholds:
+    """Scale calibration validation thresholds."""
+    min_scale_factor: float = DEFAULT_SCALE_FACTOR_MIN
+    max_scale_factor: float = DEFAULT_SCALE_FACTOR_MAX
+    min_confidence: float = DEFAULT_SCALE_CONFIDENCE_MIN
+
+
+@dataclass
+class InteractiveThresholds:
+    """Interactive asset processing validation thresholds."""
+    min_ok_rate: float = DEFAULT_INTERACTIVE_OK_RATE_MIN
+    min_physics_stability_rate: float = DEFAULT_INTERACTIVE_STABILITY_RATE_MIN
+    max_fallback_rate: float = DEFAULT_INTERACTIVE_FALLBACK_RATE_MAX
+
+
+@dataclass
 class GenieSimKinematicReachabilityThresholds:
     """Genie Sim kinematic reachability validation thresholds."""
     enabled: bool = True
@@ -202,6 +242,10 @@ class QualityConfig:
     replicator: ReplicatorThresholds = field(default_factory=ReplicatorThresholds)
     episode_metadata: EpisodeMetadataThresholds = field(default_factory=EpisodeMetadataThresholds)
     dwm: DwmThresholds = field(default_factory=DwmThresholds)
+    inventory_enrichment: InventoryEnrichmentThresholds = field(default_factory=InventoryEnrichmentThresholds)
+    variation_assets: VariationAssetsThresholds = field(default_factory=VariationAssetsThresholds)
+    scale: ScaleThresholds = field(default_factory=ScaleThresholds)
+    interactive: InteractiveThresholds = field(default_factory=InteractiveThresholds)
     geniesim_kinematic_reachability: GenieSimKinematicReachabilityThresholds = field(
         default_factory=GenieSimKinematicReachabilityThresholds
     )
@@ -603,6 +647,15 @@ class ConfigLoader:
             "DEFAULT_AVERAGE_QUALITY_SCORE_MIN": DEFAULT_AVERAGE_QUALITY_SCORE_MIN,
             "DEFAULT_SENSOR_CAPTURE_RATE_MIN": DEFAULT_SENSOR_CAPTURE_RATE_MIN,
             "DEFAULT_PHYSICS_VALIDATION_RATE_MIN": DEFAULT_PHYSICS_VALIDATION_RATE_MIN,
+            "DEFAULT_INVENTORY_MIN_OBJECTS": DEFAULT_INVENTORY_MIN_OBJECTS,
+            "DEFAULT_VARIATION_MIN_OBJECTS": DEFAULT_VARIATION_MIN_OBJECTS,
+            "DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN": DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN,
+            "DEFAULT_SCALE_FACTOR_MIN": DEFAULT_SCALE_FACTOR_MIN,
+            "DEFAULT_SCALE_FACTOR_MAX": DEFAULT_SCALE_FACTOR_MAX,
+            "DEFAULT_SCALE_CONFIDENCE_MIN": DEFAULT_SCALE_CONFIDENCE_MIN,
+            "DEFAULT_INTERACTIVE_OK_RATE_MIN": DEFAULT_INTERACTIVE_OK_RATE_MIN,
+            "DEFAULT_INTERACTIVE_STABILITY_RATE_MIN": DEFAULT_INTERACTIVE_STABILITY_RATE_MIN,
+            "DEFAULT_INTERACTIVE_FALLBACK_RATE_MAX": DEFAULT_INTERACTIVE_FALLBACK_RATE_MAX,
         }
 
         def _resolve(value: Any) -> Any:
@@ -736,6 +789,10 @@ class ConfigLoader:
         replicator_thresholds = thresholds.get("replicator", {})
         episode_metadata_thresholds = thresholds.get("episode_metadata", {})
         dwm_thresholds = thresholds.get("dwm", {})
+        inventory_thresholds = thresholds.get("inventory_enrichment", {})
+        variation_thresholds = thresholds.get("variation_assets", {})
+        scale_thresholds = thresholds.get("scale", {})
+        interactive_thresholds = thresholds.get("interactive", {})
         geniesim_ik_thresholds = thresholds.get("geniesim_kinematic_reachability", {})
         geniesim_data_thresholds = thresholds.get("geniesim_data_collection", {})
 
@@ -830,6 +887,58 @@ class ConfigLoader:
                         "metadata/scene_info.json",
                         "metadata/prompt.txt",
                     ],
+                ),
+            ),
+            inventory_enrichment=InventoryEnrichmentThresholds(
+                min_object_count=inventory_thresholds.get(
+                    "min_object_count",
+                    DEFAULT_INVENTORY_MIN_OBJECTS,
+                ),
+                require_enrichment_metadata=inventory_thresholds.get(
+                    "require_enrichment_metadata",
+                    True,
+                ),
+                allowed_statuses=inventory_thresholds.get(
+                    "allowed_statuses",
+                    ["success", "stub"],
+                ),
+            ),
+            variation_assets=VariationAssetsThresholds(
+                min_object_count=variation_thresholds.get(
+                    "min_object_count",
+                    DEFAULT_VARIATION_MIN_OBJECTS,
+                ),
+                min_3d_success_rate=variation_thresholds.get(
+                    "min_3d_success_rate",
+                    DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN,
+                ),
+            ),
+            scale=ScaleThresholds(
+                min_scale_factor=scale_thresholds.get(
+                    "min_scale_factor",
+                    DEFAULT_SCALE_FACTOR_MIN,
+                ),
+                max_scale_factor=scale_thresholds.get(
+                    "max_scale_factor",
+                    DEFAULT_SCALE_FACTOR_MAX,
+                ),
+                min_confidence=scale_thresholds.get(
+                    "min_confidence",
+                    DEFAULT_SCALE_CONFIDENCE_MIN,
+                ),
+            ),
+            interactive=InteractiveThresholds(
+                min_ok_rate=interactive_thresholds.get(
+                    "min_ok_rate",
+                    DEFAULT_INTERACTIVE_OK_RATE_MIN,
+                ),
+                min_physics_stability_rate=interactive_thresholds.get(
+                    "min_physics_stability_rate",
+                    DEFAULT_INTERACTIVE_STABILITY_RATE_MIN,
+                ),
+                max_fallback_rate=interactive_thresholds.get(
+                    "max_fallback_rate",
+                    DEFAULT_INTERACTIVE_FALLBACK_RATE_MAX,
                 ),
             ),
             geniesim_kinematic_reachability=GenieSimKinematicReachabilityThresholds(
@@ -1423,6 +1532,54 @@ class ConfigLoader:
                                 errors[
                                     "thresholds.geniesim_kinematic_reachability.max_unreachable_targets"
                                 ] = "Must be a non-negative integer"
+
+                if "inventory_enrichment" in thresholds:
+                    inventory = thresholds["inventory_enrichment"]
+                    if isinstance(inventory, dict):
+                        if "min_object_count" in inventory and inventory["min_object_count"] < 0:
+                            errors["thresholds.inventory_enrichment.min_object_count"] = "Must be non-negative"
+                        if "require_enrichment_metadata" in inventory and not isinstance(
+                            inventory["require_enrichment_metadata"],
+                            bool,
+                        ):
+                            errors["thresholds.inventory_enrichment.require_enrichment_metadata"] = "Must be boolean"
+
+                if "variation_assets" in thresholds:
+                    variation = thresholds["variation_assets"]
+                    if isinstance(variation, dict):
+                        if "min_object_count" in variation and variation["min_object_count"] < 0:
+                            errors["thresholds.variation_assets.min_object_count"] = "Must be non-negative"
+                        if "min_3d_success_rate" in variation:
+                            val = variation["min_3d_success_rate"]
+                            if not (0.0 <= val <= 1.0):
+                                errors["thresholds.variation_assets.min_3d_success_rate"] = "Must be between 0.0 and 1.0"
+
+                if "scale" in thresholds:
+                    scale = thresholds["scale"]
+                    if isinstance(scale, dict):
+                        if "min_scale_factor" in scale and scale["min_scale_factor"] <= 0:
+                            errors["thresholds.scale.min_scale_factor"] = "Must be positive"
+                        if "max_scale_factor" in scale and scale["max_scale_factor"] <= 0:
+                            errors["thresholds.scale.max_scale_factor"] = "Must be positive"
+                        if (
+                            "min_scale_factor" in scale
+                            and "max_scale_factor" in scale
+                            and scale["max_scale_factor"] < scale["min_scale_factor"]
+                        ):
+                            errors["thresholds.scale"] = "max_scale_factor must be >= min_scale_factor"
+                        if "min_confidence" in scale:
+                            val = scale["min_confidence"]
+                            if not (0.0 <= val <= 1.0):
+                                errors["thresholds.scale.min_confidence"] = "Must be between 0.0 and 1.0"
+
+                if "interactive" in thresholds:
+                    interactive = thresholds["interactive"]
+                    if isinstance(interactive, dict):
+                        for key in ["min_ok_rate", "min_physics_stability_rate", "max_fallback_rate"]:
+                            if key in interactive:
+                                val = interactive[key]
+                                if not (0.0 <= val <= 1.0):
+                                    errors[f"thresholds.interactive.{key}"] = "Must be between 0.0 and 1.0"
 
         if "gate_overrides" in config:
             gate_overrides = config["gate_overrides"]

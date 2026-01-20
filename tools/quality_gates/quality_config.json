@@ -118,6 +118,29 @@
       ],
       "description": "DWM conditioning bundle structure requirements"
     },
+    "inventory_enrichment": {
+      "min_object_count": "DEFAULT_INVENTORY_MIN_OBJECTS",
+      "require_enrichment_metadata": true,
+      "allowed_statuses": ["success", "stub"],
+      "description": "Inventory enrichment output requirements"
+    },
+    "variation_assets": {
+      "min_object_count": "DEFAULT_VARIATION_MIN_OBJECTS",
+      "min_3d_success_rate": "DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN",
+      "description": "Variation asset generation requirements"
+    },
+    "scale": {
+      "min_scale_factor": "DEFAULT_SCALE_FACTOR_MIN",
+      "max_scale_factor": "DEFAULT_SCALE_FACTOR_MAX",
+      "min_confidence": "DEFAULT_SCALE_CONFIDENCE_MIN",
+      "description": "Scale calibration validation thresholds"
+    },
+    "interactive": {
+      "min_ok_rate": "DEFAULT_INTERACTIVE_OK_RATE_MIN",
+      "min_physics_stability_rate": "DEFAULT_INTERACTIVE_STABILITY_RATE_MIN",
+      "max_fallback_rate": "DEFAULT_INTERACTIVE_FALLBACK_RATE_MAX",
+      "description": "Interactive asset processing thresholds"
+    },
     "isaac_lab": {
       "require_env_cfg": true,
       "require_task_files": true,
