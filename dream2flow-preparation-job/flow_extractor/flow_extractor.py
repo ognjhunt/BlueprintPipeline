@@ -48,6 +48,7 @@ from models import (
     TaskInstruction,
     TrackedPoint,
 )
+from tools.config.constants import DEFAULT_HTTP_TIMEOUT_S
 
 
 @dataclass
@@ -547,7 +548,7 @@ class FlowExtractor:
                 "prompt": target_object,
                 "model": self.config.segmentation_model,
             },
-            timeout=300,
+            timeout=DEFAULT_HTTP_TIMEOUT_S,  # allow long-running segmentation inference
         )
         response.raise_for_status()
         result = response.json()
@@ -605,7 +606,7 @@ class FlowExtractor:
                 "frames": payload_frames,
                 "model": self.config.depth_model,
             },
-            timeout=300,
+            timeout=DEFAULT_HTTP_TIMEOUT_S,  # allow long-running depth inference
         )
         response.raise_for_status()
         result = response.json()
@@ -668,7 +669,7 @@ class FlowExtractor:
                 "num_points": self.config.num_tracking_points,
                 "model": self.config.tracking_model,
             },
-            timeout=300,
+            timeout=DEFAULT_HTTP_TIMEOUT_S,  # allow long-running tracking inference
         )
         response.raise_for_status()
         result = response.json()

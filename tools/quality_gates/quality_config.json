@@ -13,26 +13,26 @@
       "description": "Physics property validation thresholds"
     },
     "episodes": {
-      "collision_free_rate_min": 0.90,
-      "quality_score_min": 0.90,
+      "collision_free_rate_min": "DEFAULT_COLLISION_FREE_RATE_MIN",
+      "quality_score_min": "DEFAULT_QUALITY_SCORE_MIN",
       "quality_pass_rate_min": 0.70,
       "min_episodes_required": 3,
       "tier_thresholds": {
         "core": {
-          "collision_free_rate_min": 0.90,
-          "quality_score_min": 0.90,
+          "collision_free_rate_min": "DEFAULT_COLLISION_FREE_RATE_MIN",
+          "quality_score_min": "DEFAULT_QUALITY_SCORE_MIN",
           "quality_pass_rate_min": 0.70,
           "min_episodes_required": 3
         },
         "plus": {
-          "collision_free_rate_min": 0.90,
-          "quality_score_min": 0.90,
+          "collision_free_rate_min": "DEFAULT_COLLISION_FREE_RATE_MIN",
+          "quality_score_min": "DEFAULT_QUALITY_SCORE_MIN",
           "quality_pass_rate_min": 0.70,
           "min_episodes_required": 4
         },
         "full": {
-          "collision_free_rate_min": 0.90,
-          "quality_score_min": 0.90,
+          "collision_free_rate_min": "DEFAULT_COLLISION_FREE_RATE_MIN",
+          "quality_score_min": "DEFAULT_QUALITY_SCORE_MIN",
           "quality_pass_rate_min": 0.70,
           "min_episodes_required": 5
         }
@@ -40,9 +40,9 @@
       "description": "Episode generation quality thresholds"
     },
     "data_quality": {
-      "min_average_quality_score": 0.90,
-      "min_sensor_capture_rate": 0.95,
-      "min_physics_validation_rate": 0.95,
+      "min_average_quality_score": "DEFAULT_AVERAGE_QUALITY_SCORE_MIN",
+      "min_sensor_capture_rate": "DEFAULT_SENSOR_CAPTURE_RATE_MIN",
+      "min_physics_validation_rate": "DEFAULT_PHYSICS_VALIDATION_RATE_MIN",
       "allowed_sensor_sources": [
         "isaac_sim_replicator",
         "simulation"

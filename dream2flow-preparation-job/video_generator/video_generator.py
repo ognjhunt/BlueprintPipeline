@@ -43,6 +43,7 @@ from models import (
     TaskInstruction,
     TaskType,
 )
+from tools.config.constants import DEFAULT_HTTP_TIMEOUT_S
 
 
 @dataclass
@@ -290,7 +291,7 @@ class VideoGenerator:
             self.config.api_endpoint,
             files=files,
             data=data,
-            timeout=300,
+            timeout=DEFAULT_HTTP_TIMEOUT_S,  # allow long-running video generation
         )
         response.raise_for_status()
 

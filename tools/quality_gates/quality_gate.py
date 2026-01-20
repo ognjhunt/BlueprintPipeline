@@ -34,12 +34,24 @@ if TYPE_CHECKING:
 # Import configuration
 try:
     from tools.config import load_quality_config, QualityConfig
+    from tools.config.constants import (
+        DEFAULT_AVERAGE_QUALITY_SCORE_MIN,
+        DEFAULT_COLLISION_FREE_RATE_MIN,
+        DEFAULT_PHYSICS_VALIDATION_RATE_MIN,
+        DEFAULT_QUALITY_SCORE_MIN,
+        DEFAULT_SENSOR_CAPTURE_RATE_MIN,
+    )
     from tools.config.env import parse_bool_env, parse_float_env, parse_int_env
     from tools.quality_gates.notification_validation import ensure_production_notification_channels
     HAVE_CONFIG = True
 except ImportError:
     HAVE_CONFIG = False
     QualityConfig = None
+    DEFAULT_AVERAGE_QUALITY_SCORE_MIN = 0.90
+    DEFAULT_COLLISION_FREE_RATE_MIN = 0.90
+    DEFAULT_PHYSICS_VALIDATION_RATE_MIN = 0.95
+    DEFAULT_QUALITY_SCORE_MIN = 0.90
+    DEFAULT_SENSOR_CAPTURE_RATE_MIN = 0.95
 
 
 class QualityGateSeverity(str, Enum):
@@ -2255,9 +2267,19 @@ class QualityGateRegistry:
                 }
             else:
                 base_thresholds = {
-                    "collision_free_rate_min": float(os.getenv("BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN", "0.90")),
+                    "collision_free_rate_min": float(
+                        os.getenv(
+                            "BP_QUALITY_EPISODES_COLLISION_FREE_RATE_MIN",
+                            str(DEFAULT_COLLISION_FREE_RATE_MIN),
+                        )
+                    ),
                     "quality_pass_rate_min": float(os.getenv("BP_QUALITY_EPISODES_QUALITY_PASS_RATE_MIN", "0.70")),
-                    "quality_score_min": float(os.getenv("BP_QUALITY_EPISODES_QUALITY_SCORE_MIN", "0.90")),
+                    "quality_score_min": float(
+                        os.getenv(
+                            "BP_QUALITY_EPISODES_QUALITY_SCORE_MIN",
+                            str(DEFAULT_QUALITY_SCORE_MIN),
+                        )
+                    ),
                     "min_episodes_required": int(os.getenv("BP_QUALITY_EPISODES_MIN_EPISODES_REQUIRED", "3")),
                 }
 
@@ -2301,21 +2323,21 @@ class QualityGateRegistry:
                 getattr(self.config.episodes, "tier_thresholds", {}) if self.config else {}
             ) or {
                 "core": {
-                    "collision_free_rate_min": 0.90,
+                    "collision_free_rate_min": DEFAULT_COLLISION_FREE_RATE_MIN,
                     "quality_pass_rate_min": 0.70,
-                    "quality_score_min": 0.90,
+                    "quality_score_min": DEFAULT_QUALITY_SCORE_MIN,
                     "min_episodes_required": 3,
                 },
                 "plus": {
-                    "collision_free_rate_min": 0.90,
+                    "collision_free_rate_min": DEFAULT_COLLISION_FREE_RATE_MIN,
                     "quality_pass_rate_min": 0.70,
-                    "quality_score_min": 0.90,
+                    "quality_score_min": DEFAULT_QUALITY_SCORE_MIN,
                     "min_episodes_required": 4,
                 },
                 "full": {
-                    "collision_free_rate_min": 0.90,
+                    "collision_free_rate_min": DEFAULT_COLLISION_FREE_RATE_MIN,
                     "quality_pass_rate_min": 0.70,
-                    "quality_score_min": 0.90,
+                    "quality_score_min": DEFAULT_QUALITY_SCORE_MIN,
                     "min_episodes_required": 5,
                 },
             }
@@ -2595,7 +2617,9 @@ class QualityGateRegistry:
             if self.config and hasattr(self.config, "data_quality"):
                 min_avg_quality = self.config.data_quality.min_average_quality_score
             else:
-                min_avg_quality = float(os.getenv("BP_QUALITY_AVG_SCORE_MIN", "0.85"))
+                min_avg_quality = float(
+                    os.getenv("BP_QUALITY_AVG_SCORE_MIN", str(DEFAULT_AVERAGE_QUALITY_SCORE_MIN))
+                )
 
             avg_quality = episode_stats.get("average_quality_score", 0.0) or 0.0
             total = episode_stats.get("total_generated", 0) or 0
@@ -2640,7 +2664,12 @@ class QualityGateRegistry:
                 min_sensor_rate = self.config.data_quality.min_sensor_capture_rate
                 allowed_sources = self.config.data_quality.allowed_sensor_sources
             else:
-                min_sensor_rate = float(os.getenv("BP_QUALITY_SENSOR_CAPTURE_RATE_MIN", "0.90"))
+                min_sensor_rate = float(
+                    os.getenv(
+                        "BP_QUALITY_SENSOR_CAPTURE_RATE_MIN",
+                        str(DEFAULT_SENSOR_CAPTURE_RATE_MIN),
+                    )
+                )
                 allowed_sources = [
                     source.strip()
                     for source in os.getenv(
@@ -2700,7 +2729,12 @@ class QualityGateRegistry:
                 min_physics_rate = self.config.data_quality.min_physics_validation_rate
                 allowed_backends = self.config.data_quality.allowed_physics_backends
             else:
-                min_physics_rate = float(os.getenv("BP_QUALITY_PHYSICS_VALIDATION_RATE_MIN", "0.90"))
+                min_physics_rate = float(
+                    os.getenv(
+                        "BP_QUALITY_PHYSICS_VALIDATION_RATE_MIN",
+                        str(DEFAULT_PHYSICS_VALIDATION_RATE_MIN),
+                    )
+                )
                 allowed_backends = [
                     backend.strip()
                     for backend in os.getenv(
