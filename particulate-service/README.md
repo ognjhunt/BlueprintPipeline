@@ -52,10 +52,11 @@ to bound dependency probe latency.
 ### GET /debug - Debug Info
 
 Returns detailed service state and model validation info when debug access is explicitly enabled.
-Debug is disabled by default and always blocked when `ENV=production`. For non-production
-environments, set `DEBUG_MODE=1` and `DEBUG_TOKEN=<shared-secret>`, then send the token in an
-`Authorization: Bearer <shared-secret>` header. Legacy `PARTICULATE_DEBUG` and
-`PARTICULATE_DEBUG_TOKEN` variables are still honored.
+Debug is disabled by default and always blocked when production mode is detected (including
+`ENV=production`). For non-production environments, set `DEBUG_MODE=1` and
+`DEBUG_TOKEN=<shared-secret>` (or legacy `PARTICULATE_DEBUG` / `PARTICULATE_DEBUG_TOKEN`), then
+send the token in an `Authorization: Bearer <shared-secret>` header. In production, store the
+token in Secret Manager under `particulate-debug-token`; env var secrets are not allowed.
 
 ## Deployment
 
