@@ -85,7 +85,7 @@ from tools.cost_tracking.estimate import (
 from tools.config.env import parse_bool_env, parse_int_env
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
-from tools.error_handling import (
+from tools.error_handling.retry import (
     NonRetryableError,
     RetryConfig,
     RetryableError,
@@ -2734,6 +2734,8 @@ class LocalPipelineRunner:
         task_config = _load_json(task_config_path, "Genie Sim task config")
 
         robot_types = self._resolve_geniesim_robot_types()
+        if not robot_types:
+            raise NonRetryableError("No robot types configured")
         robot_type = robot_types[0]
         multi_robot = len(robot_types) > 1
         episodes_per_task = parse_int_env(
