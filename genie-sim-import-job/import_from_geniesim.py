@@ -880,6 +880,29 @@ def _write_combined_import_manifest(
     min_quality = min(min_quality_scores) if min_quality_scores else 0.0
     max_quality = max(max_quality_scores) if max_quality_scores else 0.0
 
+    # Aggregate provenance from all robots
+    aggregated_provenance = {
+        "source": "genie_sim_multi_robot",
+        "job_id": job_id,
+        "imported_by": "BlueprintPipeline",
+        "importer": "genie-sim-import-job",
+        "client_mode": "local",
+        "robots": {},
+    }
+    for entry in robot_entries:
+        robot_type = entry.get("robot_type", "unknown")
+        robot_output_dir = entry.get("output_dir")
+        if robot_output_dir:
+            robot_manifest_path = Path(robot_output_dir) / "import_manifest.json"
+            if robot_manifest_path.exists():
+                try:
+                    robot_manifest = _load_json_file(robot_manifest_path)
+                    robot_provenance = robot_manifest.get("provenance")
+                    if robot_provenance:
+                        aggregated_provenance["robots"][robot_type] = robot_provenance
+                except Exception as exc:
+                    print(f"[IMPORT] ⚠️ Failed to load provenance for {robot_type}: {exc}")
+
     import_manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "schema_definition": MANIFEST_SCHEMA_DEFINITION,
@@ -914,6 +937,7 @@ def _write_combined_import_manifest(
         },
         "robots": robot_entries,
         "job_metadata": job_metadata or {},
+        "provenance": aggregated_provenance,
     }
 
     manifest_path = output_dir / "import_manifest.json"
@@ -2433,6 +2457,18 @@ def main():
     # Run import
     try:
         metrics = get_metrics()
+    except Exception as exc:
+        print(f"[GENIE-SIM-IMPORT] ⚠️ Failed to initialize metrics: {exc}")
+        # Metrics are optional, proceed anyway
+        class MockMetrics:
+            def track_job(self, name, scene_id):
+                from contextlib import contextmanager
+                @contextmanager
+                def mock(): yield
+                return mock()
+            def __getattr__(self, name): return type('Mock', (), {'inc': lambda *a, **k: None})()
+        metrics = MockMetrics()
+
         if artifacts_by_robot:
             robot_entries = []
             overall_success = True
@@ -2528,42 +2564,6 @@ def main():
                         f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}"
                     )
 
-                firebase_summary = None
-                if enable_firebase_upload and result.success:
-                    from tools.firebase_upload.uploader import (
-                        init_firebase,
-                        upload_episodes_to_firebase,
-                    )
-
-                    print(
-                        "[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage "
-                        f"for robot {robot_type}..."
-                    )
-                    try:
-                        init_firebase()
-                        firebase_summary = upload_episodes_to_firebase(
-                            result.output_dir,
-                            scene_id,
-                            prefix=f"{firebase_upload_prefix}/{robot_type}",
-                        )
-                    except Exception as exc:
-                        _alert_firebase_upload_failure(
-                            scene_id=scene_id,
-                            job_id=job_id,
-                            robot_type=robot_type,
-                            error=str(exc),
-                        )
-                        print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
-                        raise
-                    print(
-                        "[GENIE-SIM-IMPORT] Firebase upload complete: "
-                        f"uploaded={firebase_summary.get('uploaded', 0)} "
-                        f"skipped={firebase_summary.get('skipped', 0)} "
-                        f"reuploaded={firebase_summary.get('reuploaded', 0)} "
-                        f"failed={firebase_summary.get('failed', 0)} "
-                        f"total={firebase_summary.get('total_files', 0)}"
-                    )
-
                 overall_success = overall_success and result.success
                 robot_entries.append({
                     "robot_type": robot_type,
@@ -2591,7 +2591,6 @@ def main():
                     "warnings": result.warnings,
                     "upload_status": result.upload_status,
                     "upload_failures": result.upload_failures,
-                    "firebase_upload": firebase_summary,
                 })
 
             combined_output_dir = _resolve_local_output_dir(
@@ -2618,6 +2617,65 @@ def main():
                 "[GENIE-SIM-IMPORT] Combined import manifest: "
                 f"{combined_manifest_path}"
             )
+
+            if enable_firebase_upload and overall_success:
+                from tools.firebase_upload.uploader import (
+                    init_firebase,
+                    upload_episodes_to_firebase,
+                )
+                from tools.error_handling.retry import retry_with_backoff
+
+                print(
+                    "[GENIE-SIM-IMPORT] Uploading combined results to Firebase Storage..."
+                )
+
+                def _upload_with_retry():
+                    init_firebase()
+                    return upload_episodes_to_firebase(
+                        combined_output_dir,
+                        scene_id,
+                        prefix=firebase_upload_prefix,
+                    )
+
+                retry_upload = retry_with_backoff(
+                    max_retries=3,
+                    base_delay=2.0,
+                    max_delay=30.0,
+                    backoff_factor=2.0,
+                )(_upload_with_retry)
+
+                try:
+                    upload_summary = retry_upload()
+                except Exception as exc:
+                    _alert_firebase_upload_failure(
+                        scene_id=scene_id,
+                        job_id=job_id,
+                        robot_type="combined",
+                        error=str(exc),
+                    )
+                    print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed after retries: {exc}")
+                    raise
+
+                print(
+                    "[GENIE-SIM-IMPORT] Firebase upload complete: "
+                    f"uploaded={upload_summary.get('uploaded', 0)} "
+                    f"skipped={upload_summary.get('skipped', 0)} "
+                    f"reuploaded={upload_summary.get('reuploaded', 0)} "
+                    f"failed={upload_summary.get('failed', 0)} "
+                    f"total={upload_summary.get('total_files', 0)}"
+                )
+
+                # Cleanup local combined results after successful upload
+                cleanup_local = parse_bool_env(
+                    os.getenv("CLEANUP_LOCAL_ARTIFACTS"),
+                    default=production_mode,
+                )
+                if cleanup_local:
+                    print(f"[GENIE-SIM-IMPORT] Cleaning up local directory: {combined_output_dir}")
+                    try:
+                        shutil.rmtree(combined_output_dir)
+                    except Exception as exc:
+                        print(f"[GENIE-SIM-IMPORT] ⚠️ Local cleanup failed: {exc}")
 
             if overall_success:
                 print(f"[GENIE-SIM-IMPORT] ✅ Multi-robot import succeeded")
@@ -2657,15 +2715,27 @@ def main():
                     init_firebase,
                     upload_episodes_to_firebase,
                 )
+                from tools.error_handling.retry import retry_with_backoff
 
                 print("[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage...")
-                try:
+
+                def _upload_with_retry():
                     init_firebase()
-                    upload_summary = upload_episodes_to_firebase(
+                    return upload_episodes_to_firebase(
                         result.output_dir,
                         scene_id,
                         prefix=firebase_upload_prefix,
                     )
+
+                retry_upload = retry_with_backoff(
+                    max_retries=3,
+                    base_delay=2.0,
+                    max_delay=30.0,
+                    backoff_factor=2.0,
+                )(_upload_with_retry)
+
+                try:
+                    upload_summary = retry_upload()
                 except Exception as exc:
                     _alert_firebase_upload_failure(
                         scene_id=scene_id,
@@ -2673,8 +2743,9 @@ def main():
                         robot_type="default",
                         error=str(exc),
                     )
-                    print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
+                    print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed after retries: {exc}")
                     raise
+
                 print(
                     "[GENIE-SIM-IMPORT] Firebase upload complete: "
                     f"uploaded={upload_summary.get('uploaded', 0)} "
@@ -2683,6 +2754,18 @@ def main():
                     f"failed={upload_summary.get('failed', 0)} "
                     f"total={upload_summary.get('total_files', 0)}"
                 )
+
+                # Cleanup local results after successful upload
+                cleanup_local = parse_bool_env(
+                    os.getenv("CLEANUP_LOCAL_ARTIFACTS"),
+                    default=production_mode,
+                )
+                if cleanup_local:
+                    print(f"[GENIE-SIM-IMPORT] Cleaning up local directory: {result.output_dir}")
+                    try:
+                        shutil.rmtree(result.output_dir)
+                    except Exception as exc:
+                        print(f"[GENIE-SIM-IMPORT] ⚠️ Local cleanup failed: {exc}")
             sys.exit(0)
         else:
             print(f"[GENIE-SIM-IMPORT] ❌ Import failed")
