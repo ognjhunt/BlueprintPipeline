@@ -1556,6 +1556,15 @@ def main():
             partial_results=partial_results,
         )
 
+    if production_mode and generate_embeddings and not require_embeddings:
+        message = (
+            "Production mode requires real embeddings; placeholder embeddings are disallowed. "
+            "Set REQUIRE_EMBEDDINGS=true (or remove the override) when GENERATE_EMBEDDINGS is enabled."
+        )
+        print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
+        _write_failure_marker(RuntimeError(message), "embedding_requirement_validation")
+        sys.exit(1)
+
     embedding_provider_available = _embedding_provider_available()
     if production_mode and generate_embeddings and not embedding_provider_available:
         message = (
