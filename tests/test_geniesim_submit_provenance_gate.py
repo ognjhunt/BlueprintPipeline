@@ -147,8 +147,12 @@ def _install_firebase_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     def upload_episodes_to_firebase(*_args: object, **_kwargs: object) -> dict[str, int]:
         return {"uploaded": 0, "skipped": 0, "reuploaded": 0, "failed": 0, "total_files": 0}
 
+    def upload_firebase_files(*_args: object, **_kwargs: object) -> dict[str, int]:
+        return {"uploaded": 0, "skipped": 0, "reuploaded": 0, "failed": 0, "total_files": 0}
+
     fake_firebase.FirebaseUploadError = FirebaseUploadError
     fake_firebase.upload_episodes_to_firebase = upload_episodes_to_firebase
+    fake_firebase.upload_firebase_files = upload_firebase_files
     monkeypatch.setitem(sys.modules, "tools.firebase_upload", fake_firebase)
 
 

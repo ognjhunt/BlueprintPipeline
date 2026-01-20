@@ -10,7 +10,7 @@ import base64
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import firebase_admin
 from firebase_admin import credentials, storage
@@ -145,15 +145,13 @@ def _verify_blob_checksum(
     return not errors, detail
 
 
-def upload_episodes_to_firebase(
-    episodes_dir: Path,
+def _upload_firebase_files(
+    file_paths: Sequence[Path],
+    *,
+    base_dir: Path,
     scene_id: str,
-    prefix: str = "datasets",
+    prefix: str,
 ) -> dict:
-    """Upload episode artifacts to Firebase Storage."""
-    if not episodes_dir.exists():
-        raise FileNotFoundError(f"Episodes directory not found: {episodes_dir}")
-
     init_firebase()
     bucket = storage.bucket()
 
@@ -161,20 +159,13 @@ def upload_episodes_to_firebase(
     if concurrency < 1:
         raise ValueError("FIREBASE_UPLOAD_CONCURRENCY must be >= 1")
 
-    total_files = 0
+    total_files = len(file_paths)
     uploaded_files = 0
     skipped_files = 0
     reuploaded_files = 0
     failures = []
     verification_failed = []
     file_statuses = []
-
-    file_paths = [
-        file_path
-        for file_path in sorted(episodes_dir.rglob("*"))
-        if file_path.is_file()
-    ]
-    total_files = len(file_paths)
 
     def _upload_single(
         path: Path,
@@ -252,7 +243,7 @@ def upload_episodes_to_firebase(
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {}
         for file_path in file_paths:
-            relative_path = file_path.relative_to(episodes_dir).as_posix()
+            relative_path = file_path.relative_to(base_dir).as_posix()
             remote_path = f"{prefix}/{scene_id}/{relative_path}"
             content_type, _ = mimetypes.guess_type(file_path.name)
             future = executor.submit(_upload_single, file_path, remote_path, content_type)
@@ -327,6 +318,64 @@ def upload_episodes_to_firebase(
         )
 
     return summary
+
+
+def upload_episodes_to_firebase(
+    episodes_dir: Path,
+    scene_id: str,
+    prefix: str = "datasets",
+) -> dict:
+    """Upload episode artifacts to Firebase Storage."""
+    if not episodes_dir.exists():
+        raise FileNotFoundError(f"Episodes directory not found: {episodes_dir}")
+
+    file_paths = [
+        file_path
+        for file_path in sorted(episodes_dir.rglob("*"))
+        if file_path.is_file()
+    ]
+    return _upload_firebase_files(
+        file_paths,
+        base_dir=episodes_dir,
+        scene_id=scene_id,
+        prefix=prefix,
+    )
+
+
+def upload_firebase_files(
+    paths: Iterable[str | Path],
+    prefix: str,
+    scene_id: str,
+) -> dict:
+    """Upload explicit file paths to Firebase Storage."""
+    file_paths = [Path(path) for path in paths if path]
+    if not file_paths:
+        return {
+            "total_files": 0,
+            "uploaded": 0,
+            "skipped": 0,
+            "reuploaded": 0,
+            "failed": 0,
+            "file_statuses": [],
+            "failures": [],
+            "verification_failed": [],
+            "verification_strategy": "sha256_metadata+md5_base64",
+        }
+
+    for file_path in file_paths:
+        if not file_path.exists():
+            raise FileNotFoundError(f"Retry file path not found: {file_path}")
+        if not file_path.is_file():
+            raise ValueError(f"Retry path is not a file: {file_path}")
+
+    common_root = Path(os.path.commonpath([str(path) for path in file_paths]))
+    base_dir = common_root.parent if common_root.is_file() else common_root
+    return _upload_firebase_files(
+        file_paths,
+        base_dir=base_dir,
+        scene_id=scene_id,
+        prefix=prefix,
+    )
 
 
 def cleanup_firebase_paths(
