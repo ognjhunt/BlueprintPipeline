@@ -10,7 +10,13 @@ commonLabels:
 
 resources:
   - ../episode-generation-job.yaml
+  - ../genie-sim-export-job.yaml
   - ../genie-sim-gpu-job.yaml
+  - ../genie-sim-import-job.yaml
+  - ../genie-sim-import-webhook.yaml
+  - ../genie-sim-local-job.yaml
+  - ../genie-sim-submit-job.yaml
+  - ../genie-sim-training-job.yaml
   - ../firebase-cleanup-cronjob.yaml
   - ../dream2flow-preparation-job.yaml
   - ../dwm-preparation-job.yaml
