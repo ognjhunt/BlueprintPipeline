@@ -130,6 +130,11 @@
       "max_unreachable_targets": 0,
       "check_place_targets": true,
       "description": "Reachability requirements for Genie Sim task target poses"
+    },
+    "geniesim_data_collection": {
+      "min_collision_free_rate": 0.9,
+      "min_task_success_rate": 0.8,
+      "description": "Genie Sim data collection quality thresholds"
     }
   },
   "human_approval": {
