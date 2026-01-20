@@ -86,6 +86,17 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 # Add parent paths for imports
 ADAPTER_ROOT = Path(__file__).resolve().parent
@@ -107,6 +118,7 @@ from tools.geniesim_adapter.config import (
     get_geniesim_port,
 )
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
+from tools.config.env import parse_bool_env
 
 logger = logging.getLogger(__name__)
 
@@ -264,132 +276,248 @@ class CommandType(int, Enum):
     GET_CHECKER_STATUS = 56
 
 
-@dataclass
-class GenieSimConfig:
+class GenieSimConfig(BaseModel):
     """Configuration for Genie Sim local framework."""
 
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
     # Connection settings
-    host: str = field(default_factory=get_geniesim_host)
-    port: int = field(default_factory=get_geniesim_port)
-    timeout: float = field(default_factory=get_geniesim_grpc_timeout_s)
-    max_retries: int = 3
+    host: StrictStr = Field(default_factory=get_geniesim_host)
+    port: StrictInt = Field(default_factory=get_geniesim_port)
+    timeout: StrictFloat = Field(default_factory=get_geniesim_grpc_timeout_s)
+    max_retries: StrictInt = 3
 
     # Installation paths
     geniesim_root: Path = Path("/opt/geniesim")
     isaac_sim_path: Path = Path("/isaac-sim")
-    isaacsim_required: bool = False
-    curobo_required: bool = False
+    isaacsim_required: StrictBool = False
+    curobo_required: StrictBool = False
 
     # Data collection settings
-    episodes_per_task: int = 100
-    use_curobo: bool = True
-    headless: bool = True
+    episodes_per_task: StrictInt = 100
+    use_curobo: StrictBool = True
+    headless: StrictBool = True
     environment: str = "development"
-    allow_linear_fallback: bool = False
-    allow_linear_fallback_in_production: bool = False
-    allow_ik_failure_fallback: bool = False
-    stall_timeout_s: float = 30.0
-    max_stalls: int = 2
-    stall_backoff_s: float = 5.0
-    max_duration_seconds: Optional[float] = None
+    allow_linear_fallback: StrictBool = False
+    allow_linear_fallback_in_production: StrictBool = False
+    allow_ik_failure_fallback: StrictBool = False
+    stall_timeout_s: StrictFloat = 30.0
+    max_stalls: StrictInt = 2
+    stall_backoff_s: StrictFloat = 5.0
+    max_duration_seconds: Optional[StrictFloat] = None
 
     # Output settings
     recording_dir: Path = Path("/tmp/geniesim_recordings")
     log_dir: Path = Path("/tmp/geniesim_logs")
     lerobot_export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2
-    require_lerobot_v3: bool = False
-    cleanup_tmp: bool = True
+    require_lerobot_v3: StrictBool = False
+    cleanup_tmp: StrictBool = True
 
     # Robot configuration
     robot_type: str = "franka"
     robot_urdf: Optional[str] = None
 
-    def __post_init__(self) -> None:
-        if self.environment != "production":
-            return
-        for label, path, env_name in (
-            ("recording", self.recording_dir, GENIESIM_RECORDINGS_DIR_ENV),
-            ("log", self.log_dir, GENIESIM_LOG_DIR_ENV),
-        ):
-            if _is_temp_path(path):
-                logger.warning(
-                    "Genie Sim %s directory resolves under a temporary path (%s) in production. "
-                    "Set %s to a persistent location.",
-                    label,
-                    path,
-                    env_name,
-                )
-
     @classmethod
     def from_env(cls) -> "GenieSimConfig":
         """Create configuration from environment variables."""
+        env = os.environ
         environment = (
-            os.getenv("GENIESIM_ENV")
-            or os.getenv("PIPELINE_ENV")
-            or os.getenv("BP_ENV")
+            env.get("GENIESIM_ENV")
+            or env.get("PIPELINE_ENV")
+            or env.get("BP_ENV")
             or "development"
-        ).lower()
-        allow_linear_fallback = os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK", "0") == "1"
-        allow_linear_fallback_in_production = (
-            os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD", "0") == "1"
         )
-        allow_ik_failure_env = os.getenv("GENIESIM_ALLOW_IK_FAILURE_FALLBACK")
-        allow_ik_failure_fallback = (
-            _parse_bool(allow_ik_failure_env, default=False)
-            if allow_ik_failure_env is not None
-            else allow_linear_fallback
-        )
-        cleanup_default = environment != "production"
-        cleanup_tmp = _parse_bool(os.getenv("GENIESIM_CLEANUP_TMP"), default=cleanup_default)
-        collection_timeout_env = os.getenv("GENIESIM_COLLECTION_TIMEOUT_S")
-        max_duration_seconds = None
-        if collection_timeout_env not in (None, ""):
+        env_data: Dict[str, Any] = {
+            "environment": environment,
+        }
+        for key, env_name in (
+            ("host", "GENIESIM_HOST"),
+            ("port", "GENIESIM_PORT"),
+            ("geniesim_root", "GENIESIM_ROOT"),
+            ("isaac_sim_path", "ISAAC_SIM_PATH"),
+            ("isaacsim_required", "ISAACSIM_REQUIRED"),
+            ("curobo_required", "CUROBO_REQUIRED"),
+            ("headless", "HEADLESS"),
+            ("robot_type", "ROBOT_TYPE"),
+            ("allow_linear_fallback", "GENIESIM_ALLOW_LINEAR_FALLBACK"),
+            ("allow_linear_fallback_in_production", "GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD"),
+            ("allow_ik_failure_fallback", "GENIESIM_ALLOW_IK_FAILURE_FALLBACK"),
+            ("stall_timeout_s", "GENIESIM_STALL_TIMEOUT_S"),
+            ("max_stalls", "GENIESIM_MAX_STALLS"),
+            ("stall_backoff_s", "GENIESIM_STALL_BACKOFF_S"),
+            ("max_duration_seconds", "GENIESIM_COLLECTION_TIMEOUT_S"),
+            ("lerobot_export_format", "LEROBOT_EXPORT_FORMAT"),
+            ("require_lerobot_v3", "LEROBOT_REQUIRE_V3"),
+            ("cleanup_tmp", "GENIESIM_CLEANUP_TMP"),
+        ):
+            if env_name in env and env.get(env_name) not in (None, ""):
+                env_data[key] = env.get(env_name)
+        if "allow_ik_failure_fallback" not in env_data and "allow_linear_fallback" in env_data:
+            env_data["allow_ik_failure_fallback"] = env_data["allow_linear_fallback"]
+        timeout_value = env.get("GENIESIM_GRPC_TIMEOUT_S") or env.get("GENIESIM_TIMEOUT")
+        if timeout_value not in (None, ""):
+            env_data["timeout"] = timeout_value
+        recording_dir = _resolve_recording_dir()
+        log_dir = _resolve_log_dir()
+        env_data["recording_dir"] = recording_dir
+        env_data["log_dir"] = log_dir
+        return cls.model_validate(env_data)
+
+    @field_validator("host", mode="before")
+    @classmethod
+    def _validate_host(cls, value: Any) -> str:
+        if value is None:
+            raise ValueError("GENIESIM_HOST must be set to a non-empty hostname.")
+        host = str(value).strip()
+        if not host:
+            raise ValueError("GENIESIM_HOST must be a non-empty hostname.")
+        return host
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def _normalize_environment(cls, value: Any) -> str:
+        if value is None:
+            return "development"
+        env_value = str(value).strip().lower()
+        if not env_value:
+            raise ValueError("Environment must be a non-empty string.")
+        return env_value
+
+    @field_validator(
+        "port",
+        "max_retries",
+        "episodes_per_task",
+        "max_stalls",
+        mode="before",
+    )
+    @classmethod
+    def _validate_ints(cls, value: Any, info) -> int:
+        field_name = info.field_name
+        if value is None:
+            raise ValueError(f"{field_name} is required.")
+        if isinstance(value, bool):
+            raise ValueError(f"{field_name} must be an integer, not a boolean.")
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str):
             try:
-                max_duration_seconds = float(collection_timeout_env)
-            except ValueError:
-                logger.warning(
-                    "GENIESIM_COLLECTION_TIMEOUT_S must be a number of seconds; ignoring invalid value."
+                parsed = int(value.strip())
+            except ValueError as exc:
+                raise ValueError(f"{field_name} must be an integer (got {value!r}).") from exc
+        else:
+            raise ValueError(f"{field_name} must be an integer (got {value!r}).")
+        if field_name == "port" and not 1 <= parsed <= 65535:
+            raise ValueError("port must be between 1 and 65535.")
+        if field_name in {"max_retries", "episodes_per_task", "max_stalls"} and parsed < 0:
+            raise ValueError(f"{field_name} must be >= 0.")
+        return parsed
+
+    @field_validator(
+        "timeout",
+        "stall_timeout_s",
+        "stall_backoff_s",
+        "max_duration_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _validate_floats(cls, value: Any, info) -> Optional[float]:
+        if value is None:
+            if info.field_name == "max_duration_seconds":
+                return None
+            raise ValueError(f"{info.field_name} must be a number.")
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be a number, not a boolean.")
+        if isinstance(value, (int, float)):
+            parsed = float(value)
+        elif isinstance(value, str):
+            try:
+                parsed = float(value.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    f"{info.field_name} must be a number (got {value!r})."
+                ) from exc
+        else:
+            raise ValueError(f"{info.field_name} must be a number (got {value!r}).")
+        if parsed < 0.0:
+            raise ValueError(f"{info.field_name} must be >= 0.")
+        return parsed
+
+    @field_validator(
+        "isaacsim_required",
+        "curobo_required",
+        "use_curobo",
+        "headless",
+        "allow_linear_fallback",
+        "allow_linear_fallback_in_production",
+        "allow_ik_failure_fallback",
+        "require_lerobot_v3",
+        "cleanup_tmp",
+        mode="before",
+    )
+    @classmethod
+    def _validate_bools(cls, value: Any, info) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            parsed = parse_bool_env(value, default=None)
+            if parsed is None:
+                raise ValueError(
+                    f"{info.field_name} must be a boolean-like value (got {value!r})."
                 )
-        if environment == "production":
-            if allow_linear_fallback_in_production:
-                raise RuntimeError(
+            return parsed
+        raise ValueError(
+            f"{info.field_name} must be a boolean-like value (got {value!r})."
+        )
+
+    @field_validator("geniesim_root", "isaac_sim_path", "recording_dir", "log_dir", mode="before")
+    @classmethod
+    def _validate_paths(cls, value: Any, info) -> Path:
+        if isinstance(value, Path):
+            return value.expanduser()
+        if isinstance(value, str):
+            candidate = value.strip()
+            if not candidate:
+                raise ValueError(f"{info.field_name} must be a non-empty path.")
+            return Path(candidate).expanduser()
+        raise ValueError(f"{info.field_name} must be a path-like value (got {value!r}).")
+
+    @field_validator("lerobot_export_format", mode="before")
+    @classmethod
+    def _validate_lerobot_format(cls, value: Any) -> LeRobotExportFormat:
+        if isinstance(value, LeRobotExportFormat):
+            return value
+        if value is None:
+            return LeRobotExportFormat.LEROBOT_V2
+        return parse_lerobot_export_format(value, default=LeRobotExportFormat.LEROBOT_V2)
+
+    @model_validator(mode="after")
+    def _finalize_config(self) -> "GenieSimConfig":
+        if self.environment == "production":
+            if self.allow_linear_fallback_in_production:
+                raise ValueError(
                     "Refusing to enable linear fallback in production. "
                     "GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD is ignored in production."
                 )
-            if allow_linear_fallback or allow_ik_failure_fallback:
-                raise RuntimeError(
+            if self.allow_linear_fallback or self.allow_ik_failure_fallback:
+                raise ValueError(
                     "Refusing to enable linear fallback in production. "
                     "Unset GENIESIM_ALLOW_LINEAR_FALLBACK and GENIESIM_ALLOW_IK_FAILURE_FALLBACK."
                 )
-        recording_dir = _resolve_recording_dir()
-        log_dir = _resolve_log_dir()
-        return cls(
-            host=get_geniesim_host(),
-            port=get_geniesim_port(),
-            timeout=get_geniesim_grpc_timeout_s(),
-            geniesim_root=Path(os.getenv("GENIESIM_ROOT", "/opt/geniesim")),
-            isaac_sim_path=Path(os.getenv("ISAAC_SIM_PATH", "/isaac-sim")),
-            isaacsim_required=_parse_bool(os.getenv("ISAACSIM_REQUIRED"), default=False),
-            curobo_required=_parse_bool(os.getenv("CUROBO_REQUIRED"), default=False),
-            headless=os.getenv("HEADLESS", "1") == "1",
-            robot_type=os.getenv("ROBOT_TYPE", "franka"),
-            environment=environment,
-            allow_linear_fallback=allow_linear_fallback,
-            allow_linear_fallback_in_production=allow_linear_fallback_in_production,
-            allow_ik_failure_fallback=allow_ik_failure_fallback,
-            stall_timeout_s=float(os.getenv("GENIESIM_STALL_TIMEOUT_S", "30")),
-            max_stalls=int(os.getenv("GENIESIM_MAX_STALLS", "2")),
-            stall_backoff_s=float(os.getenv("GENIESIM_STALL_BACKOFF_S", "5")),
-            max_duration_seconds=max_duration_seconds,
-            recording_dir=recording_dir,
-            log_dir=log_dir,
-            lerobot_export_format=parse_lerobot_export_format(
-                os.getenv("LEROBOT_EXPORT_FORMAT"),
-                default=LeRobotExportFormat.LEROBOT_V2,
-            ),
-            require_lerobot_v3=_parse_bool(os.getenv("LEROBOT_REQUIRE_V3"), default=False),
-            cleanup_tmp=cleanup_tmp,
-        )
+            for label, path, env_name in (
+                ("recording", self.recording_dir, GENIESIM_RECORDINGS_DIR_ENV),
+                ("log", self.log_dir, GENIESIM_LOG_DIR_ENV),
+            ):
+                if _is_temp_path(path):
+                    logger.warning(
+                        "Genie Sim %s directory resolves under a temporary path (%s) in production. "
+                        "Set %s to a persistent location.",
+                        label,
+                        path,
+                        env_name,
+                    )
+        return self
 
 
 @dataclass
@@ -439,12 +567,6 @@ def _parse_version(version: str) -> tuple:
     parts = version.split(".")
     padded = (parts + ["0", "0", "0"])[:3]
     return tuple(int(part) if part.isdigit() else 0 for part in padded)
-
-
-def _parse_bool(value: Optional[str], default: bool = False) -> bool:
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _resolve_recording_dir() -> Path:

@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from import_manifest_utils import (
     ENV_SNAPSHOT_KEYS,
@@ -1379,9 +1380,10 @@ def _collect_local_episode_metadata(
     }
 
 
-@dataclass
-class ImportConfig:
+class ImportConfig(BaseModel):
     """Configuration for episode import."""
+
+    model_config = ConfigDict(extra="forbid", validate_default=True)
 
     # Genie Sim job
     job_id: str
@@ -1411,6 +1413,89 @@ class ImportConfig:
 
     job_metadata_path: Optional[str] = None
     local_episodes_prefix: Optional[str] = None
+
+    @field_validator("output_dir", mode="before")
+    @classmethod
+    def _validate_output_dir(cls, value: Any) -> Path:
+        if isinstance(value, Path):
+            return value
+        if isinstance(value, str):
+            candidate = value.strip()
+            if not candidate:
+                raise ValueError("output_dir must be a non-empty path.")
+            return Path(candidate)
+        raise ValueError(f"output_dir must be a path-like value (got {value!r}).")
+
+    @field_validator("min_quality_score", mode="before")
+    @classmethod
+    def _validate_min_quality_score(cls, value: Any) -> float:
+        if value is None:
+            raise ValueError("min_quality_score is required.")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"min_quality_score must be a float (got {value!r})."
+            ) from exc
+        if parsed < QUALITY_CONFIG.min_allowed or parsed > QUALITY_CONFIG.max_allowed:
+            raise ValueError(
+                f"min_quality_score must be between {QUALITY_CONFIG.min_allowed} "
+                f"and {QUALITY_CONFIG.max_allowed} (got {parsed})."
+            )
+        return parsed
+
+    @field_validator("lerobot_skip_rate_max", mode="before")
+    @classmethod
+    def _validate_lerobot_skip_rate_max(cls, value: Any) -> float:
+        if value is None:
+            raise ValueError("lerobot_skip_rate_max is required.")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"lerobot_skip_rate_max must be a float (got {value!r})."
+            ) from exc
+        if parsed < 0.0:
+            raise ValueError("lerobot_skip_rate_max must be >= 0.")
+        return parsed
+
+    @field_validator("min_episodes_required", mode="before")
+    @classmethod
+    def _validate_min_episodes_required(cls, value: Any) -> int:
+        if value is None:
+            raise ValueError("min_episodes_required is required.")
+        if isinstance(value, bool):
+            raise ValueError("min_episodes_required must be an integer, not a boolean.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"min_episodes_required must be an integer (got {value!r})."
+            ) from exc
+        if parsed < 1:
+            raise ValueError("min_episodes_required must be >= 1.")
+        return parsed
+
+
+def _format_validation_error(error: ValidationError) -> str:
+    details = []
+    for entry in error.errors():
+        location = ".".join(str(part) for part in entry.get("loc", []))
+        message = entry.get("msg", "Invalid value")
+        details.append(f"{location}: {message}" if location else message)
+    return "; ".join(details) if details else str(error)
+
+
+def _create_import_config(payload: Dict[str, Any]) -> ImportConfig:
+    try:
+        return ImportConfig.model_validate(payload)
+    except ValidationError as exc:
+        details = _format_validation_error(exc)
+        print(
+            "[GENIE-SIM-IMPORT] ERROR: Invalid import configuration. "
+            f"Fix the environment inputs and retry. Details: {details}"
+        )
+        sys.exit(1)
 
 
 @dataclass
@@ -2766,25 +2851,27 @@ def main():
     )
 
     # Create configuration
-    config = ImportConfig(
-        job_id=job_id,
-        output_dir=output_dir,
-        gcs_output_path=gcs_output_path,
-        enable_gcs_uploads=not disable_gcs_upload,
-        min_quality_score=min_quality_score,
-        enable_validation=enable_validation,
-        filter_low_quality=filter_low_quality,
-        require_lerobot=require_lerobot,
-        require_lerobot_default=require_lerobot_resolution.default,
-        require_lerobot_source=require_lerobot_resolution.source,
-        require_lerobot_raw_value=require_lerobot_resolution.raw_value,
-        lerobot_skip_rate_max=lerobot_skip_rate_max,
-        min_episodes_required=min_episodes_required,
-        poll_interval=poll_interval,
-        wait_for_completion=wait_for_completion,
-        fail_on_partial_error=fail_on_partial_error,
-        job_metadata_path=job_metadata_path,
-        local_episodes_prefix=local_episodes_prefix,
+    config = _create_import_config(
+        {
+            "job_id": job_id,
+            "output_dir": output_dir,
+            "gcs_output_path": gcs_output_path,
+            "enable_gcs_uploads": not disable_gcs_upload,
+            "min_quality_score": min_quality_score,
+            "enable_validation": enable_validation,
+            "filter_low_quality": filter_low_quality,
+            "require_lerobot": require_lerobot,
+            "require_lerobot_default": require_lerobot_resolution.default,
+            "require_lerobot_source": require_lerobot_resolution.source,
+            "require_lerobot_raw_value": require_lerobot_resolution.raw_value,
+            "lerobot_skip_rate_max": lerobot_skip_rate_max,
+            "min_episodes_required": min_episodes_required,
+            "poll_interval": poll_interval,
+            "wait_for_completion": wait_for_completion,
+            "fail_on_partial_error": fail_on_partial_error,
+            "job_metadata_path": job_metadata_path,
+            "local_episodes_prefix": local_episodes_prefix,
+        }
     )
 
     artifacts_by_robot = _resolve_artifacts_by_robot(job_metadata, artifacts_by_robot_env)
@@ -2844,25 +2931,27 @@ def main():
                     job_id=job_id,
                     explicit_gcs_output_path=explicit_gcs_output_path,
                 )
-                robot_config = ImportConfig(
-                    job_id=job_id,
-                    output_dir=robot_output_dir,
-                    gcs_output_path=robot_gcs_output_path,
-                    enable_gcs_uploads=not disable_gcs_upload,
-                    min_quality_score=min_quality_score,
-                    enable_validation=enable_validation,
-                    filter_low_quality=filter_low_quality,
-                    require_lerobot=require_lerobot,
-                    require_lerobot_default=require_lerobot_resolution.default,
-                    require_lerobot_source=require_lerobot_resolution.source,
-                    require_lerobot_raw_value=require_lerobot_resolution.raw_value,
-                    lerobot_skip_rate_max=lerobot_skip_rate_max,
-                    min_episodes_required=min_episodes_required,
-                    poll_interval=poll_interval,
-                    wait_for_completion=wait_for_completion,
-                    fail_on_partial_error=fail_on_partial_error,
-                    job_metadata_path=job_metadata_path,
-                    local_episodes_prefix=episodes_prefix,
+                robot_config = _create_import_config(
+                    {
+                        "job_id": job_id,
+                        "output_dir": robot_output_dir,
+                        "gcs_output_path": robot_gcs_output_path,
+                        "enable_gcs_uploads": not disable_gcs_upload,
+                        "min_quality_score": min_quality_score,
+                        "enable_validation": enable_validation,
+                        "filter_low_quality": filter_low_quality,
+                        "require_lerobot": require_lerobot,
+                        "require_lerobot_default": require_lerobot_resolution.default,
+                        "require_lerobot_source": require_lerobot_resolution.source,
+                        "require_lerobot_raw_value": require_lerobot_resolution.raw_value,
+                        "lerobot_skip_rate_max": lerobot_skip_rate_max,
+                        "min_episodes_required": min_episodes_required,
+                        "poll_interval": poll_interval,
+                        "wait_for_completion": wait_for_completion,
+                        "fail_on_partial_error": fail_on_partial_error,
+                        "job_metadata_path": job_metadata_path,
+                        "local_episodes_prefix": episodes_prefix,
+                    }
                 )
                 robot_job_metadata = _build_robot_job_metadata(
                     job_metadata,
