@@ -389,6 +389,10 @@ class DataCollectionResult:
     average_quality_score: float = 0.0
     collision_free_rate: float = 0.0
     task_success_rate: float = 0.0
+    collision_free_episodes: int = 0
+    collision_info_episodes: int = 0
+    task_success_episodes: int = 0
+    task_success_info_episodes: int = 0
 
     # Timing
     duration_seconds: float = 0.0
@@ -1673,6 +1677,7 @@ class GenieSimLocalFramework:
         self._server_process: Optional[subprocess.Popen] = None
         self._status = GenieSimServerStatus.NOT_RUNNING
         self._stall_count = 0
+        self._last_planning_report: Dict[str, Any] = {}
 
         # Ensure directories exist
         self.config.recording_dir.mkdir(parents=True, exist_ok=True)
@@ -2119,6 +2124,10 @@ class GenieSimLocalFramework:
             passed_episodes = 0
             total_frames = 0
             quality_scores = []
+            collision_free_episodes = 0
+            collision_info_episodes = 0
+            task_success_episodes = 0
+            task_success_info_episodes = 0
 
             # Create output directory for this run
             run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2154,6 +2163,16 @@ class GenieSimLocalFramework:
                         )
 
                         total_episodes += 1
+                        collision_free_flag = episode_result.get("collision_free")
+                        if collision_free_flag is not None:
+                            collision_info_episodes += 1
+                            if collision_free_flag:
+                                collision_free_episodes += 1
+                        task_success_flag = episode_result.get("task_success")
+                        if task_success_flag is not None:
+                            task_success_info_episodes += 1
+                            if task_success_flag:
+                                task_success_episodes += 1
 
                         if episode_result.get("success"):
                             passed_episodes += 1
@@ -2201,12 +2220,27 @@ class GenieSimLocalFramework:
             result.total_frames = total_frames
             result.recording_dir = run_dir
             result.duration_seconds = time.time() - start_time
+            result.collision_free_episodes = collision_free_episodes
+            result.collision_info_episodes = collision_info_episodes
+            result.task_success_episodes = task_success_episodes
+            result.task_success_info_episodes = task_success_info_episodes
 
             if quality_scores:
                 result.average_quality_score = np.mean(quality_scores)
 
-            if total_episodes > 0:
-                result.task_success_rate = passed_episodes / total_episodes
+            if collision_info_episodes > 0:
+                result.collision_free_rate = collision_free_episodes / collision_info_episodes
+            elif total_episodes > 0:
+                result.warnings.append(
+                    "Collision-free rate unavailable: no collision metadata captured."
+                )
+
+            if task_success_info_episodes > 0:
+                result.task_success_rate = task_success_episodes / task_success_info_episodes
+            elif total_episodes > 0:
+                result.warnings.append(
+                    "Task success rate unavailable: no success metadata captured."
+                )
 
             result.success = (passed_episodes > 0) and not timed_out
 
@@ -2216,6 +2250,18 @@ class GenieSimLocalFramework:
             self.log(f"Episodes: {passed_episodes}/{total_episodes} passed")
             self.log(f"Total frames: {total_frames}")
             self.log(f"Average quality: {result.average_quality_score:.2f}")
+            if result.collision_info_episodes > 0:
+                self.log(
+                    "Collision-free rate: "
+                    f"{result.collision_free_rate:.2%} "
+                    f"({result.collision_free_episodes}/{result.collision_info_episodes})"
+                )
+            if result.task_success_info_episodes > 0:
+                self.log(
+                    "Task success rate: "
+                    f"{result.task_success_rate:.2%} "
+                    f"({result.task_success_episodes}/{result.task_success_info_episodes})"
+                )
             self.log(f"Duration: {result.duration_seconds:.1f}s")
             self.log(f"Output: {run_dir}")
 
@@ -2306,6 +2352,8 @@ class GenieSimLocalFramework:
             "success": False,
             "frame_count": 0,
             "quality_score": 0.0,
+            "collision_free": None,
+            "task_success": None,
             "stall_info": {
                 "stall_detected": False,
                 "stall_timeout_s": self.config.stall_timeout_s,
@@ -2332,6 +2380,8 @@ class GenieSimLocalFramework:
                 result["error"] = "Motion planning failed"
                 return result
 
+            planning_report = dict(self._last_planning_report)
+            result["collision_free"] = planning_report.get("collision_free")
             timed_trajectory = self._ensure_trajectory_timestamps(trajectory)
 
             collector_state = {
@@ -2502,6 +2552,8 @@ class GenieSimLocalFramework:
             quality_score = self._calculate_quality_score(frames, task)
             min_quality = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
             validation_passed = quality_score >= min_quality
+            task_success = self._extract_task_success(frames, task)
+            collision_free = planning_report.get("collision_free")
 
             # Save episode
             episode_path = output_dir / f"{episode_id}.json"
@@ -2520,6 +2572,9 @@ class GenieSimLocalFramework:
                     "frame_count": len(frames),
                     "quality_score": quality_score,
                     "validation_passed": validation_passed,
+                    "task_success": task_success,
+                    "collision_free": collision_free,
+                    "collision_source": planning_report.get("collision_source"),
                     "stall_info": result["stall_info"],
                 }, f, default=_json_default)
 
@@ -2527,6 +2582,8 @@ class GenieSimLocalFramework:
             result["frame_count"] = len(frames)
             result["quality_score"] = quality_score
             result["validation_passed"] = validation_passed
+            result["task_success"] = task_success
+            result["collision_free"] = collision_free
             result["output_path"] = str(episode_path)
 
         except Exception as e:
@@ -2670,6 +2727,12 @@ class GenieSimLocalFramework:
         Returns:
             List of waypoints or None if planning fails
         """
+        self._last_planning_report = {
+            "planner": None,
+            "collision_free": None,
+            "collision_source": None,
+            "notes": [],
+        }
         production_mode = self.config.environment == "production"
         # Get target position from task
         target_pos = task.get("target_position", [0.5, 0.0, 0.8])
@@ -3073,6 +3136,7 @@ class GenieSimLocalFramework:
         )
 
         planner = None
+        collision_free: Optional[bool] = None
         if CollisionAwarePlanner is not None:
             try:
                 planner = CollisionAwarePlanner(
@@ -3157,6 +3221,7 @@ class GenieSimLocalFramework:
         bounds. If IK fails, falls back to bounded joint-space interpolation
         with reachability and collision heuristics.
         """
+        collision_free: Optional[bool] = None
         if obstacles is None:
             obstacles = self._get_scene_obstacles(task, initial_obs)
 
@@ -3206,18 +3271,39 @@ class GenieSimLocalFramework:
                             "  ⚠️  IK fallback trajectory leaves workspace bounds; rejecting.",
                             "WARNING",
                         )
+                        collision_free = False
                     elif self._trajectory_violates_clearance(positions, obstacles, clearance=0.05):
                         self.log(
                             "  ⚠️  IK fallback trajectory violates obstacle clearance; rejecting.",
                             "WARNING",
                         )
+                        collision_free = False
                     else:
                         self.log("  ✅ IK fallback accepted with clearance checks.")
+                        collision_free = True
+                        self._last_planning_report.update(
+                            {
+                                "planner": "ik_fallback",
+                                "collision_free": collision_free,
+                                "collision_source": "ik_clearance_check",
+                                "notes": [],
+                            }
+                        )
                         return ik_trajectory
                 else:
                     self.log(
                         "  ℹ️  IK fallback accepted (FK unavailable for clearance checks).",
                         "INFO",
+                    )
+                    if planner is not None:
+                        collision_free = True
+                    self._last_planning_report.update(
+                        {
+                            "planner": "ik_fallback",
+                            "collision_free": collision_free,
+                            "collision_source": "ik_planner" if planner is not None else None,
+                            "notes": [],
+                        }
                     )
                     return ik_trajectory
 
@@ -3274,6 +3360,7 @@ class GenieSimLocalFramework:
                     "ERROR",
                 )
                 return None
+            collision_free = True
         elif workspace_bounds is not None:
             if np.any(target_position < workspace_bounds[0]) or np.any(
                 target_position > workspace_bounds[1]
@@ -3303,6 +3390,14 @@ class GenieSimLocalFramework:
         self.log(
             "  ✅ Joint-space fallback generated with bounds and clearance heuristics.",
             "INFO",
+        )
+        self._last_planning_report.update(
+            {
+                "planner": "linear_fallback",
+                "collision_free": collision_free,
+                "collision_source": "joint_space_clearance" if collision_free is not None else None,
+                "notes": [],
+            }
         )
         return trajectory
 
@@ -3397,6 +3492,7 @@ class GenieSimLocalFramework:
 
             # Planning phases for pick-and-place task
             trajectory_segments = []
+            plan_results: List[CuRoboPlanResult] = []
 
             # Phase 1: Approach - move to pre-grasp position
             pre_grasp_position = target_position.copy()
@@ -3418,9 +3514,18 @@ class GenieSimLocalFramework:
 
             if not approach_result.success:
                 self.log(f"Approach planning failed: {approach_result.error_message}", "WARNING")
+                self._last_planning_report.update(
+                    {
+                        "planner": "curobo",
+                        "collision_free": False,
+                        "collision_source": "curobo_plan_failure",
+                        "notes": [approach_result.error_message],
+                    }
+                )
                 return None
 
             trajectory_segments.append(("approach", approach_result.joint_trajectory))
+            plan_results.append(approach_result)
             last_joints = approach_result.joint_trajectory[-1]
 
             # Phase 2: Grasp - move to grasp position
@@ -3443,6 +3548,7 @@ class GenieSimLocalFramework:
                 # Continue with partial trajectory
             else:
                 trajectory_segments.append(("grasp", grasp_result.joint_trajectory))
+                plan_results.append(grasp_result)
                 last_joints = grasp_result.joint_trajectory[-1]
 
             # Phase 3: Lift - move up after grasping
@@ -3462,6 +3568,7 @@ class GenieSimLocalFramework:
 
             if lift_result.success:
                 trajectory_segments.append(("lift", lift_result.joint_trajectory))
+                plan_results.append(lift_result)
                 last_joints = lift_result.joint_trajectory[-1]
 
             # Phase 4: Transport - move to place position (if specified)
@@ -3484,6 +3591,7 @@ class GenieSimLocalFramework:
 
                 if transport_result.success:
                     trajectory_segments.append(("transport", transport_result.joint_trajectory))
+                    plan_results.append(transport_result)
                     last_joints = transport_result.joint_trajectory[-1]
 
                 # Phase 5: Place - lower to place position
@@ -3500,6 +3608,7 @@ class GenieSimLocalFramework:
 
                 if place_result.success:
                     trajectory_segments.append(("place", place_result.joint_trajectory))
+                    plan_results.append(place_result)
 
             # Combine all trajectory segments
             full_trajectory = []
@@ -3520,6 +3629,18 @@ class GenieSimLocalFramework:
             # Calculate quality metrics
             total_planning_time = approach_result.planning_time_ms
             self.log(f"  Total planning time: {total_planning_time:.1f}ms")
+
+            collision_free = None
+            if plan_results:
+                collision_free = all(result.is_collision_free for result in plan_results)
+            self._last_planning_report.update(
+                {
+                    "planner": "curobo",
+                    "collision_free": collision_free,
+                    "collision_source": "curobo_plan_result",
+                    "notes": [],
+                }
+            )
 
             return full_trajectory if full_trajectory else None
 
@@ -3708,6 +3829,30 @@ class GenieSimLocalFramework:
         )
 
         return min(1.0, max(0.0, weighted_score))
+
+    def _extract_task_success(
+        self,
+        frames: List[Dict[str, Any]],
+        task: Dict[str, Any],
+    ) -> Optional[bool]:
+        """Extract task success flag from Genie Sim metadata when available."""
+        if not frames:
+            return None
+
+        success_schema = task.get("success_schema") or {}
+        success_keys = success_schema.get("success_keys") or task.get("success_keys")
+        if not success_keys:
+            success_keys = DEFAULT_SUCCESS_SCHEMA["success_keys"]
+
+        for frame in reversed(frames):
+            obs = frame.get("observation") or {}
+            metadata = obs.get("metadata") if isinstance(obs, dict) else None
+            task_meta = obs.get("task") if isinstance(obs, dict) else None
+            for key in success_keys:
+                for container in (obs, frame, metadata, task_meta):
+                    if isinstance(container, dict) and key in container:
+                        return bool(container.get(key))
+        return None
 
     # =========================================================================
     # Export
