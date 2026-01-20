@@ -439,6 +439,14 @@ export ENABLE_CUROBO=0  # Use fallback planner
 
 ---
 
+## Genie Sim Import Job
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `REQUIRE_LEROBOT` | bool | production/service mode | Treat LeRobot conversion failures as job failures. Defaults to enabled when production or service mode is detected; explicitly set to override. |
+
+---
+
 ## Service Endpoints
 
 Genie Sim runs locally using the gRPC host/port configuration below for client-server communication.
