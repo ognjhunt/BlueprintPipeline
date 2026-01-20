@@ -34,6 +34,7 @@ from models import (
     RobotTrackingTarget,
     RobotTrajectory,
 )
+from tools.config.constants import DEFAULT_HTTP_TIMEOUT_S
 
 
 @dataclass
@@ -224,7 +225,11 @@ class RobotTracker:
             "method": self.config.method.value,
         }
 
-        response = requests.post(self.config.tracking_api, json=payload, timeout=300)
+        response = requests.post(
+            self.config.tracking_api,
+            json=payload,
+            timeout=DEFAULT_HTTP_TIMEOUT_S,  # allow long-running trajectory optimization
+        )
         response.raise_for_status()
         result = response.json()
 

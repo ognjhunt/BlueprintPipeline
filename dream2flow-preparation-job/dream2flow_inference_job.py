@@ -38,6 +38,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models import Dream2FlowBundle, TaskInstruction, TaskType
+from tools.config.constants import DEFAULT_HTTP_TIMEOUT_S
 
 
 @dataclass
@@ -165,7 +166,11 @@ class Dream2FlowModelClient:
             Image.fromarray(depth_uint16).save(buffer, format="PNG")
             data["depth_base64"] = base64.b64encode(buffer.getvalue()).decode()
 
-        response = requests.post(self.api_endpoint, json=data, timeout=300)
+        response = requests.post(
+            self.api_endpoint,
+            json=data,
+            timeout=DEFAULT_HTTP_TIMEOUT_S,  # allow long-running Dream2Flow inference payloads
+        )
         response.raise_for_status()
 
         result = response.json()
