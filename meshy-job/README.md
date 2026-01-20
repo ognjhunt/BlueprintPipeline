@@ -13,9 +13,9 @@ Generates or processes Meshy assets within the pipeline.
 - **Outputs:** Meshy-generated assets and metadata.
 
 ## Key environment variables
-- Variables defining input/output locations and any Meshy service configuration.
+- `MESHY_API_KEY`: Meshy API key for 3D generation.
+- `MESHY_BASE_URL` or `MESHY_API_BASE`: Optional override for the Meshy API base URL (defaults to `https://api.meshy.ai`).
 
 ## How to run locally
 - Build the container: `docker build -t meshy-job .`
 - Run the job: `python run_meshy_from_assets.py` or `./run_meshy.sh`.
-
