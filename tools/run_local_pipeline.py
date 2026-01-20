@@ -3156,6 +3156,7 @@ class LocalPipelineRunner:
 
         job_id = f"local-{uuid.uuid4()}"
         submission_message = "Local Genie Sim execution started."
+        submit_step_start = time.time()
         preflight_report = run_geniesim_preflight(
             "genie-sim-local-runner",
             require_server=False,
@@ -3194,7 +3195,6 @@ class LocalPipelineRunner:
 
         output_dirs: Dict[str, Path] = {}
         robot_failures: Dict[str, Dict[str, Any]] = {}
-        submit_step_start = time.time()
         for robot_index, current_robot in enumerate(robot_types):
             remaining_budget_seconds = None
             if submit_timeout_seconds is not None:
@@ -3203,7 +3203,8 @@ class LocalPipelineRunner:
                 if remaining_budget_seconds <= 0:
                     timeout_message = (
                         "Genie Sim submit timed out after "
-                        f"{elapsed_seconds:.1f}s (budget {submit_timeout_seconds:.1f}s) "
+                        f"{elapsed_seconds:.1f}s (budget {submit_timeout_seconds:.1f}s, "
+                        "including preflight) "
                         f"before starting robot {current_robot}."
                     )
                     self.log(timeout_message, "ERROR")
