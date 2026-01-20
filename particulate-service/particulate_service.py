@@ -66,6 +66,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.config import load_pipeline_config
+from tools.config.constants import DEFAULT_PROCESS_TIMEOUT_S
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 
@@ -546,7 +547,10 @@ print(f"Parameters: {{sum(p.numel() for p in model.parameters()):,}}")
 """
         result = subprocess.run(
             [sys.executable, "-c", model_load],
-            capture_output=True, text=True, timeout=300, cwd=str(PARTICULATE_ROOT)
+            capture_output=True,
+            text=True,
+            timeout=DEFAULT_PROCESS_TIMEOUT_S,  # allow model download + GPU load
+            cwd=str(PARTICULATE_ROOT),
         )
 
         log(f"Model load stdout:\n{result.stdout}")

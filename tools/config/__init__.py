@@ -14,6 +14,14 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from .constants import (
+    DEFAULT_AVERAGE_QUALITY_SCORE_MIN,
+    DEFAULT_COLLISION_FREE_RATE_MIN,
+    DEFAULT_PHYSICS_VALIDATION_RATE_MIN,
+    DEFAULT_QUALITY_SCORE_MIN,
+    DEFAULT_SENSOR_CAPTURE_RATE_MIN,
+)
+
 try:
     from pydantic import BaseModel, ConfigDict, ValidationError, validator
     HAVE_PYDANTIC = True
@@ -43,8 +51,8 @@ class PhysicsThresholds:
 @dataclass
 class EpisodeThresholds:
     """Episode quality thresholds."""
-    collision_free_rate_min: float = 0.90
-    quality_score_min: float = 0.90
+    collision_free_rate_min: float = DEFAULT_COLLISION_FREE_RATE_MIN
+    quality_score_min: float = DEFAULT_QUALITY_SCORE_MIN
     quality_pass_rate_min: float = 0.70
     min_episodes_required: int = 3
     tier_thresholds: Dict[str, Dict[str, Union[float, int]]] = field(default_factory=dict)
@@ -53,9 +61,9 @@ class EpisodeThresholds:
 @dataclass
 class DataQualityThresholds:
     """Data quality SLI thresholds."""
-    min_average_quality_score: float = 0.90
-    min_sensor_capture_rate: float = 0.95
-    min_physics_validation_rate: float = 0.95
+    min_average_quality_score: float = DEFAULT_AVERAGE_QUALITY_SCORE_MIN
+    min_sensor_capture_rate: float = DEFAULT_SENSOR_CAPTURE_RATE_MIN
+    min_physics_validation_rate: float = DEFAULT_PHYSICS_VALIDATION_RATE_MIN
     allowed_sensor_sources: List[str] = field(
         default_factory=lambda: ["isaac_sim_replicator", "simulation"]
     )
@@ -587,6 +595,28 @@ class ConfigLoader:
         return result
 
     @classmethod
+    def _resolve_quality_default_constants(cls, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Replace placeholder strings with shared default constants."""
+        replacements = {
+            "DEFAULT_COLLISION_FREE_RATE_MIN": DEFAULT_COLLISION_FREE_RATE_MIN,
+            "DEFAULT_QUALITY_SCORE_MIN": DEFAULT_QUALITY_SCORE_MIN,
+            "DEFAULT_AVERAGE_QUALITY_SCORE_MIN": DEFAULT_AVERAGE_QUALITY_SCORE_MIN,
+            "DEFAULT_SENSOR_CAPTURE_RATE_MIN": DEFAULT_SENSOR_CAPTURE_RATE_MIN,
+            "DEFAULT_PHYSICS_VALIDATION_RATE_MIN": DEFAULT_PHYSICS_VALIDATION_RATE_MIN,
+        }
+
+        def _resolve(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {key: _resolve(val) for key, val in value.items()}
+            if isinstance(value, list):
+                return [_resolve(item) for item in value]
+            if isinstance(value, str) and value in replacements:
+                return replacements[value]
+            return value
+
+        return _resolve(config)
+
+    @classmethod
     def _warn_on_quality_threshold_conflicts(cls, config: Dict[str, Any]) -> None:
         thresholds = config.get("thresholds", {})
         if not isinstance(thresholds, dict):
@@ -649,7 +679,13 @@ class ConfigLoader:
                 )
         else:
             path = config_path or QUALITY_CONFIG_PATH
-            config = cls._load_json(path, validate=validate, config_type="quality")
+            config = cls._load_json(path, validate=False, config_type="quality")
+            config = cls._resolve_quality_default_constants(config)
+            if validate:
+                errors = cls.validate_config(config, "quality")
+                if errors:
+                    error_msg = "\n".join(f"  {key}: {msg}" for key, msg in errors.items())
+                    raise ValueError(f"Configuration validation failed in {path}:\n{error_msg}")
 
             if cls._quality_audit_trail:
                 cls._quality_audit_trail.add_source(
@@ -711,16 +747,31 @@ class ConfigLoader:
                 friction_max=thresholds.get("physics", {}).get("friction_max", 2.0),
             ),
             episodes=EpisodeThresholds(
-                collision_free_rate_min=thresholds.get("episodes", {}).get("collision_free_rate_min", 0.90),
-                quality_score_min=thresholds.get("episodes", {}).get("quality_score_min", 0.90),
+                collision_free_rate_min=thresholds.get("episodes", {}).get(
+                    "collision_free_rate_min",
+                    DEFAULT_COLLISION_FREE_RATE_MIN,
+                ),
+                quality_score_min=thresholds.get("episodes", {}).get(
+                    "quality_score_min",
+                    DEFAULT_QUALITY_SCORE_MIN,
+                ),
                 quality_pass_rate_min=thresholds.get("episodes", {}).get("quality_pass_rate_min", 0.70),
                 min_episodes_required=thresholds.get("episodes", {}).get("min_episodes_required", 3),
                 tier_thresholds=thresholds.get("episodes", {}).get("tier_thresholds", {}),
             ),
             data_quality=DataQualityThresholds(
-                min_average_quality_score=data_quality.get("min_average_quality_score", 0.90),
-                min_sensor_capture_rate=data_quality.get("min_sensor_capture_rate", 0.95),
-                min_physics_validation_rate=data_quality.get("min_physics_validation_rate", 0.95),
+                min_average_quality_score=data_quality.get(
+                    "min_average_quality_score",
+                    DEFAULT_AVERAGE_QUALITY_SCORE_MIN,
+                ),
+                min_sensor_capture_rate=data_quality.get(
+                    "min_sensor_capture_rate",
+                    DEFAULT_SENSOR_CAPTURE_RATE_MIN,
+                ),
+                min_physics_validation_rate=data_quality.get(
+                    "min_physics_validation_rate",
+                    DEFAULT_PHYSICS_VALIDATION_RATE_MIN,
+                ),
                 allowed_sensor_sources=data_quality.get(
                     "allowed_sensor_sources",
                     ["isaac_sim_replicator", "simulation"],
