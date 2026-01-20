@@ -312,7 +312,7 @@ def run_geniesim_export_job(
     Run the Genie Sim export job.
 
     Args:
-        root: Root path (e.g., /mnt/gcs)
+        root: Root path (e.g., value of GCSFUSE_MOUNT_PATH or /mnt/gcs)
         scene_id: Scene identifier
         assets_prefix: Path to scene assets
         geniesim_prefix: Output path for Genie Sim files
@@ -339,6 +339,7 @@ def run_geniesim_export_job(
         0 on success, 1 on failure
     """
     production_mode = resolve_production_mode()
+    gcs_mount_path = os.getenv("GCSFUSE_MOUNT_PATH", "/mnt/gcs")
     require_quality_gates_env = os.getenv("REQUIRE_QUALITY_GATES")
     env_override = (
         parse_bool(require_quality_gates_env, True)
@@ -1583,13 +1584,14 @@ def main():
 
     validated = False
     try:
-        assets_root = Path("/mnt/gcs") / assets_prefix
+        assets_root = Path(gcs_mount_path) / assets_prefix
         validate_scene_manifest(assets_root / "scene_manifest.json", label="[GENIESIM-EXPORT-JOB]")
         validated = True
 
         print("[GENIESIM-EXPORT-JOB] Configuration:")
         print(f"[GENIESIM-EXPORT-JOB]   Bucket: {bucket}")
         print(f"[GENIESIM-EXPORT-JOB]   Scene ID: {scene_id}")
+        print(f"[GENIESIM-EXPORT-JOB]   GCS Mount Path: {gcs_mount_path}")
         print(f"[GENIESIM-EXPORT-JOB]   Variation Assets: {variation_assets_prefix}")
         print(f"[GENIESIM-EXPORT-JOB]   Replicator Bundle: {replicator_prefix}")
         print(f"[GENIESIM-EXPORT-JOB]   Primary Robot Type: {robot_type}")
@@ -1604,7 +1606,7 @@ def main():
         print(f"[GENIESIM-EXPORT-JOB]   Strict Premium Features: {strict_premium_features}")
         print(f"[GENIESIM-EXPORT-JOB]   Require Quality Gates: {require_quality_gates}")
 
-        GCS_ROOT = Path("/mnt/gcs")
+        GCS_ROOT = Path(gcs_mount_path)
 
         metrics = get_metrics()
         with metrics.track_job(JOB_NAME, scene_id):
