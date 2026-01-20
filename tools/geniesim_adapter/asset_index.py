@@ -784,15 +784,26 @@ class AssetIndexBuilder:
         )
         if self.require_embeddings or self._is_production():
             raise RuntimeError(message)
-        self.log(f"{message} Padding/truncating to expected size.", "WARNING")
-        if len(embedding) > self.embedding_dim:
-            return embedding[: self.embedding_dim]
+        self.log(f"{message} Resizing to expected size.", "WARNING")
+        return self._resize_embedding(embedding)
+
+    def _resize_embedding(self, embedding: List[float]) -> List[float]:
+        if len(embedding) == self.embedding_dim:
+            return list(embedding)
         if not embedding:
             return [0.0] * self.embedding_dim
-        padded = list(embedding)
-        while len(padded) < self.embedding_dim:
-            padded.extend(padded[: min(len(padded), self.embedding_dim - len(padded))])
-        return padded[: self.embedding_dim]
+        if len(embedding) < self.embedding_dim:
+            padded = np.pad(
+                np.asarray(embedding, dtype=float),
+                (0, self.embedding_dim - len(embedding)),
+                mode="constant",
+            )
+            return padded.tolist()
+        original = np.asarray(embedding, dtype=float)
+        original_indices = np.linspace(0.0, 1.0, num=len(original))
+        target_indices = np.linspace(0.0, 1.0, num=self.embedding_dim)
+        resized = np.interp(target_indices, original_indices, original)
+        return resized.tolist()
 
     def _request_embedding(self, text: str, config: Dict[str, str]) -> List[float]:
         payload = {
