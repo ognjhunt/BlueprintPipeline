@@ -2223,9 +2223,27 @@ def run_local_import_job(
 # =============================================================================
 
 
-def _emit_import_quality_gate(result: ImportResult, scene_id: str) -> None:
+def _emit_import_quality_gate(
+    result: ImportResult,
+    scene_id: str,
+    job_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
     checkpoint = QualityGateCheckpoint.GENIESIM_IMPORT_COMPLETE
     registry = QualityGateRegistry(verbose=True)
+
+    local_execution = (job_metadata or {}).get("local_execution", {})
+    robot_type = (job_metadata or {}).get("robot_type")
+    if robot_type and isinstance(local_execution, dict) and "by_robot" in local_execution:
+        per_robot = local_execution.get("by_robot", {}).get(robot_type, {})
+        collision_free_rate = per_robot.get("collision_free_rate")
+        task_success_rate = per_robot.get("task_success_rate")
+        episodes_collected = per_robot.get("episodes_collected")
+        by_robot = {robot_type: per_robot}
+    else:
+        collision_free_rate = local_execution.get("collision_free_rate")
+        task_success_rate = local_execution.get("task_success_rate")
+        episodes_collected = local_execution.get("episodes_collected")
+        by_robot = local_execution.get("by_robot")
 
     def _check_import(ctx: Dict[str, Any]) -> QualityGateResult:
         passed = ctx["success"]
@@ -2271,6 +2289,10 @@ def _emit_import_quality_gate(result: ImportResult, scene_id: str) -> None:
         "episodes_filtered": result.episodes_filtered,
         "episodes_parse_failed": result.episodes_parse_failed,
         "average_quality_score": result.average_quality_score,
+        "collision_free_rate": collision_free_rate,
+        "task_success_rate": task_success_rate,
+        "episodes_collected": episodes_collected,
+        "by_robot": by_robot,
         "import_manifest_path": str(result.import_manifest_path)
         if result.import_manifest_path
         else None,
@@ -2527,7 +2549,7 @@ def main():
                     episodes_filtered=result.episodes_filtered,
                 )
                 try:
-                    _emit_import_quality_gate(result, scene_id)
+                    _emit_import_quality_gate(result, scene_id, job_metadata=robot_job_metadata)
                 except Exception as exc:
                     print(
                         f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}"
@@ -2645,7 +2667,7 @@ def main():
             episodes_filtered=result.episodes_filtered,
         )
         try:
-            _emit_import_quality_gate(result, scene_id)
+            _emit_import_quality_gate(result, scene_id, job_metadata=job_metadata)
         except Exception as exc:
             print(f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}")
 
