@@ -110,8 +110,8 @@ def test_cost_tracker_uses_defaults_in_non_prod(
     cost_tracker = tracker.CostTracker(data_dir=tmp_path, enable_logging=False)
 
     assert cost_tracker.pricing["geniesim_job"] == pytest.approx(
-        tracker.PLACEHOLDER_GENIESIM_JOB_COST
+        tracker.DEFAULT_PRICING["geniesim_job"]
     )
     assert cost_tracker.pricing["geniesim_episode"] == pytest.approx(
-        tracker.PLACEHOLDER_GENIESIM_EPISODE_COST
+        tracker.DEFAULT_PRICING["geniesim_episode"]
     )

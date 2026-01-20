@@ -272,7 +272,9 @@ select your Prometheus datasource when prompted.
 
 ### Cost tracking configuration
 
-Cost tracking reads pricing overrides from environment variables:
+Cost tracking reads canonical defaults from `tools/cost_tracking/pricing_defaults.json`
+and then applies overrides in the following order: custom pricing JSON → environment
+variable overrides.
 
 * `GENIESIM_JOB_COST` and `GENIESIM_EPISODE_COST` must be set to real values in
   production (`BP_ENV` or `GENIESIM_ENV` set to `production`/`prod`), otherwise
@@ -285,8 +287,7 @@ Cost tracking reads pricing overrides from environment variables:
 * `GENIESIM_GPU_REGION` and `GENIESIM_GPU_NODE_TYPE` can be used to select the
   hourly rate when job metadata does not include region or node type.
 * `COST_TRACKING_PRICING_JSON` or `COST_TRACKING_PRICING_PATH` can override any
-  pricing keys in `tools/cost_tracking/tracker.py` (for example, Cloud Run
-  pricing).
+  pricing keys in the defaults file (for example, Cloud Run pricing).
 
 ## SLO Targets & On-Call Escalation
 
