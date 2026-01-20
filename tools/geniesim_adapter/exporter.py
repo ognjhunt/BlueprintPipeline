@@ -503,6 +503,7 @@ source:
                 "config": "Export configuration snapshot.",
                 "result": "Export output paths, statistics, warnings, and errors.",
                 "geniesim_compatibility": "Target Genie Sim compatibility metadata.",
+                "premium_artifacts": "Post-export premium feature artifacts and bundle locations.",
                 "file_inventory": "List of output files (path + size).",
                 "checksums": "SHA256 checksums for all output files.",
             },
@@ -548,6 +549,7 @@ source:
                     "scene_config": "yaml",
                 },
             },
+            "premium_artifacts": {},
             "file_inventory": file_inventory,
             "checksums": {
                 "files": file_checksums,
