@@ -91,11 +91,11 @@ spec:
                   name: genie-sim-submit-overrides
                   key: FIREBASE_SERVICE_ACCOUNT_PATH
                   optional: true
-            - name: FIREBASE_EPISODE_PREFIX
+            - name: FIREBASE_UPLOAD_PREFIX
               valueFrom:
                 configMapKeyRef:
                   name: genie-sim-submit-overrides
-                  key: FIREBASE_EPISODE_PREFIX
+                  key: FIREBASE_UPLOAD_PREFIX
                   optional: true
 
           resources:
