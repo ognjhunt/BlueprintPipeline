@@ -66,6 +66,14 @@ jobs:
             exit 1
           fi
 
+      - name: Validate Isaac Sim base image version
+        run: |
+          ISAAC_SIM_VERSION="$(awk -F= '/^ARG ISAAC_SIM_VERSION=/{print $2}' genie-sim-gpu-job/Dockerfile | xargs)"
+          if [[ -z "${ISAAC_SIM_VERSION}" ]]; then
+            echo "ISAAC_SIM_VERSION default must be set in genie-sim-gpu-job/Dockerfile."
+            exit 1
+          fi
+
       - name: Load Genie Sim ref
         run: echo "GENIESIM_REF=$(cat genie-sim-gpu-job/GENIESIM_REF)" >> $GITHUB_ENV
 
