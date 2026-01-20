@@ -205,11 +205,21 @@ class QualityConfig:
     gate_overrides: GateOverrideConfig = field(default_factory=GateOverrideConfig)
 
 
+VIDEO_PROFILE_RESOLUTIONS = {
+    "low": {"width": 640, "height": 480},
+    "medium": {"width": 960, "height": 540},
+    "high": {"width": 1280, "height": 720},
+}
+
+DEFAULT_VIDEO_PROFILE = "high"
+
+
 @dataclass
 class VideoConfig:
-    """Video capture configuration."""
-    width: int = 640
-    height: int = 480
+    """Video capture configuration with profile-aware defaults."""
+    profile: str = DEFAULT_VIDEO_PROFILE
+    width: int = VIDEO_PROFILE_RESOLUTIONS[DEFAULT_VIDEO_PROFILE]["width"]
+    height: int = VIDEO_PROFILE_RESOLUTIONS[DEFAULT_VIDEO_PROFILE]["height"]
     fps: int = 30
     codec: str = "h264"
     capture_depth: bool = True
@@ -948,6 +958,34 @@ class ConfigLoader:
             ),
         )
 
+        video_profile_value = os.getenv("BP_VIDEO_PROFILE", video.get("profile", DEFAULT_VIDEO_PROFILE))
+        video_profile = (
+            video_profile_value.lower()
+            if isinstance(video_profile_value, str)
+            else DEFAULT_VIDEO_PROFILE
+        )
+        profile_resolution = VIDEO_PROFILE_RESOLUTIONS.get(video_profile)
+        if profile_resolution is None:
+            logger.warning(
+                "Unknown video profile '%s'; falling back to '%s'.",
+                video_profile,
+                DEFAULT_VIDEO_PROFILE,
+            )
+            video_profile = DEFAULT_VIDEO_PROFILE
+            profile_resolution = VIDEO_PROFILE_RESOLUTIONS[video_profile]
+
+        resolution = video.get("resolution", {})
+        width = (
+            resolution.get("width")
+            if isinstance(resolution, dict) and resolution.get("width") is not None
+            else profile_resolution["width"]
+        )
+        height = (
+            resolution.get("height")
+            if isinstance(resolution, dict) and resolution.get("height") is not None
+            else profile_resolution["height"]
+        )
+
         return PipelineConfig(
             episode_generation=EpisodeGenerationConfig(
                 episodes_per_task=ep_gen.get("episodes_per_task", 10),
@@ -962,8 +1000,9 @@ class ConfigLoader:
                 }),
             ),
             video=VideoConfig(
-                width=video.get("resolution", {}).get("width", 640),
-                height=video.get("resolution", {}).get("height", 480),
+                profile=video_profile,
+                width=width,
+                height=height,
                 fps=video.get("fps", 30),
                 codec=video.get("codec", "h264"),
                 capture_depth=video.get("capture_depth", True),
@@ -1156,6 +1195,13 @@ class ConfigLoader:
                     res = video["resolution"]
                     if res.get("width", 0) <= 0 or res.get("height", 0) <= 0:
                         errors["video.resolution"] = "Width and height must be positive"
+                if "profile" in video:
+                    profile = video["profile"]
+                    if (
+                        not isinstance(profile, str)
+                        or profile.lower() not in VIDEO_PROFILE_RESOLUTIONS
+                    ):
+                        errors["video.profile"] = "Profile must be one of: low, medium, high"
                 if "fps" in video and video["fps"] <= 0:
                     errors["video.fps"] = "FPS must be positive"
 
