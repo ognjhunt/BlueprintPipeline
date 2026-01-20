@@ -175,6 +175,110 @@ def _run_geniesim_ik_gate(
     return False
 
 
+def _aggregate_quality_metrics(
+    local_run_results: Dict[str, Optional[DataCollectionResult]],
+) -> Dict[str, Any]:
+    collision_free_episodes = 0
+    collision_info_episodes = 0
+    task_success_episodes = 0
+    task_success_info_episodes = 0
+    episodes_collected = 0
+
+    by_robot: Dict[str, Any] = {}
+    for robot, result in local_run_results.items():
+        if result is None:
+            continue
+        episodes_collected += getattr(result, "episodes_collected", 0) or 0
+        collision_free_episodes += getattr(result, "collision_free_episodes", 0) or 0
+        collision_info_episodes += getattr(result, "collision_info_episodes", 0) or 0
+        task_success_episodes += getattr(result, "task_success_episodes", 0) or 0
+        task_success_info_episodes += getattr(result, "task_success_info_episodes", 0) or 0
+        by_robot[robot] = {
+            "collision_free_rate": getattr(result, "collision_free_rate", None),
+            "collision_free_episodes": getattr(result, "collision_free_episodes", 0),
+            "collision_info_episodes": getattr(result, "collision_info_episodes", 0),
+            "task_success_rate": getattr(result, "task_success_rate", None),
+            "task_success_episodes": getattr(result, "task_success_episodes", 0),
+            "task_success_info_episodes": getattr(result, "task_success_info_episodes", 0),
+        }
+
+    collision_free_rate = (
+        collision_free_episodes / collision_info_episodes
+        if collision_info_episodes > 0
+        else None
+    )
+    task_success_rate = (
+        task_success_episodes / task_success_info_episodes
+        if task_success_info_episodes > 0
+        else None
+    )
+
+    return {
+        "collision_free_rate": collision_free_rate,
+        "task_success_rate": task_success_rate,
+        "episodes_collected": episodes_collected,
+        "by_robot": by_robot,
+        "collision_free_episodes": collision_free_episodes,
+        "collision_info_episodes": collision_info_episodes,
+        "task_success_episodes": task_success_episodes,
+        "task_success_info_episodes": task_success_info_episodes,
+    }
+
+
+def _run_geniesim_data_quality_gate(
+    *,
+    scene_id: str,
+    local_run_results: Dict[str, Optional[DataCollectionResult]],
+) -> bool:
+    if not HAVE_QUALITY_GATES:
+        logger.info("[GENIESIM-SUBMIT] Quality gates unavailable; skipping data quality gate.")
+        return True
+
+    metrics = _aggregate_quality_metrics(local_run_results)
+    registry = QualityGateRegistry(verbose=True)
+    results, _ = registry.run_checkpoint_with_approval(
+        checkpoint=QualityGateCheckpoint.GENIESIM_IMPORT_COMPLETE,
+        context=metrics,
+        scene_id=scene_id,
+        wait_for_approval=False,
+    )
+
+    failures = [result for result in results if not result.passed]
+    if not failures:
+        return True
+
+    if not _is_production_mode():
+        logger.warning(
+            "[GENIESIM-SUBMIT] Data quality gate failed in non-production; proceeding."
+        )
+        return True
+
+    approval_manager = registry.approval_manager or HumanApprovalManager(
+        scene_id=scene_id,
+        config=registry.config,
+        verbose=True,
+    )
+    override_metadata = _load_override_metadata()
+    if override_metadata:
+        pending_requests = approval_manager.list_pending()
+        override_success = True
+        for request in pending_requests:
+            if request.status != ApprovalStatus.PENDING:
+                continue
+            if not approval_manager.override(request.request_id, override_metadata):
+                override_success = False
+        if override_success and not approval_manager.list_pending():
+            logger.warning(
+                "[GENIESIM-SUBMIT] Data quality gate overridden via approval workflow."
+            )
+            return True
+
+    logger.error(
+        "[GENIESIM-SUBMIT] Data quality gate failed in production; blocking submission."
+    )
+    return False
+
+
 @dataclass(frozen=True)
 class LocalGenerationParams:
     episodes_per_task: int
@@ -838,6 +942,7 @@ def main() -> int:
     use_gcs_fuse = False
     local_root: Optional[Path] = None
     skip_local_run = False
+    skip_postprocessing = False
     if asset_provenance_exists:
         asset_provenance_payload = _read_json_blob(
             storage_client,
@@ -1013,7 +1118,31 @@ def main() -> int:
             submission_message = "Local Genie Sim execution completed."
             job_status = "completed"
 
-    if not skip_local_run and local_root and not use_gcs_fuse and output_dirs:
+    if (
+        not skip_local_run
+        and job_status == "completed"
+        and local_run_results
+        and not _run_geniesim_data_quality_gate(
+            scene_id=scene_id,
+            local_run_results=local_run_results,
+        )
+    ):
+        submission_message = "Genie Sim data quality gate failed."
+        failure_reason = "Genie Sim data quality gate failed"
+        failure_details = {
+            "data_quality": _aggregate_quality_metrics(local_run_results),
+        }
+        job_status = "failed"
+        skip_postprocessing = True
+
+    if (
+        not skip_local_run
+        and not skip_postprocessing
+        and job_status != "failed"
+        and local_root
+        and not use_gcs_fuse
+        and output_dirs
+    ):
         upload_failures: list[dict[str, str]] = []
         manifest_mismatches: list[dict[str, str]] = []
         upload_logger = logging.getLogger("genie-sim-submit-job")
@@ -1157,7 +1286,7 @@ def main() -> int:
     firebase_retry_failed_count = 0
     firebase_retry_manifest_path: Optional[str] = None
     firebase_retry_manifest_payload: Optional[Dict[str, Any]] = None
-    if not skip_local_run and output_dirs:
+    if not skip_local_run and not skip_postprocessing and job_status != "failed" and output_dirs:
         firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
         firebase_second_pass_max = int(os.getenv("FIREBASE_UPLOAD_SECOND_PASS_MAX", "1"))
         from tools.firebase_upload import (
@@ -1546,10 +1675,17 @@ def main() -> int:
         getattr(result, "episodes_passed", 0) if result else 0
         for result in local_run_results.values()
     )
+    quality_metrics_summary = _aggregate_quality_metrics(local_run_results) if local_run_results else {}
     local_execution = {
         "success": job_status == "completed",
         "episodes_collected": episodes_collected_total,
         "episodes_passed": episodes_passed_total,
+        "collision_free_rate": quality_metrics_summary.get("collision_free_rate"),
+        "task_success_rate": quality_metrics_summary.get("task_success_rate"),
+        "collision_free_episodes": quality_metrics_summary.get("collision_free_episodes", 0),
+        "collision_info_episodes": quality_metrics_summary.get("collision_info_episodes", 0),
+        "task_success_episodes": quality_metrics_summary.get("task_success_episodes", 0),
+        "task_success_info_episodes": quality_metrics_summary.get("task_success_info_episodes", 0),
         "preflight": preflight_report,
         "server_info": server_info_by_robot if multi_robot else server_info_by_robot.get(robot_type),
     }
@@ -1559,6 +1695,14 @@ def main() -> int:
                 "success": bool(result and result.success),
                 "episodes_collected": getattr(result, "episodes_collected", 0) if result else 0,
                 "episodes_passed": getattr(result, "episodes_passed", 0) if result else 0,
+                "collision_free_rate": getattr(result, "collision_free_rate", None) if result else None,
+                "collision_free_episodes": getattr(result, "collision_free_episodes", 0) if result else 0,
+                "collision_info_episodes": getattr(result, "collision_info_episodes", 0) if result else 0,
+                "task_success_rate": getattr(result, "task_success_rate", None) if result else None,
+                "task_success_episodes": getattr(result, "task_success_episodes", 0) if result else 0,
+                "task_success_info_episodes": getattr(result, "task_success_info_episodes", 0)
+                if result
+                else 0,
                 "output_dir": str(output_dirs.get(current_robot)) if output_dirs else None,
                 "server_info": server_info_by_robot.get(current_robot),
             }
