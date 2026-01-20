@@ -10,6 +10,9 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
 
 ## Credentials & environment variables
 
+- [ ] **Reference the centralized environment variable list** in
+  [`tools/config/ENVIRONMENT_VARIABLES.md`](../tools/config/ENVIRONMENT_VARIABLES.md) for defaults and production
+  caveats before deploying.
 - [ ] **NGC key** available when pulling NVIDIA Isaac Sim images (`NGC_API_KEY`).
 - [ ] **Genie Sim repo path** set locally via `GENIESIM_ROOT` when running the pipeline outside CI.
 - [ ] **Recording/log directories** set to persistent locations in production:
