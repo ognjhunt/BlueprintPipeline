@@ -82,6 +82,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from tools.checkpoint import load_checkpoint, should_skip_step, write_checkpoint
+from tools.checkpoint.hash_config import resolve_checkpoint_hash_setting
 from tools.cost_tracking.estimate import (
     estimate_gpu_costs,
     format_estimate_summary,
@@ -235,12 +236,7 @@ class LocalPipelineRunner:
             self.fail_fast = fail_fast
         self.environment = os.getenv("BP_ENV", "development").lower()
         self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
-        self.enable_checkpoint_hashes = os.getenv("BP_CHECKPOINT_HASHES", "0").lower() in {
-            "1",
-            "true",
-            "yes",
-            "y",
-        }
+        self.enable_checkpoint_hashes = resolve_checkpoint_hash_setting()
 
         # Derive scene ID from directory name
         self.scene_id = self.scene_dir.name
@@ -1006,6 +1002,16 @@ class LocalPipelineRunner:
         }
 
         if production_mode:
+            report["checks"]["checkpoint_hashes"] = {
+                "enabled": self.enable_checkpoint_hashes,
+                "env": os.getenv("BP_CHECKPOINT_HASHES"),
+            }
+            if not self.enable_checkpoint_hashes:
+                report["errors"].append(
+                    "Checkpoint output hashes must be enabled in production. "
+                    "Set BP_CHECKPOINT_HASHES=1 to continue."
+                )
+
             gcs_report = validate_gcs_credentials()
             firebase_report = validate_firebase_credentials(required=True)
             report["checks"]["gcs_credentials"] = gcs_report

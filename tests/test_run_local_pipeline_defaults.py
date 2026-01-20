@@ -63,3 +63,21 @@ def test_dream2flow_steps_require_explicit_flag(monkeypatch, tmp_path):
         PipelineStep.DREAM2FLOW,
         PipelineStep.DREAM2FLOW_INFERENCE,
     ]
+
+
+def test_production_enables_checkpoint_hashes(monkeypatch, tmp_path):
+    monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.delenv("BP_CHECKPOINT_HASHES", raising=False)
+
+    from tools.run_local_pipeline import LocalPipelineRunner
+
+    runner = LocalPipelineRunner(
+        scene_dir=tmp_path,
+        verbose=False,
+        skip_interactive=True,
+        environment_type="kitchen",
+        enable_dwm=False,
+        enable_dream2flow=False,
+    )
+
+    assert runner.enable_checkpoint_hashes is True

@@ -11,6 +11,7 @@ from .success_metrics import (
 )
 from .pipeline_analytics import (
     track_pipeline_run,
+    update_pipeline_status,
     track_scene_delivery,
     track_customer_feedback,
     get_dashboard_data,
@@ -23,6 +24,7 @@ __all__ = [
     "CustomerOutcome",
     "PipelineMetrics",
     "track_pipeline_run",
+    "update_pipeline_status",
     "track_scene_delivery",
     "track_customer_feedback",
     "get_dashboard_data",
