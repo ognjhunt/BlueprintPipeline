@@ -53,6 +53,9 @@ Environment Variables:
     GENIESIM_PORT: Genie Sim gRPC server port (default: adapter default port)
     GENIESIM_GRPC_TIMEOUT_S: Connection timeout in seconds (default: 30; legacy: GENIESIM_TIMEOUT)
     GENIESIM_ROOT: Path to Genie Sim installation (default: /opt/geniesim)
+    GENIESIM_RECORDINGS_DIR: Directory for Genie Sim recordings (default: /tmp/geniesim_recordings)
+    GENIESIM_RECORDING_DIR: Legacy alias for GENIESIM_RECORDINGS_DIR
+    GENIESIM_LOG_DIR: Directory for Genie Sim logs (default: /tmp/geniesim_logs)
     ISAAC_SIM_PATH: Path to Isaac Sim installation (default: /isaac-sim)
     ISAACSIM_REQUIRED: Enforce Isaac Sim + Genie Sim installation checks (default: false)
     CUROBO_REQUIRED: Enforce cuRobo availability checks (default: false)
@@ -106,6 +109,10 @@ from tools.geniesim_adapter.config import (
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 
 logger = logging.getLogger(__name__)
+
+GENIESIM_RECORDINGS_DIR_ENV = "GENIESIM_RECORDINGS_DIR"
+GENIESIM_RECORDING_DIR_ENV = "GENIESIM_RECORDING_DIR"
+GENIESIM_LOG_DIR_ENV = "GENIESIM_LOG_DIR"
 
 # Import gRPC protobuf stubs
 try:
@@ -297,6 +304,22 @@ class GenieSimConfig:
     robot_type: str = "franka"
     robot_urdf: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        if self.environment != "production":
+            return
+        for label, path, env_name in (
+            ("recording", self.recording_dir, GENIESIM_RECORDINGS_DIR_ENV),
+            ("log", self.log_dir, GENIESIM_LOG_DIR_ENV),
+        ):
+            if _is_temp_path(path):
+                logger.warning(
+                    "Genie Sim %s directory resolves under a temporary path (%s) in production. "
+                    "Set %s to a persistent location.",
+                    label,
+                    path,
+                    env_name,
+                )
+
     @classmethod
     def from_env(cls) -> "GenieSimConfig":
         """Create configuration from environment variables."""
@@ -333,6 +356,8 @@ class GenieSimConfig:
                     "Refusing to enable linear fallback in production. "
                     "Unset GENIESIM_ALLOW_LINEAR_FALLBACK and GENIESIM_ALLOW_IK_FAILURE_FALLBACK."
                 )
+        recording_dir = _resolve_recording_dir()
+        log_dir = _resolve_log_dir()
         return cls(
             host=get_geniesim_host(),
             port=get_geniesim_port(),
@@ -351,6 +376,8 @@ class GenieSimConfig:
             max_stalls=int(os.getenv("GENIESIM_MAX_STALLS", "2")),
             stall_backoff_s=float(os.getenv("GENIESIM_STALL_BACKOFF_S", "5")),
             max_duration_seconds=max_duration_seconds,
+            recording_dir=recording_dir,
+            log_dir=log_dir,
             lerobot_export_format=parse_lerobot_export_format(
                 os.getenv("LEROBOT_EXPORT_FORMAT"),
                 default=LeRobotExportFormat.LEROBOT_V2,
@@ -413,6 +440,36 @@ def _parse_bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_recording_dir() -> Path:
+    raw = os.getenv(GENIESIM_RECORDINGS_DIR_ENV)
+    legacy = os.getenv(GENIESIM_RECORDING_DIR_ENV)
+    if raw and legacy and raw != legacy:
+        logger.warning(
+            "Both %s and %s are set; using %s=%s.",
+            GENIESIM_RECORDINGS_DIR_ENV,
+            GENIESIM_RECORDING_DIR_ENV,
+            GENIESIM_RECORDINGS_DIR_ENV,
+            raw,
+        )
+    if legacy and not raw:
+        logger.warning(
+            "%s is deprecated; use %s instead.",
+            GENIESIM_RECORDING_DIR_ENV,
+            GENIESIM_RECORDINGS_DIR_ENV,
+        )
+    resolved = raw or legacy
+    if resolved:
+        return Path(resolved).expanduser()
+    return Path("/tmp/geniesim_recordings")
+
+
+def _resolve_log_dir() -> Path:
+    raw = os.getenv(GENIESIM_LOG_DIR_ENV)
+    if raw:
+        return Path(raw).expanduser()
+    return Path("/tmp/geniesim_logs")
 
 
 def _is_temp_path(path: Path) -> bool:
@@ -1820,6 +1877,8 @@ class GenieSimLocalFramework:
         allow_mock_override = os.getenv("ALLOW_GENIESIM_MOCK", "0") == "1"
         production_mode = self.config.environment == "production"
         env = os.environ.copy()
+        env[GENIESIM_RECORDINGS_DIR_ENV] = str(self.config.recording_dir)
+        env[GENIESIM_LOG_DIR_ENV] = str(self.config.log_dir)
 
         if use_local_server:
             if production_mode:

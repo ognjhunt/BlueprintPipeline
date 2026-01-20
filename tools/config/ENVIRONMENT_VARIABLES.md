@@ -441,6 +441,9 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_STALL_TIMEOUT_S` | float | 30 | Abort/reset an episode if observation progress stalls longer than this timeout (seconds). |
 | `GENIESIM_MAX_STALLS` | int | 2 | Max stalled episodes before the local framework restarts the Genie Sim server. |
 | `GENIESIM_STALL_BACKOFF_S` | float | 5 | Backoff (seconds) to wait after a stall or restart before resuming data collection. |
+| `GENIESIM_RECORDINGS_DIR` | path | `/tmp/geniesim_recordings` | Output directory for Genie Sim recordings (avoid temp paths in production). |
+| `GENIESIM_RECORDING_DIR` | path | (legacy) | Deprecated alias for `GENIESIM_RECORDINGS_DIR`. |
+| `GENIESIM_LOG_DIR` | path | `/tmp/geniesim_logs` | Output directory for Genie Sim server logs (avoid temp paths in production). |
 | `GENIESIM_TASK_CONFIDENCE_THRESHOLD` | float | 0.8 | Affordance confidence threshold for boosting task priority in task generation. |
 | `GENIESIM_TASK_SIZE_SMALL_THRESHOLD` | float | 0.05 | Object size threshold (meters) below which tasks are treated as harder. |
 | `GENIESIM_TASK_SIZE_LARGE_THRESHOLD` | float | 0.3 | Object size threshold (meters) above which tasks are treated as harder. |
