@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from google.cloud import storage
+from pydantic import ValidationError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -90,6 +91,15 @@ CONTRACT_SCHEMAS = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+def _format_validation_error(error: ValidationError) -> str:
+    details = []
+    for entry in error.errors():
+        location = ".".join(str(part) for part in entry.get("loc", []))
+        message = entry.get("msg", "Invalid value")
+        details.append(f"{location}: {message}" if location else message)
+    return "; ".join(details) if details else str(error)
 
 
 def _safe_int(value: Any, default: int = 0, field_name: str = "value") -> int:
@@ -862,7 +872,23 @@ def _run_local_data_collection_with_handshake(
     required_capabilities: set[str],
     verbose: bool = True,
 ) -> DataCollectionResult:
-    config = GenieSimConfig.from_env()
+    def _handshake_failure(message: str) -> DataCollectionResult:
+        result = DataCollectionResult(
+            success=False,
+            task_name=task_config.get("name", "unknown"),
+        )
+        result.errors.append(message)
+        return result
+
+    try:
+        config = GenieSimConfig.from_env()
+    except ValidationError as exc:
+        details = _format_validation_error(exc)
+        return _handshake_failure(
+            "Invalid Genie Sim configuration. "
+            "Review GENIESIM_* and ISAACSIM_* env vars and retry. "
+            f"Details: {details}"
+        )
     config.robot_type = robot_type
     config.episodes_per_task = episodes_per_task
     config.recording_dir = output_dir / "recordings"
@@ -875,14 +901,6 @@ def _run_local_data_collection_with_handshake(
     )
     scene_usd = scene_manifest.get("usd_path")
     server_info: Dict[str, Any] = {}
-
-    def _handshake_failure(message: str) -> DataCollectionResult:
-        result = DataCollectionResult(
-            success=False,
-            task_name=task_config.get("name", "unknown"),
-        )
-        result.errors.append(message)
-        return result
 
     if framework.is_server_running():
         if not framework.connect():
