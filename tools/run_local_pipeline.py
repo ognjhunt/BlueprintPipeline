@@ -90,6 +90,7 @@ from tools.error_handling import (
     RetryableError,
     retry_with_backoff,
 )
+from tools.firebase_upload.firebase_upload_orchestrator import resolve_firebase_upload_prefix
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
@@ -369,9 +370,14 @@ class LocalPipelineRunner:
         *,
         multi_robot: bool,
     ) -> str:
-        if multi_robot:
-            return f"{firebase_prefix}/{self.scene_id}/{robot}/geniesim_{job_id}/"
-        return f"{firebase_prefix}/{self.scene_id}/geniesim_{job_id}/"
+        del job_id
+        from tools.firebase_upload.firebase_upload_orchestrator import build_firebase_upload_prefix
+
+        return build_firebase_upload_prefix(
+            self.scene_id,
+            robot_type=robot if multi_robot else None,
+            prefix=firebase_prefix,
+        )
 
     def _cleanup_firebase_artifacts(
         self,
@@ -2934,130 +2940,36 @@ class LocalPipelineRunner:
         job_payload["firebase_upload_status"] = firebase_upload_status
 
         firebase_upload_status_by_robot: Dict[str, str] = {}
+        firebase_cleanup_by_robot: Dict[str, Any] = {}
+        firebase_prefix = resolve_firebase_upload_prefix()
         if local_run_results:
-            firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
-            from tools.firebase_upload import upload_episodes_to_firebase
-            from tools.firebase_upload.uploader import (
-                FirebaseUploadError,
-                init_firebase,
+            from tools.firebase_upload.firebase_upload_orchestrator import (
+                FirebaseUploadOrchestratorError,
+                upload_episodes_with_retry,
             )
-
-            def _run_firebase_with_retry(label: str, action: Any) -> Any:
-                config = self.retry_config
-
-                def on_retry(attempt: int, exc: Exception, delay: float) -> None:
-                    self.log(
-                        (
-                            f"{label} retry {attempt}/{config.max_retries} after {delay:.2f}s: "
-                            f"{self._summarize_exception(exc)}"
-                        ),
-                        "WARNING",
-                    )
-
-                def on_failure(attempt: int, exc: Exception) -> None:
-                    self.log(
-                        f"{label} failed after {attempt} attempts: {self._summarize_exception(exc)}",
-                        "ERROR",
-                    )
-
-                decorator = retry_with_backoff(
-                    max_retries=config.max_retries,
-                    base_delay=config.base_delay,
-                    max_delay=config.max_delay,
-                    backoff_factor=config.backoff_factor,
-                    jitter=config.jitter,
-                    on_retry=on_retry,
-                    on_failure=on_failure,
-                )
-                return decorator(action)()
-
-            try:
-                _run_firebase_with_retry("firebase init", init_firebase)
-            except Exception as exc:
-                firebase_upload_error["init"] = str(exc)
-                firebase_upload_status = "failed"
-                job_payload["firebase_upload_status"] = firebase_upload_status
-                submission_message = (
-                    "Local Genie Sim execution completed; Firebase upload initialization failed."
-                )
-                if firebase_upload_required:
-                    failure_reason = (
-                        "Firebase upload initialization failed: "
-                        f"{self._summarize_exception(exc)}"
-                    )
-                    job_status = "failed"
-                    job_payload["status"] = job_status
-                    job_payload["message"] = submission_message
-                    job_payload["failure_reason"] = failure_reason
-                    failure_details["firebase_upload"] = failure_reason
-                    successful_robots = [
-                        current_robot
-                        for current_robot, result in local_run_results.items()
-                        if result and result.success
-                    ]
-                    cleanup_details["local"] = self._merge_cleanup_reports(
-                        cleanup_details.get("local"),
-                        self._cleanup_local_output_dirs(
-                            output_dirs,
-                            successful_robots,
-                            enabled=cleanup_enabled,
-                        ),
-                    )
-                    failure_details["cleanup"] = cleanup_details
-                    job_payload["failure_details"] = failure_details or None
-                    job_path = self.geniesim_dir / "job.json"
-                    _write_idempotency_payload()
-                    _safe_write_text(
-                        job_path,
-                        json.dumps(job_payload, indent=2),
-                        context="geniesim job payload",
-                    )
-                    return StepResult(
-                        step=PipelineStep.GENIESIM_SUBMIT,
-                        success=False,
-                        duration_seconds=time.time() - start_time,
-                        message=submission_message,
-                        outputs={
-                            "job_id": job_id,
-                            "job_status": job_status,
-                            "job_payload": str(job_path),
-                        },
-                    )
-                self.log(
-                    f"Firebase upload init failed: {self._summarize_exception(exc)}",
-                    "WARNING",
-                )
 
             for current_robot, result in local_run_results.items():
                 if not result or not result.success:
                     continue
                 try:
-                    firebase_upload_summary[current_robot] = _run_firebase_with_retry(
-                        f"firebase upload ({current_robot})",
-                        lambda: upload_episodes_to_firebase(
-                            episodes_dir=output_dirs[current_robot],
-                            scene_id=self.scene_id,
-                            prefix=firebase_prefix,
-                        ),
+                    firebase_result = upload_episodes_with_retry(
+                        episodes_dir=output_dirs[current_robot],
+                        scene_id=self.scene_id,
+                        robot_type=current_robot if multi_robot else None,
+                        prefix=firebase_prefix,
+                        cleanup_on_failure=cleanup_enabled,
                     )
+                    firebase_upload_summary[current_robot] = firebase_result.summary
                     firebase_upload_status_by_robot[current_robot] = "completed"
-                except FirebaseUploadError as exc:
-                    firebase_upload_summary[current_robot] = exc.summary
+                except FirebaseUploadOrchestratorError as exc:
+                    firebase_upload_summary[current_robot] = exc.retry_summary or exc.summary or {}
                     firebase_upload_error[current_robot] = str(exc)
                     submission_message = (
                         "Local Genie Sim execution completed; Firebase upload failed."
                     )
                     firebase_upload_status_by_robot[current_robot] = "failed"
-                    self.log(
-                        f"Firebase upload failed: {self._summarize_exception(exc)}",
-                        "WARNING",
-                    )
-                except Exception as exc:
-                    firebase_upload_error[current_robot] = str(exc)
-                    submission_message = (
-                        "Local Genie Sim execution completed; Firebase upload failed."
-                    )
-                    firebase_upload_status_by_robot[current_robot] = "failed"
+                    if exc.cleanup_result:
+                        firebase_cleanup_by_robot[current_robot] = exc.cleanup_result
                     self.log(
                         f"Firebase upload failed: {self._summarize_exception(exc)}",
                         "WARNING",
@@ -3077,7 +2989,10 @@ class LocalPipelineRunner:
                 job_payload["status"] = job_status
                 job_payload["message"] = submission_message
                 job_payload["failure_reason"] = failure_reason
-                failure_details["firebase_upload"] = firebase_upload_error or None
+                failure_details["firebase_upload"] = {
+                    "errors": firebase_upload_error or None,
+                    "cleanup": firebase_cleanup_by_robot or None,
+                }
                 failed_upload_robots = [
                     current_robot
                     for current_robot, status in firebase_upload_status_by_robot.items()
@@ -3125,7 +3040,7 @@ class LocalPipelineRunner:
 
         if firebase_upload_summary or firebase_upload_error:
             firebase_payload = {
-                "prefix": os.getenv("FIREBASE_EPISODE_PREFIX", "datasets"),
+                "prefix": firebase_prefix,
                 "summary": firebase_upload_summary.get(robot_type) if not multi_robot else firebase_upload_summary,
                 "error": firebase_upload_error.get(robot_type) if not multi_robot else firebase_upload_error,
             }

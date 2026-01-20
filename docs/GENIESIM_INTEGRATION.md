@@ -18,8 +18,12 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
 - [ ] **Firebase uploads (submit/import)** have credentials available in production or service mode:
   - `FIREBASE_STORAGE_BUCKET`
   - `FIREBASE_SERVICE_ACCOUNT_JSON` or `FIREBASE_SERVICE_ACCOUNT_PATH`
-  - Optional prefixes: `FIREBASE_EPISODE_PREFIX` (submit) and `FIREBASE_UPLOAD_PREFIX` (import).
+  - Optional prefix: `FIREBASE_UPLOAD_PREFIX` (used by submit/import).
   - `ENABLE_FIREBASE_UPLOAD=true` to force uploads outside production/service mode (import defaults to enabled in production/service mode).
+
+### Migration note: Firebase upload prefix rename
+
+The Firebase upload prefix is now standardized on `FIREBASE_UPLOAD_PREFIX` for both submit and import. If you previously set `FIREBASE_EPISODE_PREFIX`, update your environment, workflow, and secret/configmap values to avoid mismatched dataset paths in downstream consumers.
 
 ## Secure gRPC configuration
 
