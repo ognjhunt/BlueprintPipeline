@@ -28,6 +28,18 @@ class DummyContext:
         self.details = details
 
 
+class StreamingContext(DummyContext):
+    def __init__(self, remaining: int) -> None:
+        super().__init__()
+        self.remaining = remaining
+
+    def is_active(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
+
 def test_default_servicer_handles_core_methods(tmp_path: Path) -> None:
     servicer = geniesim_pb2_grpc.GenieSimServiceServicer()
     context = DummyContext()
@@ -94,3 +106,14 @@ def test_default_servicer_handles_core_methods(tmp_path: Path) -> None:
         context,
     )
     assert command.success is True
+
+
+def test_stream_observations_yields_multiple(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GENIESIM_STREAM_INTERVAL_S", "0")
+    servicer = geniesim_pb2_grpc.GenieSimServiceServicer()
+    context = StreamingContext(remaining=3)
+
+    responses = list(servicer.StreamObservations(geniesim_pb2.GetObservationRequest(), context))
+
+    assert len(responses) == 3
+    assert all(response.success for response in responses)

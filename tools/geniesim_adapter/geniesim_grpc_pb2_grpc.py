@@ -604,26 +604,7 @@ class GenieSimServiceServicer:
         delegate = self._resolve_delegate("GetObservation")
         if delegate:
             return self._call_delegate(delegate, request, context, GetObservationResponse(success=False))
-        with self._state_lock:
-            joint_state = self._build_joint_state()
-            ee_pose = self._ee_pose
-        robot_state = RobotState(
-            joint_state=joint_state,
-            end_effector_pose=ee_pose,
-            gripper_width=self._gripper_width,
-            gripper_is_grasping=self._gripper_is_grasping,
-            link_poses=[],
-            link_names=[],
-        )
-        scene_state = SceneState(objects=[], simulation_time=time.time(), step_count=0)
-        camera_observation = CameraObservation(images=[])
-        return GetObservationResponse(
-            success=True,
-            robot_state=robot_state,
-            scene_state=scene_state,
-            camera_observation=camera_observation,
-            timestamp=time.time(),
-        )
+        return self._build_observation_response()
 
     def GetJointPosition(
         self,
@@ -1220,9 +1201,54 @@ class GenieSimServiceServicer:
         delegate = self._resolve_delegate("StreamObservations")
         if delegate:
             return self._call_delegate(delegate, request, context, iter(()))
-        logger.warning("StreamObservations is not implemented in the test servicer.")
-        self._set_context_status(context, self._grpc_status("UNIMPLEMENTED"), "StreamObservations not implemented")
-        return iter(())
+        interval_s = self._stream_interval_seconds()
+
+        def stream() -> Iterator[GetObservationResponse]:
+            while True:
+                if not self._context_is_active(context):
+                    return
+                yield self._build_observation_response()
+                if interval_s > 0:
+                    time.sleep(interval_s)
+
+        return stream()
+
+    def _build_observation_response(self) -> GetObservationResponse:
+        with self._state_lock:
+            joint_state = self._build_joint_state()
+            ee_pose = self._ee_pose
+        robot_state = RobotState(
+            joint_state=joint_state,
+            end_effector_pose=ee_pose,
+            gripper_width=self._gripper_width,
+            gripper_is_grasping=self._gripper_is_grasping,
+            link_poses=[],
+            link_names=[],
+        )
+        scene_state = SceneState(objects=[], simulation_time=time.time(), step_count=0)
+        camera_observation = CameraObservation(images=[])
+        return GetObservationResponse(
+            success=True,
+            robot_state=robot_state,
+            scene_state=scene_state,
+            camera_observation=camera_observation,
+            timestamp=time.time(),
+        )
+
+    @staticmethod
+    def _context_is_active(context: Any) -> bool:
+        if context is None or not hasattr(context, "is_active"):
+            return True
+        return context.is_active()
+
+    @staticmethod
+    def _stream_interval_seconds(default: float = 0.1) -> float:
+        raw_value = os.getenv("GENIESIM_STREAM_INTERVAL_S", str(default))
+        try:
+            interval = float(raw_value)
+        except (TypeError, ValueError):
+            return default
+        return max(0.0, interval)
 
     def _resolve_delegate(self, method_name: str) -> Optional[Callable]:
         if self._delegate is None:
