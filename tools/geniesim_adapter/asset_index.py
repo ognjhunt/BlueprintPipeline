@@ -335,11 +335,15 @@ class AssetIndexBuilder:
             require_env = os.getenv("REQUIRE_EMBEDDINGS")
             if require_env is None:
                 require_env = os.getenv("DISALLOW_PLACEHOLDER_EMBEDDINGS")
-            self.require_embeddings = (
-                require_env.strip().lower() in {"1", "true", "yes", "on"}
-                if require_env is not None
-                else False
-            )
+            if require_env is not None:
+                self.require_embeddings = require_env.strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+            else:
+                self.require_embeddings = self._is_production()
         else:
             self.require_embeddings = require_embeddings
 
@@ -854,6 +858,11 @@ class AssetIndexBuilder:
     def _get_embedding_with_status(self, text: str) -> tuple[List[float], str, str]:
         config = self._resolve_embedding_config()
         if not config:
+            if self._is_production():
+                raise RuntimeError(
+                    "Embeddings are required in production but no embedding provider is configured. "
+                    "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
+                )
             if self.require_embeddings:
                 raise RuntimeError(
                     "Embeddings are required but no embedding provider is configured. "

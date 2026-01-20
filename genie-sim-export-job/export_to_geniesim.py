@@ -1493,8 +1493,9 @@ def main():
         os.getenv("GENERATE_EMBEDDINGS"),
         default=production_mode,
     )
+    require_embeddings_env = os.getenv("REQUIRE_EMBEDDINGS")
     require_embeddings = parse_bool_env(
-        os.getenv("REQUIRE_EMBEDDINGS"),
+        require_embeddings_env,
         default=production_mode,
     )
     filter_commercial = parse_bool_env(os.getenv("FILTER_COMMERCIAL"), default=True)
@@ -1554,11 +1555,11 @@ def main():
         )
 
     embedding_provider_available = _embedding_provider_available()
-    if production_mode and require_embeddings and not embedding_provider_available:
+    if production_mode and generate_embeddings and not embedding_provider_available:
         message = (
             "Production mode requires embeddings, but no embedding provider keys were found. "
             "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY, or explicitly disable "
-            "REQUIRE_EMBEDDINGS."
+            "GENERATE_EMBEDDINGS/REQUIRE_EMBEDDINGS."
         )
         print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
         _write_failure_marker(RuntimeError(message), "embedding_provider_validation")
