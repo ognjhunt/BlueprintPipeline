@@ -14,12 +14,15 @@ from typing import Iterable, Optional, Sequence
 
 import firebase_admin
 from firebase_admin import credentials, storage
+from google.auth.credentials import AnonymousCredentials
 
 from tools.error_handling.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
 _FIREBASE_APP: Optional[firebase_admin.App] = None
+_FIREBASE_STORAGE_CLIENT: Optional[storage.Client] = None
+_FIREBASE_STORAGE_BUCKET = None
 _SHA256_METADATA_KEY = "sha256"
 
 
@@ -31,6 +34,15 @@ class FirebaseUploadError(RuntimeError):
         self.summary = summary
 
 
+def _get_emulator_endpoint() -> Optional[str]:
+    emulator_host = os.getenv("FIREBASE_STORAGE_EMULATOR_HOST")
+    if not emulator_host:
+        return None
+    if emulator_host.startswith(("http://", "https://")):
+        return emulator_host
+    return f"http://{emulator_host}"
+
+
 def init_firebase() -> firebase_admin.App:
     """Initialize the Firebase app singleton."""
     global _FIREBASE_APP
@@ -40,9 +52,17 @@ def init_firebase() -> firebase_admin.App:
     service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
     bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
+    emulator_endpoint = _get_emulator_endpoint()
 
     if not bucket_name:
         raise ValueError("FIREBASE_STORAGE_BUCKET is required to initialize Firebase storage")
+
+    if emulator_endpoint:
+        _FIREBASE_APP = firebase_admin.initialize_app(
+            options={"storageBucket": bucket_name},
+        )
+        logger.info("Initialized Firebase app for emulator at %s", emulator_endpoint)
+        return _FIREBASE_APP
 
     if service_account_json:
         try:
@@ -69,6 +89,32 @@ def init_firebase() -> firebase_admin.App:
     )
     logger.info("Initialized Firebase app with storage bucket %s", bucket_name)
     return _FIREBASE_APP
+
+
+def _get_storage_bucket():
+    emulator_endpoint = _get_emulator_endpoint()
+    if emulator_endpoint:
+        bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
+        if not bucket_name:
+            raise ValueError("FIREBASE_STORAGE_BUCKET is required to initialize Firebase storage")
+
+        global _FIREBASE_STORAGE_CLIENT, _FIREBASE_STORAGE_BUCKET
+        if _FIREBASE_STORAGE_CLIENT is None:
+            project = os.getenv("FIREBASE_PROJECT", os.getenv("GOOGLE_CLOUD_PROJECT", "demo-firebase"))
+            _FIREBASE_STORAGE_CLIENT = storage.Client(
+                project=project,
+                credentials=AnonymousCredentials(),
+                client_options={"api_endpoint": emulator_endpoint},
+            )
+        if (
+            _FIREBASE_STORAGE_BUCKET is None
+            or _FIREBASE_STORAGE_BUCKET.name != bucket_name
+        ):
+            _FIREBASE_STORAGE_BUCKET = _FIREBASE_STORAGE_CLIENT.bucket(bucket_name)
+        return _FIREBASE_STORAGE_BUCKET
+
+    init_firebase()
+    return storage.bucket()
 
 
 @retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=10.0)
@@ -152,8 +198,7 @@ def _upload_firebase_files(
     scene_id: str,
     prefix: str,
 ) -> dict:
-    init_firebase()
-    bucket = storage.bucket()
+    bucket = _get_storage_bucket()
 
     concurrency = int(os.getenv("FIREBASE_UPLOAD_CONCURRENCY", "8"))
     if concurrency < 1:
@@ -387,8 +432,7 @@ def cleanup_firebase_paths(
     if not prefix and not paths:
         raise ValueError("cleanup_firebase_paths requires a prefix or paths to delete")
 
-    init_firebase()
-    bucket = storage.bucket()
+    bucket = _get_storage_bucket()
 
     deleted = []
     failed = []
