@@ -63,6 +63,7 @@ Environment Variables:
     GENIESIM_MAX_STALLS: Max stalled episodes before server restart (default: 2)
     GENIESIM_STALL_BACKOFF_S: Backoff between stall handling attempts (default: 5)
     GENIESIM_COLLECTION_TIMEOUT_S: Abort data collection if total runtime exceeds this timeout (default: unset)
+    GENIESIM_CLEANUP_TMP: Remove Genie Sim temp directories after a run (default: 1 for local, 0 in production)
 """
 
 import base64
@@ -290,6 +291,7 @@ class GenieSimConfig:
     log_dir: Path = Path("/tmp/geniesim_logs")
     lerobot_export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2
     require_lerobot_v3: bool = False
+    cleanup_tmp: bool = True
 
     # Robot configuration
     robot_type: str = "franka"
@@ -309,6 +311,8 @@ class GenieSimConfig:
             if allow_ik_failure_env is not None
             else allow_linear_fallback
         )
+        cleanup_default = environment != "production"
+        cleanup_tmp = _parse_bool(os.getenv("GENIESIM_CLEANUP_TMP"), default=cleanup_default)
         collection_timeout_env = os.getenv("GENIESIM_COLLECTION_TIMEOUT_S")
         max_duration_seconds = None
         if collection_timeout_env not in (None, ""):
@@ -352,6 +356,7 @@ class GenieSimConfig:
                 default=LeRobotExportFormat.LEROBOT_V2,
             ),
             require_lerobot_v3=_parse_bool(os.getenv("LEROBOT_REQUIRE_V3"), default=False),
+            cleanup_tmp=cleanup_tmp,
         )
 
 
@@ -404,6 +409,20 @@ def _parse_bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_temp_path(path: Path) -> bool:
+    try:
+        resolved = path.expanduser().resolve()
+    except FileNotFoundError:
+        resolved = path.expanduser().absolute()
+    for root in (Path("/tmp"), Path("/var/tmp")):
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        return resolved != root
+    return False
 
 
 # =============================================================================
@@ -1535,7 +1554,7 @@ class GenieSimGRPCClient:
         )
         return bool(response and response.success)
 
-    def start_recording(self, episode_id: str, output_dir: str = "/tmp/recordings") -> bool:
+    def start_recording(self, episode_id: str, output_dir: str) -> bool:
         """
         Start recording an episode.
 
@@ -1979,6 +1998,17 @@ class GenieSimLocalFramework:
     # Data Collection
     # =========================================================================
 
+    def _cleanup_temp_dirs(self) -> None:
+        paths = {self.config.recording_dir, self.config.log_dir}
+        for path in paths:
+            if not path:
+                continue
+            path = Path(path)
+            if not _is_temp_path(path):
+                self.log(f"Skipping cleanup for non-temp path: {path}", "WARNING")
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+
     def run_data_collection(
         self,
         task_config: Dict[str, Any],
@@ -2026,169 +2056,173 @@ class GenieSimLocalFramework:
             task_name=task_config.get("name", "unknown"),
         )
 
-        def _timeout_exceeded() -> bool:
-            nonlocal timed_out
-            if timeout_seconds is None or timeout_seconds <= 0:
-                return False
-            elapsed = time.time() - start_time
-            if elapsed < timeout_seconds:
-                return False
-            timeout_message = (
-                "Genie Sim data collection exceeded max duration "
-                f"({elapsed:.1f}s >= {timeout_seconds:.1f}s); aborting."
-            )
-            if not timed_out:
-                timed_out = True
-                result.timed_out = True
-                result.success = False
-                result.errors.append(timeout_message)
-                self.log(timeout_message, "ERROR")
-            return True
-
-        scene_usd_path = None
-        if scene_config:
-            scene_usd_path = scene_config.get("usd_path") or scene_config.get("scene_usd_path")
-        if scene_usd_path:
-            scene_usd_path = Path(scene_usd_path)
-
-        # Ensure server is running (bootstrap if needed)
-        if not self.is_server_running():
-            if not self.start_server(scene_usd_path=scene_usd_path):
-                result.errors.append("Failed to start Genie Sim server")
-                return result
-
-        # Ensure connected
-        if not self._client.is_connected():
-            if not self.connect():
-                result.errors.append("Failed to connect to Genie Sim server")
-                return result
-        if not self._client.ping(timeout=10.0):
-            result.errors.append("Genie Sim server ping failed")
-            return result
-        if expected_server_version or required_capabilities:
-            try:
-                server_info = self.verify_server_capabilities(
-                    expected_server_version=expected_server_version,
-                    required_capabilities=required_capabilities,
+        try:
+            def _timeout_exceeded() -> bool:
+                nonlocal timed_out
+                if timeout_seconds is None or timeout_seconds <= 0:
+                    return False
+                elapsed = time.time() - start_time
+                if elapsed < timeout_seconds:
+                    return False
+                timeout_message = (
+                    "Genie Sim data collection exceeded max duration "
+                    f"({elapsed:.1f}s >= {timeout_seconds:.1f}s); aborting."
                 )
-                result.server_info = server_info
-            except RuntimeError as exc:
-                error_message = f"Genie Sim server capability check failed: {exc}"
-                self.log(error_message, "ERROR")
-                result.errors.append(error_message)
+                if not timed_out:
+                    timed_out = True
+                    result.timed_out = True
+                    result.success = False
+                    result.errors.append(timeout_message)
+                    self.log(timeout_message, "ERROR")
+                return True
+
+            scene_usd_path = None
+            if scene_config:
+                scene_usd_path = scene_config.get("usd_path") or scene_config.get("scene_usd_path")
+            if scene_usd_path:
+                scene_usd_path = Path(scene_usd_path)
+
+            # Ensure server is running (bootstrap if needed)
+            if not self.is_server_running():
+                if not self.start_server(scene_usd_path=scene_usd_path):
+                    result.errors.append("Failed to start Genie Sim server")
+                    return result
+
+            # Ensure connected
+            if not self._client.is_connected():
+                if not self.connect():
+                    result.errors.append("Failed to connect to Genie Sim server")
+                    return result
+            if not self._client.ping(timeout=10.0):
+                result.errors.append("Genie Sim server ping failed")
                 return result
+            if expected_server_version or required_capabilities:
+                try:
+                    server_info = self.verify_server_capabilities(
+                        expected_server_version=expected_server_version,
+                        required_capabilities=required_capabilities,
+                    )
+                    result.server_info = server_info
+                except RuntimeError as exc:
+                    error_message = f"Genie Sim server capability check failed: {exc}"
+                    self.log(error_message, "ERROR")
+                    result.errors.append(error_message)
+                    return result
 
-        episodes_target = episodes_per_task or self.config.episodes_per_task
-        tasks = task_config.get("suggested_tasks", [task_config])
+            episodes_target = episodes_per_task or self.config.episodes_per_task
+            tasks = task_config.get("suggested_tasks", [task_config])
 
-        self.log(f"Tasks: {len(tasks)}")
-        self.log(f"Episodes per task: {episodes_target}")
+            self.log(f"Tasks: {len(tasks)}")
+            self.log(f"Episodes per task: {episodes_target}")
 
-        total_episodes = 0
-        passed_episodes = 0
-        total_frames = 0
-        quality_scores = []
+            total_episodes = 0
+            passed_episodes = 0
+            total_frames = 0
+            quality_scores = []
 
-        # Create output directory for this run
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = self.config.recording_dir / f"run_{run_id}"
-        run_dir.mkdir(parents=True, exist_ok=True)
+            # Create output directory for this run
+            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_dir = self.config.recording_dir / f"run_{run_id}"
+            run_dir.mkdir(parents=True, exist_ok=True)
 
-        for task_idx, task in enumerate(tasks):
-            if _timeout_exceeded():
-                break
-            task_name = task.get("task_name", f"task_{task_idx}")
-            self.log(f"\nTask {task_idx + 1}/{len(tasks)}: {task_name}")
-
-            # Configure environment for task
-            self._configure_task(task, scene_config)
-
-            for ep_idx in range(episodes_target):
+            for task_idx, task in enumerate(tasks):
                 if _timeout_exceeded():
                     break
-                if progress_callback:
-                    current = task_idx * episodes_target + ep_idx + 1
-                    total = len(tasks) * episodes_target
-                    progress_callback(current, total, f"Task: {task_name}, Episode: {ep_idx + 1}")
+                task_name = task.get("task_name", f"task_{task_idx}")
+                self.log(f"\nTask {task_idx + 1}/{len(tasks)}: {task_name}")
 
-                try:
-                    # Reset environment
-                    self._client.reset_environment()
+                # Configure environment for task
+                self._configure_task(task, scene_config)
 
-                    # Generate and execute trajectory
-                    episode_result = self._run_single_episode(
-                        task=task,
-                        episode_id=f"{task_name}_ep{ep_idx:04d}",
-                        output_dir=run_dir,
-                    )
+                for ep_idx in range(episodes_target):
+                    if _timeout_exceeded():
+                        break
+                    if progress_callback:
+                        current = task_idx * episodes_target + ep_idx + 1
+                        total = len(tasks) * episodes_target
+                        progress_callback(current, total, f"Task: {task_name}, Episode: {ep_idx + 1}")
 
-                    total_episodes += 1
+                    try:
+                        # Reset environment
+                        self._client.reset_environment()
 
-                    if episode_result.get("success"):
-                        passed_episodes += 1
-                        total_frames += episode_result.get("frame_count", 0)
-                        quality_scores.append(episode_result.get("quality_score", 0.0))
-                    else:
-                        stall_info = episode_result.get("stall_info") or {}
-                        if stall_info.get("stall_detected"):
-                            self._stall_count += 1
-                            stall_message = (
-                                f"Episode {ep_idx} of {task_name} stalled after "
-                                f"{stall_info.get('last_progress_age_s', 0.0):.1f}s "
-                                f"(stall {self._stall_count}/{self.config.max_stalls})"
-                            )
-                            result.warnings.append(stall_message)
-                            if self._stall_count > self.config.max_stalls:
-                                error_message = (
-                                    f"{stall_message}; restarting Genie Sim server "
-                                    f"after exceeding max stalls ({self.config.max_stalls})."
-                                )
-                                result.errors.append(error_message)
-                                self.log(error_message, "ERROR")
-                                self.stop_server()
-                                if not self.start_server(scene_usd_path=scene_usd_path):
-                                    result.errors.append(
-                                        "Failed to restart Genie Sim server after stall."
-                                    )
-                                    return result
-                                if self.config.stall_backoff_s > 0:
-                                    time.sleep(self.config.stall_backoff_s)
-                        result.warnings.append(
-                            f"Episode {ep_idx} of {task_name} failed: {episode_result.get('error', 'unknown')}"
+                        # Generate and execute trajectory
+                        episode_result = self._run_single_episode(
+                            task=task,
+                            episode_id=f"{task_name}_ep{ep_idx:04d}",
+                            output_dir=run_dir,
                         )
 
-                except Exception as e:
-                    result.warnings.append(f"Episode {ep_idx} of {task_name} error: {e}")
-                    self.log(f"  Episode {ep_idx} error: {e}", "WARNING")
+                        total_episodes += 1
 
-            if timed_out:
-                break
+                        if episode_result.get("success"):
+                            passed_episodes += 1
+                            total_frames += episode_result.get("frame_count", 0)
+                            quality_scores.append(episode_result.get("quality_score", 0.0))
+                        else:
+                            stall_info = episode_result.get("stall_info") or {}
+                            if stall_info.get("stall_detected"):
+                                self._stall_count += 1
+                                stall_message = (
+                                    f"Episode {ep_idx} of {task_name} stalled after "
+                                    f"{stall_info.get('last_progress_age_s', 0.0):.1f}s "
+                                    f"(stall {self._stall_count}/{self.config.max_stalls})"
+                                )
+                                result.warnings.append(stall_message)
+                                if self._stall_count > self.config.max_stalls:
+                                    error_message = (
+                                        f"{stall_message}; restarting Genie Sim server "
+                                        f"after exceeding max stalls ({self.config.max_stalls})."
+                                    )
+                                    result.errors.append(error_message)
+                                    self.log(error_message, "ERROR")
+                                    self.stop_server()
+                                    if not self.start_server(scene_usd_path=scene_usd_path):
+                                        result.errors.append(
+                                            "Failed to restart Genie Sim server after stall."
+                                        )
+                                        return result
+                                    if self.config.stall_backoff_s > 0:
+                                        time.sleep(self.config.stall_backoff_s)
+                            result.warnings.append(
+                                f"Episode {ep_idx} of {task_name} failed: {episode_result.get('error', 'unknown')}"
+                            )
 
-        # Calculate statistics
-        result.episodes_collected = total_episodes
-        result.episodes_passed = passed_episodes
-        result.total_frames = total_frames
-        result.recording_dir = run_dir
-        result.duration_seconds = time.time() - start_time
+                    except Exception as e:
+                        result.warnings.append(f"Episode {ep_idx} of {task_name} error: {e}")
+                        self.log(f"  Episode {ep_idx} error: {e}", "WARNING")
 
-        if quality_scores:
-            result.average_quality_score = np.mean(quality_scores)
+                if timed_out:
+                    break
 
-        if total_episodes > 0:
-            result.task_success_rate = passed_episodes / total_episodes
+            # Calculate statistics
+            result.episodes_collected = total_episodes
+            result.episodes_passed = passed_episodes
+            result.total_frames = total_frames
+            result.recording_dir = run_dir
+            result.duration_seconds = time.time() - start_time
 
-        result.success = (passed_episodes > 0) and not timed_out
+            if quality_scores:
+                result.average_quality_score = np.mean(quality_scores)
 
-        self.log("\n" + "=" * 70)
-        self.log("DATA COLLECTION COMPLETE")
-        self.log("=" * 70)
-        self.log(f"Episodes: {passed_episodes}/{total_episodes} passed")
-        self.log(f"Total frames: {total_frames}")
-        self.log(f"Average quality: {result.average_quality_score:.2f}")
-        self.log(f"Duration: {result.duration_seconds:.1f}s")
-        self.log(f"Output: {run_dir}")
+            if total_episodes > 0:
+                result.task_success_rate = passed_episodes / total_episodes
 
-        return result
+            result.success = (passed_episodes > 0) and not timed_out
+
+            self.log("\n" + "=" * 70)
+            self.log("DATA COLLECTION COMPLETE")
+            self.log("=" * 70)
+            self.log(f"Episodes: {passed_episodes}/{total_episodes} passed")
+            self.log(f"Total frames: {total_frames}")
+            self.log(f"Average quality: {result.average_quality_score:.2f}")
+            self.log(f"Duration: {result.duration_seconds:.1f}s")
+            self.log(f"Output: {run_dir}")
+
+            return result
+        finally:
+            if self.config.cleanup_tmp:
+                self._cleanup_temp_dirs()
 
     def verify_server_capabilities(
         self,
@@ -2285,7 +2319,7 @@ class GenieSimLocalFramework:
 
         try:
             # Start recording
-            self._client.start_recording(episode_id)
+            self._client.start_recording(episode_id, str(output_dir))
             recording_started = True
 
             # Get initial observation
