@@ -505,18 +505,24 @@ class GenieSimConfig(BaseModel):
                     "Refusing to enable linear fallback in production. "
                     "Unset GENIESIM_ALLOW_LINEAR_FALLBACK and GENIESIM_ALLOW_IK_FAILURE_FALLBACK."
                 )
-            for label, path, env_name in (
-                ("recording", self.recording_dir, GENIESIM_RECORDINGS_DIR_ENV),
-                ("log", self.log_dir, GENIESIM_LOG_DIR_ENV),
-            ):
-                if _is_temp_path(path):
-                    logger.warning(
-                        "Genie Sim %s directory resolves under a temporary path (%s) in production. "
-                        "Set %s to a persistent location.",
-                        label,
-                        path,
-                        env_name,
-                    )
+            temp_dirs = [
+                (label, path, env_name)
+                for label, path, env_name in (
+                    ("recording", self.recording_dir, GENIESIM_RECORDINGS_DIR_ENV),
+                    ("log", self.log_dir, GENIESIM_LOG_DIR_ENV),
+                )
+                if _is_temp_path(path)
+            ]
+            if temp_dirs:
+                offenders = ", ".join(
+                    f"{env_name}={path}"
+                    for _, path, env_name in temp_dirs
+                )
+                raise ValueError(
+                    "Refusing to use temporary directories for Genie Sim in production. "
+                    f"Set {GENIESIM_RECORDINGS_DIR_ENV} and {GENIESIM_LOG_DIR_ENV} "
+                    f"to persistent locations. Offending values: {offenders}."
+                )
         return self
 
 
