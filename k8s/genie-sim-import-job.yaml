@@ -27,7 +27,7 @@ data:
   FAIL_ON_PARTIAL_ERROR: "false"
   DISABLE_GCS_UPLOAD: "false"
   ENABLE_FIREBASE_UPLOAD: "true"
-  FIREBASE_STORAGE_BUCKET: "blueprint-8c1ca.appspot.com"
+  FIREBASE_STORAGE_BUCKET: "${FIREBASE_STORAGE_BUCKET}"
 
 ---
 apiVersion: batch/v1
