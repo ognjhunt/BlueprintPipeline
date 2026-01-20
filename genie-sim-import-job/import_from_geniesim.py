@@ -317,30 +317,6 @@ def _guard_quality_thresholds(
     print(f"[GENIE-SIM-IMPORT] WARNING: {message}")
 
 
-def _preflight_firebase_upload() -> bool:
-    bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
-    service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-    service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
-
-    if not bucket_name or (not service_account_json and not service_account_path):
-        print(
-            "[GENIE-SIM-IMPORT] ERROR: Firebase upload preflight failed. Set "
-            "FIREBASE_STORAGE_BUCKET and either FIREBASE_SERVICE_ACCOUNT_JSON or "
-            "FIREBASE_SERVICE_ACCOUNT_PATH."
-        )
-        return False
-
-    from tools.firebase_upload.uploader import init_firebase
-
-    try:
-        init_firebase()
-    except Exception as exc:
-        print(f"[GENIE-SIM-IMPORT] ERROR: Firebase upload preflight failed: {exc}")
-        return False
-
-    return True
-
-
 def _alert_low_quality(
     *,
     scene_id: str,
@@ -2773,8 +2749,6 @@ def main():
         default=production_mode or service_mode,
     )
     firebase_upload_prefix = resolve_firebase_upload_prefix()
-    if enable_firebase_upload and not _preflight_firebase_upload():
-        sys.exit(1)
     try:
         lerobot_skip_rate_max = _resolve_skip_rate_max(
             os.getenv("LEROBOT_SKIP_RATE_MAX")
@@ -2806,6 +2780,8 @@ def main():
             require_geniesim=False,
             require_gemini=False,
             validate_gcs=True,
+            validate_firebase=True,
+            require_firebase=enable_firebase_upload,
         )
     except ImportError as e:
         print(f"[GENIE-SIM-IMPORT] WARNING: Startup validation unavailable: {e}")

@@ -6,9 +6,10 @@ Centralized credential and environment validation to fail fast
 before jobs start executing.
 """
 
+import json
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 from tools.geniesim_adapter.config import (
@@ -150,10 +151,84 @@ def validate_gemini_credentials(required: bool = False) -> Dict[str, any]:
     }
 
 
+def validate_firebase_credentials(required: bool = False) -> Dict[str, Any]:
+    """
+    Validate Firebase Storage credentials.
+
+    Ensure required environment variables are present and credentials are usable.
+
+    Args:
+        required: If True, treat missing Firebase config as errors
+
+    Returns:
+        Dict with validation results
+    """
+    bucket = os.getenv("FIREBASE_STORAGE_BUCKET")
+    emulator_host = os.getenv("FIREBASE_STORAGE_EMULATOR_HOST")
+    service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if not bucket:
+        message = "FIREBASE_STORAGE_BUCKET not set"
+        if required:
+            errors.append(message)
+        else:
+            warnings.append(message)
+
+    service_account_required = not emulator_host
+    has_service_account = bool(service_account_json or service_account_path)
+
+    if service_account_required and not has_service_account:
+        message = (
+            "Firebase service account credentials not set "
+            "(FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH)"
+        )
+        if required:
+            errors.append(message)
+        else:
+            warnings.append(message)
+
+    if service_account_json:
+        try:
+            json.loads(service_account_json)
+        except json.JSONDecodeError as exc:
+            errors.append(f"FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON: {exc}")
+
+    if service_account_path:
+        path = Path(service_account_path)
+        if not path.exists():
+            errors.append(f"FIREBASE_SERVICE_ACCOUNT_PATH does not exist: {path}")
+        elif not path.is_file():
+            errors.append(f"FIREBASE_SERVICE_ACCOUNT_PATH is not a file: {path}")
+
+    should_init = bool(bucket) and (emulator_host or has_service_account)
+    if should_init and not errors:
+        try:
+            from tools.firebase_upload.uploader import init_firebase
+
+            init_firebase()
+        except Exception as exc:
+            errors.append(f"Firebase initialization failed: {exc}")
+
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "bucket_set": bool(bucket),
+        "emulator_host_set": bool(emulator_host),
+        "service_account_set": has_service_account,
+    }
+
+
 def validate_all_credentials(
     require_geniesim: bool = False,
     require_gemini: bool = False,
     validate_gcs: bool = True,
+    validate_firebase: bool = False,
+    require_firebase: bool = False,
 ) -> Dict[str, any]:
     """
     Validate all credentials at job startup.
@@ -164,6 +239,8 @@ def validate_all_credentials(
         require_geniesim: Raise error if Genie Sim credentials missing
         require_gemini: Raise error if Gemini credentials missing
         validate_gcs: Check GCS bucket access
+        validate_firebase: Include Firebase validation in the report
+        require_firebase: Treat Firebase credentials as required when validating
 
     Returns:
         Dict with all validation results
@@ -178,6 +255,9 @@ def validate_all_credentials(
 
     if validate_gcs:
         results["gcs"] = validate_gcs_credentials()
+
+    if validate_firebase:
+        results["firebase"] = validate_firebase_credentials(required=require_firebase)
 
     # Collect all errors
     all_errors = []
@@ -231,6 +311,8 @@ def validate_and_fail_fast(
     require_geniesim: bool = False,
     require_gemini: bool = False,
     validate_gcs: bool = True,
+    validate_firebase: bool = False,
+    require_firebase: bool = False,
 ) -> None:
     """
     Validate credentials and exit if validation fails.
@@ -242,6 +324,8 @@ def validate_and_fail_fast(
         require_geniesim: Raise error if Genie Sim credentials missing
         require_gemini: Raise error if Gemini credentials missing
         validate_gcs: Check GCS bucket access
+        validate_firebase: Include Firebase validation in the report
+        require_firebase: Treat Firebase credentials as required when validating
 
     Raises:
         SystemExit: If validation fails
@@ -256,6 +340,8 @@ def validate_and_fail_fast(
             require_geniesim=require_geniesim,
             require_gemini=require_gemini,
             validate_gcs=validate_gcs,
+            validate_firebase=validate_firebase,
+            require_firebase=require_firebase,
         )
 
         print_validation_report(result, job_name)
