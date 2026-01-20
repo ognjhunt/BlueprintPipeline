@@ -484,7 +484,7 @@ def create_default_sim2real_validation_exporter(
     robot_type: str,
     output_dir: Path,
     config: Optional[Sim2RealValidationConfig] = None,
-) -> Dict[str, Path]:
+) -> DefaultSim2RealValidationExporter:
     """
     Factory function to create and run DefaultSim2RealValidationExporter.
 
@@ -495,7 +495,7 @@ def create_default_sim2real_validation_exporter(
         config: Optional configuration (defaults to all features enabled)
 
     Returns:
-        Dictionary mapping manifest type to output path
+        DefaultSim2RealValidationExporter instance
     """
     exporter = DefaultSim2RealValidationExporter(
         scene_id=scene_id,
@@ -503,7 +503,7 @@ def create_default_sim2real_validation_exporter(
         output_dir=output_dir,
         config=config,
     )
-    return exporter.export_all_manifests()
+    return exporter
 
 
 if __name__ == "__main__":
@@ -526,12 +526,13 @@ if __name__ == "__main__":
 
     config = Sim2RealValidationConfig(enabled=not args.disable)
 
-    manifests = create_default_sim2real_validation_exporter(
+    exporter = create_default_sim2real_validation_exporter(
         scene_id=args.scene_id,
         robot_type=args.robot_type,
         output_dir=args.output_dir,
         config=config,
     )
+    manifests = exporter.export_all_manifests()
 
     print("\n" + "="*60)
     print("SIM2REAL VALIDATION EXPORT COMPLETE")
