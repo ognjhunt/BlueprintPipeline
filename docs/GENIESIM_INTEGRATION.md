@@ -57,6 +57,21 @@ export GENIESIM_TLS_KEY=/etc/ssl/private/geniesim-client-key.pem
 export GENIESIM_AUTH_TOKEN_PATH=/etc/secrets/geniesim.jwt
 ```
 
+### Local mock server TLS defaults
+
+The local mock server (`python -m tools.geniesim_adapter.geniesim_server`) now enables TLS by default. If
+`GENIESIM_TLS_CERT` and `GENIESIM_TLS_KEY` (or the `--tls-cert/--tls-key` flags) are not provided, it generates a
+self-signed certificate at startup and writes it to a temporary directory.
+
+**Dev workflow:**
+
+1. Start the server; it logs the generated certificate path.
+2. Point clients (including health checks) to that certificate via `GENIESIM_TLS_CA=<path-to-generated-cert>`.
+3. If you need plaintext gRPC for local testing, pass `--insecure` to the server and health check CLI.
+
+The self-signed certificate generator uses the `cryptography` package, which is included in the updated
+requirements for local Genie Sim tooling.
+
 ## Server health checks
 
 - [ ] **Run the health check module** before submit/import steps:
