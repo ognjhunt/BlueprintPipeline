@@ -35,10 +35,14 @@ RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --upgrade pip \
 
 COPY genie-sim-submit-job/ /app/genie-sim-submit-job/
 COPY genie-sim-export-job/ /app/genie-sim-export-job/
+COPY genie-sim-gpu-job/entrypoint.sh /app/genie-sim-gpu-job/entrypoint.sh
+COPY genie-sim-gpu-job/gpu_warmup.py /app/genie-sim-gpu-job/gpu_warmup.py
 COPY tools/ /app/tools/
+
+RUN chmod +x /app/genie-sim-gpu-job/entrypoint.sh
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 ENV OMNI_KIT_ALLOW_ROOT=1
 
-ENTRYPOINT ["/isaac-sim/python.sh", "/app/genie-sim-submit-job/submit_to_geniesim.py"]
+ENTRYPOINT ["/app/genie-sim-gpu-job/entrypoint.sh"]
