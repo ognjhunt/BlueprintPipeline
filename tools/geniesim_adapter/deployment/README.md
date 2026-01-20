@@ -36,6 +36,8 @@ The local framework relies on these variables:
 - `ISAAC_SIM_PATH`: Path to the Isaac Sim installation (default: `/isaac-sim`)
 - `GENIESIM_HOST`: gRPC host for the Genie Sim server (default: `localhost`)
 - `GENIESIM_PORT`: gRPC port for the Genie Sim server (default: `50051`)
+- `GENIESIM_CLEANUP_TMP`: Remove Genie Sim temp directories after a run completes
+  (default: `1` for local/development, `0` in production)
 
 ## Notes
 
