@@ -94,7 +94,6 @@ from tools.error_handling.retry import (
     RetryableError,
     retry_with_backoff,
 )
-from tools.firebase_upload.firebase_upload_orchestrator import resolve_firebase_upload_prefix
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.lerobot_validation import validate_lerobot_dataset
@@ -2864,22 +2863,12 @@ class LocalPipelineRunner:
         preflight_report = None
         failure_details: Dict[str, Any] = {}
         failure_reason = None
-        firebase_upload_summary: Dict[str, Any] = {}
-        firebase_upload_error: Dict[str, str] = {}
         firebase_upload_status = "skipped"
         cleanup_enabled = parse_bool_env(
             os.getenv("GENIESIM_CLEANUP_ON_FAILURE"),
             default=True,
         )
         cleanup_details: Dict[str, Any] = {"enabled": cleanup_enabled}
-        firebase_upload_required = parse_bool_env(
-            os.getenv("FIREBASE_UPLOAD_REQUIRED"),
-            default=resolve_production_mode(),
-        )
-        firebase_require_atomic = parse_bool_env(
-            os.getenv("FIREBASE_REQUIRE_ATOMIC_UPLOAD"),
-            default=False,
-        )
         import uuid
 
         job_id = f"local-{uuid.uuid4()}"
@@ -3463,143 +3452,13 @@ class LocalPipelineRunner:
                 for current_robot, result in local_run_results.items()
             }
         job_payload["local_execution"] = local_execution
-        job_payload["firebase_upload_status"] = firebase_upload_status
-
-        firebase_upload_status_by_robot: Dict[str, str] = {}
-        firebase_cleanup_by_robot: Dict[str, Any] = {}
-        successful_upload_robots: List[str] = []
-        firebase_prefix = resolve_firebase_upload_prefix()
-        if local_run_results:
-            from tools.firebase_upload.firebase_upload_orchestrator import (
-                FirebaseUploadOrchestratorError,
-                upload_episodes_with_retry,
+        if local_run_results and job_status != "failed":
+            firebase_upload_status = "pending"
+            self.log(
+                "Firebase upload will occur during import after validation.",
+                "INFO",
             )
-
-            for current_robot, result in local_run_results.items():
-                if not result or not result.success:
-                    continue
-                try:
-                    firebase_result = upload_episodes_with_retry(
-                        episodes_dir=output_dirs[current_robot],
-                        scene_id=self.scene_id,
-                        robot_type=current_robot if multi_robot else None,
-                        prefix=firebase_prefix,
-                        cleanup_on_failure=cleanup_enabled,
-                    )
-                    firebase_upload_summary[current_robot] = firebase_result.summary
-                    firebase_upload_status_by_robot[current_robot] = "completed"
-                    successful_upload_robots.append(current_robot)
-                except FirebaseUploadOrchestratorError as exc:
-                    firebase_upload_summary[current_robot] = exc.retry_summary or exc.summary or {}
-                    firebase_upload_error[current_robot] = str(exc)
-                    submission_message = (
-                        "Local Genie Sim execution completed; Firebase upload failed."
-                    )
-                    firebase_upload_status_by_robot[current_robot] = "failed"
-                    if exc.cleanup_result:
-                        firebase_cleanup_by_robot[current_robot] = {
-                            "cleanup": exc.cleanup_result,
-                        }
-                    self.log(
-                        f"Firebase upload failed: {self._summarize_exception(exc)}",
-                        "WARNING",
-                    )
-            if "failed" in firebase_upload_status_by_robot.values():
-                firebase_upload_status = "failed"
-            elif firebase_upload_status_by_robot:
-                firebase_upload_status = "completed"
-            job_payload["firebase_upload_status"] = firebase_upload_status
-
-            failed_upload_robots = [
-                current_robot
-                for current_robot, status in firebase_upload_status_by_robot.items()
-                if status == "failed"
-            ]
-            if failed_upload_robots and firebase_require_atomic:
-                firebase_atomic_cleanup = self._cleanup_firebase_artifacts(
-                    firebase_prefix=firebase_prefix,
-                    job_id=job_id,
-                    robots=successful_upload_robots,
-                    upload_summaries=firebase_upload_summary,
-                    enabled=cleanup_enabled,
-                    multi_robot=multi_robot,
-                )
-                cleanup_details["firebase"] = self._merge_cleanup_reports(
-                    cleanup_details.get("firebase"),
-                    firebase_atomic_cleanup,
-                )
-                firebase_cleanup_by_robot = self._merge_firebase_cleanup_by_robot(
-                    firebase_cleanup_by_robot,
-                    firebase_atomic_cleanup,
-                )
-
-            if firebase_upload_status == "failed" and firebase_upload_required:
-                failure_reason = (
-                    "Firebase upload failed: "
-                    f"{self._summarize_exception(Exception(firebase_upload_error))}"
-                )
-                job_status = "failed"
-                job_payload["status"] = job_status
-                job_payload["message"] = submission_message
-                job_payload["failure_reason"] = failure_reason
-                failure_details["firebase_upload"] = {
-                    "errors": firebase_upload_error or None,
-                    "cleanup": firebase_cleanup_by_robot or None,
-                }
-                cleanup_details["local"] = self._merge_cleanup_reports(
-                    cleanup_details.get("local"),
-                    self._cleanup_local_output_dirs(
-                        output_dirs,
-                        failed_upload_robots,
-                        enabled=cleanup_enabled,
-                    ),
-                )
-                cleanup_details["firebase"] = self._merge_cleanup_reports(
-                    cleanup_details.get("firebase"),
-                    self._cleanup_firebase_artifacts(
-                        firebase_prefix=firebase_prefix,
-                        job_id=job_id,
-                        robots=failed_upload_robots,
-                        upload_summaries=firebase_upload_summary,
-                        enabled=cleanup_enabled,
-                        multi_robot=multi_robot,
-                    ),
-                )
-                firebase_cleanup_by_robot = self._merge_firebase_cleanup_by_robot(
-                    firebase_cleanup_by_robot,
-                    cleanup_details["firebase"],
-                )
-                failure_details["cleanup"] = cleanup_details
-                job_payload["failure_details"] = failure_details or None
-                job_path = self.geniesim_dir / "job.json"
-                _write_idempotency_payload()
-                _safe_write_text(
-                    job_path,
-                    json.dumps(job_payload, indent=2),
-                    context="geniesim job payload",
-                )
-                return StepResult(
-                    step=PipelineStep.GENIESIM_SUBMIT,
-                    success=False,
-                    duration_seconds=time.time() - start_time,
-                    message=submission_message,
-                    outputs={
-                        "job_id": job_id,
-                        "job_status": job_status,
-                        "job_payload": str(job_path),
-                        "preflight_report_path": str(preflight_report_path),
-                    },
-                )
-
-        if firebase_upload_summary or firebase_upload_error:
-            firebase_payload = {
-                "prefix": firebase_prefix,
-                "summary": firebase_upload_summary.get(robot_type) if not multi_robot else firebase_upload_summary,
-                "error": firebase_upload_error.get(robot_type) if not multi_robot else firebase_upload_error,
-            }
-            if multi_robot:
-                firebase_payload["status_by_robot"] = firebase_upload_status_by_robot
-            job_payload["firebase_upload"] = firebase_payload
+        job_payload["firebase_upload_status"] = firebase_upload_status
 
         job_payload["message"] = submission_message or job_payload.get("message")
         job_payload["status"] = job_status

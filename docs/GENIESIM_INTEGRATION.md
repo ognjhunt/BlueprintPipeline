@@ -19,15 +19,15 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
 - [ ] **gRPC Python dependency** (`grpcio`) installed in the Python environment used by the adapter.
 - [ ] **Production deployments** set `PIPELINE_ENV=production` (and `GENIESIM_ENV=production` for GenieSim-only services) plus enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks. Legacy production flags are deprecated and should be removed before **2025-12-31**.
 - [ ] **Optional runtime cap** configured via `GENIESIM_COLLECTION_TIMEOUT_S` to bound local data collection duration.
-- [ ] **Firebase uploads (submit/import)** have credentials available in production or service mode:
+- [ ] **Firebase uploads (import only)** have credentials available in production or service mode:
   - `FIREBASE_STORAGE_BUCKET`
   - `FIREBASE_SERVICE_ACCOUNT_JSON` or `FIREBASE_SERVICE_ACCOUNT_PATH`
-  - Optional prefix: `FIREBASE_UPLOAD_PREFIX` (used by submit/import).
+  - Optional prefix: `FIREBASE_UPLOAD_PREFIX` (used by import after validation).
   - `ENABLE_FIREBASE_UPLOAD=true` to force uploads outside production/service mode (import defaults to enabled in production/service mode).
 
 ### Migration note: Firebase upload prefix rename
 
-The Firebase upload prefix is now standardized on `FIREBASE_UPLOAD_PREFIX` for both submit and import. If you previously set `FIREBASE_EPISODE_PREFIX`, update your environment, workflow, and secret/configmap values to avoid mismatched dataset paths in downstream consumers.
+The Firebase upload prefix is now standardized on `FIREBASE_UPLOAD_PREFIX` for import uploads. If you previously set `FIREBASE_EPISODE_PREFIX`, update your environment, workflow, and secret/configmap values to avoid mismatched dataset paths in downstream consumers.
 
 ## Secure gRPC configuration
 

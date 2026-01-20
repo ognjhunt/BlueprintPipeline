@@ -17,11 +17,10 @@ Environment Variables:
     MIN_QUALITY_SCORE: Minimum quality score (default: 0.85)
     FILTER_LOW_QUALITY: Filter low-quality episodes during import (default: true)
     ALLOW_MISSING_ASSET_PROVENANCE: Allow missing asset provenance report (default: false)
-    FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name (required for Firebase uploads)
-    FIREBASE_SERVICE_ACCOUNT_JSON: Firebase service account JSON payload
-    FIREBASE_SERVICE_ACCOUNT_PATH: Firebase service account JSON path
-    FIREBASE_UPLOAD_PREFIX: Firebase prefix for Genie Sim episodes (default: datasets)
-    FIREBASE_UPLOAD_SECOND_PASS_MAX: Max retry attempts for Firebase upload failures (default: 1)
+    FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name (used by import job uploads)
+    FIREBASE_SERVICE_ACCOUNT_JSON: Firebase service account JSON payload (used by import job uploads)
+    FIREBASE_SERVICE_ACCOUNT_PATH: Firebase service account JSON path (used by import job uploads)
+    FIREBASE_UPLOAD_PREFIX: Firebase prefix for Genie Sim episodes (default: datasets; used by import job uploads)
 """
 
 import hashlib
@@ -59,12 +58,6 @@ from tools.gcs_upload import (
 from tools.config import load_pipeline_config
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
-from tools.firebase_upload.firebase_upload_orchestrator import (
-    FirebaseUploadOrchestratorError,
-    build_firebase_upload_prefix,
-    resolve_firebase_upload_prefix,
-    upload_episodes_with_retry,
-)
 from tools.logging_config import init_logging
 from tools.quality.quality_config import resolve_quality_settings
 from tools.validation.entrypoint_checks import validate_required_env_vars
@@ -584,27 +577,6 @@ def _resolve_robot_types(default_robot: str) -> list[str]:
     return [legacy_robot] if legacy_robot else [default_robot]
 
 
-def _preflight_firebase_upload() -> Optional[str]:
-    bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
-    service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-    service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
-
-    if not bucket_name or (not service_account_json and not service_account_path):
-        return (
-            "Set FIREBASE_STORAGE_BUCKET and either FIREBASE_SERVICE_ACCOUNT_JSON or "
-            "FIREBASE_SERVICE_ACCOUNT_PATH."
-        )
-
-    from tools.firebase_upload.uploader import init_firebase
-
-    try:
-        init_firebase()
-    except Exception as exc:
-        return str(exc)
-
-    return None
-
-
 def _normalize_tags(tags: Any) -> list[str]:
     if isinstance(tags, list):
         return [str(tag).strip() for tag in tags if str(tag).strip()]
@@ -1099,8 +1071,6 @@ def main() -> int:
     local_run_results: Dict[str, Optional[DataCollectionResult]] = {}
     failure_reason = None
     failure_details: Dict[str, Any] = {}
-    firebase_upload_summary: Dict[str, Any] = {}
-    firebase_upload_error: Dict[str, str] = {}
     firebase_upload_status = "skipped"
     episodes_output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
     submitted_at = datetime.utcnow().isoformat() + "Z"
@@ -1196,27 +1166,6 @@ def main() -> int:
         canary_scene_ids=canary_scene_ids,
         canary_percent=canary_percent,
     )
-
-    if not skip_local_run:
-        firebase_preflight_error = _preflight_firebase_upload()
-        if firebase_preflight_error:
-            submission_message = (
-                "Firebase upload preflight failed; aborting local Genie Sim execution."
-            )
-            failure_reason = "Firebase upload preflight failed"
-            failure_details = {
-                **failure_details,
-                "firebase_preflight": {
-                    "error": firebase_preflight_error,
-                    "bucket": os.getenv("FIREBASE_STORAGE_BUCKET"),
-                },
-            }
-            job_status = "failed"
-            skip_local_run = True
-            logger.error(
-                "[GENIESIM-SUBMIT-JOB] Firebase upload preflight failed: %s",
-                firebase_preflight_error,
-            )
 
     if not skip_local_run:
         gcs_root = Path("/mnt/gcs") / bucket
@@ -1462,164 +1411,14 @@ def main() -> int:
                 job_status = "failed"
             failure_reason = failure_reason or "GCS upload failed"
 
-    firebase_upload_status_by_robot: Dict[str, str] = {}
-    firebase_remote_prefix_by_robot: Dict[str, str] = {}
-    firebase_cleanup_by_robot: Dict[str, Any] = {}
-    firebase_upload_prefix = None
     firebase_retry_attempted = False
     firebase_retry_failed_count = 0
     firebase_retry_manifest_path: Optional[str] = None
-    firebase_retry_manifest_payload: Optional[Dict[str, Any]] = None
-    if not skip_local_run and output_dirs:
-        firebase_prefix = resolve_firebase_upload_prefix()
-        firebase_upload_prefix = build_firebase_upload_prefix(scene_id, prefix=firebase_prefix)
     if not skip_local_run and not skip_postprocessing and job_status != "failed" and output_dirs:
-        firebase_prefix = os.getenv("FIREBASE_EPISODE_PREFIX", "datasets")
-        firebase_second_pass_max = int(os.getenv("FIREBASE_UPLOAD_SECOND_PASS_MAX", "1"))
-        from tools.firebase_upload import (
-            FirebaseUploadError,
-            upload_firebase_files,
-            upload_episodes_to_firebase,
+        firebase_upload_status = "pending"
+        logger.info(
+            "[GENIESIM-SUBMIT-JOB] Firebase upload will occur during import after validation."
         )
-
-        firebase_upload_prefix = f"{firebase_prefix}/{scene_id}"
-        firebase_retry_manifest_payload = {
-            "scene_id": scene_id,
-            "job_id": job_id,
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "prefix": firebase_prefix,
-            "remote_prefix": firebase_upload_prefix,
-            "robots": {},
-        }
-
-        for current_robot, output_dir in output_dirs.items():
-            local_result = local_run_results.get(current_robot)
-            if not local_result or not local_result.success:
-                continue
-            retry_entry: Optional[Dict[str, Any]] = None
-            try:
-                firebase_result = upload_episodes_with_retry(
-                    episodes_dir=output_dir,
-                    scene_id=scene_id,
-                    robot_type=current_robot if multi_robot else None,
-                    prefix=firebase_prefix,
-                )
-                firebase_upload_summary[current_robot] = firebase_result.summary
-                firebase_remote_prefix_by_robot[current_robot] = firebase_result.remote_prefix
-                firebase_upload_status_by_robot[current_robot] = "completed"
-                logger.info(
-                    "[GENIESIM-SUBMIT-JOB] Firebase upload summary for %s: "
-                    "uploaded=%s skipped=%s reuploaded=%s failed=%s total=%s",
-                    current_robot,
-                    firebase_result.summary.get("uploaded", 0),
-                    firebase_result.summary.get("skipped", 0),
-                    firebase_result.summary.get("reuploaded", 0),
-                    firebase_result.summary.get("failed", 0),
-                    firebase_result.summary.get("total_files", 0),
-                )
-                if firebase_result.retry_attempted:
-                    retry_entry = {
-                        "initial_failures": (
-                            firebase_result.initial_summary.get("failures", [])
-                            if firebase_result.initial_summary
-                            else []
-                        ),
-                        "retry_attempted": True,
-                        "retry_failures": (
-                            firebase_result.retry_summary.get("failures", [])
-                            if firebase_result.retry_summary
-                            else []
-                        ),
-                        "retry_summary": firebase_result.retry_summary,
-                    }
-                    firebase_retry_attempted = True
-            except FirebaseUploadOrchestratorError as exc:
-                firebase_upload_summary[current_robot] = exc.retry_summary or exc.summary or {}
-                firebase_upload_error[current_robot] = str(exc)
-                firebase_upload_status_by_robot[current_robot] = "failed"
-                submission_message = (
-                    "Local Genie Sim execution completed; Firebase upload failed."
-                )
-                if exc.retry_attempted:
-                    firebase_retry_attempted = True
-                if exc.remote_prefix:
-                    firebase_remote_prefix_by_robot[current_robot] = exc.remote_prefix
-                if exc.cleanup_result:
-                    firebase_cleanup_by_robot[current_robot] = exc.cleanup_result
-                retry_entry = {
-                    "initial_failures": (
-                        exc.summary.get("failures", []) if exc.summary else []
-                    ),
-                    "retry_attempted": exc.retry_attempted,
-                    "retry_failures": (
-                        exc.retry_summary.get("failures", [])
-                        if exc.retry_summary
-                        else []
-                    ),
-                    "retry_summary": exc.retry_summary,
-                    "cleanup": exc.cleanup_result,
-                }
-                if firebase_upload_status_by_robot.get(current_robot) == "failed":
-                    logger.warning(
-                        "[GENIESIM-SUBMIT-JOB] Firebase upload failed: %s",
-                        firebase_upload_error[current_robot],
-                    )
-            if retry_entry:
-                firebase_retry_manifest_payload["robots"][current_robot] = {
-                    **retry_entry,
-                    "output_dir": str(output_dir),
-                    "remote_prefix": firebase_remote_prefix_by_robot.get(current_robot),
-                }
-
-        if "failed" in firebase_upload_status_by_robot.values():
-            firebase_upload_status = "failed"
-        elif firebase_upload_status_by_robot:
-            firebase_upload_status = "completed"
-        if firebase_retry_manifest_payload["robots"]:
-            firebase_retry_failed_count = sum(
-                len(entry.get("retry_failures", []))
-                for entry in firebase_retry_manifest_payload["robots"].values()
-                if entry.get("retry_attempted")
-            )
-            retry_manifest_relative_path = (
-                Path(job_output_path).parent / "upload_retry_manifest.json"
-            )
-            firebase_retry_manifest_path = f"gs://{bucket}/{retry_manifest_relative_path}"
-            if local_root:
-                retry_manifest_local_path = local_root / retry_manifest_relative_path
-                retry_manifest_local_path.parent.mkdir(parents=True, exist_ok=True)
-                _write_local_json(retry_manifest_local_path, firebase_retry_manifest_payload)
-                manifest_blob = storage_client.bucket(bucket).blob(
-                    str(retry_manifest_relative_path)
-                )
-                upload_blob_from_filename(
-                    manifest_blob,
-                    retry_manifest_local_path,
-                    firebase_retry_manifest_path,
-                    logger=logging.getLogger("genie-sim-submit-job"),
-                    verify_upload=True,
-                    content_type="application/json",
-                )
-        if firebase_upload_status == "failed":
-            if job_status != "failed":
-                job_status = "failed"
-            failure_reason = failure_reason or "Firebase upload failed"
-            firebase_failure_details: Dict[str, Any] = {
-                "status_by_robot": firebase_upload_status_by_robot,
-                "errors_by_robot": firebase_upload_error,
-                "failing_robots": sorted(firebase_upload_error.keys()),
-                "local_output_dirs": {
-                    robot: str(output_dirs.get(robot))
-                    for robot in firebase_upload_error.keys()
-                },
-                "remote_prefix": firebase_upload_prefix,
-                "remote_prefix_by_robot": firebase_remote_prefix_by_robot,
-                "cleanup_by_robot": firebase_cleanup_by_robot or None,
-            }
-            failure_details = {
-                **failure_details,
-                "firebase_upload": firebase_failure_details,
-            }
 
     metrics = get_metrics()
     metrics_summary = {
@@ -1688,6 +1487,7 @@ def main() -> int:
             "retry_attempted": firebase_retry_attempted,
             "retry_failed_count": firebase_retry_failed_count,
             "retry_manifest_path": firebase_retry_manifest_path,
+            "deferred_to_import": True,
         },
     }
     try:
@@ -1807,15 +1607,6 @@ def main() -> int:
         job_payload["artifacts"] = artifacts_by_robot[robot_type]
     else:
         job_payload["artifacts"] = artifacts_by_robot[robot_type]
-    if firebase_upload_summary or firebase_upload_error:
-        firebase_payload = {
-            "prefix": resolve_firebase_upload_prefix(),
-            "summary": firebase_upload_summary.get(robot_type) if not multi_robot else firebase_upload_summary,
-            "error": firebase_upload_error.get(robot_type) if not multi_robot else firebase_upload_error,
-        }
-        if multi_robot:
-            firebase_payload["status_by_robot"] = firebase_upload_status_by_robot
-        job_payload["firebase_upload"] = firebase_payload
     episodes_collected_total = sum(
         _safe_int(
             getattr(result, "episodes_collected", None),
