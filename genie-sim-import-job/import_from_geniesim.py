@@ -32,6 +32,8 @@ Environment Variables:
     ALLOW_PARTIAL_FIREBASE_UPLOADS: Allow Firebase uploads to proceed for
         successful robots even if others fail (default: false)
     ARTIFACTS_BY_ROBOT: JSON map of robot type to artifacts payload for multi-robot imports
+    ALLOW_IDEMPOTENT_RETRY: Allow retrying a local import when a prior manifest
+        indicates a failed or partial run (default: false)
 """
 
 import copy
@@ -897,6 +899,53 @@ def _load_existing_import_manifest(output_dir: Path) -> Optional[Dict[str, Any]]
         return None
     with open(manifest_path, "r") as handle:
         return json.load(handle)
+
+
+def _resolve_manifest_import_status(import_manifest: Dict[str, Any]) -> str:
+    status = import_manifest.get("import_status")
+    if isinstance(status, str):
+        return status.strip().lower()
+    success = import_manifest.get("success")
+    if isinstance(success, bool):
+        return "success" if success else "failed"
+    checksums_success = (
+        import_manifest.get("verification", {}).get("checksums", {}).get("success")
+    )
+    if checksums_success is True:
+        return "success"
+    if checksums_success is False:
+        return "failed"
+    return "unknown"
+
+
+def _resolve_import_status(result: "ImportResult") -> str:
+    if result.success:
+        return "success"
+    if result.episodes_passed_validation or result.episodes_filtered:
+        return "partial"
+    return "failed"
+
+
+def _update_import_manifest_status(
+    manifest_path: Optional[Path],
+    status: str,
+    success: Optional[bool] = None,
+) -> None:
+    if manifest_path is None or not manifest_path.exists():
+        return
+    with open(manifest_path, "r") as handle:
+        import_manifest = json.load(handle)
+    import_manifest["import_status"] = status
+    if success is not None:
+        import_manifest["success"] = success
+    import_manifest["status_updated_at"] = datetime.utcnow().isoformat() + "Z"
+    checksums = import_manifest.setdefault("checksums", {})
+    metadata_checksums = checksums.setdefault("metadata", {})
+    metadata_checksums.setdefault("import_manifest.json", {})
+    metadata_checksums["import_manifest.json"]["sha256"] = compute_manifest_checksum(
+        import_manifest
+    )
+    write_json_atomic(manifest_path, import_manifest, indent=2)
 
 
 def _update_import_manifest_firebase_summary(
@@ -2052,12 +2101,49 @@ def run_local_import_job(
             existing_manifest.get("job_idempotency", {}) if existing_manifest else {}
         )
         if existing_idempotency.get("key") == idempotency.get("key"):
-            result.success = True
-            result.warnings.append(
-                "Duplicate import detected; matching import_manifest.json "
-                "already exists for this idempotency key."
+            allow_retry = parse_bool_env(
+                os.getenv("ALLOW_IDEMPOTENT_RETRY"), default=False
             )
-            return result
+            import_status = (
+                _resolve_manifest_import_status(existing_manifest)
+                if existing_manifest
+                else "unknown"
+            )
+            if import_status in {"success", "succeeded", "complete", "completed"}:
+                result.success = True
+                result.warnings.append(
+                    "Duplicate import detected; matching import_manifest.json "
+                    "already exists for this idempotency key."
+                )
+                return result
+            if import_status in {"failed", "partial"} and not allow_retry:
+                result.errors.append(
+                    "Previous import for this idempotency key did not complete "
+                    f"successfully (status: {import_status}). Set "
+                    "ALLOW_IDEMPOTENT_RETRY=true to rerun."
+                )
+                return result
+            if import_status in {"failed", "partial"} and allow_retry:
+                warning_message = (
+                    "Retrying local import after previous "
+                    f"{import_status} run for this idempotency key."
+                )
+                print(f"[IMPORT] ⚠️  {warning_message}")
+                result.warnings.append(warning_message)
+            elif import_status == "unknown" and not allow_retry:
+                result.errors.append(
+                    "Existing import_manifest.json found for this idempotency key "
+                    "with unknown status. Set ALLOW_IDEMPOTENT_RETRY=true to rerun "
+                    "or delete the manifest to proceed."
+                )
+                return result
+            elif import_status == "unknown" and allow_retry:
+                warning_message = (
+                    "Retrying local import with unknown prior status for this "
+                    "idempotency key."
+                )
+                print(f"[IMPORT] ⚠️  {warning_message}")
+                result.warnings.append(warning_message)
 
     recordings_dir = config.output_dir / "recordings"
     if not recordings_dir.exists():
@@ -2402,6 +2488,8 @@ def run_local_import_job(
         "job_id": config.job_id,
         "output_dir": output_dir_str,
         "gcs_output_path": gcs_output_path,
+        "import_status": "in_progress",
+        "success": False,
         "job_idempotency": {
             "key": idempotency.get("key") if idempotency else None,
             "first_submitted_at": idempotency.get("first_submitted_at") if idempotency else None,
@@ -2553,6 +2641,7 @@ def run_local_import_job(
         result.errors.append("Import manifest verification failed.")
         result.success = False
         print("[IMPORT] ❌ Import manifest verification failed; aborting job.")
+        _update_import_manifest_status(import_manifest_path, "failed", success=False)
         print("=" * 80 + "\n")
         return result
     print("[IMPORT] ✅ Import manifest verification succeeded")
@@ -2592,6 +2681,7 @@ def run_local_import_job(
         for error in verification_errors:
             print(f"[IMPORT]   - {error}")
         result.success = False
+        _update_import_manifest_status(import_manifest_path, "failed", success=False)
         print("=" * 80 + "\n")
         return result
     else:
@@ -2610,6 +2700,7 @@ def run_local_import_job(
         for error in manifest_checksum_result["errors"]:
             print(f"[IMPORT]   - {error}")
         result.success = False
+        _update_import_manifest_status(import_manifest_path, "failed", success=False)
         print("=" * 80 + "\n")
         return result
 
@@ -2618,9 +2709,14 @@ def run_local_import_job(
     )
     if not result.checksum_verification_passed:
         result.success = False
+        _update_import_manifest_status(import_manifest_path, "failed", success=False)
         return result
 
     result.success = len(result.errors) == 0
+    import_status = _resolve_import_status(result)
+    _update_import_manifest_status(
+        import_manifest_path, import_status, success=result.success
+    )
 
     print("=" * 80)
     print("LOCAL IMPORT COMPLETE")
