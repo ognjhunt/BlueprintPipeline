@@ -40,6 +40,8 @@ Configuration (Environment Variables):
     ASSET_LIBRARY_PATH: Path to shared asset library (optional)
     SKIP_EXISTING: Skip assets that already exist (default: "1")
     DRY_RUN: Skip actual generation (default: "0")
+    ASSET_VECTOR_LEXICAL_FALLBACK: Enable lexical fallback when embeddings are unavailable (default: "0")
+    ASSET_VECTOR_LEXICAL_THRESHOLD: Minimum token overlap score for lexical matches (default: "0.2")
 
     # UltraShape-specific configuration
     ULTRASHAPE_REPO_PATH: Path to UltraShape repository (default: /app/UltraShape-1.0)
@@ -58,6 +60,7 @@ import time
 import datetime
 import shutil
 import subprocess
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict, field
@@ -291,6 +294,8 @@ class PipelineConfig:
     vector_backend_uri: Optional[str]
     vector_similarity_threshold: float
     vector_max_candidates: int
+    vector_lexical_fallback: bool
+    vector_lexical_threshold: float
 
 
 @dataclass
@@ -729,6 +734,42 @@ def embed_asset_spec(asset: AssetSpec, client) -> Optional[List[float]]:
     return None
 
 
+def tokenize_text(text: Optional[str]) -> List[str]:
+    if not text:
+        return []
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def build_asset_lexical_tokens(asset: AssetSpec) -> set[str]:
+    tokens: List[str] = []
+    tokens.extend(tokenize_text(asset.name))
+    tokens.extend(tokenize_text(asset.description))
+    tokens.extend(tokenize_text(asset.semantic_class))
+    tokens.extend(tokenize_text(asset.category))
+    tokens.extend(tokenize_text(asset.material_hint))
+    tokens.extend(tokenize_text(asset.style_hint))
+    tokens.extend(tokenize_text(asset.generation_prompt_hint))
+    for variant in asset.example_variants:
+        tokens.extend(tokenize_text(variant))
+    return set(tokens)
+
+
+def build_record_lexical_tokens(record: EmbeddingRecord) -> set[str]:
+    tokens: List[str] = []
+    tokens.extend(tokenize_text(record.asset_id))
+    tokens.extend(tokenize_text(record.description))
+    for tag in record.tags:
+        tokens.extend(tokenize_text(tag))
+    return set(tokens)
+
+
+def score_lexical_overlap(asset_tokens: set[str], record_tokens: set[str]) -> float:
+    if not asset_tokens or not record_tokens:
+        return 0.0
+    overlap = asset_tokens & record_tokens
+    return len(overlap) / len(asset_tokens)
+
+
 # ============================================================================
 # Asset Library (Optional)
 # ============================================================================
@@ -773,6 +814,40 @@ def check_asset_library(
 
     query_embedding = embed_asset_spec(asset, client)
     if not query_embedding:
+        if not config.vector_lexical_fallback:
+            return None
+        asset_tokens = build_asset_lexical_tokens(asset)
+        if not asset_tokens or not vector_index.records:
+            return None
+
+        scored: List[Tuple[float, EmbeddingRecord]] = []
+        for record in vector_index.records:
+            if record.category != asset.category:
+                continue
+            record_tokens = build_record_lexical_tokens(record)
+            score = score_lexical_overlap(asset_tokens, record_tokens)
+            scored.append((score, record))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if not scored:
+            print(
+                f"[VAR-PIPELINE] No lexical candidates for {asset.name} in category {asset.category}"
+            )
+            return None
+
+        best_score, best_record = scored[0]
+        best_path = Path(best_record.path)
+        if not best_path.is_absolute():
+            best_path = lib_root / best_path
+
+        print(
+            f"[VAR-PIPELINE] Lexical match for {asset.name}: {best_record.asset_id} -> "
+            f"{best_path} (score={best_score:.3f})"
+        )
+
+        if best_score >= config.vector_lexical_threshold and best_path.is_file():
+            return best_path
+
         return None
 
     candidates = vector_index.search(
@@ -1847,6 +1922,10 @@ def main():
             os.getenv("ASSET_VECTOR_SIMILARITY_THRESHOLD", "0.82")
         ),
         vector_max_candidates=int(os.getenv("ASSET_VECTOR_MAX_CANDIDATES", "5")),
+        vector_lexical_fallback=getenv_bool("ASSET_VECTOR_LEXICAL_FALLBACK", "0"),
+        vector_lexical_threshold=float(
+            os.getenv("ASSET_VECTOR_LEXICAL_THRESHOLD", "0.2")
+        ),
     )
 
     print(f"[VAR-PIPELINE] Configuration:")
@@ -1875,6 +1954,13 @@ def main():
     print(
         f"[VAR-PIPELINE]   Vector max candidates: {config.vector_max_candidates}"
     )
+    print(
+        f"[VAR-PIPELINE]   Lexical fallback: {'enabled' if config.vector_lexical_fallback else 'disabled'}"
+    )
+    if config.vector_lexical_fallback:
+        print(
+            f"[VAR-PIPELINE]   Lexical threshold: {config.vector_lexical_threshold}"
+        )
     if config.dry_run:
         print(f"[VAR-PIPELINE]   DRY RUN MODE")
 
