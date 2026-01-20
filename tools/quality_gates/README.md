@@ -34,10 +34,10 @@ the thresholds in `tools/quality_gates/quality_config.json`:
 
 ```json
 {
-  "thresholds": {
+    "thresholds": {
     "geniesim_kinematic_reachability": {
       "enabled": true,
-      "min_reachability_rate": 0.95,
+      "min_reachability_rate": 1.0,
       "max_unreachable_targets": 0,
       "check_place_targets": true
     }
@@ -49,6 +49,9 @@ In production, a failed reachability gate blocks submission unless a manual
 override is granted via the quality gate approval workflow. Ensure your override
 metadata complies with `gate_overrides` in `quality_config.json` (including
 `allowed_overriders`) so the audit entry is recorded.
+
+The default policy requires full reachability: no unreachable targets are
+allowed, and the minimum reachability rate is set to `1.0`.
 
 Automated override payloads can be provided via `BP_QUALITY_OVERRIDE_METADATA`
 as JSON. The payload must include `approver_id`, `category`, `ticket`, and
