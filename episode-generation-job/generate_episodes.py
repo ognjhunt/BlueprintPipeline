@@ -291,6 +291,7 @@ from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS, 
 from motion_planner import AIMotionPlanner, MotionPlan, SceneContext
 from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS
 from lerobot_exporter import LeRobotExporter, LeRobotDatasetConfig
+from multi_format_exporters import MultiFormatExporter
 from quality_constants import MIN_QUALITY_SCORE, MAX_RETRIES, PRODUCTION_TRAINING_THRESHOLD
 from tools.error_handling.partial_failure import (
     PartialFailureError,
@@ -485,6 +486,123 @@ class GeneratedEpisode:
 
     # Timing
     generation_time_seconds: float = 0.0
+
+
+def _convert_episode_for_multiformat(
+    episode: GeneratedEpisode,
+    resolution: Tuple[int, int],
+    default_fps: float,
+) -> Dict[str, Any]:
+    """Convert GeneratedEpisode to the dict structure expected by MultiFormatExporter."""
+    frames: List[Dict[str, Any]] = []
+    trajectory = episode.trajectory
+    states = trajectory.states if trajectory else []
+
+    for idx, state in enumerate(states):
+        if idx < len(states) - 1:
+            next_state = states[idx + 1]
+            action = list(next_state.joint_positions) + [next_state.gripper_position]
+        else:
+            action = list(state.joint_positions) + [state.gripper_position]
+
+        frame: Dict[str, Any] = {
+            "timestamp": state.timestamp,
+            "joint_positions": state.joint_positions.tolist(),
+            "gripper_position": state.gripper_position,
+            "action": action,
+            "reward": 1.0 if (idx == len(states) - 1 and episode.is_valid) else 0.0,
+        }
+
+        if state.joint_velocities is not None:
+            frame["joint_velocities"] = state.joint_velocities.tolist()
+        if state.joint_torques is not None:
+            frame["joint_torques"] = state.joint_torques.tolist()
+        if state.joint_efforts is not None:
+            frame["joint_efforts"] = state.joint_efforts.tolist()
+        if state.joint_accelerations is not None:
+            frame["joint_accelerations"] = state.joint_accelerations.tolist()
+        if state.gripper_force is not None:
+            frame["gripper_force"] = state.gripper_force
+        if state.ee_position is not None:
+            frame["ee_position"] = state.ee_position.tolist()
+        if state.ee_orientation is not None:
+            frame["ee_orientation"] = state.ee_orientation.tolist()
+        if state.ee_velocity is not None:
+            frame["ee_velocity"] = state.ee_velocity.tolist()
+
+        frames.append(frame)
+
+    result: Dict[str, Any] = {
+        "episode_id": episode.episode_id,
+        "task": episode.task_description or episode.task_name,
+        "success": episode.is_valid,
+        "quality_score": episode.quality_score,
+        "frames": frames,
+        "resolution": list(resolution),
+    }
+
+    if episode.task_spec and episode.task_spec.segments and frames:
+        fps = trajectory.fps if trajectory and trajectory.fps else default_fps
+        num_frames = len(frames)
+        segments_payload = []
+        for segment in episode.task_spec.segments:
+            start_frame = int(round(segment.start_time * fps))
+            end_frame = int(round(segment.end_time * fps))
+            if num_frames:
+                start_frame = max(0, min(start_frame, num_frames - 1))
+                end_frame = max(start_frame, min(end_frame, num_frames - 1))
+            segments_payload.append(
+                {
+                    "skill_type": segment.skill_name or segment.segment_type.value,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                }
+            )
+        if segments_payload:
+            result["skill_segments"] = segments_payload
+
+    return result
+
+
+def _build_multiformat_splits(
+    episodes: List[GeneratedEpisode],
+    split_config: Any,
+) -> Dict[str, List[str]]:
+    """Build train/val/test split mapping from DatasetSplitConfig."""
+    split_map: Dict[str, List[str]] = {"train": [], "val": [], "test": []}
+    episode_ids = [episode.episode_id for episode in episodes]
+
+    explicit_splits = getattr(split_config, "explicit_splits", None)
+    if explicit_splits:
+        for episode_id in episode_ids:
+            split_name = explicit_splits.get(episode_id)
+            if split_name not in split_map:
+                logger.warning(
+                    "[EPISODE-GEN-JOB] Unknown split '%s' for episode %s; defaulting to train.",
+                    split_name,
+                    episode_id,
+                )
+                split_name = "train"
+            split_map[split_name].append(episode_id)
+        return split_map
+
+    rng = np.random.default_rng(getattr(split_config, "split_seed", 42))
+    shuffled_ids = sorted(episode_ids)
+    rng.shuffle(shuffled_ids)
+
+    train_ratio = getattr(split_config, "train_ratio", 0.8)
+    val_ratio = getattr(split_config, "val_ratio", 0.1)
+    test_ratio = getattr(split_config, "test_ratio", 0.1)
+
+    total = len(shuffled_ids)
+    train_count = int(total * train_ratio)
+    val_count = int(total * val_ratio)
+    test_count = max(0, total - train_count - val_count)
+
+    split_map["train"] = shuffled_ids[:train_count]
+    split_map["val"] = shuffled_ids[train_count:train_count + val_count]
+    split_map["test"] = shuffled_ids[train_count + val_count:train_count + val_count + test_count]
+    return split_map
 
 
 def _load_scene_config(scene_dir: Path) -> Dict[str, Any]:
@@ -1652,6 +1770,7 @@ class EpisodeGenerator:
                 task_key = episode.task_name
                 output.tasks_generated[task_key] = output.tasks_generated.get(task_key, 0) + 1
 
+        lerobot_export_failed = False
         try:
             dataset_path = exporter.finalize()
             output.lerobot_dataset_path = dataset_path
@@ -1673,6 +1792,7 @@ class EpisodeGenerator:
                 )
                 if self.verbose:
                     self.log(traceback.format_exc(), "DEBUG")
+                lerobot_export_failed = True
             else:
                 output.errors.append(error_msg)
                 self.log(error_msg, "ERROR")
@@ -1683,6 +1803,80 @@ class EpisodeGenerator:
         # Clean up memory after export
         del exporter
         gc.collect()
+
+        if not lerobot_export_failed:
+            data_pack_config = None
+            if get_data_pack_config is not None:
+                data_pack_config = get_data_pack_config(
+                    self.config.data_pack_tier,
+                    num_cameras=self.config.num_cameras,
+                    resolution=self.config.image_resolution,
+                    fps=self.config.fps,
+                )
+            if data_pack_config is None:
+                self.log(
+                    "Skipping multi-format export; data pack configuration unavailable.",
+                    "WARNING",
+                )
+            else:
+                formats = [fmt.value for fmt in data_pack_config.additional_formats]
+                if formats:
+                    self.log("\nStep 6b: Exporting additional dataset formats...")
+                    exportable_episodes = [
+                        episode for episode in valid_episodes if episode.trajectory
+                    ]
+                    splits = _build_multiformat_splits(
+                        exportable_episodes,
+                        data_pack_config.split_config,
+                    )
+                    converted_episodes = [
+                        _convert_episode_for_multiformat(
+                            episode,
+                            self.config.image_resolution,
+                            self.config.fps,
+                        )
+                        for episode in exportable_episodes
+                    ]
+
+                    exporter = MultiFormatExporter(
+                        self.config.output_dir / "multi_format",
+                        verbose=self.verbose,
+                    )
+                    try:
+                        output_paths = exporter.export(
+                            episodes=converted_episodes,
+                            splits=splits,
+                            formats=formats,
+                            robot_type=self.config.robot_type,
+                            dataset_name=f"{self.config.scene_id}_episodes",
+                        )
+                        for fmt, path in output_paths.items():
+                            self.log(f"  {fmt} export: {path}")
+                    except Exception as e:
+                        error_msg = f"Multi-format export failed: {e}"
+                        is_production = self._is_production_quality_level()
+                        allow_failure = self._allow_lerobot_export_failure()
+                        if is_production and os.getenv("ALLOW_LEROBOT_EXPORT_FAILURE"):
+                            self.log(
+                                "ALLOW_LEROBOT_EXPORT_FAILURE is ignored in production runs.",
+                                "ERROR",
+                            )
+                        if allow_failure:
+                            output.warnings.append(error_msg)
+                            self.log(
+                                f"{error_msg} (continuing because ALLOW_LEROBOT_EXPORT_FAILURE is enabled for dev runs)",
+                                "WARNING",
+                            )
+                            if self.verbose:
+                                self.log(traceback.format_exc(), "DEBUG")
+                        else:
+                            output.errors.append(error_msg)
+                            self.log(error_msg, "ERROR")
+                            if self.verbose:
+                                self.log(traceback.format_exc(), "DEBUG")
+                            raise
+                else:
+                    self.log("No additional formats requested; skipping multi-format export.")
 
         # Step 8: Write generation manifest
         self.log("\nStep 7: Writing generation manifest and validation report...")
