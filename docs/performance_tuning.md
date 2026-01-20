@@ -29,7 +29,7 @@ Resource needs vary by scene size and number of objects. Use these as starting p
 ### Physics stability
 - Reduce `physics_dt` to improve stability if objects jitter.
 - Increase solver iterations for large scenes or complex articulation.
-- Validate mass and inertia tensors during `simready-job`.
+- Validate mass and inertia tensors during `simready-job` (USD/mesh-derived when possible, box approximation as fallback).
 
 ### Rendering performance
 - Use lower render resolution for Replicator previews.
