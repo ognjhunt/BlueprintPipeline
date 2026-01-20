@@ -393,6 +393,9 @@ class LocalPipelineRunner:
             max_delay=max_delay,
         )
 
+    def _is_production_mode(self) -> bool:
+        return self.environment == "production" or resolve_production_mode()
+
     def _parse_env_int(self, name: str, default: int) -> int:
         raw = os.getenv(name)
         if raw is None or raw == "":
@@ -400,6 +403,10 @@ class LocalPipelineRunner:
         try:
             return int(raw)
         except ValueError:
+            if self._is_production_mode():
+                raise NonRetryableError(
+                    f"Invalid {name} value '{raw}' in production; expected integer."
+                )
             self.log(f"Invalid {name} value '{raw}', defaulting to {default}", "WARNING")
             return default
 
@@ -410,6 +417,10 @@ class LocalPipelineRunner:
         try:
             return float(raw)
         except ValueError:
+            if self._is_production_mode():
+                raise NonRetryableError(
+                    f"Invalid {name} value '{raw}' in production; expected number."
+                )
             self.log(f"Invalid {name} value '{raw}', defaulting to {default}", "WARNING")
             return default
 
@@ -425,6 +436,10 @@ class LocalPipelineRunner:
             return default
         parts = [part.strip() for part in re.split(r"[x,]", raw) if part.strip()]
         if len(parts) != 2:
+            if self._is_production_mode():
+                raise NonRetryableError(
+                    f"Invalid {name} value '{raw}' in production; expected WIDTHxHEIGHT."
+                )
             self.log(
                 f"Invalid {name} value '{raw}', expected WIDTHxHEIGHT; defaulting to {default}",
                 "WARNING",
@@ -434,6 +449,10 @@ class LocalPipelineRunner:
             width = int(parts[0])
             height = int(parts[1])
         except ValueError:
+            if self._is_production_mode():
+                raise NonRetryableError(
+                    f"Invalid {name} value '{raw}' in production; expected integers."
+                )
             self.log(
                 f"Invalid {name} value '{raw}', expected integers; defaulting to {default}",
                 "WARNING",
