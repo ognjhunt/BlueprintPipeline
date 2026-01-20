@@ -52,6 +52,8 @@ class FakeBucket:
 @pytest.fixture(autouse=True)
 def _reset_firebase_app(monkeypatch):
     monkeypatch.setattr(uploader, "_FIREBASE_APP", None)
+    monkeypatch.setattr(uploader, "_FIREBASE_STORAGE_CLIENT", None)
+    monkeypatch.setattr(uploader, "_FIREBASE_STORAGE_BUCKET", None)
 
 
 def _setup_firebase_env(monkeypatch) -> None:
