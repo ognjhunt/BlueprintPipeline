@@ -426,11 +426,69 @@ def create_default_embodiment_transfer_exporter(
             "estimated_savings": f"${int((multi_robot_multiplier - 1) * 100000):,} vs. training each robot from scratch",
         }, f, indent=2)
 
+    config_path = output_dir / "embodiment_transfer_config.json"
+    with open(config_path, "w") as f:
+        json.dump({
+            "enabled": True,
+            "scene_id": scene_id,
+            "source_robot": source_robot,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "output_artifacts": {
+                "transfer_matrix": "embodiment_transfer_matrix.json",
+                "compatibility_scores": "compatibility_scores.json",
+                "multi_robot_strategy": "multi_robot_strategy.json",
+                "transfer_summary": "embodiment_transfer_summary.json",
+            },
+            "value": "Previously $20,000-$100,000 upsell - NOW FREE BY DEFAULT",
+        }, f, indent=2)
+
     return {
         "embodiment_transfer_matrix": matrix_path,
         "compatibility_scores": scores_path,
         "multi_robot_strategy": strategy_path,
+        "embodiment_transfer_config": config_path,
     }
+
+
+def execute_embodiment_transfer(
+    config_path: Path,
+    output_dir: Path,
+) -> Dict[str, Path]:
+    """
+    Generate embodiment transfer artifacts using the exported config.
+
+    Outputs:
+        - embodiment_transfer_summary.json
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    config = json.loads(Path(config_path).read_text())
+    if not config.get("enabled", False):
+        print("[EMBODIMENT-TRANSFER] Disabled in config, skipping artifact generation")
+        return {}
+
+    summary_path = output_dir / config.get("output_artifacts", {}).get("transfer_summary", "embodiment_transfer_summary.json")
+    matrix_path = output_dir / config.get("output_artifacts", {}).get("transfer_matrix", "embodiment_transfer_matrix.json")
+    matrix_payload = json.loads(matrix_path.read_text()) if matrix_path.exists() else {}
+
+    compatibility = matrix_payload.get("compatibility_matrix", {})
+    top_targets = list(compatibility.keys())[:2]
+
+    summary_path.write_text(
+        json.dumps(
+            {
+                "scene_id": config.get("scene_id"),
+                "source_robot": config.get("source_robot"),
+                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "top_transfer_targets": top_targets,
+                "multi_robot_multiplier": matrix_payload.get("multi_robot_data_multiplier"),
+            },
+            indent=2,
+        )
+    )
+
+    return {"transfer_summary": summary_path}
 
 
 if __name__ == "__main__":

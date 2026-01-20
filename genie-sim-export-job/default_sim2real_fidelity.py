@@ -372,10 +372,68 @@ def create_default_sim2real_fidelity_exporter(
             "estimated_validation_time": "1-3 weeks",
         }, f, indent=2)
 
+    config_path = output_dir / "sim2real_fidelity_config.json"
+    with open(config_path, "w") as f:
+        json.dump({
+            "enabled": True,
+            "scene_id": scene_id,
+            "robot_type": robot_type,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "output_artifacts": {
+                "fidelity_matrix": "sim2real_fidelity_matrix.json",
+                "trust_matrix": "trust_matrix.json",
+                "transfer_confidence_report": "transfer_confidence_report.json",
+                "fidelity_summary": "fidelity_summary.json",
+            },
+            "value": "Previously $20,000-$50,000 upsell - NOW FREE BY DEFAULT",
+        }, f, indent=2)
+
     return {
         "sim2real_fidelity_matrix": matrix_path,
         "trust_matrix": trust_matrix_path,
         "transfer_confidence_report": confidence_report_path,
+        "sim2real_fidelity_config": config_path,
+    }
+
+
+def execute_sim2real_fidelity(
+    config_path: Path,
+    output_dir: Path,
+) -> Dict[str, Path]:
+    """
+    Generate sim2real fidelity artifacts using the exported config.
+
+    Outputs:
+        - fidelity_summary.json
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    config = json.loads(Path(config_path).read_text())
+    if not config.get("enabled", False):
+        print("[SIM2REAL-FIDELITY] Disabled in config, skipping artifact generation")
+        return {}
+
+    summary_path = output_dir / config.get("output_artifacts", {}).get("fidelity_summary", "fidelity_summary.json")
+    matrix_path = output_dir / config.get("output_artifacts", {}).get("fidelity_matrix", "sim2real_fidelity_matrix.json")
+    matrix_payload = json.loads(matrix_path.read_text()) if matrix_path.exists() else {}
+
+    summary_path.write_text(
+        json.dumps(
+            {
+                "scene_id": config.get("scene_id"),
+                "robot_type": config.get("robot_type"),
+                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "overall_fidelity": matrix_payload.get("overall_scores", {}).get("fidelity_score"),
+                "transfer_confidence": matrix_payload.get("overall_scores", {}).get("transfer_confidence"),
+                "deployment_readiness": matrix_payload.get("overall_scores", {}).get("deployment_readiness"),
+            },
+            indent=2,
+        )
+    )
+
+    return {
+        "fidelity_summary": summary_path,
     }
 
 
