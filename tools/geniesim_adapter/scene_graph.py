@@ -15,6 +15,7 @@ References:
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -34,6 +35,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.logging_config import init_logging
+from tools.config.production_mode import resolve_production_mode
 
 init_logging()
 logger = logging.getLogger(__name__)
@@ -1348,6 +1350,8 @@ def convert_manifest_to_scene_graph(
     Convenience function to convert a manifest file to scene graph.
 
     GAP-PERF-001 FIX: Use streaming JSON parser for large manifests to prevent OOM.
+    Streaming uses StreamingManifestParser metadata reads; large files require ijson.
+    Production raises if ijson is missing to avoid silent full-file loads.
 
     Args:
         manifest_path: Path to scene_manifest.json
@@ -1360,43 +1364,81 @@ def convert_manifest_to_scene_graph(
     """
     runtime_config = _load_scene_graph_runtime_config()
 
+    file_size_mb = manifest_path.stat().st_size / (1024 * 1024)
+
     # Auto-detect if streaming is needed based on file size
     if use_streaming is None:
-        file_size_mb = manifest_path.stat().st_size / (1024 * 1024)
         use_streaming = file_size_mb > 10  # Use streaming for files > 10MB
+
+    if use_streaming and file_size_mb > 10:
+        ijson_available = importlib.util.find_spec("ijson") is not None
+        if not ijson_available:
+            message = (
+                "Streaming requested for large manifest but ijson is not installed. "
+                "Install ijson (pip install ijson) to avoid full-file JSON loads."
+            )
+            if resolve_production_mode():
+                raise RuntimeError(message)
+            logger.error(message, extra={"manifest_path": str(manifest_path)})
 
     # GAP-PERF-001 FIX: Use streaming parser for large manifests
     if use_streaming and HAVE_STREAMING_PARSER:
         if verbose:
             logger.info(
                 "[SCENE-GRAPH-CONVERTER] Using streaming parser for large manifest (%.1f MB)",
-                manifest_path.stat().st_size / (1024 * 1024),
+                file_size_mb,
                 extra={"manifest_path": str(manifest_path)},
             )
 
-        # Load metadata without objects (streaming handles objects separately)
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-
-        # Remove objects array (will be streamed)
-        manifest.pop("objects", None)
+        def _inflate_metadata(flat_metadata: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+            nested: Dict[str, Any] = {}
+            for key, value in flat_metadata.items():
+                if not key.startswith(prefix):
+                    continue
+                parts = key[len(prefix):].split(".")
+                cursor = nested
+                for part in parts[:-1]:
+                    cursor = cursor.setdefault(part, {})
+                cursor[parts[-1]] = value
+            return nested
 
         # Create converter
         converter = SceneGraphConverter(verbose=verbose)
+        parser = StreamingManifestParser(str(manifest_path))
+        manifest_metadata = parser.get_metadata()
+
+        metadata_payload = manifest_metadata.get("metadata")
+        if metadata_payload is None:
+            metadata_payload = _inflate_metadata(manifest_metadata, "metadata.")
+
+        missing_keys = [
+            key for key in ("scene_id", "coordinate_system", "meters_per_unit")
+            if key not in manifest_metadata
+        ]
+        if metadata_payload is None or metadata_payload == {}:
+            if "metadata" not in manifest_metadata:
+                missing_keys.append("metadata")
+            metadata_payload = metadata_payload or {}
+
+        if missing_keys:
+            logger.warning(
+                "Manifest metadata missing keys in streaming mode: %s",
+                ", ".join(missing_keys),
+                extra={"manifest_path": str(manifest_path)},
+            )
 
         # Start building scene graph with metadata
         scene_graph = GenieSimSceneGraph(
-            scene_id=manifest.get("scene_id", "unknown"),
-            coordinate_system=manifest.get("coordinate_system", "y_up"),
-            meters_per_unit=manifest.get("meters_per_unit", 1.0),
+            scene_id=manifest_metadata.get("scene_id", "unknown"),
+            coordinate_system=manifest_metadata.get("coordinate_system", "y_up"),
+            meters_per_unit=manifest_metadata.get("meters_per_unit", 1.0),
             nodes=[],
             edges=[],
-            metadata=manifest.get("metadata", {}),
+            metadata=metadata_payload,
         )
 
         # Stream process objects in batches
-        parser = StreamingManifestParser(str(manifest_path))
-        usd_base_path = manifest.get("usd_file")
+        usd_base_path = manifest_metadata.get("usd_file")
 
         batch_count = 0
         batch_size = runtime_config.streaming_batch_size
