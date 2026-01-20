@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from tools.error_handling.retry import NonRetryableError
@@ -55,3 +57,26 @@ def test_parse_resolution_env_invalid_non_production_warns(monkeypatch, tmp_path
 
     assert result == [320, 240]
     assert "Invalid DEFAULT_CAMERA_RESOLUTION value 'badvalue'" in captured.out
+
+
+def test_pipeline_env_prefers_canonical(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.setenv("BP_ENV", "development")
+
+    with caplog.at_level(logging.WARNING):
+        runner = _make_runner(tmp_path)
+
+    assert runner.environment == "production"
+    assert not any("BP_ENV is deprecated" in record.message for record in caplog.records)
+
+
+def test_pipeline_env_legacy_bp_env_warns(monkeypatch, tmp_path, caplog):
+    monkeypatch.delenv("PIPELINE_ENV", raising=False)
+    monkeypatch.delenv("GENIESIM_ENV", raising=False)
+    monkeypatch.setenv("BP_ENV", "production")
+
+    with caplog.at_level(logging.WARNING):
+        runner = _make_runner(tmp_path)
+
+    assert runner.environment == "production"
+    assert any("BP_ENV is deprecated" in record.message for record in caplog.records)
