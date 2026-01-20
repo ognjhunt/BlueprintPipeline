@@ -26,6 +26,15 @@ fast to prevent generating mock (non-trainable) data.
 
 The fastest way to get started is using NVIDIA's pre-built Isaac Sim container from NGC.
 
+### Docker Compose (BlueprintPipeline)
+
+When using `docker-compose.isaacsim.yaml`, you can run Compose from outside the repo root by
+setting `PROJECT_ROOT` to the BlueprintPipeline directory:
+
+```bash
+PROJECT_ROOT=/path/to/BlueprintPipeline docker compose -f docker-compose.isaacsim.yaml up episode-generation
+```
+
 ### Pull and Run Isaac Sim Container
 
 ```bash

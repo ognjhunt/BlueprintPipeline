@@ -103,16 +103,17 @@ services:
 
     volumes:
       # Local scene data (if not using GCS)
-      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
+      # Tip: run from outside repo root with PROJECT_ROOT=/path/to/BlueprintPipeline docker compose -f docker-compose.isaacsim.yaml up
+      - ${SCENES_DIR:-${PROJECT_ROOT:-.}/scenes}:/mnt/local/scenes:rw
       # Output directory
-      - ${OUTPUT_DIR:-./output}:/output:rw
+      - ${OUTPUT_DIR:-${PROJECT_ROOT:-.}/output}:/output:rw
       # GCS credentials
-      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-${PROJECT_ROOT:-.}/credentials/service-account.json}:/credentials/service-account.json:ro
       # Cache for Isaac Sim
       - isaac-sim-cache:/root/.cache/ov
       - isaac-sim-data:/root/.local/share/ov
       # Logs
-      - ./logs/episode-gen:/logs:rw
+      - ${PROJECT_ROOT:-.}/logs/episode-gen:/logs:rw
 
     # Shared memory for Isaac Sim
     shm_size: "16gb"
@@ -153,8 +154,8 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY required for replicator}
 
     volumes:
-      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
-      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - ${SCENES_DIR:-${PROJECT_ROOT:-.}/scenes}:/mnt/local/scenes:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-${PROJECT_ROOT:-.}/credentials/service-account.json}:/credentials/service-account.json:ro
 
     privileged: true
     cap_add:
@@ -186,8 +187,8 @@ services:
       NUM_ENVS: ${NUM_ENVS:-1024}
 
     volumes:
-      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
-      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - ${SCENES_DIR:-${PROJECT_ROOT:-.}/scenes}:/mnt/local/scenes:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-${PROJECT_ROOT:-.}/credentials/service-account.json}:/credentials/service-account.json:ro
 
     networks:
       - blueprint-net
@@ -211,8 +212,8 @@ services:
       USD_PREFIX: ${USD_PREFIX:-scenes/${SCENE_ID}/usd}
 
     volumes:
-      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
-      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - ${SCENES_DIR:-${PROJECT_ROOT:-.}/scenes}:/mnt/local/scenes:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-${PROJECT_ROOT:-.}/credentials/service-account.json}:/credentials/service-account.json:ro
 
     networks:
       - blueprint-net
@@ -234,8 +235,8 @@ services:
       ASSETS_PREFIX: ${ASSETS_PREFIX:-scenes/${SCENE_ID}/assets}
 
     volumes:
-      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
-      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - ${SCENES_DIR:-${PROJECT_ROOT:-.}/scenes}:/mnt/local/scenes:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-${PROJECT_ROOT:-.}/credentials/service-account.json}:/credentials/service-account.json:ro
 
     networks:
       - blueprint-net
@@ -264,12 +265,12 @@ services:
       IMAGE_RESOLUTION: ${IMAGE_RESOLUTION:-1280,720}
 
     volumes:
-      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
-      - ${OUTPUT_DIR:-./output}:/output:rw
-      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - ${SCENES_DIR:-${PROJECT_ROOT:-.}/scenes}:/mnt/local/scenes:rw
+      - ${OUTPUT_DIR:-${PROJECT_ROOT:-.}/output}:/output:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-${PROJECT_ROOT:-.}/credentials/service-account.json}:/credentials/service-account.json:ro
       - isaac-sim-cache:/root/.cache/ov
       - isaac-sim-data:/root/.local/share/ov
-      - ./logs/pipeline:/logs:rw
+      - ${PROJECT_ROOT:-.}/logs/pipeline:/logs:rw
 
     shm_size: "16gb"
     privileged: true
@@ -319,12 +320,12 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
 
     volumes:
-      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
-      - ${OUTPUT_DIR:-./output}:/output:rw
-      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - ${SCENES_DIR:-${PROJECT_ROOT:-.}/scenes}:/mnt/local/scenes:rw
+      - ${OUTPUT_DIR:-${PROJECT_ROOT:-.}/output}:/output:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-${PROJECT_ROOT:-.}/credentials/service-account.json}:/credentials/service-account.json:ro
       - isaac-sim-cache:/root/.cache/ov
       - isaac-sim-data:/root/.local/share/ov
-      - ./logs/dwm:/logs:rw
+      - ${PROJECT_ROOT:-.}/logs/dwm:/logs:rw
 
     shm_size: "16gb"
     privileged: true
@@ -378,12 +379,12 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
 
     volumes:
-      - ${SCENES_DIR:-./scenes}:/mnt/local/scenes:rw
-      - ${OUTPUT_DIR:-./output}:/output:rw
-      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials/service-account.json}:/credentials/service-account.json:ro
+      - ${SCENES_DIR:-${PROJECT_ROOT:-.}/scenes}:/mnt/local/scenes:rw
+      - ${OUTPUT_DIR:-${PROJECT_ROOT:-.}/output}:/output:rw
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-${PROJECT_ROOT:-.}/credentials/service-account.json}:/credentials/service-account.json:ro
       - isaac-sim-cache:/root/.cache/ov
       - isaac-sim-data:/root/.local/share/ov
-      - ./logs/dream2flow:/logs:rw
+      - ${PROJECT_ROOT:-.}/logs/dream2flow:/logs:rw
 
     shm_size: "16gb"
     privileged: true
