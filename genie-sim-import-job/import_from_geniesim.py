@@ -2201,9 +2201,14 @@ def run_local_import_job(
         for entry in validation_summary["episode_results"]
         if not entry["passed"]
     ]
-    filtered_episode_ids = (
-        failed_episode_ids if not config.fail_on_partial_error else []
-    )
+    failed_episode_id_set = set(failed_episode_ids)
+    filtered_episode_ids: List[str] = []
+    filtered_episode_metadata_list = episode_metadata_list
+    if not config.fail_on_partial_error and failed_episode_ids:
+        filtered_episode_ids = failed_episode_ids
+        filtered_episode_metadata_list = [
+            ep for ep in episode_metadata_list if ep.episode_id not in failed_episode_id_set
+        ]
     if validation_summary["failed_count"] > 0:
         failure_message = (
             f"{validation_summary['failed_count']} local episodes failed validation"
@@ -2213,10 +2218,11 @@ def run_local_import_job(
             result.success = False
         else:
             result.warnings.append(failure_message)
-            result.warnings.append(
-                "Excluding failed episodes from manifest: "
-                + ", ".join(failed_episode_ids)
-            )
+            if filtered_episode_ids:
+                result.warnings.append(
+                    "Excluding failed episodes from downstream processing and manifest: "
+                    + ", ".join(filtered_episode_ids)
+                )
 
     lerobot_dir = config.output_dir / "lerobot"
     dataset_info_path = lerobot_dir / "dataset_info.json"
@@ -2273,11 +2279,13 @@ def run_local_import_job(
         total_size_bytes += episode_file.stat().st_size
 
     low_quality_episodes = [
-        ep for ep in episode_metadata_list if ep.quality_score < config.min_quality_score
+        ep
+        for ep in filtered_episode_metadata_list
+        if ep.quality_score < config.min_quality_score
     ]
     result.episodes_passed_validation = validation_summary["passed_count"]
-    result.episodes_filtered = validation_summary["failed_count"]
-    quality_scores = [ep.quality_score for ep in episode_metadata_list]
+    result.episodes_filtered = len(filtered_episode_ids)
+    quality_scores = [ep.quality_score for ep in filtered_episode_metadata_list]
     result.average_quality_score = float(np.mean(quality_scores)) if quality_scores else 0.0
     quality_min_score = float(np.min(quality_scores)) if quality_scores else 0.0
     quality_max_score = float(np.max(quality_scores)) if quality_scores else 0.0
@@ -2501,6 +2509,8 @@ def run_local_import_job(
             "downloaded": result.total_episodes_downloaded,
             "passed_validation": result.episodes_passed_validation,
             "filtered": result.episodes_filtered,
+            "excluded_failed_count": len(filtered_episode_ids),
+            "excluded_failed_ids": filtered_episode_ids,
             "download_errors": 0,
             "parse_failed": result.episodes_parse_failed,
             "parse_failures": result.episode_parse_failures,
@@ -2545,6 +2555,7 @@ def run_local_import_job(
                 **validation_summary,
                 "failed_episode_ids": failed_episode_ids,
                 "filtered_episode_ids": filtered_episode_ids,
+                "filtered_episode_count": len(filtered_episode_ids),
                 "fail_on_partial_error": config.fail_on_partial_error,
             },
         },
