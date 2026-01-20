@@ -44,6 +44,8 @@ Environment overrides:
     - DEFAULT_CAMERA_IDS: Comma-separated camera IDs for replicator capture config.
     - DEFAULT_CAMERA_RESOLUTION: Resolution as "WIDTHxHEIGHT" or "WIDTH,HEIGHT".
     - DEFAULT_STREAM_IDS: Comma-separated stream IDs for replicator capture config.
+    - ALLOW_PARTIAL_FIREBASE_UPLOADS: Allow Firebase uploads to proceed for
+      successful robots even if others fail.
     - FIREBASE_REQUIRE_ATOMIC_UPLOAD: When true, rollback all successful uploads if any robot fails.
     - GENIESIM_SUBMIT_TIMEOUT_S: Total wall-clock timeout for the genie-sim-submit step.
     - GCS_MOUNT_ROOT: Base path used for local GCS-style mount mapping.
@@ -3215,6 +3217,15 @@ class LocalPipelineRunner:
         if not multi_robot:
             job_payload["job_metrics"] = job_metrics_by_robot[robot_type]
 
+        allow_partial_firebase_uploads = parse_bool_env(
+            os.getenv("ALLOW_PARTIAL_FIREBASE_UPLOADS"),
+            default=False,
+        )
+        fail_on_partial_error = parse_bool_env(
+            os.getenv("FAIL_ON_PARTIAL_ERROR"),
+            default=False,
+        )
+        production_mode = resolve_production_mode()
         require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
         allow_partial_failures = parse_bool_env(
             os.getenv("ALLOW_PARTIAL_FAILURES"), default=False
@@ -3489,6 +3500,12 @@ class LocalPipelineRunner:
         job_payload["job_metrics_summary"]["artifact_validation"] = {
             "status": artifact_validation_status,
             "cross_robot": cross_robot_validation,
+        }
+        job_payload["firebase_upload_policy"] = {
+            "allow_partial_uploads": allow_partial_firebase_uploads,
+            "suppress_on_partial_failure": production_mode or fail_on_partial_error,
+            "production_mode": production_mode,
+            "fail_on_partial_error": fail_on_partial_error,
         }
         if not artifacts_valid:
             job_status = "failed"

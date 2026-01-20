@@ -28,6 +28,8 @@ Environment Variables:
     FIREBASE_SERVICE_ACCOUNT_JSON: Service account JSON payload for Firebase
     FIREBASE_SERVICE_ACCOUNT_PATH: Path to service account JSON for Firebase
     FIREBASE_UPLOAD_PREFIX: Remote prefix for Firebase uploads (default: datasets)
+    ALLOW_PARTIAL_FIREBASE_UPLOADS: Allow Firebase uploads to proceed for
+        successful robots even if others fail (default: false)
     ARTIFACTS_BY_ROBOT: JSON map of robot type to artifacts payload for multi-robot imports
 """
 
@@ -874,6 +876,18 @@ def _load_local_job_metadata(
         raise FileNotFoundError(f"Job metadata not found at {metadata_path}")
     with open(metadata_path, "r") as handle:
         return json.load(handle)
+
+
+def _write_local_job_metadata(
+    bucket: str,
+    job_metadata_path: Optional[str],
+    job_metadata: Dict[str, Any],
+) -> None:
+    if not job_metadata_path:
+        return
+    metadata_path = _resolve_local_path(bucket, job_metadata_path)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(metadata_path, job_metadata, indent=2)
 
 
 def _load_existing_import_manifest(output_dir: Path) -> Optional[Dict[str, Any]]:
@@ -2770,6 +2784,10 @@ def main():
 
     # Error handling configuration
     fail_on_partial_error = parse_bool_env(os.getenv("FAIL_ON_PARTIAL_ERROR"), default=False)
+    allow_partial_firebase_uploads = parse_bool_env(
+        os.getenv("ALLOW_PARTIAL_FIREBASE_UPLOADS"),
+        default=False,
+    )
 
     # Validate credentials at startup
     sys.path.insert(0, str(REPO_ROOT / "tools"))
@@ -2807,6 +2825,10 @@ def main():
     print(f"[GENIE-SIM-IMPORT]   LeRobot Skip Rate Max: {lerobot_skip_rate_max:.2f}%")
     print(f"[GENIE-SIM-IMPORT]   GCS Uploads Enabled: {not disable_gcs_upload}")
     print(f"[GENIE-SIM-IMPORT]   Firebase Uploads Enabled: {enable_firebase_upload}")
+    print(
+        "[GENIE-SIM-IMPORT]   Allow Partial Firebase Uploads: "
+        f"{allow_partial_firebase_uploads}"
+    )
     print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}")
     print(f"[GENIE-SIM-IMPORT]   Fail on Partial Error: {fail_on_partial_error}\n")
 
@@ -2858,6 +2880,7 @@ def main():
         if artifacts_by_robot:
             robot_entries = []
             overall_success = True
+            robot_results: List[Dict[str, Any]] = []
             for robot_type, artifacts in sorted(artifacts_by_robot.items()):
                 episodes_prefix = artifacts.get("episodes_prefix") or artifacts.get("episodes_path")
                 if not episodes_prefix:
@@ -2865,7 +2888,7 @@ def main():
                     error_result.errors.append(
                         f"Missing episodes_prefix for robot {robot_type}"
                     )
-                    robot_entries.append({
+                    robot_entry = {
                         "robot_type": robot_type,
                         "success": False,
                         "output_dir": None,
@@ -2889,7 +2912,18 @@ def main():
                         },
                         "errors": error_result.errors,
                         "warnings": [],
-                    })
+                        "upload_status": None,
+                        "upload_failures": [],
+                        "firebase_upload": None,
+                    }
+                    robot_entries.append(robot_entry)
+                    robot_results.append(
+                        {
+                            "robot_type": robot_type,
+                            "result": error_result,
+                            "entry": robot_entry,
+                        }
+                    )
                     overall_success = False
                     continue
 
@@ -2955,40 +2989,8 @@ def main():
                         f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}"
                     )
 
-                firebase_summary = None
-                if enable_firebase_upload and result.success:
-                    print(
-                        "[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage "
-                        f"for robot {robot_type}..."
-                    )
-                    try:
-                        firebase_result = upload_episodes_with_retry(
-                            episodes_dir=result.output_dir,
-                            scene_id=scene_id,
-                            robot_type=robot_type,
-                            prefix=firebase_upload_prefix,
-                        )
-                        firebase_summary = firebase_result.summary
-                    except Exception as exc:
-                        _alert_firebase_upload_failure(
-                            scene_id=scene_id,
-                            job_id=job_id,
-                            robot_type=robot_type,
-                            error=str(exc),
-                        )
-                        print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
-                        raise
-                    print(
-                        "[GENIE-SIM-IMPORT] Firebase upload complete: "
-                        f"uploaded={firebase_summary.get('uploaded', 0)} "
-                        f"skipped={firebase_summary.get('skipped', 0)} "
-                        f"reuploaded={firebase_summary.get('reuploaded', 0)} "
-                        f"failed={firebase_summary.get('failed', 0)} "
-                        f"total={firebase_summary.get('total_files', 0)}"
-                    )
-
                 overall_success = overall_success and result.success
-                robot_entries.append({
+                robot_entry = {
                     "robot_type": robot_type,
                     "success": result.success,
                     "output_dir": str(result.output_dir) if result.output_dir else None,
@@ -3017,8 +3019,104 @@ def main():
                     "warnings": result.warnings,
                     "upload_status": result.upload_status,
                     "upload_failures": result.upload_failures,
-                    "firebase_upload": firebase_summary,
-                })
+                    "firebase_upload": None,
+                }
+                robot_entries.append(robot_entry)
+                robot_results.append(
+                    {
+                        "robot_type": robot_type,
+                        "result": result,
+                        "entry": robot_entry,
+                    }
+                )
+
+            failed_robots = [
+                payload["robot_type"]
+                for payload in robot_results
+                if not payload["result"].success
+            ]
+            partial_failure = bool(failed_robots)
+            firebase_upload_suppressed = False
+            suppression_reason = None
+            if partial_failure:
+                if production_mode or fail_on_partial_error:
+                    firebase_upload_suppressed = True
+                    suppression_reason = (
+                        "partial_failure_production_or_fail_on_partial_error"
+                    )
+                elif not allow_partial_firebase_uploads:
+                    firebase_upload_suppressed = True
+                    suppression_reason = "partial_failure_partial_uploads_disabled"
+
+            if enable_firebase_upload and not firebase_upload_suppressed:
+                for payload in robot_results:
+                    robot_type = payload["robot_type"]
+                    result = payload["result"]
+                    entry = payload["entry"]
+                    if not result.success:
+                        continue
+                    print(
+                        "[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage "
+                        f"for robot {robot_type}..."
+                    )
+                    try:
+                        firebase_result = upload_episodes_with_retry(
+                            episodes_dir=result.output_dir,
+                            scene_id=scene_id,
+                            robot_type=robot_type,
+                            prefix=firebase_upload_prefix,
+                        )
+                        firebase_summary = firebase_result.summary
+                    except Exception as exc:
+                        _alert_firebase_upload_failure(
+                            scene_id=scene_id,
+                            job_id=job_id,
+                            robot_type=robot_type,
+                            error=str(exc),
+                        )
+                        print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
+                        raise
+                    entry["firebase_upload"] = firebase_summary
+                    print(
+                        "[GENIE-SIM-IMPORT] Firebase upload complete: "
+                        f"uploaded={firebase_summary.get('uploaded', 0)} "
+                        f"skipped={firebase_summary.get('skipped', 0)} "
+                        f"reuploaded={firebase_summary.get('reuploaded', 0)} "
+                        f"failed={firebase_summary.get('failed', 0)} "
+                        f"total={firebase_summary.get('total_files', 0)}"
+                    )
+            elif enable_firebase_upload and firebase_upload_suppressed:
+                print(
+                    "[GENIE-SIM-IMPORT] Firebase uploads suppressed due to partial "
+                    f"failures (reason={suppression_reason})."
+                )
+
+            if partial_failure:
+                robots_not_uploaded = []
+                if firebase_upload_suppressed:
+                    robots_not_uploaded = [payload["robot_type"] for payload in robot_results]
+                else:
+                    robots_not_uploaded = [
+                        payload["robot_type"]
+                        for payload in robot_results
+                        if not payload["result"].success
+                    ]
+                if job_metadata is not None:
+                    job_summary = job_metadata.setdefault("job_summary", {})
+                    job_summary["partial_failures"] = {
+                        "failed_robots": failed_robots,
+                        "robots_not_uploaded": robots_not_uploaded,
+                        "firebase_upload_suppressed": firebase_upload_suppressed,
+                        "suppression_reason": suppression_reason,
+                        "allow_partial_firebase_uploads": allow_partial_firebase_uploads,
+                        "production_mode": production_mode,
+                        "fail_on_partial_error": fail_on_partial_error,
+                    }
+                    _write_local_job_metadata(
+                        bucket=bucket,
+                        job_metadata_path=job_metadata_path,
+                        job_metadata=job_metadata,
+                    )
 
             combined_output_dir = _resolve_local_output_dir(
                 bucket=bucket,
