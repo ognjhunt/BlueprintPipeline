@@ -77,6 +77,10 @@ from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
 )
+from tools.validation.geniesim_export import (
+    ExportConsistencyError,
+    validate_export_consistency,
+)
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 
@@ -213,6 +217,25 @@ def _resolve_embedding_model() -> Optional[str]:
     if os.getenv("OPENAI_API_KEY"):
         return "text-embedding-3-large"
     return "qwen-text-embedding-v4"
+
+
+def _validate_export_consistency(
+    scene_graph_path: Path,
+    asset_index_path: Path,
+    task_config_path: Path,
+) -> None:
+    try:
+        validate_export_consistency(
+            scene_graph_path=scene_graph_path,
+            asset_index_path=asset_index_path,
+            task_config_path=task_config_path,
+        )
+    except ExportConsistencyError as exc:
+        raise RuntimeError(
+            "Genie Sim export consistency check failed. "
+            f"Scene graph: {scene_graph_path}, Asset index: {asset_index_path}, "
+            f"Task config: {task_config_path}. Error: {exc}"
+        ) from exc
 
 
 def _fail_variation_assets_requirement(
@@ -996,6 +1019,14 @@ def run_geniesim_export_job(
             print(f"[GENIESIM-EXPORT-JOB]   Edges: {result.num_edges}")
             print(f"[GENIESIM-EXPORT-JOB]   Assets: {result.num_assets}")
             print(f"[GENIESIM-EXPORT-JOB]   Tasks: {result.num_tasks}")
+
+            print("[GENIESIM-EXPORT-JOB] Validating export consistency")
+            _validate_export_consistency(
+                scene_graph_path=result.scene_graph_path,
+                asset_index_path=result.asset_index_path,
+                task_config_path=result.task_config_path,
+            )
+            print("[GENIESIM-EXPORT-JOB] ✅ Export consistency validated")
 
             # Export premium analytics manifests (DEFAULT: ENABLED)
             premium_analytics_manifests = {}
