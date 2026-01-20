@@ -172,6 +172,10 @@
     "streaming": {
       "batch_size": 100,
       "description": "Streaming batch size for large scene manifests."
+    },
+    "validation": {
+      "allow_unvalidated_input": true,
+      "description": "Allow fallback sanitization when validation utilities are unavailable (non-production only)."
     }
   },
   "ab_testing": {

@@ -15,11 +15,13 @@ References:
 from __future__ import annotations
 
 import hashlib
+import html
 import importlib.util
 import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 from collections import OrderedDict
@@ -187,9 +189,75 @@ class SceneGraphRuntimeConfig:
     physics_contact_depth_threshold: float
     physics_containment_ratio_threshold: float
     heuristic_confidence_scale: float
+    allow_unvalidated_input: bool
 
 
 _SCENE_GRAPH_CONFIG: Optional[SceneGraphRuntimeConfig] = None
+_FALLBACK_ALLOWED_CATEGORIES = frozenset(
+    {
+        "object",
+        "unknown",
+        "cup",
+        "mug",
+        "plate",
+        "bowl",
+        "utensil",
+        "bottle",
+        "pot",
+        "pan",
+        "microwave",
+        "refrigerator",
+        "oven",
+        "dishwasher",
+        "sink",
+        "faucet",
+        "countertop",
+        "cabinet",
+        "box",
+        "package",
+        "carton",
+        "tote",
+        "pallet",
+        "shelf",
+        "rack",
+        "conveyor",
+        "desk",
+        "chair",
+        "monitor",
+        "keyboard",
+        "mouse",
+        "phone",
+        "book",
+        "pen",
+        "drawer",
+        "filing_cabinet",
+    }
+)
+_FALLBACK_OBJECT_ID_PATTERN = re.compile(r"[^a-zA-Z0-9_\-]+")
+
+
+def _sanitize_fallback_text(value: Any, max_length: int) -> str:
+    if value is None:
+        return ""
+    sanitized = html.escape(str(value), quote=True)
+    sanitized = "".join(ch for ch in sanitized if ch.isprintable())
+    return sanitized.strip()[:max_length]
+
+
+def _sanitize_fallback_object_id(value: str, max_length: int = 128) -> str:
+    sanitized = _FALLBACK_OBJECT_ID_PATTERN.sub("", value).strip()[:max_length]
+    if sanitized:
+        return sanitized
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"obj_{digest}"
+
+
+def _sanitize_fallback_category(value: Any) -> Tuple[str, bool]:
+    sanitized = _sanitize_fallback_text(value, max_length=64).lower()
+    sanitized = _FALLBACK_OBJECT_ID_PATTERN.sub("", sanitized)
+    if sanitized in _FALLBACK_ALLOWED_CATEGORIES:
+        return sanitized, False
+    return "object", True
 
 
 def _parse_env_float(key: str, default: float) -> float:
@@ -244,6 +312,7 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         containment_ratio_default = relation_config.physics_containment_ratio_threshold
         heuristic_confidence_default = relation_config.heuristic_confidence_scale
         batch_default = streaming_config.batch_size
+        allow_unvalidated_default = pipeline_config.scene_graph.validation.allow_unvalidated_input
     else:
         vertical_default = 0.05
         horizontal_default = 0.15
@@ -253,6 +322,7 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         containment_ratio_default = 0.8
         heuristic_confidence_default = 0.6
         batch_default = 100
+        allow_unvalidated_default = True
 
     config = SceneGraphRuntimeConfig(
         vertical_proximity_threshold=_parse_env_float(
@@ -287,13 +357,18 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
             "BP_SCENE_GRAPH_HEURISTIC_CONFIDENCE_SCALE",
             heuristic_confidence_default,
         ),
+        allow_unvalidated_input=_parse_env_bool(
+            "BP_SCENE_GRAPH_ALLOW_UNVALIDATED_INPUT",
+            allow_unvalidated_default,
+        ),
     )
 
     logger.info(
         "Scene graph config: vertical_proximity_threshold=%.3f, horizontal_proximity_threshold=%.3f, "
         "alignment_angle_threshold=%.3f, streaming_batch_size=%d, "
         "enable_physics_validation=%s, physics_contact_depth_threshold=%.4f, "
-        "physics_containment_ratio_threshold=%.3f, heuristic_confidence_scale=%.2f",
+        "physics_containment_ratio_threshold=%.3f, heuristic_confidence_scale=%.2f, "
+        "allow_unvalidated_input=%s",
         config.vertical_proximity_threshold,
         config.horizontal_proximity_threshold,
         config.alignment_angle_threshold,
@@ -302,6 +377,7 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         config.physics_contact_depth_threshold,
         config.physics_containment_ratio_threshold,
         config.heuristic_confidence_scale,
+        config.allow_unvalidated_input,
     )
 
     _SCENE_GRAPH_CONFIG = config
@@ -938,7 +1014,22 @@ class SceneGraphConverter:
 
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
+        self.runtime_config = _load_scene_graph_runtime_config()
+        self.production_mode = resolve_production_mode()
+        self._ensure_validation_availability()
         self.relation_inferencer = RelationInferencer(verbose=verbose)
+
+    def _ensure_validation_availability(self) -> None:
+        if HAVE_VALIDATION_TOOLS:
+            return
+        message = (
+            "Input validation tools unavailable for scene graph conversion. "
+            "Install tools.validation dependencies or enable validation."
+        )
+        if self.production_mode:
+            raise RuntimeError(f"{message} Production mode requires validation.")
+        if not self.runtime_config.allow_unvalidated_input:
+            raise RuntimeError(f"{message} Unvalidated input fallback disabled.")
 
     def log(self, msg: str, level: str = "INFO", extra: Optional[Dict[str, Any]] = None) -> None:
         if not self.verbose:
@@ -990,7 +1081,7 @@ class SceneGraphConverter:
             progress_every = max(50, total_objects // 10)
 
         for index, obj in enumerate(objects, start=1):
-            node = self._convert_object_to_node(obj, usd_base_path)
+            node = self._convert_object_to_node(obj, usd_base_path, scene_id=scene_id)
             if node:
                 nodes.append(node)
             if progress_every and index % progress_every == 0:
@@ -1052,6 +1143,7 @@ class SceneGraphConverter:
         self,
         obj: Dict[str, Any],
         usd_base_path: Optional[str],
+        scene_id: Optional[str] = None,
     ) -> Optional[GenieSimNode]:
         """Convert a BlueprintPipeline object to a Genie Sim node."""
         try:
@@ -1087,15 +1179,32 @@ class SceneGraphConverter:
                     name = sanitize_string(name_raw, max_length=128)
 
                 except ValidationError as e:
-                    logger.warning(f"Object {obj_id} validation failed: {e}. Using defaults.")
+                    logger.warning(
+                        "Object validation failed: %s. Using defaults.",
+                        e,
+                        extra={"scene_id": scene_id, "object_id": obj_id},
+                    )
                     category = "object"
                     description = ""
                     name = obj_id[:128]  # Truncate if needed
             else:
-                # No validation available - use raw values (insecure)
-                category = obj.get("category", "object")
-                description = obj.get("description", "")
-                name = obj.get("name", obj_id)
+                obj_id_raw = obj_id
+                obj_id = _sanitize_fallback_object_id(obj_id_raw)
+                category_raw = obj.get("category", "object")
+                category, category_fallback = _sanitize_fallback_category(category_raw)
+                description_raw = obj.get("description", "")
+                description = _sanitize_fallback_text(description_raw, max_length=1024)
+                name_raw = obj.get("name", obj_id)
+                name = _sanitize_fallback_text(name_raw, max_length=128)
+                logger.warning(
+                    "Validation tools unavailable; using fallback sanitization.",
+                    extra={"scene_id": scene_id, "object_id": obj_id},
+                )
+                if obj_id != obj_id_raw or category_fallback or name != str(name_raw) or description != str(description_raw):
+                    logger.info(
+                        "Fallback sanitization applied to object fields.",
+                        extra={"scene_id": scene_id, "object_id": obj_id},
+                    )
 
             # Build semantic description
             semantic = f"{category}: {name}"
@@ -1114,7 +1223,11 @@ class SceneGraphConverter:
                         validated_dims.get("height", 0.1),
                     ]
                 except ValidationError as e:
-                    logger.warning(f"Object {obj_id} dimensions invalid: {e}. Using defaults.")
+                    logger.warning(
+                        "Object dimensions invalid: %s. Using defaults.",
+                        e,
+                        extra={"scene_id": scene_id, "object_id": obj_id},
+                    )
                     size = [0.1, 0.1, 0.1]
             elif isinstance(dimensions, dict):
                 size = [
@@ -1162,7 +1275,11 @@ class SceneGraphConverter:
                         field_name=f"{obj_id}.rotation_quaternion",
                     )
                 except ValidationError as e:
-                    logger.warning("Object %s quaternion invalid: %s. Using identity.", obj_id, e)
+                    logger.warning(
+                        "Object quaternion invalid: %s. Using identity.",
+                        e,
+                        extra={"scene_id": scene_id, "object_id": obj_id},
+                    )
                     orientation = [1.0, 0.0, 0.0, 0.0]
 
             pose = Pose(position=pos, orientation=orientation)
@@ -1467,7 +1584,11 @@ def convert_manifest_to_scene_graph(
 
             # Convert batch of objects to nodes
             for obj in batch:
-                node = converter._convert_object_to_node(obj, usd_base_path)
+                node = converter._convert_object_to_node(
+                    obj,
+                    usd_base_path,
+                    scene_id=scene_graph.scene_id,
+                )
                 if node:
                     scene_graph.nodes.append(node)
 

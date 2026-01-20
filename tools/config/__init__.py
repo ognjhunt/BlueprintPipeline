@@ -275,10 +275,17 @@ class SceneGraphStreamingConfig:
 
 
 @dataclass
+class SceneGraphValidationConfig:
+    """Validation configuration for scene graph conversion."""
+    allow_unvalidated_input: bool = True
+
+
+@dataclass
 class SceneGraphConfig:
     """Scene graph conversion configuration."""
     relation_inference: SceneGraphRelationInferenceConfig = field(default_factory=SceneGraphRelationInferenceConfig)
     streaming: SceneGraphStreamingConfig = field(default_factory=SceneGraphStreamingConfig)
+    validation: SceneGraphValidationConfig = field(default_factory=SceneGraphValidationConfig)
 
 
 @dataclass
@@ -990,6 +997,12 @@ class ConfigLoader:
                 streaming=SceneGraphStreamingConfig(
                     batch_size=scene_graph.get("streaming", {}).get("batch_size", 100),
                 ),
+                validation=SceneGraphValidationConfig(
+                    allow_unvalidated_input=scene_graph.get("validation", {}).get(
+                        "allow_unvalidated_input",
+                        True,
+                    ),
+                ),
             ),
             ab_testing=ABTestingConfig(
                 enabled=ab_testing.get("enabled", False),
@@ -1154,6 +1167,13 @@ class ConfigLoader:
                 if isinstance(streaming, dict):
                     if "batch_size" in streaming and streaming["batch_size"] <= 0:
                         errors["scene_graph.streaming.batch_size"] = "Must be positive"
+                validation = scene_graph.get("validation", {})
+                if isinstance(validation, dict):
+                    if "allow_unvalidated_input" in validation and not isinstance(
+                        validation["allow_unvalidated_input"],
+                        bool,
+                    ):
+                        errors["scene_graph.validation.allow_unvalidated_input"] = "Must be a boolean"
 
         if "health_checks" in config:
             health_checks = config["health_checks"]
