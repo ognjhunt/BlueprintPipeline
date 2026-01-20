@@ -63,8 +63,42 @@ def test_geniesim_full_flow_e2e(tmp_path, monkeypatch):
         )
         lerobot_dir = Path(output_dir) / "lerobot"
         lerobot_dir.mkdir(parents=True, exist_ok=True)
+        meta_dir = lerobot_dir / "meta"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        data_dir = lerobot_dir / "data" / "chunk-000"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (meta_dir / "info.json").write_text(
+            json.dumps(
+                {
+                    "format": "lerobot",
+                    "export_format": "lerobot_v2",
+                    "version": "2.0",
+                }
+            )
+        )
+        parquet_path = data_dir / "episode_000000.parquet"
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            parquet_path.write_text("")
+        else:
+            table = pa.Table.from_pydict(
+                {
+                    "episode_id": ["episode_000000"],
+                    "frame_index": [0],
+                    "timestamp": [0.0],
+                    "observation": ["state"],
+                    "action": [0.0],
+                    "reward": [0.0],
+                    "done": [False],
+                    "task_name": ["task"],
+                    "task_id": ["task_0"],
+                }
+            )
+            pq.write_table(table, parquet_path)
         (lerobot_dir / "dataset_info.json").write_text(
-            json.dumps({"episodes": 1, "robot": robot_type})
+            json.dumps({"format": "lerobot", "version": "2.0", "episodes": 1, "robot": robot_type})
         )
         return SimpleNamespace(success=True, episodes_collected=1, episodes_passed=1)
 
