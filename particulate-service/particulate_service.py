@@ -36,6 +36,7 @@ Cloud Run Settings (REQUIRED):
     --min-instances 0
 """
 
+import atexit
 import base64
 import binascii
 import hmac
@@ -47,6 +48,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import stat
 import threading
 import traceback
 import uuid
@@ -132,7 +134,7 @@ def _apply_security_headers(response):  # type: ignore[override]
 
 PARTICULATE_ROOT = Path(os.environ.get("PARTICULATE_ROOT", "/opt/particulate"))
 PARTICULATE_INFER = PARTICULATE_ROOT / "infer.py"
-TMP_ROOT = Path("/tmp/particulate")
+_TMP_ENV_VAR = "PARTICULATE_TMP_DIR"
 
 ENVIRONMENT = os.environ.get("ENV", "").lower()
 PRODUCTION_MODE = resolve_production_mode()
@@ -143,6 +145,47 @@ DEBUG_ENDPOINT_ENABLED = ENABLE_DEBUG_ENDPOINT or DEBUG_MODE
 
 def _is_production_env() -> bool:
     return ENVIRONMENT == "production" or PRODUCTION_MODE
+
+
+def _ensure_secure_directory(path: Path) -> None:
+    try:
+        os.chmod(path, 0o700)
+    except OSError as exc:
+        log(f"Failed to chmod temp directory {path}: {exc}", "ERROR")
+
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        log(f"Failed to stat temp directory {path}: {exc}", "ERROR")
+        if _is_production_env():
+            raise RuntimeError(f"Temp directory {path} is not accessible") from exc
+        return
+
+    if mode != 0o700:
+        message = f"Temp directory {path} permissions are {oct(mode)}, expected 0o700"
+        log(message, "ERROR")
+        if _is_production_env():
+            raise RuntimeError(message)
+
+
+def _init_tmp_root() -> Path:
+    base_dir = os.getenv(_TMP_ENV_VAR)
+    if base_dir:
+        base_path = Path(base_dir).expanduser()
+        if not base_path.exists():
+            base_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        elif not base_path.is_dir():
+            raise RuntimeError(f"{_TMP_ENV_VAR} must point to a directory: {base_path}")
+        tmp_root = Path(tempfile.mkdtemp(prefix="particulate-", dir=str(base_path)))
+    else:
+        tmp_root = Path(tempfile.mkdtemp(prefix="particulate-"))
+
+    _ensure_secure_directory(tmp_root)
+    log(f"Using temp root: {tmp_root}")
+    return tmp_root
+
+
+TMP_ROOT = _init_tmp_root()
 
 
 def _load_debug_token() -> Optional[str]:
@@ -1068,7 +1111,6 @@ def start_warmup():
     if os.getenv("PARTICULATE_SKIP_WARMUP", "").lower() in ("1", "true", "yes"):
         log("Skipping warmup (PARTICULATE_SKIP_WARMUP enabled)")
         return
-    TMP_ROOT.mkdir(parents=True, exist_ok=True)
     log(f"PARTICULATE_ROOT={PARTICULATE_ROOT}")
     log(f"DEBUG_MODE={DEBUG_MODE}")
 
@@ -1078,6 +1120,18 @@ def start_warmup():
 
 # Initialize on import
 start_warmup()
+
+
+def _cleanup_tmp_root() -> None:
+    try:
+        if TMP_ROOT.exists():
+            shutil.rmtree(TMP_ROOT, ignore_errors=True)
+            log(f"Cleaned up temp root: {TMP_ROOT}")
+    except Exception as exc:
+        log(f"Failed to cleanup temp root {TMP_ROOT}: {exc}", "WARNING")
+
+
+atexit.register(_cleanup_tmp_root)
 
 
 if __name__ == "__main__":
