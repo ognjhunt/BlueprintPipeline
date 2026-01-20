@@ -357,6 +357,19 @@ def _request_metadata() -> dict:
     }
 
 
+def _log_webhook_event(event: str, payload: dict, extra: dict) -> None:
+    audit_payload = {
+        "event": event,
+        "request_metadata": _request_metadata(),
+        "job_id": payload.get("job_id"),
+        "scene_id": payload.get("scene_id"),
+        "status": payload.get("status"),
+    }
+    if extra:
+        audit_payload.update(extra)
+    app.logger.info(json.dumps(audit_payload, sort_keys=True))
+
+
 def _verify_hmac_signature(body: bytes, secret: str) -> bool:
     signature = request.headers.get("X-Webhook-Signature", "")
     if not signature.startswith("sha256="):
@@ -610,6 +623,20 @@ def handle_job_complete():
         response.status_code = 200
         return _apply_rate_limit_headers(response, rate_limit)
 
+    _log_webhook_event(
+        "webhook.accepted",
+        payload,
+        {
+            "idempotency_key": marker.get("idempotency_key"),
+            "request_id": marker.get("request_id"),
+            "rate_limit": {
+                "limit": rate_limit.get("limit"),
+                "remaining": rate_limit.get("remaining"),
+                "retry_after": rate_limit.get("retry_after"),
+            },
+        },
+    )
+
     workflow_name = os.getenv("WORKFLOW_NAME", "genie-sim-import-pipeline")
     region = os.getenv("WORKFLOW_REGION", "us-central1")
     retry_policy = retry.Retry(
@@ -667,6 +694,16 @@ def handle_job_complete():
         })
         response.status_code = status_code
         return _apply_rate_limit_headers(response, rate_limit)
+
+    _log_webhook_event(
+        "workflow.triggered",
+        payload,
+        {
+            "execution_name": response.name,
+            "workflow_name": workflow_name,
+            "region": region,
+        },
+    )
 
     try:
         firestore.Client(project=_get_project_id()).collection(
