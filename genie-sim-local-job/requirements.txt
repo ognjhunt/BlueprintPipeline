@@ -12,5 +12,7 @@ pydantic==2.8.2
 grpcio==1.66.1
 grpcio-tools==1.66.1
 protobuf==5.27.3
+# TLS certificate generation for local mock server
+cryptography==42.0.8
 # Local framework dependencies
 numpy==1.26.4
