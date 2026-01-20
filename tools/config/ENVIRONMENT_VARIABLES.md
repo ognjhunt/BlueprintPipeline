@@ -399,7 +399,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
 | `GEMINI_API_KEY` | str | No | Google Gemini key for LLM features (dev fallback only; production requires Secret Manager) |
 | `HF_TOKEN` | str | No | HuggingFace token for model downloads |
 | `MESHY_API_KEY` | str | No | Meshy key for 3D generation |
-| `INVENTORY_ENRICHMENT_API_KEY` | str | No | Inventory enrichment key (dev fallback; Secret Manager preferred) |
+| `INVENTORY_ENRICHMENT_API_KEY` | str | No | Inventory enrichment key (dev fallback; Secret Manager preferred; required in production for external enrichment) |
 
 ---
 
@@ -477,7 +477,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `OMNIVERSE_PATH_ROOT` | path | (contextual) | Omniverse path root for USD assets (e.g., `NVIDIA/Assets/Isaac` or `NVIDIA/Robots`) |
 | `PARTICULATE_HEALTHCHECK_HOST` | str | `localhost` | Hostname used for the particulate service health check |
 | `PARTICULATE_SERVICE_PORT` | int | 5000 | Particulate service port |
-| `INVENTORY_ENRICHMENT_ENDPOINT` | url | unset | Inventory enrichment service endpoint |
+| `INVENTORY_ENRICHMENT_ENDPOINT` | url | unset | Inventory enrichment service endpoint (required in production for external enrichment) |
 
 **Example**:
 ```bash
@@ -581,7 +581,7 @@ export LOG_LEVEL=WARNING
 | `SKIP_QUALITY_GATES` | bool | "0" | Skip quality validation (⚠️ dev only) |
 | `DRY_RUN` | bool | "0" | Dry run (no output generated) |
 | `PYTEST_VERBOSE` | bool | "0" | Verbose test output |
-| `INVENTORY_ENRICHMENT_MODE` | str | "mock" | Inventory enrichment mode (`mock` or `external`) |
+| `INVENTORY_ENRICHMENT_MODE` | str | "mock" (production defaults to `external` when `BP_ENV`/`GENIESIM_ENV` is production) | Inventory enrichment mode (`mock` or `external`) |
 
 ---
 
