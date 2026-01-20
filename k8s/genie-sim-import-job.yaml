@@ -9,6 +9,7 @@
 #   GENIE_SIM_JOB_ID=geniesim-job-123 \
 #   SCENE_ID=scene_123 \
 #   BUCKET=example-bucket \
+#   FIREBASE_STORAGE_BUCKET=blueprint-8c1ca.appspot.com \
 #   envsubst < k8s/genie-sim-import-job.yaml | kubectl apply -f -
 # =============================================================================
 
@@ -26,7 +27,7 @@ data:
   FAIL_ON_PARTIAL_ERROR: "false"
   DISABLE_GCS_UPLOAD: "false"
   ENABLE_FIREBASE_UPLOAD: "true"
-  FIREBASE_STORAGE_BUCKET: "${FIREBASE_STORAGE_BUCKET}"
+  FIREBASE_STORAGE_BUCKET: "blueprint-8c1ca.appspot.com"
 
 ---
 apiVersion: batch/v1
