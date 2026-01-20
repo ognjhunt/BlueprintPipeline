@@ -150,13 +150,18 @@ class PhysicsValidator:
         # 4. Center of mass validation
         if bounds:
             if physics.get("center_of_mass_m") is None:
-                computed_com, com_source = self._compute_center_of_mass(physics, bounds)
+                computed_com, com_source, com_warning = self._compute_center_of_mass(
+                    obj,
+                    physics,
+                    bounds,
+                )
                 physics["center_of_mass_m"] = computed_com.tolist()
+                physics["center_of_mass_source"] = com_source
                 if com_source != "mesh":
                     result.add_issue(
                         ValidationLevel.WARNING,
                         "center_of_mass",
-                        "Center of mass missing; inferred from bounds instead of mesh data",
+                        com_warning or "Center of mass missing; inferred from bounds instead of mesh data",
                         current_value=physics["center_of_mass_m"],
                         suggested_value="mesh-derived center of mass",
                     )
@@ -331,10 +336,49 @@ class PhysicsValidator:
 
     def _compute_center_of_mass(
         self,
+        obj: Dict[str, Any],
         physics: Dict[str, Any],
         bounds: Dict[str, Any],
-    ) -> Tuple[np.ndarray, str]:
-        """Compute center of mass from mesh bounds or fallback to bounding box."""
+    ) -> Tuple[np.ndarray, str, Optional[str]]:
+        """Compute center of mass from mesh geometry or fallback to bounding box."""
+        mesh_path = self._find_mesh_path(obj, physics)
+        if mesh_path:
+            try:
+                import importlib.util
+                if importlib.util.find_spec("trimesh") is None:
+                    raise ModuleNotFoundError("trimesh not available")
+                import trimesh
+            except Exception:
+                mesh_warning = "Center of mass inferred from bounds; trimesh not available for mesh COM."
+            else:
+                try:
+                    mesh = trimesh.load(str(mesh_path), force="mesh")
+                    if isinstance(mesh, trimesh.Scene):
+                        geometries = [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
+                        if geometries:
+                            mesh = trimesh.util.concatenate(geometries)
+                        else:
+                            mesh = None
+
+                    if mesh is None or mesh.is_empty:
+                        mesh_warning = "Center of mass inferred from bounds; mesh is empty."
+                    else:
+                        volume = float(mesh.volume) if mesh.volume is not None else 0.0
+                        if volume > 0:
+                            com = mesh.center_mass
+                            if com is None:
+                                mass_props = mesh.mass_properties(density=1.0)
+                                com = mass_props.get("center_mass")
+                            if com is not None:
+                                return np.array(com, dtype=float), "mesh", None
+                            mesh_warning = "Center of mass inferred from bounds; mesh COM unavailable."
+                        else:
+                            mesh_warning = "Center of mass inferred from bounds; mesh volume is zero."
+                except Exception:
+                    mesh_warning = "Center of mass inferred from bounds; mesh COM computation failed."
+        else:
+            mesh_warning = "Center of mass inferred from bounds; no mesh path available."
+
         mesh_bounds = physics.get("mesh_bounds") or bounds.get("mesh_bounds") or {}
         mesh_center = mesh_bounds.get("center")
         if mesh_center is None:
@@ -344,7 +388,7 @@ class PhysicsValidator:
                 mesh_center = [(mesh_min[i] + mesh_max[i]) * 0.5 for i in range(3)]
 
         if mesh_center is not None:
-            return np.array(mesh_center, dtype=float), "mesh"
+            return np.array(mesh_center, dtype=float), "bounds", mesh_warning
 
         bounds_center = bounds.get("center_m") or bounds.get("center")
         if bounds_center is None:
@@ -355,7 +399,7 @@ class PhysicsValidator:
             else:
                 bounds_center = [0.0, 0.0, 0.0]
 
-        return np.array(bounds_center, dtype=float), "bounds"
+        return np.array(bounds_center, dtype=float), "bounds", mesh_warning
 
     def _validate_collision_shape(
         self,
