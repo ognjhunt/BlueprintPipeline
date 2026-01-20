@@ -38,6 +38,31 @@ def test_curobo_missing_production_fails_fast(monkeypatch):
         lf.GenieSimLocalFramework(config=config, verbose=False)
 
 
+def test_production_temp_dirs_raise_for_defaults(monkeypatch):
+    monkeypatch.setenv("GENIESIM_ENV", "production")
+    monkeypatch.delenv("GENIESIM_RECORDINGS_DIR", raising=False)
+    monkeypatch.delenv("GENIESIM_RECORDING_DIR", raising=False)
+    monkeypatch.delenv("GENIESIM_LOG_DIR", raising=False)
+
+    with pytest.raises(
+        ValueError,
+        match=r"GENIESIM_RECORDINGS_DIR.*GENIESIM_LOG_DIR",
+    ):
+        lf.GenieSimConfig.from_env()
+
+
+def test_production_temp_dirs_raise_for_explicit_paths(monkeypatch):
+    monkeypatch.setenv("GENIESIM_ENV", "production")
+    monkeypatch.setenv("GENIESIM_RECORDINGS_DIR", "/tmp/custom_recordings")
+    monkeypatch.setenv("GENIESIM_LOG_DIR", "/tmp/custom_logs")
+
+    with pytest.raises(
+        ValueError,
+        match=r"GENIESIM_RECORDINGS_DIR.*GENIESIM_LOG_DIR",
+    ):
+        lf.GenieSimConfig.from_env()
+
+
 @pytest.mark.unit
 def test_check_geniesim_availability_allows_mock(monkeypatch, tmp_path):
     monkeypatch.setenv("GENIESIM_ENV", "development")
