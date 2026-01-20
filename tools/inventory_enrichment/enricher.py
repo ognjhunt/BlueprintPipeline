@@ -190,22 +190,65 @@ class ExternalInventoryEnricher(InventoryEnricher):
 
 
 def _resolve_config(mode: Optional[str] = None) -> InventoryEnrichmentConfig:
-    resolved_mode = (mode or os.getenv("INVENTORY_ENRICHMENT_MODE", "mock")).strip().lower()
+    env_mode = os.getenv("INVENTORY_ENRICHMENT_MODE")
+    resolved_mode = (mode or env_mode or "mock").strip().lower()
+    if not mode and env_mode is None and _is_production_env():
+        resolved_mode = "external"
     endpoint = os.getenv("INVENTORY_ENRICHMENT_ENDPOINT")
     return InventoryEnrichmentConfig(mode=resolved_mode, endpoint=endpoint)
+
+
+def _is_production_env() -> bool:
+    return (os.getenv("BP_ENV", "") or "").strip().lower() in {"production", "prod"} or (
+        os.getenv("GENIESIM_ENV", "") or ""
+    ).strip().lower() in {"production", "prod"}
 
 
 def get_inventory_enricher(mode: Optional[str] = None) -> InventoryEnricher:
     """Factory for inventory enrichment providers."""
     config = _resolve_config(mode)
+    production_mode = _is_production_env()
+    mode_source = (
+        "argument"
+        if mode
+        else "environment"
+        if os.getenv("INVENTORY_ENRICHMENT_MODE") is not None
+        else "production-default"
+        if production_mode
+        else "default"
+    )
+    logger.info(
+        "Resolved inventory enrichment mode",
+        extra={
+            "inventory_enrichment_mode": config.mode,
+            "inventory_enrichment_mode_source": mode_source,
+            "inventory_enrichment_production": production_mode,
+            "inventory_enrichment_has_endpoint": bool(config.endpoint),
+        },
+    )
 
-    if config.mode in {"mock", "stub", "offline"}:
-        return MockInventoryEnricher()
+    api_key = None
     if config.mode == "external":
         api_key = get_secret_or_env(
             SecretIds.INVENTORY_ENRICHMENT_API_KEY,
             env_var="INVENTORY_ENRICHMENT_API_KEY",
         )
+        if production_mode:
+            missing = []
+            if not config.endpoint:
+                missing.append("INVENTORY_ENRICHMENT_ENDPOINT")
+            if not api_key:
+                missing.append("INVENTORY_ENRICHMENT_API_KEY (Secret Manager or env var)")
+            if missing:
+                missing_list = ", ".join(missing)
+                raise InventoryEnrichmentError(
+                    "Production inventory enrichment requires missing configuration: "
+                    f"{missing_list}"
+                )
+
+    if config.mode in {"mock", "stub", "offline"}:
+        return MockInventoryEnricher()
+    if config.mode == "external":
         if not api_key:
             raise InventoryEnrichmentError(
                 "Inventory enrichment API key not found in Secret Manager or env var"
