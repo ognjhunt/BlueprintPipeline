@@ -15,6 +15,7 @@ Environment Variables:
     EPISODES_PER_TASK: Episodes per task (default: tools/config/pipeline_config.json)
     NUM_VARIATIONS: Scene variations (default: 5)
     MIN_QUALITY_SCORE: Minimum quality score (default: 0.85)
+    FILTER_LOW_QUALITY: Filter low-quality episodes during import (default: true)
     ALLOW_MISSING_ASSET_PROVENANCE: Allow missing asset provenance report (default: false)
     FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name (required for Firebase uploads)
     FIREBASE_SERVICE_ACCOUNT_JSON: Firebase service account JSON payload
@@ -64,6 +65,7 @@ from tools.firebase_upload.firebase_upload_orchestrator import (
     upload_episodes_with_retry,
 )
 from tools.logging_config import init_logging
+from tools.quality.quality_config import resolve_quality_settings
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from monitoring.alerting import send_alert
 
@@ -838,7 +840,8 @@ def main() -> int:
     multi_robot = len(robot_types) > 1
     episodes_per_task = _resolve_episodes_per_task()
     num_variations = int(os.getenv("NUM_VARIATIONS", "5"))
-    min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
+    quality_settings = resolve_quality_settings()
+    min_quality_score = quality_settings.min_quality_score
     canary_enabled = parse_bool_env(os.getenv("CANARY_ENABLED"), default=False)
     canary_tags = _parse_csv_env(os.getenv("CANARY_TAGS"))
     canary_scene_ids = _parse_csv_env(os.getenv("CANARY_SCENE_IDS"))
@@ -1482,6 +1485,19 @@ def main() -> int:
             "episodes_per_task": episodes_per_task,
             "num_variations": num_variations,
             "min_quality_score": min_quality_score,
+        },
+        "quality_config": {
+            "min_quality_score": min_quality_score,
+            "filter_low_quality": quality_settings.filter_low_quality,
+            "range": {
+                "min_allowed": quality_settings.config.min_allowed,
+                "max_allowed": quality_settings.config.max_allowed,
+            },
+            "defaults": {
+                "min_quality_score": quality_settings.config.default_min_quality_score,
+                "filter_low_quality": quality_settings.config.default_filter_low_quality,
+            },
+            "source_path": quality_settings.config.source_path,
         },
         "export_schema": {
             "export_schema_version": export_marker.get("export_schema_version"),
