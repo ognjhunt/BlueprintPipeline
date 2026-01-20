@@ -105,15 +105,16 @@ scenes/{scene_id}/geniesim/
 | `ROBOT_TYPE` | `franka` | Primary robot type: `franka`, `g2`, `ur10` |
 | `MAX_TASKS` | `50` | Maximum suggested tasks |
 | `GENERATE_EMBEDDINGS` | `false` | Generate semantic embeddings |
-| `REQUIRE_EMBEDDINGS` | `false` | Fail if real embeddings cannot be generated |
+| `REQUIRE_EMBEDDINGS` | `false` | Require real embeddings (placeholders disallowed in production) |
 | `FILTER_COMMERCIAL` | `true` | Only include commercial-use assets |
 | `COPY_USD` | `true` | Copy USD files to output |
 
 ### Production Embedding Requirements
 
 When `GENIESIM_ENV`/`BP_ENV` resolves to `production`, embedding generation is required and placeholder embeddings
-are disabled. Provide an embedding provider API key (for example, `OPENAI_API_KEY` or `QWEN_API_KEY`/
-`DASHSCOPE_API_KEY`) and matching embedding model environment variables so the job can complete successfully.
+are disallowed. Ensure `REQUIRE_EMBEDDINGS=true` (or remove overrides) whenever `GENERATE_EMBEDDINGS=true`, and
+provide an embedding provider API key (for example, `OPENAI_API_KEY` or `QWEN_API_KEY`/`DASHSCOPE_API_KEY`) and
+matching embedding model environment variables so the job can complete successfully.
 
 ### Enhanced Features (NEW)
 
