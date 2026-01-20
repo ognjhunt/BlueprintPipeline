@@ -45,6 +45,7 @@ Environment overrides:
     - DEFAULT_CAMERA_RESOLUTION: Resolution as "WIDTHxHEIGHT" or "WIDTH,HEIGHT".
     - DEFAULT_STREAM_IDS: Comma-separated stream IDs for replicator capture config.
     - FIREBASE_REQUIRE_ATOMIC_UPLOAD: When true, rollback all successful uploads if any robot fails.
+    - GENIESIM_SUBMIT_TIMEOUT_S: Total wall-clock timeout for the genie-sim-submit step.
     - GCS_MOUNT_ROOT: Base path used for local GCS-style mount mapping.
     - PIPELINE_FAIL_FAST: Stop the pipeline on the first failure when true.
     - REQUIRE_BALANCED_ROBOT_EPISODES: Fail validation when cross-robot episode counts mismatch.
@@ -2784,13 +2785,23 @@ class LocalPipelineRunner:
         quality_settings = resolve_quality_settings()
         min_quality_score = quality_settings.min_quality_score
         collection_timeout_env = os.getenv("GENIESIM_COLLECTION_TIMEOUT_S")
-        max_duration_seconds = None
+        collection_timeout_seconds = None
         if collection_timeout_env not in (None, ""):
             try:
-                max_duration_seconds = float(collection_timeout_env)
+                collection_timeout_seconds = float(collection_timeout_env)
             except ValueError:
                 self.log(
                     "GENIESIM_COLLECTION_TIMEOUT_S must be a number of seconds; ignoring invalid value.",
+                    "WARNING",
+                )
+        submit_timeout_env = os.getenv("GENIESIM_SUBMIT_TIMEOUT_S")
+        submit_timeout_seconds = None
+        if submit_timeout_env not in (None, ""):
+            try:
+                submit_timeout_seconds = float(submit_timeout_env)
+            except ValueError:
+                self.log(
+                    "GENIESIM_SUBMIT_TIMEOUT_S must be a number of seconds; ignoring invalid value.",
                     "WARNING",
                 )
 
@@ -2911,7 +2922,33 @@ class LocalPipelineRunner:
 
         output_dirs: Dict[str, Path] = {}
         robot_failures: Dict[str, Dict[str, Any]] = {}
-        for current_robot in robot_types:
+        submit_step_start = time.time()
+        for robot_index, current_robot in enumerate(robot_types):
+            remaining_budget_seconds = None
+            if submit_timeout_seconds is not None:
+                elapsed_seconds = time.time() - submit_step_start
+                remaining_budget_seconds = submit_timeout_seconds - elapsed_seconds
+                if remaining_budget_seconds <= 0:
+                    timeout_message = (
+                        "Genie Sim submit timed out after "
+                        f"{elapsed_seconds:.1f}s (budget {submit_timeout_seconds:.1f}s) "
+                        f"before starting robot {current_robot}."
+                    )
+                    self.log(timeout_message, "ERROR")
+                    failure_reason = "Genie Sim submit timed out"
+                    failure_details["timeout"] = {
+                        "message": timeout_message,
+                        "budget_seconds": submit_timeout_seconds,
+                        "elapsed_seconds": elapsed_seconds,
+                        "robot": current_robot,
+                    }
+                    for skipped_robot in robot_types[robot_index:]:
+                        robot_failures[skipped_robot] = {
+                            "error": timeout_message,
+                            "type": "total_timeout",
+                        }
+                        local_run_results.setdefault(skipped_robot, None)
+                    break
             if multi_robot:
                 output_dir = self.episodes_dir / current_robot / f"geniesim_{job_id}"
             else:
@@ -2934,11 +2971,20 @@ class LocalPipelineRunner:
                 context="geniesim task config",
             )
 
+            effective_max_duration_seconds = collection_timeout_seconds
+            if remaining_budget_seconds is not None and remaining_budget_seconds > 0:
+                effective_max_duration_seconds = (
+                    remaining_budget_seconds
+                    if effective_max_duration_seconds is None
+                    else min(effective_max_duration_seconds, remaining_budget_seconds)
+                )
+
             def _collect_data(
                 scene_manifest_path: Path = scene_manifest_path,
                 task_config_local_path: Path = task_config_local_path,
                 output_dir: Path = output_dir,
                 current_robot: str = current_robot,
+                max_duration_seconds: Optional[float] = effective_max_duration_seconds,
             ) -> Any:
                 result = run_local_data_collection(
                     scene_manifest_path=scene_manifest_path,
@@ -2973,7 +3019,8 @@ class LocalPipelineRunner:
 
         if robot_failures:
             failure_details["by_robot"] = robot_failures
-            failure_reason = "Local Genie Sim execution failed"
+            if failure_reason is None:
+                failure_reason = "Local Genie Sim execution failed"
             cleanup_details["local"] = self._merge_cleanup_reports(
                 cleanup_details.get("local"),
                 self._cleanup_local_output_dirs(
