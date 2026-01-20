@@ -15,6 +15,7 @@ References:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,8 @@ from tools.geniesim_adapter.config import (
     get_geniesim_task_size_large_threshold,
     get_geniesim_task_size_small_threshold,
 )
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Data Models
@@ -186,9 +189,16 @@ class TaskConfigGenerator:
         self.task_size_large_threshold = get_geniesim_task_size_large_threshold()
         self.task_max_per_object = get_geniesim_task_max_per_object()
 
-    def log(self, msg: str, level: str = "INFO") -> None:
-        if self.verbose:
-            print(f"[TASK-CONFIG-GENERATOR] [{level}] {msg}")
+    def log(self, msg: str, level: str = "INFO", extra: Optional[Dict[str, Any]] = None) -> None:
+        if not self.verbose:
+            return
+        level_name = level.upper()
+        if level_name in {"WARN", "WARNING"}:
+            logger.warning("[TASK-CONFIG-GENERATOR] %s", msg, extra=extra)
+        elif level_name == "ERROR":
+            logger.error("[TASK-CONFIG-GENERATOR] %s", msg, extra=extra)
+        else:
+            logger.info("[TASK-CONFIG-GENERATOR] %s", msg, extra=extra)
 
     def generate(
         self,
@@ -216,11 +226,17 @@ class TaskConfigGenerator:
         objects = manifest.get("objects", [])
 
         environment_type = scene_config.get("environment_type", "general")
-        self.log(f"Scene: {scene_id}, environment: {environment_type}")
+        self.log(
+            f"Scene: {scene_id}, environment: {environment_type}",
+            extra={"scene_id": scene_id},
+        )
 
         # Generate suggested tasks
         tasks = self._generate_tasks(objects, environment_type)
-        self.log(f"Generated {len(tasks)} task suggestions")
+        self.log(
+            f"Generated {len(tasks)} task suggestions",
+            extra={"scene_id": scene_id},
+        )
 
         # Prioritize and limit tasks
         tasks = self._prioritize_tasks(tasks, max_tasks)

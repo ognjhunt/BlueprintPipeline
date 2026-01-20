@@ -28,14 +28,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Add repo root to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from tools.logging_config import init_logging
+
+init_logging()
+logger = logging.getLogger(__name__)
 
 # Import validation utilities
 try:
@@ -399,9 +400,9 @@ class RelationInferencer:
         self._cache_hits = 0
         self._cache_misses = 0
 
-    def log(self, msg: str) -> None:
+    def log(self, msg: str, extra: Optional[Dict[str, Any]] = None) -> None:
         if self.verbose:
-            print(f"[RELATION-INFERENCER] {msg}")
+            logger.info("[RELATION-INFERENCER] %s", msg, extra=extra)
 
     def infer_relations(
         self,
@@ -428,7 +429,8 @@ class RelationInferencer:
             self._cache_hits += 1
             self.log(
                 f"Cache hit for scene_id={scene_id or 'unknown'} "
-                f"({len(nodes)} nodes)."
+                f"({len(nodes)} nodes).",
+                extra={"scene_id": scene_id or "unknown"},
             )
             return list(cached_edges)
 
@@ -458,7 +460,8 @@ class RelationInferencer:
             if self.verbose:
                 self.log(
                     f"Relation inference progress: {processed_pairs}/{total_pairs} "
-                    f"pairs in {elapsed:.1f}s"
+                    f"pairs in {elapsed:.1f}s",
+                    extra={"scene_id": scene_id or "unknown"},
                 )
             last_report_time = now
 
@@ -935,9 +938,16 @@ class SceneGraphConverter:
         self.verbose = verbose
         self.relation_inferencer = RelationInferencer(verbose=verbose)
 
-    def log(self, msg: str, level: str = "INFO") -> None:
-        if self.verbose:
-            print(f"[SCENE-GRAPH-CONVERTER] [{level}] {msg}")
+    def log(self, msg: str, level: str = "INFO", extra: Optional[Dict[str, Any]] = None) -> None:
+        if not self.verbose:
+            return
+        level_name = level.upper()
+        if level_name in {"WARN", "WARNING"}:
+            logger.warning("[SCENE-GRAPH-CONVERTER] %s", msg, extra=extra)
+        elif level_name == "ERROR":
+            logger.error("[SCENE-GRAPH-CONVERTER] %s", msg, extra=extra)
+        else:
+            logger.info("[SCENE-GRAPH-CONVERTER] %s", msg, extra=extra)
 
     def convert(
         self,
@@ -966,7 +976,10 @@ class SceneGraphConverter:
         meters_per_unit = scene_config.get("meters_per_unit", 1.0)
 
         total_objects = len(objects)
-        self.log(f"Scene: {scene_id}, {total_objects} objects, coord={coord_frame}")
+        self.log(
+            f"Scene: {scene_id}, {total_objects} objects, coord={coord_frame}",
+            extra={"scene_id": scene_id},
+        )
 
         # Convert nodes
         nodes = []
@@ -979,13 +992,19 @@ class SceneGraphConverter:
             if node:
                 nodes.append(node)
             if progress_every and index % progress_every == 0:
-                self.log(f"Converted {index}/{total_objects} objects to nodes")
+                self.log(
+                    f"Converted {index}/{total_objects} objects to nodes",
+                    extra={"scene_id": scene_id},
+                )
 
-        self.log(f"Converted {len(nodes)} nodes")
+        self.log(f"Converted {len(nodes)} nodes", extra={"scene_id": scene_id})
 
         # Extract explicit edges from relationships
         explicit_edges = self._extract_explicit_edges(objects)
-        self.log(f"Found {len(explicit_edges)} explicit relationships")
+        self.log(
+            f"Found {len(explicit_edges)} explicit relationships",
+            extra={"scene_id": scene_id},
+        )
 
         # Infer additional edges
         inferred_edges = self.relation_inferencer.infer_relations(
@@ -996,7 +1015,7 @@ class SceneGraphConverter:
 
         # Merge edges (explicit edges take priority)
         edges = self._merge_edges(explicit_edges, inferred_edges)
-        self.log(f"Total edges: {len(edges)}")
+        self.log(f"Total edges: {len(edges)}", extra={"scene_id": scene_id})
 
         # Create scene graph
         scene_graph = GenieSimSceneGraph(
@@ -1013,13 +1032,19 @@ class SceneGraphConverter:
         )
 
         duration = time.monotonic() - start_time
-        self.log(f"Finished non-streaming conversion in {duration:.2f}s")
+        self.log(
+            f"Finished non-streaming conversion in {duration:.2f}s",
+            extra={"scene_id": scene_id},
+        )
         return scene_graph
 
     def _relation_inference_progress(self, processed_pairs: int, elapsed: float) -> None:
         """Progress callback for relation inference."""
         if self.verbose:
-            self.log(f"Relation inference processed {processed_pairs} pairs in {elapsed:.1f}s")
+            self.log(
+                f"Relation inference processed {processed_pairs} pairs in {elapsed:.1f}s",
+                extra={"processed_pairs": processed_pairs},
+            )
 
     def _convert_object_to_node(
         self,
@@ -1343,7 +1368,11 @@ def convert_manifest_to_scene_graph(
     # GAP-PERF-001 FIX: Use streaming parser for large manifests
     if use_streaming and HAVE_STREAMING_PARSER:
         if verbose:
-            print(f"[SCENE-GRAPH-CONVERTER] Using streaming parser for large manifest ({manifest_path.stat().st_size / (1024*1024):.1f} MB)")
+            logger.info(
+                "[SCENE-GRAPH-CONVERTER] Using streaming parser for large manifest (%.1f MB)",
+                manifest_path.stat().st_size / (1024 * 1024),
+                extra={"manifest_path": str(manifest_path)},
+            )
 
         # Load metadata without objects (streaming handles objects separately)
         with open(manifest_path) as f:
@@ -1374,12 +1403,18 @@ def convert_manifest_to_scene_graph(
         for batch in parser.stream_objects(batch_size=batch_size):
             batch_count += 1
             if verbose and batch_count % 10 == 0:
-                print(f"[SCENE-GRAPH-CONVERTER] Processed {batch_count * batch_size} objects...")
+                logger.info(
+                    "[SCENE-GRAPH-CONVERTER] Processed %d objects...",
+                    batch_count * batch_size,
+                    extra={"manifest_path": str(manifest_path)},
+                )
         def stream_progress(processed_objects: int, elapsed: float) -> None:
             if verbose:
-                print(
-                    "[SCENE-GRAPH-CONVERTER] Streamed "
-                    f"{processed_objects} objects in {elapsed:.1f}s"
+                logger.info(
+                    "[SCENE-GRAPH-CONVERTER] Streamed %d objects in %.1fs",
+                    processed_objects,
+                    elapsed,
+                    extra={"manifest_path": str(manifest_path)},
                 )
 
         for batch in parser.stream_objects(
@@ -1396,14 +1431,23 @@ def convert_manifest_to_scene_graph(
 
         # Infer relations from node positions
         if verbose:
-            print(f"[SCENE-GRAPH-CONVERTER] Inferring spatial relations for {len(scene_graph.nodes)} nodes...")
+            logger.info(
+                "[SCENE-GRAPH-CONVERTER] Inferring spatial relations for %d nodes...",
+                len(scene_graph.nodes),
+                extra={"scene_id": scene_graph.scene_id},
+            )
         scene_graph.edges = converter._infer_relations(
             scene_graph.nodes,
             scene_id=scene_graph.scene_id,
         )
 
         if verbose:
-            print(f"[SCENE-GRAPH-CONVERTER] Streaming conversion complete: {len(scene_graph.nodes)} nodes, {len(scene_graph.edges)} edges")
+            logger.info(
+                "[SCENE-GRAPH-CONVERTER] Streaming conversion complete: %d nodes, %d edges",
+                len(scene_graph.nodes),
+                len(scene_graph.edges),
+                extra={"scene_id": scene_graph.scene_id},
+            )
 
     else:
         # Standard mode for small manifests
