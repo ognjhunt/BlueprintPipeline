@@ -447,7 +447,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 |----------|------|---------|-------------|
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
 | `GENIESIM_ENV` | str | `development` | Environment toggle for Genie Sim integrations (`production` disables mock/fallback behavior). |
-| `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (disallow placeholder embeddings). |
+| `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (disallow placeholder embeddings). Defaults to `true` when `GENIESIM_ENV`/`BP_ENV` resolves to production. |
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework). |
 | `GENIESIM_GRPC_TIMEOUT_S` | float | 30.0 | gRPC request timeout for Genie Sim adapters (seconds). Falls back to legacy `GENIESIM_TIMEOUT` if set. |
@@ -496,8 +496,9 @@ export ISAACSIM_REQUIRED=true
 export CUROBO_REQUIRED=true
 ```
 
-For production asset indexing/embedding flows, ensure a valid embedding provider is configured
-(`OPENAI_API_KEY` or `QWEN_API_KEY`/`DASHSCOPE_API_KEY`, plus the corresponding embedding model).
+For production asset indexing/embedding flows, placeholder embeddings are disallowed. Ensure a valid embedding
+provider is configured (`OPENAI_API_KEY` or `QWEN_API_KEY`/`DASHSCOPE_API_KEY`, plus the corresponding embedding
+model) or exports will fail fast.
 
 ---
 

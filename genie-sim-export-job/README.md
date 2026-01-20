@@ -109,6 +109,12 @@ scenes/{scene_id}/geniesim/
 | `FILTER_COMMERCIAL` | `true` | Only include commercial-use assets |
 | `COPY_USD` | `true` | Copy USD files to output |
 
+### Production Embedding Requirements
+
+When `GENIESIM_ENV`/`BP_ENV` resolves to `production`, embedding generation is required and placeholder embeddings
+are disabled. Provide an embedding provider API key (for example, `OPENAI_API_KEY` or `QWEN_API_KEY`/
+`DASHSCOPE_API_KEY`) and matching embedding model environment variables so the job can complete successfully.
+
 ### Enhanced Features (NEW)
 
 | Variable | Default | Description |
