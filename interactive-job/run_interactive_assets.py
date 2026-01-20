@@ -47,6 +47,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.config.env_flags import env_flag
+from tools.config.production_mode import resolve_production_mode as resolve_pipeline_production_mode
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.workflow import FailureMarkerWriter
@@ -110,21 +111,25 @@ def parse_csv_env(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def resolve_production_mode() -> Tuple[bool, str, Optional[str]]:
+def resolve_interactive_production_mode() -> Tuple[bool, str, Optional[str]]:
     """Resolve production mode from explicit override or pipeline environment."""
     explicit_value = os.getenv("PRODUCTION_MODE")
     if explicit_value is not None:
         return env_flag(explicit_value, default=False), "PRODUCTION_MODE", explicit_value
 
-    pipeline_env = os.getenv("BP_ENV")
-    if pipeline_env is not None:
-        return pipeline_env.strip().lower() in {"production", "prod"}, "BP_ENV", pipeline_env
-
     pipeline_env = os.getenv("PIPELINE_ENV")
     if pipeline_env is not None:
-        return pipeline_env.strip().lower() in {"production", "prod"}, "PIPELINE_ENV", pipeline_env
+        return resolve_pipeline_production_mode(), "PIPELINE_ENV", pipeline_env
 
-    return False, "default", None
+    geniesim_env = os.getenv("GENIESIM_ENV")
+    if geniesim_env is not None:
+        return resolve_pipeline_production_mode(), "GENIESIM_ENV", geniesim_env
+
+    pipeline_env = os.getenv("BP_ENV")
+    if pipeline_env is not None:
+        return resolve_pipeline_production_mode(), "BP_ENV", pipeline_env
+
+    return resolve_pipeline_production_mode(), "default", None
 
 
 def resolve_particulate_endpoint(
@@ -1645,7 +1650,7 @@ def main() -> None:
     )
 
     mode = os.getenv("INTERACTIVE_MODE", MODE_GLB)  # Default to GLB mode
-    production_mode, production_source, production_value = resolve_production_mode()
+    production_mode, production_source, production_value = resolve_interactive_production_mode()
     labs_mode = env_flag(os.getenv("LABS_MODE"), default=False)
     disallow_placeholder_env = env_flag(os.getenv("DISALLOW_PLACEHOLDER_URDF"), default=False)
     disallow_placeholder_urdf = production_mode or disallow_placeholder_env
