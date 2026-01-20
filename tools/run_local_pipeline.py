@@ -772,6 +772,33 @@ class LocalPipelineRunner:
                     "manifest": _load_json(manifest_path, "quality gate manifest"),
                 },
             }
+        if step == PipelineStep.SCALE:
+            report_path = self.assets_dir / "scale_report.json"
+            return {
+                "checkpoint": QualityGateCheckpoint.SCALE_COMPLETE,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "scale_report_path": str(report_path),
+                },
+            }
+        if step == PipelineStep.INTERACTIVE:
+            manifest_path = self.assets_dir / "scene_manifest.json"
+            required_count = 0
+            if manifest_path.is_file():
+                manifest = _load_json(manifest_path, "interactive manifest")
+                required_count = len([
+                    obj for obj in manifest.get("objects", [])
+                    if obj.get("type") == "interactive"
+                ])
+            results_path = self.assets_dir / "interactive" / "interactive_results.json"
+            return {
+                "checkpoint": QualityGateCheckpoint.INTERACTIVE_COMPLETE,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "interactive_results_path": str(results_path),
+                    "required_interactive_count": required_count,
+                },
+            }
         if step == PipelineStep.SIMREADY:
             manifest_path = self.assets_dir / "scene_manifest.json"
             if not manifest_path.is_file():
@@ -801,12 +828,32 @@ class LocalPipelineRunner:
                     "usd_path": str(usd_path),
                 },
             }
+        if step == PipelineStep.INVENTORY_ENRICHMENT:
+            inventory_path = self.seg_dir / "inventory.json"
+            enriched_path = self.seg_dir / "inventory_enriched.json"
+            return {
+                "checkpoint": QualityGateCheckpoint.INVENTORY_ENRICHMENT_COMPLETE,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "inventory_path": str(inventory_path),
+                    "inventory_enriched_path": str(enriched_path),
+                },
+            }
         if step == PipelineStep.REPLICATOR:
             return {
                 "checkpoint": QualityGateCheckpoint.REPLICATOR_COMPLETE,
                 "context": {
                     "scene_id": self.scene_id,
                     "replicator_bundle_dir": str(self.replicator_dir),
+                },
+            }
+        if step == PipelineStep.VARIATION_GEN:
+            variation_assets_path = self.scene_dir / "variation_assets" / "variation_assets.json"
+            return {
+                "checkpoint": QualityGateCheckpoint.VARIATION_GEN_COMPLETE,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "variation_assets_path": str(variation_assets_path),
                 },
             }
         if step == PipelineStep.ISAAC_LAB:
