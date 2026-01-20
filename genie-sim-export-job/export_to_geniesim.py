@@ -13,7 +13,8 @@ This job:
 5. Generates MULTI-ROBOT configuration (DEFAULT: ENABLED)
 6. Generates enhanced features config (VLA, annotations, bimanual)
 7. Generates PREMIUM ANALYTICS manifests (DEFAULT: ENABLED - NO LONGER UPSELL!)
-8. Outputs files ready for Genie Sim data generation
+8. Generates premium feature artifacts from emitted configs (post-export stage)
+9. Outputs files ready for Genie Sim data generation
 
 Pipeline Position:
     3D-RE-GEN → simready → usd-assembly → replicator → [THIS JOB] → Genie Sim
@@ -49,16 +50,26 @@ Environment Variables:
     ENABLE_VLA_PACKAGES: Generate VLA fine-tuning configs - default: true
     ENABLE_RICH_ANNOTATIONS: Generate rich annotation configs - default: true
     ENABLE_PREMIUM_ANALYTICS: Enable premium analytics capture - default: true (NO LONGER UPSELL!)
+    ENABLE_SIM2REAL_FIDELITY: Enable sim2real fidelity artifacts - default: true
+    ENABLE_EMBODIMENT_TRANSFER: Enable embodiment transfer artifacts - default: true
+    ENABLE_TRAJECTORY_OPTIMALITY: Enable trajectory optimality artifacts - default: true
+    ENABLE_POLICY_LEADERBOARD: Enable policy leaderboard artifacts - default: true
+    ENABLE_TACTILE_SENSORS: Enable tactile sensor artifacts - default: true
+    ENABLE_LANGUAGE_ANNOTATIONS: Enable language annotation artifacts - default: true
+    ENABLE_GENERALIZATION_ANALYZER: Enable generalization analysis artifacts - default: true
+    ENABLE_SIM2REAL_VALIDATION: Enable sim2real validation artifacts - default: true
+    ENABLE_AUDIO_NARRATION: Enable audio narration artifacts - default: true
     STRICT_PREMIUM_FEATURES: Fail fast on premium feature export errors - default: false
 """
 
+import hashlib
 import json
 import os
 import shutil
 import sys
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 # Add repository root to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -105,6 +116,7 @@ try:
     from .default_premium_analytics import (
         create_default_premium_analytics_exporter,
         DefaultPremiumAnalyticsConfig,
+        execute_premium_analytics,
     )
     PREMIUM_ANALYTICS_AVAILABLE = True
 except ImportError:
@@ -114,54 +126,63 @@ except ImportError:
 # Import ALL default premium features (DEFAULT: ENABLED - NO LONGER UPSELL!)
 try:
     from .default_sim2real_fidelity import create_default_sim2real_fidelity_exporter
+    from .default_sim2real_fidelity import execute_sim2real_fidelity
     SIM2REAL_AVAILABLE = True
 except ImportError:
     SIM2REAL_AVAILABLE = False
 
 try:
     from .default_embodiment_transfer import create_default_embodiment_transfer_exporter
+    from .default_embodiment_transfer import execute_embodiment_transfer
     EMBODIMENT_TRANSFER_AVAILABLE = True
 except ImportError:
     EMBODIMENT_TRANSFER_AVAILABLE = False
 
 try:
     from .default_trajectory_optimality import create_default_trajectory_optimality_exporter
+    from .default_trajectory_optimality import execute_trajectory_optimality
     TRAJECTORY_OPTIMALITY_AVAILABLE = True
 except ImportError:
     TRAJECTORY_OPTIMALITY_AVAILABLE = False
 
 try:
     from .default_policy_leaderboard import create_default_policy_leaderboard_exporter
+    from .default_policy_leaderboard import execute_policy_leaderboard
     POLICY_LEADERBOARD_AVAILABLE = True
 except ImportError:
     POLICY_LEADERBOARD_AVAILABLE = False
 
 try:
     from .default_tactile_sensor_sim import create_default_tactile_sensor_exporter
+    from .default_tactile_sensor_sim import execute_tactile_sensor_sim
     TACTILE_SENSOR_AVAILABLE = True
 except ImportError:
     TACTILE_SENSOR_AVAILABLE = False
 
 try:
     from .default_language_annotations import create_default_language_annotations_exporter
+    from .default_language_annotations import execute_language_annotations
     LANGUAGE_ANNOTATIONS_AVAILABLE = True
 except ImportError:
     LANGUAGE_ANNOTATIONS_AVAILABLE = False
 
 try:
     from .default_generalization_analyzer import create_default_generalization_analyzer_exporter
+    from .default_generalization_analyzer import execute_generalization_analysis
     GENERALIZATION_ANALYZER_AVAILABLE = True
 except ImportError:
     GENERALIZATION_ANALYZER_AVAILABLE = False
 
 try:
     from .default_sim2real_validation import create_default_sim2real_validation_exporter
+    from .default_sim2real_validation import execute_sim2real_validation
     SIM2REAL_VALIDATION_AVAILABLE = True
 except ImportError:
     SIM2REAL_VALIDATION_AVAILABLE = False
 
 try:
     from .default_audio_narration import create_default_audio_narration_exporter
+    from .default_audio_narration import execute_audio_narration
     AUDIO_NARRATION_AVAILABLE = True
 except ImportError:
     AUDIO_NARRATION_AVAILABLE = False
@@ -182,6 +203,84 @@ def parse_bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _compute_sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _iter_files_sorted(root: Path) -> List[Path]:
+    files = [path for path in root.rglob("*") if path.is_file()]
+    return sorted(files, key=lambda path: path.as_posix())
+
+
+def _build_file_inventory(root: Path, exclude_paths: Optional[List[Path]] = None) -> List[Dict[str, Any]]:
+    exclude_set = {path.resolve() for path in exclude_paths or []}
+    inventory = []
+    for path in _iter_files_sorted(root):
+        if path.resolve() in exclude_set:
+            continue
+        inventory.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "size_bytes": path.stat().st_size,
+            }
+        )
+    return inventory
+
+
+def _build_directory_checksums(root: Path, exclude_paths: Optional[List[Path]] = None) -> Dict[str, Dict[str, Any]]:
+    exclude_set = {path.resolve() for path in exclude_paths or []}
+    checksums: Dict[str, Dict[str, Any]] = {}
+    for path in _iter_files_sorted(root):
+        if path.resolve() in exclude_set:
+            continue
+        rel_path = path.relative_to(root).as_posix()
+        checksums[rel_path] = {
+            "sha256": _compute_sha256(path),
+            "size_bytes": path.stat().st_size,
+        }
+    return checksums
+
+
+def _compute_manifest_checksum(manifest: Dict[str, Any]) -> str:
+    manifest_copy = json.loads(json.dumps(manifest))
+    checksums = manifest_copy.get("checksums", {})
+    file_checksums = checksums.get("files", {})
+    file_checksums.pop("export_manifest.json", None)
+    if "files" in checksums:
+        checksums["files"] = file_checksums
+    manifest_copy["checksums"] = checksums
+    payload = json.dumps(manifest_copy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _update_export_manifest(
+    output_dir: Path,
+    premium_artifacts: Dict[str, Dict[str, str]],
+) -> None:
+    export_manifest_path = output_dir / "export_manifest.json"
+    if not export_manifest_path.exists():
+        print("[GENIESIM-EXPORT-JOB] WARNING: export_manifest.json not found; skipping update")
+        return
+
+    manifest = json.loads(export_manifest_path.read_text())
+    manifest["premium_artifacts"] = premium_artifacts
+
+    file_inventory = _build_file_inventory(output_dir, exclude_paths=[export_manifest_path])
+    file_checksums = _build_directory_checksums(output_dir, exclude_paths=[export_manifest_path])
+    manifest["file_inventory"] = file_inventory
+    manifest.setdefault("checksums", {})
+    manifest["checksums"]["files"] = file_checksums
+    manifest["checksums"]["files"][export_manifest_path.name] = {
+        "sha256": _compute_manifest_checksum(manifest),
+    }
+
+    export_manifest_path.write_text(json.dumps(manifest, indent=2))
 
 
 def _is_service_mode() -> bool:
@@ -304,6 +403,15 @@ def run_geniesim_export_job(
     variation_assets_prefix: Optional[str] = None,  # Path to variation assets
     replicator_prefix: Optional[str] = None,  # Path to replicator bundle
     enable_premium_analytics: bool = True,  # DEFAULT: ENABLED (no longer upsell!)
+    enable_sim2real_fidelity: bool = True,
+    enable_embodiment_transfer: bool = True,
+    enable_trajectory_optimality: bool = True,
+    enable_policy_leaderboard: bool = True,
+    enable_tactile_sensors: bool = True,
+    enable_language_annotations: bool = True,
+    enable_generalization_analyzer: bool = True,
+    enable_sim2real_validation: bool = True,
+    enable_audio_narration: bool = True,
     strict_premium_features: bool = False,
     require_quality_gates: bool = True,
     bucket: str = "",
@@ -331,6 +439,15 @@ def run_geniesim_export_job(
         variation_assets_prefix: Path to variation assets (YOUR commercial assets)
         replicator_prefix: Path to replicator bundle
         enable_premium_analytics: Enable premium analytics capture (DEFAULT: True - NO LONGER UPSELL!)
+        enable_sim2real_fidelity: Enable sim2real fidelity artifacts (DEFAULT: True)
+        enable_embodiment_transfer: Enable embodiment transfer artifacts (DEFAULT: True)
+        enable_trajectory_optimality: Enable trajectory optimality artifacts (DEFAULT: True)
+        enable_policy_leaderboard: Enable policy leaderboard artifacts (DEFAULT: True)
+        enable_tactile_sensors: Enable tactile sensor artifacts (DEFAULT: True)
+        enable_language_annotations: Enable language annotation artifacts (DEFAULT: True)
+        enable_generalization_analyzer: Enable generalization analysis artifacts (DEFAULT: True)
+        enable_sim2real_validation: Enable sim2real validation artifacts (DEFAULT: True)
+        enable_audio_narration: Enable audio narration artifacts (DEFAULT: True)
         strict_premium_features: Fail fast on premium feature export errors (DEFAULT: False)
         require_quality_gates: Fail when quality gates are unavailable or error (DEFAULT: True)
         bucket: GCS bucket for failure markers (optional)
@@ -382,6 +499,15 @@ def run_geniesim_export_job(
     print(f"[GENIESIM-EXPORT-JOB] VLA packages enabled: {enable_vla_packages}")
     print(f"[GENIESIM-EXPORT-JOB] Rich annotations enabled: {enable_rich_annotations}")
     print(f"[GENIESIM-EXPORT-JOB] Premium analytics enabled: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
+    print(f"[GENIESIM-EXPORT-JOB] Sim2Real fidelity enabled: {enable_sim2real_fidelity}")
+    print(f"[GENIESIM-EXPORT-JOB] Embodiment transfer enabled: {enable_embodiment_transfer}")
+    print(f"[GENIESIM-EXPORT-JOB] Trajectory optimality enabled: {enable_trajectory_optimality}")
+    print(f"[GENIESIM-EXPORT-JOB] Policy leaderboard enabled: {enable_policy_leaderboard}")
+    print(f"[GENIESIM-EXPORT-JOB] Tactile sensors enabled: {enable_tactile_sensors}")
+    print(f"[GENIESIM-EXPORT-JOB] Language annotations enabled: {enable_language_annotations}")
+    print(f"[GENIESIM-EXPORT-JOB] Generalization analyzer enabled: {enable_generalization_analyzer}")
+    print(f"[GENIESIM-EXPORT-JOB] Sim2Real validation enabled: {enable_sim2real_validation}")
+    print(f"[GENIESIM-EXPORT-JOB] Audio narration enabled: {enable_audio_narration}")
     print(f"[GENIESIM-EXPORT-JOB] Strict premium features: {strict_premium_features}")
     print(f"[GENIESIM-EXPORT-JOB] Require quality gates: {require_quality_gates}")
 
@@ -1030,11 +1156,14 @@ def run_geniesim_export_job(
             )
             print("[GENIESIM-EXPORT-JOB] ✅ Export consistency validated")
 
+            # Premium feature artifact generation stage (post-export, pre-submit)
             # Export premium analytics manifests (DEFAULT: ENABLED)
             premium_analytics_manifests = {}
             premium_feature_staged_counts = {}
             premium_feature_counts = {}
             premium_feature_status = {}
+            premium_feature_artifacts: dict[str, dict[str, str]] = {}
+            premium_feature_artifact_counts: dict[str, int] = {}
             premium_feature_staged_dirs = {}
             premium_feature_final_dirs = {
                 "premium_analytics": "premium_analytics",
@@ -1086,6 +1215,17 @@ def run_geniesim_export_job(
                     premium_analytics_manifests = analytics_exporter.export_all_manifests()
                     premium_feature_staged_counts["premium_analytics"] = len(premium_analytics_manifests)
                     premium_feature_staged_dirs["premium_analytics"] = analytics_dir
+                    config_path = premium_analytics_manifests.get("config")
+                    if config_path:
+                        analytics_artifacts = execute_premium_analytics(
+                            config_path=config_path,
+                            output_dir=analytics_dir,
+                        )
+                        premium_feature_artifacts["premium_analytics"] = {
+                            name: path.relative_to(analytics_dir).as_posix()
+                            for name, path in analytics_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["premium_analytics"] = len(analytics_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Premium analytics: "
                         f"{len(premium_analytics_manifests)} manifests exported"
@@ -1105,7 +1245,7 @@ def run_geniesim_export_job(
             all_premium_features_manifests = {}
 
             # 1. Sim2Real Fidelity Matrix ($20k-$50k value)
-            if SIM2REAL_AVAILABLE:
+            if SIM2REAL_AVAILABLE and enable_sim2real_fidelity:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Fidelity Matrix ($20k-$50k value - NOW FREE)")
                 sim2real_dir = temp_dir / "sim2real_fidelity"
                 try:
@@ -1117,6 +1257,17 @@ def run_geniesim_export_job(
                     all_premium_features_manifests.update({"sim2real": sim2real_manifests})
                     premium_feature_staged_counts["sim2real_fidelity"] = len(sim2real_manifests)
                     premium_feature_staged_dirs["sim2real_fidelity"] = sim2real_dir
+                    config_path = sim2real_manifests.get("sim2real_fidelity_config")
+                    if config_path:
+                        fidelity_artifacts = execute_sim2real_fidelity(
+                            config_path=config_path,
+                            output_dir=sim2real_dir,
+                        )
+                        premium_feature_artifacts["sim2real_fidelity"] = {
+                            name: path.relative_to(sim2real_dir).as_posix()
+                            for name, path in fidelity_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["sim2real_fidelity"] = len(fidelity_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Fidelity: "
                         f"{len(sim2real_manifests)} manifests exported"
@@ -1128,7 +1279,7 @@ def run_geniesim_export_job(
                     record_premium_warning("sim2real_fidelity", exc, sim2real_dir)
 
             # 2. Embodiment Transfer Analysis ($20k-$100k value)
-            if EMBODIMENT_TRANSFER_AVAILABLE:
+            if EMBODIMENT_TRANSFER_AVAILABLE and enable_embodiment_transfer:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Embodiment Transfer Analysis ($20k-$100k value - NOW FREE)")
                 embodiment_dir = temp_dir / "embodiment_transfer"
                 try:
@@ -1140,6 +1291,17 @@ def run_geniesim_export_job(
                     all_premium_features_manifests.update({"embodiment": embodiment_manifests})
                     premium_feature_staged_counts["embodiment_transfer"] = len(embodiment_manifests)
                     premium_feature_staged_dirs["embodiment_transfer"] = embodiment_dir
+                    config_path = embodiment_manifests.get("embodiment_transfer_config")
+                    if config_path:
+                        transfer_artifacts = execute_embodiment_transfer(
+                            config_path=config_path,
+                            output_dir=embodiment_dir,
+                        )
+                        premium_feature_artifacts["embodiment_transfer"] = {
+                            name: path.relative_to(embodiment_dir).as_posix()
+                            for name, path in transfer_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["embodiment_transfer"] = len(transfer_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Embodiment Transfer: "
                         f"{len(embodiment_manifests)} manifests exported"
@@ -1151,7 +1313,7 @@ def run_geniesim_export_job(
                     record_premium_warning("embodiment_transfer", exc, embodiment_dir)
 
             # 3. Trajectory Optimality Analysis ($10k-$25k value)
-            if TRAJECTORY_OPTIMALITY_AVAILABLE:
+            if TRAJECTORY_OPTIMALITY_AVAILABLE and enable_trajectory_optimality:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Trajectory Optimality Analysis ($10k-$25k value - NOW FREE)")
                 trajectory_dir = temp_dir / "trajectory_optimality"
                 try:
@@ -1162,6 +1324,17 @@ def run_geniesim_export_job(
                     all_premium_features_manifests.update({"trajectory": trajectory_manifests})
                     premium_feature_staged_counts["trajectory_optimality"] = len(trajectory_manifests)
                     premium_feature_staged_dirs["trajectory_optimality"] = trajectory_dir
+                    config_path = trajectory_manifests.get("trajectory_optimality_config")
+                    if config_path:
+                        trajectory_artifacts = execute_trajectory_optimality(
+                            config_path=config_path,
+                            output_dir=trajectory_dir,
+                        )
+                        premium_feature_artifacts["trajectory_optimality"] = {
+                            name: path.relative_to(trajectory_dir).as_posix()
+                            for name, path in trajectory_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["trajectory_optimality"] = len(trajectory_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Trajectory Optimality: "
                         f"{len(trajectory_manifests)} manifests exported"
@@ -1173,7 +1346,7 @@ def run_geniesim_export_job(
                     record_premium_warning("trajectory_optimality", exc, trajectory_dir)
 
             # 4. Policy Leaderboard ($20k-$40k value)
-            if POLICY_LEADERBOARD_AVAILABLE:
+            if POLICY_LEADERBOARD_AVAILABLE and enable_policy_leaderboard:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Policy Leaderboard ($20k-$40k value - NOW FREE)")
                 leaderboard_dir = temp_dir / "policy_leaderboard"
                 try:
@@ -1184,6 +1357,17 @@ def run_geniesim_export_job(
                     all_premium_features_manifests.update({"leaderboard": leaderboard_manifests})
                     premium_feature_staged_counts["policy_leaderboard"] = len(leaderboard_manifests)
                     premium_feature_staged_dirs["policy_leaderboard"] = leaderboard_dir
+                    config_path = leaderboard_manifests.get("policy_leaderboard_config")
+                    if config_path:
+                        leaderboard_artifacts = execute_policy_leaderboard(
+                            config_path=config_path,
+                            output_dir=leaderboard_dir,
+                        )
+                        premium_feature_artifacts["policy_leaderboard"] = {
+                            name: path.relative_to(leaderboard_dir).as_posix()
+                            for name, path in leaderboard_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["policy_leaderboard"] = len(leaderboard_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Policy Leaderboard: "
                         f"{len(leaderboard_manifests)} manifests exported"
@@ -1195,7 +1379,7 @@ def run_geniesim_export_job(
                     record_premium_warning("policy_leaderboard", exc, leaderboard_dir)
 
             # 5. Tactile Sensor Simulation ($15k-$30k value)
-            if TACTILE_SENSOR_AVAILABLE:
+            if TACTILE_SENSOR_AVAILABLE and enable_tactile_sensors:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Tactile Sensor Simulation ($15k-$30k value - NOW FREE)")
                 tactile_dir = temp_dir / "tactile_sensors"
                 try:
@@ -1206,6 +1390,17 @@ def run_geniesim_export_job(
                     all_premium_features_manifests.update({"tactile": tactile_manifests})
                     premium_feature_staged_counts["tactile_sensors"] = len(tactile_manifests)
                     premium_feature_staged_dirs["tactile_sensors"] = tactile_dir
+                    config_path = tactile_manifests.get("tactile_sensor_config")
+                    if config_path:
+                        tactile_artifacts = execute_tactile_sensor_sim(
+                            config_path=config_path,
+                            output_dir=tactile_dir,
+                        )
+                        premium_feature_artifacts["tactile_sensors"] = {
+                            name: path.relative_to(tactile_dir).as_posix()
+                            for name, path in tactile_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["tactile_sensors"] = len(tactile_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Tactile Sensors: "
                         f"{len(tactile_manifests)} manifests exported"
@@ -1217,7 +1412,7 @@ def run_geniesim_export_job(
                     record_premium_warning("tactile_sensors", exc, tactile_dir)
 
             # 6. Language Annotations ($10k-$25k value)
-            if LANGUAGE_ANNOTATIONS_AVAILABLE:
+            if LANGUAGE_ANNOTATIONS_AVAILABLE and enable_language_annotations:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Language Annotations ($10k-$25k value - NOW FREE)")
                 language_dir = temp_dir / "language_annotations"
                 try:
@@ -1228,6 +1423,17 @@ def run_geniesim_export_job(
                     all_premium_features_manifests.update({"language": language_manifests})
                     premium_feature_staged_counts["language_annotations"] = len(language_manifests)
                     premium_feature_staged_dirs["language_annotations"] = language_dir
+                    config_path = language_manifests.get("language_annotations_config")
+                    if config_path:
+                        language_artifacts = execute_language_annotations(
+                            config_path=config_path,
+                            output_dir=language_dir,
+                        )
+                        premium_feature_artifacts["language_annotations"] = {
+                            name: path.relative_to(language_dir).as_posix()
+                            for name, path in language_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["language_annotations"] = len(language_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Language Annotations: "
                         f"{len(language_manifests)} manifests exported"
@@ -1239,7 +1445,7 @@ def run_geniesim_export_job(
                     record_premium_warning("language_annotations", exc, language_dir)
 
             # 7. Generalization Analyzer ($15k-$35k value)
-            if GENERALIZATION_ANALYZER_AVAILABLE:
+            if GENERALIZATION_ANALYZER_AVAILABLE and enable_generalization_analyzer:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Generalization Analyzer ($15k-$35k value - NOW FREE)")
                 generalization_dir = temp_dir / "generalization_analysis"
                 try:
@@ -1250,6 +1456,17 @@ def run_geniesim_export_job(
                     all_premium_features_manifests.update({"generalization": generalization_manifests})
                     premium_feature_staged_counts["generalization_analyzer"] = len(generalization_manifests)
                     premium_feature_staged_dirs["generalization_analyzer"] = generalization_dir
+                    config_path = generalization_manifests.get("generalization_analysis_config")
+                    if config_path:
+                        generalization_artifacts = execute_generalization_analysis(
+                            config_path=config_path,
+                            output_dir=generalization_dir,
+                        )
+                        premium_feature_artifacts["generalization_analyzer"] = {
+                            name: path.relative_to(generalization_dir).as_posix()
+                            for name, path in generalization_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["generalization_analyzer"] = len(generalization_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Generalization Analyzer: "
                         f"{len(generalization_manifests)} manifests exported"
@@ -1261,7 +1478,7 @@ def run_geniesim_export_job(
                     record_premium_warning("generalization_analyzer", exc, generalization_dir)
 
             # 8. Sim2Real Validation Service ($5k-$25k/study value)
-            if SIM2REAL_VALIDATION_AVAILABLE:
+            if SIM2REAL_VALIDATION_AVAILABLE and enable_sim2real_validation:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Validation Service ($5k-$25k/study - NOW FREE)")
                 sim2real_validation_dir = temp_dir / "sim2real_validation"
                 try:
@@ -1274,6 +1491,17 @@ def run_geniesim_export_job(
                     all_premium_features_manifests.update({"sim2real_validation": sim2real_validation_manifests})
                     premium_feature_staged_counts["sim2real_validation"] = len(sim2real_validation_manifests)
                     premium_feature_staged_dirs["sim2real_validation"] = sim2real_validation_dir
+                    config_path = sim2real_validation_manifests.get("config")
+                    if config_path:
+                        validation_artifacts = execute_sim2real_validation(
+                            config_path=config_path,
+                            output_dir=sim2real_validation_dir,
+                        )
+                        premium_feature_artifacts["sim2real_validation"] = {
+                            name: path.relative_to(sim2real_validation_dir).as_posix()
+                            for name, path in validation_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["sim2real_validation"] = len(validation_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Validation: "
                         f"{len(sim2real_validation_manifests)} manifests exported"
@@ -1286,7 +1514,7 @@ def run_geniesim_export_job(
                     record_premium_warning("sim2real_validation", exc, sim2real_validation_dir)
 
             # 9. Audio Narration ($5k-$15k value)
-            if AUDIO_NARRATION_AVAILABLE:
+            if AUDIO_NARRATION_AVAILABLE and enable_audio_narration:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Audio Narration ($5k-$15k value - NOW FREE)")
                 audio_narration_dir = temp_dir / "audio_narration"
                 try:
@@ -1298,6 +1526,17 @@ def run_geniesim_export_job(
                     all_premium_features_manifests.update({"audio_narration": audio_narration_manifests})
                     premium_feature_staged_counts["audio_narration"] = len(audio_narration_manifests)
                     premium_feature_staged_dirs["audio_narration"] = audio_narration_dir
+                    config_path = audio_narration_manifests.get("config")
+                    if config_path:
+                        narration_artifacts = execute_audio_narration(
+                            config_path=config_path,
+                            output_dir=audio_narration_dir,
+                        )
+                        premium_feature_artifacts["audio_narration"] = {
+                            name: path.relative_to(audio_narration_dir).as_posix()
+                            for name, path in narration_artifacts.items()
+                        }
+                        premium_feature_artifact_counts["audio_narration"] = len(narration_artifacts)
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Audio Narration: "
                         f"{len(audio_narration_manifests)} manifests exported"
@@ -1324,6 +1563,19 @@ def run_geniesim_export_job(
                 raise
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
+
+            premium_artifacts_manifest: dict[str, dict[str, str]] = {}
+            for feature_name, artifacts in premium_feature_artifacts.items():
+                final_dir = output_dir / premium_feature_final_dirs[feature_name]
+                premium_artifacts_manifest[feature_name] = {
+                    artifact_name: (final_dir / relative_path).relative_to(output_dir).as_posix()
+                    for artifact_name, relative_path in artifacts.items()
+                }
+
+            try:
+                _update_export_manifest(output_dir, premium_artifacts_manifest)
+            except Exception as exc:
+                record_premium_warning("export_manifest_update", exc, output_dir)
 
             # Summary of premium features
             if any([SIM2REAL_AVAILABLE, EMBODIMENT_TRANSFER_AVAILABLE, TRAJECTORY_OPTIMALITY_AVAILABLE,
@@ -1426,6 +1678,10 @@ def run_geniesim_export_job(
                 marker_data["premium_analytics_manifests"] = premium_feature_counts["premium_analytics"]
             if premium_feature_counts:
                 marker_data["premium_feature_counts"] = premium_feature_counts
+            if premium_feature_artifact_counts:
+                marker_data["premium_feature_artifact_counts"] = premium_feature_artifact_counts
+            if premium_artifacts_manifest:
+                marker_data["premium_feature_artifacts"] = premium_artifacts_manifest
             marker_path.write_text(json.dumps(marker_data, indent=2))
             print(f"\n[GENIESIM-EXPORT-JOB] ✓ Completion marker written with schema v{marker_data['export_schema_version']}")
 
@@ -1508,6 +1764,15 @@ def main():
     enable_vla_packages = parse_bool_env(os.getenv("ENABLE_VLA_PACKAGES"), default=True)
     enable_rich_annotations = parse_bool_env(os.getenv("ENABLE_RICH_ANNOTATIONS"), default=True)
     enable_premium_analytics = parse_bool_env(os.getenv("ENABLE_PREMIUM_ANALYTICS"), default=True)
+    enable_sim2real_fidelity = parse_bool_env(os.getenv("ENABLE_SIM2REAL_FIDELITY"), default=True)
+    enable_embodiment_transfer = parse_bool_env(os.getenv("ENABLE_EMBODIMENT_TRANSFER"), default=True)
+    enable_trajectory_optimality = parse_bool_env(os.getenv("ENABLE_TRAJECTORY_OPTIMALITY"), default=True)
+    enable_policy_leaderboard = parse_bool_env(os.getenv("ENABLE_POLICY_LEADERBOARD"), default=True)
+    enable_tactile_sensors = parse_bool_env(os.getenv("ENABLE_TACTILE_SENSORS"), default=True)
+    enable_language_annotations = parse_bool_env(os.getenv("ENABLE_LANGUAGE_ANNOTATIONS"), default=True)
+    enable_generalization_analyzer = parse_bool_env(os.getenv("ENABLE_GENERALIZATION_ANALYZER"), default=True)
+    enable_sim2real_validation = parse_bool_env(os.getenv("ENABLE_SIM2REAL_VALIDATION"), default=True)
+    enable_audio_narration = parse_bool_env(os.getenv("ENABLE_AUDIO_NARRATION"), default=True)
     require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
     strict_premium_features = parse_bool_env(os.getenv("STRICT_PREMIUM_FEATURES"), default=False)
     embedding_model = _resolve_embedding_model()
@@ -1534,6 +1799,15 @@ def main():
         "enable_vla_packages": enable_vla_packages,
         "enable_rich_annotations": enable_rich_annotations,
         "enable_premium_analytics": enable_premium_analytics,
+        "enable_sim2real_fidelity": enable_sim2real_fidelity,
+        "enable_embodiment_transfer": enable_embodiment_transfer,
+        "enable_trajectory_optimality": enable_trajectory_optimality,
+        "enable_policy_leaderboard": enable_policy_leaderboard,
+        "enable_tactile_sensors": enable_tactile_sensors,
+        "enable_language_annotations": enable_language_annotations,
+        "enable_generalization_analyzer": enable_generalization_analyzer,
+        "enable_sim2real_validation": enable_sim2real_validation,
+        "enable_audio_narration": enable_audio_narration,
         "strict_premium_features": strict_premium_features,
         "require_quality_gates": require_quality_gates,
     }
@@ -1603,6 +1877,15 @@ def main():
         print(f"[GENIESIM-EXPORT-JOB]   Rich Annotations: {enable_rich_annotations}")
         print(f"[GENIESIM-EXPORT-JOB]   Commercial Filter: {filter_commercial}")
         print(f"[GENIESIM-EXPORT-JOB]   Premium Analytics: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
+        print(f"[GENIESIM-EXPORT-JOB]   Sim2Real Fidelity: {enable_sim2real_fidelity}")
+        print(f"[GENIESIM-EXPORT-JOB]   Embodiment Transfer: {enable_embodiment_transfer}")
+        print(f"[GENIESIM-EXPORT-JOB]   Trajectory Optimality: {enable_trajectory_optimality}")
+        print(f"[GENIESIM-EXPORT-JOB]   Policy Leaderboard: {enable_policy_leaderboard}")
+        print(f"[GENIESIM-EXPORT-JOB]   Tactile Sensors: {enable_tactile_sensors}")
+        print(f"[GENIESIM-EXPORT-JOB]   Language Annotations: {enable_language_annotations}")
+        print(f"[GENIESIM-EXPORT-JOB]   Generalization Analyzer: {enable_generalization_analyzer}")
+        print(f"[GENIESIM-EXPORT-JOB]   Sim2Real Validation: {enable_sim2real_validation}")
+        print(f"[GENIESIM-EXPORT-JOB]   Audio Narration: {enable_audio_narration}")
         print(f"[GENIESIM-EXPORT-JOB]   Strict Premium Features: {strict_premium_features}")
         print(f"[GENIESIM-EXPORT-JOB]   Require Quality Gates: {require_quality_gates}")
 
@@ -1633,6 +1916,15 @@ def main():
                 replicator_prefix=replicator_prefix,
                 # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
                 enable_premium_analytics=enable_premium_analytics,
+                enable_sim2real_fidelity=enable_sim2real_fidelity,
+                enable_embodiment_transfer=enable_embodiment_transfer,
+                enable_trajectory_optimality=enable_trajectory_optimality,
+                enable_policy_leaderboard=enable_policy_leaderboard,
+                enable_tactile_sensors=enable_tactile_sensors,
+                enable_language_annotations=enable_language_annotations,
+                enable_generalization_analyzer=enable_generalization_analyzer,
+                enable_sim2real_validation=enable_sim2real_validation,
+                enable_audio_narration=enable_audio_narration,
                 strict_premium_features=strict_premium_features,
                 require_quality_gates=require_quality_gates,
                 bucket=bucket,
