@@ -749,12 +749,22 @@ def _validate_minimal_schema(payload: Any, schema: Dict[str, Any], path: str) ->
     if schema_type == "object":
         if not isinstance(payload, dict):
             raise ValueError(f"{path}: expected object")
+        properties = schema.get("properties", {})
         for key in schema.get("required", []):
             if key not in payload:
                 raise ValueError(f"{path}: missing required field '{key}'")
-        for key, prop_schema in schema.get("properties", {}).items():
+        for key, prop_schema in properties.items():
             if key in payload:
                 _validate_minimal_schema(payload[key], prop_schema, f"{path}.{key}")
+        additional = schema.get("additionalProperties", True)
+        if additional is False:
+            for key in payload:
+                if key not in properties:
+                    raise ValueError(f"{path}.{key}: unexpected additional property")
+        elif isinstance(additional, dict):
+            for key, value in payload.items():
+                if key not in properties:
+                    _validate_minimal_schema(value, additional, f"{path}.{key}")
     elif schema_type == "array":
         if not isinstance(payload, list):
             raise ValueError(f"{path}: expected array")
@@ -786,6 +796,46 @@ def _validate_minimal_schema(payload: Any, schema: Dict[str, Any], path: str) ->
     elif isinstance(schema_type, list):
         if not any(_type_matches(payload, schema_type_option) for schema_type_option in schema_type):
             raise ValueError(f"{path}: expected one of types {schema_type}")
+
+    if "allOf" in schema:
+        all_errors = []
+        for sub_schema in schema.get("allOf", []):
+            try:
+                _validate_minimal_schema(payload, sub_schema, path)
+            except ValueError as exc:
+                all_errors.append(str(exc))
+        if all_errors:
+            details = "; ".join(all_errors)
+            raise ValueError(f"{path}: failed allOf validation ({details})")
+
+    if "anyOf" in schema:
+        any_errors = []
+        matched = False
+        for sub_schema in schema.get("anyOf", []):
+            try:
+                _validate_minimal_schema(payload, sub_schema, path)
+            except ValueError as exc:
+                any_errors.append(str(exc))
+            else:
+                matched = True
+                break
+        if not matched:
+            details = "; ".join(any_errors) if any_errors else "no matching schema"
+            raise ValueError(f"{path}: failed anyOf validation ({details})")
+
+    if "oneOf" in schema:
+        one_errors = []
+        match_count = 0
+        for sub_schema in schema.get("oneOf", []):
+            try:
+                _validate_minimal_schema(payload, sub_schema, path)
+            except ValueError as exc:
+                one_errors.append(str(exc))
+            else:
+                match_count += 1
+        if match_count != 1:
+            details = "; ".join(one_errors) if one_errors else "invalid oneOf match count"
+            raise ValueError(f"{path}: failed oneOf validation ({details})")
 
 
 def _type_matches(payload: Any, schema_type: str) -> bool:
