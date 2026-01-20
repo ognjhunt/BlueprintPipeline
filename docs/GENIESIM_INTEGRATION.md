@@ -66,6 +66,15 @@ export GENIESIM_AUTH_TOKEN_PATH=/etc/secrets/geniesim.jwt
   - `tools/geniesim_adapter/scene_graph.py`
   - `tools/geniesim_adapter/asset_index.py`
 
+## Regenerating gRPC stubs
+
+When the Genie Sim proto changes, regenerate the Python gRPC stubs from `geniesim_grpc.proto`:
+
+```bash
+pip install grpcio grpcio-tools
+python tools/geniesim_adapter/regenerate_stubs.py
+```
+
 ## Local mock server behavior
 
 When using the lightweight local mock server (`tools/geniesim_adapter/geniesim_server.py`) for development or CI, the servicer provides deterministic, non-error responses for core telemetry endpoints:
