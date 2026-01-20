@@ -18,7 +18,7 @@ metadata:
 data:
   MAX_TASKS: "50"
   GENERATE_EMBEDDINGS: "false"
-  REQUIRE_EMBEDDINGS: "false"
+  REQUIRE_EMBEDDINGS: "true"
   FILTER_COMMERCIAL: "true"
   COPY_USD: "true"
   ENABLE_MULTI_ROBOT: "true"
