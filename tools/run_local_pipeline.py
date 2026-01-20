@@ -1090,6 +1090,13 @@ class LocalPipelineRunner:
             require_server=require_server,
         )
         self._geniesim_preflight_report = report
+        self.geniesim_dir.mkdir(parents=True, exist_ok=True)
+        preflight_report_path = self.geniesim_dir / "preflight_report.json"
+        _safe_write_text(
+            preflight_report_path,
+            json.dumps(report, indent=2),
+            context="geniesim preflight report",
+        )
         if not require_server and not report.get("status", {}).get("server_running", False):
             self.log(
                 "Genie Sim server is not running; the local framework will start it automatically if needed.",
@@ -2830,6 +2837,7 @@ class LocalPipelineRunner:
                         "job_id": prior_job_payload.get("job_id"),
                         "job_status": prior_status,
                         "job_payload": str(job_path),
+                        "preflight_report_path": prior_job_payload.get("preflight_report_path"),
                     },
                 )
             if prior_key == idempotency_key and prior_status == "failed":
@@ -2869,6 +2877,12 @@ class LocalPipelineRunner:
             "genie-sim-local-runner",
             require_server=False,
         )
+        preflight_report_path = self.geniesim_dir / "preflight_report.json"
+        _safe_write_text(
+            preflight_report_path,
+            json.dumps(preflight_report, indent=2),
+            context="geniesim preflight report",
+        )
         try:
             if not preflight_report.get("ok", False):
                 raise NonRetryableError(
@@ -2883,7 +2897,10 @@ class LocalPipelineRunner:
                 success=False,
                 duration_seconds=time.time() - start_time,
                 message=str(exc),
-                outputs={"preflight": preflight_report},
+                outputs={
+                    "preflight": preflight_report,
+                    "preflight_report_path": str(preflight_report_path),
+                },
             )
 
         merged_manifest_path = self.geniesim_dir / "merged_scene_manifest.json"
@@ -2987,6 +3004,7 @@ class LocalPipelineRunner:
             "submitted_at": datetime.utcnow().isoformat() + "Z",
             "message": submission_message,
             "idempotency_key": idempotency_key,
+            "preflight_report_path": str(preflight_report_path),
             "bundle": {
                 "scene_graph": str(scene_graph_path),
                 "asset_index": str(asset_index_path),
@@ -3522,6 +3540,7 @@ class LocalPipelineRunner:
                         "job_id": job_id,
                         "job_status": job_status,
                         "job_payload": str(job_path),
+                        "preflight_report_path": str(preflight_report_path),
                     },
                 )
 
@@ -3560,6 +3579,7 @@ class LocalPipelineRunner:
                 "job_id": job_id,
                 "job_status": job_status,
                 "job_payload": str(job_path),
+                "preflight_report_path": str(preflight_report_path),
             },
         )
 
