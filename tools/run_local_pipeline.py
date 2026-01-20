@@ -3066,26 +3066,24 @@ class LocalPipelineRunner:
         )
         quality_settings = resolve_quality_settings()
         min_quality_score = quality_settings.min_quality_score
-        collection_timeout_env = os.getenv("GENIESIM_COLLECTION_TIMEOUT_S")
-        collection_timeout_seconds = None
-        if collection_timeout_env not in (None, ""):
+        def _parse_timeout_env(env_var: str) -> Optional[float]:
+            raw_value = os.getenv(env_var)
+            if raw_value in (None, ""):
+                return None
             try:
-                collection_timeout_seconds = float(collection_timeout_env)
-            except ValueError:
-                self.log(
-                    "GENIESIM_COLLECTION_TIMEOUT_S must be a number of seconds; ignoring invalid value.",
-                    "WARNING",
+                timeout_value = float(raw_value)
+            except ValueError as exc:
+                raise NonRetryableError(
+                    f"{env_var} must be a number of seconds; got {raw_value!r}."
+                ) from exc
+            if timeout_value <= 0:
+                raise NonRetryableError(
+                    f"{env_var} must be greater than 0 seconds; got {raw_value!r}."
                 )
-        submit_timeout_env = os.getenv("GENIESIM_SUBMIT_TIMEOUT_S")
-        submit_timeout_seconds = None
-        if submit_timeout_env not in (None, ""):
-            try:
-                submit_timeout_seconds = float(submit_timeout_env)
-            except ValueError:
-                self.log(
-                    "GENIESIM_SUBMIT_TIMEOUT_S must be a number of seconds; ignoring invalid value.",
-                    "WARNING",
-                )
+            return timeout_value
+
+        collection_timeout_seconds = _parse_timeout_env("GENIESIM_COLLECTION_TIMEOUT_S")
+        submit_timeout_seconds = _parse_timeout_env("GENIESIM_SUBMIT_TIMEOUT_S")
 
         idempotency_payload = {
             "scene_id": self.scene_id,
