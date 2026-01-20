@@ -26,7 +26,9 @@ Output:
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -34,8 +36,23 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# Robot specifications
-ROBOT_SPECS = {
+LOGGER = logging.getLogger(__name__)
+ROBOT_SPECS_ENV_VAR = "ROBOT_SPECS_PATH"
+POLICY_CONFIGS_DIR = Path(__file__).resolve().parents[1] / "policy_configs"
+ROBOT_SPECS_FILENAMES = (
+    "robot_specs.json",
+    "robot_specs.yaml",
+    "robot_specs.yml",
+    "robot_embodiments.json",
+    "robot_embodiments.yaml",
+    "robot_embodiments.yml",
+)
+
+# Robot specifications default schema:
+# {"robot_name": {"dof": int, "reach_m": float, "payload_kg": float,
+#  "joint_limits": [[min, max], ...], "gripper_type": str,
+#  "gripper_width_range_m": [min, max]}}
+DEFAULT_ROBOT_SPECS = {
     "franka": {
         "dof": 7,
         "reach_m": 0.855,
@@ -77,6 +94,138 @@ ROBOT_SPECS = {
         "joint_limits": [(-1.57, 1.57)] * 7,
     },
 }
+
+_ROBOT_SPECS_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def _load_yaml_payload(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        import yaml
+    except ImportError:
+        LOGGER.error("PyYAML is required to load robot specs from %s", path)
+        return None
+    return yaml.safe_load(path.read_text())
+
+
+def _load_robot_specs_file(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+
+    if path.suffix.lower() in {".json"}:
+        return json.loads(path.read_text())
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        return _load_yaml_payload(path)
+
+    LOGGER.error("Unsupported robot specs format: %s", path)
+    return None
+
+
+def _find_robot_specs_path() -> Optional[Path]:
+    env_path = os.environ.get(ROBOT_SPECS_ENV_VAR)
+    if env_path:
+        candidate = Path(env_path).expanduser()
+        if candidate.is_dir():
+            for filename in ROBOT_SPECS_FILENAMES:
+                file_path = candidate / filename
+                if file_path.exists():
+                    LOGGER.info("Loading robot specs from %s", file_path)
+                    return file_path
+        else:
+            LOGGER.info("Loading robot specs from %s", candidate)
+            return candidate
+        LOGGER.error("ROBOT_SPECS_PATH provided but no valid file found at %s", candidate)
+
+    if POLICY_CONFIGS_DIR.exists():
+        for filename in ROBOT_SPECS_FILENAMES:
+            file_path = POLICY_CONFIGS_DIR / filename
+            if file_path.exists():
+                LOGGER.info("Loading robot specs from %s", file_path)
+                return file_path
+
+    return None
+
+
+def _validate_robot_spec(name: str, spec: Dict[str, Any]) -> List[str]:
+    errors = []
+    required_fields = ("dof", "reach_m", "payload_kg", "joint_limits")
+    for field_name in required_fields:
+        if field_name not in spec:
+            errors.append(f"missing required field '{field_name}'")
+
+    dof = spec.get("dof")
+    if not isinstance(dof, int) or dof <= 0:
+        errors.append("dof must be a positive integer")
+
+    for numeric_field in ("reach_m", "payload_kg"):
+        value = spec.get(numeric_field)
+        if not isinstance(value, (int, float)) or value <= 0:
+            errors.append(f"{numeric_field} must be a positive number")
+
+    joint_limits = spec.get("joint_limits")
+    if not isinstance(joint_limits, list) or not joint_limits:
+        errors.append("joint_limits must be a non-empty list of [min, max] pairs")
+    else:
+        for limit in joint_limits:
+            if (
+                not isinstance(limit, (list, tuple))
+                or len(limit) != 2
+                or not all(isinstance(v, (int, float)) for v in limit)
+                or limit[0] >= limit[1]
+            ):
+                errors.append("joint_limits entries must be [min, max] numeric pairs")
+                break
+        if isinstance(dof, int) and dof > 0 and len(joint_limits) != dof:
+            errors.append("joint_limits length must match dof")
+
+    if errors:
+        LOGGER.error("Robot spec validation failed for '%s': %s", name, "; ".join(errors))
+    return errors
+
+
+def _merge_robot_specs(
+    defaults: Dict[str, Dict[str, Any]],
+    overrides: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    merged = {name: spec.copy() for name, spec in defaults.items()}
+    for name, override in overrides.items():
+        if not isinstance(override, dict):
+            LOGGER.error("Robot spec override for '%s' must be a mapping", name)
+            continue
+        merged.setdefault(name, {})
+        merged[name].update(override)
+
+    validated: Dict[str, Dict[str, Any]] = {}
+    for name, spec in merged.items():
+        errors = _validate_robot_spec(name, spec)
+        if errors and name in defaults:
+            LOGGER.error("Using default specs for '%s' due to validation errors", name)
+            validated[name] = defaults[name].copy()
+        elif errors:
+            LOGGER.error("Dropping invalid robot spec for '%s'", name)
+        else:
+            validated[name] = spec
+
+    return validated
+
+
+def _load_robot_specs() -> Dict[str, Dict[str, Any]]:
+    user_specs: Dict[str, Dict[str, Any]] = {}
+    specs_path = _find_robot_specs_path()
+    if specs_path:
+        payload = _load_robot_specs_file(specs_path)
+        if isinstance(payload, dict):
+            user_specs = payload
+        else:
+            LOGGER.error("Robot specs file %s did not contain a mapping", specs_path)
+
+    return _merge_robot_specs(DEFAULT_ROBOT_SPECS, user_specs)
+
+
+def get_robot_specs() -> Dict[str, Dict[str, Any]]:
+    global _ROBOT_SPECS_CACHE
+    if _ROBOT_SPECS_CACHE is None:
+        _ROBOT_SPECS_CACHE = _load_robot_specs()
+    return _ROBOT_SPECS_CACHE
 
 
 @dataclass
@@ -123,8 +272,9 @@ class EmbodimentTransferMatrix:
 
 def compute_kinematic_similarity(source: str, target: str) -> float:
     """Compute kinematic similarity between robots."""
-    source_spec = ROBOT_SPECS.get(source, {})
-    target_spec = ROBOT_SPECS.get(target, {})
+    robot_specs = get_robot_specs()
+    source_spec = robot_specs.get(source, {})
+    target_spec = robot_specs.get(target, {})
 
     if not source_spec or not target_spec:
         return 0.0
@@ -157,8 +307,9 @@ def compute_kinematic_similarity(source: str, target: str) -> float:
 
 def compute_workspace_overlap(source: str, target: str) -> float:
     """Compute workspace overlap between robots."""
-    source_spec = ROBOT_SPECS.get(source, {})
-    target_spec = ROBOT_SPECS.get(target, {})
+    robot_specs = get_robot_specs()
+    source_spec = robot_specs.get(source, {})
+    target_spec = robot_specs.get(target, {})
 
     if not source_spec or not target_spec:
         return 0.0
@@ -178,8 +329,9 @@ def compute_workspace_overlap(source: str, target: str) -> float:
 
 def compute_action_space_compatibility(source: str, target: str) -> float:
     """Compute action space compatibility."""
-    source_spec = ROBOT_SPECS.get(source, {})
-    target_spec = ROBOT_SPECS.get(target, {})
+    robot_specs = get_robot_specs()
+    source_spec = robot_specs.get(source, {})
+    target_spec = robot_specs.get(target, {})
 
     if not source_spec or not target_spec:
         return 0.0
@@ -231,9 +383,11 @@ def create_default_embodiment_transfer_exporter(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    robot_specs = get_robot_specs()
+
     # Compute compatibility with all other robots
     compatibility_matrix = {}
-    target_robots = [r for r in ROBOT_SPECS.keys() if r != source_robot]
+    target_robots = [r for r in robot_specs.keys() if r != source_robot]
 
     for target in target_robots:
         kinematic_sim = compute_kinematic_similarity(source_robot, target)
@@ -252,13 +406,13 @@ def create_default_embodiment_transfer_exporter(
         predicted_success = compatibility_score * 0.9
 
         # DOF match
-        source_dof = ROBOT_SPECS[source_robot]["dof"]
-        target_dof = ROBOT_SPECS[target]["dof"]
+        source_dof = robot_specs[source_robot]["dof"]
+        target_dof = robot_specs[target]["dof"]
         dof_match = (source_dof == target_dof)
 
         # Gripper compatibility
-        source_gripper = ROBOT_SPECS[source_robot]["gripper_type"]
-        target_gripper = ROBOT_SPECS[target]["gripper_type"]
+        source_gripper = robot_specs[source_robot]["gripper_type"]
+        target_gripper = robot_specs[target]["gripper_type"]
 
         if source_gripper == target_gripper:
             gripper_compat = "identical"
@@ -268,7 +422,7 @@ def create_default_embodiment_transfer_exporter(
             gripper_compat = "different"
 
         # Reach ratio
-        reach_ratio = ROBOT_SPECS[target]["reach_m"] / ROBOT_SPECS[source_robot]["reach_m"]
+        reach_ratio = robot_specs[target]["reach_m"] / robot_specs[source_robot]["reach_m"]
 
         # Transfer strategy
         if compatibility_score >= 0.8:
