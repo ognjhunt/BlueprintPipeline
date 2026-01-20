@@ -98,6 +98,112 @@ CONTRACT_SCHEMAS = {
 logger = logging.getLogger(__name__)
 
 
+def _safe_int(value: Any, default: int = 0, field_name: str = "value") -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        logger.warning(
+            "[GENIESIM-SUBMIT] Expected int for %s, got bool %r; using default %s.",
+            field_name,
+            value,
+            default,
+        )
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        logger.warning(
+            "[GENIESIM-SUBMIT] Expected int for %s, got non-integer float %r; using default %s.",
+            field_name,
+            value,
+            default,
+        )
+        return default
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            logger.warning(
+                "[GENIESIM-SUBMIT] Expected int for %s, got empty string; using default %s.",
+                field_name,
+                default,
+            )
+            return default
+        try:
+            return int(stripped)
+        except ValueError:
+            try:
+                float_value = float(stripped)
+            except ValueError:
+                logger.warning(
+                    "[GENIESIM-SUBMIT] Expected int for %s, got %r; using default %s.",
+                    field_name,
+                    value,
+                    default,
+                )
+                return default
+            if float_value.is_integer():
+                return int(float_value)
+            logger.warning(
+                "[GENIESIM-SUBMIT] Expected int for %s, got %r; using default %s.",
+                field_name,
+                value,
+                default,
+            )
+            return default
+    logger.warning(
+        "[GENIESIM-SUBMIT] Expected int for %s, got %s %r; using default %s.",
+        field_name,
+        type(value).__name__,
+        value,
+        default,
+    )
+    return default
+
+
+def _safe_float(value: Any, default: Optional[float] = None, field_name: str = "value") -> Optional[float]:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        logger.warning(
+            "[GENIESIM-SUBMIT] Expected float for %s, got bool %r; using default %s.",
+            field_name,
+            value,
+            default,
+        )
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            logger.warning(
+                "[GENIESIM-SUBMIT] Expected float for %s, got empty string; using default %s.",
+                field_name,
+                default,
+            )
+            return default
+        try:
+            return float(stripped)
+        except ValueError:
+            logger.warning(
+                "[GENIESIM-SUBMIT] Expected float for %s, got %r; using default %s.",
+                field_name,
+                value,
+                default,
+            )
+            return default
+    logger.warning(
+        "[GENIESIM-SUBMIT] Expected float for %s, got %s %r; using default %s.",
+        field_name,
+        type(value).__name__,
+        value,
+        default,
+    )
+    return default
+
+
 def _is_production_mode() -> bool:
     pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
     bp_env = os.getenv("BP_ENV", "").lower()
@@ -197,18 +303,51 @@ def _aggregate_quality_metrics(
     for robot, result in local_run_results.items():
         if result is None:
             continue
-        episodes_collected += getattr(result, "episodes_collected", 0) or 0
-        collision_free_episodes += getattr(result, "collision_free_episodes", 0) or 0
-        collision_info_episodes += getattr(result, "collision_info_episodes", 0) or 0
-        task_success_episodes += getattr(result, "task_success_episodes", 0) or 0
-        task_success_info_episodes += getattr(result, "task_success_info_episodes", 0) or 0
+        episodes_collected += _safe_int(
+            getattr(result, "episodes_collected", None),
+            field_name=f"{robot}.episodes_collected",
+        )
+        collision_free_episodes += _safe_int(
+            getattr(result, "collision_free_episodes", None),
+            field_name=f"{robot}.collision_free_episodes",
+        )
+        collision_info_episodes += _safe_int(
+            getattr(result, "collision_info_episodes", None),
+            field_name=f"{robot}.collision_info_episodes",
+        )
+        task_success_episodes += _safe_int(
+            getattr(result, "task_success_episodes", None),
+            field_name=f"{robot}.task_success_episodes",
+        )
+        task_success_info_episodes += _safe_int(
+            getattr(result, "task_success_info_episodes", None),
+            field_name=f"{robot}.task_success_info_episodes",
+        )
         by_robot[robot] = {
-            "collision_free_rate": getattr(result, "collision_free_rate", None),
-            "collision_free_episodes": getattr(result, "collision_free_episodes", 0),
-            "collision_info_episodes": getattr(result, "collision_info_episodes", 0),
-            "task_success_rate": getattr(result, "task_success_rate", None),
-            "task_success_episodes": getattr(result, "task_success_episodes", 0),
-            "task_success_info_episodes": getattr(result, "task_success_info_episodes", 0),
+            "collision_free_rate": _safe_float(
+                getattr(result, "collision_free_rate", None),
+                field_name=f"{robot}.collision_free_rate",
+            ),
+            "collision_free_episodes": _safe_int(
+                getattr(result, "collision_free_episodes", None),
+                field_name=f"{robot}.collision_free_episodes",
+            ),
+            "collision_info_episodes": _safe_int(
+                getattr(result, "collision_info_episodes", None),
+                field_name=f"{robot}.collision_info_episodes",
+            ),
+            "task_success_rate": _safe_float(
+                getattr(result, "task_success_rate", None),
+                field_name=f"{robot}.task_success_rate",
+            ),
+            "task_success_episodes": _safe_int(
+                getattr(result, "task_success_episodes", None),
+                field_name=f"{robot}.task_success_episodes",
+            ),
+            "task_success_info_episodes": _safe_int(
+                getattr(result, "task_success_info_episodes", None),
+                field_name=f"{robot}.task_success_info_episodes",
+            ),
         }
 
     collision_free_rate = (
@@ -1138,8 +1277,18 @@ def main() -> int:
 
         robot_failures = {
             robot: {
-                "episodes_collected": getattr(result, "episodes_collected", 0) if result else 0,
-                "episodes_passed": getattr(result, "episodes_passed", 0) if result else 0,
+                "episodes_collected": _safe_int(
+                    getattr(result, "episodes_collected", None),
+                    field_name=f"{robot}.episodes_collected",
+                )
+                if result
+                else 0,
+                "episodes_passed": _safe_int(
+                    getattr(result, "episodes_passed", None),
+                    field_name=f"{robot}.episodes_passed",
+                )
+                if result
+                else 0,
                 "errors": getattr(result, "errors", []) if result else [],
             }
             for robot, result in local_run_results.items()
@@ -1673,11 +1822,21 @@ def main() -> int:
             firebase_payload["status_by_robot"] = firebase_upload_status_by_robot
         job_payload["firebase_upload"] = firebase_payload
     episodes_collected_total = sum(
-        getattr(result, "episodes_collected", 0) if result else 0
+        _safe_int(
+            getattr(result, "episodes_collected", None),
+            field_name="total.episodes_collected",
+        )
+        if result
+        else 0
         for result in local_run_results.values()
     )
     episodes_passed_total = sum(
-        getattr(result, "episodes_passed", 0) if result else 0
+        _safe_int(
+            getattr(result, "episodes_passed", None),
+            field_name="total.episodes_passed",
+        )
+        if result
+        else 0
         for result in local_run_results.values()
     )
     quality_metrics_summary = _aggregate_quality_metrics(local_run_results) if local_run_results else {}
@@ -1698,14 +1857,52 @@ def main() -> int:
         local_execution["by_robot"] = {
             current_robot: {
                 "success": bool(result and result.success),
-                "episodes_collected": getattr(result, "episodes_collected", 0) if result else 0,
-                "episodes_passed": getattr(result, "episodes_passed", 0) if result else 0,
-                "collision_free_rate": getattr(result, "collision_free_rate", None) if result else None,
-                "collision_free_episodes": getattr(result, "collision_free_episodes", 0) if result else 0,
-                "collision_info_episodes": getattr(result, "collision_info_episodes", 0) if result else 0,
-                "task_success_rate": getattr(result, "task_success_rate", None) if result else None,
-                "task_success_episodes": getattr(result, "task_success_episodes", 0) if result else 0,
-                "task_success_info_episodes": getattr(result, "task_success_info_episodes", 0)
+                "episodes_collected": _safe_int(
+                    getattr(result, "episodes_collected", None),
+                    field_name=f"{current_robot}.episodes_collected",
+                )
+                if result
+                else 0,
+                "episodes_passed": _safe_int(
+                    getattr(result, "episodes_passed", None),
+                    field_name=f"{current_robot}.episodes_passed",
+                )
+                if result
+                else 0,
+                "collision_free_rate": _safe_float(
+                    getattr(result, "collision_free_rate", None),
+                    field_name=f"{current_robot}.collision_free_rate",
+                )
+                if result
+                else None,
+                "collision_free_episodes": _safe_int(
+                    getattr(result, "collision_free_episodes", None),
+                    field_name=f"{current_robot}.collision_free_episodes",
+                )
+                if result
+                else 0,
+                "collision_info_episodes": _safe_int(
+                    getattr(result, "collision_info_episodes", None),
+                    field_name=f"{current_robot}.collision_info_episodes",
+                )
+                if result
+                else 0,
+                "task_success_rate": _safe_float(
+                    getattr(result, "task_success_rate", None),
+                    field_name=f"{current_robot}.task_success_rate",
+                )
+                if result
+                else None,
+                "task_success_episodes": _safe_int(
+                    getattr(result, "task_success_episodes", None),
+                    field_name=f"{current_robot}.task_success_episodes",
+                )
+                if result
+                else 0,
+                "task_success_info_episodes": _safe_int(
+                    getattr(result, "task_success_info_episodes", None),
+                    field_name=f"{current_robot}.task_success_info_episodes",
+                )
                 if result
                 else 0,
                 "output_dir": str(output_dirs.get(current_robot)) if output_dirs else None,
