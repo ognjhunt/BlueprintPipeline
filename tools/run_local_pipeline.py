@@ -44,6 +44,7 @@ Environment overrides:
     - DEFAULT_CAMERA_IDS: Comma-separated camera IDs for replicator capture config.
     - DEFAULT_CAMERA_RESOLUTION: Resolution as "WIDTHxHEIGHT" or "WIDTH,HEIGHT".
     - DEFAULT_STREAM_IDS: Comma-separated stream IDs for replicator capture config.
+    - FIREBASE_REQUIRE_ATOMIC_UPLOAD: When true, rollback all successful uploads if any robot fails.
     - GCS_MOUNT_ROOT: Base path used for local GCS-style mount mapping.
     - PIPELINE_FAIL_FAST: Stop the pipeline on the first failure when true.
     - REQUIRE_BALANCED_ROBOT_EPISODES: Fail validation when cross-robot episode counts mismatch.
@@ -565,6 +566,28 @@ class LocalPipelineRunner:
         merged["left_behind"].update(base_report.get("left_behind", {}))
         merged["left_behind"].update(extra_report.get("left_behind", {}))
         return merged
+
+    @staticmethod
+    def _merge_firebase_cleanup_by_robot(
+        base_report: Dict[str, Any],
+        extra_report: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        cleaned = extra_report.get("cleaned", {})
+        left_behind = extra_report.get("left_behind", {})
+        for robot in set(cleaned) | set(left_behind):
+            existing = base_report.get(robot)
+            if existing is None:
+                merged_entry: Dict[str, Any] = {}
+            elif isinstance(existing, dict) and ("cleanup" in existing or "left_behind" in existing):
+                merged_entry = dict(existing)
+            else:
+                merged_entry = {"cleanup": existing}
+            if robot in cleaned:
+                merged_entry["cleanup"] = cleaned[robot]
+            if robot in left_behind:
+                merged_entry["left_behind"] = left_behind[robot]
+            base_report[robot] = merged_entry
+        return base_report
 
     def _resolve_default_capture_config(self) -> Dict[str, Any]:
         default_cameras = ["wrist", "overhead"]
@@ -2834,6 +2857,10 @@ class LocalPipelineRunner:
             os.getenv("FIREBASE_UPLOAD_REQUIRED"),
             default=resolve_production_mode(),
         )
+        firebase_require_atomic = parse_bool_env(
+            os.getenv("FIREBASE_REQUIRE_ATOMIC_UPLOAD"),
+            default=False,
+        )
         import uuid
 
         job_id = f"local-{uuid.uuid4()}"
@@ -3375,6 +3402,7 @@ class LocalPipelineRunner:
 
         firebase_upload_status_by_robot: Dict[str, str] = {}
         firebase_cleanup_by_robot: Dict[str, Any] = {}
+        successful_upload_robots: List[str] = []
         firebase_prefix = resolve_firebase_upload_prefix()
         if local_run_results:
             from tools.firebase_upload.firebase_upload_orchestrator import (
@@ -3395,6 +3423,7 @@ class LocalPipelineRunner:
                     )
                     firebase_upload_summary[current_robot] = firebase_result.summary
                     firebase_upload_status_by_robot[current_robot] = "completed"
+                    successful_upload_robots.append(current_robot)
                 except FirebaseUploadOrchestratorError as exc:
                     firebase_upload_summary[current_robot] = exc.retry_summary or exc.summary or {}
                     firebase_upload_error[current_robot] = str(exc)
@@ -3403,7 +3432,9 @@ class LocalPipelineRunner:
                     )
                     firebase_upload_status_by_robot[current_robot] = "failed"
                     if exc.cleanup_result:
-                        firebase_cleanup_by_robot[current_robot] = exc.cleanup_result
+                        firebase_cleanup_by_robot[current_robot] = {
+                            "cleanup": exc.cleanup_result,
+                        }
                     self.log(
                         f"Firebase upload failed: {self._summarize_exception(exc)}",
                         "WARNING",
@@ -3413,6 +3444,29 @@ class LocalPipelineRunner:
             elif firebase_upload_status_by_robot:
                 firebase_upload_status = "completed"
             job_payload["firebase_upload_status"] = firebase_upload_status
+
+            failed_upload_robots = [
+                current_robot
+                for current_robot, status in firebase_upload_status_by_robot.items()
+                if status == "failed"
+            ]
+            if failed_upload_robots and firebase_require_atomic:
+                firebase_atomic_cleanup = self._cleanup_firebase_artifacts(
+                    firebase_prefix=firebase_prefix,
+                    job_id=job_id,
+                    robots=successful_upload_robots,
+                    upload_summaries=firebase_upload_summary,
+                    enabled=cleanup_enabled,
+                    multi_robot=multi_robot,
+                )
+                cleanup_details["firebase"] = self._merge_cleanup_reports(
+                    cleanup_details.get("firebase"),
+                    firebase_atomic_cleanup,
+                )
+                firebase_cleanup_by_robot = self._merge_firebase_cleanup_by_robot(
+                    firebase_cleanup_by_robot,
+                    firebase_atomic_cleanup,
+                )
 
             if firebase_upload_status == "failed" and firebase_upload_required:
                 failure_reason = (
@@ -3427,11 +3481,6 @@ class LocalPipelineRunner:
                     "errors": firebase_upload_error or None,
                     "cleanup": firebase_cleanup_by_robot or None,
                 }
-                failed_upload_robots = [
-                    current_robot
-                    for current_robot, status in firebase_upload_status_by_robot.items()
-                    if status == "failed"
-                ]
                 cleanup_details["local"] = self._merge_cleanup_reports(
                     cleanup_details.get("local"),
                     self._cleanup_local_output_dirs(
@@ -3450,6 +3499,10 @@ class LocalPipelineRunner:
                         enabled=cleanup_enabled,
                         multi_robot=multi_robot,
                     ),
+                )
+                firebase_cleanup_by_robot = self._merge_firebase_cleanup_by_robot(
+                    firebase_cleanup_by_robot,
+                    cleanup_details["firebase"],
                 )
                 failure_details["cleanup"] = cleanup_details
                 job_payload["failure_details"] = failure_details or None
