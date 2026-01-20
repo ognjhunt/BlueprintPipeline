@@ -10,7 +10,7 @@ Genie Sim Asset Index stores:
     - Mass properties
     - Texture variants
     - Semantic descriptions (for RAG retrieval)
-    - 2048-dim embeddings (optional, requires embedding model)
+    - Embeddings sized to configured embedding_dim (optional, requires embedding model)
 
 References:
     - Genie Sim 3.0 Paper: https://arxiv.org/html/2601.02078v1
@@ -70,7 +70,7 @@ class GenieSimAsset:
     # Variants
     texture_variants: Dict[str, str] = field(default_factory=dict)
 
-    # Embedding (2048-dim for QWEN, generated separately)
+    # Embedding (size from embedding_dim, generated separately)
     embedding: Optional[List[float]] = None
     embedding_status: str = "pending"
 
@@ -303,6 +303,7 @@ class AssetIndexBuilder:
         generate_embeddings: bool = False,
         embedding_model: Optional[str] = None,
         embedding_provider: Optional[str] = None,
+        embedding_dim: Optional[int] = None,
         verbose: bool = True,
         strict_category_validation: Optional[bool] = None,
         require_embeddings: Optional[bool] = None,
@@ -314,6 +315,7 @@ class AssetIndexBuilder:
             generate_embeddings: Whether to generate embeddings (requires model)
             embedding_model: Embedding model name (e.g., "qwen-text-embedding-v4")
             embedding_provider: Embedding provider ("openai" or "qwen")
+            embedding_dim: Embedding dimensionality (overrides GENIESIM_EMBEDDING_DIM)
             require_embeddings: Require real embeddings (disallow placeholders)
             verbose: Print progress
         """
@@ -339,6 +341,24 @@ class AssetIndexBuilder:
             )
         else:
             self.require_embeddings = require_embeddings
+
+        if embedding_dim is None:
+            embedding_dim_env = os.getenv("GENIESIM_EMBEDDING_DIM", "").strip()
+            if embedding_dim_env:
+                try:
+                    embedding_dim = int(embedding_dim_env)
+                except ValueError:
+                    self.log(
+                        f"Invalid GENIESIM_EMBEDDING_DIM={embedding_dim_env!r}; "
+                        "using default embedding_dim of 2048.",
+                        "WARNING",
+                    )
+                    embedding_dim = None
+        if embedding_dim is None:
+            embedding_dim = 2048
+        if embedding_dim <= 0:
+            raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
+        self.embedding_dim = embedding_dim
 
         # Embedding client (initialized lazily)
         self._embedding_client = None
@@ -398,6 +418,7 @@ class AssetIndexBuilder:
             "total_assets": len(assets),
             "commercial_assets": sum(1 for a in assets if a.commercial_ok),
             "embedding_model": self.embedding_model if self.generate_embeddings else None,
+            "embedding_dim": self.embedding_dim,
             "embedding_errors": embedding_errors,
             "embedding_failure_rate": embedding_failure_rate,
             "embedding_failures": embedding_failures,
@@ -736,7 +757,9 @@ class AssetIndexBuilder:
             )
 
         try:
-            return self._request_embedding(text, config), "ok", ""
+            embedding = self._request_embedding(text, config)
+            embedding = self._normalize_embedding_length(embedding, source="provider")
+            return embedding, "ok", ""
         except Exception as e:
             if self.require_embeddings:
                 raise RuntimeError(
@@ -751,6 +774,25 @@ class AssetIndexBuilder:
                 "placeholder",
                 f"Embedding request failed; placeholder embedding used: {e}",
             )
+
+    def _normalize_embedding_length(self, embedding: List[float], source: str) -> List[float]:
+        if len(embedding) == self.embedding_dim:
+            return embedding
+        message = (
+            f"Embedding length {len(embedding)} from {source} does not match "
+            f"expected {self.embedding_dim}."
+        )
+        if self.require_embeddings or self._is_production():
+            raise RuntimeError(message)
+        self.log(f"{message} Padding/truncating to expected size.", "WARNING")
+        if len(embedding) > self.embedding_dim:
+            return embedding[: self.embedding_dim]
+        if not embedding:
+            return [0.0] * self.embedding_dim
+        padded = list(embedding)
+        while len(padded) < self.embedding_dim:
+            padded.extend(padded[: min(len(padded), self.embedding_dim - len(padded))])
+        return padded[: self.embedding_dim]
 
     def _request_embedding(self, text: str, config: Dict[str, str]) -> List[float]:
         payload = {
@@ -798,10 +840,10 @@ class AssetIndexBuilder:
             val = int.from_bytes(text_hash[i:i + 4], "big")
             embedding.append((val / (2**32)) * 2 - 1)
 
-        while len(embedding) < 2048:
-            embedding.extend(embedding[:min(len(embedding), 2048 - len(embedding))])
+        while len(embedding) < self.embedding_dim:
+            embedding.extend(embedding[:min(len(embedding), self.embedding_dim - len(embedding))])
 
-        return embedding[:2048]
+        return embedding[: self.embedding_dim]
 
 
 # =============================================================================
