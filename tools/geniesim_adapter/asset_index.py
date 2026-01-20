@@ -22,6 +22,7 @@ import json
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 from urllib import error as url_error
 from urllib import request as url_request
@@ -609,32 +610,117 @@ class AssetIndexBuilder:
             return None
 
     @staticmethod
-    def _parse_license_value(value: Optional[str]) -> Optional[LicenseType]:
-        if not value:
-            return None
+    def _normalize_license_string(value: str) -> str:
         normalized = str(value).strip().lower()
+        normalized = normalized.replace("_", "-")
+        normalized = normalized.replace("(", " ").replace(")", " ")
+        normalized = " ".join(normalized.split())
+        for prefix in ("license:", "spdx:"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):].strip()
+        return normalized
+
+    @staticmethod
+    def _parse_license_value(value: Optional[str]) -> tuple[Optional[LicenseType], Dict[str, Any]]:
+        if not value:
+            return None, {"raw": value, "normalized": None, "match": None, "candidates": []}
+        raw = str(value).strip()
+        normalized = GenieSimAssetIndexBuilder._normalize_license_string(raw)
         license_map = {
             "cc0": LicenseType.CC0,
+            "cc0-1.0": LicenseType.CC0_1_0,
             "cc-by": LicenseType.CC_BY,
-            "cc by": LicenseType.CC_BY,
+            "cc-by-4.0": LicenseType.CC_BY_4_0,
             "cc-by-sa": LicenseType.CC_BY_SA,
             "cc-by-nc": LicenseType.CC_BY_NC,
             "cc-by-nc-sa": LicenseType.CC_BY_NC_SA,
             "academic-only": LicenseType.ACADEMIC_ONLY,
             "research-only": LicenseType.RESEARCH_ONLY,
             "mit": LicenseType.MIT,
-            "apache": LicenseType.APACHE_2,
             "apache-2.0": LicenseType.APACHE_2,
+            "bsd-2-clause": LicenseType.BSD_2_CLAUSE,
+            "bsd-3-clause": LicenseType.BSD_3_CLAUSE,
+            "gpl-3.0": LicenseType.GPL_3_0,
+            "lgpl-3.0": LicenseType.LGPL_3_0,
+            "mpl-2.0": LicenseType.MPL_2_0,
             "proprietary-commercial": LicenseType.PROPRIETARY_COMMERCIAL,
             "proprietary": LicenseType.PROPRIETARY_COMMERCIAL,
             "nvidia-omniverse": LicenseType.NVIDIA_OMNIVERSE,
-            "nvidia": LicenseType.NVIDIA_OMNIVERSE,
             "simready": LicenseType.SIMREADY,
         }
-        for key, license_type in license_map.items():
-            if key in normalized:
-                return license_type
-        return None
+        synonym_map = {
+            "cc by": LicenseType.CC_BY,
+            "cc-by 4.0": LicenseType.CC_BY_4_0,
+            "cc by 4.0": LicenseType.CC_BY_4_0,
+            "creative commons attribution 4.0": LicenseType.CC_BY_4_0,
+            "creative commons attribution 4.0 international": LicenseType.CC_BY_4_0,
+            "cc0 1.0": LicenseType.CC0_1_0,
+            "cc0-1": LicenseType.CC0_1_0,
+            "creative commons zero 1.0": LicenseType.CC0_1_0,
+            "apache": LicenseType.APACHE_2,
+            "apache-2": LicenseType.APACHE_2,
+            "apache 2": LicenseType.APACHE_2,
+            "apache 2.0": LicenseType.APACHE_2,
+            "apache license 2.0": LicenseType.APACHE_2,
+            "mit license": LicenseType.MIT,
+            "bsd 2 clause": LicenseType.BSD_2_CLAUSE,
+            "bsd 2-clause": LicenseType.BSD_2_CLAUSE,
+            "bsd 3 clause": LicenseType.BSD_3_CLAUSE,
+            "bsd 3-clause": LicenseType.BSD_3_CLAUSE,
+            "gpl-3": LicenseType.GPL_3_0,
+            "gpl-3.0-only": LicenseType.GPL_3_0,
+            "gpl v3": LicenseType.GPL_3_0,
+            "gplv3": LicenseType.GPL_3_0,
+            "lgpl-3": LicenseType.LGPL_3_0,
+            "lgpl-3.0-only": LicenseType.LGPL_3_0,
+            "lgpl v3": LicenseType.LGPL_3_0,
+            "lgplv3": LicenseType.LGPL_3_0,
+            "mpl 2.0": LicenseType.MPL_2_0,
+            "mozilla public license 2.0": LicenseType.MPL_2_0,
+            "nvidia": LicenseType.NVIDIA_OMNIVERSE,
+        }
+
+        if normalized in license_map:
+            return license_map[normalized], {
+                "raw": raw,
+                "normalized": normalized,
+                "match": "exact",
+                "candidates": [],
+            }
+        if normalized in synonym_map:
+            return synonym_map[normalized], {
+                "raw": raw,
+                "normalized": normalized,
+                "match": "synonym",
+                "candidates": [],
+            }
+
+        if re.search(r"\b(or|and)\b|/|,", normalized):
+            parts = re.split(r"\s*(?:/|,|\bor\b|\band\b)\s*", normalized)
+            matches: List[LicenseType] = []
+            for part in parts:
+                if not part:
+                    continue
+                part = part.strip()
+                if part in license_map:
+                    matches.append(license_map[part])
+                elif part in synonym_map:
+                    matches.append(synonym_map[part])
+            unique_matches = list(dict.fromkeys(matches))
+            if len(unique_matches) > 1:
+                return None, {
+                    "raw": raw,
+                    "normalized": normalized,
+                    "match": "ambiguous",
+                    "candidates": [m.value for m in unique_matches],
+                }
+
+        return None, {
+            "raw": raw,
+            "normalized": normalized,
+            "match": "unknown",
+            "candidates": [],
+        }
 
     def _resolve_commercial_status(
         self,
@@ -652,30 +738,54 @@ class AssetIndexBuilder:
             elif isinstance(provenance_license, str):
                 license_raw = provenance_license
 
-        license_type = self._parse_license_value(license_raw)
+        license_type, parse_info = self._parse_license_value(license_raw)
         commercial_ok: Optional[bool] = None
         if license_type is not None:
             commercial_ok = license_type in COMMERCIAL_OK_LICENSES
 
-        if commercial_ok is None and isinstance(provenance, dict):
+        provenance_license = None
+        if isinstance(provenance, dict):
             provenance_license = provenance.get("license")
+
+        if license_type is None and license_raw:
             if isinstance(provenance_license, dict) and "commercial_ok" in provenance_license:
                 commercial_ok = bool(provenance_license.get("commercial_ok"))
-            elif "commercial_ok" in provenance:
+            else:
+                commercial_ok = False
+        else:
+            if commercial_ok is None and isinstance(provenance_license, dict):
+                if "commercial_ok" in provenance_license:
+                    commercial_ok = bool(provenance_license.get("commercial_ok"))
+            if commercial_ok is None and isinstance(provenance, dict) and "commercial_ok" in provenance:
                 commercial_ok = bool(provenance.get("commercial_ok"))
-
-        if commercial_ok is None and isinstance(asset_data.get("commercial_ok"), bool):
-            commercial_ok = bool(asset_data.get("commercial_ok"))
-
-        if commercial_ok is None:
-            commercial_ok = asset_source not in ["geniesim_assets", "external_nc"]
+            if commercial_ok is None and isinstance(asset_data.get("commercial_ok"), bool):
+                commercial_ok = bool(asset_data.get("commercial_ok"))
+            if commercial_ok is None:
+                commercial_ok = asset_source not in ["geniesim_assets", "external_nc"]
 
         if license_type is not None:
             license_value = license_type.value
         elif license_raw:
-            license_value = str(license_raw)
+            license_value = "unknown"
         else:
             license_value = "proprietary" if commercial_ok else "unknown"
+
+        if license_raw and license_type is None:
+            log_payload = {
+                "event": "license_resolution",
+                "status": parse_info.get("match"),
+                "asset_id": obj.get("id"),
+                "license_raw": license_raw,
+                "normalized": parse_info.get("normalized"),
+                "candidates": parse_info.get("candidates", []),
+                "commercial_ok": commercial_ok,
+                "provenance_commercial_ok": (
+                    provenance_license.get("commercial_ok")
+                    if isinstance(provenance_license, dict)
+                    else None
+                ),
+            }
+            self.log(json.dumps(log_payload), "WARNING")
 
         return commercial_ok, license_value
 
