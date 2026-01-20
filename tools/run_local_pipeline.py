@@ -85,6 +85,7 @@ from tools.cost_tracking.estimate import (
     format_estimate_summary,
     load_estimate_config,
 )
+from tools.config import load_quality_config as load_quality_gate_config
 from tools.config.env import parse_bool_env, parse_int_env
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
@@ -100,6 +101,10 @@ from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.lerobot_validation import validate_lerobot_dataset
 from tools.quality.quality_config import resolve_quality_settings
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
+from tools.startup_validation import (
+    validate_firebase_credentials,
+    validate_gcs_credentials,
+)
 from tools.validation.geniesim_export import ExportConsistencyError, validate_export_consistency
 
 # Add repository root to path
@@ -910,6 +915,130 @@ class LocalPipelineRunner:
             outputs["quality_gate_blocked"] = True
         return result
 
+    @staticmethod
+    def _is_cloud_path(path: Path, gcs_root: Path) -> bool:
+        path_str = str(path)
+        if path_str.startswith("gs://"):
+            return True
+        try:
+            path.resolve().relative_to(gcs_root)
+        except ValueError:
+            return False
+        return True
+
+    def _validate_production_startup(self) -> Dict[str, Any]:
+        production_mode = resolve_production_mode()
+        report: Dict[str, Any] = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "production_mode": production_mode,
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+            "checks": {},
+        }
+
+        if production_mode:
+            gcs_report = validate_gcs_credentials()
+            firebase_report = validate_firebase_credentials(required=True)
+            report["checks"]["gcs_credentials"] = gcs_report
+            report["checks"]["firebase_credentials"] = firebase_report
+            report["warnings"].extend(gcs_report.get("warnings", []))
+            report["warnings"].extend(firebase_report.get("warnings", []))
+            if not gcs_report.get("valid", False):
+                report["errors"].extend(gcs_report.get("errors", []))
+            if not firebase_report.get("valid", False):
+                report["errors"].extend(firebase_report.get("errors", []))
+
+            gcs_root = Path(os.getenv("GCS_MOUNT_ROOT", "/mnt/gcs")).resolve()
+            path_checks: Dict[str, Any] = {
+                "scene_dir": self.scene_dir,
+                "assets_dir": self.assets_dir,
+                "layout_dir": self.layout_dir,
+                "usd_dir": self.usd_dir,
+                "replicator_dir": self.replicator_dir,
+                "geniesim_dir": self.geniesim_dir,
+                "episodes_dir": self.episodes_dir,
+            }
+            path_results: Dict[str, Any] = {}
+            for label, path in path_checks.items():
+                is_cloud_path = self._is_cloud_path(path, gcs_root)
+                path_results[label] = {
+                    "path": str(path),
+                    "cloud_path": is_cloud_path,
+                }
+                if not is_cloud_path:
+                    report["errors"].append(
+                        f"{label} must be a GCS-mounted path under {gcs_root} (got {path})"
+                    )
+            report["checks"]["path_validation"] = {
+                "gcs_mount_root": str(gcs_root),
+                "paths": path_results,
+            }
+
+            production_floors = {
+                "collision_free_rate_min": 0.90,
+                "quality_pass_rate_min": 0.75,
+                "quality_score_min": 0.92,
+                "min_episodes_required": 5,
+            }
+            try:
+                quality_config = load_quality_gate_config()
+                episode_thresholds = quality_config.episodes
+                tier_thresholds = episode_thresholds.tier_thresholds or {}
+                report["checks"]["quality_gate_config"] = {
+                    "loaded": True,
+                    "episode_thresholds": {
+                        "collision_free_rate_min": episode_thresholds.collision_free_rate_min,
+                        "quality_pass_rate_min": episode_thresholds.quality_pass_rate_min,
+                        "quality_score_min": episode_thresholds.quality_score_min,
+                        "min_episodes_required": episode_thresholds.min_episodes_required,
+                    },
+                    "tier_thresholds": tier_thresholds,
+                }
+                for key, floor_value in production_floors.items():
+                    current_value = getattr(episode_thresholds, key)
+                    if current_value < floor_value:
+                        report["errors"].append(
+                            f"quality_gate_config.thresholds.episodes.{key} must be >= {floor_value} "
+                            f"in production (got {current_value})"
+                        )
+                for tier_name, threshold_values in tier_thresholds.items():
+                    if not isinstance(threshold_values, dict):
+                        continue
+                    for key, floor_value in production_floors.items():
+                        if key in threshold_values and threshold_values[key] < floor_value:
+                            report["errors"].append(
+                                "quality_gate_config.thresholds.episodes.tier_thresholds."
+                                f"{tier_name}.{key} must be >= {floor_value} in production "
+                                f"(got {threshold_values[key]})"
+                            )
+            except Exception as exc:
+                report["checks"]["quality_gate_config"] = {
+                    "loaded": False,
+                    "error": self._summarize_exception(exc),
+                }
+                report["errors"].append(
+                    f"Quality gate config failed to load: {self._summarize_exception(exc)}"
+                )
+
+        report["ok"] = not report["errors"]
+        report_path = self.scene_dir / "production_validation.json"
+        _safe_write_text(
+            report_path,
+            json.dumps(report, indent=2),
+            context="production validation report",
+        )
+
+        if report["errors"]:
+            error_summary = "\n".join(f"  - {err}" for err in report["errors"])
+            raise NonRetryableError(
+                "Production startup validation failed:\n"
+                f"{error_summary}\n"
+                f"Report: {report_path}"
+            )
+
+        return report
+
     def run(
         self,
         steps: Optional[List[PipelineStep]] = None,
@@ -932,6 +1061,13 @@ class LocalPipelineRunner:
         if seed is not None:
             self.log(f"Using pipeline seed: {seed}")
 
+        self._apply_labs_flags(run_validation=run_validation)
+        try:
+            self._validate_production_startup()
+        except NonRetryableError as exc:
+            self.log(f"ERROR: {exc}", "ERROR")
+            return False
+
         if steps is None:
             steps = self._resolve_default_steps()
 
@@ -941,8 +1077,6 @@ class LocalPipelineRunner:
         if PipelineStep.GENIESIM_SUBMIT in steps and PipelineStep.GENIESIM_IMPORT not in steps:
             submit_index = steps.index(PipelineStep.GENIESIM_SUBMIT)
             steps.insert(submit_index + 1, PipelineStep.GENIESIM_IMPORT)
-
-        self._apply_labs_flags(run_validation=run_validation)
 
         if resume_from is not None:
             if resume_from not in steps:
