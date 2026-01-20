@@ -60,6 +60,8 @@ Use this job when you need to generate variation assets for a scene that has alr
 | `ASSET_VECTOR_BACKEND_URI` | - | URI to vector store for semantic asset lookup (defaults to `{ASSET_LIBRARY_PATH}/index.json` when present) |
 | `ASSET_VECTOR_SIMILARITY_THRESHOLD` | `0.82` | Minimum cosine similarity to accept a semantic match |
 | `ASSET_VECTOR_MAX_CANDIDATES` | `5` | Max top-K candidates to consider from vector search |
+| `ASSET_VECTOR_LEXICAL_FALLBACK` | `0` | Enable lexical fallback when embeddings are unavailable |
+| `ASSET_VECTOR_LEXICAL_THRESHOLD` | `0.2` | Minimum token-overlap score for lexical fallback matches |
 | `SKIP_EXISTING` | `1` | Skip assets that already exist |
 | `REGISTER_ASSETS` | `1` | Toggle registry ingestion (automatically disabled when `DRY_RUN=1`) |
 | `DRY_RUN` | `0` | Skip actual generation (for testing) |
@@ -166,6 +168,10 @@ When `ASSET_LIBRARY_PATH` is provided, successful assets are copied into the sha
 ```
 
 Idempotency checks prevent overwriting identical files, and ingestion is automatically skipped when `DRY_RUN=1`.
+
+### Library lookup fallback
+
+When semantic embedding lookups are enabled, the pipeline first attempts a vector search. If embedding generation fails and `ASSET_VECTOR_LEXICAL_FALLBACK=1`, it falls back to a lightweight lexical match using the `AssetSpec` metadata (name/description/category/semantic class/variants) against library index metadata (`asset_id`, `tags`, `description`). The match is accepted when the overlap score meets `ASSET_VECTOR_LEXICAL_THRESHOLD`. 
 
 ### Registry updates
 
