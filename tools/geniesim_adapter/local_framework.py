@@ -67,9 +67,13 @@ Environment Variables:
     GENIESIM_STALL_BACKOFF_S: Backoff between stall handling attempts (default: 5)
     GENIESIM_COLLECTION_TIMEOUT_S: Abort data collection if total runtime exceeds this timeout (default: unset)
     GENIESIM_CLEANUP_TMP: Remove Genie Sim temp directories after a run (default: 1 for local, 0 in production)
+    GENIESIM_VALIDATE_FRAMES: Validate recorded frames before saving (default: 0)
+    GENIESIM_FAIL_ON_FRAME_VALIDATION: Fail episode when frame validation errors exist (default: 0)
 """
 
 import base64
+import importlib.util
+import io
 import json
 import logging
 import os
@@ -305,6 +309,8 @@ class GenieSimConfig(BaseModel):
     max_stalls: StrictInt = 2
     stall_backoff_s: StrictFloat = 5.0
     max_duration_seconds: Optional[StrictFloat] = None
+    validate_frames: StrictBool = False
+    fail_on_frame_validation: StrictBool = False
 
     # Output settings
     recording_dir: Path = Path("/tmp/geniesim_recordings")
@@ -346,6 +352,8 @@ class GenieSimConfig(BaseModel):
             ("max_stalls", "GENIESIM_MAX_STALLS"),
             ("stall_backoff_s", "GENIESIM_STALL_BACKOFF_S"),
             ("max_duration_seconds", "GENIESIM_COLLECTION_TIMEOUT_S"),
+            ("validate_frames", "GENIESIM_VALIDATE_FRAMES"),
+            ("fail_on_frame_validation", "GENIESIM_FAIL_ON_FRAME_VALIDATION"),
             ("lerobot_export_format", "LEROBOT_EXPORT_FORMAT"),
             ("require_lerobot_v3", "LEROBOT_REQUIRE_V3"),
             ("cleanup_tmp", "GENIESIM_CLEANUP_TMP"),
@@ -452,6 +460,8 @@ class GenieSimConfig(BaseModel):
         "allow_ik_failure_fallback",
         "require_lerobot_v3",
         "cleanup_tmp",
+        "validate_frames",
+        "fail_on_frame_validation",
         mode="before",
     )
     @classmethod
@@ -2736,6 +2746,31 @@ class GenieSimLocalFramework:
                 episode_id=episode_id,
             )
 
+            frame_validation = {
+                "enabled": False,
+                "errors": [],
+                "warnings": [],
+                "invalid_frame_count": 0,
+                "total_frames": len(frames),
+            }
+            if self.config.validate_frames:
+                frame_validation = self._validate_frames(
+                    frames,
+                    episode_id=episode_id,
+                    task=task,
+                )
+                if frame_validation["errors"]:
+                    message = (
+                        f"Frame validation failed for episode {episode_id}: "
+                        f"{len(frame_validation['errors'])} error(s)."
+                    )
+                    if self.config.fail_on_frame_validation:
+                        result["error"] = message
+                        result["frame_validation"] = frame_validation
+                        self.log(message, "ERROR")
+                        return result
+                    self.log(message, "WARNING")
+
             # Stop recording
             self._client.stop_recording()
             recording_stopped = True
@@ -2768,6 +2803,7 @@ class GenieSimLocalFramework:
                     "collision_free": collision_free,
                     "collision_source": planning_report.get("collision_source"),
                     "stall_info": result["stall_info"],
+                    "frame_validation": frame_validation,
                 }, f, default=_json_default)
 
             result["success"] = True
@@ -2777,6 +2813,7 @@ class GenieSimLocalFramework:
             result["task_success"] = task_success
             result["collision_free"] = collision_free
             result["output_path"] = str(episode_path)
+            result["frame_validation"] = frame_validation
 
         except Exception as e:
             result["error"] = str(e)
@@ -2875,6 +2912,191 @@ class GenieSimLocalFramework:
                 "timestamp": waypoint["timestamp"],
             })
         return frames
+
+    def _validate_frames(
+        self,
+        frames: List[Dict[str, Any]],
+        *,
+        episode_id: str,
+        task: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        errors: List[str] = []
+        warnings: List[str] = []
+        invalid_frames: set[int] = set()
+
+        required_cameras: List[str] = []
+        for key in ("required_cameras", "required_camera_ids", "camera_ids"):
+            value = task.get(key)
+            if value:
+                required_cameras = value
+                break
+        if not required_cameras:
+            camera_config = task.get("camera_config") or {}
+            for key in ("required_camera_ids", "camera_ids"):
+                value = camera_config.get(key)
+                if value:
+                    required_cameras = value
+                    break
+        if isinstance(required_cameras, str):
+            required_cameras = [required_cameras]
+        required_cameras = [str(camera_id) for camera_id in required_cameras]
+
+        timestamp_indices: Dict[float, List[int]] = {}
+        frame_index_indices: Dict[int, List[int]] = {}
+        prev_timestamp: Optional[float] = None
+        max_duration = self.config.max_duration_seconds
+
+        for idx, frame in enumerate(frames):
+            frame_errors: List[str] = []
+            frame_index = frame.get("step", idx)
+            try:
+                frame_index = int(frame_index)
+            except (TypeError, ValueError):
+                frame_errors.append(f"Frame {idx} has invalid step index: {frame_index!r}.")
+            else:
+                frame_index_indices.setdefault(frame_index, []).append(idx)
+
+            timestamp = frame.get("timestamp")
+            if timestamp is None:
+                frame_errors.append(f"Frame {idx} missing timestamp.")
+            else:
+                try:
+                    timestamp_value = float(timestamp)
+                except (TypeError, ValueError):
+                    frame_errors.append(f"Frame {idx} has non-numeric timestamp {timestamp!r}.")
+                else:
+                    if not np.isfinite(timestamp_value):
+                        frame_errors.append(f"Frame {idx} has non-finite timestamp {timestamp_value!r}.")
+                    if timestamp_value < 0:
+                        frame_errors.append(f"Frame {idx} has negative timestamp {timestamp_value}.")
+                    if max_duration is not None and timestamp_value > max_duration:
+                        frame_errors.append(
+                            f"Frame {idx} timestamp {timestamp_value} exceeds max duration {max_duration}."
+                        )
+                    if prev_timestamp is not None and timestamp_value < prev_timestamp:
+                        frame_errors.append(
+                            f"Frame {idx} timestamp {timestamp_value} is earlier than previous {prev_timestamp}."
+                        )
+                    timestamp_indices.setdefault(timestamp_value, []).append(idx)
+                    prev_timestamp = timestamp_value
+
+            obs = frame.get("observation") or {}
+            camera_frames = obs.get("camera_frames") or {}
+            if required_cameras and not camera_frames:
+                frame_errors.append(
+                    f"Frame {idx} missing camera_frames for required cameras {required_cameras}."
+                )
+            for camera_id in required_cameras:
+                if camera_id not in camera_frames:
+                    frame_errors.append(f"Frame {idx} missing camera frame for camera '{camera_id}'.")
+
+            for camera_id, camera_data in camera_frames.items():
+                if not isinstance(camera_data, dict):
+                    frame_errors.append(
+                        f"Frame {idx} camera '{camera_id}' has invalid camera data."
+                    )
+                    continue
+                width = int(camera_data.get("width") or 0)
+                height = int(camera_data.get("height") or 0)
+                if width <= 0 or height <= 0:
+                    frame_errors.append(
+                        f"Frame {idx} camera '{camera_id}' has invalid dimensions ({width}x{height})."
+                    )
+                rgb = camera_data.get("rgb")
+                depth = camera_data.get("depth")
+                if rgb is None:
+                    frame_errors.append(f"Frame {idx} camera '{camera_id}' missing rgb data.")
+                else:
+                    rgb_array = np.asarray(rgb)
+                    if rgb_array.ndim < 2:
+                        frame_errors.append(
+                            f"Frame {idx} camera '{camera_id}' rgb has invalid shape {rgb_array.shape}."
+                        )
+                    elif height > 0 and width > 0:
+                        if rgb_array.shape[0] != height or rgb_array.shape[1] != width:
+                            frame_errors.append(
+                                f"Frame {idx} camera '{camera_id}' rgb shape {rgb_array.shape} "
+                                f"does not match ({height}x{width})."
+                            )
+                if depth is None:
+                    frame_errors.append(f"Frame {idx} camera '{camera_id}' missing depth data.")
+                else:
+                    depth_array = np.asarray(depth)
+                    if depth_array.ndim < 2:
+                        frame_errors.append(
+                            f"Frame {idx} camera '{camera_id}' depth has invalid shape {depth_array.shape}."
+                        )
+                    elif height > 0 and width > 0:
+                        if depth_array.shape[0] != height or depth_array.shape[1] != width:
+                            frame_errors.append(
+                                f"Frame {idx} camera '{camera_id}' depth shape {depth_array.shape} "
+                                f"does not match ({height}x{width})."
+                            )
+
+            if frame_errors:
+                errors.extend(frame_errors)
+                invalid_frames.add(idx)
+
+        for timestamp, indices in timestamp_indices.items():
+            if len(indices) > 1:
+                errors.append(
+                    f"Duplicate timestamp {timestamp} in frames {indices} (episode {episode_id})."
+                )
+                invalid_frames.update(indices)
+
+        for frame_index, indices in frame_index_indices.items():
+            if len(indices) > 1:
+                errors.append(
+                    f"Duplicate frame index {frame_index} in frames {indices} (episode {episode_id})."
+                )
+                invalid_frames.update(indices)
+
+        pil_image_spec = importlib.util.find_spec("PIL.Image")
+        if pil_image_spec is not None:
+            from PIL import Image
+            for idx, frame in enumerate(frames):
+                obs = frame.get("observation") or {}
+                camera_obs = obs.get("camera_observation") or {}
+                images = camera_obs.get("images", [])
+                if not images:
+                    continue
+                for image in images:
+                    camera_id = str(image.get("camera_id"))
+                    if required_cameras and camera_id not in required_cameras:
+                        continue
+                    encoding = (image.get("encoding") or "").lower()
+                    for key in ("rgb_data", "depth_data"):
+                        data_str = image.get(key) or ""
+                        if not data_str:
+                            continue
+                        try:
+                            raw = base64.b64decode(data_str)
+                        except (ValueError, TypeError) as exc:
+                            errors.append(
+                                f"Frame {idx} camera '{camera_id}' {key} base64 decode failed: {exc}."
+                            )
+                            invalid_frames.add(idx)
+                            continue
+                        if "png" not in encoding and not self._is_png_data(raw):
+                            continue
+                        try:
+                            with Image.open(io.BytesIO(raw)) as image_file:
+                                image_file.verify()
+                        except Exception as exc:
+                            errors.append(
+                                f"Frame {idx} camera '{camera_id}' {key} PNG verify failed: {exc}."
+                            )
+                            invalid_frames.add(idx)
+        else:
+            warnings.append("PNG validation skipped (PIL not available).")
+
+        return {
+            "enabled": True,
+            "errors": errors,
+            "warnings": warnings,
+            "invalid_frame_count": len(invalid_frames),
+            "total_frames": len(frames),
+        }
 
     def _attach_camera_frames(
         self,
