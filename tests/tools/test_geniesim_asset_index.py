@@ -11,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 from tools.geniesim_adapter.asset_index import (
     AssetIndexBuilder,
     CATEGORY_MAPPING,
+    GenieSimAsset,
     SemanticDescriptionGenerator,
 )
 
@@ -118,3 +119,27 @@ def test_resize_embedding_empty_is_zeros():
     resized = builder._resize_embedding([])
 
     assert resized == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.unit
+def test_production_disallows_placeholder_embeddings(monkeypatch):
+    monkeypatch.setenv("GENIESIM_ENV", "production")
+    builder = AssetIndexBuilder(
+        generate_embeddings=True,
+        verbose=False,
+        require_embeddings=False,
+    )
+    asset = GenieSimAsset(
+        asset_id="asset-1",
+        usd_path="/data/asset.usdz",
+        semantic_description="test asset",
+        categories=["general"],
+    )
+
+    def _mock_embedding(_text: str):
+        return [0.0] * builder.embedding_dim, "placeholder", "mock placeholder"
+
+    monkeypatch.setattr(builder, "_get_embedding_with_status", _mock_embedding)
+
+    with pytest.raises(RuntimeError, match="Configure an embedding provider"):
+        builder._generate_embeddings([asset])
