@@ -73,3 +73,48 @@ def test_placeholder_embedding_is_deterministic():
     assert embedding_a != embedding_c
     assert np.all(np.array(embedding_a) <= 1.0)
     assert np.all(np.array(embedding_a) >= -1.0)
+
+
+@pytest.mark.unit
+def test_resize_embedding_passthrough():
+    builder = AssetIndexBuilder(generate_embeddings=False, verbose=False, embedding_dim=4)
+    embedding = [0.1, 0.2, 0.3, 0.4]
+
+    resized = builder._resize_embedding(embedding)
+
+    assert resized == embedding
+
+
+@pytest.mark.unit
+def test_resize_embedding_shrink_is_deterministic():
+    builder = AssetIndexBuilder(generate_embeddings=False, verbose=False, embedding_dim=4)
+    embedding = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+
+    resized = builder._resize_embedding(embedding)
+    resized_again = builder._resize_embedding(embedding)
+
+    original_indices = np.linspace(0.0, 1.0, num=len(embedding))
+    target_indices = np.linspace(0.0, 1.0, num=builder.embedding_dim)
+    expected = np.interp(target_indices, original_indices, embedding).tolist()
+
+    assert resized == expected
+    assert resized_again == expected
+
+
+@pytest.mark.unit
+def test_resize_embedding_grow_pads_zeros():
+    builder = AssetIndexBuilder(generate_embeddings=False, verbose=False, embedding_dim=4)
+    embedding = [0.5, 1.5]
+
+    resized = builder._resize_embedding(embedding)
+
+    assert resized == [0.5, 1.5, 0.0, 0.0]
+
+
+@pytest.mark.unit
+def test_resize_embedding_empty_is_zeros():
+    builder = AssetIndexBuilder(generate_embeddings=False, verbose=False, embedding_dim=3)
+
+    resized = builder._resize_embedding([])
+
+    assert resized == [0.0, 0.0, 0.0]
