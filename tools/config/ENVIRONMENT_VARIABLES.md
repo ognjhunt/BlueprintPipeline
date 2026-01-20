@@ -447,6 +447,15 @@ export ENABLE_CUROBO=0  # Use fallback planner
 
 ---
 
+## Local Pipeline Validation
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ALLOW_PARTIAL_FAILURES` | bool | false | Permit validation warnings for cross-robot artifacts instead of failing the local pipeline. |
+| `REQUIRE_BALANCED_ROBOT_EPISODES` | bool | false | Force local pipeline validation to fail when cross-robot episode counts mismatch, even if partial failures are allowed. |
+
+---
+
 ## Service Endpoints
 
 Genie Sim runs locally using the gRPC host/port configuration below for client-server communication.
