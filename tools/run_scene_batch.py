@@ -28,6 +28,7 @@ from tools.metrics import track_pipeline_run, update_pipeline_status
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
 from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
+from tools.scene_batch_reporting import _summarize_batch_results
 
 logger = logging.getLogger(__name__)
 
@@ -202,23 +203,6 @@ def _scene_report_path(base_dir: Path, scene_id: str) -> Path:
     return base_dir / scene_id / "quality_gate_report.json"
 
 
-def _collect_quality_failures(report_path: Optional[Path]) -> List[Dict[str, Any]]:
-    if not report_path or not report_path.exists():
-        return []
-    report = json.loads(report_path.read_text())
-    failures = []
-    for entry in report.get("results", []):
-        if not entry.get("passed"):
-            failures.append({
-                "gate_id": entry.get("gate_id"),
-                "checkpoint": entry.get("checkpoint"),
-                "severity": entry.get("severity"),
-                "message": entry.get("message"),
-                "recommendations": entry.get("recommendations", []),
-            })
-    return failures
-
-
 def _build_scene_processor(
     config: SceneBatchConfig,
     reports_dir: Path,
@@ -340,45 +324,6 @@ def _build_scene_processor(
     return process_scene, attempt_counts
 
 
-def _summarize_batch_results(
-    results: List[Any],
-    reports_dir: Path,
-) -> Dict[str, Any]:
-    failures = []
-    skipped = []
-
-    for result in results:
-        report_path = None
-        if result.metadata and result.metadata.get("quality_gate_report"):
-            report_path = Path(result.metadata["quality_gate_report"])
-
-        if result.metadata and result.metadata.get("skipped"):
-            skipped.append(result.metadata["scene_id"])
-
-        if result.status != SceneStatus.SUCCESS:
-            failures.append({
-                "scene_id": result.scene_id,
-                "status": result.status.value,
-                "error": result.error,
-                "quality_gate_failures": _collect_quality_failures(report_path),
-            })
-
-    summary = {
-        "total": len(results),
-        "success": sum(1 for r in results if r.status == SceneStatus.SUCCESS),
-        "failed": sum(1 for r in results if r.status == SceneStatus.FAILED),
-        "cancelled": sum(1 for r in results if r.status == SceneStatus.CANCELLED),
-        "skipped": skipped,
-        "failures": failures,
-    }
-
-    if reports_dir:
-        reports_dir.mkdir(parents=True, exist_ok=True)
-        (reports_dir / "batch_report.json").write_text(json.dumps(summary, indent=2))
-
-    return summary
-
-
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run BlueprintPipeline scenes in parallel.")
     parser.add_argument("--scene-root", default="./scenes", help="Base directory containing scenes.")
@@ -403,6 +348,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-inventory-enrichment", action="store_true")
     parser.add_argument("--disable-articulated-assets", action="store_true")
     parser.add_argument("--reports-dir", type=Path, default=Path("./batch_reports"))
+    parser.add_argument("--dlq-path", type=Path, help="Override dead-letter queue output path.")
     parser.add_argument("--checkpoint-step", default="batch-run", help="Checkpoint name for batch runs.")
     parser.add_argument("--skip-completed", action="store_true", help="Skip scenes with checkpoints.")
     parser.add_argument("--log-level", default="INFO")
@@ -477,7 +423,7 @@ def main() -> int:
             progress_callback=progress_callback,
         )
 
-        summary = _summarize_batch_results(batch_result.results, args.reports_dir)
+        summary = _summarize_batch_results(batch_result.results, args.reports_dir, dlq_path=args.dlq_path)
         logger.info(
             "Batch complete: %s success, %s failed, %s cancelled",
             summary["success"],
