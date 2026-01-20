@@ -23,7 +23,8 @@ Environment Variables:
     FILTER_LOW_QUALITY: Filter low-quality episodes during import (default: true)
     REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: production/service mode)
     LEROBOT_SKIP_RATE_MAX: Max allowed LeRobot skip rate percentage (default: 0.0 in production)
-    ENABLE_FIREBASE_UPLOAD: Enable Firebase Storage upload of local episodes (default: false)
+    ENABLE_FIREBASE_UPLOAD: Enable Firebase Storage upload of local episodes (default: true)
+    DISABLE_FIREBASE_UPLOAD: Explicitly disable Firebase uploads (overrides ENABLE_FIREBASE_UPLOAD)
     FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name for uploads
     FIREBASE_SERVICE_ACCOUNT_JSON: Service account JSON payload for Firebase
     FIREBASE_SERVICE_ACCOUNT_PATH: Path to service account JSON for Firebase
@@ -2758,10 +2759,16 @@ def main():
     require_lerobot = require_lerobot_resolution.value
     disable_gcs_upload = parse_bool_env(os.getenv("DISABLE_GCS_UPLOAD"), default=False)
     _guard_quality_thresholds(job_metadata, quality_settings, production_mode)
+    disable_firebase_upload = parse_bool_env(
+        os.getenv("DISABLE_FIREBASE_UPLOAD"),
+        default=False,
+    )
     enable_firebase_upload = parse_bool_env(
         os.getenv("ENABLE_FIREBASE_UPLOAD"),
-        default=production_mode or service_mode,
+        default=True,
     )
+    if disable_firebase_upload:
+        enable_firebase_upload = False
     firebase_upload_prefix = resolve_firebase_upload_prefix()
     try:
         lerobot_skip_rate_max = _resolve_skip_rate_max(
@@ -2798,7 +2805,7 @@ def main():
             require_geniesim=False,
             require_gemini=False,
             validate_gcs=True,
-            validate_firebase=True,
+            validate_firebase=enable_firebase_upload,
             require_firebase=enable_firebase_upload,
         )
     except ImportError as e:
@@ -2824,7 +2831,10 @@ def main():
     )
     print(f"[GENIE-SIM-IMPORT]   LeRobot Skip Rate Max: {lerobot_skip_rate_max:.2f}%")
     print(f"[GENIE-SIM-IMPORT]   GCS Uploads Enabled: {not disable_gcs_upload}")
-    print(f"[GENIE-SIM-IMPORT]   Firebase Uploads Enabled: {enable_firebase_upload}")
+    print(
+        "[GENIE-SIM-IMPORT]   Firebase Uploads Enabled: "
+        f"{enable_firebase_upload} (disable_env={disable_firebase_upload})"
+    )
     print(
         "[GENIE-SIM-IMPORT]   Allow Partial Firebase Uploads: "
         f"{allow_partial_firebase_uploads}"
