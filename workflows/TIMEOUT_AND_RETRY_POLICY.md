@@ -328,8 +328,8 @@ Future updates should consider:
 
 ⚠️ **Partial:**
 - Replicator/Isaac Lab jobs may need timeout adjustment for large scenes (future monitoring needed)
+- Historical performance tracking and analysis system (metrics collected but analysis dashboard not complete)
 
-📋 **TODO (Future):**
-- Historical performance tracking
-- Automatic timeout adjustment based on scene complexity
-- Support for different retry policies per customer tier (premium features)
+✅ **Completed (Post-2026-01-11):**
+- Automatic timeout adjustment based on scene complexity (implemented in `policy_configs/adaptive_timeouts.yaml`)
+- Support for different retry policies per customer tier (implemented in `upsell-features-job/customer_config.py` with BundleTier system)
