@@ -1,0 +1,17 @@
+{
+  "version": "2026-01-17",
+  "notes": "Canonical cost tracking defaults for BlueprintPipeline.",
+  "geniesim_pricing_placeholder": false,
+  "pricing": {
+    "gemini_input_per_1k": 0.00125,
+    "gemini_output_per_1k": 0.005,
+    "cloud_run_vcpu_second": 0.000024,
+    "cloud_run_memory_gb_second": 0.0000025,
+    "cloud_build_minute": 0.003,
+    "gcs_storage_gb_month": 0.02,
+    "gcs_operation_class_a": 0.0000005,
+    "gcs_operation_class_b": 0.00000004,
+    "geniesim_job": 1.25,
+    "geniesim_episode": 0.03
+  }
+}
