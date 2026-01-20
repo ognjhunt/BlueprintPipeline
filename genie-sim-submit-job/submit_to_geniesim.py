@@ -21,6 +21,7 @@ Environment Variables:
     FIREBASE_SERVICE_ACCOUNT_JSON: Firebase service account JSON payload (used by import job uploads)
     FIREBASE_SERVICE_ACCOUNT_PATH: Firebase service account JSON path (used by import job uploads)
     FIREBASE_UPLOAD_PREFIX: Firebase prefix for Genie Sim episodes (default: datasets; used by import job uploads)
+    GENIESIM_UPLOAD_TIMEOUT_S: Optional overall timeout in seconds for uploading Genie Sim output
 """
 
 import hashlib
@@ -29,7 +30,7 @@ import logging
 import os
 import sys
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1397,6 +1398,12 @@ def main() -> int:
                 )
 
             max_workers = min(8, max(1, os.cpu_count() or 1), max(1, len(manifest_entries)))
+            upload_timeout_env = os.getenv("GENIESIM_UPLOAD_TIMEOUT_S")
+            upload_timeout_seconds = _safe_float(
+                upload_timeout_env,
+                default=None,
+                field_name="GENIESIM_UPLOAD_TIMEOUT_S",
+            )
 
             def _upload_and_verify(entry: dict[str, Any]) -> Optional[dict[str, str]]:
                 relative_path = entry["path"]
@@ -1437,7 +1444,8 @@ def main() -> int:
                         executor.submit(_upload_and_verify, entry): entry["path"]
                         for entry in manifest_entries
                     }
-                    for future in as_completed(futures):
+                    completed, pending = wait(futures, timeout=upload_timeout_seconds)
+                    for future in completed:
                         try:
                             failure = future.result()
                         except Exception as exc:
@@ -1451,6 +1459,17 @@ def main() -> int:
                             continue
                         if failure:
                             upload_failures.append(failure)
+                    if pending:
+                        for future in pending:
+                            future.cancel()
+                        for future in pending:
+                            upload_failures.append(
+                                {
+                                    "path": futures[future],
+                                    "robot_type": current_robot,
+                                    "error": "timeout",
+                                }
+                            )
             if manifest_upload.success:
                 verified, failure_reason = verify_blob_upload(
                     manifest_blob,
