@@ -487,6 +487,18 @@ export ENABLE_CUROBO=0  # Use fallback planner
 
 ---
 
+## LeRobot Export Settings
+
+Controls LeRobot export formatting in `episode-generation-job/generate_episodes.py` and
+`tools/geniesim_adapter/local_framework.py`.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LEROBOT_EXPORT_FORMAT` | str | `lerobot_v2` | LeRobot export layout (`lerobot_v2`, `lerobot_v3`, or `lerobot_v0.3.3`; aliases like `v2`/`v3`/`0.3.3` are accepted). |
+| `LEROBOT_REQUIRE_V3` | bool | false | Require v3 exports; when enabled, emit a warning if v3 is not selected by `LEROBOT_EXPORT_FORMAT`. |
+
+---
+
 ## Local Pipeline Validation
 
 | Variable | Type | Default | Description |
@@ -517,12 +529,14 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_MOCK_MODE` | bool | false | Enable mock mode for Genie Sim clients in non-production runs (requires `ALLOW_GENIESIM_MOCK=1` or an explicit code flag; ignored in production). |
 | `ALLOW_GENIESIM_MOCK` | bool | 0 | Allow Genie Sim mock mode in non-production environments (`1` to enable; production always disables mock mode). |
 | `GENIESIM_ALLOW_LINEAR_FALLBACK` | bool | unset | Allow linear interpolation fallback when cuRobo is unavailable (`1` to enable, `0` to disable). In non-production, the local framework auto-enables this fallback if cuRobo is missing and this variable is unset; in production, cuRobo is required and the framework fails fast. |
+| `GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD` | bool | false | Allow linear interpolation fallback in production (not collision-aware). Production runs fail fast if this is enabled; use only for non-production experiments. |
 | `GENIESIM_STALL_TIMEOUT_S` | float | 30 | Abort/reset an episode if observation progress stalls longer than this timeout (seconds). |
 | `GENIESIM_MAX_STALLS` | int | 2 | Max stalled episodes before the local framework restarts the Genie Sim server. |
 | `GENIESIM_STALL_BACKOFF_S` | float | 5 | Backoff (seconds) to wait after a stall or restart before resuming data collection. |
 | `GENIESIM_RECORDINGS_DIR` | path | `/tmp/geniesim_recordings` | Output directory for Genie Sim recordings (avoid temp paths in production). |
 | `GENIESIM_RECORDING_DIR` | path | (legacy) | Deprecated alias for `GENIESIM_RECORDINGS_DIR`. |
 | `GENIESIM_LOG_DIR` | path | `/tmp/geniesim_logs` | Output directory for Genie Sim server logs (avoid temp paths in production). |
+| `GENIESIM_CLEANUP_TMP` | bool | true (local), false (production) | Remove Genie Sim temp directories after a run completes. Keep disabled in production to retain artifacts for auditing/troubleshooting. |
 | `GENIESIM_TASK_CONFIDENCE_THRESHOLD` | float | 0.8 | Affordance confidence threshold for boosting task priority in task generation. |
 | `GENIESIM_TASK_SIZE_SMALL_THRESHOLD` | float | 0.05 | Object size threshold (meters) below which tasks are treated as harder. |
 | `GENIESIM_TASK_SIZE_LARGE_THRESHOLD` | float | 0.3 | Object size threshold (meters) above which tasks are treated as harder. |
