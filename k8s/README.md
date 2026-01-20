@@ -73,4 +73,5 @@ ConfigMap.
 1. Populate the service account secret:
    - `FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}' envsubst < k8s/firebase-service-account-secret.yaml | kubectl apply -f -`
 2. Confirm the import job ConfigMap points at the target bucket (for example,
-   `blueprint-8c1ca.appspot.com`) before applying the job manifest.
+   `blueprint-8c1ca.appspot.com`, which corresponds to `gs://blueprint-8c1ca.appspot.com`)
+   before applying the job manifest.
