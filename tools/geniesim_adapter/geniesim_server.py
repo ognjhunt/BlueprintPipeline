@@ -5,18 +5,25 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import datetime
 import json
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Optional, Sequence
 
 import grpc
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from geniesim_grpc_pb2 import (
     CameraObservation,
@@ -52,7 +59,13 @@ from geniesim_grpc_pb2_grpc import (
     add_GenieSimServiceServicer_to_server,
 )
 from tools.logging_config import init_logging
-from tools.geniesim_adapter.config import DEFAULT_GENIESIM_PORT, GENIESIM_PORT_ENV
+from tools.geniesim_adapter.config import (
+    DEFAULT_GENIESIM_PORT,
+    GENIESIM_PORT_ENV,
+    GENIESIM_TLS_CA_ENV,
+    GENIESIM_TLS_CERT_ENV,
+    GENIESIM_TLS_KEY_ENV,
+)
 from tools.config.env import parse_int_env
 
 LOGGER = logging.getLogger("geniesim.server")
@@ -355,16 +368,33 @@ def _ensure_concrete_servicer(servicer: GenieSimServiceServicer) -> None:
 
 
 def run_health_check(host: str, port: int, timeout: float = 5.0) -> bool:
+    return _run_health_check_with_tls(
+        host,
+        port,
+        timeout=timeout,
+        tls_config=_resolve_client_tls_config(),
+    )
+
+
+def _run_health_check_with_tls(
+    host: str,
+    port: int,
+    timeout: float,
+    tls_config: "TLSClientConfig",
+) -> bool:
     target = f"{host}:{port}"
-    channel = grpc.insecure_channel(target)
-    grpc.channel_ready_future(channel).result(timeout=timeout)
-    if _health_service_available():
-        health_pb2 = importlib.import_module("grpc_health.v1.health_pb2")
-        health_pb2_grpc = importlib.import_module("grpc_health.v1.health_pb2_grpc")
-        stub = health_pb2_grpc.HealthStub(channel)
-        response = stub.Check(health_pb2.HealthCheckRequest(service=""), timeout=timeout)
-        return response.status == health_pb2.HealthCheckResponse.SERVING
-    return True
+    channel = _create_health_check_channel(target, tls_config)
+    try:
+        grpc.channel_ready_future(channel).result(timeout=timeout)
+        if _health_service_available():
+            health_pb2 = importlib.import_module("grpc_health.v1.health_pb2")
+            health_pb2_grpc = importlib.import_module("grpc_health.v1.health_pb2_grpc")
+            stub = health_pb2_grpc.HealthStub(channel)
+            response = stub.Check(health_pb2.HealthCheckRequest(service=""), timeout=timeout)
+            return response.status == health_pb2.HealthCheckResponse.SERVING
+        return True
+    finally:
+        channel.close()
 
 
 def _resolve_default_recordings_dir() -> Path:
@@ -397,9 +427,15 @@ def serve(args: argparse.Namespace) -> None:
     _ensure_concrete_servicer(servicer)
     add_GenieSimServiceServicer_to_server(servicer, server)
     _add_health_service(server)
-    server.add_insecure_port(f"{args.host}:{args.port}")
+    tls_server_config = _resolve_server_tls_config(args)
+    target = f"{args.host}:{args.port}"
+    if tls_server_config.insecure:
+        server.add_insecure_port(target)
+    else:
+        server_creds = _build_server_credentials(tls_server_config)
+        server.add_secure_port(target, server_creds)
     server.start()
-    LOGGER.info("GenieSim local gRPC server listening on %s:%s", args.host, args.port)
+    LOGGER.info("GenieSim local gRPC server listening on %s", target)
     try:
         server.wait_for_termination()
     except KeyboardInterrupt:
@@ -408,7 +444,12 @@ def serve(args: argparse.Namespace) -> None:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Local GenieSim gRPC server")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Local GenieSim gRPC server (TLS enabled by default with self-signed fallback; "
+            "use --insecure to disable)."
+        )
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
     parser.add_argument(
         "--port",
@@ -426,6 +467,32 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "Number of mock joints (defaults to $GENIESIM_DEFAULT_JOINT_COUNT or 7)"
         ),
     )
+    parser.add_argument(
+        "--tls-cert",
+        help=(
+            "Path to TLS certificate PEM for the gRPC server "
+            f"(defaults to ${GENIESIM_TLS_CERT_ENV}; auto-generates a self-signed cert if unset)."
+        ),
+    )
+    parser.add_argument(
+        "--tls-key",
+        help=(
+            "Path to TLS private key PEM for the gRPC server "
+            f"(defaults to ${GENIESIM_TLS_KEY_ENV}; auto-generates a self-signed key if unset)."
+        ),
+    )
+    parser.add_argument(
+        "--tls-ca",
+        help=(
+            "Path to TLS CA bundle PEM for health checks "
+            f"(defaults to ${GENIESIM_TLS_CA_ENV}; required when TLS is enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS and run health checks over plaintext gRPC.",
+    )
     parser.add_argument("--health-check", action="store_true", help="Run health check and exit")
     return parser.parse_args(argv)
 
@@ -435,7 +502,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.health_check:
         _configure_logging(args.log_level)
         try:
-            healthy = run_health_check(args.host, args.port)
+            healthy = _run_health_check_with_tls(
+                args.host,
+                args.port,
+                timeout=5.0,
+                tls_config=_resolve_client_tls_config(args),
+            )
         except Exception as exc:
             LOGGER.error("Health check failed: %s", exc)
             return 1
@@ -443,6 +515,134 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0 if healthy else 1
     serve(args)
     return 0
+
+
+@dataclass(frozen=True)
+class TLSServerConfig:
+    cert_path: Path
+    key_path: Path
+    insecure: bool = False
+    generated: bool = False
+
+
+@dataclass(frozen=True)
+class TLSClientConfig:
+    ca_path: Optional[Path]
+    cert_path: Optional[Path]
+    key_path: Optional[Path]
+    insecure: bool = False
+
+
+def _resolve_server_tls_config(args: argparse.Namespace) -> TLSServerConfig:
+    if args.insecure:
+        return TLSServerConfig(cert_path=Path(), key_path=Path(), insecure=True)
+    cert_path = _resolve_path(args.tls_cert, GENIESIM_TLS_CERT_ENV)
+    key_path = _resolve_path(args.tls_key, GENIESIM_TLS_KEY_ENV)
+    if cert_path and not key_path:
+        raise ValueError("TLS certificate provided without a private key.")
+    if key_path and not cert_path:
+        raise ValueError("TLS private key provided without a certificate.")
+    generated = False
+    if not cert_path or not key_path:
+        cert_path, key_path = _generate_self_signed_cert(args.host)
+        generated = True
+        LOGGER.warning(
+            "Generated self-signed TLS certificate for dev use at %s (key: %s). "
+            "Set %s/%s or --tls-cert/--tls-key for custom certs; "
+            "clients should trust the generated cert via %s.",
+            cert_path,
+            key_path,
+            GENIESIM_TLS_CERT_ENV,
+            GENIESIM_TLS_KEY_ENV,
+            GENIESIM_TLS_CA_ENV,
+        )
+    return TLSServerConfig(cert_path=cert_path, key_path=key_path, generated=generated)
+
+
+def _resolve_client_tls_config(args: Optional[argparse.Namespace] = None) -> TLSClientConfig:
+    if args and args.insecure:
+        return TLSClientConfig(ca_path=None, cert_path=None, key_path=None, insecure=True)
+    ca_path = _resolve_path(args.tls_ca if args else None, GENIESIM_TLS_CA_ENV)
+    cert_path = _resolve_path(args.tls_cert if args else None, GENIESIM_TLS_CERT_ENV)
+    key_path = _resolve_path(args.tls_key if args else None, GENIESIM_TLS_KEY_ENV)
+    if cert_path and not key_path:
+        raise ValueError("TLS client certificate provided without a private key.")
+    if key_path and not cert_path:
+        raise ValueError("TLS client private key provided without a certificate.")
+    if not ca_path:
+        raise ValueError(
+            "TLS is enabled but no CA bundle is configured. "
+            f"Set {GENIESIM_TLS_CA_ENV} or pass --tls-ca, or use --insecure for plaintext."
+        )
+    return TLSClientConfig(ca_path=ca_path, cert_path=cert_path, key_path=key_path)
+
+
+def _resolve_path(value: Optional[str], env_name: str) -> Optional[Path]:
+    raw = value or os.getenv(env_name)
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def _generate_self_signed_cert(host: str) -> tuple[Path, Path]:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "GenieSim Dev"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "geniesim-local"),
+        ]
+    )
+    san_entries = [x509.DNSName("localhost")]
+    if host:
+        try:
+            san_entries.append(x509.IPAddress(ip_address(host)))
+        except ValueError:
+            san_entries.append(x509.DNSName(host))
+    san_entries.append(x509.IPAddress(ip_address("127.0.0.1")))
+    san_entries.append(x509.IPAddress(ip_address("::1")))
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.utcnow() - datetime.timedelta(minutes=5))
+        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=7))
+        .add_extension(x509.SubjectAlternativeName(san_entries), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    temp_dir = Path(tempfile.mkdtemp(prefix="geniesim_tls_"))
+    cert_path = temp_dir / "geniesim.crt"
+    key_path = temp_dir / "geniesim.key"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    return cert_path, key_path
+
+
+def _build_server_credentials(config: TLSServerConfig) -> grpc.ServerCredentials:
+    cert_bytes = config.cert_path.read_bytes()
+    key_bytes = config.key_path.read_bytes()
+    return grpc.ssl_server_credentials(((key_bytes, cert_bytes),))
+
+
+def _create_health_check_channel(target: str, tls_config: TLSClientConfig) -> grpc.Channel:
+    if tls_config.insecure:
+        return grpc.insecure_channel(target)
+    root_certs = tls_config.ca_path.read_bytes() if tls_config.ca_path else None
+    cert_chain = tls_config.cert_path.read_bytes() if tls_config.cert_path else None
+    private_key = tls_config.key_path.read_bytes() if tls_config.key_path else None
+    credentials = grpc.ssl_channel_credentials(
+        root_certificates=root_certs,
+        private_key=private_key,
+        certificate_chain=cert_chain,
+    )
+    return grpc.secure_channel(target, credentials)
 
 
 if __name__ == "__main__":
