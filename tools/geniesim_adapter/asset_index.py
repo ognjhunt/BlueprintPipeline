@@ -29,6 +29,7 @@ from urllib import request as url_request
 
 import numpy as np
 
+from tools.config.production_mode import resolve_pipeline_environment
 from tools.quality_reports import COMMERCIAL_OK_LICENSES, LicenseType
 from tools.validation import ALLOWED_ASSET_CATEGORIES, ValidationError, validate_category
 
@@ -325,12 +326,7 @@ class AssetIndexBuilder:
         self.embedding_model = embedding_model
         self.embedding_provider = embedding_provider
         self.description_generator = SemanticDescriptionGenerator()
-        self.environment = (
-            os.getenv("GENIESIM_ENV")
-            or os.getenv("PIPELINE_ENV")
-            or os.getenv("BP_ENV")
-            or "development"
-        ).lower()
+        self.environment = resolve_pipeline_environment()
         if strict_category_validation is None:
             strict_env = os.getenv("GENIESIM_STRICT_CATEGORY", "")
             self.strict_category_validation = strict_env.lower() in {"1", "true", "yes", "on"}

@@ -31,7 +31,7 @@ import numpy as np
 if TYPE_CHECKING:
     from .notification_service import NotificationService, NotificationPayload
 
-from tools.config.production_mode import resolve_production_mode
+from tools.config.production_mode import resolve_pipeline_environment, resolve_production_mode
 
 # Import configuration
 try:
@@ -923,11 +923,9 @@ class HumanApprovalManager:
             return False
 
     def _is_local_mode(self) -> bool:
-        pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
-        geniesim_env = os.getenv("GENIESIM_ENV", "").lower()
-        bp_env = os.getenv("BP_ENV", "").lower()
         local_envs = {"local", "development", "dev", "test"}
-        return pipeline_env in local_envs or geniesim_env in local_envs or bp_env in local_envs
+        pipeline_env = resolve_pipeline_environment()
+        return pipeline_env in local_envs
 
     def _is_production_mode(self) -> bool:
         """Return True when running in production mode."""

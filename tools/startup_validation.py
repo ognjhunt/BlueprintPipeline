@@ -17,6 +17,7 @@ from tools.geniesim_adapter.config import (
     get_geniesim_host,
     get_geniesim_port,
 )
+from tools.config.production_mode import resolve_pipeline_environment
 
 
 class ValidationError(Exception):
@@ -42,7 +43,7 @@ def validate_genie_sim_credentials(required: bool = False) -> Dict[str, any]:
     grpc_host = get_geniesim_host()
     grpc_port = get_geniesim_port()
     geniesim_root = os.getenv("GENIESIM_ROOT", "/opt/geniesim")
-    environment = (os.getenv("GENIESIM_ENV") or os.getenv("PIPELINE_ENV") or os.getenv("BP_ENV") or "development").lower()
+    environment = resolve_pipeline_environment()
 
     if grpc_host != "localhost":
         warnings.append(f"GENIESIM_HOST set to {grpc_host} (typical: localhost)")
