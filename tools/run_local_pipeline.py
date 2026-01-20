@@ -3026,11 +3026,17 @@ class LocalPipelineRunner:
             job_payload["job_metrics"] = job_metrics_by_robot[robot_type]
 
         require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
+        allow_partial_failures = parse_bool_env(
+            os.getenv("ALLOW_PARTIAL_FAILURES"), default=False
+        )
         artifact_validation: Dict[str, Any] = {
             "require_lerobot": require_lerobot,
+            "allow_partial_failures": allow_partial_failures,
             "by_robot": {},
         }
         artifacts_valid = True
+        artifact_validation_status = "passed"
+        artifact_structure_by_robot: Dict[str, Any] = {}
         for current_robot, output_dir in output_dirs.items():
             recordings_dir = output_dir / "recordings"
             lerobot_dir = output_dir / "lerobot"
@@ -3063,9 +3069,25 @@ class LocalPipelineRunner:
                 "episodes_collected"
             )
             actual_episodes = len(episode_files)
+            has_recordings_dir = recordings_dir.is_dir()
+            has_episode_files = bool(episode_files)
+            has_lerobot_dir = lerobot_dir.is_dir()
+            has_dataset_info = dataset_info_path.is_file()
             count_mismatch = (
                 expected_episodes is not None and expected_episodes != actual_episodes
             )
+            artifact_structure_by_robot[current_robot] = {
+                "output_dir": str(output_dir),
+                "recordings_dir": str(recordings_dir),
+                "lerobot_dir": str(lerobot_dir),
+                "dataset_info_path": str(dataset_info_path),
+                "has_recordings_dir": has_recordings_dir,
+                "has_episode_files": has_episode_files,
+                "has_lerobot_dir": has_lerobot_dir,
+                "has_dataset_info": has_dataset_info,
+                "episodes_expected": expected_episodes,
+                "episodes_found": actual_episodes,
+            }
             if missing_paths:
                 validation_errors.append(
                     {
@@ -3093,6 +3115,7 @@ class LocalPipelineRunner:
             }
             if validation_errors:
                 artifacts_valid = False
+                artifact_validation_status = "failed"
                 job_metrics_by_robot[current_robot]["status"] = "failed"
                 failure_details.setdefault("by_robot", {})
                 failure_details["by_robot"].setdefault(current_robot, {})
@@ -3118,8 +3141,136 @@ class LocalPipelineRunner:
                 job_metrics_by_robot[current_robot][
                     "failure_details"
                 ] = failure_details["by_robot"][current_robot]
-        artifact_validation["status"] = "passed" if artifacts_valid else "failed"
+
+        expected_episode_counts = {
+            details["episodes_expected"]
+            for details in artifact_structure_by_robot.values()
+            if details["episodes_expected"] is not None
+        }
+        canonical_expected_episodes = (
+            expected_episode_counts.pop() if len(expected_episode_counts) == 1 else None
+        )
+        lerobot_required = require_lerobot or any(
+            details["has_lerobot_dir"] for details in artifact_structure_by_robot.values()
+        )
+        dataset_info_required = require_lerobot or any(
+            details["has_dataset_info"] for details in artifact_structure_by_robot.values()
+        )
+        canonical_schema = {
+            "required_subpaths": ["recordings"],
+            "lerobot_required": lerobot_required,
+            "dataset_info_required": dataset_info_required,
+            "expected_episodes": canonical_expected_episodes,
+        }
+        cross_robot_validation: Dict[str, Any] = {
+            "status": "passed",
+            "canonical_schema": canonical_schema,
+            "by_robot": {},
+            "errors": [],
+        }
+        if len(expected_episode_counts) > 1:
+            cross_robot_validation["errors"].append(
+                {
+                    "type": "expected_episode_counts_inconsistent",
+                    "expected_counts": {
+                        robot: details["episodes_expected"]
+                        for robot, details in artifact_structure_by_robot.items()
+                    },
+                }
+            )
+        for current_robot, details in artifact_structure_by_robot.items():
+            discrepancies = []
+            if not details["has_recordings_dir"]:
+                discrepancies.append(
+                    {
+                        "type": "missing_required_path",
+                        "path": details["recordings_dir"],
+                    }
+                )
+            if not details["has_episode_files"]:
+                discrepancies.append(
+                    {
+                        "type": "missing_episodes",
+                        "path": f"{details['recordings_dir']}/**/*.json",
+                    }
+                )
+            if lerobot_required and not details["has_lerobot_dir"]:
+                discrepancies.append(
+                    {
+                        "type": "missing_lerobot_dir",
+                        "path": details["lerobot_dir"],
+                    }
+                )
+            if dataset_info_required and not details["has_dataset_info"]:
+                discrepancies.append(
+                    {
+                        "type": "missing_dataset_info",
+                        "path": details["dataset_info_path"],
+                    }
+                )
+            if canonical_expected_episodes is not None:
+                if details["episodes_expected"] is None:
+                    discrepancies.append(
+                        {
+                            "type": "missing_expected_episode_count",
+                            "expected": canonical_expected_episodes,
+                        }
+                    )
+                elif details["episodes_expected"] != canonical_expected_episodes:
+                    discrepancies.append(
+                        {
+                            "type": "expected_episode_count_mismatch",
+                            "expected": canonical_expected_episodes,
+                            "found": details["episodes_expected"],
+                        }
+                    )
+                if details["episodes_found"] != canonical_expected_episodes:
+                    discrepancies.append(
+                        {
+                            "type": "episode_count_mismatch",
+                            "expected": canonical_expected_episodes,
+                            "found": details["episodes_found"],
+                        }
+                    )
+            cross_robot_validation["by_robot"][current_robot] = {
+                "schema": {
+                    "episodes_path": details["output_dir"],
+                    "recordings_path": details["recordings_dir"],
+                    "lerobot_path": details["lerobot_dir"],
+                    "dataset_info_path": details["dataset_info_path"],
+                },
+                "episodes_found": details["episodes_found"],
+                "episodes_expected": details["episodes_expected"],
+                "discrepancies": discrepancies,
+            }
+            if discrepancies:
+                cross_robot_validation["status"] = "failed"
+
+        if cross_robot_validation["errors"] or cross_robot_validation["status"] == "failed":
+            if allow_partial_failures:
+                if artifact_validation_status == "passed":
+                    artifact_validation_status = "warning"
+                self.log(
+                    "Cross-robot artifact validation found inconsistencies; "
+                    "continuing due to ALLOW_PARTIAL_FAILURES.",
+                    "WARNING",
+                )
+            else:
+                artifacts_valid = False
+                artifact_validation_status = "failed"
+                failure_details.setdefault("artifact_validation", {})
+                failure_details["artifact_validation"]["cross_robot"] = cross_robot_validation
+                if not job_payload.get("failure_reason"):
+                    job_payload["failure_reason"] = "Cross-robot artifact validation failed"
+                job_payload["failure_details"] = failure_details.get("artifact_validation")
+
+        artifact_validation["cross_robot"] = cross_robot_validation
+        artifact_validation["status"] = artifact_validation_status
         job_payload["artifact_validation"] = artifact_validation
+        job_payload["job_metrics_summary"]["artifact_validation"] = {
+            "status": artifact_validation_status,
+            "cross_robot": cross_robot_validation,
+        }
         if not artifacts_valid:
             job_status = "failed"
             job_payload["status"] = job_status
