@@ -692,6 +692,40 @@ class LocalPipelineRunner:
             message=f"Error: {message}",
         )
 
+    def _handle_retryable_exception(
+        self,
+        step: PipelineStep,
+        exc: Exception,
+        context: str,
+        *,
+        duration_seconds: float = 0,
+    ) -> StepResult:
+        pipeline_error = classify_exception(exc)
+        self._log_exception_traceback(context, exc)
+        error_context = None
+        if getattr(pipeline_error, "context", None) is not None:
+            try:
+                error_context = pipeline_error.context.to_dict()
+            except Exception:
+                error_context = pipeline_error.context
+        detail = (
+            f"error_type={pipeline_error.__class__.__name__} "
+            f"retryable={pipeline_error.retryable}"
+        )
+        if error_context:
+            detail = f"{detail} context={error_context}"
+        self.log(f"{step.value} classified error: {detail}", "ERROR")
+        user_message = getattr(pipeline_error, "user_message", None) or pipeline_error.message
+        sanitized_message = self._sanitize_error_message(user_message)
+        summary_message = self._summarize_exception(pipeline_error)
+        message = sanitized_message or summary_message
+        return StepResult(
+            step=step,
+            success=False,
+            duration_seconds=duration_seconds,
+            message=f"Error: {message}",
+        )
+
     def _write_marker(self, marker_path: Path, status: str) -> None:
         """Write a simple JSON marker file."""
         _safe_write_text(
@@ -1526,9 +1560,9 @@ class LocalPipelineRunner:
             if step == PipelineStep.REGEN3D:
                 result = self._run_regen3d_adapter()
             elif step == PipelineStep.SCALE:
-                result = self._run_scale()
+                result = self._run_with_retry(PipelineStep.SCALE, self._run_scale)
             elif step == PipelineStep.INTERACTIVE:
-                result = self._run_interactive()
+                result = self._run_with_retry(PipelineStep.INTERACTIVE, self._run_interactive)
             elif step == PipelineStep.SIMREADY:
                 result = self._run_simready()
             elif step == PipelineStep.USD:
@@ -1548,11 +1582,11 @@ class LocalPipelineRunner:
             elif step == PipelineStep.GENIESIM_IMPORT:
                 result = self._run_geniesim_import()
             elif step == PipelineStep.DWM:
-                result = self._run_dwm()
+                result = self._run_with_retry(PipelineStep.DWM, self._run_dwm)
             elif step == PipelineStep.DWM_INFERENCE:
                 result = self._run_dwm_inference()
             elif step == PipelineStep.DREAM2FLOW:
-                result = self._run_dream2flow()
+                result = self._run_with_retry(PipelineStep.DREAM2FLOW, self._run_dream2flow)
             elif step == PipelineStep.DREAM2FLOW_INFERENCE:
                 result = self._run_dream2flow_inference()
             elif step == PipelineStep.VALIDATE:
@@ -1564,6 +1598,13 @@ class LocalPipelineRunner:
                     duration_seconds=0,
                     message=f"Unknown step: {step.value}",
                 )
+        except RetryableError as e:
+            result = self._handle_retryable_exception(
+                step,
+                e,
+                f"Step {step.value} failed after retries",
+                duration_seconds=time.time() - start_time,
+            )
         except NonRetryableError as e:
             result = StepResult(
                 step=step,
