@@ -44,6 +44,8 @@ import numpy as np
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from tools.config.production_mode import resolve_production_mode
+
 from models import (
     Dream2FlowBundle,
     Dream2FlowJobConfig,
@@ -297,8 +299,7 @@ class Dream2FlowPreparationJob:
     def _should_enforce_real_render(self) -> bool:
         """Check if production flags require real rendering."""
         return (
-            os.getenv("PRODUCTION_MODE", "").lower() in {"1", "true", "yes"}
-            or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
+            resolve_production_mode()
             or os.getenv("DREAM2FLOW_PRODUCTION", "").lower() in {"1", "true", "yes"}
         )
 

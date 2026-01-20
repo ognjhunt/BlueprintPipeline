@@ -35,6 +35,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.config.production_mode import resolve_production_mode
+
 try:
     from tools.llm_client import create_llm_client, LLMResponse
     HAVE_LLM_CLIENT = True
@@ -469,11 +471,10 @@ class AIMotionPlanner:
         self._collision_planner = None
         self._curobo_device = curobo_device or os.getenv("CUROBO_DEVICE", "cuda:0")
         self._use_curobo = use_curobo and os.getenv("USE_CUROBO", "true").lower() in {"1", "true", "yes"}
-        labs_staging = os.getenv("LABS_STAGING", "0").lower() in {"1", "true", "yes"}
-        production_quality = os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
         require_collision_env = os.getenv("REQUIRE_COLLISION_PLANNER", "false").lower() in {"1", "true", "yes"}
-        self._require_collision_planner = require_collision_env or production_quality or labs_staging
-        self._production_guard = production_quality or labs_staging
+        production_mode = resolve_production_mode()
+        self._require_collision_planner = require_collision_env or production_mode
+        self._production_guard = production_mode
         self._timing = load_motion_planner_timing()
         self._planner_backend_order = [
             name.strip().lower()

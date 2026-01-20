@@ -323,7 +323,12 @@ class GenieSimConfig:
     @classmethod
     def from_env(cls) -> "GenieSimConfig":
         """Create configuration from environment variables."""
-        environment = os.getenv("GENIESIM_ENV", os.getenv("BP_ENV", "development")).lower()
+        environment = (
+            os.getenv("GENIESIM_ENV")
+            or os.getenv("PIPELINE_ENV")
+            or os.getenv("BP_ENV")
+            or "development"
+        ).lower()
         allow_linear_fallback = os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK", "0") == "1"
         allow_linear_fallback_in_production = (
             os.getenv("GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD", "0") == "1"

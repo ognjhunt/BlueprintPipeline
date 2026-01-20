@@ -36,6 +36,8 @@ try:
 except ImportError:
     HAVE_CONFIG = False
 
+from tools.config.production_mode import resolve_production_mode
+
 from .compatibility_matrix import (
     ArticulationState,
     AssetCategory,
@@ -108,9 +110,7 @@ class IntelligentRegionDetector:
                     PIPELINE_CONFIG_PATH,
                     exc,
                 )
-                strict_env = os.getenv("SIMREADY_PRODUCTION_MODE", "").lower()
-                pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
-                if strict_env in {"1", "true", "yes"} or pipeline_env in {"prod", "production"}:
+                if resolve_production_mode():
                     raise
         return "gemini-3-pro-preview"
 

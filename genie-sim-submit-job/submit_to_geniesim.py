@@ -58,6 +58,7 @@ from tools.gcs_upload import (
 )
 from tools.config import load_pipeline_config
 from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
 from tools.firebase_upload.firebase_upload_orchestrator import (
     FirebaseUploadOrchestratorError,
     build_firebase_upload_prefix,
@@ -205,13 +206,7 @@ def _safe_float(value: Any, default: Optional[float] = None, field_name: str = "
 
 
 def _is_production_mode() -> bool:
-    pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
-    bp_env = os.getenv("BP_ENV", "").lower()
-    return (
-        parse_bool_env(os.getenv("PRODUCTION_MODE"), default=False)
-        or pipeline_env == "production"
-        or bp_env == "production"
-    )
+    return resolve_production_mode()
 
 
 def _load_override_metadata() -> Optional[Dict[str, Any]]:

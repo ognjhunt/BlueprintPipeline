@@ -41,7 +41,7 @@ def validate_genie_sim_credentials(required: bool = False) -> Dict[str, any]:
     grpc_host = get_geniesim_host()
     grpc_port = get_geniesim_port()
     geniesim_root = os.getenv("GENIESIM_ROOT", "/opt/geniesim")
-    environment = os.getenv("GENIESIM_ENV", os.getenv("BP_ENV", "development")).lower()
+    environment = (os.getenv("GENIESIM_ENV") or os.getenv("PIPELINE_ENV") or os.getenv("BP_ENV") or "development").lower()
 
     if grpc_host != "localhost":
         warnings.append(f"GENIESIM_HOST set to {grpc_host} (typical: localhost)")

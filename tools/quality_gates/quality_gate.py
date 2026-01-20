@@ -31,6 +31,8 @@ import numpy as np
 if TYPE_CHECKING:
     from .notification_service import NotificationService, NotificationPayload
 
+from tools.config.production_mode import resolve_production_mode
+
 # Import configuration
 try:
     from tools.config import load_quality_config, QualityConfig
@@ -900,15 +902,14 @@ class HumanApprovalManager:
 
     def _is_local_mode(self) -> bool:
         pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
+        geniesim_env = os.getenv("GENIESIM_ENV", "").lower()
         bp_env = os.getenv("BP_ENV", "").lower()
         local_envs = {"local", "development", "dev", "test"}
-        return pipeline_env in local_envs or bp_env in local_envs
+        return pipeline_env in local_envs or geniesim_env in local_envs or bp_env in local_envs
 
     def _is_production_mode(self) -> bool:
         """Return True when running in production mode."""
-        pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
-        bp_env = os.getenv("BP_ENV", "").lower()
-        return pipeline_env == "production" or bp_env == "production"
+        return resolve_production_mode()
 
 
 @dataclass
@@ -2253,9 +2254,7 @@ class QualityGateRegistry:
             episode_stats = ctx.get("episode_stats", {})
 
             def is_production_mode() -> bool:
-                pipeline_env = os.getenv("PIPELINE_ENV", "").lower()
-                bp_env = os.getenv("BP_ENV", "").lower()
-                return pipeline_env == "production" or bp_env == "production"
+                return resolve_production_mode()
 
             # Get thresholds from config or use defaults
             if self.config and hasattr(self.config, 'episodes'):
