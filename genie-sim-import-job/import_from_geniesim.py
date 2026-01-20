@@ -86,6 +86,11 @@ from tools.quality_gates.quality_gate import (
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
+from tools.firebase_upload.firebase_upload_orchestrator import (
+    FirebaseUploadOrchestratorError,
+    resolve_firebase_upload_prefix,
+    upload_episodes_with_retry,
+)
 from tools.gcs_upload import (
     calculate_file_md5_base64,
     upload_blob_from_filename,
@@ -2335,7 +2340,7 @@ def main():
         os.getenv("ENABLE_FIREBASE_UPLOAD"),
         default=production_mode or service_mode,
     )
-    firebase_upload_prefix = os.getenv("FIREBASE_UPLOAD_PREFIX", "datasets")
+    firebase_upload_prefix = resolve_firebase_upload_prefix()
     if enable_firebase_upload and not _preflight_firebase_upload():
         sys.exit(1)
     try:
@@ -2530,22 +2535,18 @@ def main():
 
                 firebase_summary = None
                 if enable_firebase_upload and result.success:
-                    from tools.firebase_upload.uploader import (
-                        init_firebase,
-                        upload_episodes_to_firebase,
-                    )
-
                     print(
                         "[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage "
                         f"for robot {robot_type}..."
                     )
                     try:
-                        init_firebase()
-                        firebase_summary = upload_episodes_to_firebase(
-                            result.output_dir,
-                            scene_id,
-                            prefix=f"{firebase_upload_prefix}/{robot_type}",
+                        firebase_result = upload_episodes_with_retry(
+                            episodes_dir=result.output_dir,
+                            scene_id=scene_id,
+                            robot_type=robot_type,
+                            prefix=firebase_upload_prefix,
                         )
+                        firebase_summary = firebase_result.summary
                     except Exception as exc:
                         _alert_firebase_upload_failure(
                             scene_id=scene_id,
@@ -2653,20 +2654,14 @@ def main():
             print(f"[GENIE-SIM-IMPORT] Episodes imported: {result.episodes_passed_validation}")
             print(f"[GENIE-SIM-IMPORT] Average quality: {result.average_quality_score:.2f}")
             if enable_firebase_upload:
-                from tools.firebase_upload.uploader import (
-                    init_firebase,
-                    upload_episodes_to_firebase,
-                )
-
                 print("[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage...")
                 try:
-                    init_firebase()
-                    upload_summary = upload_episodes_to_firebase(
-                        result.output_dir,
-                        scene_id,
+                    firebase_result = upload_episodes_with_retry(
+                        episodes_dir=result.output_dir,
+                        scene_id=scene_id,
                         prefix=firebase_upload_prefix,
                     )
-                except Exception as exc:
+                except FirebaseUploadOrchestratorError as exc:
                     _alert_firebase_upload_failure(
                         scene_id=scene_id,
                         job_id=job_id,
@@ -2675,6 +2670,7 @@ def main():
                     )
                     print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
                     raise
+                upload_summary = firebase_result.summary
                 print(
                     "[GENIE-SIM-IMPORT] Firebase upload complete: "
                     f"uploaded={upload_summary.get('uploaded', 0)} "

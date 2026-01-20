@@ -355,8 +355,9 @@ export SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1
 | `FIREBASE_STORAGE_BUCKET` | str | None | Firebase Storage bucket used for upload jobs (required for Genie Sim submit/import in production/service mode; e.g., `blueprint-8c1ca.appspot.com`) |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | str | None | JSON payload for Firebase service account credentials (required for Genie Sim submit/import in production/service mode) |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | path | None | Path to Firebase service account JSON credentials (required for Genie Sim submit/import in production/service mode) |
-| `FIREBASE_UPLOAD_PREFIX` | str | `datasets` | Firebase upload prefix for episode artifacts (import job) |
-| `FIREBASE_EPISODE_PREFIX` | str | `datasets` | Firebase upload prefix for Genie Sim episode artifacts (submit job) |
+| `FIREBASE_UPLOAD_PREFIX` | str | `datasets` | Firebase upload prefix for Genie Sim episode artifacts (submit/import jobs) |
+
+> **Migration note:** `FIREBASE_EPISODE_PREFIX` has been replaced by `FIREBASE_UPLOAD_PREFIX` to keep dataset paths consistent across Genie Sim submit/import flows.
 
 Scene asset input path example (GCS):
 ```
