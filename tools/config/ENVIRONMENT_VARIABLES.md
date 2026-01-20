@@ -560,8 +560,9 @@ export GCS_BUCKET_MODELS=my-project-models
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | str | "INFO" | Logging level (DEBUG, INFO, WARNING, ERROR) |
-| `PARTICULATE_DEBUG` | bool | "0" | Enable Particulate service debug mode (requires `PARTICULATE_DEBUG_TOKEN` for /debug) |
-| `PARTICULATE_DEBUG_TOKEN` | str | None | Shared secret required to access the Particulate `/debug` endpoint |
+| `PARTICULATE_DEBUG` | bool | "0" | Enable Particulate service debug mode (requires `DEBUG_TOKEN` or legacy `PARTICULATE_DEBUG_TOKEN` for /debug) |
+| `DEBUG_TOKEN` | str | None | Particulate `/debug` bearer token (non-production only; production uses Secret Manager secret `particulate-debug-token`) |
+| `PARTICULATE_DEBUG_TOKEN` | str | None | Legacy Particulate `/debug` token (non-production only; production uses Secret Manager secret `particulate-debug-token`) |
 | `BLUEPRINT_DEBUG` | bool | "0" | Enable debug logging throughout pipeline |
 | `ISAAC_SIM_DEBUG` | bool | "0" | Enable Isaac Sim debug output |
 
@@ -571,12 +572,15 @@ export GCS_BUCKET_MODELS=my-project-models
 export LOG_LEVEL=DEBUG
 export BLUEPRINT_DEBUG=1
 export PARTICULATE_DEBUG=1
-export PARTICULATE_DEBUG_TOKEN=<shared-secret>
+export DEBUG_TOKEN=<shared-secret>
 
 # Production - disable debug
 export PARTICULATE_DEBUG=0
 export LOG_LEVEL=WARNING
 ```
+
+In production, store the Particulate debug token in Secret Manager under
+`particulate-debug-token`; environment variable tokens are ignored.
 
 ---
 
@@ -615,7 +619,7 @@ export USE_MOCK_DATA=1
 export MOCK_PHYSICS=1
 export BP_ENABLE_CONFIG_AUDIT=1
 export PARTICULATE_DEBUG=1
-export PARTICULATE_DEBUG_TOKEN=<shared-secret>
+export DEBUG_TOKEN=<shared-secret>
 ```
 
 ### Production Environment
