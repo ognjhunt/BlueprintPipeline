@@ -94,6 +94,7 @@ from tools.error_handling import (
 from tools.firebase_upload.firebase_upload_orchestrator import resolve_firebase_upload_prefix
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
+from tools.lerobot_validation import validate_lerobot_dataset
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
 
 # Add repository root to path
@@ -3047,6 +3048,17 @@ class LocalPipelineRunner:
                     missing_paths.append(str(lerobot_dir))
                 if not dataset_info_path.is_file():
                     missing_paths.append(str(dataset_info_path))
+            validation_errors = []
+            lerobot_validation_errors: List[str] = []
+            if lerobot_dir.is_dir():
+                lerobot_validation_errors = validate_lerobot_dataset(lerobot_dir)
+                if lerobot_validation_errors:
+                    validation_errors.append(
+                        {
+                            "type": "lerobot_validation",
+                            "errors": lerobot_validation_errors,
+                        }
+                    )
             expected_episodes = job_metrics_by_robot.get(current_robot, {}).get(
                 "episodes_collected"
             )
@@ -3054,7 +3066,6 @@ class LocalPipelineRunner:
             count_mismatch = (
                 expected_episodes is not None and expected_episodes != actual_episodes
             )
-            validation_errors = []
             if missing_paths:
                 validation_errors.append(
                     {
@@ -3091,6 +3102,14 @@ class LocalPipelineRunner:
                     "episodes_expected": expected_episodes,
                     "missing_paths": missing_paths,
                     "require_lerobot": require_lerobot,
+                    "lerobot_errors": lerobot_validation_errors,
+                }
+                failure_details.setdefault("artifact_validation", {})
+                failure_details["artifact_validation"].setdefault("by_robot", {})
+                failure_details["artifact_validation"]["by_robot"][current_robot] = {
+                    "errors": lerobot_validation_errors,
+                    "output_dir": str(output_dir),
+                    "lerobot_dir": str(lerobot_dir),
                 }
                 if not job_metrics_by_robot[current_robot].get("failure_reason"):
                     job_metrics_by_robot[current_robot][
@@ -3360,6 +3379,7 @@ class LocalPipelineRunner:
         lerobot_dir = output_dir / "lerobot"
         dataset_info_path = lerobot_dir / "dataset_info.json"
         require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
+        lerobot_validation_errors: List[str] = []
 
         try:
             if not local_success:
@@ -3387,6 +3407,13 @@ class LocalPipelineRunner:
                     "Genie Sim lerobot artifacts missing for job "
                     f"{job_id}: expected {', '.join(missing)}"
                 )
+            if lerobot_dir.is_dir():
+                lerobot_validation_errors = validate_lerobot_dataset(lerobot_dir)
+                if lerobot_validation_errors:
+                    raise NonRetryableError(
+                        "Genie Sim lerobot validation failed for job "
+                        f"{job_id}: {'; '.join(lerobot_validation_errors)}"
+                    )
         except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
@@ -3401,6 +3428,7 @@ class LocalPipelineRunner:
                     "recordings_path": str(recordings_dir),
                     "lerobot_path": str(lerobot_dir),
                     "lerobot_dataset_info": str(dataset_info_path),
+                    "lerobot_validation_errors": lerobot_validation_errors,
                 },
             )
         config = ImportConfig(
