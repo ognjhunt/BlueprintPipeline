@@ -84,6 +84,9 @@ def test_should_skip_step_validates_hashes(tmp_path: Path) -> None:
         store_output_hashes=True,
     )
 
+    checkpoint = store.load_checkpoint(tmp_path, "step-hash")
+    assert checkpoint is not None
+    assert str(output_path) in checkpoint.output_hashes
     assert store.should_skip_step(tmp_path, "step-hash") is True
 
     output_path.write_text("modified")

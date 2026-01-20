@@ -24,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.batch_processing.parallel_runner import ParallelPipelineRunner, SceneStatus
 from tools.checkpoint import should_skip_step, write_checkpoint
+from tools.checkpoint.hash_config import resolve_checkpoint_hash_setting
 from tools.metrics import track_pipeline_run, update_pipeline_status
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
@@ -153,6 +154,8 @@ def _parse_resume_from(value: Optional[str]) -> Optional[PipelineStep]:
         return PipelineStep(value)
     except ValueError as exc:
         raise ValueError(f"Unknown resume-from step: {value}") from exc
+
+
 
 
 def _dir_has_files(path: Path) -> bool:
@@ -294,6 +297,7 @@ def _build_scene_processor(
                     },
                     output_paths=[report_path] if report_path else [],
                     scene_id=scene.scene_id,
+                    store_output_hashes=resolve_checkpoint_hash_setting(),
                 )
 
         duration = time.time() - start_time
