@@ -75,6 +75,21 @@ def test_create_image_to_3d_task_posts_payload(monkeypatch):
     assert captured["json"]["image_url"] == "data:uri"
 
 
+def test_create_image_to_3d_task_uses_configured_base_url(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers=None, json=None):
+        captured["url"] = url
+        return FakeResponse({"result": "task-123"})
+
+    monkeypatch.setenv("MESHY_BASE_URL", "https://example.meshy.local/")
+    monkeypatch.setattr(run_meshy_from_assets.requests, "post", fake_post)
+
+    run_meshy_from_assets.create_image_to_3d_task("api-key", "data:uri")
+
+    assert captured["url"] == "https://example.meshy.local/openapi/v1/image-to-3d"
+
+
 def test_create_image_to_3d_task_propagates_http_error(monkeypatch):
     def fake_post(*_args, **_kwargs):
         return FakeResponse(raise_exc=requests.HTTPError("boom"))
@@ -102,6 +117,23 @@ def test_wait_for_task_retries_until_success(monkeypatch):
 
     assert data["status"] == "SUCCEEDED"
     assert data["result"] == "done"
+
+
+def test_wait_for_task_uses_configured_base_url(monkeypatch):
+    captured = {}
+
+    def fake_get(url, **_kwargs):
+        captured["url"] = url
+        return FakeResponse({"status": "SUCCEEDED", "progress": 100, "result": "done"})
+
+    monkeypatch.setenv("MESHY_API_BASE", "https://example.meshy.internal")
+    monkeypatch.setattr(run_meshy_from_assets.requests, "get", fake_get)
+    monkeypatch.setattr(run_meshy_from_assets.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run_meshy_from_assets.time, "time", lambda: 0.0)
+
+    run_meshy_from_assets.wait_for_task("api-key", "task-123", poll_seconds=0.0, timeout=10.0)
+
+    assert captured["url"] == "https://example.meshy.internal/openapi/v1/image-to-3d/task-123"
 
 
 def test_wait_for_task_timeout(monkeypatch):

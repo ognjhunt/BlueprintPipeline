@@ -17,7 +17,16 @@ from tools.validation.entrypoint_checks import (
     validate_scene_manifest,
 )
 
-MESHY_BASE = "https://api.meshy.ai"
+DEFAULT_MESHY_BASE = "https://api.meshy.ai"
+
+
+def get_meshy_base_url() -> str:
+    base = (
+        os.environ.get("MESHY_BASE_URL")
+        or os.environ.get("MESHY_API_BASE")
+        or DEFAULT_MESHY_BASE
+    )
+    return base.rstrip("/")
 
 def load_assets_plan(assets_root: Path):
     plan = load_manifest_or_scene_assets(assets_root)
@@ -40,7 +49,7 @@ def image_to_data_uri(img_path: Path):
     return f"data:{mime};base64,{b64}"
 
 def create_image_to_3d_task(api_key: str, data_uri: str) -> str:
-    url = f"{MESHY_BASE}/openapi/v1/image-to-3d"
+    url = f"{get_meshy_base_url()}/openapi/v1/image-to-3d"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "image_url": data_uri,
@@ -57,7 +66,7 @@ def create_image_to_3d_task(api_key: str, data_uri: str) -> str:
     return task_id
 
 def wait_for_task(api_key: str, task_id: str, poll_seconds: float = 10.0, timeout: float = 1800.0):
-    url = f"{MESHY_BASE}/openapi/v1/image-to-3d/{task_id}"
+    url = f"{get_meshy_base_url()}/openapi/v1/image-to-3d/{task_id}"
     headers = {"Authorization": f"Bearer {api_key}"}
     t0 = time.time()
     while True:
