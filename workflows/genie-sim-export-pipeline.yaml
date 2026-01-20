@@ -512,6 +512,31 @@ main:
         args:
           text: '${"Genie Sim export completed for scene " + sceneId}'
           severity: "INFO"
+        next: ensure_asset_provenance_report
+
+    - ensure_asset_provenance_report:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${geniesimPrefix + "/legal/asset_provenance.json"}
+        except:
+          as: e
+          steps:
+            - handle_missing_asset_provenance_report:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: log_missing_asset_provenance_report
+                next: raise_asset_provenance_report_error
+            - log_missing_asset_provenance_report:
+                call: sys.log
+                args:
+                  text: '${"Missing asset provenance report at gs://" + bucket + "/" + geniesimPrefix + "/legal/asset_provenance.json. Rerun the variation-gen legal report step before submitting."}'
+                  severity: "ERROR"
+                next: raise_asset_provenance_report_error
+            - raise_asset_provenance_report_error:
+                raise:
+                  message: '${"Missing asset provenance report at gs://" + bucket + "/" + geniesimPrefix + "/legal/asset_provenance.json"}'
         next: init_submission_metrics
 
     - init_submission_metrics:
