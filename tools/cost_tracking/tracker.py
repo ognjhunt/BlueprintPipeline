@@ -29,28 +29,6 @@ logger = logging.getLogger(__name__)
 PLACEHOLDER_GENIESIM_JOB_COST = 0.10
 PLACEHOLDER_GENIESIM_EPISODE_COST = 0.002
 
-PRICING = {
-    # Gemini API pricing (per 1K tokens)
-    "gemini_input_per_1k": 0.00125,  # $0.00125 per 1K input tokens
-    "gemini_output_per_1k": 0.005,   # $0.005 per 1K output tokens
-
-    # Cloud Run pricing (per vCPU-second and GB-second)
-    "cloud_run_vcpu_second": 0.00002400,  # $0.000024 per vCPU-second
-    "cloud_run_memory_gb_second": 0.00000250,  # $0.0000025 per GB-second
-
-    # Cloud Build pricing (per build-minute)
-    "cloud_build_minute": 0.003,  # $0.003 per build-minute
-
-    # GCS pricing (per GB per month)
-    "gcs_storage_gb_month": 0.020,  # $0.02 per GB per month
-    "gcs_operation_class_a": 0.005 / 10000,  # $0.005 per 10K operations
-    "gcs_operation_class_b": 0.0004 / 10000,  # $0.0004 per 10K operations
-
-    # Genie Sim API (placeholder - need actual pricing)
-    "geniesim_job": PLACEHOLDER_GENIESIM_JOB_COST,  # $0.10 per job (PLACEHOLDER)
-    "geniesim_episode": PLACEHOLDER_GENIESIM_EPISODE_COST,  # $0.002 per episode (PLACEHOLDER)
-}
-
 GENIESIM_PRICING_ENV_VARS = ("GENIESIM_JOB_COST", "GENIESIM_EPISODE_COST")
 GENIESIM_GPU_RATE_TABLE_ENV = "GENIESIM_GPU_RATE_TABLE"
 GENIESIM_GPU_RATE_TABLE_PATH_ENV = "GENIESIM_GPU_RATE_TABLE_PATH"
@@ -59,6 +37,7 @@ GENIESIM_GPU_REGION_ENV = "GENIESIM_GPU_REGION"
 GENIESIM_GPU_NODE_TYPE_ENV = "GENIESIM_GPU_NODE_TYPE"
 COST_TRACKING_PRICING_ENV = "COST_TRACKING_PRICING_JSON"
 COST_TRACKING_PRICING_PATH_ENV = "COST_TRACKING_PRICING_PATH"
+DEFAULT_PRICING_PATH = Path(__file__).with_name("pricing_defaults.json")
 
 DEFAULT_GENIESIM_GPU_RATES = {
     "default": {
@@ -68,9 +47,6 @@ DEFAULT_GENIESIM_GPU_RATES = {
         "a2-highgpu-1g": 1.685,
     },
 }
-
-
-REQUIRED_PRICING_FIELDS = frozenset(PRICING.keys())
 
 
 def _parse_float(value: Any, *, env_var: str) -> float:
@@ -110,6 +86,24 @@ def _parse_pricing_payload(payload: str, *, source: str) -> Dict[str, float]:
     return _sanitize_pricing_payload(parsed, source=source)
 
 
+def _load_pricing_defaults() -> tuple[Dict[str, float], Dict[str, Any]]:
+    if not DEFAULT_PRICING_PATH.exists():
+        raise FileNotFoundError(f"Pricing defaults not found: {DEFAULT_PRICING_PATH}")
+    try:
+        parsed = json.loads(DEFAULT_PRICING_PATH.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Pricing defaults file is not valid JSON: {DEFAULT_PRICING_PATH}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Pricing defaults must be a JSON object: {DEFAULT_PRICING_PATH}")
+    if "pricing" not in parsed:
+        raise ValueError(f"Pricing defaults must include a 'pricing' block: {DEFAULT_PRICING_PATH}")
+    pricing = _sanitize_pricing_payload(parsed["pricing"], source=str(DEFAULT_PRICING_PATH))
+    metadata = {key: value for key, value in parsed.items() if key != "pricing"}
+    return pricing, metadata
+
+
 def _validate_pricing_config(pricing: Dict[str, float], *, source: str) -> None:
     missing_fields = REQUIRED_PRICING_FIELDS - pricing.keys()
     if missing_fields:
@@ -133,6 +127,15 @@ def _validate_pricing_values(
     if negative_fields:
         negative_list = ", ".join(sorted(negative_fields))
         raise ValueError(f"Pricing data from {source} has negative values for: {negative_list}.")
+
+
+DEFAULT_PRICING, DEFAULT_PRICING_METADATA = _load_pricing_defaults()
+REQUIRED_PRICING_FIELDS = frozenset(DEFAULT_PRICING.keys())
+_validate_pricing_values(
+    DEFAULT_PRICING,
+    source=str(DEFAULT_PRICING_PATH),
+    required_fields=REQUIRED_PRICING_FIELDS,
+)
 
 
 def _load_custom_pricing_from_env() -> tuple[Dict[str, float], Optional[str]]:
@@ -177,14 +180,34 @@ def _load_geniesim_pricing_from_env() -> Dict[str, float]:
 def _validate_geniesim_pricing(pricing: Dict[str, float]) -> None:
     _validate_pricing_values(
         {
-            "geniesim_job": pricing.get("geniesim_job", PLACEHOLDER_GENIESIM_JOB_COST),
+            "geniesim_job": pricing.get("geniesim_job", DEFAULT_PRICING["geniesim_job"]),
             "geniesim_episode": pricing.get(
                 "geniesim_episode",
-                PLACEHOLDER_GENIESIM_EPISODE_COST,
+                DEFAULT_PRICING["geniesim_episode"],
             ),
         },
         source="geniesim pricing",
     )
+    if DEFAULT_PRICING_METADATA.get("geniesim_pricing_placeholder") is True:
+        raise ValueError(
+            "Genie Sim pricing defaults are marked as placeholders; provide overrides via "
+            f"{COST_TRACKING_PRICING_ENV}, {COST_TRACKING_PRICING_PATH_ENV}, or "
+            f"{', '.join(GENIESIM_PRICING_ENV_VARS)}."
+        )
+    placeholder_values = {
+        "geniesim_job": PLACEHOLDER_GENIESIM_JOB_COST,
+        "geniesim_episode": PLACEHOLDER_GENIESIM_EPISODE_COST,
+    }
+    placeholder_keys = [
+        key for key, value in placeholder_values.items() if pricing.get(key) == value
+    ]
+    if placeholder_keys:
+        placeholder_list = ", ".join(sorted(placeholder_keys))
+        raise ValueError(
+            "Genie Sim pricing uses placeholder values for: "
+            f"{placeholder_list}. Provide real values via "
+            f"{', '.join(GENIESIM_PRICING_ENV_VARS)} or a pricing JSON override."
+        )
 
 
 def _require_geniesim_env_vars_in_production() -> None:
@@ -420,7 +443,7 @@ class CostTracker:
                 f"{COST_TRACKING_PRICING_ENV} or {COST_TRACKING_PRICING_PATH_ENV} in production."
             )
 
-        self.pricing = PRICING.copy()
+        self.pricing = DEFAULT_PRICING.copy()
         if custom_pricing:
             _validate_pricing_config(custom_pricing, source=pricing_source or "custom pricing")
             self.pricing.update(custom_pricing)

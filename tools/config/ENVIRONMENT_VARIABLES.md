@@ -119,6 +119,28 @@ export PIPELINE_SEED=1234
 
 ---
 
+## Cost Tracking
+
+Cost tracking loads canonical defaults from `tools/cost_tracking/pricing_defaults.json`.
+You can override pricing with either JSON payloads or targeted environment variables in
+this order: `COST_TRACKING_PRICING_JSON/PATH` → `GENIESIM_JOB_COST` / `GENIESIM_EPISODE_COST`.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `COST_TRACKING_PRICING_JSON` | json | unset | JSON/YAML payload that overrides pricing keys in the defaults file. |
+| `COST_TRACKING_PRICING_PATH` | path | unset | Path to a JSON/YAML file that overrides pricing keys in the defaults file. |
+| `GENIESIM_JOB_COST` | float | unset | Override per-job Genie Sim pricing (required in production). |
+| `GENIESIM_EPISODE_COST` | float | unset | Override per-episode Genie Sim pricing (required in production). |
+
+**Example**:
+```bash
+export COST_TRACKING_PRICING_PATH="/etc/blueprint/pricing.json"
+export GENIESIM_JOB_COST="1.25"
+export GENIESIM_EPISODE_COST="0.03"
+```
+
+---
+
 ## Webhook Controls
 
 Controls for the Genie Sim import webhook.
