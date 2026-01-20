@@ -899,6 +899,30 @@ def _load_existing_import_manifest(output_dir: Path) -> Optional[Dict[str, Any]]
         return json.load(handle)
 
 
+def _update_import_manifest_firebase_summary(
+    manifest_path: Optional[Path],
+    firebase_summary: Dict[str, Any],
+) -> None:
+    if manifest_path is None:
+        return
+    if not manifest_path.exists():
+        print(
+            "[GENIE-SIM-IMPORT] ⚠️  Import manifest not found; "
+            "skipping Firebase summary update."
+        )
+        return
+    with open(manifest_path, "r") as handle:
+        import_manifest = json.load(handle)
+    import_manifest["firebase_upload"] = firebase_summary
+    checksums = import_manifest.setdefault("checksums", {})
+    metadata_checksums = checksums.setdefault("metadata", {})
+    metadata_checksums.setdefault("import_manifest.json", {})
+    metadata_checksums["import_manifest.json"]["sha256"] = compute_manifest_checksum(
+        import_manifest
+    )
+    write_json_atomic(manifest_path, import_manifest, indent=2)
+
+
 def _resolve_job_idempotency(job_metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not job_metadata:
         return None
@@ -3288,6 +3312,10 @@ def main():
                     print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
                     raise
                 upload_summary = firebase_result.summary
+                _update_import_manifest_firebase_summary(
+                    result.import_manifest_path,
+                    upload_summary,
+                )
                 print(
                     "[GENIE-SIM-IMPORT] Firebase upload complete: "
                     f"uploaded={upload_summary.get('uploaded', 0)} "
