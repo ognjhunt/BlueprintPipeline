@@ -19,3 +19,11 @@ lives in `genie-sim-gpu-job/GENIESIM_REF` and is used in two places:
 
 CI validates that the ref is either a full 40-character SHA or a tag-like value
 (before building the image).
+
+## Isaac Sim base image version
+
+The Isaac Sim base image tag is controlled by `ARG ISAAC_SIM_VERSION` in
+`genie-sim-gpu-job/Dockerfile`. Update the default value in the Dockerfile to
+pin a new version, or override it at build time with
+`--build-arg ISAAC_SIM_VERSION=<version>`. CI validates that the build arg
+default is present and non-empty.
