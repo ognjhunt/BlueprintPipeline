@@ -16,6 +16,11 @@ Kubernetes manifests for deploying pipeline jobs and supporting infrastructure.
 ## How to run locally
 - Apply manifests with `kubectl apply -f <file>.yaml` after configuring cluster access.
 
+## Image registry validation
+All Kubernetes manifests in this folder should reference images in `ghcr.io`. When updating
+image names or tags, ensure every `image:` entry (including Kustomize overrides) points to
+the same GHCR registry so production deployments stay consistent.
+
 ## Episode generation via Kustomize
 The episode generation job reads `SCENE_ID` and `BUCKET` from the `episode-gen-runtime`
 ConfigMap, plus an image override for the Isaac Sim episode generator.
@@ -30,7 +35,7 @@ ConfigMap, plus an image override for the Isaac Sim episode generator.
 
 Example override:
 ```
-kustomize edit set image gcr.io/blueprint-project/blueprint-episode-gen=gcr.io/my-project/blueprint-episode-gen:isaacsim
+kustomize edit set image ghcr.io/blueprint-project/blueprint-episode-gen=ghcr.io/my-project/blueprint-episode-gen:isaacsim
 ```
 
 ## Firebase cleanup CronJob

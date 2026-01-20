@@ -100,7 +100,7 @@ spec:
 
       containers:
         - name: dwm-generator
-          image: gcr.io/${PROJECT_ID}/blueprint-dwm:isaacsim
+          image: ghcr.io/${PROJECT_ID}/blueprint-dwm:isaacsim
           imagePullPolicy: Always
 
           command: ["/entrypoint.sh", "generate"]

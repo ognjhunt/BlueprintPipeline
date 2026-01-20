@@ -45,7 +45,7 @@ spec:
       serviceAccountName: blueprint-pipeline-sa
       containers:
         - name: genie-sim-import-webhook
-          image: gcr.io/${PROJECT_ID}/blueprint-genie-sim-import-webhook:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-import-webhook:latest
           imagePullPolicy: Always
           command: ["gunicorn", "-b", ":8080", "main:app"]
           envFrom:
