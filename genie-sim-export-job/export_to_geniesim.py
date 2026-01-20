@@ -54,6 +54,7 @@ Environment Variables:
 
 import json
 import os
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -1030,9 +1031,25 @@ def run_geniesim_export_job(
 
             # Export premium analytics manifests (DEFAULT: ENABLED)
             premium_analytics_manifests = {}
+            premium_feature_staged_counts = {}
             premium_feature_counts = {}
             premium_feature_status = {}
+            premium_feature_staged_dirs = {}
+            premium_feature_final_dirs = {
+                "premium_analytics": "premium_analytics",
+                "sim2real_fidelity": "sim2real_fidelity",
+                "embodiment_transfer": "embodiment_transfer",
+                "trajectory_optimality": "trajectory_optimality",
+                "policy_leaderboard": "policy_leaderboard",
+                "tactile_sensors": "tactile_sensors",
+                "language_annotations": "language_annotations",
+                "generalization_analyzer": "generalization_analysis",
+                "sim2real_validation": "sim2real_validation",
+                "audio_narration": "audio_narration",
+            }
             export_warnings = []
+            temp_dir = output_dir / ".premium_tmp"
+            temp_dir.mkdir(parents=True, exist_ok=True)
 
             def record_premium_warning(feature_name: str, exc: Exception, feature_output_dir: Path) -> None:
                 warning = {
@@ -1052,11 +1069,12 @@ def run_geniesim_export_job(
                         "[GENIESIM-EXPORT-JOB] ❌ Premium feature failure blocked export "
                         "due to STRICT_PREMIUM_FEATURES=1"
                     )
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                     raise exc
 
             if enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting premium analytics manifests (DEFAULT - NO LONGER UPSELL)")
-                analytics_dir = output_dir / "premium_analytics"
+                analytics_dir = temp_dir / "premium_analytics"
                 try:
                     analytics_config = DefaultPremiumAnalyticsConfig(enabled=True)
                     analytics_exporter = create_default_premium_analytics_exporter(
@@ -1065,8 +1083,8 @@ def run_geniesim_export_job(
                         config=analytics_config,
                     )
                     premium_analytics_manifests = analytics_exporter.export_all_manifests()
-                    premium_feature_counts["premium_analytics"] = len(premium_analytics_manifests)
-                    premium_feature_status["premium_analytics"] = True
+                    premium_feature_staged_counts["premium_analytics"] = len(premium_analytics_manifests)
+                    premium_feature_staged_dirs["premium_analytics"] = analytics_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Premium analytics: "
                         f"{len(premium_analytics_manifests)} manifests exported"
@@ -1088,7 +1106,7 @@ def run_geniesim_export_job(
             # 1. Sim2Real Fidelity Matrix ($20k-$50k value)
             if SIM2REAL_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Fidelity Matrix ($20k-$50k value - NOW FREE)")
-                sim2real_dir = output_dir / "sim2real_fidelity"
+                sim2real_dir = temp_dir / "sim2real_fidelity"
                 try:
                     sim2real_manifests = create_default_sim2real_fidelity_exporter(
                         scene_id=scene_id,
@@ -1096,8 +1114,8 @@ def run_geniesim_export_job(
                         output_dir=sim2real_dir,
                     )
                     all_premium_features_manifests.update({"sim2real": sim2real_manifests})
-                    premium_feature_counts["sim2real_fidelity"] = len(sim2real_manifests)
-                    premium_feature_status["sim2real_fidelity"] = True
+                    premium_feature_staged_counts["sim2real_fidelity"] = len(sim2real_manifests)
+                    premium_feature_staged_dirs["sim2real_fidelity"] = sim2real_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Fidelity: "
                         f"{len(sim2real_manifests)} manifests exported"
@@ -1111,7 +1129,7 @@ def run_geniesim_export_job(
             # 2. Embodiment Transfer Analysis ($20k-$100k value)
             if EMBODIMENT_TRANSFER_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Embodiment Transfer Analysis ($20k-$100k value - NOW FREE)")
-                embodiment_dir = output_dir / "embodiment_transfer"
+                embodiment_dir = temp_dir / "embodiment_transfer"
                 try:
                     embodiment_manifests = create_default_embodiment_transfer_exporter(
                         scene_id=scene_id,
@@ -1119,8 +1137,8 @@ def run_geniesim_export_job(
                         output_dir=embodiment_dir,
                     )
                     all_premium_features_manifests.update({"embodiment": embodiment_manifests})
-                    premium_feature_counts["embodiment_transfer"] = len(embodiment_manifests)
-                    premium_feature_status["embodiment_transfer"] = True
+                    premium_feature_staged_counts["embodiment_transfer"] = len(embodiment_manifests)
+                    premium_feature_staged_dirs["embodiment_transfer"] = embodiment_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Embodiment Transfer: "
                         f"{len(embodiment_manifests)} manifests exported"
@@ -1134,15 +1152,15 @@ def run_geniesim_export_job(
             # 3. Trajectory Optimality Analysis ($10k-$25k value)
             if TRAJECTORY_OPTIMALITY_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Trajectory Optimality Analysis ($10k-$25k value - NOW FREE)")
-                trajectory_dir = output_dir / "trajectory_optimality"
+                trajectory_dir = temp_dir / "trajectory_optimality"
                 try:
                     trajectory_manifests = create_default_trajectory_optimality_exporter(
                         scene_id=scene_id,
                         output_dir=trajectory_dir,
                     )
                     all_premium_features_manifests.update({"trajectory": trajectory_manifests})
-                    premium_feature_counts["trajectory_optimality"] = len(trajectory_manifests)
-                    premium_feature_status["trajectory_optimality"] = True
+                    premium_feature_staged_counts["trajectory_optimality"] = len(trajectory_manifests)
+                    premium_feature_staged_dirs["trajectory_optimality"] = trajectory_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Trajectory Optimality: "
                         f"{len(trajectory_manifests)} manifests exported"
@@ -1156,15 +1174,15 @@ def run_geniesim_export_job(
             # 4. Policy Leaderboard ($20k-$40k value)
             if POLICY_LEADERBOARD_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Policy Leaderboard ($20k-$40k value - NOW FREE)")
-                leaderboard_dir = output_dir / "policy_leaderboard"
+                leaderboard_dir = temp_dir / "policy_leaderboard"
                 try:
                     leaderboard_manifests = create_default_policy_leaderboard_exporter(
                         scene_id=scene_id,
                         output_dir=leaderboard_dir,
                     )
                     all_premium_features_manifests.update({"leaderboard": leaderboard_manifests})
-                    premium_feature_counts["policy_leaderboard"] = len(leaderboard_manifests)
-                    premium_feature_status["policy_leaderboard"] = True
+                    premium_feature_staged_counts["policy_leaderboard"] = len(leaderboard_manifests)
+                    premium_feature_staged_dirs["policy_leaderboard"] = leaderboard_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Policy Leaderboard: "
                         f"{len(leaderboard_manifests)} manifests exported"
@@ -1178,15 +1196,15 @@ def run_geniesim_export_job(
             # 5. Tactile Sensor Simulation ($15k-$30k value)
             if TACTILE_SENSOR_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Tactile Sensor Simulation ($15k-$30k value - NOW FREE)")
-                tactile_dir = output_dir / "tactile_sensors"
+                tactile_dir = temp_dir / "tactile_sensors"
                 try:
                     tactile_manifests = create_default_tactile_sensor_exporter(
                         scene_id=scene_id,
                         output_dir=tactile_dir,
                     )
                     all_premium_features_manifests.update({"tactile": tactile_manifests})
-                    premium_feature_counts["tactile_sensors"] = len(tactile_manifests)
-                    premium_feature_status["tactile_sensors"] = True
+                    premium_feature_staged_counts["tactile_sensors"] = len(tactile_manifests)
+                    premium_feature_staged_dirs["tactile_sensors"] = tactile_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Tactile Sensors: "
                         f"{len(tactile_manifests)} manifests exported"
@@ -1200,15 +1218,15 @@ def run_geniesim_export_job(
             # 6. Language Annotations ($10k-$25k value)
             if LANGUAGE_ANNOTATIONS_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Language Annotations ($10k-$25k value - NOW FREE)")
-                language_dir = output_dir / "language_annotations"
+                language_dir = temp_dir / "language_annotations"
                 try:
                     language_manifests = create_default_language_annotations_exporter(
                         scene_id=scene_id,
                         output_dir=language_dir,
                     )
                     all_premium_features_manifests.update({"language": language_manifests})
-                    premium_feature_counts["language_annotations"] = len(language_manifests)
-                    premium_feature_status["language_annotations"] = True
+                    premium_feature_staged_counts["language_annotations"] = len(language_manifests)
+                    premium_feature_staged_dirs["language_annotations"] = language_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Language Annotations: "
                         f"{len(language_manifests)} manifests exported"
@@ -1222,15 +1240,15 @@ def run_geniesim_export_job(
             # 7. Generalization Analyzer ($15k-$35k value)
             if GENERALIZATION_ANALYZER_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Generalization Analyzer ($15k-$35k value - NOW FREE)")
-                generalization_dir = output_dir / "generalization_analysis"
+                generalization_dir = temp_dir / "generalization_analysis"
                 try:
                     generalization_manifests = create_default_generalization_analyzer_exporter(
                         scene_id=scene_id,
                         output_dir=generalization_dir,
                     )
                     all_premium_features_manifests.update({"generalization": generalization_manifests})
-                    premium_feature_counts["generalization_analyzer"] = len(generalization_manifests)
-                    premium_feature_status["generalization_analyzer"] = True
+                    premium_feature_staged_counts["generalization_analyzer"] = len(generalization_manifests)
+                    premium_feature_staged_dirs["generalization_analyzer"] = generalization_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Generalization Analyzer: "
                         f"{len(generalization_manifests)} manifests exported"
@@ -1244,7 +1262,7 @@ def run_geniesim_export_job(
             # 8. Sim2Real Validation Service ($5k-$25k/study value)
             if SIM2REAL_VALIDATION_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Validation Service ($5k-$25k/study - NOW FREE)")
-                sim2real_validation_dir = output_dir / "sim2real_validation"
+                sim2real_validation_dir = temp_dir / "sim2real_validation"
                 try:
                     sim2real_validation_manifests = create_default_sim2real_validation_exporter(
                         scene_id=scene_id,
@@ -1252,8 +1270,8 @@ def run_geniesim_export_job(
                         output_dir=sim2real_validation_dir,
                     )
                     all_premium_features_manifests.update({"sim2real_validation": sim2real_validation_manifests})
-                    premium_feature_counts["sim2real_validation"] = len(sim2real_validation_manifests)
-                    premium_feature_status["sim2real_validation"] = True
+                    premium_feature_staged_counts["sim2real_validation"] = len(sim2real_validation_manifests)
+                    premium_feature_staged_dirs["sim2real_validation"] = sim2real_validation_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Sim2Real Validation: "
                         f"{len(sim2real_validation_manifests)} manifests exported"
@@ -1268,15 +1286,15 @@ def run_geniesim_export_job(
             # 9. Audio Narration ($5k-$15k value)
             if AUDIO_NARRATION_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Audio Narration ($5k-$15k value - NOW FREE)")
-                audio_narration_dir = output_dir / "audio_narration"
+                audio_narration_dir = temp_dir / "audio_narration"
                 try:
                     audio_narration_manifests = create_default_audio_narration_exporter(
                         scene_id=scene_id,
                         output_dir=audio_narration_dir,
                     )
                     all_premium_features_manifests.update({"audio_narration": audio_narration_manifests})
-                    premium_feature_counts["audio_narration"] = len(audio_narration_manifests)
-                    premium_feature_status["audio_narration"] = True
+                    premium_feature_staged_counts["audio_narration"] = len(audio_narration_manifests)
+                    premium_feature_staged_dirs["audio_narration"] = audio_narration_dir
                     print(
                         "[GENIESIM-EXPORT-JOB]   ✓ Audio Narration: "
                         f"{len(audio_narration_manifests)} manifests exported"
@@ -1287,6 +1305,22 @@ def run_geniesim_export_job(
                     print("[GENIESIM-EXPORT-JOB]   ✓ VLA audio modality training (RT-2, PaLM-E)")
                 except Exception as exc:
                     record_premium_warning("audio_narration", exc, audio_narration_dir)
+
+            try:
+                for feature_name, staged_dir in premium_feature_staged_dirs.items():
+                    final_dir = output_dir / premium_feature_final_dirs[feature_name]
+                    if staged_dir.exists():
+                        if final_dir.exists():
+                            shutil.rmtree(final_dir)
+                        shutil.move(staged_dir, final_dir)
+                        premium_feature_status[feature_name] = True
+                        if feature_name in premium_feature_staged_counts:
+                            premium_feature_counts[feature_name] = premium_feature_staged_counts[feature_name]
+            except Exception:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                raise
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
             # Summary of premium features
             if any([SIM2REAL_AVAILABLE, EMBODIMENT_TRANSFER_AVAILABLE, TRAJECTORY_OPTIMALITY_AVAILABLE,
