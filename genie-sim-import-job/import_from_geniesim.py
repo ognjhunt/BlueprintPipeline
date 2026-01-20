@@ -2624,7 +2624,7 @@ def _emit_import_quality_gate(
     result: ImportResult,
     scene_id: str,
     job_metadata: Optional[Dict[str, Any]] = None,
-) -> None:
+) -> List[QualityGateResult]:
     checkpoint = QualityGateCheckpoint.GENIESIM_IMPORT_COMPLETE
     registry = QualityGateRegistry(verbose=True)
 
@@ -2698,7 +2698,23 @@ def _emit_import_quality_gate(
         "checksum_verification_passed": result.checksum_verification_passed,
         "upload_status": result.upload_status,
     }
-    registry.run_checkpoint(checkpoint, context)
+    return registry.run_checkpoint(checkpoint, context)
+
+
+def _quality_gate_failure_detected(
+    results: Optional[List[QualityGateResult]],
+) -> bool:
+    if not results:
+        return False
+    for result in results:
+        severity = (
+            result.severity.value
+            if isinstance(result.severity, QualityGateSeverity)
+            else str(result.severity)
+        )
+        if result.passed is False and severity.lower() in {"error", "critical"}:
+            return True
+    return False
 
 
 def main():
@@ -2891,6 +2907,7 @@ def main():
             robot_entries = []
             overall_success = True
             robot_results: List[Dict[str, Any]] = []
+            quality_gate_failures: List[str] = []
             for robot_type, artifacts in sorted(artifacts_by_robot.items()):
                 episodes_prefix = artifacts.get("episodes_prefix") or artifacts.get("episodes_path")
                 if not episodes_prefix:
@@ -2993,10 +3010,26 @@ def main():
                     episodes_filtered=result.episodes_filtered,
                 )
                 try:
-                    _emit_import_quality_gate(result, scene_id, job_metadata=robot_job_metadata)
+                    gate_results = _emit_import_quality_gate(
+                        result,
+                        scene_id,
+                        job_metadata=robot_job_metadata,
+                    )
+                    gate_failed = _quality_gate_failure_detected(gate_results)
                 except Exception as exc:
                     print(
                         f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}"
+                    )
+                    gate_failed = False
+
+                if gate_failed:
+                    quality_gate_failures.append(robot_type)
+                    result.success = False
+                    result.errors.append("Quality gate failure")
+                    print(
+                        "[GENIE-SIM-IMPORT] ❌ Quality gate failure detected for "
+                        f"robot {robot_type}. "
+                        "Production mode enforces a non-zero exit."
                     )
 
                 overall_success = overall_success and result.success
@@ -3048,15 +3081,20 @@ def main():
             partial_failure = bool(failed_robots)
             firebase_upload_suppressed = False
             suppression_reason = None
+            if quality_gate_failures:
+                firebase_upload_suppressed = True
+                suppression_reason = "quality_gate_failure"
             if partial_failure:
                 if production_mode or fail_on_partial_error:
                     firebase_upload_suppressed = True
-                    suppression_reason = (
-                        "partial_failure_production_or_fail_on_partial_error"
-                    )
+                    if suppression_reason is None:
+                        suppression_reason = (
+                            "partial_failure_production_or_fail_on_partial_error"
+                        )
                 elif not allow_partial_firebase_uploads:
                     firebase_upload_suppressed = True
-                    suppression_reason = "partial_failure_partial_uploads_disabled"
+                    if suppression_reason is None:
+                        suppression_reason = "partial_failure_partial_uploads_disabled"
 
             if enable_firebase_upload and not firebase_upload_suppressed:
                 for payload in robot_results:
@@ -3097,8 +3135,8 @@ def main():
                     )
             elif enable_firebase_upload and firebase_upload_suppressed:
                 print(
-                    "[GENIE-SIM-IMPORT] Firebase uploads suppressed due to partial "
-                    f"failures (reason={suppression_reason})."
+                    "[GENIE-SIM-IMPORT] Firebase uploads suppressed "
+                    f"(reason={suppression_reason})."
                 )
 
             if partial_failure:
@@ -3127,6 +3165,19 @@ def main():
                         job_metadata_path=job_metadata_path,
                         job_metadata=job_metadata,
                     )
+            if job_metadata is not None and quality_gate_failures:
+                job_summary = job_metadata.setdefault("job_summary", {})
+                job_summary["quality_gate"] = {
+                    "failed_robots": quality_gate_failures,
+                    "firebase_upload_suppressed": firebase_upload_suppressed,
+                    "suppression_reason": suppression_reason,
+                    "exit_nonzero_in_production": production_mode,
+                }
+                _write_local_job_metadata(
+                    bucket=bucket,
+                    job_metadata_path=job_metadata_path,
+                    job_metadata=job_metadata,
+                )
 
             combined_output_dir = _resolve_local_output_dir(
                 bucket=bucket,
@@ -3179,9 +3230,41 @@ def main():
             episodes_filtered=result.episodes_filtered,
         )
         try:
-            _emit_import_quality_gate(result, scene_id, job_metadata=job_metadata)
+            gate_results = _emit_import_quality_gate(
+                result,
+                scene_id,
+                job_metadata=job_metadata,
+            )
+            gate_failed = _quality_gate_failure_detected(gate_results)
         except Exception as exc:
             print(f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}")
+            gate_failed = False
+
+        if gate_failed:
+            result.success = False
+            result.errors.append("Quality gate failure")
+            print(
+                "[GENIE-SIM-IMPORT] ❌ Quality gate failure detected. "
+                "Production mode enforces a non-zero exit."
+            )
+            if enable_firebase_upload:
+                print(
+                    "[GENIE-SIM-IMPORT] Firebase uploads suppressed due to "
+                    "quality gate failure (reason=quality_gate_failure)."
+                )
+            if job_metadata is not None:
+                job_summary = job_metadata.setdefault("job_summary", {})
+                job_summary["quality_gate"] = {
+                    "failed_robots": ["default"],
+                    "firebase_upload_suppressed": True,
+                    "suppression_reason": "quality_gate_failure",
+                    "exit_nonzero_in_production": production_mode,
+                }
+                _write_local_job_metadata(
+                    bucket=bucket,
+                    job_metadata_path=job_metadata_path,
+                    job_metadata=job_metadata,
+                )
 
         if result.success:
             print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")
