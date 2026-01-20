@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -43,6 +44,8 @@ from .multi_robot_config import (
     get_geniesim_robot_config,
     save_multi_robot_config,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -191,9 +194,16 @@ class GenieSimExporter:
         )
         self.task_config_generator = TaskConfigGenerator(verbose=verbose)
 
-    def log(self, msg: str, level: str = "INFO") -> None:
-        if self.verbose:
-            print(f"[GENIESIM-EXPORTER] [{level}] {msg}")
+    def log(self, msg: str, level: str = "INFO", extra: Optional[Dict[str, Any]] = None) -> None:
+        if not self.verbose:
+            return
+        level_name = level.upper()
+        if level_name in {"WARN", "WARNING"}:
+            logger.warning("[GENIESIM-EXPORTER] %s", msg, extra=extra)
+        elif level_name == "ERROR":
+            logger.error("[GENIESIM-EXPORTER] %s", msg, extra=extra)
+        else:
+            logger.info("[GENIESIM-EXPORTER] %s", msg, extra=extra)
 
     def export(
         self,
@@ -215,8 +225,8 @@ class GenieSimExporter:
         self.log("=" * 70)
         self.log("Genie Sim 3.0 Export")
         self.log("=" * 70)
-        self.log(f"Input: {manifest_path}")
-        self.log(f"Output: {output_dir}")
+        self.log(f"Input: {manifest_path}", extra={"manifest_path": str(manifest_path)})
+        self.log(f"Output: {output_dir}", extra={"output_dir": str(output_dir)})
 
         result = GenieSimExportResult(
             success=False,
@@ -232,7 +242,7 @@ class GenieSimExporter:
 
             scene_id = manifest.get("scene_id", "unknown")
             result.scene_id = scene_id
-            self.log(f"Scene: {scene_id}")
+            self.log(f"Scene: {scene_id}", extra={"scene_id": scene_id})
 
             # Create output directory
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -250,7 +260,10 @@ class GenieSimExporter:
             scene_graph = self.scene_graph_converter.convert(manifest, usd_base_path)
             result.num_nodes = len(scene_graph.nodes)
             result.num_edges = len(scene_graph.edges)
-            self.log(f"  Nodes: {result.num_nodes}, Edges: {result.num_edges}")
+            self.log(
+                f"  Nodes: {result.num_nodes}, Edges: {result.num_edges}",
+                extra={"scene_id": scene_id},
+            )
 
             scene_graph_path = output_dir / "scene_graph.json"
             scene_graph.save(scene_graph_path)
