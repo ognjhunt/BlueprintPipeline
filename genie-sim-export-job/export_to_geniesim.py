@@ -754,11 +754,31 @@ def run_geniesim_export_job(
         print(f"[GENIESIM-EXPORT-JOB] Merging {len(variation_objects)} variation assets into manifest")
         if "objects" not in manifest:
             manifest["objects"] = []
-        manifest["objects"].extend(variation_objects)
+        existing_asset_ids = {
+            obj.get("asset_id")
+            for obj in manifest["objects"]
+            if obj.get("asset_id")
+        }
+        deduped_variation_objects = []
+        duplicate_count = 0
+        for variation_object in variation_objects:
+            asset_id = variation_object.get("asset_id")
+            if asset_id and asset_id in existing_asset_ids:
+                duplicate_count += 1
+                continue
+            deduped_variation_objects.append(variation_object)
+            if asset_id:
+                existing_asset_ids.add(asset_id)
+        if duplicate_count:
+            print(
+                "[GENIESIM-EXPORT-JOB] Skipped "
+                f"{duplicate_count} duplicate variation assets already in manifest"
+            )
+        manifest["objects"].extend(deduped_variation_objects)
 
         # Also add to a separate key for reference
         manifest["variation_assets"] = {
-            "count": len(variation_objects),
+            "count": len(deduped_variation_objects),
             "source": "variation-gen-job",
             "commercial_ok": True,
         }
