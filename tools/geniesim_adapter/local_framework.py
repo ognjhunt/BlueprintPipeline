@@ -2576,6 +2576,14 @@ class GenieSimLocalFramework:
             planning_report = dict(self._last_planning_report)
             result["collision_free"] = planning_report.get("collision_free")
             timed_trajectory = self._ensure_trajectory_timestamps(trajectory)
+            timed_trajectory, clamped_waypoints = self._validate_trajectory_joint_limits(
+                timed_trajectory
+            )
+            if clamped_waypoints:
+                self.log(
+                    f"  ⚠️  Clamped {clamped_waypoints} waypoint(s) to joint limits before execution.",
+                    "WARNING",
+                )
 
             collector_state = {
                 "observations": [],
@@ -3259,6 +3267,33 @@ class GenieSimLocalFramework:
             joints = joints.copy()
             joints[finite_mask] = np.clip(joints[finite_mask], lower[finite_mask], upper[finite_mask])
         return joints
+
+    def _validate_trajectory_joint_limits(
+        self,
+        trajectory: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        robot_config = ROBOT_CONFIGS.get(self.config.robot_type, ROBOT_CONFIGS.get("franka"))
+        if robot_config is None:
+            return trajectory, 0
+
+        clamped_waypoints = 0
+        validated_trajectory: List[Dict[str, Any]] = []
+        for waypoint in trajectory:
+            joint_positions = waypoint.get("joint_positions")
+            if joint_positions is None:
+                validated_trajectory.append(waypoint)
+                continue
+            joints = np.array(joint_positions, dtype=float)
+            if self._within_joint_limits(joints, robot_config):
+                validated_trajectory.append(waypoint)
+                continue
+            clamped = self._clamp_joints_to_limits(joints, robot_config)
+            if not np.allclose(clamped, joints):
+                clamped_waypoints += 1
+            updated_waypoint = dict(waypoint)
+            updated_waypoint["joint_positions"] = clamped.tolist()
+            validated_trajectory.append(updated_waypoint)
+        return validated_trajectory, clamped_waypoints
 
     def _resolve_workspace_bounds(
         self,
