@@ -12,6 +12,10 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
 
 - [ ] **NGC key** available when pulling NVIDIA Isaac Sim images (`NGC_API_KEY`).
 - [ ] **Genie Sim repo path** set locally via `GENIESIM_ROOT` when running the pipeline outside CI.
+- [ ] **Recording/log directories** set to persistent locations in production:
+  - `GENIESIM_RECORDINGS_DIR` (or legacy `GENIESIM_RECORDING_DIR`) for episode recordings.
+  - `GENIESIM_LOG_DIR` for server logs.
+  - Avoid `/tmp` or `/var/tmp` in production to prevent data loss.
 - [ ] **gRPC Python dependency** (`grpcio`) installed in the Python environment used by the adapter.
 - [ ] **Production deployments** explicitly set `GENIESIM_ENV=production` and enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks.
 - [ ] **Optional runtime cap** configured via `GENIESIM_COLLECTION_TIMEOUT_S` to bound local data collection duration.
