@@ -414,10 +414,10 @@ export SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1
 |----------|------|---------|-------------|
 | `FIRESTORE_PROJECT` | str | `blueprint-8c1ca` | Firestore project ID for pipeline configuration and metadata |
 | `BUCKET` | str | `blueprint-8c1ca.appspot.com` | GCS bucket used for scene assets and pipeline artifacts (not the Firebase Storage upload target) |
-| `FIREBASE_STORAGE_BUCKET` | str | None | Firebase Storage bucket used for upload jobs (required for Genie Sim submit/import in production/service mode; e.g., `blueprint-8c1ca.appspot.com`) |
-| `FIREBASE_SERVICE_ACCOUNT_JSON` | str | None | JSON payload for Firebase service account credentials (required for Genie Sim submit/import in production/service mode) |
-| `FIREBASE_SERVICE_ACCOUNT_PATH` | path | None | Path to Firebase service account JSON credentials (required for Genie Sim submit/import in production/service mode) |
-| `FIREBASE_UPLOAD_PREFIX` | str | `datasets` | Firebase upload prefix for Genie Sim episode artifacts (submit/import jobs) |
+| `FIREBASE_STORAGE_BUCKET` | str | None | Firebase Storage bucket used for import job uploads (required for Genie Sim import in production/service mode; e.g., `blueprint-8c1ca.appspot.com`) |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | str | None | JSON payload for Firebase service account credentials (required for Genie Sim import in production/service mode) |
+| `FIREBASE_SERVICE_ACCOUNT_PATH` | path | None | Path to Firebase service account JSON credentials (required for Genie Sim import in production/service mode) |
+| `FIREBASE_UPLOAD_PREFIX` | str | `datasets` | Firebase upload prefix for Genie Sim episode artifacts (import job uploads after validation) |
 
 > **Migration note:** `FIREBASE_EPISODE_PREFIX` has been replaced by `FIREBASE_UPLOAD_PREFIX` to keep dataset paths consistent across Genie Sim submit/import flows.
 
