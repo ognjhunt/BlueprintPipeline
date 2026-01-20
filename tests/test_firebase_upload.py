@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.firebase_upload import firebase_upload_orchestrator as orchestrator
 from tools.firebase_upload import uploader
 
 
@@ -225,3 +226,43 @@ def test_upload_episodes_to_firebase_raises_on_upload_failure(monkeypatch, tmp_p
     summary = exc_info.value.summary
     assert summary["failed"] == 1
     assert summary["failures"][0]["error"] == "upload failed"
+
+
+def test_upload_orchestrator_reports_cleanup_failure(monkeypatch, tmp_path, caplog):
+    episodes_dir = tmp_path / "episodes"
+    episodes_dir.mkdir()
+
+    summary = {
+        "total_files": 1,
+        "uploaded": 0,
+        "skipped": 0,
+        "reuploaded": 0,
+        "failed": 1,
+        "file_statuses": [],
+        "failures": [{"local_path": str(episodes_dir / "episode_1/data.txt")}],
+        "verification_failed": [],
+        "verification_strategy": "sha256_metadata+md5_base64",
+    }
+
+    def _fail_upload(*_args, **_kwargs):
+        raise uploader.FirebaseUploadError(summary, "upload failed")
+
+    def _fail_cleanup(*_args, **_kwargs):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(orchestrator, "upload_episodes_to_firebase", _fail_upload)
+    monkeypatch.setattr(orchestrator, "cleanup_firebase_paths", _fail_cleanup)
+
+    with caplog.at_level("ERROR"), pytest.raises(orchestrator.FirebaseUploadOrchestratorError) as exc_info:
+        orchestrator.upload_episodes_with_retry(
+            episodes_dir=episodes_dir,
+            scene_id="scene-1",
+            cleanup_on_failure=True,
+            second_pass_max=0,
+        )
+
+    exc = exc_info.value
+    assert exc.cleanup_error is not None
+    assert isinstance(exc.cleanup_error, RuntimeError)
+    assert "cleanup failed" in str(exc.cleanup_error)
+    assert "Failed to cleanup Firebase prefix" in caplog.text
