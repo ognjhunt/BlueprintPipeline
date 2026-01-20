@@ -1061,10 +1061,9 @@ class LocalPipelineRunner:
             return False
         mock_decision = resolve_geniesim_mock_mode()
         if mock_decision.requested and mock_decision.production_mode:
-            self.log(
-                "GENIESIM_MOCK_MODE requested but production mode detected; "
-                "mock mode is ignored and a Genie Sim server is required.",
-                "WARNING",
+            raise NonRetryableError(
+                "GENIESIM_MOCK_MODE cannot be used in production. "
+                "Disable GENIESIM_MOCK_MODE in production to continue."
             )
         if mock_decision.enabled:
             return False
