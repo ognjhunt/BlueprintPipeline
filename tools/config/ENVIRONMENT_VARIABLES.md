@@ -43,6 +43,34 @@ Relevant job-level documentation includes:
 
 ---
 
+## Canonical Defaults & Override Strategy
+
+The pipeline keeps a single source of truth for shared defaults in `tools/config/constants.py`. These values are
+referenced by configuration files (for example, `tools/quality_gates/quality_config.json`) and by runtime fallback
+logic in Python modules. The override order is:
+
+1. **Environment variables** (for example `BP_QUALITY_*`).
+2. **JSON configuration files** (for example `quality_config.json`).
+3. **Canonical defaults** from `tools/config/constants.py`.
+
+**Defaults and rationale**:
+
+| Setting | Default | Rationale |
+|---------|---------|-----------|
+| `DEFAULT_HTTP_TIMEOUT_S` | 300s | Allows long-running inference requests and large payload uploads/downloads to complete without premature failure. |
+| `DEFAULT_PROCESS_TIMEOUT_S` | 300s | Allows subprocesses to load models or download checkpoints while still bounding startup time. |
+| `DEFAULT_COLLISION_FREE_RATE_MIN` | 0.90 | Baseline safety threshold for collision-free episodes. |
+| `DEFAULT_QUALITY_SCORE_MIN` | 0.90 | Ensures minimum perceptual/behavioral quality before acceptance. |
+| `DEFAULT_AVERAGE_QUALITY_SCORE_MIN` | 0.90 | Enforces overall dataset quality consistency. |
+| `DEFAULT_SENSOR_CAPTURE_RATE_MIN` | 0.95 | Requires near-complete sensor capture coverage for production fidelity. |
+| `DEFAULT_PHYSICS_VALIDATION_RATE_MIN` | 0.95 | Requires near-complete physics validation coverage in production. |
+
+Override thresholds with `BP_QUALITY_*` environment variables for runtime changes or update `quality_config.json`
+for configuration-as-code changes. Timeout defaults are centralized and can be overridden by job-specific config or
+environment variables where supported by that job.
+
+---
+
 ## Alerting
 
 Alerting controls for `monitoring.alerting.send_alert`.

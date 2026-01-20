@@ -25,6 +25,7 @@ from PIL import Image, ImageDraw, ImageFont
 import imageio.v2 as imageio
 
 from models import DWMConditioningBundle
+from tools.config.constants import DEFAULT_HTTP_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,12 @@ class DWMModelClient:
 
         data = {"prompt": text_prompt}
 
-        response = requests.post(self.api_endpoint, files=files, data=data, timeout=300)
+        response = requests.post(
+            self.api_endpoint,
+            files=files,
+            data=data,
+            timeout=DEFAULT_HTTP_TIMEOUT_S,  # allow long-running DWM inference payloads
+        )
         response.raise_for_status()
 
         video_bytes: Optional[bytes] = None
