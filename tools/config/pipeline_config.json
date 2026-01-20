@@ -19,9 +19,10 @@
     "max_retries_per_episode": 3
   },
   "video": {
+    "profile": "high",
     "resolution": {
-      "width": 640,
-      "height": 480,
+      "width": 1280,
+      "height": 720,
       "description": "Video resolution for episode recordings"
     },
     "fps": 30,

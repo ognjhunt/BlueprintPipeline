@@ -268,23 +268,28 @@ Pipeline execution parameters:
 | `BP_PIPELINE_EPISODE_GENERATION_NUM_VARIATIONS` | int | 5 | Scene variations |
 | `BP_PIPELINE_EPISODE_GENERATION_MAX_PARALLEL_EPISODES` | int | 8 | Parallel episode jobs |
 | `BP_PIPELINE_EPISODE_GENERATION_EPISODE_TIMEOUT_SECONDS` | int | 300 | Episode timeout (seconds) |
+| `BP_VIDEO_PROFILE` | str | "high" | Video profile (`low`, `medium`, `high`). Used when explicit width/height are not set. |
 | `BP_PIPELINE_VIDEO_FPS` | int | 30 | Video framerate |
-| `BP_PIPELINE_VIDEO_RESOLUTION_WIDTH` | int | 640 | Video width (pixels) |
-| `BP_PIPELINE_VIDEO_RESOLUTION_HEIGHT` | int | 480 | Video height (pixels) |
+| `BP_PIPELINE_VIDEO_RESOLUTION_WIDTH` | int | 1280 | Video width (pixels) |
+| `BP_PIPELINE_VIDEO_RESOLUTION_HEIGHT` | int | 720 | Video height (pixels) |
 | `BP_PIPELINE_PHYSICS_TIMESTEP_HZ` | int | 120 | Physics simulation rate |
 | `BP_PIPELINE_PHYSICS_SOLVER_ITERATIONS` | int | 4 | Physics solver iterations |
 | `BP_PIPELINE_RESOURCE_ALLOCATION_GPU_MEMORY_FRACTION` | float | 0.8 | GPU memory fraction |
 | `BP_PIPELINE_RESOURCE_ALLOCATION_NUM_CPU_WORKERS` | int | 4 | CPU worker threads |
 | `BP_PIPELINE_RESOURCE_ALLOCATION_NUM_GPU_WORKERS` | int | 1 | GPU worker processes |
 
+By default, video capture runs at the `high` profile (1280x720). Override the profile with `BP_VIDEO_PROFILE` or
+set explicit width/height values to pin a custom resolution.
+
 **Example**:
 ```bash
 # High-throughput processing
 export BP_PIPELINE_EPISODE_GENERATION_MAX_PARALLEL_EPISODES=32
 
-# High quality video
-export BP_PIPELINE_VIDEO_RESOLUTION_WIDTH=1280
-export BP_PIPELINE_VIDEO_RESOLUTION_HEIGHT=720
+# High quality video (override default profile)
+export BP_VIDEO_PROFILE=high
+export BP_PIPELINE_VIDEO_RESOLUTION_WIDTH=1920
+export BP_PIPELINE_VIDEO_RESOLUTION_HEIGHT=1080
 export BP_PIPELINE_VIDEO_FPS=60
 
 # More resources
