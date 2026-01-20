@@ -48,6 +48,7 @@ class FirebaseUploadOrchestratorError(RuntimeError):
         retry_failed_count: int = 0,
         remote_prefix: Optional[str] = None,
         cleanup_result: Optional[dict] = None,
+        cleanup_error: Optional[BaseException] = None,
     ) -> None:
         super().__init__(message)
         self.summary = summary
@@ -56,6 +57,7 @@ class FirebaseUploadOrchestratorError(RuntimeError):
         self.retry_failed_count = retry_failed_count
         self.remote_prefix = remote_prefix
         self.cleanup_result = cleanup_result
+        self.cleanup_error = cleanup_error
 
 
 def resolve_firebase_upload_prefix(
@@ -185,11 +187,13 @@ def upload_episodes_with_retry(
                     break
 
         cleanup_result = None
+        cleanup_error = None
         if cleanup_on_failure:
             try:
                 cleanup_result = cleanup_firebase_paths(prefix=remote_prefix)
             except Exception as cleanup_exc:
-                logger.warning(
+                cleanup_error = cleanup_exc
+                logger.error(
                     "Failed to cleanup Firebase prefix %s: %s",
                     remote_prefix,
                     cleanup_exc,
@@ -203,14 +207,17 @@ def upload_episodes_with_retry(
             retry_failed_count=retry_failed_count,
             remote_prefix=remote_prefix,
             cleanup_result=cleanup_result,
+            cleanup_error=cleanup_error,
         ) from exc
     except Exception as exc:
         cleanup_result = None
+        cleanup_error = None
         if cleanup_on_failure:
             try:
                 cleanup_result = cleanup_firebase_paths(prefix=remote_prefix)
             except Exception as cleanup_exc:
-                logger.warning(
+                cleanup_error = cleanup_exc
+                logger.error(
                     "Failed to cleanup Firebase prefix %s after exception: %s",
                     remote_prefix,
                     cleanup_exc,
@@ -219,6 +226,7 @@ def upload_episodes_with_retry(
             "Firebase upload failed",
             remote_prefix=remote_prefix,
             cleanup_result=cleanup_result,
+            cleanup_error=cleanup_error,
         ) from exc
 
 
