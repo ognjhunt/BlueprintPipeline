@@ -97,6 +97,7 @@ from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.lerobot_validation import validate_lerobot_dataset
 from tools.quality.quality_config import resolve_quality_settings
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
+from tools.validation.geniesim_export import ExportConsistencyError, validate_export_consistency
 
 # Add repository root to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -2712,6 +2713,14 @@ class LocalPipelineRunner:
                 raise NonRetryableError(
                     "Genie Sim export outputs missing - run genie-sim-export first"
                 )
+            try:
+                validate_export_consistency(
+                    scene_graph_path=scene_graph_path,
+                    asset_index_path=asset_index_path,
+                    task_config_path=task_config_path,
+                )
+            except ExportConsistencyError as exc:
+                raise NonRetryableError(str(exc)) from exc
         except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_SUBMIT,
