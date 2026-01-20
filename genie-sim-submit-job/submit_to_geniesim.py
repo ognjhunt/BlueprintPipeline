@@ -92,6 +92,7 @@ CONTRACT_SCHEMAS = {
     "scene_graph": "scene_graph.schema.json",
     "asset_index": "asset_index.schema.json",
     "task_config": "task_config.schema.json",
+    "export_manifest": "export_manifest.schema.json",
 }
 
 logger = logging.getLogger(__name__)
@@ -376,11 +377,21 @@ def _read_optional_json_blob(
     client: storage.Client,
     bucket: str,
     blob_name: str,
+    schema_name: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     blob = client.bucket(bucket).blob(blob_name)
     if not blob.exists():
         return None
-    return json.loads(blob.download_as_text())
+    payload = json.loads(blob.download_as_text())
+    if schema_name:
+        schema = _load_contract_schema(schema_name)
+        try:
+            _validate_json_schema(payload, schema)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Schema validation failed for gs://{bucket}/{blob_name}: {exc}"
+            ) from exc
+    return payload
 
 
 def _read_json_blob(client: storage.Client, bucket: str, blob_name: str) -> Dict[str, Any]:
@@ -869,6 +880,7 @@ def main() -> int:
             "scene_graph": scene_graph,
             "asset_index": asset_index,
             "task_config": task_config,
+            "export_manifest": export_manifest,
         }
     )
     _validate_export_marker(export_marker)
@@ -905,7 +917,12 @@ def main() -> int:
     idempotency_key = _build_idempotency_key(scene_id, task_config_hash, export_manifest_hash)
     job_idempotency_path = f"{geniesim_prefix}/job_idempotency.json"
 
-    existing_job_payload = _read_optional_json_blob(storage_client, bucket, job_output_path)
+    existing_job_payload = _read_optional_json_blob(
+        storage_client,
+        bucket,
+        job_output_path,
+        schema_name="job_output.schema.json",
+    )
     if (
         existing_job_payload
         and existing_job_payload.get("idempotency", {}).get("key") == idempotency_key
@@ -916,7 +933,12 @@ def main() -> int:
         )
         return 0
 
-    existing_idempotency = _read_optional_json_blob(storage_client, bucket, job_idempotency_path)
+    existing_idempotency = _read_optional_json_blob(
+        storage_client,
+        bucket,
+        job_idempotency_path,
+        schema_name="job_idempotency.schema.json",
+    )
     if existing_idempotency and existing_idempotency.get("key") == idempotency_key:
         existing_metadata_path = existing_idempotency.get("job_metadata_path")
         location_hint = (

@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Genie Sim Export Manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "schema_definition",
+    "export_info",
+    "asset_provenance_path",
+    "config",
+    "result",
+    "geniesim_compatibility",
+    "file_inventory",
+    "checksums"
+  ],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "schema_definition": {
+      "type": "object",
+      "required": ["version", "description", "fields"],
+      "properties": {
+        "version": {"type": "string"},
+        "description": {"type": "string"},
+        "fields": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "notes": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "export_info": {
+      "type": "object",
+      "required": ["timestamp", "exporter_version", "source_pipeline"],
+      "properties": {
+        "timestamp": {"type": "string"},
+        "exporter_version": {"type": "string"},
+        "source_pipeline": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "asset_provenance_path": {"type": ["string", "null"]},
+    "config": {
+      "type": "object",
+      "required": [
+        "robot_type",
+        "generate_embeddings",
+        "embedding_model",
+        "require_embeddings",
+        "filter_commercial_only",
+        "max_tasks",
+        "lerobot_export_format"
+      ],
+      "properties": {
+        "robot_type": {"type": "string"},
+        "generate_embeddings": {"type": "boolean"},
+        "embedding_model": {"type": ["string", "null"]},
+        "require_embeddings": {"type": "boolean"},
+        "filter_commercial_only": {"type": "boolean"},
+        "max_tasks": {"type": "integer"},
+        "lerobot_export_format": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "result": {
+      "type": "object",
+      "required": ["success", "scene_id", "output_dir", "outputs", "statistics", "errors", "warnings"],
+      "properties": {
+        "success": {"type": "boolean"},
+        "scene_id": {"type": "string"},
+        "output_dir": {"type": "string"},
+        "outputs": {
+          "type": "object",
+          "required": ["scene_graph", "asset_index", "task_config", "scene_config"],
+          "properties": {
+            "scene_graph": {"type": ["string", "null"]},
+            "asset_index": {"type": ["string", "null"]},
+            "task_config": {"type": ["string", "null"]},
+            "scene_config": {"type": ["string", "null"]}
+          },
+          "additionalProperties": true
+        },
+        "statistics": {
+          "type": "object",
+          "required": ["nodes", "edges", "assets", "tasks"],
+          "properties": {
+            "nodes": {"type": "integer"},
+            "edges": {"type": "integer"},
+            "assets": {"type": "integer"},
+            "tasks": {"type": "integer"}
+          },
+          "additionalProperties": true
+        },
+        "errors": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "warnings": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "geniesim_compatibility": {
+      "type": "object",
+      "required": ["version", "isaac_sim_version", "formats"],
+      "properties": {
+        "version": {"type": "string"},
+        "isaac_sim_version": {"type": "string"},
+        "formats": {
+          "type": "object",
+          "required": ["scene_graph", "asset_index", "task_config", "scene_config"],
+          "properties": {
+            "scene_graph": {"type": "string"},
+            "asset_index": {"type": "string"},
+            "task_config": {"type": "string"},
+            "scene_config": {"type": "string"}
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "file_inventory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "size_bytes"],
+        "properties": {
+          "path": {"type": "string"},
+          "size_bytes": {"type": "integer"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "checksums": {
+      "type": "object",
+      "required": ["files"],
+      "properties": {
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["sha256"],
+            "properties": {
+              "sha256": {"type": "string"},
+              "size_bytes": {"type": "integer"}
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
