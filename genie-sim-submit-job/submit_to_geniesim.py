@@ -877,6 +877,12 @@ def main() -> int:
         os.getenv("ALLOW_MISSING_ASSET_PROVENANCE"),
         default=False,
     )
+    if _is_production_mode() and allow_missing_asset_provenance:
+        logger.warning(
+            "[GENIESIM-SUBMIT-JOB] Production mode detected; ignoring "
+            "ALLOW_MISSING_ASSET_PROVENANCE override."
+        )
+        allow_missing_asset_provenance = False
     allow_noncommercial_data = parse_bool_env(
         os.getenv("ALLOW_NONCOMMERCIAL_DATA"),
         default=False,
@@ -1000,7 +1006,8 @@ def main() -> int:
         submission_message = (
             "Asset provenance missing — export job incomplete or legal report deleted. "
             f"Expected asset provenance at {asset_provenance_uri}. "
-            "Remediation: rerun export job or regenerate legal report."
+            "Remediation: rerun the variation-gen legal report step to regenerate "
+            "legal/asset_provenance.json."
         )
         failure_reason = "Asset provenance missing"
         failure_details = {

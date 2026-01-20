@@ -330,3 +330,33 @@ def test_provenance_missing_allowed(
     assert job_payload["status"] == "completed"
     assert job_payload.get("failure_reason") is None
     assert job_payload["provenance_gate"]["status"] == "missing"
+
+
+def test_provenance_missing_fails_in_production_even_with_override(
+    monkeypatch: pytest.MonkeyPatch,
+    submit_module: types.ModuleType,
+    minimal_scene_graph: dict[str, object],
+    minimal_asset_index: dict[str, object],
+    minimal_task_config: dict[str, object],
+    export_marker: dict[str, object],
+) -> None:
+    blobs = _build_blob_payloads(
+        minimal_scene_graph=minimal_scene_graph,
+        minimal_asset_index=minimal_asset_index,
+        minimal_task_config=minimal_task_config,
+        export_marker=export_marker,
+        asset_provenance=None,
+    )
+    job_payload = _run_submit_job(
+        monkeypatch=monkeypatch,
+        submit_module=submit_module,
+        blob_payloads=blobs,
+        env_overrides={
+            "ALLOW_MISSING_ASSET_PROVENANCE": "true",
+            "PRODUCTION_MODE": "true",
+        },
+    )
+
+    assert job_payload["status"] == "failed"
+    assert job_payload["failure_reason"] == "Asset provenance missing"
+    assert job_payload["provenance_gate"]["status"] == "missing"
