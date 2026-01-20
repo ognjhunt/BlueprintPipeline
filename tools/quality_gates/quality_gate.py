@@ -1789,6 +1789,94 @@ class QualityGateRegistry:
             notify_on_fail=True,
         ))
 
+        # QG-11: Genie Sim data collection quality
+        def check_geniesim_data_collection(ctx: Dict[str, Any]) -> QualityGateResult:
+            collision_free_rate = ctx.get("collision_free_rate")
+            task_success_rate = ctx.get("task_success_rate")
+            episodes_collected = ctx.get("episodes_collected")
+
+            if self.config and hasattr(self.config, "geniesim_data_collection"):
+                thresholds = self.config.geniesim_data_collection
+                min_collision_free_rate = thresholds.min_collision_free_rate
+                min_task_success_rate = thresholds.min_task_success_rate
+            else:
+                min_collision_free_rate = parse_float_env(
+                    os.getenv("BP_QUALITY_GENIESIM_MIN_COLLISION_FREE_RATE"),
+                    default=0.9,
+                    min_value=0.0,
+                    max_value=1.0,
+                    name="BP_QUALITY_GENIESIM_MIN_COLLISION_FREE_RATE",
+                )
+                min_task_success_rate = parse_float_env(
+                    os.getenv("BP_QUALITY_GENIESIM_MIN_TASK_SUCCESS_RATE"),
+                    default=0.8,
+                    min_value=0.0,
+                    max_value=1.0,
+                    name="BP_QUALITY_GENIESIM_MIN_TASK_SUCCESS_RATE",
+                )
+
+            missing_rates = [
+                name
+                for name, value in (
+                    ("collision_free_rate", collision_free_rate),
+                    ("task_success_rate", task_success_rate),
+                )
+                if value is None
+            ]
+
+            passed = True
+            if episodes_collected is None or episodes_collected <= 0:
+                passed = False
+            if collision_free_rate is None or collision_free_rate < min_collision_free_rate:
+                passed = False
+            if task_success_rate is None or task_success_rate < min_task_success_rate:
+                passed = False
+
+            message = (
+                "Genie Sim data collection quality thresholds met"
+                if passed
+                else "Genie Sim data collection quality thresholds not met"
+            )
+            if missing_rates:
+                message = (
+                    "Genie Sim data collection quality metrics missing: "
+                    + ", ".join(missing_rates)
+                )
+
+            return QualityGateResult(
+                gate_id="qg-11-geniesim-data-quality",
+                checkpoint=QualityGateCheckpoint.GENIESIM_IMPORT_COMPLETE,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=message,
+                details={
+                    "collision_free_rate": collision_free_rate,
+                    "task_success_rate": task_success_rate,
+                    "episodes_collected": episodes_collected,
+                    "by_robot": ctx.get("by_robot"),
+                    "thresholds": {
+                        "min_collision_free_rate": min_collision_free_rate,
+                        "min_task_success_rate": min_task_success_rate,
+                    },
+                    "missing_metrics": missing_rates,
+                },
+                recommendations=[
+                    "Inspect Genie Sim collision checks and task success metadata",
+                    "Verify collision-aware planners are enabled for data collection",
+                    "Lower thresholds via quality_config.json if justified",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-11-geniesim-data-quality",
+            name="Genie Sim Data Collection Quality",
+            checkpoint=QualityGateCheckpoint.GENIESIM_IMPORT_COMPLETE,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates collision-free and task success rates from Genie Sim data collection",
+            check_fn=check_geniesim_data_collection,
+            notify_on_fail=True,
+        ))
+
         # QG-4: Isaac Lab Code Generation
         def check_isaac_lab(ctx: Dict[str, Any]) -> QualityGateResult:
             isaac_lab_dir = ctx.get("isaac_lab_dir")

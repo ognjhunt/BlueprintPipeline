@@ -128,6 +128,13 @@ class GenieSimKinematicReachabilityThresholds:
 
 
 @dataclass
+class GenieSimDataCollectionThresholds:
+    """Genie Sim data collection quality thresholds."""
+    min_collision_free_rate: float = 0.9
+    min_task_success_rate: float = 0.8
+
+
+@dataclass
 class HumanApprovalConfig:
     """Human approval workflow configuration."""
     enabled: bool = True
@@ -186,6 +193,9 @@ class QualityConfig:
     dwm: DwmThresholds = field(default_factory=DwmThresholds)
     geniesim_kinematic_reachability: GenieSimKinematicReachabilityThresholds = field(
         default_factory=GenieSimKinematicReachabilityThresholds
+    )
+    geniesim_data_collection: GenieSimDataCollectionThresholds = field(
+        default_factory=GenieSimDataCollectionThresholds
     )
     human_approval: HumanApprovalConfig = field(default_factory=HumanApprovalConfig)
     approval_store: ApprovalStoreConfig = field(default_factory=ApprovalStoreConfig)
@@ -644,6 +654,7 @@ class ConfigLoader:
         episode_metadata_thresholds = thresholds.get("episode_metadata", {})
         dwm_thresholds = thresholds.get("dwm", {})
         geniesim_ik_thresholds = thresholds.get("geniesim_kinematic_reachability", {})
+        geniesim_data_thresholds = thresholds.get("geniesim_data_collection", {})
 
         return QualityConfig(
             physics=PhysicsThresholds(
@@ -728,6 +739,16 @@ class ConfigLoader:
                 min_reachability_rate=geniesim_ik_thresholds.get("min_reachability_rate", 0.95),
                 max_unreachable_targets=geniesim_ik_thresholds.get("max_unreachable_targets", 0),
                 check_place_targets=geniesim_ik_thresholds.get("check_place_targets", True),
+            ),
+            geniesim_data_collection=GenieSimDataCollectionThresholds(
+                min_collision_free_rate=geniesim_data_thresholds.get(
+                    "min_collision_free_rate",
+                    0.9,
+                ),
+                min_task_success_rate=geniesim_data_thresholds.get(
+                    "min_task_success_rate",
+                    0.8,
+                ),
             ),
             human_approval=HumanApprovalConfig(
                 enabled=config.get("human_approval", {}).get("enabled", True),
