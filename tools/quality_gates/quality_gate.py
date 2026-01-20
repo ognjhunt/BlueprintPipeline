@@ -39,9 +39,18 @@ try:
     from tools.config.constants import (
         DEFAULT_AVERAGE_QUALITY_SCORE_MIN,
         DEFAULT_COLLISION_FREE_RATE_MIN,
+        DEFAULT_INVENTORY_MIN_OBJECTS,
+        DEFAULT_INTERACTIVE_FALLBACK_RATE_MAX,
+        DEFAULT_INTERACTIVE_OK_RATE_MIN,
+        DEFAULT_INTERACTIVE_STABILITY_RATE_MIN,
         DEFAULT_PHYSICS_VALIDATION_RATE_MIN,
         DEFAULT_QUALITY_SCORE_MIN,
+        DEFAULT_SCALE_CONFIDENCE_MIN,
+        DEFAULT_SCALE_FACTOR_MAX,
+        DEFAULT_SCALE_FACTOR_MIN,
         DEFAULT_SENSOR_CAPTURE_RATE_MIN,
+        DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN,
+        DEFAULT_VARIATION_MIN_OBJECTS,
     )
     from tools.config.env import parse_bool_env, parse_float_env, parse_int_env
     from tools.quality_gates.notification_validation import ensure_production_notification_channels
@@ -51,9 +60,18 @@ except ImportError:
     QualityConfig = None
     DEFAULT_AVERAGE_QUALITY_SCORE_MIN = 0.90
     DEFAULT_COLLISION_FREE_RATE_MIN = 0.90
+    DEFAULT_INVENTORY_MIN_OBJECTS = 1
+    DEFAULT_INTERACTIVE_FALLBACK_RATE_MAX = 0.50
+    DEFAULT_INTERACTIVE_OK_RATE_MIN = 0.50
+    DEFAULT_INTERACTIVE_STABILITY_RATE_MIN = 0.90
     DEFAULT_PHYSICS_VALIDATION_RATE_MIN = 0.95
     DEFAULT_QUALITY_SCORE_MIN = 0.90
+    DEFAULT_SCALE_CONFIDENCE_MIN = 0.50
+    DEFAULT_SCALE_FACTOR_MAX = 2.00
+    DEFAULT_SCALE_FACTOR_MIN = 0.50
     DEFAULT_SENSOR_CAPTURE_RATE_MIN = 0.95
+    DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN = 0.50
+    DEFAULT_VARIATION_MIN_OBJECTS = 1
 
 
 class QualityGateSeverity(str, Enum):
@@ -67,12 +85,16 @@ class QualityGateCheckpoint(str, Enum):
     """Pipeline checkpoints where quality gates are evaluated."""
     # 3D Reconstruction
     RECONSTRUCTION_COMPLETE = "reconstruction_complete"
+    SCALE_COMPLETE = "scale_complete"
+    INTERACTIVE_COMPLETE = "interactive_complete"
 
     # USD Assembly Pipeline
     MANIFEST_VALIDATED = "manifest_validated"
     SIMREADY_COMPLETE = "simready_complete"
     USD_ASSEMBLED = "usd_assembled"
     REPLICATOR_COMPLETE = "replicator_complete"
+    INVENTORY_ENRICHMENT_COMPLETE = "inventory_enrichment_complete"
+    VARIATION_GEN_COMPLETE = "variation_gen_complete"
     # Genie Sim Integration
     GENIESIM_EXPORT_READY = "geniesim_export_ready"
     GENIESIM_IMPORT_COMPLETE = "geniesim_import_complete"
@@ -1299,6 +1321,262 @@ class QualityGateRegistry:
             notify_on_fail=True,
         ))
 
+        # QG-12: Scale Calibration
+        def check_scale(ctx: Dict[str, Any]) -> QualityGateResult:
+            report_path = ctx.get("scale_report_path")
+            if not report_path or not Path(report_path).is_file():
+                return QualityGateResult(
+                    gate_id="qg-12-scale",
+                    checkpoint=QualityGateCheckpoint.SCALE_COMPLETE,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="Scale calibration report not found",
+                    details={"scale_report_path": report_path},
+                    recommendations=[
+                        "Ensure scale-job completed successfully",
+                        "Verify scale_report.json is written to the assets directory",
+                    ],
+                )
+
+            try:
+                report = json.loads(Path(report_path).read_text())
+            except json.JSONDecodeError as exc:
+                return QualityGateResult(
+                    gate_id="qg-12-scale",
+                    checkpoint=QualityGateCheckpoint.SCALE_COMPLETE,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message=f"Scale report JSON invalid: {exc}",
+                    details={"scale_report_path": report_path},
+                    recommendations=["Fix scale_report.json and regenerate the scale output"],
+                )
+
+            if self.config and hasattr(self.config, "scale"):
+                min_scale = self.config.scale.min_scale_factor
+                max_scale = self.config.scale.max_scale_factor
+                min_confidence = self.config.scale.min_confidence
+            else:
+                min_scale = parse_float_env(
+                    os.getenv("BP_QUALITY_SCALE_FACTOR_MIN"),
+                    default=DEFAULT_SCALE_FACTOR_MIN,
+                    min_value=0,
+                    name="BP_QUALITY_SCALE_FACTOR_MIN",
+                )
+                max_scale = parse_float_env(
+                    os.getenv("BP_QUALITY_SCALE_FACTOR_MAX"),
+                    default=DEFAULT_SCALE_FACTOR_MAX,
+                    min_value=0,
+                    name="BP_QUALITY_SCALE_FACTOR_MAX",
+                )
+                min_confidence = parse_float_env(
+                    os.getenv("BP_QUALITY_SCALE_CONFIDENCE_MIN"),
+                    default=DEFAULT_SCALE_CONFIDENCE_MIN,
+                    min_value=0,
+                    max_value=1,
+                    name="BP_QUALITY_SCALE_CONFIDENCE_MIN",
+                )
+
+            issues = []
+            scale_factor = report.get("scale_factor")
+            confidence = report.get("confidence")
+            if not isinstance(scale_factor, (int, float)):
+                issues.append("scale_factor missing or invalid")
+            else:
+                if scale_factor < min_scale or scale_factor > max_scale:
+                    issues.append(f"scale_factor {scale_factor:.3f} outside [{min_scale}, {max_scale}]")
+            if not isinstance(confidence, (int, float)):
+                issues.append("confidence missing or invalid")
+            elif confidence < min_confidence:
+                issues.append(f"confidence {confidence:.2f} below {min_confidence:.2f}")
+
+            passed = len(issues) == 0
+
+            return QualityGateResult(
+                gate_id="qg-12-scale",
+                checkpoint=QualityGateCheckpoint.SCALE_COMPLETE,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    "Scale calibration validated"
+                    if passed
+                    else f"Scale calibration issues: {len(issues)}"
+                ),
+                details={
+                    "scale_report_path": report_path,
+                    "scale_factor": scale_factor,
+                    "confidence": confidence,
+                    "thresholds": {
+                        "min_scale_factor": min_scale,
+                        "max_scale_factor": max_scale,
+                        "min_confidence": min_confidence,
+                    },
+                    "issues": issues,
+                },
+                recommendations=[
+                    "Review scale_report.json for outliers and low-confidence samples",
+                    "Collect additional scale cues or adjust threshold configuration",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-12-scale",
+            name="Scale Calibration",
+            checkpoint=QualityGateCheckpoint.SCALE_COMPLETE,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates scale calibration report and scale factor bounds",
+            check_fn=check_scale,
+            notify_on_fail=True,
+        ))
+
+        # QG-13: Interactive Asset Processing
+        def check_interactive(ctx: Dict[str, Any]) -> QualityGateResult:
+            results_path = ctx.get("interactive_results_path")
+            required_count = ctx.get("required_interactive_count", 0) or 0
+
+            if (required_count == 0) and (not results_path or not Path(results_path).is_file()):
+                return QualityGateResult(
+                    gate_id="qg-13-interactive",
+                    checkpoint=QualityGateCheckpoint.INTERACTIVE_COMPLETE,
+                    passed=True,
+                    severity=QualityGateSeverity.INFO,
+                    message="No interactive objects required; skipping interactive quality checks",
+                    details={"required_interactive_count": required_count},
+                )
+
+            if not results_path or not Path(results_path).is_file():
+                return QualityGateResult(
+                    gate_id="qg-13-interactive",
+                    checkpoint=QualityGateCheckpoint.INTERACTIVE_COMPLETE,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="Interactive results not found",
+                    details={"interactive_results_path": results_path},
+                    recommendations=[
+                        "Ensure interactive-job completed successfully",
+                        "Verify interactive_results.json is written under assets/interactive",
+                    ],
+                )
+
+            try:
+                results = json.loads(Path(results_path).read_text())
+            except json.JSONDecodeError as exc:
+                return QualityGateResult(
+                    gate_id="qg-13-interactive",
+                    checkpoint=QualityGateCheckpoint.INTERACTIVE_COMPLETE,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message=f"Interactive results JSON invalid: {exc}",
+                    details={"interactive_results_path": results_path},
+                    recommendations=["Fix interactive_results.json and rerun interactive-job"],
+                )
+
+            if self.config and hasattr(self.config, "interactive"):
+                min_ok_rate = self.config.interactive.min_ok_rate
+                min_stability = self.config.interactive.min_physics_stability_rate
+                max_fallback_rate = self.config.interactive.max_fallback_rate
+            else:
+                min_ok_rate = parse_float_env(
+                    os.getenv("BP_QUALITY_INTERACTIVE_OK_RATE_MIN"),
+                    default=DEFAULT_INTERACTIVE_OK_RATE_MIN,
+                    min_value=0,
+                    max_value=1,
+                    name="BP_QUALITY_INTERACTIVE_OK_RATE_MIN",
+                )
+                min_stability = parse_float_env(
+                    os.getenv("BP_QUALITY_INTERACTIVE_STABILITY_RATE_MIN"),
+                    default=DEFAULT_INTERACTIVE_STABILITY_RATE_MIN,
+                    min_value=0,
+                    max_value=1,
+                    name="BP_QUALITY_INTERACTIVE_STABILITY_RATE_MIN",
+                )
+                max_fallback_rate = parse_float_env(
+                    os.getenv("BP_QUALITY_INTERACTIVE_FALLBACK_RATE_MAX"),
+                    default=DEFAULT_INTERACTIVE_FALLBACK_RATE_MAX,
+                    min_value=0,
+                    max_value=1,
+                    name="BP_QUALITY_INTERACTIVE_FALLBACK_RATE_MAX",
+                )
+
+            total_objects = results.get("total_objects")
+            if not isinstance(total_objects, int):
+                total_objects = len(results.get("objects", []))
+
+            ok_count = int(results.get("ok_count", 0) or 0)
+            error_count = int(results.get("error_count", 0) or 0)
+            fallback_count = int(results.get("fallback_count", 0) or 0)
+
+            issues = []
+            if required_count and total_objects < required_count:
+                issues.append(
+                    f"Interactive results missing objects: {total_objects}/{required_count} found"
+                )
+            if total_objects <= 0 and required_count > 0:
+                issues.append("No interactive results for required objects")
+
+            ok_rate = 1.0
+            stability_rate = 1.0
+            fallback_rate = 0.0
+            if total_objects > 0:
+                ok_rate = ok_count / total_objects
+                stability_rate = (total_objects - error_count) / total_objects
+                fallback_rate = fallback_count / total_objects
+                if ok_rate < min_ok_rate:
+                    issues.append(f"Low OK rate: {ok_rate:.1%} < {min_ok_rate:.1%}")
+                if stability_rate < min_stability:
+                    issues.append(
+                        f"Low physics stability rate: {stability_rate:.1%} < {min_stability:.1%}"
+                    )
+                if fallback_rate > max_fallback_rate:
+                    issues.append(
+                        f"High fallback rate: {fallback_rate:.1%} > {max_fallback_rate:.1%}"
+                    )
+
+            passed = len(issues) == 0
+
+            return QualityGateResult(
+                gate_id="qg-13-interactive",
+                checkpoint=QualityGateCheckpoint.INTERACTIVE_COMPLETE,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    "Interactive results validated"
+                    if passed
+                    else f"Interactive quality issues: {len(issues)}"
+                ),
+                details={
+                    "interactive_results_path": results_path,
+                    "required_interactive_count": required_count,
+                    "total_objects": total_objects,
+                    "ok_count": ok_count,
+                    "error_count": error_count,
+                    "fallback_count": fallback_count,
+                    "ok_rate": ok_rate,
+                    "physics_stability_rate": stability_rate,
+                    "fallback_rate": fallback_rate,
+                    "thresholds": {
+                        "min_ok_rate": min_ok_rate,
+                        "min_physics_stability_rate": min_stability,
+                        "max_fallback_rate": max_fallback_rate,
+                    },
+                    "issues": issues,
+                },
+                recommendations=[
+                    "Review interactive_job logs for articulation errors",
+                    "Investigate fallback/static assets and provide valid URDFs",
+                    "Adjust interactive thresholds in quality_config.json if needed",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-13-interactive",
+            name="Interactive Asset Processing",
+            checkpoint=QualityGateCheckpoint.INTERACTIVE_COMPLETE,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates interactive asset processing success and physics stability metrics",
+            check_fn=check_interactive,
+            notify_on_fail=True,
+        ))
+
         # QG-2: Physics Plausibility
         # Use configurable thresholds
         def check_physics(ctx: Dict[str, Any]) -> QualityGateResult:
@@ -1378,6 +1656,227 @@ class QualityGateRegistry:
             severity=QualityGateSeverity.WARNING,
             description="Checks mass, friction, and other physics properties are within realistic ranges",
             check_fn=check_physics,
+            notify_on_fail=True,
+        ))
+
+        # QG-14: Inventory Enrichment
+        def check_inventory_enrichment(ctx: Dict[str, Any]) -> QualityGateResult:
+            inventory_path = ctx.get("inventory_enriched_path") or ctx.get("inventory_path")
+            if not inventory_path or not Path(inventory_path).is_file():
+                return QualityGateResult(
+                    gate_id="qg-14-inventory-enrichment",
+                    checkpoint=QualityGateCheckpoint.INVENTORY_ENRICHMENT_COMPLETE,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="Inventory enrichment output not found",
+                    details={
+                        "inventory_enriched_path": ctx.get("inventory_enriched_path"),
+                        "inventory_path": ctx.get("inventory_path"),
+                    },
+                    recommendations=[
+                        "Ensure inventory-enrichment step completed successfully",
+                        "Verify inventory_enriched.json exists under seg/",
+                    ],
+                )
+
+            try:
+                inventory = json.loads(Path(inventory_path).read_text())
+            except json.JSONDecodeError as exc:
+                return QualityGateResult(
+                    gate_id="qg-14-inventory-enrichment",
+                    checkpoint=QualityGateCheckpoint.INVENTORY_ENRICHMENT_COMPLETE,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message=f"Inventory JSON invalid: {exc}",
+                    details={"inventory_path": inventory_path},
+                    recommendations=["Fix inventory JSON formatting and rerun enrichment"],
+                )
+
+            if self.config and hasattr(self.config, "inventory_enrichment"):
+                min_objects = self.config.inventory_enrichment.min_object_count
+                require_metadata = self.config.inventory_enrichment.require_enrichment_metadata
+                allowed_statuses = self.config.inventory_enrichment.allowed_statuses
+            else:
+                min_objects = parse_int_env(
+                    os.getenv("BP_QUALITY_INVENTORY_MIN_OBJECTS"),
+                    default=DEFAULT_INVENTORY_MIN_OBJECTS,
+                    min_value=0,
+                    name="BP_QUALITY_INVENTORY_MIN_OBJECTS",
+                )
+                require_metadata = parse_bool_env(
+                    os.getenv("BP_QUALITY_INVENTORY_REQUIRE_METADATA"),
+                    default=True,
+                    name="BP_QUALITY_INVENTORY_REQUIRE_METADATA",
+                )
+                allowed_statuses = _parse_env_list(
+                    os.getenv("BP_QUALITY_INVENTORY_ALLOWED_STATUSES", "success,stub")
+                )
+
+            objects = inventory.get("objects", []) if isinstance(inventory, dict) else []
+            total_objects = inventory.get("total_objects")
+            if not isinstance(total_objects, int):
+                total_objects = len(objects)
+
+            metadata = inventory.get("metadata", {}) if isinstance(inventory, dict) else {}
+            enrichment_metadata = metadata.get("inventory_enrichment") if isinstance(metadata, dict) else None
+            status = enrichment_metadata.get("status") if isinstance(enrichment_metadata, dict) else None
+
+            issues = []
+            if total_objects < min_objects:
+                issues.append(f"Object count {total_objects} below minimum {min_objects}")
+            if require_metadata and not enrichment_metadata:
+                issues.append("Missing inventory_enrichment metadata")
+            if require_metadata and allowed_statuses and status not in allowed_statuses:
+                issues.append(f"Unexpected enrichment status: {status}")
+
+            passed = len(issues) == 0
+
+            return QualityGateResult(
+                gate_id="qg-14-inventory-enrichment",
+                checkpoint=QualityGateCheckpoint.INVENTORY_ENRICHMENT_COMPLETE,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    "Inventory enrichment validated"
+                    if passed
+                    else f"Inventory enrichment issues: {len(issues)}"
+                ),
+                details={
+                    "inventory_path": str(inventory_path),
+                    "object_count": total_objects,
+                    "enrichment_status": status,
+                    "thresholds": {
+                        "min_object_count": min_objects,
+                        "require_enrichment_metadata": require_metadata,
+                        "allowed_statuses": allowed_statuses,
+                    },
+                    "issues": issues,
+                },
+                recommendations=[
+                    "Verify inventory_enrichment service response",
+                    "Check inventory objects and regenerate enrichment payload",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-14-inventory-enrichment",
+            name="Inventory Enrichment",
+            checkpoint=QualityGateCheckpoint.INVENTORY_ENRICHMENT_COMPLETE,
+            severity=QualityGateSeverity.ERROR,
+            description="Ensures inventory enrichment output exists and meets object/metadata thresholds",
+            check_fn=check_inventory_enrichment,
+            notify_on_fail=True,
+        ))
+
+        # QG-15: Variation Asset Generation
+        def check_variation_assets(ctx: Dict[str, Any]) -> QualityGateResult:
+            assets_path = ctx.get("variation_assets_path")
+            if not assets_path or not Path(assets_path).is_file():
+                return QualityGateResult(
+                    gate_id="qg-15-variation-assets",
+                    checkpoint=QualityGateCheckpoint.VARIATION_GEN_COMPLETE,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message="variation_assets.json not found",
+                    details={"variation_assets_path": assets_path},
+                    recommendations=[
+                        "Ensure variation-gen job completed successfully",
+                        "Verify variation_assets.json is written to variation_assets/",
+                    ],
+                )
+
+            try:
+                assets = json.loads(Path(assets_path).read_text())
+            except json.JSONDecodeError as exc:
+                return QualityGateResult(
+                    gate_id="qg-15-variation-assets",
+                    checkpoint=QualityGateCheckpoint.VARIATION_GEN_COMPLETE,
+                    passed=False,
+                    severity=QualityGateSeverity.ERROR,
+                    message=f"variation_assets.json invalid: {exc}",
+                    details={"variation_assets_path": assets_path},
+                    recommendations=["Fix variation_assets.json and rerun variation-gen"],
+                )
+
+            if self.config and hasattr(self.config, "variation_assets"):
+                min_objects = self.config.variation_assets.min_object_count
+                min_success_rate = self.config.variation_assets.min_3d_success_rate
+            else:
+                min_objects = parse_int_env(
+                    os.getenv("BP_QUALITY_VARIATION_MIN_OBJECTS"),
+                    default=DEFAULT_VARIATION_MIN_OBJECTS,
+                    min_value=0,
+                    name="BP_QUALITY_VARIATION_MIN_OBJECTS",
+                )
+                min_success_rate = parse_float_env(
+                    os.getenv("BP_QUALITY_VARIATION_3D_SUCCESS_RATE_MIN"),
+                    default=DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN,
+                    min_value=0,
+                    max_value=1,
+                    name="BP_QUALITY_VARIATION_3D_SUCCESS_RATE_MIN",
+                )
+
+            objects = assets.get("objects", []) if isinstance(assets, dict) else []
+            total_objects = len(objects)
+            generation_entries = [
+                obj for obj in objects
+                if isinstance(obj.get("generated_3d"), dict)
+            ]
+            success_count = sum(
+                1 for obj in generation_entries
+                if obj.get("generated_3d", {}).get("status") == "success"
+            )
+            success_rate = (
+                success_count / len(generation_entries)
+                if generation_entries
+                else 1.0
+            )
+
+            issues = []
+            if total_objects < min_objects:
+                issues.append(f"Variation asset count {total_objects} below minimum {min_objects}")
+            if generation_entries and success_rate < min_success_rate:
+                issues.append(
+                    f"3D success rate {success_rate:.1%} below {min_success_rate:.1%}"
+                )
+
+            passed = len(issues) == 0
+
+            return QualityGateResult(
+                gate_id="qg-15-variation-assets",
+                checkpoint=QualityGateCheckpoint.VARIATION_GEN_COMPLETE,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=(
+                    "Variation assets validated"
+                    if passed
+                    else f"Variation asset issues: {len(issues)}"
+                ),
+                details={
+                    "variation_assets_path": str(assets_path),
+                    "object_count": total_objects,
+                    "generated_3d_count": len(generation_entries),
+                    "generated_3d_success_count": success_count,
+                    "generated_3d_success_rate": success_rate,
+                    "thresholds": {
+                        "min_object_count": min_objects,
+                        "min_3d_success_rate": min_success_rate,
+                    },
+                    "issues": issues,
+                },
+                recommendations=[
+                    "Review variation generation logs for failed assets",
+                    "Increase variation asset sampling or adjust thresholds",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-15-variation-assets",
+            name="Variation Asset Generation",
+            checkpoint=QualityGateCheckpoint.VARIATION_GEN_COMPLETE,
+            severity=QualityGateSeverity.ERROR,
+            description="Validates variation asset manifest and generation success rate",
+            check_fn=check_variation_assets,
             notify_on_fail=True,
         ))
 
