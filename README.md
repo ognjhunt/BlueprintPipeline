@@ -26,6 +26,15 @@ BlueprintPipeline converts scene reconstructions (from [3D-RE-GEN](https://arxiv
 - [Module Reference](docs/api/README.md)
 - [Tools guide](tools/README.md)
 
+## Cost Alerting
+
+Cost tracking can emit alerts via `monitoring.alerting.send_alert` when thresholds are
+exceeded. Configure the alert backend with the standard `ALERT_BACKEND`/`ALERT_WEBHOOK_URL`
+environment variables, then set one or both of the cost thresholds below:
+
+- `COST_ALERT_PER_SCENE_USD`: trigger an alert when an individual scene crosses this USD total.
+- `COST_ALERT_TOTAL_USD`: trigger an alert when the pipeline-wide USD total crosses this limit.
+
 ## Pipeline Architecture
 
 ```

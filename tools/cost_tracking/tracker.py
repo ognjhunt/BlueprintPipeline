@@ -40,6 +40,8 @@ GENIESIM_GPU_NODE_TYPE_ENV = "GENIESIM_GPU_NODE_TYPE"
 COST_TRACKING_PRICING_ENV = "COST_TRACKING_PRICING_JSON"
 COST_TRACKING_PRICING_PATH_ENV = "COST_TRACKING_PRICING_PATH"
 DEFAULT_PRICING_PATH = Path(__file__).with_name("pricing_defaults.json")
+COST_ALERT_PER_SCENE_ENV = "COST_ALERT_PER_SCENE_USD"
+COST_ALERT_TOTAL_ENV = "COST_ALERT_TOTAL_USD"
 
 DEFAULT_GENIESIM_GPU_RATES = {
     "default": {
@@ -56,6 +58,17 @@ def _parse_float(value: Any, *, env_var: str) -> float:
         return float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid float for {env_var}: {value!r}") from exc
+
+
+def _parse_optional_threshold(env_var: str) -> Optional[float]:
+    value = os.getenv(env_var)
+    if value is None or value == "":
+        return None
+    threshold = _parse_float(value, env_var=env_var)
+    if threshold <= 0:
+        logger.warning("Ignoring non-positive %s=%s for cost alert threshold.", env_var, value)
+        return None
+    return threshold
 
 
 def _sanitize_pricing_payload(parsed: Any, *, source: str) -> Dict[str, float]:
@@ -463,6 +476,11 @@ class CostTracker:
         # In-memory cache
         self.entries: List[CostEntry] = []
         self.scene_totals: Dict[str, float] = {}
+        self.total_cost: float = 0.0
+        self.scene_alert_threshold = _parse_optional_threshold(COST_ALERT_PER_SCENE_ENV)
+        self.total_alert_threshold = _parse_optional_threshold(COST_ALERT_TOTAL_ENV)
+        self.last_scene_alert_totals: Dict[str, float] = {}
+        self.last_total_alert_total: float = 0.0
 
         self.metrics = None
         try:
@@ -882,7 +900,7 @@ class CostTracker:
         )
 
         self.entries.append(entry)
-        self._update_scene_total(scene_id, amount)
+        self._update_scene_total(scene_id, amount, entry=entry)
         self._save_entry(entry)
         self._emit_cost_metric(entry)
 
@@ -916,7 +934,7 @@ class CostTracker:
                             data = json.loads(line)
                             entry = CostEntry(**data)
                             self.entries.append(entry)
-                            self._update_scene_total(entry.scene_id, entry.amount)
+                            self._update_scene_total(entry.scene_id, entry.amount, entry=None)
             except Exception as e:
                 logger.warning(f"Failed to load cost data: {e}")
 
@@ -929,14 +947,76 @@ class CostTracker:
         except Exception as e:
             logger.warning(f"Failed to save cost entry: {e}")
 
-    def _update_scene_total(self, scene_id: str, amount: float) -> None:
-        """Update per-scene totals and emit metrics."""
+    def _update_scene_total(
+        self,
+        scene_id: str,
+        amount: float,
+        *,
+        entry: Optional[CostEntry],
+    ) -> None:
+        """Update per-scene totals, emit metrics, and alert on thresholds."""
         self.scene_totals[scene_id] = self.scene_totals.get(scene_id, 0.0) + amount
+        self.total_cost += amount
         if self.metrics:
             self.metrics.cost_per_scene.set(
                 self.scene_totals[scene_id],
                 labels={"job": "cost_tracking", "scene_id": scene_id},
             )
+        if entry is None:
+            return
+        self._maybe_alert_thresholds(scene_id, entry)
+
+    def _maybe_alert_thresholds(self, scene_id: str, entry: CostEntry) -> None:
+        if not self.scene_alert_threshold and not self.total_alert_threshold:
+            return
+        try:
+            from monitoring.alerting import send_alert
+        except Exception:
+            logger.debug("Alerting unavailable; skipping cost alerts.")
+            return
+
+        scene_total = self.scene_totals.get(scene_id, 0.0)
+        total_cost = self.total_cost
+        details = {
+            "scene_id": scene_id,
+            "category": entry.category,
+            "job_name": entry.subcategory,
+            "scene_total_usd": scene_total,
+            "total_usd": total_cost,
+        }
+
+        if self.scene_alert_threshold is not None:
+            last_scene_alert = self.last_scene_alert_totals.get(scene_id, 0.0)
+            if last_scene_alert < self.scene_alert_threshold <= scene_total:
+                send_alert(
+                    event_type="cost_tracking.scene_threshold_exceeded",
+                    summary=(
+                        f"Scene {scene_id} cost ${scene_total:.2f} exceeded "
+                        f"threshold ${self.scene_alert_threshold:.2f}"
+                    ),
+                    details={
+                        **details,
+                        "scene_threshold_usd": self.scene_alert_threshold,
+                    },
+                    severity="warning",
+                )
+                self.last_scene_alert_totals[scene_id] = scene_total
+
+        if self.total_alert_threshold is not None:
+            if self.last_total_alert_total < self.total_alert_threshold <= total_cost:
+                send_alert(
+                    event_type="cost_tracking.total_threshold_exceeded",
+                    summary=(
+                        f"Total pipeline cost ${total_cost:.2f} exceeded "
+                        f"threshold ${self.total_alert_threshold:.2f}"
+                    ),
+                    details={
+                        **details,
+                        "total_threshold_usd": self.total_alert_threshold,
+                    },
+                    severity="warning",
+                )
+                self.last_total_alert_total = total_cost
 
 
 # Global singleton instance
