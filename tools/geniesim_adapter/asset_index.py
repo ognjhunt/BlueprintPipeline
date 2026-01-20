@@ -837,6 +837,13 @@ class AssetIndexBuilder:
                         f"{error_message}"
                     )
 
+        if production_mode and placeholder_count > 0:
+            raise RuntimeError(
+                "Placeholder embeddings are not allowed in production. "
+                "Configure an embedding provider by setting OPENAI_API_KEY or "
+                "QWEN_API_KEY/DASHSCOPE_API_KEY."
+            )
+
         failure_count = len(errors)
         failure_rate = failure_count / len(assets) if assets else 0.0
         self.log(
