@@ -580,6 +580,15 @@ class DataCollectionResult:
     server_info: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class GrpcCallResult:
+    """Structured result for gRPC calls, including availability."""
+
+    success: bool
+    available: bool
+    error: Optional[str] = None
+    payload: Any = None
+
 def _parse_version(version: str) -> tuple:
     parts = version.split(".")
     padded = (parts + ["0", "0", "0"])[:3]
@@ -657,6 +666,7 @@ class GenieSimGRPCClient:
         self._channel = None
         self._stub = None
         self._connected = False
+        self._grpc_unavailable_logged: set[str] = set()
         self._circuit_breaker = CircuitBreaker(
             f"geniesim-grpc-{self.host}:{self.port}",
             failure_threshold=get_geniesim_circuit_breaker_failure_threshold(),
@@ -709,6 +719,18 @@ class GenieSimGRPCClient:
             self.host,
             self.port,
         )
+
+    def _grpc_unavailable(self, method_name: str, reason: str) -> GrpcCallResult:
+        if method_name not in self._grpc_unavailable_logged:
+            logger.warning(
+                "Genie Sim gRPC unavailable for %s: %s (host=%s port=%s)",
+                method_name,
+                reason,
+                self.host,
+                self.port,
+            )
+            self._grpc_unavailable_logged.add(method_name)
+        return GrpcCallResult(success=False, available=False, error=reason)
 
     def _call_grpc(
         self,
@@ -848,32 +870,66 @@ class GenieSimGRPCClient:
         logger.warning("Genie Sim gRPC ping returned unsuccessful response")
         return False
 
-    def get_server_info(self, timeout: Optional[float] = None) -> Dict[str, Any]:
+    def get_server_info(self, timeout: Optional[float] = None) -> GrpcCallResult:
         """
         Fetch server version and capabilities via gRPC.
 
         Returns:
-            Dict with server version and capabilities.
+            GrpcCallResult with payload containing server version and capabilities.
         """
         if not self._connected:
-            raise RuntimeError("Not connected to Genie Sim server")
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="Not connected to Genie Sim server",
+            )
         # Keep timeouts from being clipped below the configured default.
         effective_timeout = max(self.timeout, timeout) if timeout else self.timeout
-        response = self.send_command(CommandType.GET_CHECKER_STATUS, {})
-        if not response.get("success"):
-            error = response.get("error_message") or response.get("error") or "unknown error"
-            raise RuntimeError(f"Genie Sim server info request failed: {error}")
+        response_result = self.send_command(CommandType.GET_CHECKER_STATUS, {})
+        if not response_result.available:
+            return GrpcCallResult(
+                success=False,
+                available=False,
+                error=response_result.error or "gRPC unavailable",
+            )
+        if not response_result.success:
+            error_payload = response_result.payload or {}
+            error = (
+                response_result.error
+                or error_payload.get("error_message")
+                or error_payload.get("error")
+                or "unknown error"
+            )
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error=error,
+                payload=error_payload,
+            )
+        response = response_result.payload or {}
         version = response.get("version")
         capabilities = response.get("capabilities")
         if not version:
-            raise RuntimeError("Genie Sim server info missing version")
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="Genie Sim server info missing version",
+            )
         if not isinstance(capabilities, list):
-            raise RuntimeError("Genie Sim server info missing capabilities list")
-        return {
-            "version": version,
-            "capabilities": capabilities,
-            "timeout_s": effective_timeout,
-        }
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="Genie Sim server info missing capabilities list",
+            )
+        return GrpcCallResult(
+            success=True,
+            available=True,
+            payload={
+                "version": version,
+                "capabilities": capabilities,
+                "timeout_s": effective_timeout,
+            },
+        )
 
     def _check_server_socket(self) -> bool:
         """Check if server is running via socket connection."""
@@ -909,7 +965,7 @@ class GenieSimGRPCClient:
         self,
         command: CommandType,
         data: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> GrpcCallResult:
         """
         Send command to Genie Sim server.
 
@@ -920,14 +976,21 @@ class GenieSimGRPCClient:
             data: Optional command data
 
         Returns:
-            Response data from server
+            GrpcCallResult with payload containing response data from server.
         """
         if not self._connected:
             raise RuntimeError("Not connected to Genie Sim server")
 
-        if not self._have_grpc or self._stub is None:
-            logger.warning(f"gRPC not available - cannot send command: {command.name}")
-            return {"success": False, "error": "gRPC not available"}
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "send_command",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "send_command",
+                "gRPC stub not initialized",
+            )
 
         # Real gRPC implementation
         def _request() -> SendCommandResponse:
@@ -955,7 +1018,12 @@ class GenieSimGRPCClient:
             success_checker=lambda resp: resp.success,
         )
         if response is None:
-            return {"success": False, "error": "gRPC call failed"}
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+                payload={"success": False, "error": "gRPC call failed"},
+            )
 
         # Parse response
         result = {
@@ -971,19 +1039,33 @@ class GenieSimGRPCClient:
             except json.JSONDecodeError:
                 logger.warning("Failed to decode response payload")
 
-        return result
+        error_message = result.get("error_message") if not result.get("success") else None
+        return GrpcCallResult(
+            success=bool(result.get("success")),
+            available=True,
+            error=error_message,
+            payload=result,
+        )
 
-    def get_observation(self) -> Dict[str, Any]:
+    def get_observation(self) -> GrpcCallResult:
         """
         Get current observation from simulation.
 
         Uses real gRPC GetObservation call.
 
         Returns:
-            Dictionary with robot_state, scene_state, timestamp
+            GrpcCallResult with payload containing robot_state, scene_state, timestamp.
         """
-        if not self._have_grpc or self._stub is None:
-            return {"success": False, "error": "gRPC not available"}
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "get_observation",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "get_observation",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> GetObservationResponse:
             request = GetObservationRequest(
@@ -1000,13 +1082,27 @@ class GenieSimGRPCClient:
             success_checker=lambda resp: resp.success,
         )
         if response is None:
-            return {"success": False, "error": "gRPC call failed"}
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+                payload={"success": False, "error": "gRPC call failed"},
+            )
         if not response.success:
-            return {"success": False}
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC response unsuccessful",
+                payload={"success": False},
+            )
 
         result = self._format_observation_response(response)
         self._latest_observation = result
-        return result
+        return GrpcCallResult(
+            success=True,
+            available=True,
+            payload=result,
+        )
 
     def _format_observation_response(self, response: GetObservationResponse) -> Dict[str, Any]:
         result = {
@@ -1115,17 +1211,25 @@ class GenieSimGRPCClient:
         include_semantic: bool = False,
         camera_ids: Optional[Sequence[str]] = None,
         timeout: Optional[float] = None,
-    ) -> Any:
+    ) -> GrpcCallResult:
         """
         Stream observations from the simulation.
 
         Uses real gRPC StreamObservations call.
 
         Returns:
-            Generator yielding observation dictionaries.
+            GrpcCallResult with payload yielding observation dictionaries.
         """
-        if not self._have_grpc or self._stub is None:
-            return
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "stream_observations",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "stream_observations",
+                "gRPC stub not initialized",
+            )
 
         request = GetObservationRequest(
             include_images=include_images,
@@ -1143,22 +1247,35 @@ class GenieSimGRPCClient:
             None,
         )
         if stream is None:
-            return
-        try:
-            for response in stream:
-                if not response.success:
-                    logger.warning("StreamObservations yielded unsuccessful response")
-                    yield {"success": False}
-                    continue
-                formatted = self._format_observation_response(response)
-                self._latest_observation = formatted
-                yield formatted
-        except Exception as exc:
-            if self._circuit_breaker:
-                self._circuit_breaker.record_failure(exc)
-            logger.error("Genie Sim gRPC StreamObservations iteration failed: %s", exc)
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
 
-    def set_joint_position(self, positions: List[float]) -> bool:
+        def _iterator() -> Any:
+            try:
+                for response in stream:
+                    if not response.success:
+                        logger.warning("StreamObservations yielded unsuccessful response")
+                        yield {"success": False, "error": "gRPC response unsuccessful"}
+                        continue
+                    formatted = self._format_observation_response(response)
+                    self._latest_observation = formatted
+                    yield formatted
+            except Exception as exc:
+                if self._circuit_breaker:
+                    self._circuit_breaker.record_failure(exc)
+                logger.error("Genie Sim gRPC StreamObservations iteration failed: %s", exc)
+                yield {"success": False, "error": str(exc)}
+
+        return GrpcCallResult(
+            success=True,
+            available=True,
+            payload=_iterator(),
+        )
+
+    def set_joint_position(self, positions: List[float]) -> GrpcCallResult:
         """
         Set robot joint positions.
 
@@ -1168,10 +1285,18 @@ class GenieSimGRPCClient:
             positions: Target joint positions
 
         Returns:
-            True if successful
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "set_joint_position",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "set_joint_position",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> SetJointPositionResponse:
             request = SetJointPositionRequest(
@@ -1186,19 +1311,39 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-    def get_joint_position(self) -> Optional[List[float]]:
+    def get_joint_position(self) -> GrpcCallResult:
         """
         Get current joint positions.
 
         Uses real gRPC GetJointPosition call.
 
         Returns:
-            List of joint positions or None
+            GrpcCallResult with payload list of joint positions.
         """
-        if not self._have_grpc or self._stub is None:
-            return None
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "get_joint_position",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "get_joint_position",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> GetJointPositionResponse:
             request = GetJointPositionRequest()
@@ -1210,12 +1355,25 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        if response and response.success and response.joint_state:
-            return response.joint_state.positions
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success and response.joint_state:
+            return GrpcCallResult(
+                success=True,
+                available=True,
+                payload=list(response.joint_state.positions),
+            )
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-        return None
-
-    def get_ee_pose(self, ee_link_name: str = "") -> Optional[Dict[str, Any]]:
+    def get_ee_pose(self, ee_link_name: str = "") -> GrpcCallResult:
         """
         Get current end-effector pose.
 
@@ -1225,10 +1383,18 @@ class GenieSimGRPCClient:
             ee_link_name: Optional end-effector link name
 
         Returns:
-            Pose dict or None
+            GrpcCallResult with payload pose dict.
         """
-        if not self._have_grpc or self._stub is None:
-            return None
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "get_ee_pose",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "get_ee_pose",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> GetEEPoseResponse:
             request = GetEEPoseRequest(ee_link_name=ee_link_name)
@@ -1240,21 +1406,43 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        if response and response.success:
-            return self._pose_to_dict(response.pose)
-        return None
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(
+                success=True,
+                available=True,
+                payload=self._pose_to_dict(response.pose),
+            )
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-    def get_gripper_state(self) -> Optional[Dict[str, Any]]:
+    def get_gripper_state(self) -> GrpcCallResult:
         """
         Get current gripper state.
 
         Uses real gRPC GetGripperState call.
 
         Returns:
-            Dict with width, force, and grasping state
+            GrpcCallResult with payload containing width, force, and grasping state.
         """
-        if not self._have_grpc or self._stub is None:
-            return None
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "get_gripper_state",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "get_gripper_state",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> GetGripperStateResponse:
             request = GetGripperStateRequest()
@@ -1266,20 +1454,34 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        if response and response.success:
-            return {
-                "width": response.width,
-                "force": response.force,
-                "is_grasping": response.is_grasping,
-            }
-        return None
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(
+                success=True,
+                available=True,
+                payload={
+                    "width": response.width,
+                    "force": response.force,
+                    "is_grasping": response.is_grasping,
+                },
+            )
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
     def set_gripper_state(
         self,
         width: float,
         force: float = 0.0,
         wait_for_completion: bool = True,
-    ) -> bool:
+    ) -> GrpcCallResult:
         """
         Set gripper state.
 
@@ -1291,10 +1493,18 @@ class GenieSimGRPCClient:
             wait_for_completion: Wait for gripper action to complete
 
         Returns:
-            True if successful
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "set_gripper_state",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "set_gripper_state",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> SetGripperStateResponse:
             request = SetGripperStateRequest(
@@ -1310,9 +1520,21 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-    def get_object_pose(self, object_id: str) -> Optional[Dict[str, Any]]:
+    def get_object_pose(self, object_id: str) -> GrpcCallResult:
         """
         Get an object's pose.
 
@@ -1322,10 +1544,18 @@ class GenieSimGRPCClient:
             object_id: Object identifier
 
         Returns:
-            Pose dict or None
+            GrpcCallResult with payload pose dict.
         """
-        if not self._have_grpc or self._stub is None:
-            return None
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "get_object_pose",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "get_object_pose",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> GetObjectPoseResponse:
             request = GetObjectPoseRequest(object_id=object_id)
@@ -1337,11 +1567,25 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        if response and response.success:
-            return self._pose_to_dict(response.pose)
-        return None
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(
+                success=True,
+                available=True,
+                payload=self._pose_to_dict(response.pose),
+            )
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-    def set_object_pose(self, object_id: str, pose: Dict[str, Any]) -> bool:
+    def set_object_pose(self, object_id: str, pose: Dict[str, Any]) -> GrpcCallResult:
         """
         Set an object's pose.
 
@@ -1352,10 +1596,18 @@ class GenieSimGRPCClient:
             pose: Pose dict
 
         Returns:
-            True if successful
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "set_object_pose",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "set_object_pose",
+                "gRPC stub not initialized",
+            )
 
         pose_message = self._pose_from_data(pose) or GrpcPose()
 
@@ -1369,9 +1621,21 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-    def attach_object(self, object_id: str, link_name: str) -> bool:
+    def attach_object(self, object_id: str, link_name: str) -> GrpcCallResult:
         """
         Attach an object to a robot link.
 
@@ -1382,10 +1646,18 @@ class GenieSimGRPCClient:
             link_name: Robot link name
 
         Returns:
-            True if successful
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "attach_object",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "attach_object",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> AttachObjectResponse:
             request = AttachObjectRequest(object_id=object_id, link_name=link_name)
@@ -1397,9 +1669,21 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-    def detach_object(self, object_id: str) -> bool:
+    def detach_object(self, object_id: str) -> GrpcCallResult:
         """
         Detach an object from the robot.
 
@@ -1409,10 +1693,18 @@ class GenieSimGRPCClient:
             object_id: Object identifier
 
         Returns:
-            True if successful
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "detach_object",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "detach_object",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> DetachObjectResponse:
             request = DetachObjectRequest(object_id=object_id)
@@ -1424,7 +1716,19 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
     def init_robot(
         self,
@@ -1432,7 +1736,7 @@ class GenieSimGRPCClient:
         urdf_path: str = "",
         base_pose: Optional[Dict[str, Any]] = None,
         initial_joint_positions: Optional[Sequence[float]] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> GrpcCallResult:
         """
         Initialize the robot in the simulation.
 
@@ -1445,10 +1749,18 @@ class GenieSimGRPCClient:
             initial_joint_positions: Optional initial joint positions
 
         Returns:
-            Dict with joint metadata or None
+            GrpcCallResult with payload containing joint metadata.
         """
-        if not self._have_grpc or self._stub is None:
-            return None
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "init_robot",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "init_robot",
+                "gRPC stub not initialized",
+            )
 
         pose_message = self._pose_from_data(base_pose) or GrpcPose()
 
@@ -1467,12 +1779,26 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        if response and response.success:
-            return {
-                "num_joints": response.num_joints,
-                "joint_names": list(response.joint_names),
-            }
-        return None
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(
+                success=True,
+                available=True,
+                payload={
+                    "num_joints": response.num_joints,
+                    "joint_names": list(response.joint_names),
+                },
+            )
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
     def reset(
         self,
@@ -1480,7 +1806,7 @@ class GenieSimGRPCClient:
         reset_robot: bool = True,
         reset_objects: bool = True,
         scene_path: str = "",
-    ) -> bool:
+    ) -> GrpcCallResult:
         """
         Reset the simulation environment.
 
@@ -1492,10 +1818,18 @@ class GenieSimGRPCClient:
             scene_path: Optional scene path override
 
         Returns:
-            True if reset successful
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "reset",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "reset",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> ResetResponse:
             request = ResetRequest(
@@ -1511,7 +1845,19 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
     def add_camera(
         self,
@@ -1523,7 +1869,7 @@ class GenieSimGRPCClient:
         fov: float = 60.0,
         near_clip: float = 0.01,
         far_clip: float = 10.0,
-    ) -> bool:
+    ) -> GrpcCallResult:
         """
         Add a camera to the simulation.
 
@@ -1540,10 +1886,18 @@ class GenieSimGRPCClient:
             far_clip: Far clipping plane
 
         Returns:
-            True if successful
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "add_camera",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "add_camera",
+                "gRPC stub not initialized",
+            )
 
         pose_message = self._pose_from_data(pose) or GrpcPose()
 
@@ -1566,7 +1920,19 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
     def get_camera_data(self, camera_id: str = "wrist") -> Optional[Dict[str, Any]]:
         """
@@ -1582,7 +1948,10 @@ class GenieSimGRPCClient:
         """
         obs = getattr(self, "_latest_observation", None)
         if obs is None or not obs.get("success"):
-            obs = self.get_observation()
+            obs_result = self.get_observation()
+            if not obs_result.available or not obs_result.success:
+                return None
+            obs = obs_result.payload or {}
         if not obs.get("success"):
             return None
 
@@ -1706,7 +2075,7 @@ class GenieSimGRPCClient:
     def _is_png_data(data: bytes) -> bool:
         return data.startswith(b"\x89PNG\r\n\x1a\n")
 
-    def execute_trajectory(self, trajectory: List[Dict[str, Any]]) -> bool:
+    def execute_trajectory(self, trajectory: List[Dict[str, Any]]) -> GrpcCallResult:
         """
         Execute a trajectory on the robot.
 
@@ -1716,10 +2085,18 @@ class GenieSimGRPCClient:
             trajectory: List of waypoints with positions, velocities, timestamps
 
         Returns:
-            True if execution successful
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "execute_trajectory",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "execute_trajectory",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> SetTrajectoryResponse:
             # Convert trajectory to gRPC format
@@ -1747,9 +2124,21 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-    def start_recording(self, episode_id: str, output_dir: str) -> bool:
+    def start_recording(self, episode_id: str, output_dir: str) -> GrpcCallResult:
         """
         Start recording an episode.
 
@@ -1760,10 +2149,18 @@ class GenieSimGRPCClient:
             output_dir: Directory to save recordings
 
         Returns:
-            True if recording started
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "start_recording",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "start_recording",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> StartRecordingResponse:
             request = StartRecordingRequest(
@@ -1781,19 +2178,39 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-    def stop_recording(self) -> bool:
+    def stop_recording(self) -> GrpcCallResult:
         """
         Stop recording current episode.
 
         Uses real gRPC StopRecording call.
 
         Returns:
-            True if recording stopped
+            GrpcCallResult indicating success.
         """
-        if not self._have_grpc or self._stub is None:
-            return False
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "stop_recording",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "stop_recording",
+                "gRPC stub not initialized",
+            )
 
         def _request() -> StopRecordingResponse:
             request = StopRecordingRequest(save_metadata=True)
@@ -1805,16 +2222,28 @@ class GenieSimGRPCClient:
             None,
             success_checker=lambda resp: resp.success,
         )
-        return bool(response and response.success)
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+            )
+        if response.success:
+            return GrpcCallResult(success=True, available=True)
+        return GrpcCallResult(
+            success=False,
+            available=True,
+            error="gRPC response unsuccessful",
+        )
 
-    def reset_environment(self) -> bool:
+    def reset_environment(self) -> GrpcCallResult:
         """
         Reset the simulation environment.
 
         Uses real gRPC Reset call.
 
         Returns:
-            True if reset successful
+            GrpcCallResult indicating success.
         """
         return self.reset(reset_robot=True, reset_objects=True)
 
@@ -2346,7 +2775,19 @@ class GenieSimLocalFramework:
 
                     try:
                         # Reset environment
-                        self._client.reset_environment()
+                        reset_result = self._client.reset_environment()
+                        if not reset_result.available:
+                            error_message = (
+                                f"Reset unavailable before episode: {reset_result.error}"
+                            )
+                            result.errors.append(error_message)
+                            self.log(error_message, "ERROR")
+                            return result
+                        if not reset_result.success:
+                            error_message = reset_result.error or "Reset failed before episode."
+                            result.errors.append(error_message)
+                            self.log(error_message, "ERROR")
+                            return result
 
                         # Generate and execute trajectory
                         episode_result = self._run_single_episode(
@@ -2470,7 +2911,16 @@ class GenieSimLocalFramework:
         required_capabilities: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """Fetch and verify server capabilities before running a job."""
-        server_info = self._client.get_server_info(timeout=5.0)
+        server_info_result = self._client.get_server_info(timeout=5.0)
+        if not server_info_result.available:
+            raise RuntimeError(
+                f"Genie Sim server info unavailable: {server_info_result.error}"
+            )
+        if not server_info_result.success:
+            raise RuntimeError(
+                f"Genie Sim server info request failed: {server_info_result.error}"
+            )
+        server_info = server_info_result.payload or {}
         version = server_info.get("version", "")
         capabilities = server_info.get("capabilities", [])
         normalized_caps = {str(cap).strip() for cap in capabilities}
@@ -2506,7 +2956,7 @@ class GenieSimLocalFramework:
         target_objects = task.get("target_objects", [])
         for obj in target_objects:
             try:
-                self._client.send_command(
+                result = self._client.send_command(
                     CommandType.SET_OBJECT_POSE,
                     {
                         "object_id": obj.get("id"),
@@ -2514,6 +2964,18 @@ class GenieSimLocalFramework:
                         "rotation": obj.get("rotation", [0, 0, 0, 1]),
                     }
                 )
+                if not result.available:
+                    self.log(
+                        f"gRPC unavailable while configuring object {obj.get('id')}: {result.error}",
+                        "WARNING",
+                    )
+                elif not result.success:
+                    error_payload = result.payload or {}
+                    error_detail = result.error or error_payload.get("error") or "unknown error"
+                    self.log(
+                        f"Failed to configure object {obj.get('id')}: {error_detail}",
+                        "WARNING",
+                    )
             except Exception as e:
                 self.log(f"Failed to configure object {obj.get('id')}: {e}", "WARNING")
 
@@ -2560,11 +3022,24 @@ class GenieSimLocalFramework:
 
         try:
             # Start recording
-            self._client.start_recording(episode_id, str(output_dir))
+            recording_result = self._client.start_recording(episode_id, str(output_dir))
+            if not recording_result.available:
+                result["error"] = f"Recording unavailable: {recording_result.error}"
+                return result
+            if not recording_result.success:
+                result["error"] = recording_result.error or "Failed to start recording"
+                return result
             recording_started = True
 
             # Get initial observation
-            obs = self._client.get_observation()
+            obs_result = self._client.get_observation()
+            if not obs_result.available:
+                result["error"] = f"Observation unavailable: {obs_result.error}"
+                return result
+            if not obs_result.success:
+                result["error"] = obs_result.error or "Failed to get observation"
+                return result
+            obs = obs_result.payload or {}
 
             # Generate trajectory (using cuRobo motion planning)
             trajectory = self._generate_trajectory(task, obs)
@@ -2606,20 +3081,26 @@ class GenieSimLocalFramework:
 
             def _collect_streaming() -> None:
                 try:
-                    stream = self._client.stream_observations()
-                    if stream is None:
+                    stream_result = self._client.stream_observations()
+                    if not stream_result.available:
+                        collector_state["error"] = (
+                            f"Observation stream unavailable: {stream_result.error}"
+                        )
+                        return
+                    if not stream_result.success or stream_result.payload is None:
                         collector_state["mode"] = "polling"
                         _collect_polling()
                         return
-                    for response in stream:
+                    for response in stream_result.payload:
                         if abort_event.is_set():
                             break
-                        if not response.success:
+                        if not response.get("success", False):
                             collector_state["error"] = (
-                                "Observation stream returned unsuccessful response."
+                                response.get("error")
+                                or "Observation stream returned unsuccessful response."
                             )
                             break
-                        obs_frame = self._client._format_observation_response(response)
+                        obs_frame = response
                         collector_state["observations"].append(obs_frame)
                         _note_progress(obs_frame)
                 except Exception as exc:
@@ -2639,12 +3120,19 @@ class GenieSimLocalFramework:
                         sleep_for = target_time - time.time()
                         if sleep_for > 0:
                             time.sleep(sleep_for)
-                        obs_frame = self._client.get_observation()
-                        if not obs_frame.get("success"):
+                        obs_result = self._client.get_observation()
+                        if not obs_result.available:
                             collector_state["error"] = (
-                                "Timed observation polling returned unsuccessful response."
+                                f"Timed observation polling unavailable: {obs_result.error}"
                             )
                             break
+                        if not obs_result.success:
+                            collector_state["error"] = (
+                                obs_result.error
+                                or "Timed observation polling returned unsuccessful response."
+                            )
+                            break
+                        obs_frame = obs_result.payload or {}
                         obs_frame["planned_timestamp"] = planned_timestamp
                         collector_state["observations"].append(obs_frame)
                         _note_progress(obs_frame)
@@ -2664,7 +3152,18 @@ class GenieSimLocalFramework:
 
             def _execute_trajectory() -> None:
                 try:
-                    execution_state["success"] = self._client.execute_trajectory(timed_trajectory)
+                    execution_result = self._client.execute_trajectory(timed_trajectory)
+                    if not execution_result.available:
+                        execution_state["error"] = (
+                            f"Trajectory execution unavailable: {execution_result.error}"
+                        )
+                        return
+                    if not execution_result.success:
+                        execution_state["error"] = (
+                            execution_result.error or "Trajectory execution failed"
+                        )
+                        return
+                    execution_state["success"] = True
                 except Exception as exc:
                     execution_state["error"] = f"Trajectory execution failed: {exc}"
 
@@ -2696,7 +3195,17 @@ class GenieSimLocalFramework:
                             self.log(stall_message, "WARNING")
                             abort_event.set()
                             try:
-                                self._client.reset_environment()
+                                reset_result = self._client.reset_environment()
+                                if not reset_result.available:
+                                    self.log(
+                                        f"Reset unavailable after stall: {reset_result.error}",
+                                        "WARNING",
+                                    )
+                                elif not reset_result.success:
+                                    self.log(
+                                        reset_result.error or "Reset failed after stall.",
+                                        "WARNING",
+                                    )
                             except Exception as exc:
                                 self.log(f"Failed to reset after stall: {exc}", "WARNING")
                             if self.config.stall_backoff_s > 0:
@@ -2771,7 +3280,17 @@ class GenieSimLocalFramework:
                     self.log(message, "WARNING")
 
             # Stop recording
-            self._client.stop_recording()
+            stop_result = self._client.stop_recording()
+            if not stop_result.available:
+                self.log(
+                    f"Stop recording unavailable: {stop_result.error}",
+                    "WARNING",
+                )
+            elif not stop_result.success:
+                self.log(
+                    stop_result.error or "Stop recording failed.",
+                    "WARNING",
+                )
             recording_stopped = True
 
             # Calculate quality score
@@ -2817,12 +3336,32 @@ class GenieSimLocalFramework:
         except Exception as e:
             result["error"] = str(e)
             if recording_started and not recording_stopped:
-                self._client.stop_recording()
+                stop_result = self._client.stop_recording()
+                if not stop_result.available:
+                    self.log(
+                        f"Stop recording unavailable: {stop_result.error}",
+                        "WARNING",
+                    )
+                elif not stop_result.success:
+                    self.log(
+                        stop_result.error or "Stop recording failed.",
+                        "WARNING",
+                    )
                 recording_stopped = True
         finally:
             if recording_started and not recording_stopped:
                 try:
-                    self._client.stop_recording()
+                    stop_result = self._client.stop_recording()
+                    if not stop_result.available:
+                        self.log(
+                            f"Stop recording unavailable: {stop_result.error}",
+                            "WARNING",
+                        )
+                    elif not stop_result.success:
+                        self.log(
+                            stop_result.error or "Stop recording failed.",
+                            "WARNING",
+                        )
                 except Exception:
                     self.log("Failed to stop recording after episode error.", "WARNING")
 
@@ -3152,7 +3691,21 @@ class GenieSimLocalFramework:
         place_pos = task.get("place_position", [0.3, 0.2, 0.8])
 
         # Get initial joint positions
-        initial_joints = self._client.get_joint_position()
+        initial_joints_result = self._client.get_joint_position()
+        if not initial_joints_result.available:
+            self.log(
+                f"  ⚠️  Joint state unavailable: {initial_joints_result.error}; using default seed.",
+                "WARNING",
+            )
+            initial_joints = None
+        elif not initial_joints_result.success:
+            self.log(
+                "  ⚠️  Joint state request failed; using default seed.",
+                "WARNING",
+            )
+            initial_joints = None
+        else:
+            initial_joints = initial_joints_result.payload
         if initial_joints is None:
             initial_joints = [0.0] * 7  # Default for 7-DOF arm
 
@@ -3680,13 +4233,24 @@ class GenieSimLocalFramework:
             workspace_bounds=workspace_bounds,
         )
 
-        initial_joints = self._client.get_joint_position()
+        initial_joints_result = self._client.get_joint_position()
+        if not initial_joints_result.available:
+            self.log(
+                f"  ⚠️  Joint state unavailable: {initial_joints_result.error}; "
+                "using default joint seed.",
+                "WARNING",
+            )
+            initial_joints = None
+        elif not initial_joints_result.success:
+            self.log("  ⚠️  Missing joint state; using default joint seed.", "WARNING")
+            initial_joints = None
+        else:
+            initial_joints = initial_joints_result.payload
         if initial_joints is None:
             if robot_config is not None:
                 initial_joints = robot_config.default_joint_positions.tolist()
             else:
                 initial_joints = [0.0] * 7
-            self.log("  ⚠️  Missing joint state; using default joint seed.", "WARNING")
 
         initial_joints = np.array(initial_joints, dtype=float)
 
