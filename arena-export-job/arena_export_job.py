@@ -404,9 +404,10 @@ def run_arena_export(
     if SIM2REAL_VALIDATION_AVAILABLE:
         try:
             sim2real_validation_dir = output_dir / "arena" / "sim2real_validation"
-            sim2real_validation_manifests = create_default_sim2real_validation_exporter(
+            sim2real_validation_exporter = create_default_sim2real_validation_exporter(
                 scene_id=scene_id, robot_type=robot_type, output_dir=sim2real_validation_dir
             )
+            sim2real_validation_manifests = sim2real_validation_exporter.export_all_manifests()
             result["files_generated"].extend([str(p) for p in sim2real_validation_manifests.values()])
             print(f"[ARENA]   ✓ Sim2Real Validation: {len(sim2real_validation_manifests)} manifests")
             print("[ARENA]   ✓ Real-world validation trial tracking ($5k-$25k/study - NOW FREE)")
@@ -416,7 +417,10 @@ def run_arena_export(
     if AUDIO_NARRATION_AVAILABLE:
         try:
             audio_narration_dir = output_dir / "arena" / "audio_narration"
-            audio_narration_manifests = create_default_audio_narration_exporter(scene_id=scene_id, output_dir=audio_narration_dir)
+            audio_narration_exporter = create_default_audio_narration_exporter(
+                scene_id=scene_id, output_dir=audio_narration_dir
+            )
+            audio_narration_manifests = audio_narration_exporter.export_all_manifests()
             result["files_generated"].extend([str(p) for p in audio_narration_manifests.values()])
             print(f"[ARENA]   ✓ Audio Narration: {len(audio_narration_manifests)} manifests")
             print("[ARENA]   ✓ TTS narration for VLA training ($5k-$15k - NOW FREE)")

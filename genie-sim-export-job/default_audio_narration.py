@@ -498,7 +498,7 @@ def create_default_audio_narration_exporter(
     scene_id: str,
     output_dir: Path,
     config: Optional[DefaultAudioNarrationConfig] = None,
-) -> Dict[str, Path]:
+) -> DefaultAudioNarrationExporter:
     """
     Factory function to create and run DefaultAudioNarrationExporter.
 
@@ -508,14 +508,14 @@ def create_default_audio_narration_exporter(
         config: Optional configuration (defaults to all features enabled)
 
     Returns:
-        Dictionary mapping manifest type to output path
+        DefaultAudioNarrationExporter instance
     """
     exporter = DefaultAudioNarrationExporter(
         scene_id=scene_id,
         output_dir=output_dir,
         config=config,
     )
-    return exporter.export_all_manifests()
+    return exporter
 
 
 if __name__ == "__main__":
@@ -537,13 +537,15 @@ if __name__ == "__main__":
 
     config = DefaultAudioNarrationConfig(enabled=not args.disable)
 
-    manifests = create_default_audio_narration_exporter(
+    exporter = create_default_audio_narration_exporter(
         scene_id=args.scene_id,
         output_dir=args.output_dir,
         config=config,
     )
 
-    print("\n" + "="*60)
+    manifests = exporter.export_all_manifests()
+
+    print("\n" + "=" * 60)
     print("AUDIO NARRATION EXPORT COMPLETE")
     print("="*60)
     print(f"Scene: {args.scene_id}")
