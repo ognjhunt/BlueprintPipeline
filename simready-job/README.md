@@ -70,6 +70,15 @@ mass, density, friction, restitution, and collision shape remain within
 simulation-safe bounds. If the quality ratio is too low, the job fails to
 prompt richer metadata or tuned material priors.
 
+### Physics validation notes
+
+When simready validates physics properties, it now prefers USD-derived mass
+properties or mesh-based inertia calculations (via `trimesh`, when available).
+If mesh computation is unavailable or fails, the validator falls back to a box
+approximation and records the provenance in the validation output via
+`inertia_source` (`usd`, `mesh`, or `box_approx`) so operators can spot
+approximations in reports.
+
 ### Production modes (free vs. paid)
 
 **Free production (deterministic, no Gemini)**:
