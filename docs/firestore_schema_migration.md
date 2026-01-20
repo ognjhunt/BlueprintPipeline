@@ -12,69 +12,38 @@ This document tracks how to migrate Firestore documents between schema versions.
 | `usage_tracking` | 1 |
 | `assets` (asset catalog) | 1 |
 
-## Migration Process (Placeholder)
+## Migration Process
 
 1. **Identify target collections**: List collections that require updates.
 2. **Back up data**: Export the collections before applying changes.
-3. **Run migration script**: Apply version-specific transformations.
-4. **Verify**: Sample documents to confirm `schema_version` and new fields.
-5. **Deploy**: Roll out application changes that depend on the new schema.
+3. **Register migration transforms**: Add version-to-version transforms in
+   `tools/firestore/migrations.py`.
+4. **Run migration script**: Apply version-specific transformations with
+   `scripts/firestore_migrate.py`.
+5. **Verify**: Sample documents to confirm `schema_version` and new fields.
+6. **Deploy**: Roll out application changes that depend on the new schema.
 
-## Placeholder Script
+## Adding a New Migration Transform
+
+Edit `tools/firestore/migrations.py` and register a transform for a collection
+and version hop. The registry keys are `(from_version, to_version)` tuples.
 
 ```python
-"""Placeholder Firestore schema migration script.
-
-Fill in the transformation logic when a new schema version is introduced.
-"""
-
-from __future__ import annotations
-
-from typing import Iterable
-
-from google.cloud import firestore
+from tools.firestore.migrations import MIGRATIONS
 
 
-def migrate_collection(
-    client: firestore.Client,
-    collection_name: str,
-    from_version: int,
-    to_version: int,
-) -> None:
-    """Migrate documents in a collection from one schema version to another."""
-    collection = client.collection(collection_name)
-    batch = client.batch()
-    updated = 0
-
-    for doc in collection.stream():
-        data = doc.to_dict() or {}
-        if data.get("schema_version") != from_version:
-            continue
-
-        # TODO: apply transformation logic when bumping schema versions.
-        data["schema_version"] = to_version
-
-        batch.set(doc.reference, data, merge=True)
-        updated += 1
-
-        if updated % 400 == 0:
-            batch.commit()
-            batch = client.batch()
-
-    if updated % 400 != 0:
-        batch.commit()
+def migrate_scene_1_to_2(data: dict) -> dict:
+    data["new_field"] = data.pop("old_field", None)
+    return data
 
 
-def main(collections: Iterable[str], from_version: int, to_version: int) -> None:
-    client = firestore.Client()
-    for collection in collections:
-        migrate_collection(client, collection, from_version, to_version)
-
-
-if __name__ == "__main__":
-    main(
-        collections=["customers", "scenes", "feature_flags", "usage_tracking", "assets"],
-        from_version=1,
-        to_version=2,
-    )
+MIGRATIONS["scenes"][(1, 2)] = migrate_scene_1_to_2
 ```
+
+## Running a Migration
+
+```bash
+python scripts/firestore_migrate.py scenes 1 2
+```
+
+The script logs the registered steps and updates documents in batch commits.
