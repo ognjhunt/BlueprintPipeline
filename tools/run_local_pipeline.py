@@ -88,6 +88,7 @@ from tools.cost_tracking.estimate import (
 from tools.config.env import parse_bool_env, parse_int_env
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
+from tools.error_handling.errors import classify_exception
 from tools.error_handling.retry import (
     NonRetryableError,
     RetryConfig,
@@ -647,6 +648,42 @@ class LocalPipelineRunner:
         self.log(f"{context}: {self._summarize_exception(exc)}", "ERROR")
         if self.debug:
             self.log(traceback.format_exc(), "DEBUG")
+
+    def _handle_step_exception(
+        self,
+        step: PipelineStep,
+        exc: Exception,
+        context: str,
+        *,
+        duration_seconds: float = 0,
+    ) -> StepResult:
+        pipeline_error = classify_exception(exc)
+        self._log_exception_traceback(context, exc)
+        error_context = None
+        if getattr(pipeline_error, "context", None) is not None:
+            try:
+                error_context = pipeline_error.context.to_dict()
+            except Exception:
+                error_context = pipeline_error.context
+        detail = (
+            f"error_type={pipeline_error.__class__.__name__} "
+            f"retryable={pipeline_error.retryable}"
+        )
+        if error_context:
+            detail = f"{detail} context={error_context}"
+        self.log(f"{step.value} classified error: {detail}", "ERROR")
+        if pipeline_error.retryable:
+            raise RetryableError(pipeline_error.message) from exc
+        user_message = getattr(pipeline_error, "user_message", None) or pipeline_error.message
+        sanitized_message = self._sanitize_error_message(user_message)
+        summary_message = self._summarize_exception(pipeline_error)
+        message = sanitized_message or summary_message
+        return StepResult(
+            step=step,
+            success=False,
+            duration_seconds=duration_seconds,
+            message=f"Error: {message}",
+        )
 
     def _write_marker(self, marker_path: Path, status: str) -> None:
         """Write a simple JSON marker file."""
@@ -2633,12 +2670,10 @@ class LocalPipelineRunner:
                 message=f"Import error: {self._summarize_exception(e)}",
             )
         except Exception as e:
-            self._log_exception_traceback("Isaac Lab task generation failed", e)
-            return StepResult(
-                step=PipelineStep.ISAAC_LAB,
-                success=False,
-                duration_seconds=0,
-                message=f"Error: {self._summarize_exception(e)}",
+            return self._handle_step_exception(
+                PipelineStep.ISAAC_LAB,
+                e,
+                "Isaac Lab task generation failed",
             )
 
     def _run_geniesim_export(self) -> StepResult:
@@ -2699,11 +2734,11 @@ class LocalPipelineRunner:
                 message=str(exc),
             )
         except Exception as exc:
-            return StepResult(
-                step=PipelineStep.GENIESIM_EXPORT,
-                success=False,
+            return self._handle_step_exception(
+                PipelineStep.GENIESIM_EXPORT,
+                exc,
+                "Genie Sim export failed",
                 duration_seconds=time.time() - start_time,
-                message=f"Genie Sim export failed: {self._summarize_exception(exc)}",
             )
 
         return StepResult(
@@ -3646,11 +3681,11 @@ class LocalPipelineRunner:
                 message=str(exc),
             )
         except Exception as exc:
-            return StepResult(
-                step=PipelineStep.GENIESIM_IMPORT,
-                success=False,
+            return self._handle_step_exception(
+                PipelineStep.GENIESIM_IMPORT,
+                exc,
+                "Genie Sim import failed",
                 duration_seconds=time.time() - start_time,
-                message=f"Genie Sim import failed: {self._summarize_exception(exc)}",
             )
 
         marker_path = None
@@ -3752,12 +3787,10 @@ class LocalPipelineRunner:
                 message=f"Import error (DWM job not found): {self._summarize_exception(e)}",
             )
         except Exception as e:
-            self._log_exception_traceback("DWM preparation failed", e)
-            return StepResult(
-                step=PipelineStep.DWM,
-                success=False,
-                duration_seconds=0,
-                message=f"Error: {self._summarize_exception(e)}",
+            return self._handle_step_exception(
+                PipelineStep.DWM,
+                e,
+                "DWM preparation failed",
             )
 
     def _run_dwm_inference(self) -> StepResult:
@@ -3813,12 +3846,10 @@ class LocalPipelineRunner:
                 message=f"Import error (DWM inference job not found): {self._summarize_exception(e)}",
             )
         except Exception as e:
-            self._log_exception_traceback("DWM inference failed", e)
-            return StepResult(
-                step=PipelineStep.DWM_INFERENCE,
-                success=False,
-                duration_seconds=0,
-                message=f"Error: {self._summarize_exception(e)}",
+            return self._handle_step_exception(
+                PipelineStep.DWM_INFERENCE,
+                e,
+                "DWM inference failed",
             )
 
     def _run_dream2flow(self) -> StepResult:
@@ -3889,12 +3920,10 @@ class LocalPipelineRunner:
                 message=f"Import error (Dream2Flow job not found): {self._summarize_exception(e)}",
             )
         except Exception as e:
-            self._log_exception_traceback("Dream2Flow preparation failed", e)
-            return StepResult(
-                step=PipelineStep.DREAM2FLOW,
-                success=False,
-                duration_seconds=0,
-                message=f"Error: {self._summarize_exception(e)}",
+            return self._handle_step_exception(
+                PipelineStep.DREAM2FLOW,
+                e,
+                "Dream2Flow preparation failed",
             )
 
     def _run_dream2flow_inference(self) -> StepResult:
@@ -3950,12 +3979,10 @@ class LocalPipelineRunner:
                 message=f"Import error (Dream2Flow inference job not found): {self._summarize_exception(e)}",
             )
         except Exception as e:
-            self._log_exception_traceback("Dream2Flow inference failed", e)
-            return StepResult(
-                step=PipelineStep.DREAM2FLOW_INFERENCE,
-                success=False,
-                duration_seconds=0,
-                message=f"Error: {self._summarize_exception(e)}",
+            return self._handle_step_exception(
+                PipelineStep.DREAM2FLOW_INFERENCE,
+                e,
+                "Dream2Flow inference failed",
             )
 
     def _run_validation(self) -> StepResult:
