@@ -65,6 +65,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.config import load_pipeline_config
 from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
+
+try:
+    from tools.secrets import get_secret_or_env
+    HAVE_SECRET_MANAGER = True
+except ImportError:  # pragma: no cover
+    HAVE_SECRET_MANAGER = False
+    get_secret_or_env = None
 
 from monitoring.alerting import send_alert
 
@@ -127,12 +135,64 @@ PARTICULATE_INFER = PARTICULATE_ROOT / "infer.py"
 TMP_ROOT = Path("/tmp/particulate")
 
 ENVIRONMENT = os.environ.get("ENV", "").lower()
+PRODUCTION_MODE = resolve_production_mode()
 ENABLE_DEBUG_ENDPOINT = os.environ.get("ENABLE_DEBUG_ENDPOINT", "false").lower() in ("1", "true", "yes")
 DEBUG_MODE = os.environ.get("DEBUG_MODE", os.environ.get("PARTICULATE_DEBUG", "0")) == "1"
 DEBUG_ENDPOINT_ENABLED = ENABLE_DEBUG_ENDPOINT or DEBUG_MODE
-DEBUG_TOKEN = os.environ.get("DEBUG_TOKEN", os.environ.get("PARTICULATE_DEBUG_TOKEN", ""))
-if DEBUG_TOKEN is not None:
-    DEBUG_TOKEN = DEBUG_TOKEN.strip() or None
+
+
+def _is_production_env() -> bool:
+    return ENVIRONMENT == "production" or PRODUCTION_MODE
+
+
+def _load_debug_token() -> Optional[str]:
+    env_token = os.environ.get("DEBUG_TOKEN", os.environ.get("PARTICULATE_DEBUG_TOKEN", ""))
+    if env_token is not None:
+        env_token = env_token.strip() or None
+    production_mode = _is_production_env()
+
+    if HAVE_SECRET_MANAGER and get_secret_or_env is not None:
+        try:
+            token = get_secret_or_env(
+                "particulate-debug-token",
+                env_var="DEBUG_TOKEN",
+                fallback_to_env=not production_mode,
+            )
+        except Exception as exc:
+            if production_mode:
+                logger.error(
+                    "Debug token must be stored in Secret Manager in production; "
+                    "env var DEBUG_TOKEN is not allowed. (%s)",
+                    exc,
+                )
+                return None
+            logger.warning(
+                "Failed to fetch Secret Manager debug token; falling back to env vars: %s",
+                exc,
+            )
+            token = env_token
+        if token and not env_token:
+            logger.info("Using Secret Manager for debug token.")
+        if token is not None:
+            token = token.strip() or None
+        if token:
+            return token
+        if not production_mode:
+            return env_token
+        return None
+
+    if production_mode:
+        if env_token:
+            logger.error(
+                "Debug token must be stored in Secret Manager in production; "
+                "env var DEBUG_TOKEN is not allowed."
+            )
+        return None
+
+    return env_token
+
+
+DEBUG_TOKEN = _load_debug_token()
 PARTICULATE_MAX_GLB_BYTES = int(os.environ.get("PARTICULATE_MAX_GLB_BYTES", "52428800"))
 PARTICULATE_MAX_GLB_B64_CHARS = ((PARTICULATE_MAX_GLB_BYTES + 2) // 3) * 4
 
@@ -845,7 +905,7 @@ def readiness():
 
 
 def _debug_block_reason() -> Optional[str]:
-    if ENVIRONMENT == "production":
+    if _is_production_env():
         return "production_environment"
     if not DEBUG_ENDPOINT_ENABLED:
         return "debug_endpoint_disabled"
