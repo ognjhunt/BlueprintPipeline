@@ -5,7 +5,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 import pytest
 
 from tools.error_handling.retry import NonRetryableError
-from tools.run_local_pipeline import LocalPipelineRunner
+from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
 
 
 def test_geniesim_submit_requires_robot_types(tmp_path, monkeypatch):
@@ -26,3 +26,21 @@ def test_geniesim_submit_requires_robot_types(tmp_path, monkeypatch):
 
     with pytest.raises(NonRetryableError, match="No robot types configured"):
         runner._run_geniesim_submit()
+
+
+def test_geniesim_mock_mode_rejected_in_production(tmp_path, monkeypatch):
+    runner = LocalPipelineRunner(
+        scene_dir=tmp_path,
+        verbose=False,
+        skip_interactive=True,
+        environment_type="kitchen",
+    )
+
+    monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.setenv("GENIESIM_MOCK_MODE", "true")
+
+    with pytest.raises(
+        NonRetryableError,
+        match="Disable GENIESIM_MOCK_MODE in production",
+    ):
+        runner._geniesim_requires_server([PipelineStep.GENIESIM_SUBMIT])
