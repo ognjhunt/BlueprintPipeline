@@ -1831,4 +1831,41 @@ if __name__ == "__main__":
     metrics = get_metrics()
     scene_id = os.environ.get("SCENE_ID", "unknown")
     with metrics.track_job("genie-sim-submit-job", scene_id):
-        raise SystemExit(main())
+        try:
+            raise SystemExit(main())
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            geniesim_prefix = os.getenv("GENIESIM_PREFIX", f"scenes/{scene_id}/geniesim")
+            bucket = os.getenv("BUCKET")
+            error_context = {
+                "scene_id": scene_id,
+                "geniesim_prefix": geniesim_prefix,
+                "bucket": bucket,
+                "reason": reason,
+            }
+            logger.error(
+                "[GENIESIM-SUBMIT] Unhandled exception in __main__.",
+                extra={"context": error_context},
+            )
+            if bucket:
+                try:
+                    storage_client = storage.Client()
+                    _write_failure_marker(
+                        storage_client,
+                        bucket,
+                        geniesim_prefix,
+                        {
+                            "scene_id": scene_id,
+                            "status": "failed",
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                            "reason": reason,
+                            "context": error_context,
+                        },
+                    )
+                except Exception as marker_exc:
+                    marker_reason = f"{type(marker_exc).__name__}: {marker_exc}"
+                    logger.error(
+                        "[GENIESIM-SUBMIT] Failed to write failure marker: %s",
+                        marker_reason,
+                    )
+            raise SystemExit(1)
