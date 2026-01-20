@@ -21,7 +21,7 @@ Environment Variables:
     MIN_QUALITY_SCORE: Minimum quality score for import (default: from quality_config.json)
     ENABLE_VALIDATION: Enable quality validation (default: true)
     FILTER_LOW_QUALITY: Filter low-quality episodes during import (default: true)
-    REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: false)
+    REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: production/service mode)
     LEROBOT_SKIP_RATE_MAX: Max allowed LeRobot skip rate percentage (default: 0.0 in production)
     ENABLE_FIREBASE_UPLOAD: Enable Firebase Storage upload of local episodes (default: false)
     FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name for uploads
@@ -216,6 +216,37 @@ def _resolve_min_episodes_required(raw_value: Optional[str]) -> int:
     if min_episodes < 1:
         raise ValueError("MIN_EPISODES_REQUIRED must be >= 1")
     return min_episodes
+
+
+@dataclass(frozen=True)
+class RequireLerobotResolution:
+    value: bool
+    default: bool
+    source: str
+    raw_value: Optional[str]
+
+
+def _resolve_require_lerobot(
+    raw_value: Optional[str],
+    *,
+    production_mode: bool,
+    service_mode: bool,
+) -> RequireLerobotResolution:
+    default_value = production_mode or service_mode
+    if raw_value is None:
+        return RequireLerobotResolution(
+            value=default_value,
+            default=default_value,
+            source="default",
+            raw_value=None,
+        )
+    resolved = parse_bool_env(raw_value, default=default_value)
+    return RequireLerobotResolution(
+        value=resolved,
+        default=default_value,
+        source="env",
+        raw_value=raw_value,
+    )
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -1366,6 +1397,9 @@ class ImportConfig:
     enable_validation: bool = True
     filter_low_quality: bool = DEFAULT_FILTER_LOW_QUALITY
     require_lerobot: bool = False
+    require_lerobot_default: bool = False
+    require_lerobot_source: str = "default"
+    require_lerobot_raw_value: Optional[str] = None
     lerobot_skip_rate_max: float = 0.0
 
     # Polling (if waiting for completion)
@@ -2227,6 +2261,9 @@ def run_local_import_job(
             "enable_validation": config.enable_validation,
             "filter_low_quality": config.filter_low_quality,
             "require_lerobot": config.require_lerobot,
+            "require_lerobot_default": config.require_lerobot_default,
+            "require_lerobot_source": config.require_lerobot_source,
+            "require_lerobot_raw_value": config.require_lerobot_raw_value,
             "lerobot_skip_rate_max": config.lerobot_skip_rate_max,
             "min_episodes_required": config.min_episodes_required,
             "poll_interval": config.poll_interval,
@@ -2310,6 +2347,9 @@ def run_local_import_job(
             "output_dir": _relative_to_bundle(bundle_root, lerobot_dir),
             "error": lerobot_error,
             "required": config.require_lerobot,
+            "required_default": config.require_lerobot_default,
+            "required_source": config.require_lerobot_source,
+            "required_raw_value": config.require_lerobot_raw_value,
             "skip_rate_max": config.lerobot_skip_rate_max,
         },
         "validation": {
@@ -2633,10 +2673,15 @@ def main():
     min_quality_score = quality_settings.min_quality_score
     enable_validation = parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True)
     filter_low_quality = quality_settings.filter_low_quality
-    require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
-    disable_gcs_upload = parse_bool_env(os.getenv("DISABLE_GCS_UPLOAD"), default=False)
     production_mode = resolve_production_mode()
     service_mode = _is_service_mode()
+    require_lerobot_resolution = _resolve_require_lerobot(
+        os.getenv("REQUIRE_LEROBOT"),
+        production_mode=production_mode,
+        service_mode=service_mode,
+    )
+    require_lerobot = require_lerobot_resolution.value
+    disable_gcs_upload = parse_bool_env(os.getenv("DISABLE_GCS_UPLOAD"), default=False)
     _guard_quality_thresholds(job_metadata, quality_settings, production_mode)
     enable_firebase_upload = parse_bool_env(
         os.getenv("ENABLE_FIREBASE_UPLOAD"),
@@ -2693,7 +2738,11 @@ def main():
     )
     print(f"[GENIE-SIM-IMPORT]   Min Episodes Required: {min_episodes_required}")
     print(f"[GENIE-SIM-IMPORT]   Enable Validation: {enable_validation}")
-    print(f"[GENIE-SIM-IMPORT]   Require LeRobot: {require_lerobot}")
+    print(
+        "[GENIE-SIM-IMPORT]   Require LeRobot: "
+        f"{require_lerobot} (default={require_lerobot_resolution.default}, "
+        f"source={require_lerobot_resolution.source})"
+    )
     print(f"[GENIE-SIM-IMPORT]   LeRobot Skip Rate Max: {lerobot_skip_rate_max:.2f}%")
     print(f"[GENIE-SIM-IMPORT]   GCS Uploads Enabled: {not disable_gcs_upload}")
     print(f"[GENIE-SIM-IMPORT]   Firebase Uploads Enabled: {enable_firebase_upload}")
@@ -2726,6 +2775,9 @@ def main():
         enable_validation=enable_validation,
         filter_low_quality=filter_low_quality,
         require_lerobot=require_lerobot,
+        require_lerobot_default=require_lerobot_resolution.default,
+        require_lerobot_source=require_lerobot_resolution.source,
+        require_lerobot_raw_value=require_lerobot_resolution.raw_value,
         lerobot_skip_rate_max=lerobot_skip_rate_max,
         min_episodes_required=min_episodes_required,
         poll_interval=poll_interval,
@@ -2801,6 +2853,9 @@ def main():
                     enable_validation=enable_validation,
                     filter_low_quality=filter_low_quality,
                     require_lerobot=require_lerobot,
+                    require_lerobot_default=require_lerobot_resolution.default,
+                    require_lerobot_source=require_lerobot_resolution.source,
+                    require_lerobot_raw_value=require_lerobot_resolution.raw_value,
                     lerobot_skip_rate_max=lerobot_skip_rate_max,
                     min_episodes_required=min_episodes_required,
                     poll_interval=poll_interval,
