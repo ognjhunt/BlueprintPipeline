@@ -95,6 +95,7 @@ from tools.firebase_upload.firebase_upload_orchestrator import resolve_firebase_
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.lerobot_validation import validate_lerobot_dataset
+from tools.quality.quality_config import resolve_quality_settings
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
 
 # Add repository root to path
@@ -2738,7 +2739,8 @@ class LocalPipelineRunner:
             min_value=1,
             name="NUM_VARIATIONS",
         )
-        min_quality_score = float(os.getenv("MIN_QUALITY_SCORE", "0.85"))
+        quality_settings = resolve_quality_settings()
+        min_quality_score = quality_settings.min_quality_score
         collection_timeout_env = os.getenv("GENIESIM_COLLECTION_TIMEOUT_S")
         max_duration_seconds = None
         if collection_timeout_env not in (None, ""):
@@ -2757,6 +2759,7 @@ class LocalPipelineRunner:
             "episodes_per_task": episodes_per_task,
             "num_variations": num_variations,
             "min_quality_score": min_quality_score,
+            "filter_low_quality": quality_settings.filter_low_quality,
         }
         idempotency_key = hashlib.sha256(
             json.dumps(idempotency_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -2956,6 +2959,19 @@ class LocalPipelineRunner:
                 "episodes_per_task": episodes_per_task,
                 "num_variations": num_variations,
                 "min_quality_score": min_quality_score,
+            },
+            "quality_config": {
+                "min_quality_score": min_quality_score,
+                "filter_low_quality": quality_settings.filter_low_quality,
+                "range": {
+                    "min_allowed": quality_settings.config.min_allowed,
+                    "max_allowed": quality_settings.config.max_allowed,
+                },
+                "defaults": {
+                    "min_quality_score": quality_settings.config.default_min_quality_score,
+                    "filter_low_quality": quality_settings.config.default_filter_low_quality,
+                },
+                "source_path": quality_settings.config.source_path,
             },
         }
         task_count = len(task_config.get("tasks", [])) or 1
@@ -3582,12 +3598,13 @@ class LocalPipelineRunner:
                     "lerobot_validation_errors": lerobot_validation_errors,
                 },
             )
+        quality_settings = resolve_quality_settings()
         config = ImportConfig(
             job_id=job_id,
             output_dir=output_dir,
-            min_quality_score=float(os.getenv("MIN_QUALITY_SCORE", "0.85")),
+            min_quality_score=quality_settings.min_quality_score,
             enable_validation=parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True),
-            filter_low_quality=parse_bool_env(os.getenv("FILTER_LOW_QUALITY"), default=True),
+            filter_low_quality=quality_settings.filter_low_quality,
             require_lerobot=require_lerobot,
             wait_for_completion=True,
             poll_interval=0,
