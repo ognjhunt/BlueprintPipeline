@@ -17,7 +17,7 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
   - `GENIESIM_LOG_DIR` for server logs.
   - Avoid `/tmp` or `/var/tmp` in production to prevent data loss.
 - [ ] **gRPC Python dependency** (`grpcio`) installed in the Python environment used by the adapter.
-- [ ] **Production deployments** explicitly set `GENIESIM_ENV=production` and enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks.
+- [ ] **Production deployments** set `PIPELINE_ENV=production` (and `GENIESIM_ENV=production` for GenieSim-only services) plus enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks. Legacy production flags are deprecated and should be removed before **2025-12-31**.
 - [ ] **Optional runtime cap** configured via `GENIESIM_COLLECTION_TIMEOUT_S` to bound local data collection duration.
 - [ ] **Firebase uploads (submit/import)** have credentials available in production or service mode:
   - `FIREBASE_STORAGE_BUCKET`
@@ -112,11 +112,13 @@ When using the lightweight local mock server (`tools/geniesim_adapter/geniesim_s
 
 ## Production toggle
 
-Use `GENIESIM_ENV=production` as the canonical production toggle for Genie Sim integrations, along with required runtime flags:
+Use `PIPELINE_ENV=production` as the canonical production toggle. Genie Sim-specific services may additionally set
+`GENIESIM_ENV=production`. Legacy toggles (`BP_ENV`, `PRODUCTION_MODE`, etc.) are deprecated and scheduled for removal
+after **2025-12-31**.
 
 ```bash
-export GENIESIM_ENV=production
 export PIPELINE_ENV=production
+export GENIESIM_ENV=production
 export ISAACSIM_REQUIRED=true
 export CUROBO_REQUIRED=true
 ```

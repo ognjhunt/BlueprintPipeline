@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
 try:
     from PIL import Image
 except ImportError:
@@ -105,7 +106,7 @@ def _has_secret_or_env(secret_id: str, env_var: str) -> bool:
 
 def _is_production_env() -> bool:
     return (
-        parse_bool_env(os.getenv("PRODUCTION"), default=False)
+        resolve_production_mode()
         or os.getenv("K_SERVICE") is not None
         or os.getenv("KUBERNETES_SERVICE_HOST") is not None
     )

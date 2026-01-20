@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 import requests
 import jsonschema
 
+from tools.config.production_mode import resolve_production_mode
 from tools.error_handling.retry import NonRetryableError, RetryableError, retry_with_backoff
 from tools.secrets import get_secret_or_env, SecretIds
 
@@ -199,9 +200,7 @@ def _resolve_config(mode: Optional[str] = None) -> InventoryEnrichmentConfig:
 
 
 def _is_production_env() -> bool:
-    return (os.getenv("BP_ENV", "") or "").strip().lower() in {"production", "prod"} or (
-        os.getenv("GENIESIM_ENV", "") or ""
-    ).strip().lower() in {"production", "prod"}
+    return resolve_production_mode()
 
 
 def get_inventory_enricher(mode: Optional[str] = None) -> InventoryEnricher:

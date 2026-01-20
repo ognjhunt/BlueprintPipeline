@@ -188,17 +188,24 @@ Production mode is resolved through a shared helper (`tools/config/production_mo
 environment variables as production indicators, in the order below. The first match that evaluates to production
 enables production mode; there is no explicit "false override" once any flag is set to a production value.
 
-**Canonical flags (preferred)**:
+**Canonical flag (preferred)**:
 1. `PIPELINE_ENV=production` or `PIPELINE_ENV=prod`
-2. `PRODUCTION_MODE=1|true|yes`
-3. `SIMREADY_PRODUCTION_MODE=1|true|yes`
+2. (GenieSim integrations) `GENIESIM_ENV=production` or `GENIESIM_ENV=prod`
 
-**Legacy compatibility flags (still honored)**:
+**Legacy compatibility flags (deprecated; removal after 2025-12-31)**:
+- `BP_ENV=production|prod`
+- `PRODUCTION_MODE=1|true|yes`
+- `SIMREADY_PRODUCTION_MODE=1|true|yes`
 - `DATA_QUALITY_LEVEL=production`
 - `ISAAC_SIM_REQUIRED=1|true|yes`
 - `REQUIRE_REAL_PHYSICS=1|true|yes`
 - `PRODUCTION=1|true|yes`
 - `LABS_STAGING=1|true|yes`
+
+**Migration guidance**:
+- Replace any legacy production toggles with `PIPELINE_ENV=production`.
+- GenieSim-only services may use `GENIESIM_ENV=production` alongside `PIPELINE_ENV`.
+- Plan to remove legacy flags from job manifests and scripts before **2025-12-31**.
 
 **Example**:
 ```bash

@@ -14,6 +14,7 @@ if str(SIMREADY_DIR) not in sys.path:
 
 from prepare_simready_assets import prepare_simready_assets_job  # noqa: E402
 from tools.validation.entrypoint_checks import validate_required_env_vars  # noqa: E402
+from tools.config.production_mode import resolve_production_mode  # noqa: E402
 
 
 def run_from_env(root: Path = DEFAULT_ROOT) -> int:
@@ -30,14 +31,14 @@ def run_from_env(root: Path = DEFAULT_ROOT) -> int:
     scene_id = os.environ["SCENE_ID"]
     assets_prefix = os.environ["ASSETS_PREFIX"]
     allow_heuristic_fallback = os.getenv("SIMREADY_ALLOW_HEURISTIC_FALLBACK")
-    production_mode = os.getenv("SIMREADY_PRODUCTION_MODE")
+    production_mode = resolve_production_mode()
     return prepare_simready_assets_job(
         bucket,
         scene_id,
         assets_prefix,
         root=root,
         allow_heuristic_fallback=None if allow_heuristic_fallback is None else allow_heuristic_fallback.lower() in {"1", "true", "yes"},
-        production_mode=None if production_mode is None else production_mode.lower() in {"1", "true", "yes"},
+        production_mode=production_mode,
     )
 
 

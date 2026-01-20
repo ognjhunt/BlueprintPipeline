@@ -46,6 +46,7 @@ from monitoring.alerting import send_alert
 from prepare_dwm_bundle import DWMJobConfig, DWMPreparationJob
 from models import TrajectoryType, HandActionType
 from tools.gcs_upload import upload_blob_from_filename
+from tools.config.production_mode import resolve_production_mode
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
@@ -181,6 +182,8 @@ def _parse_optional_bool(value: str | None) -> Optional[bool]:
 
 
 def _is_production_level(level: str | None) -> bool:
+    if resolve_production_mode():
+        return True
     if level is None:
         return False
     normalized = level.strip().lower()

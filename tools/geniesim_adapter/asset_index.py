@@ -325,7 +325,12 @@ class AssetIndexBuilder:
         self.embedding_model = embedding_model
         self.embedding_provider = embedding_provider
         self.description_generator = SemanticDescriptionGenerator()
-        self.environment = os.getenv("GENIESIM_ENV", os.getenv("BP_ENV", "development")).lower()
+        self.environment = (
+            os.getenv("GENIESIM_ENV")
+            or os.getenv("PIPELINE_ENV")
+            or os.getenv("BP_ENV")
+            or "development"
+        ).lower()
         if strict_category_validation is None:
             strict_env = os.getenv("GENIESIM_STRICT_CATEGORY", "")
             self.strict_category_validation = strict_env.lower() in {"1", "true", "yes", "on"}
