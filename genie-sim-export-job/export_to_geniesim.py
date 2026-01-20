@@ -1264,11 +1264,12 @@ def run_geniesim_export_job(
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Sim2Real Validation Service ($5k-$25k/study - NOW FREE)")
                 sim2real_validation_dir = temp_dir / "sim2real_validation"
                 try:
-                    sim2real_validation_manifests = create_default_sim2real_validation_exporter(
+                    sim2real_validation_exporter = create_default_sim2real_validation_exporter(
                         scene_id=scene_id,
                         robot_type=robot_type,
                         output_dir=sim2real_validation_dir,
                     )
+                    sim2real_validation_manifests = sim2real_validation_exporter.export_all_manifests()
                     all_premium_features_manifests.update({"sim2real_validation": sim2real_validation_manifests})
                     premium_feature_staged_counts["sim2real_validation"] = len(sim2real_validation_manifests)
                     premium_feature_staged_dirs["sim2real_validation"] = sim2real_validation_dir
@@ -1288,10 +1289,11 @@ def run_geniesim_export_job(
                 print("\n[GENIESIM-EXPORT-JOB] Exporting Audio Narration ($5k-$15k value - NOW FREE)")
                 audio_narration_dir = temp_dir / "audio_narration"
                 try:
-                    audio_narration_manifests = create_default_audio_narration_exporter(
+                    audio_narration_exporter = create_default_audio_narration_exporter(
                         scene_id=scene_id,
                         output_dir=audio_narration_dir,
                     )
+                    audio_narration_manifests = audio_narration_exporter.export_all_manifests()
                     all_premium_features_manifests.update({"audio_narration": audio_narration_manifests})
                     premium_feature_staged_counts["audio_narration"] = len(audio_narration_manifests)
                     premium_feature_staged_dirs["audio_narration"] = audio_narration_dir
