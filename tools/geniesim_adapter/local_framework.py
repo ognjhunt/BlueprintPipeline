@@ -104,8 +104,6 @@ from tools.geniesim_adapter.config import (
 )
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 
-# Configure logging
-init_logging()
 logger = logging.getLogger(__name__)
 
 # Import gRPC protobuf stubs
@@ -1727,10 +1725,17 @@ class GenieSimLocalFramework:
             require_server=False,
         )
 
-    def log(self, msg: str, level: str = "INFO") -> None:
+    def log(self, msg: str, level: str = "INFO", extra: Optional[Dict[str, Any]] = None) -> None:
         """Log a message."""
-        if self.verbose:
-            print(f"[GENIESIM-LOCAL] [{level}] {msg}")
+        if not self.verbose:
+            return
+        level_name = level.upper()
+        if level_name in {"WARN", "WARNING"}:
+            logger.warning("[GENIESIM-LOCAL] %s", msg, extra=extra)
+        elif level_name == "ERROR":
+            logger.error("[GENIESIM-LOCAL] %s", msg, extra=extra)
+        else:
+            logger.info("[GENIESIM-LOCAL] %s", msg, extra=extra)
 
     # =========================================================================
     # Server Management
@@ -4242,16 +4247,24 @@ def run_geniesim_preflight_or_exit(
         ping_timeout=ping_timeout,
     )
     if not report["ok"]:
-        print(f"[GENIESIM-PREFLIGHT] {stage} preflight failed.", file=sys.stderr)
+        logger.error("[GENIESIM-PREFLIGHT] %s preflight failed.", stage, extra={"stage": stage})
         if report["missing"]:
-            print("Missing requirements:", file=sys.stderr)
-            for item in report["missing"]:
-                print(f"  - {item}", file=sys.stderr)
+            logger.error(
+                "Missing requirements: %s",
+                ", ".join(report["missing"]),
+                extra={"stage": stage},
+            )
         if report["remediation"]:
-            print("Remediation steps:", file=sys.stderr)
-            for step in report["remediation"]:
-                print(f"  - {step}", file=sys.stderr)
-        print(f"Details: {json.dumps(report['status'], indent=2)}", file=sys.stderr)
+            logger.error(
+                "Remediation steps: %s",
+                " ".join(report["remediation"]),
+                extra={"stage": stage},
+            )
+        logger.error(
+            "Details: %s",
+            json.dumps(report["status"], indent=2),
+            extra={"stage": stage},
+        )
         raise SystemExit(1)
     return report
 
@@ -4265,6 +4278,8 @@ def main():
     """CLI for Genie Sim local framework."""
     import argparse
 
+    init_logging()
+
     parser = argparse.ArgumentParser(description="Genie Sim 3.0 Local Framework")
     parser.add_argument("command", choices=["check", "start", "stop", "run", "export"])
     parser.add_argument("--scene", help="Path to scene manifest or USD")
@@ -4277,7 +4292,7 @@ def main():
 
     if args.command == "check":
         status = check_geniesim_availability()
-        print(json.dumps(status, indent=2))
+        logger.info("%s", json.dumps(status, indent=2))
         sys.exit(0 if status["available"] else 1)
 
     config = GenieSimConfig(robot_type=args.robot)
@@ -4286,18 +4301,18 @@ def main():
     if args.command == "start":
         scene_path = Path(args.scene) if args.scene else None
         if framework.start_server(scene_path):
-            print("Server started successfully")
+            logger.info("Server started successfully")
         else:
-            print("Failed to start server")
+            logger.error("Failed to start server")
             sys.exit(1)
 
     elif args.command == "stop":
         framework.stop_server()
-        print("Server stopped")
+        logger.info("Server stopped")
 
     elif args.command == "run":
         if not args.task_config:
-            print("--task-config is required for run command")
+            logger.error("--task-config is required for run command")
             sys.exit(1)
 
         result = run_local_data_collection(
@@ -4309,9 +4324,13 @@ def main():
         )
 
         if result.success:
-            print(f"Data collection completed: {result.episodes_passed}/{result.episodes_collected} episodes")
+            logger.info(
+                "Data collection completed: %s/%s episodes",
+                result.episodes_passed,
+                result.episodes_collected,
+            )
         else:
-            print(f"Data collection failed: {result.errors}")
+            logger.error("Data collection failed: %s", result.errors)
             sys.exit(1)
 
     elif args.command == "export":
@@ -4319,7 +4338,11 @@ def main():
         lerobot_dir = Path(args.output) / "lerobot"
 
         result = framework.export_to_lerobot(recording_dir, lerobot_dir)
-        print(f"Exported {result['exported']} episodes to {lerobot_dir}")
+        logger.info(
+            "Exported %s episodes to %s",
+            result["exported"],
+            lerobot_dir,
+        )
 
 
 if __name__ == "__main__":

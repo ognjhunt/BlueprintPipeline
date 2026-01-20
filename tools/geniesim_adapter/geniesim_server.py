@@ -51,6 +51,7 @@ from geniesim_grpc_pb2_grpc import (
     GenieSimServiceServicer,
     add_GenieSimServiceServicer_to_server,
 )
+from tools.logging_config import init_logging
 from tools.geniesim_adapter.config import DEFAULT_GENIESIM_PORT, GENIESIM_PORT_ENV
 from tools.config.env import parse_int_env
 
@@ -324,10 +325,8 @@ class GenieSimLocalServicer(GenieSimServiceServicer):
 
 
 def _configure_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
-    )
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    init_logging(level=log_level)
 
 
 def _health_service_available() -> bool:
