@@ -49,6 +49,7 @@ Environment Variables:
     ASSETS_PREFIX: Path to scene assets (scene_manifest.json)
     EPISODES_PREFIX: Output path for episodes
     ENABLE_FIREBASE_UPLOAD: Enable Firebase Storage upload of generated episodes
+        (defaults to enabled for production runs)
     FIREBASE_STORAGE_BUCKET: Firebase Storage bucket name for uploads
     FIREBASE_SERVICE_ACCOUNT_JSON: Service account JSON payload for Firebase
     FIREBASE_SERVICE_ACCOUNT_PATH: Path to service account JSON for Firebase
@@ -3453,7 +3454,7 @@ def _run_main():
     episodes_prefix = os.getenv("EPISODES_PREFIX", f"scenes/{scene_id}/episodes")
     enable_firebase_upload = parse_bool_env(
         os.getenv("ENABLE_FIREBASE_UPLOAD"),
-        default=False,
+        default=_is_production_run(),
     )
     firebase_upload_prefix = os.getenv("FIREBASE_UPLOAD_PREFIX", "datasets")
 
