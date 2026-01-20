@@ -63,3 +63,15 @@ The manifest file can be either:
 2. If using `FIREBASE_SERVICE_ACCOUNT_PATH`, mount the credentials via a Secret and set
    the env var in `firebase-cleanup-overrides`.
 3. Review logs for the JSON summary containing `requested`, `deleted`, and `failed`.
+
+## Genie Sim import Firebase credentials
+The Genie Sim import job expects the Firebase service account JSON mounted at
+`/secrets/firebase/service-account.json` and uses `FIREBASE_STORAGE_BUCKET` from its
+ConfigMap.
+
+### Apply the secret
+1. Populate the service account secret:
+   - `FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}' envsubst < k8s/firebase-service-account-secret.yaml | kubectl apply -f -`
+2. Confirm the import job ConfigMap points at the target bucket (for example,
+   `blueprint-8c1ca.appspot.com`, which corresponds to `gs://blueprint-8c1ca.appspot.com`)
+   before applying the job manifest.
