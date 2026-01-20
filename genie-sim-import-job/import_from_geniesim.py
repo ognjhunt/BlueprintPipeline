@@ -20,6 +20,7 @@ Environment Variables:
     MIN_EPISODES_REQUIRED: Minimum number of episodes required for import (default: 1)
     MIN_QUALITY_SCORE: Minimum quality score for import (default: from quality_config.json)
     ENABLE_VALIDATION: Enable quality validation (default: true)
+    FILTER_LOW_QUALITY: Filter low-quality episodes during import (default: true)
     REQUIRE_LEROBOT: Treat LeRobot conversion failure as job failure (default: false)
     LEROBOT_SKIP_RATE_MAX: Max allowed LeRobot skip rate percentage (default: 0.0 in production)
     ENABLE_FIREBASE_UPLOAD: Enable Firebase Storage upload of local episodes (default: false)
@@ -98,10 +99,12 @@ from tools.gcs_upload import (
 )
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.utils.atomic_write import write_json_atomic, write_text_atomic
-from quality_config import (
+from tools.quality.quality_config import (
+    DEFAULT_FILTER_LOW_QUALITY,
     DEFAULT_MIN_QUALITY_SCORE,
     QUALITY_CONFIG,
-    resolve_min_quality_score,
+    ResolvedQualitySettings,
+    resolve_quality_settings,
 )
 
 # Import quality validation
@@ -213,6 +216,73 @@ def _resolve_min_episodes_required(raw_value: Optional[str]) -> int:
     if min_episodes < 1:
         raise ValueError("MIN_EPISODES_REQUIRED must be >= 1")
     return min_episodes
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        return parse_bool_env(value, default=None)
+    return None
+
+
+def _guard_quality_thresholds(
+    job_metadata: Optional[Dict[str, Any]],
+    quality_settings: ResolvedQualitySettings,
+    production_mode: bool,
+) -> None:
+    if not job_metadata:
+        return
+    quality_metadata = job_metadata.get("quality_config", {})
+    generation_params = job_metadata.get("generation_params", {})
+    submitted_min_quality = _coerce_float(
+        quality_metadata.get("min_quality_score")
+    ) or _coerce_float(generation_params.get("min_quality_score"))
+    submitted_filter_low_quality = _coerce_bool(
+        quality_metadata.get("filter_low_quality")
+    )
+
+    mismatches = []
+    if submitted_min_quality is not None and abs(
+        submitted_min_quality - quality_settings.min_quality_score
+    ) > 1e-6:
+        mismatches.append(
+            "min_quality_score "
+            f"(submit={submitted_min_quality}, import={quality_settings.min_quality_score})"
+        )
+    if (
+        submitted_filter_low_quality is not None
+        and submitted_filter_low_quality != quality_settings.filter_low_quality
+    ):
+        mismatches.append(
+            "filter_low_quality "
+            f"(submit={submitted_filter_low_quality}, import={quality_settings.filter_low_quality})"
+        )
+
+    if not mismatches:
+        return
+
+    message = (
+        "[GENIE-SIM-IMPORT] Quality config mismatch detected: "
+        + "; ".join(mismatches)
+    )
+    if production_mode:
+        print(f"[GENIE-SIM-IMPORT] ERROR: {message}")
+        sys.exit(1)
+    print(f"[GENIE-SIM-IMPORT] WARNING: {message}")
 
 
 def _preflight_firebase_upload() -> bool:
@@ -896,6 +966,7 @@ def _write_combined_import_manifest(
     gcs_output_path: Optional[str],
     job_metadata: Optional[Dict[str, Any]],
     robot_entries: List[Dict[str, Any]],
+    quality_settings: ResolvedQualitySettings,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     normalized_gcs_output_path = _normalize_gcs_output_path(gcs_output_path)
@@ -1056,6 +1127,19 @@ def _write_combined_import_manifest(
             "validation_enabled": any(
                 entry["quality"]["validation_enabled"] for entry in normalized_robot_entries
             ),
+        },
+        "quality_config": {
+            "min_quality_score": quality_settings.min_quality_score,
+            "filter_low_quality": quality_settings.filter_low_quality,
+            "range": {
+                "min_allowed": quality_settings.config.min_allowed,
+                "max_allowed": quality_settings.config.max_allowed,
+            },
+            "defaults": {
+                "min_quality_score": quality_settings.config.default_min_quality_score,
+                "filter_low_quality": quality_settings.config.default_filter_low_quality,
+            },
+            "source_path": quality_settings.config.source_path,
         },
         "robots": normalized_robot_entries,
         "job_metadata": job_metadata or {},
@@ -1280,7 +1364,7 @@ class ImportConfig:
     min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE
     min_episodes_required: int = MIN_EPISODES_REQUIRED
     enable_validation: bool = True
-    filter_low_quality: bool = True
+    filter_low_quality: bool = DEFAULT_FILTER_LOW_QUALITY
     require_lerobot: bool = False
     lerobot_skip_rate_max: float = 0.0
 
@@ -2204,6 +2288,19 @@ def run_local_import_job(
             "threshold": config.min_quality_score,
             "validation_enabled": config.enable_validation,
         },
+        "quality_config": {
+            "min_quality_score": config.min_quality_score,
+            "filter_low_quality": config.filter_low_quality,
+            "range": {
+                "min_allowed": QUALITY_CONFIG.min_allowed,
+                "max_allowed": QUALITY_CONFIG.max_allowed,
+            },
+            "defaults": {
+                "min_quality_score": QUALITY_CONFIG.default_min_quality_score,
+                "filter_low_quality": QUALITY_CONFIG.default_filter_low_quality,
+            },
+            "source_path": QUALITY_CONFIG.source_path,
+        },
         "lerobot": {
             "conversion_success": result.lerobot_conversion_success,
             "converted_count": len(lerobot_episode_files),
@@ -2529,19 +2626,18 @@ def main():
 
     # Quality configuration
     try:
-        min_quality_score = resolve_min_quality_score(
-            os.getenv("MIN_QUALITY_SCORE"),
-            QUALITY_CONFIG,
-        )
+        quality_settings = resolve_quality_settings()
     except ValueError as exc:
         print(f"[GENIE-SIM-IMPORT] ERROR: {exc}")
         sys.exit(1)
+    min_quality_score = quality_settings.min_quality_score
     enable_validation = parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True)
-    filter_low_quality = parse_bool_env(os.getenv("FILTER_LOW_QUALITY"), default=True)
+    filter_low_quality = quality_settings.filter_low_quality
     require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
     disable_gcs_upload = parse_bool_env(os.getenv("DISABLE_GCS_UPLOAD"), default=False)
     production_mode = resolve_production_mode()
     service_mode = _is_service_mode()
+    _guard_quality_thresholds(job_metadata, quality_settings, production_mode)
     enable_firebase_upload = parse_bool_env(
         os.getenv("ENABLE_FIREBASE_UPLOAD"),
         default=production_mode or service_mode,
@@ -2823,6 +2919,7 @@ def main():
                 combined_gcs_output_path,
                 job_metadata,
                 robot_entries,
+                quality_settings,
             )
             print(
                 "[GENIE-SIM-IMPORT] Combined import manifest: "

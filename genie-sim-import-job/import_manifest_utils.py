@@ -25,6 +25,7 @@ MANIFEST_SCHEMA_DEFINITION = {
         "package": "Packaged bundle archive details (path, checksum, size, format).",
         "episodes": "Episode download summary metrics.",
         "quality": "Quality scoring summary and thresholds.",
+        "quality_config": "Resolved quality thresholds/filters applied during import.",
         "lerobot": "LeRobot conversion status and outputs.",
         "metrics_summary": "Pipeline metrics snapshot.",
         "file_inventory": "List of all output files (path + size).",
