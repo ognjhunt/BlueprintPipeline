@@ -322,6 +322,10 @@ class GenieSimConfig:
                 logger.warning(
                     "GENIESIM_COLLECTION_TIMEOUT_S must be a number of seconds; ignoring invalid value."
                 )
+
+        recording_dir = os.getenv("GENIESIM_RECORDING_DIR")
+        log_dir = os.getenv("GENIESIM_LOG_DIR")
+
         if environment == "production":
             if allow_linear_fallback_in_production:
                 raise RuntimeError(
@@ -333,6 +337,12 @@ class GenieSimConfig:
                     "Refusing to enable linear fallback in production. "
                     "Unset GENIESIM_ALLOW_LINEAR_FALLBACK and GENIESIM_ALLOW_IK_FAILURE_FALLBACK."
                 )
+            if not recording_dir or not log_dir:
+                logger.warning(
+                    "Production environment detected but GENIESIM_RECORDING_DIR or "
+                    "GENIESIM_LOG_DIR are unset. Defaulting to /tmp which may not persist."
+                )
+
         return cls(
             host=get_geniesim_host(),
             port=get_geniesim_port(),
@@ -351,6 +361,8 @@ class GenieSimConfig:
             max_stalls=int(os.getenv("GENIESIM_MAX_STALLS", "2")),
             stall_backoff_s=float(os.getenv("GENIESIM_STALL_BACKOFF_S", "5")),
             max_duration_seconds=max_duration_seconds,
+            recording_dir=Path(recording_dir) if recording_dir else Path("/tmp/geniesim_recordings"),
+            log_dir=Path(log_dir) if log_dir else Path("/tmp/geniesim_logs"),
             lerobot_export_format=parse_lerobot_export_format(
                 os.getenv("LEROBOT_EXPORT_FORMAT"),
                 default=LeRobotExportFormat.LEROBOT_V2,
@@ -3087,6 +3099,14 @@ class GenieSimLocalFramework:
             except Exception as exc:
                 self.log(f"  ⚠️  Collision-aware planner failed: {exc}", "WARNING")
                 planner = None
+
+        if production_mode and planner is None:
+            self.log(
+                "  ❌ Collision-aware planner unavailable for IK fallback in production. "
+                "Failing to prevent non-collision-aware trajectories.",
+                "ERROR",
+            )
+            return None
 
         ik_solver = IKSolver(robot_config, verbose=False)
         seed_joints = initial_joints.copy()
