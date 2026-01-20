@@ -30,8 +30,14 @@ connection details:
 - `GENIESIM_ROOT` (default `/opt/geniesim`)
 - `GENIESIM_HOST` (default `localhost`)
 - `GENIESIM_PORT` (default `50051`)
+- `GENIESIM_GPU_PREALLOCATE_MB` (optional, integer MB). When set to a value > 0, the
+  entrypoint runs a GPU warmup step to preallocate the requested memory.
+- `GENIESIM_GPU_WARMUP_STRICT` (optional, `1`/`true`). When enabled, the warmup step
+  exits non-zero on failure; otherwise failures are logged and ignored.
 
 ## Notes
 
 - GPU runtime and NVIDIA container toolkit are required.
 - The container runs `submit_to_geniesim.py` via `python.sh` from Isaac Sim.
+- The warmup step uses `torch` if available; if not present or CUDA is unavailable, it
+  logs a warning and continues.
