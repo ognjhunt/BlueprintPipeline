@@ -1507,7 +1507,7 @@ class QualityGateRegistry:
                 )
                 min_reachability_rate = parse_float_env(
                     os.getenv("BP_QUALITY_GENIESIM_IK_MIN_RATE"),
-                    default=0.95,
+                    default=1.0,
                     min_value=0.0,
                     max_value=1.0,
                     name="BP_QUALITY_GENIESIM_IK_MIN_RATE",

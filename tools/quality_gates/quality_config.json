@@ -126,10 +126,10 @@
     },
     "geniesim_kinematic_reachability": {
       "enabled": true,
-      "min_reachability_rate": 0.95,
+      "min_reachability_rate": 1.0,
       "max_unreachable_targets": 0,
       "check_place_targets": true,
-      "description": "Reachability requirements for Genie Sim task target poses"
+      "description": "Reachability requirements for Genie Sim task target poses (no unreachable targets allowed)"
     },
     "geniesim_data_collection": {
       "min_collision_free_rate": 0.9,
