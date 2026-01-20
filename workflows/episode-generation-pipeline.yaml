@@ -60,6 +60,11 @@ main:
           - stagingDataRoot: '${default(map.get(event, "staging_data_root"), "/mnt/gcs")}'
           - monitoringGateEnabled: '${sys.get_env("BP_ENV") == "production"}'
           - buildPollTimeoutSeconds: '${int(default(map.get(event, "build_poll_timeout_seconds"), default(sys.get_env("EPISODE_BUILD_POLL_TIMEOUT_SECONDS"), "3600")))}'
+          - firebaseBucket: '${default(sys.get_env("FIREBASE_STORAGE_BUCKET"), "")}'
+          - firebaseServiceAccountJson: '${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_JSON"), "")}'
+          - firebaseServiceAccountPath: '${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_PATH"), "/secrets/firebase/service-account.json")}'
+          - firebaseUploadPrefix: '${default(sys.get_env("FIREBASE_UPLOAD_PREFIX"), "datasets")}'
+          - enableFirebaseUpload: '${default(sys.get_env("ENABLE_FIREBASE_UPLOAD"), if(sys.get_env("BP_ENV") == "production", "true", "false"))}'
           # Bundle tier for upsell features (standard, pro, enterprise, foundation)
           # Can be passed in event or read from scene config
           - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'
@@ -455,6 +460,16 @@ main:
                                 value: '${if(audioNarrationEnabled, "true", "false")}'
                               - name: SUBTITLE_GENERATION_ENABLED
                                 value: '${if(subtitleGenerationEnabled, "true", "false")}'
+                              - name: ENABLE_FIREBASE_UPLOAD
+                                value: ${enableFirebaseUpload}
+                              - name: FIREBASE_STORAGE_BUCKET
+                                value: ${firebaseBucket}
+                              - name: FIREBASE_SERVICE_ACCOUNT_JSON
+                                value: ${firebaseServiceAccountJson}
+                              - name: FIREBASE_SERVICE_ACCOUNT_PATH
+                                value: ${firebaseServiceAccountPath}
+                              - name: FIREBASE_UPLOAD_PREFIX
+                                value: ${firebaseUploadPrefix}
                               - name: GOOGLE_APPLICATION_CREDENTIALS
                                 value: /secrets/gcs/key.json
                               resources:
@@ -470,12 +485,18 @@ main:
                               - name: gcs-credentials
                                 mountPath: /secrets/gcs
                                 readOnly: true
+                              - name: firebase-credentials
+                                mountPath: /secrets/firebase
+                                readOnly: true
                               - name: dshm
                                 mountPath: /dev/shm
                             volumes:
                             - name: gcs-credentials
                               secret:
                                 secretName: gcs-service-account
+                            - name: firebase-credentials
+                              secret:
+                                secretName: firebase-service-account
                             - name: dshm
                               emptyDir:
                                 medium: Memory
