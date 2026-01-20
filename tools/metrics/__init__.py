@@ -14,6 +14,7 @@ from .pipeline_analytics import (
     track_scene_delivery,
     track_customer_feedback,
     get_dashboard_data,
+    update_pipeline_status,
 )
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "track_scene_delivery",
     "track_customer_feedback",
     "get_dashboard_data",
+    "update_pipeline_status",
 ]
