@@ -47,6 +47,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
 
 from motion_planner import MotionPlan, Waypoint
 from trajectory_solver import JointTrajectory, JointState, ROBOT_CONFIGS
@@ -58,7 +59,6 @@ from quality_constants import (
 )
 from usd_scene_scan import resolve_robot_prim_paths
 from isaac_sim_enforcement import (
-    DataQualityLevel,
     ProductionDataQualityError,
     get_environment_capabilities,
 )
@@ -502,15 +502,7 @@ class SimulationValidator:
 
     def _is_production_requested(self) -> bool:
         """Return True when production or labs-staging requirements are active."""
-        capabilities = get_environment_capabilities()
-        data_quality = os.environ.get("DATA_QUALITY_LEVEL", "development").lower()
-        labs_staging = os.environ.get("LABS_STAGING", "").lower() in {"1", "true", "yes"}
-        return (
-            capabilities.production_mode
-            or data_quality == DataQualityLevel.PRODUCTION.value
-            or os.environ.get("ISAAC_SIM_REQUIRED", "false").lower() == "true"
-            or labs_staging
-        )
+        return resolve_production_mode()
 
     def is_using_real_physics(self) -> bool:
         """Check if using real PhysX simulation."""
@@ -1410,14 +1402,7 @@ class ValidationReportGenerator:
 
     def _enforce_physx_usage(self, physics_validation: Dict[str, Any]) -> None:
         """Fail if PhysX validation is required but not used."""
-        data_quality = os.environ.get("DATA_QUALITY_LEVEL", "development").lower()
-        labs_staging = os.environ.get("LABS_STAGING", "").lower() in {"1", "true", "yes"}
-        production_requested = (
-            os.environ.get("PRODUCTION_MODE", "false").lower() == "true"
-            or os.environ.get("ISAAC_SIM_REQUIRED", "false").lower() == "true"
-            or data_quality == DataQualityLevel.PRODUCTION.value
-            or labs_staging
-        )
+        production_requested = resolve_production_mode()
 
         if production_requested and not physics_validation.get("physx_used", False):
             raise ProductionDataQualityError(

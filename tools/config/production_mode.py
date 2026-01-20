@@ -8,14 +8,15 @@ from typing import Mapping, Optional
 _TRUTHY_VALUES = {"1", "true", "yes", "y", "on"}
 
 _LEGACY_PRODUCTION_FLAGS = (
-    "SIMREADY_PRODUCTION_MODE",
     "PRODUCTION_MODE",
-    "DATA_QUALITY_LEVEL",
+    "SIMREADY_PRODUCTION_MODE",
     "ISAAC_SIM_REQUIRED",
     "REQUIRE_REAL_PHYSICS",
     "PRODUCTION",
     "LABS_STAGING",
 )
+
+_LEGACY_PRODUCTION_ENVS = ("BP_ENV",)
 
 
 def _is_truthy(value: Optional[str]) -> bool:
@@ -27,12 +28,14 @@ def _is_truthy(value: Optional[str]) -> bool:
 def resolve_production_mode(env: Optional[Mapping[str, str]] = None) -> bool:
     """Resolve production-mode state from canonical + legacy environment flags.
 
-    Canonical flags:
+    Canonical flags (preferred):
       - PIPELINE_ENV=production|prod
+      - GENIESIM_ENV=production|prod (GenieSim integrations)
+
+    Legacy flags (deprecated, still honored for compatibility):
+      - BP_ENV=production|prod
       - PRODUCTION_MODE=1/true/yes
       - SIMREADY_PRODUCTION_MODE=1/true/yes
-
-    Legacy flags (still honored for episode-generation compatibility):
       - DATA_QUALITY_LEVEL=production
       - ISAAC_SIM_REQUIRED=1/true/yes
       - REQUIRE_REAL_PHYSICS=1/true/yes
@@ -43,8 +46,16 @@ def resolve_production_mode(env: Optional[Mapping[str, str]] = None) -> bool:
     env = env or os.environ
     pipeline_env = (env.get("PIPELINE_ENV", "") or "").strip().lower()
     geniesim_env = (env.get("GENIESIM_ENV", "") or "").strip().lower()
-    if pipeline_env in {"prod", "production"} or geniesim_env == "production":
+    if pipeline_env in {"prod", "production"}:
         return True
+
+    if geniesim_env in {"prod", "production"}:
+        return True
+
+    for legacy_env in _LEGACY_PRODUCTION_ENVS:
+        legacy_value = (env.get(legacy_env, "") or "").strip().lower()
+        if legacy_value in {"prod", "production"}:
+            return True
 
     data_quality_level = (env.get("DATA_QUALITY_LEVEL", "") or "").strip().lower()
     if data_quality_level == "production":

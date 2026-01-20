@@ -41,6 +41,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.config.production_mode import resolve_production_mode
+
 # Try to import cuRobo
 try:
     import torch
@@ -82,9 +84,7 @@ from trajectory_solver import ROBOT_CONFIGS
 
 def _requires_curobo() -> bool:
     """Return True when cuRobo is required for production or labs staging runs."""
-    data_quality = os.getenv("DATA_QUALITY_LEVEL", "").lower()
-    labs_staging = os.getenv("LABS_STAGING", "0").lower() in {"1", "true", "yes"}
-    return data_quality == "production" or labs_staging
+    return resolve_production_mode()
 
 
 class CollisionGeometryType(str, Enum):

@@ -55,6 +55,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
 
 # Import Isaac Sim integration for availability checking
 try:
@@ -96,14 +97,7 @@ class SensorDataCaptureMode(Enum):
 
 def _is_production_run() -> bool:
     """Detect production runs where fail-closed should be enforced."""
-    return (
-        parse_bool_env(os.getenv("REQUIRE_REAL_PHYSICS"), default=False)
-        or os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production"
-        or parse_bool_env(os.getenv("PRODUCTION_MODE"), default=False)
-        or parse_bool_env(os.getenv("ISAAC_SIM_REQUIRED"), default=False)
-        or parse_bool_env(os.getenv("PRODUCTION"), default=False)
-        or os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}
-    )
+    return resolve_production_mode()
 
 
 def _mock_capture_disallowed() -> bool:
@@ -113,6 +107,15 @@ def _mock_capture_disallowed() -> bool:
 
 def _mock_capture_block_reason() -> str:
     """Return the first production flag that disallows mock capture."""
+    pipeline_env = (os.getenv("PIPELINE_ENV", "") or "").strip().lower()
+    if pipeline_env in {"prod", "production"}:
+        return f"PIPELINE_ENV={pipeline_env}"
+    geniesim_env = (os.getenv("GENIESIM_ENV", "") or "").strip().lower()
+    if geniesim_env in {"prod", "production"}:
+        return f"GENIESIM_ENV={geniesim_env}"
+    bp_env = (os.getenv("BP_ENV", "") or "").strip().lower()
+    if bp_env in {"prod", "production"}:
+        return f"BP_ENV={bp_env}"
     if parse_bool_env(os.getenv("REQUIRE_REAL_PHYSICS"), default=False):
         return "REQUIRE_REAL_PHYSICS=true"
     if os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production":

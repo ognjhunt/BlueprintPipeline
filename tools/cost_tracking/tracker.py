@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tools.config.production_mode import resolve_production_mode
+
 logger = logging.getLogger(__name__)
 
 
@@ -156,11 +158,7 @@ def _load_custom_pricing_from_env() -> tuple[Dict[str, float], Optional[str]]:
 
 
 def _is_production_env() -> bool:
-    env_values = [
-        os.getenv("BP_ENV", "").strip().lower(),
-        os.getenv("GENIESIM_ENV", "").strip().lower(),
-    ]
-    return any(value in {"prod", "production"} for value in env_values if value)
+    return resolve_production_mode()
 
 
 def _load_geniesim_pricing_from_env() -> Dict[str, float]:

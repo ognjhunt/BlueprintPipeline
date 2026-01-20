@@ -42,6 +42,8 @@ import numpy as np
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from tools.config.production_mode import resolve_production_mode
+
 from models import (
     CameraTrajectory,
     DWMConditioningBundle,
@@ -83,6 +85,8 @@ def _parse_optional_bool(value: str | None) -> Optional[bool]:
 
 
 def _is_production_level(level: str | None) -> bool:
+    if resolve_production_mode():
+        return True
     if level is None:
         return False
     normalized = level.strip().lower()
