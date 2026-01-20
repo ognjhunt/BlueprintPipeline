@@ -503,6 +503,31 @@ def test_mixed_case_license_is_commercial_ok():
     assert export_module._is_commercial_license("cC0")
 
 
+def test_production_requires_real_embeddings_with_generation(monkeypatch):
+    export_module = _load_export_to_geniesim_module()
+
+    class DummyFailureMarkerWriter:
+        def __init__(self, bucket, scene_id, job_name):
+            self.bucket = bucket
+            self.scene_id = scene_id
+            self.job_name = job_name
+
+        def write_failure(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(export_module, "FailureMarkerWriter", DummyFailureMarkerWriter)
+    monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.setenv("BUCKET", "test-bucket")
+    monkeypatch.setenv("SCENE_ID", "scene-123")
+    monkeypatch.setenv("GENERATE_EMBEDDINGS", "true")
+    monkeypatch.setenv("REQUIRE_EMBEDDINGS", "false")
+
+    with pytest.raises(SystemExit) as exc:
+        export_module.main()
+
+    assert exc.value.code == 1
+
+
 # =============================================================================
 # Task Config Generator Tests
 # =============================================================================
