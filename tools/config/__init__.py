@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -19,6 +20,8 @@ try:
 except ImportError:
     HAVE_PYDANTIC = False
     ValidationError = Exception  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 
 # Configuration file paths
@@ -122,7 +125,7 @@ class DwmThresholds:
 class GenieSimKinematicReachabilityThresholds:
     """Genie Sim kinematic reachability validation thresholds."""
     enabled: bool = True
-    min_reachability_rate: float = 0.95
+    min_reachability_rate: float = 1.0
     max_unreachable_targets: int = 0
     check_place_targets: bool = True
 
@@ -574,6 +577,31 @@ class ConfigLoader:
         return result
 
     @classmethod
+    def _warn_on_quality_threshold_conflicts(cls, config: Dict[str, Any]) -> None:
+        thresholds = config.get("thresholds", {})
+        if not isinstance(thresholds, dict):
+            return
+        geniesim_ik = thresholds.get("geniesim_kinematic_reachability", {})
+        if not isinstance(geniesim_ik, dict):
+            return
+        if geniesim_ik.get("enabled", True) is False:
+            return
+        min_rate = geniesim_ik.get("min_reachability_rate")
+        max_unreachable = geniesim_ik.get("max_unreachable_targets")
+        if (
+            isinstance(min_rate, (int, float))
+            and isinstance(max_unreachable, int)
+            and max_unreachable == 0
+            and min_rate < 1.0
+        ):
+            logger.warning(
+                "Genie Sim reachability thresholds are contradictory: min_reachability_rate=%.3f "
+                "while max_unreachable_targets=0. Raise min_reachability_rate to 1.0 or allow "
+                "some unreachable targets.",
+                min_rate,
+            )
+
+    @classmethod
     def load_quality_config(
         cls,
         config_path: Optional[Path] = None,
@@ -652,6 +680,8 @@ class ConfigLoader:
 
             if use_cache and not overrides:
                 cls._quality_config_cache = config
+
+        cls._warn_on_quality_threshold_conflicts(config)
 
         # Parse into dataclass
         thresholds = config.get("thresholds", {})
@@ -743,7 +773,7 @@ class ConfigLoader:
             ),
             geniesim_kinematic_reachability=GenieSimKinematicReachabilityThresholds(
                 enabled=geniesim_ik_thresholds.get("enabled", True),
-                min_reachability_rate=geniesim_ik_thresholds.get("min_reachability_rate", 0.95),
+                min_reachability_rate=geniesim_ik_thresholds.get("min_reachability_rate", 1.0),
                 max_unreachable_targets=geniesim_ik_thresholds.get("max_unreachable_targets", 0),
                 check_place_targets=geniesim_ik_thresholds.get("check_place_targets", True),
             ),
