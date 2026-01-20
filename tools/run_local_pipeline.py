@@ -2899,6 +2899,88 @@ class LocalPipelineRunner:
         if not multi_robot:
             job_payload["job_metrics"] = job_metrics_by_robot[robot_type]
 
+        require_lerobot = parse_bool_env(os.getenv("REQUIRE_LEROBOT"), default=False)
+        artifact_validation: Dict[str, Any] = {
+            "require_lerobot": require_lerobot,
+            "by_robot": {},
+        }
+        artifacts_valid = True
+        for current_robot, output_dir in output_dirs.items():
+            recordings_dir = output_dir / "recordings"
+            lerobot_dir = output_dir / "lerobot"
+            dataset_info_path = lerobot_dir / "dataset_info.json"
+            missing_paths = []
+            episode_files: List[Path] = []
+            if not recordings_dir.is_dir():
+                missing_paths.append(str(recordings_dir))
+            else:
+                episode_files = list(recordings_dir.rglob("*.json"))
+                if not episode_files:
+                    missing_paths.append(f"{recordings_dir}/**/*.json")
+            if require_lerobot:
+                if not lerobot_dir.is_dir():
+                    missing_paths.append(str(lerobot_dir))
+                if not dataset_info_path.is_file():
+                    missing_paths.append(str(dataset_info_path))
+            expected_episodes = job_metrics_by_robot.get(current_robot, {}).get(
+                "episodes_collected"
+            )
+            actual_episodes = len(episode_files)
+            count_mismatch = (
+                expected_episodes is not None and expected_episodes != actual_episodes
+            )
+            validation_errors = []
+            if missing_paths:
+                validation_errors.append(
+                    {
+                        "type": "missing_paths",
+                        "paths": missing_paths,
+                    }
+                )
+            if count_mismatch:
+                validation_errors.append(
+                    {
+                        "type": "episode_count_mismatch",
+                        "expected": expected_episodes,
+                        "found": actual_episodes,
+                    }
+                )
+            artifact_validation["by_robot"][current_robot] = {
+                "status": "passed" if not validation_errors else "failed",
+                "output_dir": str(output_dir),
+                "recordings_dir": str(recordings_dir),
+                "lerobot_dir": str(lerobot_dir),
+                "dataset_info_path": str(dataset_info_path),
+                "episodes_found": actual_episodes,
+                "episodes_expected": expected_episodes,
+                "errors": validation_errors,
+            }
+            if validation_errors:
+                artifacts_valid = False
+                job_metrics_by_robot[current_robot]["status"] = "failed"
+                failure_details.setdefault("by_robot", {})
+                failure_details["by_robot"].setdefault(current_robot, {})
+                failure_details["by_robot"][current_robot]["artifact_validation"] = {
+                    "errors": validation_errors,
+                    "episodes_found": actual_episodes,
+                    "episodes_expected": expected_episodes,
+                    "missing_paths": missing_paths,
+                    "require_lerobot": require_lerobot,
+                }
+                if not job_metrics_by_robot[current_robot].get("failure_reason"):
+                    job_metrics_by_robot[current_robot][
+                        "failure_reason"
+                    ] = "Artifact validation failed"
+                job_metrics_by_robot[current_robot][
+                    "failure_details"
+                ] = failure_details["by_robot"][current_robot]
+        artifact_validation["status"] = "passed" if artifacts_valid else "failed"
+        job_payload["artifact_validation"] = artifact_validation
+        if not artifacts_valid:
+            job_status = "failed"
+            job_payload["status"] = job_status
+            job_payload["job_metrics_summary"]["status"] = job_status
+
         artifacts_by_robot = {}
         for current_robot, output_dir in output_dirs.items():
             artifacts_by_robot[current_robot] = {
