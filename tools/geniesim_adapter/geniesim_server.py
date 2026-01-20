@@ -67,6 +67,7 @@ from tools.geniesim_adapter.config import (
     GENIESIM_TLS_KEY_ENV,
 )
 from tools.config.env import parse_int_env
+from tools.config.production_mode import resolve_env_with_legacy
 
 LOGGER = logging.getLogger("geniesim.server")
 
@@ -398,9 +399,15 @@ def _run_health_check_with_tls(
 
 
 def _resolve_default_recordings_dir() -> Path:
-    raw = os.getenv(GENIESIM_RECORDINGS_DIR_ENV)
-    if raw:
-        return Path(raw).expanduser()
+    resolved, _ = resolve_env_with_legacy(
+        canonical_names=(GENIESIM_RECORDINGS_DIR_ENV,),
+        legacy_names=("GENIESIM_RECORDING_DIR",),
+        env=os.environ,
+        preferred_name=GENIESIM_RECORDINGS_DIR_ENV,
+        log=LOGGER,
+    )
+    if resolved:
+        return Path(resolved).expanduser()
     return Path("/tmp/geniesim_recordings")
 
 

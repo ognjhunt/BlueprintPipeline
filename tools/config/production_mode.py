@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence, Tuple
 
 _TRUTHY_VALUES = {"1", "true", "yes", "y", "on"}
 
@@ -17,6 +18,66 @@ _LEGACY_PRODUCTION_FLAGS = (
 )
 
 _LEGACY_PRODUCTION_ENVS = ("BP_ENV",)
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_env_value(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def resolve_env_with_legacy(
+    *,
+    canonical_names: Sequence[str],
+    legacy_names: Sequence[str] = (),
+    env: Optional[Mapping[str, str]] = None,
+    default: Optional[str] = None,
+    preferred_name: Optional[str] = None,
+    log: Optional[logging.Logger] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve an env value from canonical names, falling back to legacy names."""
+    source = env or os.environ
+    for name in canonical_names:
+        value = _normalize_env_value(source.get(name))
+        if value is not None:
+            return value, name
+
+    if legacy_names:
+        canonical_label = preferred_name or (canonical_names[0] if canonical_names else None)
+        for name in legacy_names:
+            value = _normalize_env_value(source.get(name))
+            if value is not None:
+                if canonical_label:
+                    (log or logger).warning(
+                        "%s is deprecated; use %s instead.",
+                        name,
+                        canonical_label,
+                    )
+                else:
+                    (log or logger).warning("%s is deprecated.", name)
+                return value, name
+
+    return default, None
+
+
+def resolve_pipeline_environment(
+    env: Optional[Mapping[str, str]] = None,
+    default: str = "development",
+    log: Optional[logging.Logger] = None,
+) -> str:
+    """Resolve pipeline environment from canonical/legacy envs."""
+    value, _ = resolve_env_with_legacy(
+        canonical_names=("PIPELINE_ENV", "GENIESIM_ENV"),
+        legacy_names=("BP_ENV",),
+        env=env,
+        default=default,
+        preferred_name="PIPELINE_ENV",
+        log=log,
+    )
+    return (value or default).strip().lower()
 
 
 def _is_truthy(value: Optional[str]) -> bool:
@@ -44,18 +105,15 @@ def resolve_production_mode(env: Optional[Mapping[str, str]] = None) -> bool:
     """
 
     env = env or os.environ
-    pipeline_env = (env.get("PIPELINE_ENV", "") or "").strip().lower()
-    geniesim_env = (env.get("GENIESIM_ENV", "") or "").strip().lower()
-    if pipeline_env in {"prod", "production"}:
+    pipeline_env, _ = resolve_env_with_legacy(
+        canonical_names=("PIPELINE_ENV", "GENIESIM_ENV"),
+        legacy_names=_LEGACY_PRODUCTION_ENVS,
+        env=env,
+        preferred_name="PIPELINE_ENV",
+        log=logger,
+    )
+    if (pipeline_env or "").strip().lower() in {"prod", "production"}:
         return True
-
-    if geniesim_env in {"prod", "production"}:
-        return True
-
-    for legacy_env in _LEGACY_PRODUCTION_ENVS:
-        legacy_value = (env.get(legacy_env, "") or "").strip().lower()
-        if legacy_value in {"prod", "production"}:
-            return True
 
     data_quality_level = (env.get("DATA_QUALITY_LEVEL", "") or "").strip().lower()
     if data_quality_level == "production":

@@ -24,8 +24,9 @@ Environment Variables:
     APPROVED_PARTICULATE_MODELS: Comma-separated allowlist for local Particulate models (default: pat_b)
     REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
-    BP_ENV / PIPELINE_ENV: Pipeline environment (e.g., "production") for production guardrails
-    PRODUCTION_MODE: Explicit boolean override for production mode (takes priority over BP_ENV/PIPELINE_ENV)
+    PIPELINE_ENV / GENIESIM_ENV: Pipeline environment (e.g., "production") for production guardrails
+    BP_ENV: Legacy alias for PIPELINE_ENV
+    PRODUCTION_MODE: Explicit boolean override for production mode (takes priority over PIPELINE_ENV/GENIESIM_ENV)
     DISALLOW_PLACEHOLDER_URDF: "true" to fail if placeholder URDFs are generated
     LABS_MODE: "true" to enforce labs guardrails (Particulate required, no heuristics)
 """
@@ -47,7 +48,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from tools.config.env_flags import env_flag
-from tools.config.production_mode import resolve_production_mode as resolve_pipeline_production_mode
+from tools.config.production_mode import (
+    resolve_env_with_legacy,
+    resolve_production_mode as resolve_pipeline_production_mode,
+)
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.workflow import FailureMarkerWriter
@@ -117,17 +121,14 @@ def resolve_interactive_production_mode() -> Tuple[bool, str, Optional[str]]:
     if explicit_value is not None:
         return env_flag(explicit_value, default=False), "PRODUCTION_MODE", explicit_value
 
-    pipeline_env = os.getenv("PIPELINE_ENV")
+    pipeline_env, source = resolve_env_with_legacy(
+        canonical_names=("PIPELINE_ENV", "GENIESIM_ENV"),
+        legacy_names=("BP_ENV",),
+        env=os.environ,
+        preferred_name="PIPELINE_ENV",
+    )
     if pipeline_env is not None:
-        return resolve_pipeline_production_mode(), "PIPELINE_ENV", pipeline_env
-
-    geniesim_env = os.getenv("GENIESIM_ENV")
-    if geniesim_env is not None:
-        return resolve_pipeline_production_mode(), "GENIESIM_ENV", geniesim_env
-
-    pipeline_env = os.getenv("BP_ENV")
-    if pipeline_env is not None:
-        return resolve_pipeline_production_mode(), "BP_ENV", pipeline_env
+        return resolve_pipeline_production_mode(), source or "default", pipeline_env
 
     return resolve_pipeline_production_mode(), "default", None
 
