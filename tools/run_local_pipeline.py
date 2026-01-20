@@ -46,6 +46,7 @@ Environment overrides:
     - DEFAULT_STREAM_IDS: Comma-separated stream IDs for replicator capture config.
     - GCS_MOUNT_ROOT: Base path used for local GCS-style mount mapping.
     - PIPELINE_FAIL_FAST: Stop the pipeline on the first failure when true.
+    - REQUIRE_BALANCED_ROBOT_EPISODES: Fail validation when cross-robot episode counts mismatch.
 
 References:
 - 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
@@ -3056,9 +3057,14 @@ class LocalPipelineRunner:
         allow_partial_failures = parse_bool_env(
             os.getenv("ALLOW_PARTIAL_FAILURES"), default=False
         )
+        require_balanced_robot_episodes = parse_bool_env(
+            os.getenv("REQUIRE_BALANCED_ROBOT_EPISODES"),
+            default=False,
+        )
         artifact_validation: Dict[str, Any] = {
             "require_lerobot": require_lerobot,
             "allow_partial_failures": allow_partial_failures,
+            "require_balanced_robot_episodes": require_balanced_robot_episodes,
             "by_robot": {},
         }
         artifacts_valid = True
@@ -3273,8 +3279,32 @@ class LocalPipelineRunner:
             if discrepancies:
                 cross_robot_validation["status"] = "failed"
 
+        mismatch_types = {
+            "expected_episode_counts_inconsistent",
+            "expected_episode_count_mismatch",
+            "episode_count_mismatch",
+        }
+        cross_robot_episode_mismatch = any(
+            error.get("type") in mismatch_types
+            for error in cross_robot_validation.get("errors", [])
+        ) or any(
+            discrepancy.get("type") in mismatch_types
+            for details in cross_robot_validation.get("by_robot", {}).values()
+            for discrepancy in details.get("discrepancies", [])
+        )
+
         if cross_robot_validation["errors"] or cross_robot_validation["status"] == "failed":
-            if allow_partial_failures:
+            if require_balanced_robot_episodes and cross_robot_episode_mismatch:
+                artifacts_valid = False
+                artifact_validation_status = "failed"
+                failure_details.setdefault("artifact_validation", {})
+                failure_details["artifact_validation"]["cross_robot"] = cross_robot_validation
+                if not job_payload.get("failure_reason"):
+                    job_payload["failure_reason"] = (
+                        "Cross-robot episode counts mismatch"
+                    )
+                job_payload["failure_details"] = failure_details.get("artifact_validation")
+            elif allow_partial_failures:
                 if artifact_validation_status == "passed":
                     artifact_validation_status = "warning"
                 self.log(
