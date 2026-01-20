@@ -45,6 +45,7 @@ Environment overrides:
     - DEFAULT_CAMERA_RESOLUTION: Resolution as "WIDTHxHEIGHT" or "WIDTH,HEIGHT".
     - DEFAULT_STREAM_IDS: Comma-separated stream IDs for replicator capture config.
     - GCS_MOUNT_ROOT: Base path used for local GCS-style mount mapping.
+    - PIPELINE_FAIL_FAST: Stop the pipeline on the first failure when true.
 
 References:
 - 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
@@ -185,6 +186,7 @@ class LocalPipelineRunner:
         enable_dream2flow: bool = False,
         enable_inventory_enrichment: Optional[bool] = None,
         disable_articulated_assets: bool = False,
+        fail_fast: Optional[bool] = None,
     ):
         """Initialize the local pipeline runner.
 
@@ -211,6 +213,13 @@ class LocalPipelineRunner:
         else:
             self.enable_inventory_enrichment = enable_inventory_enrichment
         self.disable_articulated_assets = disable_articulated_assets
+        if fail_fast is None:
+            self.fail_fast = parse_bool_env(
+                os.getenv("PIPELINE_FAIL_FAST"),
+                default=False,
+            )
+        else:
+            self.fail_fast = fail_fast
         self.environment = os.getenv("BP_ENV", "development").lower()
         self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
         self.enable_checkpoint_hashes = os.getenv("BP_CHECKPOINT_HASHES", "0").lower() in {
@@ -245,6 +254,105 @@ class LocalPipelineRunner:
         self.retry_config = self._resolve_retry_config()
         self._geniesim_local_run_results: Dict[str, Any] = {}
         self._geniesim_output_dirs: Dict[str, Path] = {}
+
+    def _resolve_step_dependencies(
+        self,
+        steps: List[PipelineStep],
+    ) -> Dict[PipelineStep, List[PipelineStep]]:
+        """Return step dependency map for the current run."""
+        dependencies: Dict[PipelineStep, List[PipelineStep]] = {
+            PipelineStep.SCALE: [PipelineStep.REGEN3D],
+            PipelineStep.INTERACTIVE: [PipelineStep.REGEN3D],
+            PipelineStep.SIMREADY: [PipelineStep.REGEN3D],
+            PipelineStep.USD: [PipelineStep.SIMREADY],
+            PipelineStep.INVENTORY_ENRICHMENT: [PipelineStep.REGEN3D],
+            PipelineStep.REPLICATOR: [PipelineStep.USD],
+            PipelineStep.VARIATION_GEN: [PipelineStep.REPLICATOR],
+            PipelineStep.ISAAC_LAB: [PipelineStep.USD],
+            PipelineStep.DWM: [PipelineStep.USD],
+            PipelineStep.DWM_INFERENCE: [PipelineStep.DWM],
+            PipelineStep.DREAM2FLOW: [PipelineStep.USD],
+            PipelineStep.DREAM2FLOW_INFERENCE: [PipelineStep.DREAM2FLOW],
+            PipelineStep.GENIESIM_EXPORT: [PipelineStep.SIMREADY],
+            PipelineStep.GENIESIM_SUBMIT: [PipelineStep.GENIESIM_EXPORT],
+            PipelineStep.GENIESIM_IMPORT: [PipelineStep.GENIESIM_SUBMIT],
+        }
+
+        if self._variation_assets_expected(steps):
+            dependencies.setdefault(PipelineStep.GENIESIM_EXPORT, []).append(
+                PipelineStep.VARIATION_GEN
+            )
+
+        return dependencies
+
+    def _variation_assets_expected(self, steps: List[PipelineStep]) -> bool:
+        """Return True if variation assets are expected for Genie Sim export."""
+        if PipelineStep.VARIATION_GEN in steps:
+            return True
+        manifest_path = self.replicator_dir / "variation_assets" / "manifest.json"
+        if not manifest_path.is_file():
+            return False
+        try:
+            manifest = _load_json(manifest_path, "variation assets manifest")
+        except NonRetryableError as exc:
+            self.log(f"Unable to parse variation assets manifest: {exc}", "WARNING")
+            return True
+        assets = manifest.get("assets", []) if isinstance(manifest, dict) else []
+        return bool(assets)
+
+    def _find_step_result(self, step: PipelineStep) -> Optional[StepResult]:
+        for result in reversed(self.results):
+            if result.step == step:
+                return result
+        return None
+
+    def _output_is_nonempty(self, path: Path) -> bool:
+        if path.is_dir():
+            return any(path.iterdir())
+        if not path.exists():
+            return False
+        return path.stat().st_size > 0
+
+    def _missing_expected_outputs(self, step: PipelineStep) -> List[Path]:
+        missing: List[Path] = []
+        for path in self._expected_output_paths(step):
+            if not self._output_is_nonempty(path):
+                missing.append(path)
+        return missing
+
+    def _check_step_prerequisites(
+        self,
+        step: PipelineStep,
+        dependencies: Dict[PipelineStep, List[PipelineStep]],
+        requested_steps: List[PipelineStep],
+    ) -> Optional[StepResult]:
+        required_steps = dependencies.get(step, [])
+        if not required_steps:
+            return None
+
+        issues: List[str] = []
+        for prereq in required_steps:
+            prereq_result = self._find_step_result(prereq)
+            if prereq_result is None and prereq in requested_steps:
+                issues.append(f"{prereq.value} did not run yet")
+            elif prereq_result is not None and not prereq_result.success:
+                issues.append(f"{prereq.value} failed")
+
+            missing_outputs = self._missing_expected_outputs(prereq)
+            if missing_outputs:
+                missing_list = ", ".join(str(path) for path in missing_outputs)
+                issues.append(f"{prereq.value} outputs missing: {missing_list}")
+
+        if not issues:
+            return None
+
+        message = "Skipped due to missing prerequisites: " + "; ".join(issues)
+        return StepResult(
+            step=step,
+            success=False,
+            duration_seconds=0,
+            message=message,
+        )
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
@@ -834,7 +942,21 @@ class LocalPipelineRunner:
         # Run each step
         all_success = True
         forced_steps = set(force_rerun_steps or [])
+        dependencies = self._resolve_step_dependencies(steps)
         for step in steps:
+            prerequisite_result = self._check_step_prerequisites(
+                step,
+                dependencies,
+                steps,
+            )
+            if prerequisite_result is not None:
+                self.results.append(prerequisite_result)
+                all_success = False
+                self.log(f"Step {step.value} skipped: {prerequisite_result.message}", "ERROR")
+                if self.fail_fast:
+                    self.log("Fail-fast enabled; stopping pipeline.", "ERROR")
+                    break
+                continue
             if resume_from is not None:
                 expected_outputs = self._expected_output_paths(step)
                 if step in forced_steps:
@@ -871,6 +993,9 @@ class LocalPipelineRunner:
                 all_success = False
                 self.log(f"Step {step.value} failed: {result.message}", "ERROR")
                 # Continue with remaining steps for partial results
+                if self.fail_fast:
+                    self.log("Fail-fast enabled; stopping pipeline.", "ERROR")
+                    break
             else:
                 write_checkpoint(
                     self.scene_dir,
@@ -3699,6 +3824,7 @@ class LocalPipelineRunner:
                 self.geniesim_dir / "scene_graph.json",
                 self.geniesim_dir / "task_config.json",
                 self.geniesim_dir / "asset_index.json",
+                self.geniesim_dir / "merged_scene_manifest.json",
             ]
         if step == PipelineStep.GENIESIM_SUBMIT:
             return [self.geniesim_dir / "job.json"]
@@ -3830,6 +3956,12 @@ def main():
         help="Path to JSON config for GPU rate + duration overrides",
     )
     parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        default=None,
+        help="Stop the pipeline immediately on the first failure",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Reduce output verbosity",
@@ -3897,6 +4029,7 @@ def main():
             args.disable_articulations
             or os.getenv("DISABLE_ARTICULATED_ASSETS", "").lower() in {"1", "true", "yes", "y"}
         ),
+        fail_fast=args.fail_fast,
     )
 
     if args.estimate_costs:
