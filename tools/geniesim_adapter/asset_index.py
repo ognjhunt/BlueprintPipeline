@@ -204,17 +204,59 @@ CATEGORY_MAPPING = {
 
 # Material type to physics properties
 MATERIAL_PHYSICS = {
-    "metal": GenieSimMaterial(friction=0.4, restitution=0.2, density=7800.0),
+    "steel": GenieSimMaterial(friction=0.45, restitution=0.2, density=7850.0),
+    "stainless_steel": GenieSimMaterial(friction=0.4, restitution=0.2, density=8000.0),
+    "cast_iron": GenieSimMaterial(friction=0.5, restitution=0.15, density=7200.0),
+    "aluminum": GenieSimMaterial(friction=0.4, restitution=0.25, density=2700.0),
     "plastic": GenieSimMaterial(friction=0.5, restitution=0.3, density=1200.0),
     "wood": GenieSimMaterial(friction=0.6, restitution=0.15, density=700.0),
     "glass": GenieSimMaterial(friction=0.3, restitution=0.1, density=2500.0),
     "ceramic": GenieSimMaterial(friction=0.5, restitution=0.1, density=2300.0),
+    "stone": GenieSimMaterial(friction=0.6, restitution=0.05, density=2600.0),
+    "concrete": GenieSimMaterial(friction=0.7, restitution=0.05, density=2400.0),
+    "brick": GenieSimMaterial(friction=0.7, restitution=0.05, density=1800.0),
+    "leather": GenieSimMaterial(friction=0.6, restitution=0.1, density=860.0),
     "fabric": GenieSimMaterial(friction=0.7, restitution=0.05, density=500.0),
+    "foam": GenieSimMaterial(friction=0.8, restitution=0.3, density=50.0),
     "rubber": GenieSimMaterial(friction=0.9, restitution=0.6, density=1100.0),
     "paper": GenieSimMaterial(friction=0.5, restitution=0.05, density=700.0),
     "cardboard": GenieSimMaterial(friction=0.5, restitution=0.1, density=300.0),
+    "water": GenieSimMaterial(friction=0.05, restitution=0.0, density=1000.0),
     "default": GenieSimMaterial(friction=0.5, restitution=0.1, density=1000.0),
 }
+
+MATERIAL_ALIASES = {
+    "metal": "steel",
+    "stainless": "stainless_steel",
+    "stainlesssteel": "stainless_steel",
+    "aluminium": "aluminum",
+    "aluminium_alloy": "aluminum",
+    "iron": "cast_iron",
+    "granite": "stone",
+    "marble": "stone",
+    "rock": "stone",
+    "cement": "concrete",
+    "brickwork": "brick",
+    "timber": "wood",
+    "plywood": "wood",
+    "cloth": "fabric",
+    "textile": "fabric",
+    "leatherette": "leather",
+    "styrofoam": "foam",
+    "foam_rubber": "foam",
+    "rubber_foam": "foam",
+    "porcelain": "ceramic",
+    "liquid": "water",
+}
+
+
+def normalize_material_type(material_type: Optional[str]) -> str:
+    if not material_type:
+        return "default"
+    normalized = str(material_type).strip().lower()
+    normalized = normalized.replace("-", "_")
+    normalized = re.sub(r"\s+", "_", normalized)
+    return MATERIAL_ALIASES.get(normalized, normalized)
 
 
 # =============================================================================
@@ -256,9 +298,9 @@ class SemanticDescriptionGenerator:
 
         # Material
         physics_hints = obj.get("physics_hints", {})
-        material_type = physics_hints.get("material_type", "")
-        if material_type:
-            parts.append(f"made of {material_type}")
+        material_type = normalize_material_type(physics_hints.get("material_type", ""))
+        if material_type != "default":
+            parts.append(f"made of {material_type.replace('_', ' ')}")
 
         # Affordances
         semantics = obj.get("semantics", {})
@@ -533,6 +575,14 @@ class AssetIndexBuilder:
             # Get physics properties
             physics = obj.get("physics", {})
             physics_hints = obj.get("physics_hints", {})
+            raw_material_type = physics_hints.get("material_type", "")
+            material_type = normalize_material_type(raw_material_type)
+            if raw_material_type and material_type not in MATERIAL_PHYSICS:
+                self.log(
+                    f"Unknown material_type '{raw_material_type}' for asset {obj_id}; using default.",
+                    "WARNING",
+                )
+                material_type = "default"
 
             mass = physics.get("mass")
             if mass is None:
@@ -544,12 +594,10 @@ class AssetIndexBuilder:
                         dimensions.get("depth", 0.1) *
                         dimensions.get("height", 0.1)
                     )
-                    material_type = physics_hints.get("material_type", "default")
                     density = MATERIAL_PHYSICS.get(material_type, MATERIAL_PHYSICS["default"]).density
                     mass = volume * density
 
             # Get material properties
-            material_type = physics_hints.get("material_type", "default")
             material = MATERIAL_PHYSICS.get(material_type, MATERIAL_PHYSICS["default"])
 
             # Override with explicit values if present
