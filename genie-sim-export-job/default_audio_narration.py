@@ -37,6 +37,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import uuid
 
+from tools.audio.tts_providers import (
+    DEFAULT_FALLBACK_ORDER,
+    TTSProviderError,
+    detect_available_providers,
+    get_provider_adapter,
+    provider_metadata,
+)
+
 
 @dataclass
 class VoicePreset:
@@ -91,6 +99,12 @@ class DefaultAudioNarrationConfig:
 
     # TTS providers (in order of preference)
     tts_providers: List[str] = None
+
+    # Provider fallback order (explicit)
+    provider_fallback_order: List[str] = None
+
+    # Provider metadata for downstream consumers
+    tts_provider_metadata: Dict[str, Dict[str, Any]] = None
 
     # Audio output configuration
     audio_output: AudioOutputConfig = None
@@ -152,8 +166,14 @@ class DefaultAudioNarrationConfig:
                 ),
             ]
 
+        if self.provider_fallback_order is None:
+            self.provider_fallback_order = list(DEFAULT_FALLBACK_ORDER)
+
+        if self.tts_provider_metadata is None:
+            self.tts_provider_metadata = provider_metadata()
+
         if self.tts_providers is None:
-            self.tts_providers = ["google", "local", "mock"]
+            self.tts_providers = detect_available_providers(self.provider_fallback_order)
 
         if self.audio_output is None:
             self.audio_output = AudioOutputConfig(
@@ -260,6 +280,8 @@ class DefaultAudioNarrationConfig:
             "voice_presets": [asdict(vp) for vp in self.voice_presets],
             "default_voice_preset": self.default_voice_preset,
             "tts_providers": self.tts_providers,
+            "tts_provider_metadata": self.tts_provider_metadata,
+            "provider_fallback_order": self.provider_fallback_order,
             "audio_output": asdict(self.audio_output),
             "narration_templates": [
                 {
@@ -348,6 +370,8 @@ class DefaultAudioNarrationExporter:
             },
             "default_preset": self.config.default_voice_preset,
             "supported_languages": ["en-US", "en-GB", "de-DE", "fr-FR", "ja-JP", "zh-CN"],
+            "provider_capabilities": self.config.tts_provider_metadata,
+            "provider_fallback_order": self.config.provider_fallback_order,
             "note": "Multiple voice presets now DEFAULT - for varied training data",
         }
 
@@ -558,8 +582,23 @@ def execute_audio_narration(
     formats = config.get("audio_output", {}).get("formats", ["wav"])
     sample_rate = config.get("audio_output", {}).get("sample_rate", 22050)
     channels = config.get("audio_output", {}).get("channels", 1)
+    provider_order = config.get("tts_providers") or list(DEFAULT_FALLBACK_ORDER)
+    provider_errors: List[Dict[str, Any]] = []
 
     audio_files: Dict[str, Path] = {}
+    segment_texts = {
+        "intro": "The robot is preparing to pick and place the object.",
+        "grasp": "The gripper closes to grasp the object securely.",
+        "conclusion": "Task completed successfully.",
+        "narration": "The robot completes the episode narration.",
+    }
+
+    voice_presets = {preset["preset_id"]: preset for preset in config.get("voice_presets", [])}
+    default_voice_id = config.get("default_voice_preset", "narrator")
+    default_preset = voice_presets.get(default_voice_id, {})
+    preferred_voice = default_preset.get("voice_name", "default")
+
+    segment_provider: Dict[str, str] = {}
     for fmt in formats:
         for stem in [
             "episode_0001_intro",
@@ -567,20 +606,43 @@ def execute_audio_narration(
             "episode_0001_conclusion",
             "episode_0001_narration",
         ]:
+            segment_key = stem.replace("episode_0001_", "")
             audio_path = audio_dir / f"{stem}.{fmt}"
+            audio_bytes = None
+            provider_used = None
+            for provider_name in provider_order:
+                try:
+                    adapter = get_provider_adapter(provider_name)
+                    audio_bytes = adapter.generate_audio(
+                        text=segment_texts.get(segment_key, segment_texts["narration"]),
+                        voice=preferred_voice,
+                        audio_format=fmt,
+                    )
+                    provider_used = provider_name
+                    break
+                except TTSProviderError as exc:
+                    provider_errors.append(exc.to_dict())
+                    continue
+            if audio_bytes is None or provider_used is None:
+                raise RuntimeError(
+                    f"All TTS providers failed for format {fmt}. Errors: {provider_errors}"
+                )
             if fmt == "wav":
-                with wave.open(str(audio_path), "w") as wav_file:
+                with wave.open(str(audio_path), "wb") as wav_file:
                     wav_file.setnchannels(channels)
                     wav_file.setsampwidth(2)
                     wav_file.setframerate(sample_rate)
-                    wav_file.writeframes(b"\x00\x00" * sample_rate * channels)
+                    wav_file.writeframes(audio_bytes)
             else:
-                audio_path.write_bytes(
-                    b"PLACEHOLDER AUDIO - FORMAT TO BE GENERATED BY TTS PIPELINE\n"
-                )
+                audio_path.write_bytes(audio_bytes)
             audio_files[f"{stem}.{fmt}"] = audio_path
+            segment_provider[f"{stem}.{fmt}"] = provider_used
 
     manifest_path = audio_dir / "narration_manifest.json"
+    combined_provider = segment_provider.get(
+        f"episode_0001_narration.{formats[0]}",
+        provider_order[0],
+    )
     manifest_path.write_text(
         json.dumps(
             {
@@ -588,12 +650,37 @@ def execute_audio_narration(
                 "scene_id": config_payload.get("scene_id"),
                 "generated_at": datetime.utcnow().isoformat() + "Z",
                 "audio_formats": formats,
+                "tts_provider": combined_provider,
+                "tts_provider_fallback_order": provider_order,
+                "tts_provider_errors": provider_errors,
                 "segments": [
-                    {"phase": "intro", "file": f"episode_0001_intro.{formats[0]}"},
-                    {"phase": "grasp", "file": f"episode_0001_grasp.{formats[0]}"},
-                    {"phase": "conclusion", "file": f"episode_0001_conclusion.{formats[0]}"},
+                    {
+                        "phase": "intro",
+                        "file": f"episode_0001_intro.{formats[0]}",
+                        "tts_provider": segment_provider.get(
+                            f"episode_0001_intro.{formats[0]}",
+                            combined_provider,
+                        ),
+                    },
+                    {
+                        "phase": "grasp",
+                        "file": f"episode_0001_grasp.{formats[0]}",
+                        "tts_provider": segment_provider.get(
+                            f"episode_0001_grasp.{formats[0]}",
+                            combined_provider,
+                        ),
+                    },
+                    {
+                        "phase": "conclusion",
+                        "file": f"episode_0001_conclusion.{formats[0]}",
+                        "tts_provider": segment_provider.get(
+                            f"episode_0001_conclusion.{formats[0]}",
+                            combined_provider,
+                        ),
+                    },
                 ],
                 "combined_file": f"episode_0001_narration.{formats[0]}",
+                "combined_tts_provider": combined_provider,
             },
             indent=2,
         )
