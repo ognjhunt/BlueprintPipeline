@@ -71,6 +71,7 @@ Environment Variables:
 """
 
 import base64
+import binascii
 import importlib.util
 import io
 import json
@@ -1974,14 +1975,54 @@ class GenieSimGRPCClient:
             )
             return None
 
-        rgb_bytes = base64.b64decode(image_info.get("rgb_data") or b"")
-        depth_bytes = base64.b64decode(image_info.get("depth_data") or b"")
         width = int(image_info.get("width") or 0)
         height = int(image_info.get("height") or 0)
         encoding = (image_info.get("encoding") or "").lower()
 
-        rgb_image = self._decode_rgb_data(rgb_bytes, width, height, encoding)
-        depth_image = self._decode_depth_data(depth_bytes, width, height, encoding)
+        if width <= 0 or height <= 0:
+            logger.warning(
+                "Invalid camera dimensions for '%s' (width=%s, height=%s).",
+                camera_id,
+                width,
+                height,
+            )
+            return {
+                "camera_id": camera_id,
+                "rgb": None,
+                "depth": None,
+                "width": width,
+                "height": height,
+                "encoding": encoding,
+                "timestamp": image_info.get("timestamp"),
+            }
+
+        def _safe_b64decode(field: str) -> Optional[bytes]:
+            payload = image_info.get(field)
+            if not payload:
+                return b""
+            try:
+                return base64.b64decode(payload)
+            except (binascii.Error, ValueError):
+                logger.warning(
+                    "Failed to decode camera '%s' field '%s'.",
+                    camera_id,
+                    field,
+                )
+                return None
+
+        rgb_bytes = _safe_b64decode("rgb_data")
+        depth_bytes = _safe_b64decode("depth_data")
+
+        rgb_image = (
+            self._decode_rgb_data(rgb_bytes, width, height, encoding)
+            if rgb_bytes is not None
+            else None
+        )
+        depth_image = (
+            self._decode_depth_data(depth_bytes, width, height, encoding)
+            if depth_bytes is not None
+            else None
+        )
 
         return {
             "camera_id": camera_id,
