@@ -128,15 +128,15 @@ def _extract_positions(task: Dict[str, Any]) -> List[Tuple[str, List[float]]]:
     return positions
 
 
-def validate_export_consistency(
+def _validate_export_consistency_payloads(
     *,
-    scene_graph_path: Path,
-    asset_index_path: Path,
-    task_config_path: Path,
+    scene_graph: Dict[str, Any],
+    asset_index: Dict[str, Any],
+    task_config: Dict[str, Any],
+    scene_graph_context: Path,
+    asset_index_context: Path,
+    task_config_context: Path,
 ) -> None:
-    scene_graph = _load_json(scene_graph_path, "scene graph")
-    asset_index = _load_json(asset_index_path, "asset index")
-    task_config = _load_json(task_config_path, "task config")
 
     asset_ids = {
         asset.get("asset_id")
@@ -172,13 +172,13 @@ def validate_export_consistency(
         if isinstance(task_config, dict)
         else None,
         context="task config",
-        path=task_config_path,
+        path=task_config_context,
     )
     if workspace_bounds is None and isinstance(task_config, dict):
         workspace_bounds = _parse_workspace_bounds(
             task_config.get("workspace_bounds"),
             context="task config",
-            path=task_config_path,
+            path=task_config_context,
         )
 
     out_of_bounds: List[str] = []
@@ -193,7 +193,7 @@ def validate_export_consistency(
             task_bounds = _parse_workspace_bounds(
                 task_bounds_override,
                 context=f"task[{idx}]",
-                path=task_config_path,
+                path=task_config_context,
             )
         if task_bounds is None:
             continue
@@ -202,21 +202,21 @@ def validate_export_consistency(
                 task_label = task.get("task_type") or task.get("name") or "unknown"
                 out_of_bounds.append(
                     f"Task[{idx}] ({task_label}) {key}={position} outside workspace bounds "
-                    f"min={task_bounds[0]} max={task_bounds[1]} (task_config: {task_config_path})"
+                    f"min={task_bounds[0]} max={task_bounds[1]} (task_config: {task_config_context})"
                 )
 
     errors: List[str] = []
     if missing_scene_assets:
         errors.append(
             "Scene graph references missing asset_ids "
-            f"{sorted(missing_scene_assets)} (scene_graph: {scene_graph_path}, "
-            f"asset_index: {asset_index_path})"
+            f"{sorted(missing_scene_assets)} (scene_graph: {scene_graph_context}, "
+            f"asset_index: {asset_index_context})"
         )
     if missing_task_assets:
         errors.append(
             "Task config references missing object ids "
-            f"{sorted(missing_task_assets)} (task_config: {task_config_path}, "
-            f"asset_index: {asset_index_path})"
+            f"{sorted(missing_task_assets)} (task_config: {task_config_context}, "
+            f"asset_index: {asset_index_context})"
         )
     if out_of_bounds:
         errors.append(
@@ -227,3 +227,39 @@ def validate_export_consistency(
         raise ExportConsistencyError(
             "Genie Sim export consistency validation failed:\n- " + "\n- ".join(errors)
         )
+
+
+def validate_export_consistency(
+    *,
+    scene_graph_path: Path,
+    asset_index_path: Path,
+    task_config_path: Path,
+) -> None:
+    scene_graph = _load_json(scene_graph_path, "scene graph")
+    asset_index = _load_json(asset_index_path, "asset index")
+    task_config = _load_json(task_config_path, "task config")
+    _validate_export_consistency_payloads(
+        scene_graph=scene_graph,
+        asset_index=asset_index,
+        task_config=task_config,
+        scene_graph_context=scene_graph_path,
+        asset_index_context=asset_index_path,
+        task_config_context=task_config_path,
+    )
+
+
+def validate_export_consistency_data(
+    *,
+    scene_graph: Dict[str, Any],
+    asset_index: Dict[str, Any],
+    task_config: Dict[str, Any],
+) -> None:
+    placeholder = Path("<in-memory>")
+    _validate_export_consistency_payloads(
+        scene_graph=scene_graph,
+        asset_index=asset_index,
+        task_config=task_config,
+        scene_graph_context=placeholder,
+        asset_index_context=placeholder,
+        task_config_context=placeholder,
+    )
