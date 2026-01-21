@@ -64,6 +64,7 @@ Environment Variables:
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import sys
@@ -97,6 +98,9 @@ from tools.validation.geniesim_export import (
 )
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
+from tools.logging_config import init_logging
+
+logger = logging.getLogger(__name__)
 
 # Import quality gates for validation before export
 try:
@@ -111,7 +115,7 @@ try:
     HAVE_QUALITY_GATES = True
 except ImportError:
     HAVE_QUALITY_GATES = False
-    print("[GENIESIM-EXPORT-JOB] WARNING: Quality gates not available")
+    logger.warning("[GENIESIM-EXPORT-JOB] Quality gates not available")
 
 # Import default premium analytics (DEFAULT: ENABLED)
 try:
@@ -123,7 +127,7 @@ try:
     PREMIUM_ANALYTICS_AVAILABLE = True
 except ImportError:
     PREMIUM_ANALYTICS_AVAILABLE = False
-    print("[GENIESIM-EXPORT-JOB] WARNING: Premium analytics module not available")
+    logger.warning("[GENIESIM-EXPORT-JOB] Premium analytics module not available")
 
 # Import ALL default premium features (DEFAULT: ENABLED - NO LONGER UPSELL!)
 try:
@@ -191,6 +195,13 @@ except ImportError:
 
 JOB_NAME = "genie-sim-export-job"
 COMMERCIAL_LICENSE_ALLOWLIST = {"cc0", "cc-by", "mit", "apache-2.0"}
+
+
+def _resolve_debug_mode() -> bool:
+    debug_flag = parse_bool_env(os.getenv("BLUEPRINT_DEBUG"))
+    if debug_flag is None:
+        debug_flag = parse_bool_env(os.getenv("DEBUG"), default=False)
+    return bool(debug_flag)
 
 
 def _normalize_license_type(value: Optional[str]) -> str:
@@ -501,6 +512,7 @@ def run_geniesim_export_job(
     strict_premium_features: bool = False,
     require_quality_gates: bool = True,
     bucket: str = "",
+    debug: bool = False,
 ) -> int:
     """
     Run the Genie Sim export job.
@@ -542,6 +554,7 @@ def run_geniesim_export_job(
         0 on success, 1 on failure
     """
     production_mode = resolve_production_mode()
+    log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": scene_id})
     gcs_mount_path = os.getenv("GCSFUSE_MOUNT_PATH", "/mnt/gcs")
     require_quality_gates_env = os.getenv("REQUIRE_QUALITY_GATES")
     env_override = (
@@ -551,51 +564,53 @@ def run_geniesim_export_job(
     )
     if production_mode:
         if require_quality_gates is False or env_override is False:
-            print(
-                "[GENIESIM-EXPORT-JOB] Production mode enabled; "
-                "REQUIRE_QUALITY_GATES override rejected and quality gates enforced."
+            log.warning(
+                "Production mode enabled; REQUIRE_QUALITY_GATES override rejected and "
+                "quality gates enforced."
             )
         require_quality_gates = True
         if not filter_commercial:
-            print(
-                "[GENIESIM-EXPORT-JOB] Production mode enabled; "
-                "FILTER_COMMERCIAL override rejected and commercial licensing checks enforced."
+            log.warning(
+                "Production mode enabled; FILTER_COMMERCIAL override rejected and "
+                "commercial licensing checks enforced."
             )
         filter_commercial = True
     else:
         if require_quality_gates is False or env_override is False:
-            print(
-                "[GENIESIM-EXPORT-JOB] Non-production mode; "
-                "REQUIRE_QUALITY_GATES override honored."
+            log.info(
+                "Non-production mode; REQUIRE_QUALITY_GATES override honored."
             )
 
-    print(f"[GENIESIM-EXPORT-JOB] Starting Genie Sim export for scene: {scene_id}")
-    print(f"[GENIESIM-EXPORT-JOB] Assets prefix: {assets_prefix}")
-    print(f"[GENIESIM-EXPORT-JOB] Output prefix: {geniesim_prefix}")
-    print(f"[GENIESIM-EXPORT-JOB] Variation assets prefix: {variation_assets_prefix}")
-    print(f"[GENIESIM-EXPORT-JOB] Replicator prefix: {replicator_prefix}")
-    print(f"[GENIESIM-EXPORT-JOB] Primary robot type: {robot_type}")
-    print(f"[GENIESIM-EXPORT-JOB] Max tasks: {max_tasks}")
-    print(f"[GENIESIM-EXPORT-JOB] Generate embeddings: {generate_embeddings}")
-    print(f"[GENIESIM-EXPORT-JOB] Require embeddings: {require_embeddings}")
-    print(f"[GENIESIM-EXPORT-JOB] Filter commercial: {filter_commercial}")
-    print(f"[GENIESIM-EXPORT-JOB] Copy USD: {copy_usd}")
-    print(f"[GENIESIM-EXPORT-JOB] Multi-robot enabled: {enable_multi_robot}")
-    print(f"[GENIESIM-EXPORT-JOB] Bimanual enabled: {enable_bimanual}")
-    print(f"[GENIESIM-EXPORT-JOB] VLA packages enabled: {enable_vla_packages}")
-    print(f"[GENIESIM-EXPORT-JOB] Rich annotations enabled: {enable_rich_annotations}")
-    print(f"[GENIESIM-EXPORT-JOB] Premium analytics enabled: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
-    print(f"[GENIESIM-EXPORT-JOB] Sim2Real fidelity enabled: {enable_sim2real_fidelity}")
-    print(f"[GENIESIM-EXPORT-JOB] Embodiment transfer enabled: {enable_embodiment_transfer}")
-    print(f"[GENIESIM-EXPORT-JOB] Trajectory optimality enabled: {enable_trajectory_optimality}")
-    print(f"[GENIESIM-EXPORT-JOB] Policy leaderboard enabled: {enable_policy_leaderboard}")
-    print(f"[GENIESIM-EXPORT-JOB] Tactile sensors enabled: {enable_tactile_sensors}")
-    print(f"[GENIESIM-EXPORT-JOB] Language annotations enabled: {enable_language_annotations}")
-    print(f"[GENIESIM-EXPORT-JOB] Generalization analyzer enabled: {enable_generalization_analyzer}")
-    print(f"[GENIESIM-EXPORT-JOB] Sim2Real validation enabled: {enable_sim2real_validation}")
-    print(f"[GENIESIM-EXPORT-JOB] Audio narration enabled: {enable_audio_narration}")
-    print(f"[GENIESIM-EXPORT-JOB] Strict premium features: {strict_premium_features}")
-    print(f"[GENIESIM-EXPORT-JOB] Require quality gates: {require_quality_gates}")
+    log.info("Starting Genie Sim export for scene: %s", scene_id)
+    log.info("Assets prefix: %s", assets_prefix)
+    log.info("Output prefix: %s", geniesim_prefix)
+    log.info("Variation assets prefix: %s", variation_assets_prefix)
+    log.info("Replicator prefix: %s", replicator_prefix)
+    log.info("Primary robot type: %s", robot_type)
+    log.info("Max tasks: %s", max_tasks)
+    log.info("Generate embeddings: %s", generate_embeddings)
+    log.info("Require embeddings: %s", require_embeddings)
+    log.info("Filter commercial: %s", filter_commercial)
+    log.info("Copy USD: %s", copy_usd)
+    log.info("Multi-robot enabled: %s", enable_multi_robot)
+    log.info("Bimanual enabled: %s", enable_bimanual)
+    log.info("VLA packages enabled: %s", enable_vla_packages)
+    log.info("Rich annotations enabled: %s", enable_rich_annotations)
+    log.info(
+        "Premium analytics enabled: %s (DEFAULT - NO LONGER UPSELL!)",
+        enable_premium_analytics,
+    )
+    log.info("Sim2Real fidelity enabled: %s", enable_sim2real_fidelity)
+    log.info("Embodiment transfer enabled: %s", enable_embodiment_transfer)
+    log.info("Trajectory optimality enabled: %s", enable_trajectory_optimality)
+    log.info("Policy leaderboard enabled: %s", enable_policy_leaderboard)
+    log.info("Tactile sensors enabled: %s", enable_tactile_sensors)
+    log.info("Language annotations enabled: %s", enable_language_annotations)
+    log.info("Generalization analyzer enabled: %s", enable_generalization_analyzer)
+    log.info("Sim2Real validation enabled: %s", enable_sim2real_validation)
+    log.info("Audio narration enabled: %s", enable_audio_narration)
+    log.info("Strict premium features: %s", strict_premium_features)
+    log.info("Require quality gates: %s", require_quality_gates)
 
     assets_dir = root / assets_prefix
     output_dir = root / geniesim_prefix
@@ -603,7 +618,7 @@ def run_geniesim_export_job(
     commercial_checks_required = filter_commercial or service_mode or production_mode
 
     # Validate upstream job completion before starting export
-    print("\n[GENIESIM-EXPORT-JOB] Validating upstream job completion...")
+    log.info("Validating upstream job completion...")
     upstream_errors = []
 
     # Check for USD assembly completion marker
@@ -989,7 +1004,7 @@ def run_geniesim_export_job(
         print("\n[GENIESIM-EXPORT-JOB] Running quality gates before export...")
         try:
             checkpoint = QualityGateCheckpoint.GENIESIM_EXPORT_READY
-            registry = QualityGateRegistry(verbose=True)
+            registry = QualityGateRegistry(verbose=debug)
 
             def _build_result(
                 gate_id: str,
@@ -1236,7 +1251,7 @@ def run_geniesim_export_job(
     )
 
     try:
-        exporter = GenieSimExporter(config, verbose=True)
+        exporter = GenieSimExporter(config, verbose=debug)
         # Use merged manifest that includes YOUR variation assets
         result = exporter.export(
             manifest_path=merged_manifest_path,
@@ -1806,6 +1821,12 @@ def run_geniesim_export_job(
 
 def main():
     """Main entry point."""
+    debug_mode = _resolve_debug_mode()
+    if debug_mode:
+        os.environ["LOG_LEVEL"] = "DEBUG"
+    init_logging(level=logging.DEBUG if debug_mode else None)
+    log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": os.getenv("SCENE_ID")})
+
     # Validate credentials at startup
     sys.path.insert(0, str(REPO_ROOT / "tools"))
     try:
@@ -1818,7 +1839,7 @@ def main():
             validate_gcs=True,
         )
     except ImportError as e:
-        print(f"[GENIESIM-EXPORT-JOB] WARNING: Startup validation unavailable: {e}")
+        log.warning("Startup validation unavailable: %s", e)
 
     validate_required_env_vars(
         {
@@ -1830,6 +1851,7 @@ def main():
 
     bucket = os.environ["BUCKET"]
     scene_id = os.environ["SCENE_ID"]
+    log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": scene_id})
 
     # Prefixes with defaults
     assets_prefix = os.getenv(
@@ -1926,9 +1948,7 @@ def main():
 
     def _write_failure_marker(exc: Exception, failed_step: str) -> None:
         if not bucket or not scene_id:
-            print(
-                "[GENIESIM-EXPORT-JOB] WARNING: Skipping failure marker; BUCKET/SCENE_ID missing.",
-            )
+            log.warning("Skipping failure marker; BUCKET/SCENE_ID missing.")
             return
         FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
             exception=exc,
@@ -1942,7 +1962,7 @@ def main():
             "Production mode requires real embeddings; placeholder embeddings are disallowed. "
             "Set REQUIRE_EMBEDDINGS=true (or remove the override) when GENERATE_EMBEDDINGS is enabled."
         )
-        print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
+        log.error("%s", message)
         _write_failure_marker(RuntimeError(message), "embedding_requirement_validation")
         sys.exit(1)
 
@@ -1953,13 +1973,12 @@ def main():
             "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY, or explicitly disable "
             "GENERATE_EMBEDDINGS/REQUIRE_EMBEDDINGS."
         )
-        print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {message}")
+        log.error("%s", message)
         _write_failure_marker(RuntimeError(message), "embedding_provider_validation")
         sys.exit(1)
     if generate_embeddings and not require_embeddings and not embedding_provider_available:
-        print(
-            "[GENIESIM-EXPORT-JOB] ⚠️  Embedding provider unavailable; "
-            "placeholder embeddings will be used."
+        log.warning(
+            "Embedding provider unavailable; placeholder embeddings will be used."
         )
 
     if generate_embeddings and embedding_provider_available:
@@ -1981,32 +2000,35 @@ def main():
         validate_scene_manifest(assets_root / "scene_manifest.json", label="[GENIESIM-EXPORT-JOB]")
         validated = True
 
-        print("[GENIESIM-EXPORT-JOB] Configuration:")
-        print(f"[GENIESIM-EXPORT-JOB]   Bucket: {bucket}")
-        print(f"[GENIESIM-EXPORT-JOB]   Scene ID: {scene_id}")
-        print(f"[GENIESIM-EXPORT-JOB]   GCS Mount Path: {gcs_mount_path}")
-        print(f"[GENIESIM-EXPORT-JOB]   Variation Assets: {variation_assets_prefix}")
-        print(f"[GENIESIM-EXPORT-JOB]   Replicator Bundle: {replicator_prefix}")
-        print(f"[GENIESIM-EXPORT-JOB]   Primary Robot Type: {robot_type}")
-        print(f"[GENIESIM-EXPORT-JOB]   Max Tasks: {max_tasks}")
-        print(f"[GENIESIM-EXPORT-JOB]   Require Embeddings: {require_embeddings}")
-        print(f"[GENIESIM-EXPORT-JOB]   Multi-Robot: {enable_multi_robot}")
-        print(f"[GENIESIM-EXPORT-JOB]   Bimanual: {enable_bimanual}")
-        print(f"[GENIESIM-EXPORT-JOB]   VLA Packages: {enable_vla_packages}")
-        print(f"[GENIESIM-EXPORT-JOB]   Rich Annotations: {enable_rich_annotations}")
-        print(f"[GENIESIM-EXPORT-JOB]   Commercial Filter: {filter_commercial}")
-        print(f"[GENIESIM-EXPORT-JOB]   Premium Analytics: {enable_premium_analytics} (DEFAULT - NO LONGER UPSELL!)")
-        print(f"[GENIESIM-EXPORT-JOB]   Sim2Real Fidelity: {enable_sim2real_fidelity}")
-        print(f"[GENIESIM-EXPORT-JOB]   Embodiment Transfer: {enable_embodiment_transfer}")
-        print(f"[GENIESIM-EXPORT-JOB]   Trajectory Optimality: {enable_trajectory_optimality}")
-        print(f"[GENIESIM-EXPORT-JOB]   Policy Leaderboard: {enable_policy_leaderboard}")
-        print(f"[GENIESIM-EXPORT-JOB]   Tactile Sensors: {enable_tactile_sensors}")
-        print(f"[GENIESIM-EXPORT-JOB]   Language Annotations: {enable_language_annotations}")
-        print(f"[GENIESIM-EXPORT-JOB]   Generalization Analyzer: {enable_generalization_analyzer}")
-        print(f"[GENIESIM-EXPORT-JOB]   Sim2Real Validation: {enable_sim2real_validation}")
-        print(f"[GENIESIM-EXPORT-JOB]   Audio Narration: {enable_audio_narration}")
-        print(f"[GENIESIM-EXPORT-JOB]   Strict Premium Features: {strict_premium_features}")
-        print(f"[GENIESIM-EXPORT-JOB]   Require Quality Gates: {require_quality_gates}")
+        log.info("Configuration:")
+        log.info("  Bucket: %s", bucket)
+        log.info("  Scene ID: %s", scene_id)
+        log.info("  GCS Mount Path: %s", gcs_mount_path)
+        log.info("  Variation Assets: %s", variation_assets_prefix)
+        log.info("  Replicator Bundle: %s", replicator_prefix)
+        log.info("  Primary Robot Type: %s", robot_type)
+        log.info("  Max Tasks: %s", max_tasks)
+        log.info("  Require Embeddings: %s", require_embeddings)
+        log.info("  Multi-Robot: %s", enable_multi_robot)
+        log.info("  Bimanual: %s", enable_bimanual)
+        log.info("  VLA Packages: %s", enable_vla_packages)
+        log.info("  Rich Annotations: %s", enable_rich_annotations)
+        log.info("  Commercial Filter: %s", filter_commercial)
+        log.info(
+            "  Premium Analytics: %s (DEFAULT - NO LONGER UPSELL!)",
+            enable_premium_analytics,
+        )
+        log.info("  Sim2Real Fidelity: %s", enable_sim2real_fidelity)
+        log.info("  Embodiment Transfer: %s", enable_embodiment_transfer)
+        log.info("  Trajectory Optimality: %s", enable_trajectory_optimality)
+        log.info("  Policy Leaderboard: %s", enable_policy_leaderboard)
+        log.info("  Tactile Sensors: %s", enable_tactile_sensors)
+        log.info("  Language Annotations: %s", enable_language_annotations)
+        log.info("  Generalization Analyzer: %s", enable_generalization_analyzer)
+        log.info("  Sim2Real Validation: %s", enable_sim2real_validation)
+        log.info("  Audio Narration: %s", enable_audio_narration)
+        log.info("  Strict Premium Features: %s", strict_premium_features)
+        log.info("  Require Quality Gates: %s", require_quality_gates)
 
         GCS_ROOT = Path(gcs_mount_path)
 
@@ -2047,6 +2069,7 @@ def main():
                 strict_premium_features=strict_premium_features,
                 require_quality_gates=require_quality_gates,
                 bucket=bucket,
+                debug=debug_mode,
             )
 
         sys.exit(exit_code)
