@@ -98,6 +98,7 @@ class GenieSimExportConfig:
     pretty_json: bool = True
     include_metadata: bool = True
     lerobot_export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2
+    dry_run: bool = False
 
     def get_multi_robot_config(self) -> MultiRobotConfig:
         """Get multi-robot configuration, using default if not specified."""
@@ -129,6 +130,11 @@ class GenieSimExportResult:
     # Errors and warnings
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+
+    # In-memory export artifacts (used for dry runs/validation)
+    scene_graph_data: Optional[Dict[str, Any]] = None
+    asset_index_data: Optional[Dict[str, Any]] = None
+    task_config_data: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -205,6 +211,22 @@ class GenieSimExporter:
         else:
             logger.info("[GENIESIM-EXPORTER] %s", msg, extra=extra)
 
+    def _ensure_dir(self, path: Path, description: str) -> None:
+        if self.config.dry_run:
+            self.log(f"[DRY-RUN] Skipping directory creation for {description}: {path}")
+            return
+        path.mkdir(parents=True, exist_ok=True)
+
+    def _write_text(self, path: Path, content: str, description: str) -> None:
+        if self.config.dry_run:
+            self.log(f"[DRY-RUN] Skipping write for {description}: {path}")
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def _write_json(self, path: Path, payload: Dict[str, Any], description: str) -> None:
+        self._write_text(path, json.dumps(payload, indent=2), description)
+
     def export(
         self,
         manifest_path: Path,
@@ -227,6 +249,8 @@ class GenieSimExporter:
         self.log("=" * 70)
         self.log(f"Input: {manifest_path}", extra={"manifest_path": str(manifest_path)})
         self.log(f"Output: {output_dir}", extra={"output_dir": str(output_dir)})
+        if self.config.dry_run:
+            self.log("Dry run enabled: no files will be written.")
 
         result = GenieSimExportResult(
             success=False,
@@ -245,7 +269,7 @@ class GenieSimExporter:
             self.log(f"Scene: {scene_id}", extra={"scene_id": scene_id})
 
             # Create output directory
-            output_dir.mkdir(parents=True, exist_ok=True)
+            self._ensure_dir(output_dir, "export output")
 
             # Determine USD base path
             if usd_source_dir:
@@ -266,7 +290,8 @@ class GenieSimExporter:
             )
 
             scene_graph_path = output_dir / "scene_graph.json"
-            scene_graph.save(scene_graph_path)
+            result.scene_graph_data = scene_graph.to_dict()
+            self._write_text(scene_graph_path, scene_graph.to_json(), "scene graph")
             result.scene_graph_path = scene_graph_path
 
             # Step 2: Build asset index
@@ -299,7 +324,8 @@ class GenieSimExporter:
             self.log(f"  Assets: {result.num_assets}")
 
             asset_index_path = output_dir / "asset_index.json"
-            asset_index.save(asset_index_path)
+            result.asset_index_data = asset_index.to_dict()
+            self._write_text(asset_index_path, asset_index.to_json(), "asset index")
             result.asset_index_path = asset_index_path
 
             # Step 3: Generate task config
@@ -314,7 +340,8 @@ class GenieSimExporter:
             self.log(f"  Tasks: {result.num_tasks}")
 
             task_config_path = output_dir / "task_config.json"
-            task_config.save(task_config_path)
+            result.task_config_data = task_config.to_dict()
+            self._write_text(task_config_path, task_config.to_json(), "task config")
             result.task_config_path = task_config_path
 
             # Step 4: Generate scene config (YAML for Genie Sim)
@@ -341,7 +368,10 @@ class GenieSimExporter:
                 self.log("\nStep 6: Generating multi-robot configuration...")
                 multi_robot_config = self.config.get_multi_robot_config()
                 multi_robot_path = output_dir / "multi_robot_config.json"
-                save_multi_robot_config(multi_robot_config, multi_robot_path)
+                if self.config.dry_run:
+                    self.log(f"[DRY-RUN] Skipping write for multi-robot configuration: {multi_robot_path}")
+                else:
+                    save_multi_robot_config(multi_robot_config, multi_robot_path)
                 self.log(f"  Primary robots: {[r.value for r in multi_robot_config.primary_robots]}")
                 self.log(f"  All robots: {[r.value for r in multi_robot_config.get_all_robots()]}")
                 self.log(f"  Bimanual enabled: {multi_robot_config.enable_bimanual}")
@@ -358,11 +388,14 @@ class GenieSimExporter:
             # Step 8: Write export manifest
             self.log("\nStep 8: Writing export manifest...")
             export_manifest_path = output_dir / "export_manifest.json"
-            self._write_export_manifest(
-                result=result,
-                config=self.config,
-                output_path=export_manifest_path,
-            )
+            if self.config.dry_run:
+                self.log(f"[DRY-RUN] Skipping write for export manifest: {export_manifest_path}")
+            else:
+                self._write_export_manifest(
+                    result=result,
+                    config=self.config,
+                    output_path=export_manifest_path,
+                )
 
             result.success = True
             self.log("\n" + "=" * 70)
@@ -461,8 +494,7 @@ source:
   manifest_path: "scene_manifest.json"
 """
 
-        with open(output_path, "w") as f:
-            f.write(yaml_content)
+        self._write_text(output_path, yaml_content, "scene config")
 
     def _copy_usd_files(
         self,
@@ -470,6 +502,10 @@ source:
         output_dir: Path,
     ) -> None:
         """Copy USD files to output directory."""
+        if self.config.dry_run:
+            self.log(f"[DRY-RUN] Skipping USD copy to: {output_dir}")
+            return
+
         output_dir.mkdir(parents=True, exist_ok=True)
 
         usd_extensions = {".usd", ".usda", ".usdc", ".usdz"}
@@ -537,6 +573,7 @@ source:
                 "filter_commercial_only": config.filter_commercial_only,
                 "max_tasks": config.max_tasks,
                 "lerobot_export_format": config.lerobot_export_format.value,
+                "dry_run": config.dry_run,
             },
             "result": result.to_dict(),
             "geniesim_compatibility": {
@@ -560,8 +597,7 @@ source:
             "sha256": self._compute_manifest_checksum(manifest),
         }
 
-        with open(output_path, "w") as f:
-            json.dump(manifest, f, indent=2)
+        self._write_json(output_path, manifest, "export manifest")
 
     @staticmethod
     def _compute_sha256(path: Path) -> str:
@@ -718,8 +754,7 @@ source:
             },
         }
 
-        with open(output_path, "w") as f:
-            json.dump(enhanced_config, f, indent=2)
+        self._write_json(output_path, enhanced_config, "enhanced features config")
 
 
 # =============================================================================

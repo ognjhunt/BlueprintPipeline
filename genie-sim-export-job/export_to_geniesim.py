@@ -60,6 +60,8 @@ Environment Variables:
     ENABLE_SIM2REAL_VALIDATION: Enable sim2real validation artifacts - default: true
     ENABLE_AUDIO_NARRATION: Enable audio narration artifacts - default: true
     STRICT_PREMIUM_FEATURES: Fail fast on premium feature export errors - default: false
+    GENIESIM_EXPORT_DRY_RUN: Validate/export without writing outputs - default: false
+    DRY_RUN: Alias for GENIESIM_EXPORT_DRY_RUN
 """
 
 import hashlib
@@ -68,6 +70,7 @@ import os
 import shutil
 import sys
 import traceback
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -94,6 +97,7 @@ from tools.validation.entrypoint_checks import (
 from tools.validation.geniesim_export import (
     ExportConsistencyError,
     validate_export_consistency,
+    validate_export_consistency_data,
 )
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
@@ -409,13 +413,23 @@ def _validate_export_consistency(
     scene_graph_path: Path,
     asset_index_path: Path,
     task_config_path: Path,
+    scene_graph_data: Optional[Dict[str, Any]] = None,
+    asset_index_data: Optional[Dict[str, Any]] = None,
+    task_config_data: Optional[Dict[str, Any]] = None,
 ) -> None:
     try:
-        validate_export_consistency(
-            scene_graph_path=scene_graph_path,
-            asset_index_path=asset_index_path,
-            task_config_path=task_config_path,
-        )
+        if scene_graph_data and asset_index_data and task_config_data:
+            validate_export_consistency_data(
+                scene_graph=scene_graph_data,
+                asset_index=asset_index_data,
+                task_config=task_config_data,
+            )
+        else:
+            validate_export_consistency(
+                scene_graph_path=scene_graph_path,
+                asset_index_path=asset_index_path,
+                task_config_path=task_config_path,
+            )
     except ExportConsistencyError as exc:
         raise RuntimeError(
             "Genie Sim export consistency check failed. "
@@ -432,6 +446,7 @@ def _fail_variation_assets_requirement(
     reason: str,
     filter_commercial: bool,
     service_mode: bool,
+    dry_run: bool,
 ) -> int:
     requirement_message = (
         "Sellable datasets require variation-gen-job assets. "
@@ -459,6 +474,7 @@ def _fail_variation_assets_requirement(
             "variation_assets_prefix": variation_assets_prefix,
             "filter_commercial": filter_commercial,
             "service_mode": service_mode,
+            "dry_run": dry_run,
         },
         recommendations=[
             "Run variation-gen-job to generate commercial-safe variation assets.",
@@ -500,6 +516,7 @@ def run_geniesim_export_job(
     enable_audio_narration: bool = True,
     strict_premium_features: bool = False,
     require_quality_gates: bool = True,
+    dry_run: bool = False,
     bucket: str = "",
 ) -> int:
     """
@@ -536,6 +553,7 @@ def run_geniesim_export_job(
         enable_audio_narration: Enable audio narration artifacts (DEFAULT: True)
         strict_premium_features: Fail fast on premium feature export errors (DEFAULT: False)
         require_quality_gates: Fail when quality gates are unavailable or error (DEFAULT: True)
+        dry_run: Validate without writing outputs (DEFAULT: False)
         bucket: GCS bucket for failure markers (optional)
 
     Returns:
@@ -596,6 +614,7 @@ def run_geniesim_export_job(
     print(f"[GENIESIM-EXPORT-JOB] Audio narration enabled: {enable_audio_narration}")
     print(f"[GENIESIM-EXPORT-JOB] Strict premium features: {strict_premium_features}")
     print(f"[GENIESIM-EXPORT-JOB] Require quality gates: {require_quality_gates}")
+    print(f"[GENIESIM-EXPORT-JOB] Dry run: {dry_run}")
 
     assets_dir = root / assets_prefix
     output_dir = root / geniesim_prefix
@@ -673,6 +692,7 @@ def run_geniesim_export_job(
                 reason="Missing VARIATION_ASSETS_PREFIX for commercial/service export.",
                 filter_commercial=filter_commercial,
                 service_mode=service_mode,
+                dry_run=dry_run,
             )
         print("[GENIESIM-EXPORT-JOB] WARNING: No variation_assets_prefix specified")
         print("[GENIESIM-EXPORT-JOB] WARNING: Without YOUR variation assets, you cannot sell the data commercially!")
@@ -695,6 +715,7 @@ def run_geniesim_export_job(
                             reason="variation_assets.json contains no variation assets.",
                             filter_commercial=filter_commercial,
                             service_mode=service_mode,
+                            dry_run=dry_run,
                         )
                     print("[GENIESIM-EXPORT-JOB] WARNING: variation_assets.json has no assets")
                     raw_variation_objects = []
@@ -763,6 +784,7 @@ def run_geniesim_export_job(
                             reason="All variation assets were filtered out as non-commercial.",
                             filter_commercial=filter_commercial,
                             service_mode=service_mode,
+                            dry_run=dry_run,
                         )
                 else:
                     variation_objects = raw_variation_objects
@@ -780,6 +802,7 @@ def run_geniesim_export_job(
                         reason=f"Failed to load variation assets: {e}",
                         filter_commercial=filter_commercial,
                         service_mode=service_mode,
+                        dry_run=dry_run,
                     )
                 print(f"[GENIESIM-EXPORT-JOB] WARNING: Failed to load variation assets: {e}")
                 variation_objects = []
@@ -792,6 +815,7 @@ def run_geniesim_export_job(
                     reason=f"Variation assets file not found: {variation_assets_json}",
                     filter_commercial=filter_commercial,
                     service_mode=service_mode,
+                    dry_run=dry_run,
                 )
             print(f"[GENIESIM-EXPORT-JOB] No variation assets found at: {variation_assets_json}")
             variation_objects = []
@@ -874,9 +898,15 @@ def run_geniesim_export_job(
         print("[GENIESIM-EXPORT-JOB] WARNING: Scene will only have original objects")
         print("[GENIESIM-EXPORT-JOB] WARNING: For domain randomization in commercial use, you need variation assets!")
 
+    dry_run_workspace = None
+    if dry_run:
+        dry_run_workspace = Path(tempfile.mkdtemp(prefix="geniesim_export_dry_run_"))
+    manifest_output_dir = dry_run_workspace or output_dir
+
     # Write merged manifest to output directory for the exporter
-    output_dir.mkdir(parents=True, exist_ok=True)
-    merged_manifest_path = output_dir / "merged_scene_manifest.json"
+    if not dry_run:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    merged_manifest_path = manifest_output_dir / "merged_scene_manifest.json"
     with open(merged_manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"[GENIESIM-EXPORT-JOB] Wrote merged manifest to: {merged_manifest_path}")
@@ -898,7 +928,7 @@ def run_geniesim_export_job(
 
     print("\n[GENIESIM-EXPORT-JOB] Generating asset provenance...")
     provenance_scene_root = _resolve_scene_root_for_provenance(assets_dir)
-    asset_provenance_path = output_dir / "legal" / "asset_provenance.json"
+    asset_provenance_path = manifest_output_dir / "legal" / "asset_provenance.json"
     try:
         generate_asset_provenance(
             scene_dir=provenance_scene_root,
@@ -1227,6 +1257,7 @@ def run_geniesim_export_job(
         max_tasks=max_tasks,
         copy_usd_files=copy_usd,
         filter_commercial_only=filter_commercial,
+        dry_run=dry_run,
         # Enhanced features (DEFAULT: ENABLED)
         enable_multi_robot=enable_multi_robot,
         enable_bimanual=enable_bimanual,
@@ -1259,11 +1290,18 @@ def run_geniesim_export_job(
                 scene_graph_path=result.scene_graph_path,
                 asset_index_path=result.asset_index_path,
                 task_config_path=result.task_config_path,
+                scene_graph_data=result.scene_graph_data if dry_run else None,
+                asset_index_data=result.asset_index_data if dry_run else None,
+                task_config_data=result.task_config_data if dry_run else None,
             )
             print("[GENIESIM-EXPORT-JOB] ✅ Export consistency validated")
 
             # Premium feature artifact generation stage (post-export, pre-submit)
             # Export premium analytics manifests (DEFAULT: ENABLED)
+            if dry_run:
+                print("[GENIESIM-EXPORT-JOB] Dry run enabled; skipping premium feature exports.")
+                return 0
+
             premium_analytics_manifests = {}
             premium_feature_staged_counts = {}
             premium_feature_counts = {}
@@ -1881,6 +1919,10 @@ def main():
     enable_audio_narration = parse_bool_env(os.getenv("ENABLE_AUDIO_NARRATION"), default=True)
     require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
     strict_premium_features = parse_bool_env(os.getenv("STRICT_PREMIUM_FEATURES"), default=False)
+    dry_run_env = os.getenv("GENIESIM_EXPORT_DRY_RUN")
+    if dry_run_env is None:
+        dry_run_env = os.getenv("DRY_RUN")
+    dry_run = parse_bool_env(dry_run_env, default=False)
     embedding_model = _resolve_embedding_model()
     if production_mode and not require_quality_gates:
         require_quality_gates = True
@@ -1916,6 +1958,7 @@ def main():
         "enable_audio_narration": enable_audio_narration,
         "strict_premium_features": strict_premium_features,
         "require_quality_gates": require_quality_gates,
+        "dry_run": dry_run,
     }
     partial_results = {
         "geniesim_output_prefix": geniesim_prefix,
@@ -2007,6 +2050,7 @@ def main():
         print(f"[GENIESIM-EXPORT-JOB]   Audio Narration: {enable_audio_narration}")
         print(f"[GENIESIM-EXPORT-JOB]   Strict Premium Features: {strict_premium_features}")
         print(f"[GENIESIM-EXPORT-JOB]   Require Quality Gates: {require_quality_gates}")
+        print(f"[GENIESIM-EXPORT-JOB]   Dry Run: {dry_run}")
 
         GCS_ROOT = Path(gcs_mount_path)
 
@@ -2046,6 +2090,7 @@ def main():
                 enable_audio_narration=enable_audio_narration,
                 strict_premium_features=strict_premium_features,
                 require_quality_gates=require_quality_gates,
+                dry_run=dry_run,
                 bucket=bucket,
             )
 
