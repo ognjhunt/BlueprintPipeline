@@ -84,6 +84,7 @@ REQUIRED_GENIESIM_CAPABILITIES = {
     "observation",
     "environment_reset",
 }
+JOB_NAME = "genie-sim-submit-job"
 CONTRACT_SCHEMAS = {
     "scene_graph": "scene_graph.schema.json",
     "asset_index": "asset_index.schema.json",
@@ -92,6 +93,13 @@ CONTRACT_SCHEMAS = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_debug_mode() -> bool:
+    debug_flag = parse_bool_env(os.getenv("BLUEPRINT_DEBUG"))
+    if debug_flag is None:
+        debug_flag = parse_bool_env(os.getenv("DEBUG"), default=False)
+    return bool(debug_flag)
 
 
 def _format_validation_error(error: ValidationError) -> str:
@@ -235,12 +243,13 @@ def _run_geniesim_ik_gate(
     scene_id: str,
     task_config: Dict[str, Any],
     robot_type: str,
+    verbose: bool = False,
 ) -> bool:
     if not HAVE_QUALITY_GATES:
         logger.info("[GENIESIM-SUBMIT] Quality gates unavailable; skipping IK reachability gate.")
         return True
 
-    registry = QualityGateRegistry(verbose=True)
+    registry = QualityGateRegistry(verbose=verbose)
     context = {
         "scene_id": scene_id,
         "task_config": task_config,
@@ -266,7 +275,7 @@ def _run_geniesim_ik_gate(
     approval_manager = registry.approval_manager or HumanApprovalManager(
         scene_id=scene_id,
         config=registry.config,
-        verbose=True,
+        verbose=verbose,
     )
     override_metadata = _load_override_metadata()
     if override_metadata:
@@ -376,13 +385,14 @@ def _run_geniesim_data_quality_gate(
     *,
     scene_id: str,
     local_run_results: Dict[str, Optional[DataCollectionResult]],
+    verbose: bool = False,
 ) -> bool:
     if not HAVE_QUALITY_GATES:
         logger.info("[GENIESIM-SUBMIT] Quality gates unavailable; skipping data quality gate.")
         return True
 
     metrics = _aggregate_quality_metrics(local_run_results)
-    registry = QualityGateRegistry(verbose=True)
+    registry = QualityGateRegistry(verbose=verbose)
     results, _ = registry.run_checkpoint_with_approval(
         checkpoint=QualityGateCheckpoint.GENIESIM_IMPORT_COMPLETE,
         context=metrics,
@@ -403,7 +413,7 @@ def _run_geniesim_data_quality_gate(
     approval_manager = registry.approval_manager or HumanApprovalManager(
         scene_id=scene_id,
         config=registry.config,
-        verbose=True,
+        verbose=verbose,
     )
     override_metadata = _load_override_metadata()
     if override_metadata:
@@ -921,7 +931,7 @@ def _run_local_data_collection_with_handshake(
     episodes_per_task: int,
     expected_server_version: str,
     required_capabilities: set[str],
-    verbose: bool = True,
+    verbose: bool = False,
 ) -> DataCollectionResult:
     def _handshake_failure(message: str) -> DataCollectionResult:
         result = DataCollectionResult(
@@ -1003,6 +1013,12 @@ def _run_local_data_collection_with_handshake(
 
 
 def main() -> int:
+    debug_mode = _resolve_debug_mode()
+    if debug_mode:
+        os.environ["LOG_LEVEL"] = "DEBUG"
+    init_logging(level=logging.DEBUG if debug_mode else None)
+    log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": os.getenv("SCENE_ID")})
+
     validate_required_env_vars(
         {
             "BUCKET": "GCS bucket name",
@@ -1012,6 +1028,8 @@ def main() -> int:
     )
     bucket = os.environ["BUCKET"]
     scene_id = os.environ["SCENE_ID"]
+    log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": scene_id})
+    log.info("Starting Genie Sim submit job for scene %s.", scene_id)
 
     preflight_report = run_geniesim_preflight_or_exit(
         "genie-sim-submit-job",
@@ -1132,6 +1150,7 @@ def main() -> int:
         scene_id=scene_id,
         task_config=task_config,
         robot_type=robot_type,
+        verbose=debug_mode,
     ):
         return 1
 
@@ -1272,7 +1291,7 @@ def main() -> int:
                 output_dir=output_dir,
                 robot_type=current_robot,
                 episodes_per_task=episodes_per_task,
-                verbose=True,
+                verbose=debug_mode,
                 expected_server_version=EXPECTED_GENIESIM_SERVER_VERSION,
                 required_capabilities=REQUIRED_GENIESIM_CAPABILITIES,
             )
@@ -1325,6 +1344,7 @@ def main() -> int:
         and not _run_geniesim_data_quality_gate(
             scene_id=scene_id,
             local_run_results=local_run_results,
+            verbose=debug_mode,
         )
     ):
         submission_message = "Genie Sim data quality gate failed."

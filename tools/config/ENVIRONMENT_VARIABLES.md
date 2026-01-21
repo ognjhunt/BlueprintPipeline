@@ -13,6 +13,26 @@ The pipeline uses environment variables for:
 
 Environment variables take precedence over JSON config files, allowing runtime customization without redeployment.
 
+## Logging and Debugging
+
+The Genie Sim export/import/submit jobs share a common logging setup via `tools.logging_config`. Use the
+debug flags below to turn on verbose job diagnostics (including verbose mode for `GenieSimExporter`,
+`GenieSimLocalFramework`, and `QualityGateRegistry`).
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `DEBUG` | bool | false | Enables debug logging for the Genie Sim export/import/submit jobs (sets `LOG_LEVEL=DEBUG`). |
+| `BLUEPRINT_DEBUG` | bool | false | Blueprint-specific alias for `DEBUG`; takes precedence when set. |
+| `LOG_LEVEL` | str | "INFO" | Explicit log level override (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+
+**Example**:
+```bash
+# Enable verbose logs for Genie Sim export/import/submit jobs
+export BLUEPRINT_DEBUG=true
+# Or explicitly set a log level
+export LOG_LEVEL=DEBUG
+```
+
 ## Canonical Boolean Values
 
 Boolean environment variables are parsed by the shared helper in `tools/config/env.py`. The canonical accepted values
