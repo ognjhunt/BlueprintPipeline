@@ -19,11 +19,58 @@ Output:
 """
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
 import math
+import os
 from pathlib import Path
-from typing import Dict, List, Tuple
+from statistics import NormalDist
+from typing import Dict, List, Optional, Tuple
 import numpy as np
+
+
+@dataclass(frozen=True)
+class PolicyLeaderboardConfig:
+    confidence_level: float = 0.95
+    significance_alpha: float = 0.05
+    bootstrap_samples: int = 10000
+
+    @classmethod
+    def from_env(cls) -> "PolicyLeaderboardConfig":
+        return cls(
+            confidence_level=_read_env_float(
+                "POLICY_LEADERBOARD_CONFIDENCE_LEVEL",
+                cls.confidence_level,
+            ),
+            significance_alpha=_read_env_float(
+                "POLICY_LEADERBOARD_SIGNIFICANCE_ALPHA",
+                cls.significance_alpha,
+            ),
+            bootstrap_samples=_read_env_int(
+                "POLICY_LEADERBOARD_BOOTSTRAP_SAMPLES",
+                cls.bootstrap_samples,
+            ),
+        )
+
+
+def _read_env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _read_env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 # Implement actual policy leaderboard logic
@@ -34,7 +81,12 @@ class PolicyLeaderboardAnalyzer:
     This class provides actual implementation, not just config generation.
     """
 
-    def __init__(self, confidence_level: float = 0.95, significance_alpha: float = 0.05):
+    def __init__(
+        self,
+        confidence_level: float = 0.95,
+        significance_alpha: float = 0.05,
+        bootstrap_samples: int = 10000,
+    ):
         """
         Initialize the policy leaderboard analyzer.
 
@@ -44,6 +96,7 @@ class PolicyLeaderboardAnalyzer:
         """
         self.confidence_level = confidence_level
         self.significance_alpha = significance_alpha
+        self.bootstrap_samples = bootstrap_samples
 
     def wilson_score_interval(
         self,
@@ -64,7 +117,7 @@ class PolicyLeaderboardAnalyzer:
             return 0.0, 0.0, 0.0
 
         p = successes / trials
-        z = 1.96  # 95% confidence
+        z = NormalDist().inv_cdf(0.5 + self.confidence_level / 2)
 
         denominator = 1 + z**2 / trials
         center = (p + z**2 / (2 * trials)) / denominator
@@ -78,7 +131,7 @@ class PolicyLeaderboardAnalyzer:
     def bootstrap_confidence_interval(
         self,
         data: List[float],
-        num_samples: int = 10000,
+        num_samples: Optional[int] = None,
     ) -> Tuple[float, float, float]:
         """
         Compute bootstrap confidence interval for mean.
@@ -98,7 +151,8 @@ class PolicyLeaderboardAnalyzer:
 
         # Bootstrap resampling
         bootstrap_means = []
-        for _ in range(num_samples):
+        resolved_samples = num_samples or self.bootstrap_samples
+        for _ in range(resolved_samples):
             sample = np.random.choice(data_array, size=len(data_array), replace=True)
             bootstrap_means.append(np.mean(sample))
 
@@ -248,6 +302,7 @@ class PolicyLeaderboardAnalyzer:
 def create_default_policy_leaderboard_exporter(
     scene_id: str,
     output_dir: Path,
+    config: Optional[PolicyLeaderboardConfig] = None,
 ) -> Dict[str, Path]:
     """
     Create policy leaderboard config and utilities (DEFAULT).
@@ -257,6 +312,8 @@ def create_default_policy_leaderboard_exporter(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    resolved_config = config or PolicyLeaderboardConfig.from_env()
+
     # Write configuration
     config_path = output_dir / "policy_leaderboard_config.json"
     with open(config_path, "w") as f:
@@ -264,9 +321,9 @@ def create_default_policy_leaderboard_exporter(
             "enabled": True,
             "scene_id": scene_id,
             "leaderboard_config": {
-                "confidence_level": 0.95,
-                "significance_alpha": 0.05,
-                "bootstrap_samples": 10000,
+                "confidence_level": resolved_config.confidence_level,
+                "significance_alpha": resolved_config.significance_alpha,
+                "bootstrap_samples": resolved_config.bootstrap_samples,
                 "metrics": [
                     "success_rate",
                     "mean_reward",
@@ -307,10 +364,14 @@ import math
 import numpy as np
 from typing import List, Tuple, Dict
 
+CONFIDENCE_LEVEL = {confidence_level}
+SIGNIFICANCE_ALPHA = {significance_alpha}
+BOOTSTRAP_SAMPLES = {bootstrap_samples}
+
 def compare_policies(
     policy1_rewards: List[float],
     policy2_rewards: List[float],
-    alpha: float = 0.05,
+    alpha: float = SIGNIFICANCE_ALPHA,
 ) -> Dict[str, any]:
     \"\"\"
     Compare two policies using statistical tests.
@@ -324,7 +385,7 @@ def compare_policies(
         Dict with comparison results
     \"\"\"
     if not policy1_rewards or not policy2_rewards:
-        return {"error": "Insufficient data for comparison"}
+        return {{"error": "Insufficient data for comparison"}}
 
     mean1 = np.mean(policy1_rewards)
     mean2 = np.mean(policy2_rewards)
@@ -337,15 +398,19 @@ def compare_policies(
 
     t_stat = (mean1 - mean2) / pooled_se if pooled_se > 1e-10 else 0.0
 
-    return {
+    return {{
         "policy1_mean": float(mean1),
         "policy2_mean": float(mean2),
         "policy1_std": float(std1),
         "policy2_std": float(std2),
         "t_statistic": float(t_stat),
         "better_policy": 1 if mean1 > mean2 else 2,
-    }
-""")
+    }}
+""".format(
+            confidence_level=resolved_config.confidence_level,
+            significance_alpha=resolved_config.significance_alpha,
+            bootstrap_samples=resolved_config.bootstrap_samples,
+        ))
 
     return {
         "policy_leaderboard_config": config_path,
