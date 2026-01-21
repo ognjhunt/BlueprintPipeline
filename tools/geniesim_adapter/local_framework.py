@@ -3014,6 +3014,7 @@ class GenieSimLocalFramework:
                 "stall_timeout_s": self.config.stall_timeout_s,
                 "stall_backoff_s": self.config.stall_backoff_s,
                 "max_stalls": self.config.max_stalls,
+                "stall_reason": None,
             },
         }
 
@@ -3067,6 +3068,7 @@ class GenieSimLocalFramework:
                 "start_time": None,
                 "last_progress_time": time.time(),
                 "last_observation_timestamp": None,
+                "completion_signal_logged": False,
             }
             start_event = threading.Event()
             timestamps = [waypoint["timestamp"] for waypoint in timed_trajectory]
@@ -3172,56 +3174,148 @@ class GenieSimLocalFramework:
 
             stall_timeout_s = self.config.stall_timeout_s
             stall_detected = False
+            stall_reason: Optional[str] = None
+            trajectory_duration = (timestamps[-1] - timestamps[0]) if timestamps else 0.0
+            trajectory_end_time = timestamps[-1] if timestamps else None
+            end_time_tolerance_s = max(0.25, trajectory_duration * 0.05)
+
+            def _observation_has_success_flag(obs_frame: Optional[Dict[str, Any]]) -> Optional[bool]:
+                if not obs_frame:
+                    return None
+                success_schema = task.get("success_schema") or {}
+                success_keys = success_schema.get("success_keys") or task.get("success_keys")
+                if not success_keys:
+                    success_keys = DEFAULT_SUCCESS_SCHEMA["success_keys"]
+                obs_payload = obs_frame.get("observation") if isinstance(obs_frame, dict) else None
+                metadata = (
+                    obs_payload.get("metadata")
+                    if isinstance(obs_payload, dict)
+                    else obs_frame.get("metadata") if isinstance(obs_frame, dict) else None
+                )
+                task_meta = (
+                    obs_payload.get("task")
+                    if isinstance(obs_payload, dict)
+                    else obs_frame.get("task") if isinstance(obs_frame, dict) else None
+                )
+                for key in success_keys:
+                    for container in (obs_frame, obs_payload, metadata, task_meta):
+                        if isinstance(container, dict) and key in container:
+                            return bool(container.get(key))
+                return None
+
+            def _is_near_trajectory_end(last_timestamp: Optional[float]) -> bool:
+                if last_timestamp is None or trajectory_end_time is None:
+                    return False
+                return last_timestamp >= trajectory_end_time - end_time_tolerance_s
+
             while execution_thread.is_alive():
                 if stall_timeout_s > 0:
                     last_progress_time = collector_state.get("last_progress_time")
                     if last_progress_time:
                         progress_age = time.time() - last_progress_time
                         if progress_age >= stall_timeout_s:
-                            stall_detected = True
-                            result["stall_info"].update({
-                                "stall_detected": True,
-                                "last_progress_age_s": progress_age,
-                                "observations_collected": len(collector_state["observations"]),
-                                "last_observation_timestamp": (
-                                    collector_state.get("last_observation_timestamp")
-                                ),
-                            })
-                            stall_message = (
-                                f"No observation progress for {progress_age:.1f}s "
-                                f"(timeout {stall_timeout_s:.1f}s); aborting episode."
+                            last_obs = (
+                                collector_state["observations"][-1]
+                                if collector_state["observations"]
+                                else None
                             )
-                            collector_state["error"] = stall_message
-                            self.log(stall_message, "WARNING")
-                            abort_event.set()
-                            try:
-                                reset_result = self._client.reset_environment()
-                                if not reset_result.available:
+                            task_success_flag = _observation_has_success_flag(last_obs)
+                            last_obs_timestamp = collector_state.get("last_observation_timestamp")
+                            near_trajectory_end = _is_near_trajectory_end(last_obs_timestamp)
+                            if task_success_flag or near_trajectory_end:
+                                if not collector_state.get("completion_signal_logged"):
                                     self.log(
-                                        f"Reset unavailable after stall: {reset_result.error}",
-                                        "WARNING",
+                                        "Stall check skipped due to completion signal "
+                                        f"(task_success={task_success_flag}, "
+                                        f"near_trajectory_end={near_trajectory_end}, "
+                                        f"last_obs_timestamp={last_obs_timestamp}, "
+                                        f"trajectory_end={trajectory_end_time}, "
+                                        f"tolerance={end_time_tolerance_s:.2f}s).",
+                                        "INFO",
                                     )
-                                elif not reset_result.success:
-                                    self.log(
-                                        reset_result.error or "Reset failed after stall.",
-                                        "WARNING",
-                                    )
-                            except Exception as exc:
-                                self.log(f"Failed to reset after stall: {exc}", "WARNING")
-                            if self.config.stall_backoff_s > 0:
-                                time.sleep(self.config.stall_backoff_s)
-                            break
+                                    collector_state["completion_signal_logged"] = True
+                            else:
+                                stall_detected = True
+                                stall_reason = "no_observation_progress"
+                                result["stall_info"].update({
+                                    "stall_detected": True,
+                                    "stall_reason": stall_reason,
+                                    "last_progress_age_s": progress_age,
+                                    "observations_collected": len(collector_state["observations"]),
+                                    "last_observation_timestamp": last_obs_timestamp,
+                                    "trajectory_end_timestamp": trajectory_end_time,
+                                    "trajectory_end_tolerance_s": end_time_tolerance_s,
+                                })
+                                stall_message = (
+                                    f"No observation progress for {progress_age:.1f}s "
+                                    f"(timeout {stall_timeout_s:.1f}s); aborting episode."
+                                )
+                                collector_state["error"] = stall_message
+                                self.log(
+                                    f"{stall_message} Stall reason={stall_reason}, "
+                                    f"trajectory_end={trajectory_end_time}, "
+                                    f"tolerance={end_time_tolerance_s:.2f}s.",
+                                    "WARNING",
+                                )
+                                abort_event.set()
+                                try:
+                                    reset_result = self._client.reset_environment()
+                                    if not reset_result.available:
+                                        self.log(
+                                            f"Reset unavailable after stall: {reset_result.error}",
+                                            "WARNING",
+                                        )
+                                    elif not reset_result.success:
+                                        self.log(
+                                            reset_result.error or "Reset failed after stall.",
+                                            "WARNING",
+                                        )
+                                except Exception as exc:
+                                    self.log(f"Failed to reset after stall: {exc}", "WARNING")
+                                if self.config.stall_backoff_s > 0:
+                                    time.sleep(self.config.stall_backoff_s)
+                                break
                 time.sleep(0.5)
 
             execution_thread.join(timeout=5.0)
-            trajectory_duration = (timestamps[-1] - timestamps[0]) if timestamps else 0.0
             collector_timeout = 5.0 if stall_detected else trajectory_duration + 10.0
             collector_thread.join(timeout=collector_timeout)
 
             if collector_thread.is_alive():
-                collector_state["error"] = (
-                    "Observation collection did not complete before timeout."
-                )
+                last_obs_timestamp = collector_state.get("last_observation_timestamp")
+                if execution_state.get("success") and _is_near_trajectory_end(last_obs_timestamp):
+                    self.log(
+                        "Observation collection still running, but execution completed and "
+                        "final observation is near trajectory end; treating episode as complete "
+                        f"(trajectory_end={trajectory_end_time}, "
+                        f"last_obs_timestamp={last_obs_timestamp}, "
+                        f"tolerance={end_time_tolerance_s:.2f}s).",
+                        "INFO",
+                    )
+                    abort_event.set()
+                    collector_thread.join(timeout=2.0)
+                else:
+                    collector_state["error"] = (
+                        "Observation collection did not complete before timeout."
+                    )
+                    if execution_state.get("success"):
+                        stall_detected = True
+                        stall_reason = "execution_completed_no_final_observation"
+                        result["stall_info"].update({
+                            "stall_detected": True,
+                            "stall_reason": stall_reason,
+                            "observations_collected": len(collector_state["observations"]),
+                            "last_observation_timestamp": last_obs_timestamp,
+                            "trajectory_end_timestamp": trajectory_end_time,
+                            "trajectory_end_tolerance_s": end_time_tolerance_s,
+                        })
+                        self.log(
+                            "Execution completed but final observation missing; "
+                            f"stall reason={stall_reason}, trajectory_end={trajectory_end_time}, "
+                            f"last_obs_timestamp={last_obs_timestamp}, "
+                            f"tolerance={end_time_tolerance_s:.2f}s.",
+                            "WARNING",
+                        )
 
             if execution_state.get("error"):
                 result["error"] = execution_state["error"]
