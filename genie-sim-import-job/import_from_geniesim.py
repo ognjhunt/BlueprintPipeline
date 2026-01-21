@@ -93,6 +93,7 @@ from tools.quality_gates.quality_gate import (
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
+from tools.logging_config import init_logging
 from tools.firebase_upload.firebase_upload_orchestrator import (
     FirebaseUploadOrchestratorError,
     resolve_firebase_upload_prefix,
@@ -133,6 +134,15 @@ except ImportError:
 
 DATASET_INFO_SCHEMA_VERSION = "1.0.0"
 MIN_EPISODES_REQUIRED = 1
+JOB_NAME = "genie-sim-import-job"
+logger = logging.getLogger(__name__)
+
+
+def _resolve_debug_mode() -> bool:
+    debug_flag = parse_bool_env(os.getenv("BLUEPRINT_DEBUG"))
+    if debug_flag is None:
+        debug_flag = parse_bool_env(os.getenv("DEBUG"), default=False)
+    return bool(debug_flag)
 
 
 def _is_service_mode() -> bool:
@@ -2757,7 +2767,7 @@ def _emit_import_quality_gate(
     job_metadata: Optional[Dict[str, Any]] = None,
 ) -> List[QualityGateResult]:
     checkpoint = QualityGateCheckpoint.GENIESIM_IMPORT_COMPLETE
-    registry = QualityGateRegistry(verbose=True)
+    registry = QualityGateRegistry(verbose=_resolve_debug_mode())
 
     local_execution = (job_metadata or {}).get("local_execution", {})
     robot_type = (job_metadata or {}).get("robot_type")
@@ -2850,12 +2860,18 @@ def _quality_gate_failure_detected(
 
 def main():
     """Main entry point for import job."""
-    print("\n[GENIE-SIM-IMPORT] Starting import job...")
+    debug_mode = _resolve_debug_mode()
+    if debug_mode:
+        os.environ["LOG_LEVEL"] = "DEBUG"
+    init_logging(level=logging.DEBUG if debug_mode else None)
+    log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": os.getenv("SCENE_ID")})
+
+    log.info("Starting import job...")
 
     # Get configuration from environment
     job_id = os.getenv("GENIE_SIM_JOB_ID")
     if not job_id:
-        print("[GENIE-SIM-IMPORT] ERROR: GENIE_SIM_JOB_ID is required")
+        log.error("GENIE_SIM_JOB_ID is required")
         sys.exit(1)
 
     # Output configuration
@@ -2868,6 +2884,7 @@ def main():
     )
     bucket = os.environ["BUCKET"]
     scene_id = os.environ["SCENE_ID"]
+    log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": scene_id})
     output_prefix = os.getenv("OUTPUT_PREFIX", f"scenes/{scene_id}/episodes")
     explicit_gcs_output_path = os.getenv("GCS_OUTPUT_PATH") or None
     job_metadata_path = os.getenv("JOB_METADATA_PATH") or None
@@ -2883,7 +2900,7 @@ def main():
             if not local_episodes_prefix and not isinstance(artifacts_by_robot, dict):
                 local_episodes_prefix = artifacts.get("episodes_prefix")
         except FileNotFoundError as e:
-            print(f"[GENIE-SIM-IMPORT] WARNING: {e}")
+            log.warning("%s", e)
             if not local_episodes_prefix:
                 sys.exit(1)
 
@@ -2891,7 +2908,7 @@ def main():
     try:
         quality_settings = resolve_quality_settings()
     except ValueError as exc:
-        print(f"[GENIE-SIM-IMPORT] ERROR: {exc}")
+        log.error("%s", exc)
         sys.exit(1)
     min_quality_score = quality_settings.min_quality_score
     enable_validation = parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True)
@@ -2922,14 +2939,14 @@ def main():
             os.getenv("LEROBOT_SKIP_RATE_MAX")
         )
     except ValueError as exc:
-        print(f"[GENIE-SIM-IMPORT] ERROR: {exc}")
+        log.error("%s", exc)
         sys.exit(1)
     try:
         min_episodes_required = _resolve_min_episodes_required(
             os.getenv("MIN_EPISODES_REQUIRED")
         )
     except ValueError as exc:
-        print(f"[GENIE-SIM-IMPORT] ERROR: {exc}")
+        log.error("%s", exc)
         sys.exit(1)
 
     # Polling configuration
@@ -2956,38 +2973,41 @@ def main():
             require_firebase=enable_firebase_upload,
         )
     except ImportError as e:
-        print(f"[GENIE-SIM-IMPORT] WARNING: Startup validation unavailable: {e}")
+        log.warning("Startup validation unavailable: %s", e)
     except SystemExit:
         # Re-raise to exit immediately
         raise
 
-    print(f"[GENIE-SIM-IMPORT] Configuration:")
-    print(f"[GENIE-SIM-IMPORT]   Job ID: {job_id}")
-    print(f"[GENIE-SIM-IMPORT]   Output Prefix: {output_prefix}")
-    print(f"[GENIE-SIM-IMPORT]   Min Quality: {min_quality_score}")
-    print(
-        "[GENIE-SIM-IMPORT]   Quality Range: "
-        f"{QUALITY_CONFIG.min_allowed} - {QUALITY_CONFIG.max_allowed}"
+    log.info("Configuration:")
+    log.info("  Job ID: %s", job_id)
+    log.info("  Output Prefix: %s", output_prefix)
+    log.info("  Min Quality: %s", min_quality_score)
+    log.info(
+        "  Quality Range: %s - %s",
+        QUALITY_CONFIG.min_allowed,
+        QUALITY_CONFIG.max_allowed,
     )
-    print(f"[GENIE-SIM-IMPORT]   Min Episodes Required: {min_episodes_required}")
-    print(f"[GENIE-SIM-IMPORT]   Enable Validation: {enable_validation}")
-    print(
-        "[GENIE-SIM-IMPORT]   Require LeRobot: "
-        f"{require_lerobot} (default={require_lerobot_resolution.default}, "
-        f"source={require_lerobot_resolution.source})"
+    log.info("  Min Episodes Required: %s", min_episodes_required)
+    log.info("  Enable Validation: %s", enable_validation)
+    log.info(
+        "  Require LeRobot: %s (default=%s, source=%s)",
+        require_lerobot,
+        require_lerobot_resolution.default,
+        require_lerobot_resolution.source,
     )
-    print(f"[GENIE-SIM-IMPORT]   LeRobot Skip Rate Max: {lerobot_skip_rate_max:.2f}%")
-    print(f"[GENIE-SIM-IMPORT]   GCS Uploads Enabled: {not disable_gcs_upload}")
-    print(
-        "[GENIE-SIM-IMPORT]   Firebase Uploads Enabled: "
-        f"{enable_firebase_upload} (disable_env={disable_firebase_upload})"
+    log.info("  LeRobot Skip Rate Max: %.2f%%", lerobot_skip_rate_max)
+    log.info("  GCS Uploads Enabled: %s", not disable_gcs_upload)
+    log.info(
+        "  Firebase Uploads Enabled: %s (disable_env=%s)",
+        enable_firebase_upload,
+        disable_firebase_upload,
     )
-    print(
-        "[GENIE-SIM-IMPORT]   Allow Partial Firebase Uploads: "
-        f"{allow_partial_firebase_uploads}"
+    log.info(
+        "  Allow Partial Firebase Uploads: %s",
+        allow_partial_firebase_uploads,
     )
-    print(f"[GENIE-SIM-IMPORT]   Wait for Completion: {wait_for_completion}")
-    print(f"[GENIE-SIM-IMPORT]   Fail on Partial Error: {fail_on_partial_error}\n")
+    log.info("  Wait for Completion: %s", wait_for_completion)
+    log.info("  Fail on Partial Error: %s", fail_on_partial_error)
 
     # Setup paths
     output_dir = _resolve_local_output_dir(
@@ -3148,19 +3168,17 @@ def main():
                     )
                     gate_failed = _quality_gate_failure_detected(gate_results)
                 except Exception as exc:
-                    print(
-                        f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}"
-                    )
+                    log.warning("Quality gate emission failed: %s", exc)
                     gate_failed = False
 
                 if gate_failed:
                     quality_gate_failures.append(robot_type)
                     result.success = False
                     result.errors.append("Quality gate failure")
-                    print(
-                        "[GENIE-SIM-IMPORT] ❌ Quality gate failure detected for "
-                        f"robot {robot_type}. "
-                        "Production mode enforces a non-zero exit."
+                    log.error(
+                        "Quality gate failure detected for robot %s. "
+                        "Production mode enforces a non-zero exit.",
+                        robot_type,
                     )
 
                 overall_success = overall_success and result.success
@@ -3234,9 +3252,9 @@ def main():
                     entry = payload["entry"]
                     if not result.success:
                         continue
-                    print(
-                        "[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage "
-                        f"for robot {robot_type}..."
+                    log.info(
+                        "Uploading episodes to Firebase Storage for robot %s...",
+                        robot_type,
                     )
                     try:
                         firebase_result = upload_episodes_with_retry(
@@ -3253,21 +3271,21 @@ def main():
                             robot_type=robot_type,
                             error=str(exc),
                         )
-                        print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
+                        log.error("Firebase upload failed: %s", exc)
                         raise
                     entry["firebase_upload"] = firebase_summary
-                    print(
-                        "[GENIE-SIM-IMPORT] Firebase upload complete: "
-                        f"uploaded={firebase_summary.get('uploaded', 0)} "
-                        f"skipped={firebase_summary.get('skipped', 0)} "
-                        f"reuploaded={firebase_summary.get('reuploaded', 0)} "
-                        f"failed={firebase_summary.get('failed', 0)} "
-                        f"total={firebase_summary.get('total_files', 0)}"
+                    log.info(
+                        "Firebase upload complete: uploaded=%s skipped=%s reuploaded=%s failed=%s total=%s",
+                        firebase_summary.get("uploaded", 0),
+                        firebase_summary.get("skipped", 0),
+                        firebase_summary.get("reuploaded", 0),
+                        firebase_summary.get("failed", 0),
+                        firebase_summary.get("total_files", 0),
                     )
             elif enable_firebase_upload and firebase_upload_suppressed:
-                print(
-                    "[GENIE-SIM-IMPORT] Firebase uploads suppressed "
-                    f"(reason={suppression_reason})."
+                log.warning(
+                    "Firebase uploads suppressed (reason=%s).",
+                    suppression_reason,
                 )
 
             if partial_failure:
@@ -3331,20 +3349,18 @@ def main():
                 robot_entries,
                 quality_settings,
             )
-            print(
-                "[GENIE-SIM-IMPORT] Combined import manifest: "
-                f"{combined_manifest_path}"
-            )
+            log.info("Combined import manifest: %s", combined_manifest_path)
 
             if overall_success:
-                print(f"[GENIE-SIM-IMPORT] ✅ Multi-robot import succeeded")
+                log.info("Multi-robot import succeeded")
                 sys.exit(0)
-            print(f"[GENIE-SIM-IMPORT] ❌ Multi-robot import failed")
+            log.error("Multi-robot import failed")
             for entry in robot_entries:
                 if entry["errors"]:
-                    print(
-                        "[GENIE-SIM-IMPORT]   - "
-                        f"{entry['robot_type']}: {', '.join(entry['errors'])}"
+                    log.error(
+                        "  - %s: %s",
+                        entry["robot_type"],
+                        ", ".join(entry["errors"]),
                     )
             sys.exit(1)
 
@@ -3368,20 +3384,19 @@ def main():
             )
             gate_failed = _quality_gate_failure_detected(gate_results)
         except Exception as exc:
-            print(f"[GENIE-SIM-IMPORT] ⚠️  Quality gate emission failed: {exc}")
+            log.warning("Quality gate emission failed: %s", exc)
             gate_failed = False
 
         if gate_failed:
             result.success = False
             result.errors.append("Quality gate failure")
-            print(
-                "[GENIE-SIM-IMPORT] ❌ Quality gate failure detected. "
-                "Production mode enforces a non-zero exit."
+            log.error(
+                "Quality gate failure detected. Production mode enforces a non-zero exit."
             )
             if enable_firebase_upload:
-                print(
-                    "[GENIE-SIM-IMPORT] Firebase uploads suppressed due to "
-                    "quality gate failure (reason=quality_gate_failure)."
+                log.warning(
+                    "Firebase uploads suppressed due to quality gate failure "
+                    "(reason=quality_gate_failure)."
                 )
             if job_metadata is not None:
                 job_summary = job_metadata.setdefault("job_summary", {})
@@ -3398,11 +3413,11 @@ def main():
                 )
 
         if result.success:
-            print(f"[GENIE-SIM-IMPORT] ✅ Import succeeded")
-            print(f"[GENIE-SIM-IMPORT] Episodes imported: {result.episodes_passed_validation}")
-            print(f"[GENIE-SIM-IMPORT] Average quality: {result.average_quality_score:.2f}")
+            log.info("Import succeeded")
+            log.info("Episodes imported: %s", result.episodes_passed_validation)
+            log.info("Average quality: %.2f", result.average_quality_score)
             if enable_firebase_upload:
-                print("[GENIE-SIM-IMPORT] Uploading episodes to Firebase Storage...")
+                log.info("Uploading episodes to Firebase Storage...")
                 try:
                     firebase_result = upload_episodes_with_retry(
                         episodes_dir=result.output_dir,
@@ -3416,29 +3431,29 @@ def main():
                         robot_type="default",
                         error=str(exc),
                     )
-                    print(f"[GENIE-SIM-IMPORT] ❌ Firebase upload failed: {exc}")
+                    log.error("Firebase upload failed: %s", exc)
                     raise
                 upload_summary = firebase_result.summary
                 _update_import_manifest_firebase_summary(
                     result.import_manifest_path,
                     upload_summary,
                 )
-                print(
-                    "[GENIE-SIM-IMPORT] Firebase upload complete: "
-                    f"uploaded={upload_summary.get('uploaded', 0)} "
-                    f"skipped={upload_summary.get('skipped', 0)} "
-                    f"reuploaded={upload_summary.get('reuploaded', 0)} "
-                    f"failed={upload_summary.get('failed', 0)} "
-                    f"total={upload_summary.get('total_files', 0)}"
+                log.info(
+                    "Firebase upload complete: uploaded=%s skipped=%s reuploaded=%s failed=%s total=%s",
+                    upload_summary.get("uploaded", 0),
+                    upload_summary.get("skipped", 0),
+                    upload_summary.get("reuploaded", 0),
+                    upload_summary.get("failed", 0),
+                    upload_summary.get("total_files", 0),
                 )
             sys.exit(0)
         else:
-            print(f"[GENIE-SIM-IMPORT] ❌ Import failed")
+            log.error("Import failed")
             for error in result.errors:
-                print(f"[GENIE-SIM-IMPORT]   - {error}")
+                log.error("  - %s", error)
             sys.exit(1)
     except Exception as exc:
-        print(f"[GENIE-SIM-IMPORT] ERROR: Import failed with exception: {exc}")
+        log.exception("Import failed with exception: %s", exc)
         send_alert(
             event_type="geniesim_import_job_fatal_exception",
             summary="Genie Sim import job failed with an unhandled exception",
