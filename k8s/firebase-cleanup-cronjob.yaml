@@ -50,6 +50,8 @@ spec:
               envFrom:
                 - configMapRef:
                     name: firebase-cleanup-config
+                - configMapRef:
+                    name: cost-tracking-pricing
               env:
                 - name: FIREBASE_STORAGE_BUCKET
                   valueFrom:
@@ -71,3 +73,11 @@ spec:
                       optional: true
                 - name: PYTHONUNBUFFERED
                   value: "1"
+              volumeMounts:
+                - name: cost-tracking-pricing
+                  mountPath: /etc/blueprint/pricing
+                  readOnly: true
+          volumes:
+            - name: cost-tracking-pricing
+              configMap:
+                name: cost-tracking-pricing-files

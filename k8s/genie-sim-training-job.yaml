@@ -80,6 +80,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: genie-sim-training-config
+            - configMapRef:
+                name: cost-tracking-pricing
 
           env:
             - name: BUCKET
@@ -113,6 +115,9 @@ spec:
               mountPath: /dev/shm
             - name: workspace
               mountPath: /workspace
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
 
       volumes:
         - name: gcs-credentials
@@ -127,3 +132,6 @@ spec:
         - name: workspace
           emptyDir:
             sizeLimit: 50Gi
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files

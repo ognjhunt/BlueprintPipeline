@@ -59,6 +59,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: genie-sim-submit-config
+            - configMapRef:
+                name: cost-tracking-pricing
 
           env:
             - name: BUCKET
@@ -112,6 +114,9 @@ spec:
               readOnly: true
             - name: gcs-mount
               mountPath: /mnt/gcs
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
 
       volumes:
         - name: gcs-credentials
@@ -119,3 +124,6 @@ spec:
             secretName: gcs-service-account
         - name: gcs-mount
           emptyDir: {}
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files

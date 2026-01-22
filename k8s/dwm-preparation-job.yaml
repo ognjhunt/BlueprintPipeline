@@ -108,6 +108,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: dwm-config
+            - configMapRef:
+                name: cost-tracking-pricing
             - secretRef:
                 name: dwm-secrets
 
@@ -145,6 +147,9 @@ spec:
               mountPath: /root/.cache/ov
             - name: output
               mountPath: /output
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
 
       volumes:
         - name: gcs-credentials
@@ -160,3 +165,6 @@ spec:
         - name: output
           emptyDir:
             sizeLimit: 50Gi
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files
