@@ -51,6 +51,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: genie-sim-import-webhook-config
+            - configMapRef:
+                name: cost-tracking-pricing
           env:
             - name: PROJECT_ID
               value: "${PROJECT_ID}"
@@ -71,6 +73,10 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          volumeMounts:
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
           resources:
             requests:
               cpu: "4"
@@ -78,6 +84,10 @@ spec:
             limits:
               cpu: "8"
               memory: "32Gi"
+      volumes:
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files
 
 ---
 apiVersion: v1

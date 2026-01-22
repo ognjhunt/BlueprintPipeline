@@ -1,0 +1,50 @@
+# =============================================================================
+# Kubernetes ConfigMaps: Cost Tracking Pricing
+# =============================================================================
+# Stores production pricing configuration for cost tracking, including
+# per-episode pricing overrides and GPU hourly rate tables.
+#
+# Apply:
+#   kubectl apply -f k8s/cost-tracking-pricing.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-tracking-pricing
+  namespace: blueprint
+data:
+  COST_TRACKING_PRICING_PATH: "/etc/blueprint/pricing/cost-tracking-pricing.json"
+  GENIESIM_JOB_COST: "1.25"
+  GENIESIM_EPISODE_COST: "0.03"
+  GENIESIM_GPU_RATE_TABLE_PATH: "/etc/blueprint/pricing/geniesim-gpu-rate-table.json"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-tracking-pricing-files
+  namespace: blueprint
+data:
+  cost-tracking-pricing.json: |
+    {
+      "gemini_input_per_1k": 0.00125,
+      "gemini_output_per_1k": 0.005,
+      "cloud_run_vcpu_second": 0.000024,
+      "cloud_run_memory_gb_second": 0.0000025,
+      "cloud_build_minute": 0.003,
+      "gcs_storage_gb_month": 0.02,
+      "gcs_operation_class_a": 0.0000005,
+      "gcs_operation_class_b": 0.00000004,
+      "geniesim_job": 1.25,
+      "geniesim_episode": 0.03
+    }
+  geniesim-gpu-rate-table.json: |
+    {
+      "default": {
+        "g5.xlarge": 1.006,
+        "g5.2xlarge": 1.212,
+        "g5.12xlarge": 4.384,
+        "a2-highgpu-1g": 1.685
+      }
+    }

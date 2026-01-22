@@ -9,6 +9,7 @@ commonLabels:
   failover: "true"
 
 resources:
+  - ../cost-tracking-pricing.yaml
   - ../episode-generation-job.yaml
   - ../genie-sim-export-job.yaml
   - ../genie-sim-gpu-job.yaml
