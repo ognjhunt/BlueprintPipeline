@@ -110,6 +110,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: dream2flow-config
+            - configMapRef:
+                name: cost-tracking-pricing
             - secretRef:
                 name: dream2flow-secrets
 
@@ -150,6 +152,9 @@ spec:
             # Model cache for vision models
             - name: model-cache
               mountPath: /models
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
 
       volumes:
         - name: gcs-credentials
@@ -168,3 +173,6 @@ spec:
         - name: model-cache
           emptyDir:
             sizeLimit: 20Gi
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files

@@ -89,6 +89,62 @@ echo -n "<new-value>" | gcloud secrets versions add PIPELINE_API_KEY --data-file
 
 Ensure IAM bindings allow the runtime service accounts to access the secret versions.
 
+## Step 2a: Configure cost tracking pricing
+
+Production cost tracking **requires** real pricing inputs. Store the pricing files in a ConfigMap
+or Secret Manager and wire the env vars into production jobs so `CostTracker` loads them.
+
+### Required environment variables
+- `COST_TRACKING_PRICING_PATH` or `COST_TRACKING_PRICING_JSON` (pricing overrides file/payload)
+- `GENIESIM_JOB_COST`
+- `GENIESIM_EPISODE_COST`
+- `GENIESIM_GPU_RATE_TABLE_PATH` or `GENIESIM_GPU_RATE_TABLE` (GPU-hour pricing; optional if
+  `GENIESIM_GPU_HOURLY_RATE` is set)
+
+### Example pricing files
+
+`cost-tracking-pricing.json` (per-job + per-episode overrides):
+```json
+{
+  "gemini_input_per_1k": 0.00125,
+  "gemini_output_per_1k": 0.005,
+  "cloud_run_vcpu_second": 0.000024,
+  "cloud_run_memory_gb_second": 0.0000025,
+  "cloud_build_minute": 0.003,
+  "gcs_storage_gb_month": 0.02,
+  "gcs_operation_class_a": 0.0000005,
+  "gcs_operation_class_b": 0.00000004,
+  "geniesim_job": 1.25,
+  "geniesim_episode": 0.03
+}
+```
+
+`geniesim-gpu-rate-table.json` (GPU-hour pricing):
+```json
+{
+  "default": {
+    "g5.xlarge": 1.006,
+    "g5.2xlarge": 1.212,
+    "g5.12xlarge": 4.384,
+    "a2-highgpu-1g": 1.685
+  }
+}
+```
+
+### Kubernetes example
+
+Apply the bundled ConfigMaps and ensure production jobs mount them:
+
+```bash
+kubectl apply -f k8s/cost-tracking-pricing.yaml
+```
+
+Confirm the runtime env includes:
+
+```bash
+kubectl -n blueprint get configmap cost-tracking-pricing -o yaml
+```
+
 ### Automated rotation (Cloud Scheduler + Cloud Run job)
 
 The pipeline supports automated secret rotation via a Cloud Run job and a Cloud Scheduler trigger managed by
