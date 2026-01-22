@@ -1,472 +1,269 @@
-// Genie Sim Data Collection gRPC Service Definition
-//
-// This protobuf file defines the gRPC service for communication between
-// the BlueprintPipeline and the Genie Sim data collection server running
-// inside Isaac Sim.
-//
-// Based on the Genie Sim 3.0 architecture:
-// - Repository: https://github.com/AgibotTech/genie_sim
-// - Port: configured via GENIESIM_PORT (defaults to the adapter port)
-//
-// Usage:
-//   1. Generate Python stubs: python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. geniesim_grpc.proto
-//   2. Import: from geniesim_grpc_pb2 import *
-//             from geniesim_grpc_pb2_grpc import *
-
 syntax = "proto3";
+package aimdk.protocol;
 
-package geniesim;
+import public "aimdk/protocol/common/se3_pose.proto";
+import public "aimdk/protocol/common/joint.proto";
 
-option python_package = "geniesim_grpc";
-
-// =============================================================================
-// Common Types
-// =============================================================================
-
-// 3D vector for positions
-message Vector3 {
-  double x = 1;
-  double y = 2;
-  double z = 3;
+/**
+ * @brief Label information
+ */
+message SemanticData {
+    string name = 2;
+    bytes data = 3;
+}
+message SemanticDict {
+    int32 label_id = 2;
+    string label_name = 3;
+}
+/**
+ * @brief Compressed image data
+ */
+message CamImage {
+  string format = 2;
+  bytes data = 3;
 }
 
-// Quaternion for orientations (w, x, y, z)
-message Quaternion {
-  double w = 1;
-  double x = 2;
-  double y = 3;
-  double z = 4;
+/**
+ * @brief Camera intrinsics
+ */
+message CamInfo {
+  int32 width = 1;
+  int32 height = 2;
+  float ppx = 3;
+  float ppy = 4;
+  float fx = 5;
+  float fy = 6;
 }
 
-// 6D pose (position + orientation)
-message Pose {
-  Vector3 position = 1;
-  Quaternion orientation = 2;
+message CameraRsp {
+    CamInfo camera_info = 1;
+    CamImage rgb_camera = 2;
+    CamImage depth_camera = 3;
+    SemanticData semantic_mask = 4;
+    repeated SemanticDict label_dict = 5;
 }
 
-// Joint state
-message JointState {
-  repeated double positions = 1;
-  repeated double velocities = 2;
-  repeated double efforts = 3;
-  repeated string names = 4;
+message JointRsp {
+    repeated JointState left_arm = 1;
+    repeated JointState right_arm = 2;
+    repeated JointState body_arm = 3;
+
 }
 
-// =============================================================================
-// Camera Data
-// =============================================================================
+message ObjectRsp {
+    SE3RpyPose object_pose = 7;
+}
+message GripperRsp {
+    SE3RpyPose left_gripper = 1;
+    SE3RpyPose right_gripper = 2;
 
-// Camera image data
-message CameraImage {
-  bytes rgb_data = 1;           // RGB image data (compressed PNG or raw)
-  bytes depth_data = 2;         // Depth image data (16-bit or float)
-  bytes semantic_data = 3;      // Semantic segmentation labels
-  bytes instance_data = 4;      // Instance segmentation labels
-  int32 width = 5;
-  int32 height = 6;
-  string encoding = 7;          // "rgb8", "rgba8", "32fc1", etc.
-  string camera_id = 8;
-  Pose camera_pose = 9;
-  double timestamp = 10;
 }
 
-// Multi-camera observation
-message CameraObservation {
-  repeated CameraImage images = 1;
+message CameraRequest{
+    bool render_depth = 1;
+    bool render_semantic = 2;
+    repeated string camera_prim_list = 3;
+    string additional_parameters = 4;
 }
 
-// =============================================================================
-// Robot State
-// =============================================================================
 
-// Full robot state observation
-message RobotState {
-  JointState joint_state = 1;
-  Pose end_effector_pose = 2;
-  double gripper_width = 3;
-  bool gripper_is_grasping = 4;
-  repeated Pose link_poses = 5;
-  repeated string link_names = 6;
+message GripperRequest{
+    bool left = 1;
+    bool right = 2;
 }
 
-// =============================================================================
-// Object State
-// =============================================================================
 
-// Object state in scene
-message ObjectState {
-  string object_id = 1;
-  Pose pose = 2;
-  Vector3 linear_velocity = 3;
-  Vector3 angular_velocity = 4;
-  Vector3 dimensions = 5;
-  string category = 6;
-  bool is_articulated = 7;
-  repeated double joint_positions = 8;  // For articulated objects
+/**
+ * @brief request
+ */
+message GetObservationReq {
+    bool isCam = 1;
+    CameraRequest CameraReq = 2;
+    bool isJoint = 3;
+    bool isPose = 4;
+    repeated string objectPrims = 5;
+    bool isGripper = 6;
+    GripperRequest gripperReq = 7;
+    bool startRecording = 8;
+    bool stopRecording = 9;
+    int32 fps = 10;
+    string task_name = 11;
+}
+/**
+ * @brief response
+ */
+message GetObservationRsp {
+    repeated CameraRsp camera = 1;
+    repeated ObjectRsp pose = 2;
+    JointRsp joint = 3;
+    GripperRsp gripper = 4;
+    string recordingState = 5;
 }
 
-// Scene state (all objects)
-message SceneState {
-  repeated ObjectState objects = 1;
-  double simulation_time = 2;
-  int64 step_count = 3;
+message ResetReq{
+    bool reset = 1;
+}
+message ResetRsp{
+    string msg = 1;
+}
+message AttachReq{
+    repeated string obj_prims = 1;
+    bool is_right = 2;
+}
+message AttachRsp{
+    string msg = 1;
+}
+message DetachReq{
+    bool detach = 1;
+}
+message DetachRsp{
+    string msg = 1;
+}
+message RemoveObstacleReq {
+    repeated string obj_prims = 1;
+}
+message RemoveObstacleRsp {
+    string msg = 1;
+}
+message TaskStatusReq{
+    bool isSuccess = 1;
+    repeated int32 failStep =2;
+
+}
+message TaskStatusRsp{
+    string msg = 1;
 }
 
-// =============================================================================
-// Commands
-// =============================================================================
-
-// Command types (mirrors CommandType enum in local_framework.py)
-enum CommandType {
-  COMMAND_UNKNOWN = 0;
-  GET_CAMERA_DATA = 1;
-  LINEAR_MOVE = 2;
-  SET_JOINT_POSITION = 3;
-  GET_GRIPPER_STATE = 4;
-  GET_OBJECT_POSE = 5;
-  ADD_OBJECT = 6;
-  GET_ROBOT_LINK_POSE = 7;
-  GET_JOINT_POSITION = 8;
-  SET_GRIPPER_STATE = 9;
-  GET_OBSERVATION = 11;
-  RESET = 12;
-  ATTACH_OBJ = 13;
-  DETACH_OBJ = 14;
-  TASK_STATUS = 16;
-  EXIT = 17;
-  GET_EE_POSE = 18;
-  GET_IK_STATUS = 19;
-  INIT_ROBOT = 21;
-  ADD_CAMERA = 22;
-  SET_OBJECT_POSE = 24;
-  SET_TRAJECTORY_LIST = 25;
-  GET_OBJECT_JOINT = 26;
-  SET_TARGET_POINT = 27;
-  SET_FRAME_STATE = 28;
-  SET_LIGHT = 30;
-  GET_PART_DOF_JOINT = 32;
-  SET_LINEAR_VELOCITY = 33;
-  SET_CODE_FACE_ORIENTATION = 34;
-  ATTACH_OBJ_TO_PARENT = 50;
-  DETACH_OBJ_FROM_PARENT = 51;
-  REMOVE_OBJS_FROM_OBSTACLE = 52;
-  SET_TASK_METRIC = 53;
-  STORE_CURRENT_STATE = 54;
-  PLAYBACK = 55;
-  GET_CHECKER_STATUS = 56;
+message ExitReq{
+    bool exit = 1;
+}
+message ExitRsp{
+    string msg = 2;
 }
 
-// =============================================================================
-// Request/Response Messages
-// =============================================================================
-
-// Generic command request
-message CommandRequest {
-  CommandType command_type = 1;
-  bytes payload = 2;  // JSON-encoded command-specific data
+message InitRobotReq{
+    string robot_cfg_file = 1;
+    string robot_usd_path = 2;
+    string scene_usd_path = 3;
+    SE3RpyPose robot_pose = 4;
+    string stand_type = 5;
+    float stand_size_x = 6;
+    float stand_size_y = 7;
+    repeated JointCommand joint_cmd=8;
 }
-
-// Generic command response
-message CommandResponse {
-  bool success = 1;
-  string error_message = 2;
-  bytes payload = 3;  // JSON-encoded response data
+message InitRobotRsp{
+    string msg = 1;
 }
-
-// --- Observation Request/Response ---
-
-message GetObservationRequest {
-  bool include_images = 1;
-  bool include_depth = 2;
-  bool include_semantic = 3;
-  repeated string camera_ids = 4;
+message AddCameraReq{
+    string camera_prim = 1;
+    SE3RpyPose camera_pose = 2;
+    float focus_length = 3;
+    float horizontal_aperture = 4;
+    float vertical_aperture = 5;
+    int32 width = 6;
+    int32 height = 7;
+    bool is_local = 8;
 }
-
-message GetObservationResponse {
-  bool success = 1;
-  RobotState robot_state = 2;
-  SceneState scene_state = 3;
-  CameraObservation camera_observation = 4;
-  double timestamp = 5;
+message AddCameraRsp{
+    string msg = 1;
 }
-
-// --- Joint Position Control ---
-
-message SetJointPositionRequest {
-  repeated double positions = 1;
-  repeated double velocities = 2;  // Optional velocity targets
-  double duration = 3;             // Optional move duration
-  bool wait_for_completion = 4;
+message ObjectPose {
+    string prim_path = 1;
+    SE3RpyPose pose = 2;
 }
-
-message SetJointPositionResponse {
-  bool success = 1;
-  string error_message = 2;
-  JointState current_state = 3;
+message ObjectJoint {
+    string prim_path = 1;
+    repeated JointCommand joint_cmd = 2;
 }
+message SetObjectPoseReq {
+    repeated ObjectPose object_pose = 1;
+    repeated JointCommand joint_cmd = 2;
+    repeated ObjectJoint object_joint = 3;
 
-message GetJointPositionRequest {
-  // Empty - just get current positions
 }
-
-message GetJointPositionResponse {
-  bool success = 1;
-  JointState joint_state = 2;
+message SetObjectPoseRsp{
+    string msg = 1;
 }
-
-// --- End-Effector Control ---
-
-message GetEEPoseRequest {
-  string ee_link_name = 1;  // Optional, uses default if empty
+message SetTrajectoryListReq {
+  repeated SE3RpyPose trajectory_point = 1;
+  bool is_block = 2;
 }
-
-message GetEEPoseResponse {
-  bool success = 1;
-  Pose pose = 2;
+message SetTrajectoryListRsp {
+  string msg = 1;
 }
-
-message LinearMoveRequest {
-  Pose target_pose = 1;
-  double velocity = 2;
-  double acceleration = 3;
-  bool wait_for_completion = 4;
+message SetFrameStateReq {
+    string frame_state = 1;
 }
-
-message LinearMoveResponse {
-  bool success = 1;
-  string error_message = 2;
-  bool planning_success = 3;
-  bool execution_success = 4;
+message SetFrameStateRsp{
+    string msg = 1;
 }
-
-// --- Gripper Control ---
-
-message SetGripperStateRequest {
-  double width = 1;           // Target gripper width
-  double force = 2;           // Grasping force
-  bool wait_for_completion = 3;
+message SetTaskMetricReq {
+    string metric = 1;
 }
-
-message SetGripperStateResponse {
-  bool success = 1;
-  string error_message = 2;
-  double current_width = 3;
-  bool is_grasping = 4;
+message SetTaskMetricRsp{
+    string msg = 1;
 }
-
-message GetGripperStateRequest {
-  // Empty
+message MaterialInfo {
+    string object_prim = 1;
+    string material_name = 2;
+    string material_path = 3;
+    string label_name = 4;
 }
-
-message GetGripperStateResponse {
-  bool success = 1;
-  double width = 2;
-  bool is_grasping = 3;
-  double force = 4;
+message SetMaterailReq {
+    repeated MaterialInfo materials = 1;
 }
-
-// --- Object Manipulation ---
-
-message GetObjectPoseRequest {
-  string object_id = 1;
+message SetMaterialRsp {
+    string msg = 1;
 }
-
-message GetObjectPoseResponse {
-  bool success = 1;
-  Pose pose = 2;
-  string error_message = 3;
+message LightCfg {
+    string light_type = 1;
+    string light_prim = 2;
+    float light_temperature = 3;
+    float light_intensity = 4;
+    Rpy light_rotation = 5;
+    string light_texture = 6;
 }
-
-message SetObjectPoseRequest {
-  string object_id = 1;
-  Pose pose = 2;
+message SetLightReq {
+    repeated LightCfg lights = 1;
 }
-
-message SetObjectPoseResponse {
-  bool success = 1;
-  string error_message = 2;
+message SetLightRsp {
+    string msg = 1;
 }
-
-message AttachObjectRequest {
-  string object_id = 1;
-  string link_name = 2;  // Robot link to attach to
+message StoreCurrentStateReq {
+    string playback_id = 1;
 }
-
-message AttachObjectResponse {
-  bool success = 1;
-  string error_message = 2;
+message StoreCurrentStateRsp {
+    string msg = 1;
 }
-
-message DetachObjectRequest {
-  string object_id = 1;
+message PlaybackReq {
+    string playback_id = 1;
 }
-
-message DetachObjectResponse {
-  bool success = 1;
-  string error_message = 2;
+message PlaybackRsp {
+    string msg = 1;
 }
-
-// --- Trajectory Execution ---
-
-message TrajectoryPoint {
-  repeated double positions = 1;
-  repeated double velocities = 2;
-  repeated double accelerations = 3;
-  double time_from_start = 4;
+message GetCheckerStatusReq {
+    string checker = 1;
 }
-
-message SetTrajectoryRequest {
-  repeated TrajectoryPoint points = 1;
-  double execution_speed = 2;  // Speed multiplier (1.0 = normal)
-  bool wait_for_completion = 3;
+message GetCheckerStatusRsp {
+    string msg = 1;
 }
-
-message SetTrajectoryResponse {
-  bool success = 1;
-  string error_message = 2;
-  int32 points_executed = 3;
-  double execution_time = 4;
-}
-
-// --- Recording ---
-
-message StartRecordingRequest {
-  string episode_id = 1;
-  string output_directory = 2;
-  repeated string camera_ids = 3;
-  double fps = 4;
-  bool include_depth = 5;
-  bool include_semantic = 6;
-}
-
-message StartRecordingResponse {
-  bool success = 1;
-  string error_message = 2;
-  string recording_path = 3;
-}
-
-message StopRecordingRequest {
-  bool save_metadata = 1;
-}
-
-message StopRecordingResponse {
-  bool success = 1;
-  string error_message = 2;
-  int32 frames_recorded = 3;
-  double duration_seconds = 4;
-  string recording_path = 5;
-}
-
-// --- Environment Control ---
-
-message ResetRequest {
-  bool reset_robot = 1;
-  bool reset_objects = 2;
-  string scene_path = 3;  // Optional: load new scene
-}
-
-message ResetResponse {
-  bool success = 1;
-  string error_message = 2;
-}
-
-message InitRobotRequest {
-  string robot_type = 1;
-  string urdf_path = 2;
-  Pose base_pose = 3;
-  repeated double initial_joint_positions = 4;
-}
-
-message InitRobotResponse {
-  bool success = 1;
-  string error_message = 2;
-  int32 num_joints = 3;
-  repeated string joint_names = 4;
-}
-
-// --- Camera Setup ---
-
-message AddCameraRequest {
-  string camera_id = 1;
-  Pose pose = 2;
-  string parent_link = 3;  // Attach to robot link (empty = world frame)
-  int32 width = 4;
-  int32 height = 5;
-  double fov = 6;
-  double near_clip = 7;
-  double far_clip = 8;
-}
-
-message AddCameraResponse {
-  bool success = 1;
-  string error_message = 2;
-}
-
-// --- IK Status ---
-
-message GetIKStatusRequest {
-  Pose target_pose = 1;
-  repeated double seed_positions = 2;
-}
-
-message GetIKStatusResponse {
-  bool success = 1;
-  bool ik_solvable = 2;
-  repeated double solution = 3;
-  string error_message = 4;
-}
-
-// --- Task Status ---
-
-message TaskStatusRequest {
-  string task_id = 1;
-}
-
-message TaskStatusResponse {
-  bool success = 1;
-  string status = 2;  // "pending", "running", "completed", "failed"
-  double progress = 3;
-  string error_message = 4;
-}
-
-// =============================================================================
-// Service Definition
-// =============================================================================
-
-// Main Genie Sim data collection service
-service GenieSimService {
-  // Observation and State
-  rpc GetObservation(GetObservationRequest) returns (GetObservationResponse);
-  rpc GetJointPosition(GetJointPositionRequest) returns (GetJointPositionResponse);
-  rpc GetEEPose(GetEEPoseRequest) returns (GetEEPoseResponse);
-  rpc GetGripperState(GetGripperStateRequest) returns (GetGripperStateResponse);
-  rpc GetObjectPose(GetObjectPoseRequest) returns (GetObjectPoseResponse);
-  rpc GetIKStatus(GetIKStatusRequest) returns (GetIKStatusResponse);
-  rpc GetTaskStatus(TaskStatusRequest) returns (TaskStatusResponse);
-
-  // Robot Control
-  rpc SetJointPosition(SetJointPositionRequest) returns (SetJointPositionResponse);
-  rpc LinearMove(LinearMoveRequest) returns (LinearMoveResponse);
-  rpc SetGripperState(SetGripperStateRequest) returns (SetGripperStateResponse);
-  rpc SetTrajectory(SetTrajectoryRequest) returns (SetTrajectoryResponse);
-  rpc InitRobot(InitRobotRequest) returns (InitRobotResponse);
-
-  // Object Manipulation
-  rpc SetObjectPose(SetObjectPoseRequest) returns (SetObjectPoseResponse);
-  rpc AttachObject(AttachObjectRequest) returns (AttachObjectResponse);
-  rpc DetachObject(DetachObjectRequest) returns (DetachObjectResponse);
-
-  // Recording
-  rpc StartRecording(StartRecordingRequest) returns (StartRecordingResponse);
-  rpc StopRecording(StopRecordingRequest) returns (StopRecordingResponse);
-
-  // Environment
-  rpc Reset(ResetRequest) returns (ResetResponse);
-  rpc AddCamera(AddCameraRequest) returns (AddCameraResponse);
-
-  // Generic command (for less common operations)
-  rpc SendCommand(CommandRequest) returns (CommandResponse);
-
-  // Streaming observation (for continuous data collection)
-  rpc StreamObservations(GetObservationRequest) returns (stream GetObservationResponse);
+service SimObservationService {
+    rpc get_observation(GetObservationReq) returns(GetObservationRsp);
+    rpc reset(ResetReq) returns(ResetRsp);
+    rpc attach_obj(AttachReq) returns(AttachRsp);
+    rpc detach_obj(DetachReq) returns(DetachRsp);
+    rpc task_status(TaskStatusReq) returns(TaskStatusRsp);
+    rpc exit(ExitReq) returns(ExitRsp);
+    rpc init_robot(InitRobotReq) returns(InitRobotRsp);
+    rpc add_camera(AddCameraReq) returns(AddCameraRsp);
+    rpc set_object_pose(SetObjectPoseReq) returns(SetObjectPoseRsp);
+    rpc set_trajectory_list(SetTrajectoryListReq) returns(SetTrajectoryListRsp);
+    rpc set_frame_state(SetFrameStateReq) returns(SetFrameStateRsp);
+    rpc set_task_metric(SetTaskMetricReq) returns(SetTaskMetricRsp);
+    rpc set_material(SetMaterailReq) returns(SetMaterialRsp);
+    rpc set_light(SetLightReq) returns(SetLightRsp);
+    rpc remove_objs_from_obstacle(RemoveObstacleReq) returns(RemoveObstacleRsp);
+    rpc store_current_state(StoreCurrentStateReq) returns(StoreCurrentStateRsp);
+    rpc playback(PlaybackReq) returns(PlaybackRsp);
+    rpc get_checker_status(GetCheckerStatusReq) returns(GetCheckerStatusRsp);
 }
