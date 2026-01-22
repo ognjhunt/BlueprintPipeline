@@ -85,6 +85,14 @@ jobs:
           path: logs/ci/geniesim
           if-no-files-found: warn
 
+      - name: Upload Genie Sim JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: geniesim-staging-e2e-junit
+          path: logs/ci/geniesim/pytest-junit.xml
+          if-no-files-found: warn
+
       - name: Shutdown Genie Sim server
         if: always()
         run: |
