@@ -1,3 +1,4 @@
+import logging
 import sys
 from pathlib import Path
 
@@ -61,6 +62,62 @@ def test_production_temp_dirs_raise_for_explicit_paths(monkeypatch):
         match=r"GENIESIM_RECORDINGS_DIR.*GENIESIM_LOG_DIR",
     ):
         lf.GenieSimConfig.from_env()
+
+
+@pytest.mark.unit
+def test_start_server_honors_startup_timeout(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("ALLOW_GENIESIM_MOCK", "1")
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    recording_dir = tmp_path / "recordings"
+    recording_dir.mkdir()
+
+    config = lf.GenieSimConfig(
+        geniesim_root=tmp_path / "missing_geniesim",
+        log_dir=log_dir,
+        recording_dir=recording_dir,
+        server_startup_timeout_s=0.2,
+        server_startup_poll_s=0.05,
+    )
+    framework = lf.GenieSimLocalFramework(config=config, verbose=False)
+
+    class DummyProc:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(lf.subprocess, "Popen", lambda *args, **kwargs: DummyProc())
+    monkeypatch.setattr(framework._client, "_check_server_socket", lambda: True)
+    monkeypatch.setattr(framework._client, "connect", lambda: True)
+    monkeypatch.setattr(
+        framework._client,
+        "get_server_info",
+        lambda timeout=None: lf.GrpcCallResult(
+            success=False,
+            available=True,
+            error="not ready",
+        ),
+    )
+
+    current_time = {"value": 0.0}
+
+    def fake_time():
+        current_time["value"] += 0.05
+        return current_time["value"]
+
+    monkeypatch.setattr(lf.time, "time", fake_time)
+    monkeypatch.setattr(lf.time, "sleep", lambda *_: None)
+
+    with caplog.at_level(logging.ERROR):
+        result = framework.start_server(wait_for_ready=True)
+
+    assert result is False
+    assert (
+        f"{config.server_startup_timeout_s}s" in caplog.text
+        or f"{config.server_startup_timeout_s:.1f}s" in caplog.text
+    )
 
 
 @pytest.mark.unit
