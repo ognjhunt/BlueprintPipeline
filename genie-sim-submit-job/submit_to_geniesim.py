@@ -22,6 +22,9 @@ Environment Variables:
     FIREBASE_SERVICE_ACCOUNT_PATH: Firebase service account JSON path (used by import job uploads)
     FIREBASE_UPLOAD_PREFIX: Firebase prefix for Genie Sim episodes (default: datasets; used by import job uploads)
     GENIESIM_UPLOAD_TIMEOUT_S: Optional overall timeout in seconds for uploading Genie Sim output
+    GENIESIM_PARALLEL_ROBOTS: Enable parallel local runs across robot types
+    GENIESIM_MAX_PARALLEL_ROBOTS: Maximum concurrent robot runs when parallel is enabled
+    GENIESIM_PARALLEL_USE_PROCESSES: Use process pool for robot runs (GPU isolation)
 """
 
 import hashlib
@@ -30,7 +33,7 @@ import logging
 import os
 import sys
 import uuid
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -598,6 +601,24 @@ def _resolve_robot_types(default_robot: str) -> list[str]:
     return [legacy_robot] if legacy_robot else [default_robot]
 
 
+def _resolve_parallel_robot_settings(robot_types: list[str]) -> tuple[bool, int, bool]:
+    parallel_enabled = parse_bool_env(os.getenv("GENIESIM_PARALLEL_ROBOTS"), default=False)
+    max_parallel_env = os.getenv("GENIESIM_MAX_PARALLEL_ROBOTS")
+    if max_parallel_env is None:
+        max_parallel = len(robot_types)
+    else:
+        max_parallel = _safe_int(
+            max_parallel_env,
+            default=len(robot_types),
+            field_name="GENIESIM_MAX_PARALLEL_ROBOTS",
+        )
+    max_parallel = max(1, min(max_parallel, len(robot_types)))
+    use_processes = parse_bool_env(os.getenv("GENIESIM_PARALLEL_USE_PROCESSES"), default=False)
+    if max_parallel <= 1:
+        parallel_enabled = False
+    return parallel_enabled, max_parallel, use_processes
+
+
 def _normalize_tags(tags: Any) -> list[str]:
     if isinstance(tags, list):
         return [str(tag).strip() for tag in tags if str(tag).strip()]
@@ -612,6 +633,18 @@ def _resolve_scene_tags(scene_manifest: Dict[str, Any]) -> list[str]:
     scene_tags = metadata.get("scene_tags")
     resolved = _normalize_tags(tags) + _normalize_tags(scene_tags)
     return sorted(set(resolved))
+
+
+def _build_failure_result(
+    task_config: Dict[str, Any],
+    error_message: str,
+) -> DataCollectionResult:
+    result = DataCollectionResult(
+        success=False,
+        task_name=task_config.get("name", "unknown"),
+    )
+    result.errors.append(error_message)
+    return result
 
 
 def _scene_hash_percentage(scene_id: str) -> int:
@@ -1012,6 +1045,205 @@ def _run_local_data_collection_with_handshake(
     return result
 
 
+def _run_robot_collection_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
+    robot_type = payload["robot_type"]
+    result = _run_local_data_collection_with_handshake(
+        scene_manifest=payload["scene_manifest"],
+        task_config=payload["task_config"],
+        output_dir=payload["output_dir"],
+        robot_type=robot_type,
+        episodes_per_task=payload["episodes_per_task"],
+        verbose=payload["debug_mode"],
+        expected_server_version=payload["expected_server_version"],
+        required_capabilities=payload["required_capabilities"],
+    )
+    completed_at = datetime.utcnow().isoformat() + "Z"
+    server_info = getattr(result, "server_info", {}) if result else {}
+    return {
+        "robot_type": robot_type,
+        "result": result,
+        "completed_at": completed_at,
+        "server_info": server_info,
+    }
+
+
+def _run_robot_local_collections(
+    *,
+    robot_types: list[str],
+    scene_manifest: Dict[str, Any],
+    task_config: Dict[str, Any],
+    episodes_per_task: int,
+    local_root: Path,
+    episodes_output_prefix: str,
+    job_id: str,
+    debug_mode: bool,
+    expected_server_version: str,
+    required_capabilities: set[str],
+    parallel_enabled: bool,
+    max_parallel: int,
+    use_processes: bool,
+) -> tuple[
+    Dict[str, Optional[DataCollectionResult]],
+    Dict[str, Optional[datetime]],
+    Dict[str, Dict[str, Any]],
+    Dict[str, Path],
+]:
+    multi_robot = len(robot_types) > 1
+    local_run_results: Dict[str, Optional[DataCollectionResult]] = {
+        robot: None for robot in robot_types
+    }
+    local_run_ends: Dict[str, Optional[datetime]] = {robot: None for robot in robot_types}
+    server_info_by_robot: Dict[str, Dict[str, Any]] = {}
+    output_dirs: Dict[str, Path] = {}
+
+    run_payloads: list[Dict[str, Any]] = []
+    for current_robot in robot_types:
+        robot_output_prefix = episodes_output_prefix
+        if multi_robot:
+            robot_output_prefix = f"{episodes_output_prefix}/{current_robot}"
+        output_dir = local_root / robot_output_prefix / f"geniesim_{job_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dirs[current_robot] = output_dir
+
+        config_dir = output_dir / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        scene_manifest_path = config_dir / "scene_manifest.json"
+        task_config_path = config_dir / "task_config.json"
+        _write_local_json(scene_manifest_path, scene_manifest)
+        _write_local_json(task_config_path, task_config)
+
+        run_payloads.append(
+            {
+                "robot_type": current_robot,
+                "scene_manifest": scene_manifest,
+                "task_config": task_config,
+                "output_dir": output_dir,
+                "episodes_per_task": episodes_per_task,
+                "debug_mode": debug_mode,
+                "expected_server_version": expected_server_version,
+                "required_capabilities": required_capabilities,
+            }
+        )
+
+    if parallel_enabled and len(robot_types) > 1:
+        executor_cls = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
+        with executor_cls(max_workers=max_parallel) as executor:
+            futures = {
+                executor.submit(_run_robot_collection_worker, payload): payload["robot_type"]
+                for payload in run_payloads
+            }
+            for future in as_completed(futures):
+                robot = futures[future]
+                try:
+                    payload = future.result()
+                except Exception as exc:
+                    local_run_results[robot] = _build_failure_result(
+                        task_config,
+                        str(exc),
+                    )
+                    local_run_ends[robot] = datetime.utcnow()
+                    continue
+                result = payload.get("result")
+                local_run_results[robot] = result
+                completed_at = payload.get("completed_at")
+                if completed_at:
+                    local_run_ends[robot] = datetime.fromisoformat(completed_at.replace("Z", ""))
+                else:
+                    local_run_ends[robot] = datetime.utcnow()
+                server_info = payload.get("server_info") or {}
+                if server_info:
+                    server_info_by_robot[robot] = server_info
+    else:
+        for payload in run_payloads:
+            robot = payload["robot_type"]
+            try:
+                result_payload = _run_robot_collection_worker(payload)
+            except Exception as exc:
+                local_run_results[robot] = _build_failure_result(
+                    task_config,
+                    str(exc),
+                )
+                local_run_ends[robot] = datetime.utcnow()
+                continue
+            result = result_payload.get("result")
+            local_run_results[robot] = result
+            completed_at = result_payload.get("completed_at")
+            if completed_at:
+                local_run_ends[robot] = datetime.fromisoformat(completed_at.replace("Z", ""))
+            else:
+                local_run_ends[robot] = datetime.utcnow()
+            server_info = result_payload.get("server_info") or {}
+            if server_info:
+                server_info_by_robot[robot] = server_info
+
+    return local_run_results, local_run_ends, server_info_by_robot, output_dirs
+
+
+def _build_local_execution_by_robot(
+    *,
+    robot_types: list[str],
+    local_run_results: Dict[str, Optional[DataCollectionResult]],
+    output_dirs: Dict[str, Path],
+    server_info_by_robot: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        current_robot: {
+            "success": bool(result and result.success),
+            "episodes_collected": _safe_int(
+                getattr(result, "episodes_collected", None),
+                field_name=f"{current_robot}.episodes_collected",
+            )
+            if result
+            else 0,
+            "episodes_passed": _safe_int(
+                getattr(result, "episodes_passed", None),
+                field_name=f"{current_robot}.episodes_passed",
+            )
+            if result
+            else 0,
+            "collision_free_rate": _safe_float(
+                getattr(result, "collision_free_rate", None),
+                field_name=f"{current_robot}.collision_free_rate",
+            )
+            if result
+            else None,
+            "collision_free_episodes": _safe_int(
+                getattr(result, "collision_free_episodes", None),
+                field_name=f"{current_robot}.collision_free_episodes",
+            )
+            if result
+            else 0,
+            "collision_info_episodes": _safe_int(
+                getattr(result, "collision_info_episodes", None),
+                field_name=f"{current_robot}.collision_info_episodes",
+            )
+            if result
+            else 0,
+            "task_success_rate": _safe_float(
+                getattr(result, "task_success_rate", None),
+                field_name=f"{current_robot}.task_success_rate",
+            )
+            if result
+            else None,
+            "task_success_episodes": _safe_int(
+                getattr(result, "task_success_episodes", None),
+                field_name=f"{current_robot}.task_success_episodes",
+            )
+            if result
+            else 0,
+            "task_success_info_episodes": _safe_int(
+                getattr(result, "task_success_info_episodes", None),
+                field_name=f"{current_robot}.task_success_info_episodes",
+            )
+            if result
+            else 0,
+            "output_dir": str(output_dirs.get(current_robot)) if output_dirs else None,
+            "server_info": server_info_by_robot.get(current_robot),
+        }
+        for current_robot in robot_types
+    }
+
+
 def main() -> int:
     debug_mode = _resolve_debug_mode()
     if debug_mode:
@@ -1168,6 +1400,7 @@ def main() -> int:
     job_status = "submitted"
     server_info_by_robot: Dict[str, Dict[str, Any]] = {}
     output_dirs: Dict[str, Path] = {}
+    parallel_enabled, max_parallel, use_processes = _resolve_parallel_robot_settings(robot_types)
     use_gcs_fuse = False
     local_root: Optional[Path] = None
     skip_local_run = False
@@ -1270,36 +1503,29 @@ def main() -> int:
         if scene_usd_path:
             scene_manifest["usd_path"] = str(scene_usd_path)
             logger.info("[GENIESIM-SUBMIT-JOB] Using USD scene path: %s", scene_usd_path)
+        (
+            local_run_results,
+            local_run_ends,
+            server_info_by_robot,
+            output_dirs,
+        ) = _run_robot_local_collections(
+            robot_types=robot_types,
+            scene_manifest=scene_manifest,
+            task_config=task_config_local,
+            episodes_per_task=episodes_per_task,
+            local_root=local_root,
+            episodes_output_prefix=episodes_output_prefix,
+            job_id=job_id,
+            debug_mode=debug_mode,
+            expected_server_version=EXPECTED_GENIESIM_SERVER_VERSION,
+            required_capabilities=REQUIRED_GENIESIM_CAPABILITIES,
+            parallel_enabled=parallel_enabled,
+            max_parallel=max_parallel,
+            use_processes=use_processes,
+        )
         for current_robot in robot_types:
-            robot_output_prefix = episodes_output_prefix
-            if multi_robot:
-                robot_output_prefix = f"{episodes_output_prefix}/{current_robot}"
-            output_dir = local_root / robot_output_prefix / f"geniesim_{job_id}"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_dirs[current_robot] = output_dir
-
-            config_dir = output_dir / "config"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            scene_manifest_path = config_dir / "scene_manifest.json"
-            task_config_path = config_dir / "task_config.json"
-            _write_local_json(scene_manifest_path, scene_manifest)
-            _write_local_json(task_config_path, task_config_local)
-
-            local_run_result = _run_local_data_collection_with_handshake(
-                scene_manifest=scene_manifest,
-                task_config=task_config_local,
-                output_dir=output_dir,
-                robot_type=current_robot,
-                episodes_per_task=episodes_per_task,
-                verbose=debug_mode,
-                expected_server_version=EXPECTED_GENIESIM_SERVER_VERSION,
-                required_capabilities=REQUIRED_GENIESIM_CAPABILITIES,
-            )
-            local_run_results[current_robot] = local_run_result
-            local_run_ends[current_robot] = datetime.utcnow()
-            server_info = getattr(local_run_result, "server_info", {}) if local_run_result else {}
+            server_info = server_info_by_robot.get(current_robot)
             if server_info:
-                server_info_by_robot[current_robot] = server_info
                 logger.info(
                     "[GENIESIM-SUBMIT-JOB] Genie Sim server info: "
                     f"version={server_info.get('version')}, "
@@ -1323,8 +1549,8 @@ def main() -> int:
                 else 0,
                 "errors": getattr(result, "errors", []) if result else [],
             }
-            for robot, result in local_run_results.items()
-            if not result or not result.success
+            for robot in robot_types
+            if not (result := local_run_results.get(robot)) or not result.success
         }
         if robot_failures:
             submission_message = "Local Genie Sim execution failed."
@@ -1747,62 +1973,12 @@ def main() -> int:
         "server_info": server_info_by_robot if multi_robot else server_info_by_robot.get(robot_type),
     }
     if local_run_results:
-        local_execution["by_robot"] = {
-            current_robot: {
-                "success": bool(result and result.success),
-                "episodes_collected": _safe_int(
-                    getattr(result, "episodes_collected", None),
-                    field_name=f"{current_robot}.episodes_collected",
-                )
-                if result
-                else 0,
-                "episodes_passed": _safe_int(
-                    getattr(result, "episodes_passed", None),
-                    field_name=f"{current_robot}.episodes_passed",
-                )
-                if result
-                else 0,
-                "collision_free_rate": _safe_float(
-                    getattr(result, "collision_free_rate", None),
-                    field_name=f"{current_robot}.collision_free_rate",
-                )
-                if result
-                else None,
-                "collision_free_episodes": _safe_int(
-                    getattr(result, "collision_free_episodes", None),
-                    field_name=f"{current_robot}.collision_free_episodes",
-                )
-                if result
-                else 0,
-                "collision_info_episodes": _safe_int(
-                    getattr(result, "collision_info_episodes", None),
-                    field_name=f"{current_robot}.collision_info_episodes",
-                )
-                if result
-                else 0,
-                "task_success_rate": _safe_float(
-                    getattr(result, "task_success_rate", None),
-                    field_name=f"{current_robot}.task_success_rate",
-                )
-                if result
-                else None,
-                "task_success_episodes": _safe_int(
-                    getattr(result, "task_success_episodes", None),
-                    field_name=f"{current_robot}.task_success_episodes",
-                )
-                if result
-                else 0,
-                "task_success_info_episodes": _safe_int(
-                    getattr(result, "task_success_info_episodes", None),
-                    field_name=f"{current_robot}.task_success_info_episodes",
-                )
-                if result
-                else 0,
-                "output_dir": str(output_dirs.get(current_robot)) if output_dirs else None,
-                "server_info": server_info_by_robot.get(current_robot),
-            }
-            for current_robot, result in local_run_results.items()
-        }
+        local_execution["by_robot"] = _build_local_execution_by_robot(
+            robot_types=robot_types,
+            local_run_results=local_run_results,
+            output_dirs=output_dirs,
+            server_info_by_robot=server_info_by_robot,
+        )
     job_payload["local_execution"] = local_execution
 
     _write_json_blob(storage_client, bucket, job_output_path, job_payload)
