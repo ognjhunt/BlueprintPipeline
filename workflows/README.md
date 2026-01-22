@@ -47,6 +47,7 @@ default unless explicitly enabled (e.g., `ENABLE_DREAM2FLOW=true`,
 - `SECONDARY_WORKFLOW_REGION`: secondary region used when primary health checks fail. Defaults to `us-east1`.
 - `WORKFLOW_REGION`: legacy override for workflows that do not yet use primary/secondary routing.
 - `PRIMARY_BUCKET`: default bucket for manual or scheduler-driven workflows (replaces hardcoded bucket names).
+- `FIREBASE_STORAGE_BUCKET`: required in production workflow environments that enable Firebase uploads for Genie Sim export/import.
 
 ## Region routing logic
 Selected workflows perform regional health checks before invoking Cloud Run jobs:
