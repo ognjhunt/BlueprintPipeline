@@ -146,6 +146,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: episode-gen-config
+            - configMapRef:
+                name: cost-tracking-pricing
             - secretRef:
                 name: episode-gen-secrets
 
@@ -194,6 +196,9 @@ spec:
             # Output directory
             - name: output
               mountPath: /output
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
 
       volumes:
         - name: gcs-credentials
@@ -209,6 +214,9 @@ spec:
         - name: output
           emptyDir:
             sizeLimit: 100Gi
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files
 
 ---
 # =============================================================================
@@ -251,6 +259,8 @@ spec:
               envFrom:
                 - configMapRef:
                     name: episode-gen-config
+                - configMapRef:
+                    name: cost-tracking-pricing
                 - secretRef:
                     name: episode-gen-secrets
               env:
@@ -276,6 +286,9 @@ spec:
                   readOnly: true
                 - name: dshm
                   mountPath: /dev/shm
+                - name: cost-tracking-pricing
+                  mountPath: /etc/blueprint/pricing
+                  readOnly: true
 
           volumes:
             - name: gcs-credentials
@@ -285,3 +298,6 @@ spec:
               emptyDir:
                 medium: Memory
                 sizeLimit: 16Gi
+            - name: cost-tracking-pricing
+              configMap:
+                name: cost-tracking-pricing-files
