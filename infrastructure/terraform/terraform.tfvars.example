@@ -108,6 +108,9 @@ labels = {
 # Secret rotation automation
 # =============================================================================
 
+# Firebase service account JSON (creates firebase-service-account secret when set)
+# firebase_service_account_json = "{\"type\":\"service_account\",...}"
+
 # Container image for the Cloud Run rotation job
 secret_rotation_job_image = "us-docker.pkg.dev/your-gcp-project-id/pipeline/secret-rotation:latest"
 

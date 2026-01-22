@@ -695,6 +695,9 @@ main:
                                   - name: gcs-credentials
                                     mountPath: /secrets/gcs
                                     readOnly: true
+                                  - name: firebase-credentials
+                                    mountPath: /secrets/firebase
+                                    readOnly: true
                                   - name: dshm
                                     mountPath: /dev/shm
                                   - name: isaac-cache
@@ -703,6 +706,9 @@ main:
                               - name: gcs-credentials
                                 secret:
                                   secretName: gcs-service-account
+                              - name: firebase-credentials
+                                secret:
+                                  secretName: firebase-service-account
                               - name: dshm
                                 emptyDir:
                                   medium: Memory

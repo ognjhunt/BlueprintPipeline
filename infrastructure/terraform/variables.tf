@@ -215,6 +215,13 @@ variable "master_cidr" {
 # Secret rotation automation
 # =============================================================================
 
+variable "firebase_service_account_json" {
+  type        = string
+  description = "Firebase service account JSON payload for the Kubernetes secret (optional if managed externally)."
+  default     = ""
+  sensitive   = true
+}
+
 variable "secret_rotation_job_image" {
   type        = string
   description = "Container image for the secret rotation Cloud Run job"
