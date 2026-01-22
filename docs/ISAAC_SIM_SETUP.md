@@ -180,6 +180,28 @@ STAGING_SCENE_ID=<scene_id> \
 /isaac-sim/python.sh -m pytest tests/test_pipeline_e2e_staging.py -v
 ```
 
+## Genie Sim staging E2E (GPU host)
+
+To validate the Genie Sim export → submit → collect → import flow against a real
+Genie Sim gRPC server, run the staging E2E test on a GPU host with Isaac Sim
+installed. This uses the same staging environment variables configured in the CI
+workflow.
+
+Prereqs:
+- A GPU host with Isaac Sim available at `/isaac-sim/python.sh`.
+- A reachable Genie Sim gRPC server (example: `docker compose -f docker-compose.geniesim-server.yaml up -d`).
+- Staging scene data under `STAGING_DATA_ROOT/scenes/<scene_id>` with USD + replicator outputs.
+
+```bash
+RUN_GENIESIM_STAGING_E2E=1 \
+STAGING_DATA_ROOT=/mnt/gcs \
+STAGING_SCENE_ID=<scene_id> \
+STAGING_ENVIRONMENT_TYPE=kitchen \
+GENIESIM_HOST=localhost \
+GENIESIM_PORT=50051 \
+/isaac-sim/python.sh -m pytest tests/test_geniesim_staging_e2e.py -v
+```
+
 ## Production Mode
 
 For production episode generation with full physics validation:
