@@ -43,6 +43,32 @@ def _get_emulator_endpoint() -> Optional[str]:
     return f"http://{emulator_host}"
 
 
+def _preflight_firebase_credentials() -> None:
+    bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
+    if not bucket_name:
+        raise ValueError("FIREBASE_STORAGE_BUCKET is required to initialize Firebase storage")
+
+    if _get_emulator_endpoint():
+        return
+
+    service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+    service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+    if service_account_json:
+        try:
+            json.loads(service_account_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON") from exc
+    elif service_account_path:
+        path = Path(service_account_path).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"FIREBASE_SERVICE_ACCOUNT_PATH not found: {path}")
+    else:
+        raise ValueError(
+            "Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH to "
+            "initialize Firebase storage"
+        )
+
+
 def init_firebase() -> firebase_admin.App:
     """Initialize the Firebase app singleton."""
     global _FIREBASE_APP
@@ -374,6 +400,8 @@ def upload_episodes_to_firebase(
     if not episodes_dir.exists():
         raise FileNotFoundError(f"Episodes directory not found: {episodes_dir}")
 
+    _preflight_firebase_credentials()
+
     file_paths = [
         file_path
         for file_path in sorted(episodes_dir.rglob("*"))
@@ -406,6 +434,8 @@ def upload_firebase_files(
             "verification_failed": [],
             "verification_strategy": "sha256_metadata+md5_base64",
         }
+
+    _preflight_firebase_credentials()
 
     for file_path in file_paths:
         if not file_path.exists():
