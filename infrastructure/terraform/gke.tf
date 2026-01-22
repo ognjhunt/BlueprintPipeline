@@ -438,6 +438,29 @@ resource "kubernetes_service_account" "pipeline" {
   ]
 }
 
+# Firebase service account secret (mounted by workflow jobs)
+resource "kubernetes_secret" "firebase_service_account" {
+  count = var.firebase_service_account_json != "" ? 1 : 0
+
+  metadata {
+    name      = "firebase-service-account"
+    namespace = kubernetes_namespace.blueprint.metadata[0].name
+
+    labels = {
+      environment = var.environment
+      managed_by  = "terraform"
+    }
+  }
+
+  type = "Opaque"
+
+  string_data = {
+    "service-account.json" = var.firebase_service_account_json
+  }
+
+  depends_on = [kubernetes_namespace.blueprint]
+}
+
 # Resource quotas
 resource "kubernetes_resource_quota" "blueprint" {
   metadata {
