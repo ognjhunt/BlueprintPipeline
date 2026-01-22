@@ -65,6 +65,8 @@ Environment Variables:
     GENIESIM_MAX_STALLS: Max stalled episodes before server restart (default: 2)
     GENIESIM_STALL_BACKOFF_S: Backoff between stall handling attempts (default: 5)
     GENIESIM_COLLECTION_TIMEOUT_S: Abort data collection if total runtime exceeds this timeout (default: unset)
+    GENIESIM_STARTUP_TIMEOUT_S: Startup timeout in seconds for server readiness (default: 120)
+    GENIESIM_STARTUP_POLL_S: Poll interval in seconds for server readiness (default: 2)
     GENIESIM_CLEANUP_TMP: Remove Genie Sim temp directories after a run (default: 1 for local, 0 in production)
     GENIESIM_VALIDATE_FRAMES: Validate recorded frames before saving (default: 0)
     GENIESIM_FAIL_ON_FRAME_VALIDATION: Fail episode when frame validation errors exist (default: 0)
@@ -309,6 +311,8 @@ class GenieSimConfig(BaseModel):
     stall_timeout_s: StrictFloat = 30.0
     max_stalls: StrictInt = 2
     stall_backoff_s: StrictFloat = 5.0
+    server_startup_timeout_s: StrictFloat = 120.0
+    server_startup_poll_s: StrictFloat = 2.0
     max_duration_seconds: Optional[StrictFloat] = None
     validate_frames: StrictBool = False
     fail_on_frame_validation: StrictBool = False
@@ -347,6 +351,8 @@ class GenieSimConfig(BaseModel):
             ("stall_timeout_s", "GENIESIM_STALL_TIMEOUT_S"),
             ("max_stalls", "GENIESIM_MAX_STALLS"),
             ("stall_backoff_s", "GENIESIM_STALL_BACKOFF_S"),
+            ("server_startup_timeout_s", "GENIESIM_STARTUP_TIMEOUT_S"),
+            ("server_startup_poll_s", "GENIESIM_STARTUP_POLL_S"),
             ("max_duration_seconds", "GENIESIM_COLLECTION_TIMEOUT_S"),
             ("validate_frames", "GENIESIM_VALIDATE_FRAMES"),
             ("fail_on_frame_validation", "GENIESIM_FAIL_ON_FRAME_VALIDATION"),
@@ -2452,7 +2458,8 @@ class GenieSimLocalFramework:
         scene_usd_path: Optional[Path] = None,
         task_config_path: Optional[Path] = None,
         wait_for_ready: bool = True,
-        timeout: float = 120.0,
+        timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
     ) -> bool:
         """
         Start the Genie Sim data collection server.
@@ -2463,7 +2470,8 @@ class GenieSimLocalFramework:
             scene_usd_path: Path to USD scene file
             task_config_path: Path to task configuration JSON
             wait_for_ready: Wait for server to be ready
-            timeout: Timeout for waiting
+            timeout: Timeout for waiting (defaults to config server_startup_timeout_s)
+            poll_interval: Poll interval for readiness (defaults to config server_startup_poll_s)
 
         Returns:
             True if server started successfully
@@ -2569,12 +2577,49 @@ class GenieSimLocalFramework:
 
         # Wait for server to be ready
         if wait_for_ready:
+            effective_timeout = (
+                self.config.server_startup_timeout_s if timeout is None else timeout
+            )
+            effective_poll = (
+                self.config.server_startup_poll_s if poll_interval is None else poll_interval
+            )
+            if effective_poll <= 0:
+                self.log(
+                    "Invalid startup poll interval; defaulting to 0.5s",
+                    "WARNING",
+                )
+                effective_poll = 0.5
+
             start_time = time.time()
-            while time.time() - start_time < timeout:
-                if self.is_server_running():
-                    self._status = GenieSimServerStatus.READY
-                    self.log("Server is ready!")
-                    return True
+            socket_reachable = False
+            last_grpc_error: Optional[str] = None
+
+            def _check_grpc_ready() -> Tuple[bool, Optional[str]]:
+                if not self._client._have_grpc:
+                    return True, "gRPC stubs unavailable; skipping readiness check"
+                if not self._client.connect():
+                    return False, "gRPC channel not ready"
+                server_info = self._client.get_server_info(timeout=5.0)
+                if not server_info.available:
+                    return False, server_info.error or "gRPC unavailable"
+                if not server_info.success:
+                    return False, server_info.error or "gRPC readiness check failed"
+                return True, None
+
+            while time.time() - start_time < effective_timeout:
+                if not socket_reachable:
+                    socket_reachable = self._client._check_server_socket()
+                    if socket_reachable:
+                        self.log(
+                            "Server socket reachable; waiting for gRPC readiness..."
+                        )
+                if socket_reachable:
+                    grpc_ready, grpc_error = _check_grpc_ready()
+                    if grpc_ready:
+                        self._status = GenieSimServerStatus.READY
+                        self.log("Server is ready!")
+                        return True
+                    last_grpc_error = grpc_error
 
                 # Check if process exited
                 if self._server_process.poll() is not None:
@@ -2582,9 +2627,20 @@ class GenieSimLocalFramework:
                     self._status = GenieSimServerStatus.ERROR
                     return False
 
-                time.sleep(2)
+                time.sleep(effective_poll)
 
-            self.log(f"Server did not become ready within {timeout}s", "ERROR")
+            if not socket_reachable:
+                self.log(
+                    f"Server socket not reachable within {effective_timeout}s",
+                    "ERROR",
+                )
+            else:
+                grpc_detail = f" ({last_grpc_error})" if last_grpc_error else ""
+                self.log(
+                    "Server socket reachable but gRPC not ready within "
+                    f"{effective_timeout}s{grpc_detail}",
+                    "ERROR",
+                )
             self._status = GenieSimServerStatus.ERROR
             return False
 
@@ -2627,7 +2683,13 @@ class GenieSimLocalFramework:
             self._server_process = None
             self._status = GenieSimServerStatus.NOT_RUNNING
 
-    def server_context(self, scene_usd_path: Optional[Path] = None):
+    def server_context(
+        self,
+        scene_usd_path: Optional[Path] = None,
+        *,
+        timeout_s: Optional[float] = None,
+        poll_s: Optional[float] = None,
+    ):
         """
         Context manager for automatic server lifecycle management.
 
@@ -2635,7 +2697,16 @@ class GenieSimLocalFramework:
             with framework.server_context(scene_path) as fw:
                 result = fw.run_data_collection(task_config)
         """
-        return _GenieSimServerContext(self, scene_usd_path)
+        if timeout_s is None:
+            timeout_s = self.config.server_startup_timeout_s
+        if poll_s is None:
+            poll_s = self.config.server_startup_poll_s
+        return _GenieSimServerContext(
+            self,
+            scene_usd_path,
+            timeout_s=timeout_s,
+            poll_s=poll_s,
+        )
 
     # =========================================================================
     # Client Connection
@@ -5236,12 +5307,25 @@ class GenieSimLocalFramework:
 class _GenieSimServerContext:
     """Context manager for Genie Sim server lifecycle."""
 
-    def __init__(self, framework: GenieSimLocalFramework, scene_usd_path: Optional[Path]):
+    def __init__(
+        self,
+        framework: GenieSimLocalFramework,
+        scene_usd_path: Optional[Path],
+        *,
+        timeout_s: Optional[float] = None,
+        poll_s: Optional[float] = None,
+    ):
         self.framework = framework
         self.scene_usd_path = scene_usd_path
+        self.timeout_s = timeout_s
+        self.poll_s = poll_s
 
     def __enter__(self) -> GenieSimLocalFramework:
-        self.framework.start_server(self.scene_usd_path)
+        self.framework.start_server(
+            self.scene_usd_path,
+            timeout=self.timeout_s,
+            poll_interval=self.poll_s,
+        )
         self.framework.connect()
         return self.framework
 

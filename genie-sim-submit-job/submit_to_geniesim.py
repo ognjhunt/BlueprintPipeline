@@ -987,7 +987,11 @@ def _run_local_data_collection_with_handshake(
             framework.disconnect()
     else:
         try:
-            with framework.server_context(Path(scene_usd) if scene_usd else None) as fw:
+            with framework.server_context(
+                Path(scene_usd) if scene_usd else None,
+                timeout_s=config.server_startup_timeout_s,
+                poll_s=config.server_startup_poll_s,
+            ) as fw:
                 server_info = _handshake_geniesim_server(
                     fw,
                     expected_server_version=expected_server_version,
