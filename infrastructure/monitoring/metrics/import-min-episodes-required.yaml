@@ -1,0 +1,15 @@
+# Log-based metric: blueprint_import_min_episodes_required
+name: blueprint_import_min_episodes_required
+description: "Configured minimum episodes required per Genie Sim import job."
+filter: >
+  resource.type="k8s_container" AND
+  resource.labels.namespace_name="blueprint" AND
+  jsonPayload.message=~"Min Episodes Required:"
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+valueExtractor: REGEXP_EXTRACT(jsonPayload.message, "Min Episodes Required: ([0-9]+)")
+labelExtractors:
+  job_id: EXTRACT(jsonPayload.job_id)
+  scene_id: EXTRACT(jsonPayload.scene_id)
