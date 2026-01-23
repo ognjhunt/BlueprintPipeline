@@ -130,3 +130,40 @@ def test_cost_tracker_uses_defaults_in_non_prod(
     assert cost_tracker.pricing["geniesim_episode"] == pytest.approx(
         tracker.DEFAULT_PRICING["geniesim_episode"]
     )
+
+
+@pytest.mark.unit
+def test_cost_tracker_raises_on_scene_quota_exceeded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COST_HARD_QUOTA_PER_SCENE_USD", "0.001")
+
+    cost_tracker = tracker.CostTracker(data_dir=tmp_path, enable_logging=False)
+
+    with pytest.raises(tracker.CostQuotaExceeded, match="Scene cost hard quota exceeded"):
+        cost_tracker.track_gemini_call("scene-1", tokens_in=1000, tokens_out=0)
+
+
+@pytest.mark.unit
+def test_cost_tracker_raises_on_total_quota_exceeded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COST_HARD_QUOTA_TOTAL_USD", "0.001")
+
+    cost_tracker = tracker.CostTracker(data_dir=tmp_path, enable_logging=False)
+
+    with pytest.raises(tracker.CostQuotaExceeded, match="Total cost hard quota exceeded"):
+        cost_tracker.track_gemini_call("scene-1", tokens_in=1000, tokens_out=0)
+
+
+@pytest.mark.unit
+def test_cost_tracker_rejects_invalid_quota_env_vars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COST_HARD_QUOTA_TOTAL_USD", "0")
+
+    with pytest.raises(ValueError, match="COST_HARD_QUOTA_TOTAL_USD must be greater than zero"):
+        tracker.CostTracker(data_dir=tmp_path, enable_logging=False)

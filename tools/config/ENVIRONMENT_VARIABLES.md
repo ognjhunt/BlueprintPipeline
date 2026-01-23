@@ -262,6 +262,10 @@ this order: `COST_TRACKING_PRICING_JSON/PATH` → `GENIESIM_JOB_COST` / `GENIESI
 | `COST_TRACKING_PRICING_PATH` | path | unset | Path to a JSON/YAML file that overrides pricing keys in the defaults file. |
 | `GENIESIM_JOB_COST` | float | unset | Override per-job Genie Sim pricing (required in production). |
 | `GENIESIM_EPISODE_COST` | float | unset | Override per-episode Genie Sim pricing (required in production). |
+| `COST_ALERT_PER_SCENE_USD` | float | unset | Soft alert threshold for a single scene's accumulated cost. |
+| `COST_ALERT_TOTAL_USD` | float | unset | Soft alert threshold for total accumulated cost. |
+| `COST_HARD_QUOTA_PER_SCENE_USD` | float | unset | Hard quota for a single scene's accumulated cost (job fails when exceeded). |
+| `COST_HARD_QUOTA_TOTAL_USD` | float | unset | Hard quota for total accumulated cost (job fails when exceeded). |
 
 **Example**:
 ```bash
