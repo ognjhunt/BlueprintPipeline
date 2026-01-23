@@ -467,11 +467,16 @@ class CostTracker:
                 else "dev defaults + geniesim env"
             )
 
-        _validate_pricing_values(self.pricing, source="effective pricing", required_fields=REQUIRED_PRICING_FIELDS)
+        _validate_pricing_values(
+            self.pricing,
+            source="effective pricing",
+            required_fields=REQUIRED_PRICING_FIELDS,
+        )
         _validate_geniesim_pricing(self.pricing)
 
         self.enable_logging = enable_logging
-        logger.info("Cost tracking pricing source: %s", pricing_source or "dev defaults")
+        self.pricing_source = pricing_source or "dev defaults"
+        logger.info("Cost tracking pricing source: %s", self.pricing_source)
 
         # In-memory cache
         self.entries: List[CostEntry] = []
