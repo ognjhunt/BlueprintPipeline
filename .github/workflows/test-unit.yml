@@ -158,6 +158,50 @@ jobs:
           check_name: Unit Test Results (Python ${{ matrix.python-version }})
           comment_mode: off
 
+  geniesim-mock-e2e:
+    name: Genie Sim Mock E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: unit-tests
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libgl1-mesa-glx \
+            libglib2.0-0
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install pytest pytest-timeout pytest-xdist pytest-mock
+          pip install -r tests/requirements.txt
+          pip install -r tools/requirements.txt || true
+          pip install -r simready-job/requirements.txt || true
+          pip install -r usd-assembly-job/requirements.txt || true
+          pip install -r replicator-job/requirements.txt || true
+
+      - name: Run Genie Sim mock E2E test
+        env:
+          PIPELINE_ENV: test
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          pytest tests/test_geniesim_mock_e2e.py \
+            -v \
+            --tb=short \
+            --durations=10
+
   gpu-tests:
     name: GPU Tests
     runs-on: [self-hosted, linux, gpu]
@@ -308,13 +352,17 @@ jobs:
   status-check:
     name: All Tests Passed
     if: always()
-    needs: [unit-tests, gpu-tests, lint, dependency-scan, sast-codeql]
+    needs: [unit-tests, geniesim-mock-e2e, gpu-tests, lint, dependency-scan, sast-codeql]
     runs-on: ubuntu-latest
     steps:
       - name: Check test results
         run: |
           if [[ "${{ needs.unit-tests.result }}" != "success" ]]; then
             echo "Unit tests failed"
+            exit 1
+          fi
+          if [[ "${{ needs.geniesim-mock-e2e.result }}" != "success" ]]; then
+            echo "Genie Sim mock E2E tests failed"
             exit 1
           fi
           echo "All tests passed!"

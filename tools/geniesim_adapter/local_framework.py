@@ -184,6 +184,55 @@ except ImportError:
     GRPC_STUBS_AVAILABLE = False
     grpc = None
     logger.warning("gRPC stubs not available - using legacy fallback")
+    _GRPC_PLACEHOLDER_NAMES = [
+        "AddCameraReq",
+        "AddCameraRsp",
+        "AttachReq",
+        "AttachRsp",
+        "CameraRequest",
+        "DetachReq",
+        "DetachRsp",
+        "ExitReq",
+        "ExitRsp",
+        "GetCheckerStatusReq",
+        "GetCheckerStatusRsp",
+        "GetObservationReq",
+        "GetObservationRsp",
+        "InitRobotReq",
+        "InitRobotRsp",
+        "LightCfg",
+        "ObjectPose",
+        "PlaybackReq",
+        "PlaybackRsp",
+        "RemoveObstacleReq",
+        "RemoveObstacleRsp",
+        "ResetReq",
+        "ResetRsp",
+        "SetFrameStateReq",
+        "SetFrameStateRsp",
+        "SetLightReq",
+        "SetLightRsp",
+        "SetObjectPoseReq",
+        "SetObjectPoseRsp",
+        "SetTaskMetricReq",
+        "SetTaskMetricRsp",
+        "SetTrajectoryListReq",
+        "SetTrajectoryListRsp",
+        "StoreCurrentStateReq",
+        "StoreCurrentStateRsp",
+        "TaskStatusReq",
+        "TaskStatusRsp",
+        "GripperRequest",
+        "SimObservationServiceStub",
+        "joint_pb2",
+        "rpy_pb2",
+        "se3_pose_pb2",
+        "vec3_pb2",
+        "joint_channel_pb2",
+        "joint_channel_pb2_grpc",
+    ]
+    for _name in _GRPC_PLACEHOLDER_NAMES:
+        globals()[_name] = None
 
 # Import cuRobo planner from episode-generation-job
 try:
@@ -5389,10 +5438,36 @@ class GenieSimLocalFramework:
                 "`pip install pyarrow` and retry."
             ) from exc
 
+        def _compute_v3_stats(parquet_path: Path) -> Optional[Dict[str, Any]]:
+            try:
+                table = pq.read_table(parquet_path)
+            except Exception as exc:
+                self.log(f"Failed to read LeRobot v3 parquet for stats: {exc}", "WARNING")
+                return None
+
+            stats: Dict[str, Any] = {}
+            for column_name in table.column_names:
+                column = table[column_name]
+                if not (pa.types.is_integer(column.type) or pa.types.is_floating(column.type)):
+                    continue
+                values = [value for value in column.to_pylist() if value is not None]
+                if not values:
+                    continue
+                values_array = np.array(values, dtype=np.float64)
+                stats[column_name] = {
+                    "min": float(values_array.min()),
+                    "max": float(values_array.max()),
+                    "mean": float(values_array.mean()),
+                    "std": float(values_array.std()),
+                }
+
+            return stats if stats else None
+
         output_dir.mkdir(parents=True, exist_ok=True)
-        lerobot_root = output_dir / "episodes" / "lerobot"
+        lerobot_root = output_dir
         data_dir = lerobot_root / "data" / "chunk-000"
         meta_dir = lerobot_root / "meta"
+        meta_episodes_dir = meta_dir / "episodes" / "chunk-000"
         data_dir.mkdir(parents=True, exist_ok=True)
         meta_dir.mkdir(parents=True, exist_ok=True)
 
@@ -5437,7 +5512,7 @@ class GenieSimLocalFramework:
         row_group_index = 0
 
         if resolved_format == LeRobotExportFormat.LEROBOT_V3:
-            v3_output_file = data_dir / "episodes.parquet"
+            v3_output_file = data_dir / "file-0000.parquet"
             parquet_writer = pq.ParquetWriter(v3_output_file, schema=schema, compression="zstd")
 
         for ep_file in episode_files:
@@ -5524,20 +5599,21 @@ class GenieSimLocalFramework:
                 "skipped": skipped_count,
                 "total_frames": total_frames,
                 "exported_at": datetime.utcnow().isoformat() + "Z",
-                "data_path": "episodes/lerobot/data",
+                "data_path": "data",
                 "chunking": {
                     "strategy": "aggregated",
                     "chunk_dir": "chunk-000",
                     "files": [
                         {
-                            "path": "chunk-000/episodes.parquet",
+                            "path": "chunk-000/file-0000.parquet",
                             "episodes": exported_count,
                         }
                     ],
                 },
                 "schema": schema_description,
                 "frame_counts": frame_counts,
-                "episode_index": "episodes/lerobot/meta/episode_index.json",
+                "episode_index": "meta/episode_index.json",
+                "episodes_meta": "meta/episodes/chunk-000/file-0000.parquet",
             }
         else:
             info = {
@@ -5548,7 +5624,7 @@ class GenieSimLocalFramework:
                 "skipped": skipped_count,
                 "total_frames": total_frames,
                 "exported_at": datetime.utcnow().isoformat() + "Z",
-                "data_path": "episodes/lerobot/data",
+                "data_path": "data",
                 "chunking": {"strategy": "single", "chunk_dir": "chunk-000"},
                 "schema": schema_description,
                 "frame_counts": frame_counts,
@@ -5559,6 +5635,36 @@ class GenieSimLocalFramework:
         if resolved_format == LeRobotExportFormat.LEROBOT_V3:
             with open(meta_dir / "episode_index.json", "w") as f:
                 json.dump(episode_index, f, indent=2)
+            meta_episodes_dir.mkdir(parents=True, exist_ok=True)
+            meta_episodes_file = meta_episodes_dir / "file-0000.parquet"
+            episode_rows = [
+                {
+                    "episode_id": episode_id,
+                    "frames": payload.get("frames"),
+                    "row_group": payload.get("row_group"),
+                    "task_id": payload.get("task_id"),
+                    "task_name": payload.get("task_name"),
+                }
+                for episode_id, payload in episode_index.items()
+            ]
+            meta_schema = pa.schema(
+                [
+                    ("episode_id", pa.string()),
+                    ("frames", pa.int64()),
+                    ("row_group", pa.int64()),
+                    ("task_id", pa.string()),
+                    ("task_name", pa.string()),
+                ]
+            )
+            meta_payload = {
+                "episode_id": [row.get("episode_id") for row in episode_rows],
+                "frames": [row.get("frames") for row in episode_rows],
+                "row_group": [row.get("row_group") for row in episode_rows],
+                "task_id": [row.get("task_id") for row in episode_rows],
+                "task_name": [row.get("task_name") for row in episode_rows],
+            }
+            meta_table = pa.Table.from_pydict(meta_payload, schema=meta_schema)
+            pq.write_table(meta_table, meta_episodes_file)
 
         dataset_info = {
             "format": "lerobot",
@@ -5568,12 +5674,20 @@ class GenieSimLocalFramework:
             "skipped": skipped_count,
             "total_frames": total_frames,
             "exported_at": datetime.utcnow().isoformat() + "Z",
-            "lerobot_info": "episodes/lerobot/meta/info.json",
+            "lerobot_info": "meta/info.json",
             "debug_json_output": False,
         }
 
         with open(output_dir / "dataset_info.json", "w") as f:
             json.dump(dataset_info, f, indent=2)
+
+        if resolved_format == LeRobotExportFormat.LEROBOT_V3 and v3_output_file:
+            try:
+                stats_payload = _compute_v3_stats(v3_output_file) or {}
+                with open(meta_dir / "stats.json", "w") as f:
+                    json.dump(stats_payload, f, indent=2)
+            except Exception as exc:
+                self.log(f"Failed to compute LeRobot v3 stats: {exc}", "WARNING")
 
         self.log(f"Exported {exported_count} episodes, skipped {skipped_count}")
 
