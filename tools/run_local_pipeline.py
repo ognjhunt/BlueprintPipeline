@@ -1230,10 +1230,6 @@ class LocalPipelineRunner:
         if run_validation and PipelineStep.VALIDATE not in steps:
             steps.append(PipelineStep.VALIDATE)
 
-        if PipelineStep.GENIESIM_SUBMIT in steps and PipelineStep.GENIESIM_IMPORT not in steps:
-            submit_index = steps.index(PipelineStep.GENIESIM_SUBMIT)
-            steps.insert(submit_index + 1, PipelineStep.GENIESIM_IMPORT)
-
         if resume_from is not None:
             if resume_from not in steps:
                 self.log(
