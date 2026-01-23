@@ -35,6 +35,7 @@ def _summarize_batch_results(
     failures = []
     skipped = []
     dlq_entries: List[Dict[str, Any]] = []
+    scene_reports: List[Dict[str, Any]] = []
     resolved_dlq_path = dlq_path or (reports_dir / "dead_letter_queue.json" if reports_dir else None)
 
     for result in results:
@@ -44,6 +45,14 @@ def _summarize_batch_results(
 
         if result.metadata and result.metadata.get("skipped"):
             skipped.append(result.metadata["scene_id"])
+
+        scene_reports.append({
+            "scene_id": result.scene_id,
+            "scene_dir": result.metadata.get("scene_dir") if result.metadata else None,
+            "status": result.status.value,
+            "quality_gate_report": str(report_path) if report_path else None,
+            "skipped": bool(result.metadata.get("skipped")) if result.metadata else False,
+        })
 
         if result.status != SceneStatus.SUCCESS:
             attempt_count = None
@@ -75,6 +84,7 @@ def _summarize_batch_results(
         "failed": sum(1 for r in results if r.status == SceneStatus.FAILED),
         "cancelled": sum(1 for r in results if r.status == SceneStatus.CANCELLED),
         "skipped": skipped,
+        "scene_reports": scene_reports,
         "failures": failures,
     }
 
