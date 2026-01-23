@@ -62,6 +62,22 @@
         "average_quality_score": {"type": "number"},
         "source": {"type": "string"},
         "converted_at": {"type": "string"},
+        "cost_summary": {
+          "type": "object",
+          "properties": {
+            "total_usd": {"type": "number"},
+            "categories": {
+              "type": "object",
+              "additionalProperties": {"type": "number"}
+            },
+            "by_job": {
+              "type": "object",
+              "additionalProperties": {"type": "number"}
+            },
+            "pricing_source": {"type": ["string", "null"]}
+          },
+          "additionalProperties": true
+        },
         "total_episodes": {"type": "integer"},
         "skipped_episodes": {"type": "integer"}
       }
