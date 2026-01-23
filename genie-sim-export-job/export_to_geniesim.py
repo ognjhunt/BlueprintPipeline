@@ -69,6 +69,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import sys
 import traceback
 import tempfile
@@ -238,6 +239,51 @@ def _compute_sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def _atomic_write_text(path: Path, data: str) -> None:
+    parent = path.parent
+    if parent.exists() and not parent.is_dir():
+        raise NotADirectoryError(f"Parent path exists but is not a directory: {parent}")
+    parent.mkdir(parents=True, exist_ok=True)
+
+    existing_mode = None
+    try:
+        existing_mode = path.stat().st_mode
+    except FileNotFoundError:
+        pass
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=parent,
+            delete=False,
+            prefix=f".{path.name}.",
+        ) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            tmp_file.write(data)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        if existing_mode is not None:
+            os.chmod(tmp_path, stat.S_IMODE(existing_mode))
+        os.replace(tmp_path, path)
+        try:
+            dir_fd = os.open(parent, os.O_DIRECTORY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _iter_files_sorted(root: Path) -> List[Path]:
     files = [path for path in root.rglob("*") if path.is_file()]
     return sorted(files, key=lambda path: path.as_posix())
@@ -305,7 +351,7 @@ def _update_export_manifest(
         "sha256": _compute_manifest_checksum(manifest),
     }
 
-    export_manifest_path.write_text(json.dumps(manifest, indent=2))
+    _atomic_write_text(export_manifest_path, json.dumps(manifest, indent=2))
 
 
 def _is_service_mode() -> bool:
@@ -929,8 +975,7 @@ def run_geniesim_export_job(
     if not dry_run:
         output_dir.mkdir(parents=True, exist_ok=True)
     merged_manifest_path = manifest_output_dir / "merged_scene_manifest.json"
-    with open(merged_manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
+    _atomic_write_text(merged_manifest_path, json.dumps(manifest, indent=2))
     print(f"[GENIESIM-EXPORT-JOB] Wrote merged manifest to: {merged_manifest_path}")
 
     print("[GENIESIM-EXPORT-JOB] Validating merged manifest...")
@@ -1853,7 +1898,7 @@ def run_geniesim_export_job(
                 marker_data["premium_feature_artifact_counts"] = premium_feature_artifact_counts
             if premium_artifacts_manifest:
                 marker_data["premium_feature_artifacts"] = premium_artifacts_manifest
-            marker_path.write_text(json.dumps(marker_data, indent=2))
+            _atomic_write_text(marker_path, json.dumps(marker_data, indent=2))
             print(f"\n[GENIESIM-EXPORT-JOB] ✓ Completion marker written with schema v{marker_data['export_schema_version']}")
 
             return 0
