@@ -3106,6 +3106,103 @@ def _write_video_frames(
     tmp_path.replace(output_path)
 
 
+class VideoValidationError(ValueError):
+    def __init__(self, message: str, details: Dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
+
+
+def _validate_video_output(
+    frames: List[np.ndarray],
+    output_path: Path,
+    *,
+    expected_height: int,
+    expected_width: int,
+) -> Dict[str, Any]:
+    if not frames:
+        return {
+            "passed": True,
+            "expected_frames": 0,
+            "actual_frames": 0,
+            "expected_resolution": {
+                "height": expected_height,
+                "width": expected_width,
+            },
+            "actual_resolution": None,
+        }
+    if importlib.util.find_spec("imageio") is None:
+        raise ImportError("imageio is required for video validation.")
+    import imageio
+
+    reader = imageio.get_reader(str(output_path))
+    try:
+        metadata = reader.get_meta_data() or {}
+        size = metadata.get("size") or metadata.get("source_size")
+        actual_width = None
+        actual_height = None
+        if size and len(size) == 2:
+            actual_width, actual_height = size
+        else:
+            first_frame = reader.get_data(0)
+            actual_height, actual_width = first_frame.shape[:2]
+
+        try:
+            actual_frames = reader.count_frames()
+        except Exception:
+            actual_frames = None
+        if actual_frames in (None, float("inf")):
+            actual_frames = sum(1 for _ in reader)
+
+        expected_frames = len(frames)
+        passed = True
+        errors: Dict[str, str] = {}
+
+        if actual_frames != expected_frames:
+            passed = False
+            errors["frame_count"] = (
+                f"Expected {expected_frames} frame(s), got {actual_frames}."
+            )
+        if (actual_height, actual_width) != (expected_height, expected_width):
+            passed = False
+            errors["resolution"] = (
+                "Expected "
+                f"{expected_width}x{expected_height}, got {actual_width}x{actual_height}."
+            )
+
+        return {
+            "passed": passed,
+            "expected_frames": expected_frames,
+            "actual_frames": actual_frames,
+            "expected_resolution": {
+                "height": expected_height,
+                "width": expected_width,
+            },
+            "actual_resolution": {
+                "height": actual_height,
+                "width": actual_width,
+            },
+            "errors": errors,
+        }
+    finally:
+        reader.close()
+
+
+def _append_conversion_failure(
+    conversion_error: Exception,
+    episode_id: str,
+    retry_attempts: int,
+) -> Dict[str, Any]:
+    failure_entry: Dict[str, Any] = {
+        "episode_id": episode_id,
+        "error": str(conversion_error),
+        "retry_attempts": retry_attempts,
+        "final_exception": repr(conversion_error),
+    }
+    if isinstance(conversion_error, VideoValidationError):
+        failure_entry["video_validation"] = conversion_error.details
+    return failure_entry
+
+
 def convert_to_lerobot(
     episodes_dir: Path,
     output_dir: Path,
@@ -3326,6 +3423,17 @@ def convert_to_lerobot(
                             fps=video_config.fps,
                             codec=video_codec,
                         )
+                        video_validation = _validate_video_output(
+                            frames,
+                            video_path,
+                            expected_height=video_config.height,
+                            expected_width=video_config.width,
+                        )
+                        if not video_validation["passed"]:
+                            raise VideoValidationError(
+                                "Video validation failed.",
+                                video_validation,
+                            )
                         video_paths[camera_id] = rel_path
 
                 # Convert to LeRobot schema
@@ -3423,12 +3531,11 @@ def convert_to_lerobot(
                 f"{ep_metadata.episode_id} after {retry_ctx.attempt} attempt(s): {conversion_error}"
             )
             conversion_failures.append(
-                {
-                    "episode_id": ep_metadata.episode_id,
-                    "error": str(conversion_error),
-                    "retry_attempts": retry_ctx.attempt,
-                    "final_exception": repr(conversion_error),
-                }
+                _append_conversion_failure(
+                    conversion_error,
+                    ep_metadata.episode_id,
+                    retry_ctx.attempt,
+                )
             )
             skipped_count += 1
             continue
