@@ -515,6 +515,12 @@ class PipelineMetricsCollector:
             MetricType.GAUGE,
         )
 
+        self.task_success_rate = self._create_metric(
+            "task_success_rate",
+            "Task success rate",
+            MetricType.GAUGE,
+        )
+
         self.physics_validation_score = self._create_metric(
             "physics_validation_score",
             "Physics validation scores",
