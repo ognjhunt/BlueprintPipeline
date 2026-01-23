@@ -20,12 +20,141 @@
         "required": ["step", "observation", "action", "timestamp"],
         "properties": {
           "step": {"type": "integer"},
-          "observation": {"type": "object"},
+          "observation": {
+            "type": "object",
+            "properties": {
+              "joint_positions": {
+                "type": "array",
+                "items": {"type": "number"}
+              },
+              "joint_velocities": {
+                "type": "array",
+                "items": {"type": "number"}
+              },
+              "robot_state": {
+                "type": "array",
+                "items": {"type": "number"}
+              },
+              "rgb_image": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {"type": "integer"}
+                  }
+                }
+              },
+              "physics": {
+                "type": "object",
+                "properties": {
+                  "contacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["body_a", "body_b", "impulse", "position"],
+                      "properties": {
+                        "body_a": {"type": "string"},
+                        "body_b": {"type": "string"},
+                        "impulse": {"type": "number"},
+                        "position": {
+                          "type": "array",
+                          "items": {"type": "number"}
+                        },
+                        "normal": {
+                          "type": "array",
+                          "items": {"type": "number"}
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  },
+                  "collisions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["body_a", "body_b", "depth", "position"],
+                      "properties": {
+                        "body_a": {"type": "string"},
+                        "body_b": {"type": "string"},
+                        "depth": {"type": "number"},
+                        "position": {
+                          "type": "array",
+                          "items": {"type": "number"}
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          },
           "action": {
             "type": "array",
             "items": {"type": "number"}
           },
-          "timestamp": {"type": "number"}
+          "timestamp": {"type": "number"},
+          "rgb_image": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {"type": "integer"}
+              }
+            }
+          },
+          "robot_state": {
+            "type": "array",
+            "items": {"type": "number"}
+          },
+          "physics": {
+            "type": "object",
+            "properties": {
+              "contacts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["body_a", "body_b", "impulse", "position"],
+                  "properties": {
+                    "body_a": {"type": "string"},
+                    "body_b": {"type": "string"},
+                    "impulse": {"type": "number"},
+                    "position": {
+                      "type": "array",
+                      "items": {"type": "number"}
+                    },
+                    "normal": {
+                      "type": "array",
+                      "items": {"type": "number"}
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "collisions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["body_a", "body_b", "depth", "position"],
+                  "properties": {
+                    "body_a": {"type": "string"},
+                    "body_b": {"type": "string"},
+                    "depth": {"type": "number"},
+                    "position": {
+                      "type": "array",
+                      "items": {"type": "number"}
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            },
+            "additionalProperties": true
+          }
         },
         "additionalProperties": true
       }
