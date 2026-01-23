@@ -119,6 +119,24 @@ export ALERT_PROVENANCE_GATE_SEVERITY=error
 export ALERT_JOB_EXCEPTION_SEVERITY=critical
 ```
 
+## Dataset Catalog (Firestore)
+
+Controls for publishing dataset metadata to Firestore after successful Genie Sim imports.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `DATASET_CATALOG_PROJECT` | str | unset | Google Cloud project ID for the dataset catalog Firestore instance. |
+| `DATASET_CATALOG_COLLECTION` | str | "datasets" | Collection name for dataset documents. |
+| `DATASET_CATALOG_CREDENTIALS` | path | unset | Service account JSON path for dataset catalog access. |
+| `DATASET_CATALOG_EMULATOR_HOST` | str | unset | Firestore emulator host (for example `localhost:8080`). |
+
+**Example**:
+```bash
+export DATASET_CATALOG_PROJECT="blueprint-prod"
+export DATASET_CATALOG_COLLECTION="datasets"
+export DATASET_CATALOG_CREDENTIALS="/secrets/firestore-service-account.json"
+```
+
 ## Text-to-Speech (TTS) Providers
 
 Credentials for `tools.audio.tts_providers` when generating narration audio.
