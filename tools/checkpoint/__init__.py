@@ -3,6 +3,7 @@
 from tools.checkpoint.store import (
     CheckpointRecord,
     checkpoint_dir,
+    get_checkpoint_store,
     load_checkpoint,
     should_skip_step,
     write_checkpoint,
@@ -11,6 +12,7 @@ from tools.checkpoint.store import (
 __all__ = [
     "CheckpointRecord",
     "checkpoint_dir",
+    "get_checkpoint_store",
     "load_checkpoint",
     "should_skip_step",
     "write_checkpoint",

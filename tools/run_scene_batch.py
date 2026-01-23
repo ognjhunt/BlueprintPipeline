@@ -24,7 +24,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.batch_processing.parallel_runner import ParallelPipelineRunner, SceneStatus
-from tools.checkpoint import should_skip_step, write_checkpoint
+from tools.checkpoint import get_checkpoint_store
 from tools.checkpoint.hash_config import resolve_checkpoint_hash_setting
 from tools.metrics import track_pipeline_run, update_pipeline_status
 from tools.metrics.pipeline_metrics import get_metrics
@@ -227,7 +227,11 @@ def _build_scene_processor(
             metrics.retries_total.inc(labels={"scene_id": scene.scene_id, "job": job_name})
 
         report_path = _scene_report_path(reports_dir, scene.scene_id)
-        if skip_completed and should_skip_step(scene.scene_dir, checkpoint_step, expected_outputs=[report_path]):
+        checkpoint_store = get_checkpoint_store(scene.scene_dir, scene.scene_id)
+        if skip_completed and checkpoint_store.should_skip_step(
+            checkpoint_step,
+            expected_outputs=[report_path],
+        ):
             logger.info("Skipping %s (checkpoint found)", scene.scene_id)
             return {
                 "scene_id": scene.scene_id,
@@ -287,8 +291,7 @@ def _build_scene_processor(
                 )
 
             if success:
-                write_checkpoint(
-                    scene.scene_dir,
+                checkpoint_store.write_checkpoint(
                     checkpoint_step,
                     status="completed",
                     started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start_time)),
@@ -298,7 +301,6 @@ def _build_scene_processor(
                         "delivery_id": delivery_id,
                     },
                     output_paths=[report_path] if report_path else [],
-                    scene_id=scene.scene_id,
                     store_output_hashes=resolve_checkpoint_hash_setting(),
                 )
 
