@@ -98,7 +98,7 @@ Alerting controls for `monitoring.alerting.send_alert`.
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ALERT_BACKEND` | str | "none" | Alert backend (`none` to disable, `webhook` for webhook alerts). |
-| `ALERT_WEBHOOK_URL` | str | unset | Webhook URL for alert delivery when `ALERT_BACKEND=webhook`. |
+| `ALERT_WEBHOOK_URL` | str | unset | Webhook URL for alert delivery (required when `ALERT_BACKEND=webhook`). |
 | `ALERT_SOURCE` | str | "blueprint_pipeline" | Source identifier included in alert payloads. |
 | `ALERT_MIN_SEVERITY` | str | "warning" | Minimum severity to emit (`debug`, `info`, `warning`, `error`, `critical`). |
 | `ALERT_JOB_FAILURE_SEVERITY` | str | "error" | Severity for Genie Sim submit job failures. |

@@ -59,6 +59,19 @@ def test_validate_required_env_vars_missing(monkeypatch: pytest.MonkeyPatch) -> 
         )
 
 
+def test_validate_required_env_vars_webhook_missing_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    entrypoint_checks = _load_entrypoint_checks_module()
+    monkeypatch.setenv("BUCKET", "test-bucket")
+    monkeypatch.setenv("SCENE_ID", "scene_1")
+    monkeypatch.setenv("ALERT_BACKEND", "webhook")
+    monkeypatch.delenv("ALERT_WEBHOOK_URL", raising=False)
+
+    with pytest.raises(SystemExit):
+        entrypoint_checks.validate_required_env_vars(
+            {"BUCKET": "Bucket name", "SCENE_ID": "Scene identifier"}, label="[TEST]"
+        )
+
+
 def test_validate_scene_manifest_success(tmp_path: Path) -> None:
     entrypoint_checks = _load_entrypoint_checks_module()
     manifest_path = tmp_path / "scene_manifest.json"
