@@ -1,0 +1,15 @@
+# Log-based metric: blueprint_firebase_upload_failure_events
+name: blueprint_firebase_upload_failure_events
+description: "Count of Firebase upload failures reported by pipeline jobs."
+filter: >
+  resource.type="k8s_container" AND
+  resource.labels.namespace_name="blueprint" AND
+  jsonPayload.message=~"Firebase upload failed"
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+labelExtractors:
+  job_id: EXTRACT(jsonPayload.job_id)
+  scene_id: EXTRACT(jsonPayload.scene_id)
+  module: EXTRACT(jsonPayload.module)
