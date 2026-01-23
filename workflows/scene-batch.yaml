@@ -1,0 +1,206 @@
+# scene-batch.yaml
+#
+# Cloud Workflows pipeline that:
+#   1. Reads a JSON manifest containing a scene list.
+#   2. Invokes the scene-batch Cloud Run job with the scene list payload.
+#
+# To manually trigger:
+#   gcloud workflows run scene-batch \
+#     --location=us-central1 \
+#     --data='{"bucket": "your-bucket", "manifest_object": "scene-batches/manifest.json", "max_concurrent": 10}'
+
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - primaryRegion: ${default(sys.get_env("PRIMARY_WORKFLOW_REGION"), "us-central1")}
+          - secondaryRegion: ${default(sys.get_env("SECONDARY_WORKFLOW_REGION"), "us-east1")}
+          - region: ${primaryRegion}
+          - manifestBucket: '${default(map.get(args, "bucket"), default(sys.get_env("PRIMARY_BUCKET"), "blueprint-scenes"))}'
+          - manifestObject: ${map.get(args, "manifest_object")}
+          - jobName: '${default(map.get(args, "job_name"), "scene-batch-job")}'
+          - jobTimeoutSeconds: ${default(map.get(args, "timeout_seconds"), 7200)}
+          - sceneRoot: '${default(map.get(args, "scene_root"), "/mnt/gcs/scenes")}'
+          - reportsDir: '${default(map.get(args, "reports_dir"), "/mnt/gcs/batch_reports")}'
+          - checkpointStep: '${default(map.get(args, "checkpoint_step"), "batch-run")}'
+          - maxConcurrent: ${default(map.get(args, "max_concurrent"), 5)}
+          - retryAttempts: ${default(map.get(args, "retry_attempts"), 3)}
+          - retryDelay: ${default(map.get(args, "retry_delay"), 5)}
+          - rateLimit: ${default(map.get(args, "rate_limit"), 10)}
+          - steps: '${default(map.get(args, "steps"), "")}'
+          - resumeFrom: '${default(map.get(args, "resume_from"), "")}'
+          - validate: ${default(map.get(args, "validate"), false)}
+          - skipCompleted: ${default(map.get(args, "skip_completed"), false)}
+          - logLevel: '${default(map.get(args, "log_level"), "INFO")}'
+        next: check_manifest_input
+
+    - check_manifest_input:
+        switch:
+          - condition: ${manifestObject == null || manifestObject == ""}
+            raise: "manifest_object is required to run the scene batch workflow"
+        next: init_region_health
+
+    - init_region_health:
+        assign:
+          - primaryHealthy: false
+          - secondaryHealthy: false
+        next: check_primary_region
+
+    - check_primary_region:
+        try:
+          call: googleapis.run.v1.projects.locations.jobs.get
+          args:
+            name: ${"projects/" + projectId + "/locations/" + primaryRegion + "/jobs/" + jobName}
+          result: primaryJob
+        next: mark_primary_healthy
+        except:
+          as: primaryError
+          steps:
+            - log_primary_unhealthy:
+                call: sys.log
+                args:
+                  text: '${"Primary region " + primaryRegion + " job " + jobName + " unavailable: " + primaryError.message}'
+                  severity: "WARNING"
+            - check_secondary_region:
+                try:
+                  call: googleapis.run.v1.projects.locations.jobs.get
+                  args:
+                    name: ${"projects/" + projectId + "/locations/" + secondaryRegion + "/jobs/" + jobName}
+                  result: secondaryJob
+                next: mark_secondary_healthy
+                except:
+                  as: secondaryError
+                  steps:
+                    - log_secondary_unhealthy:
+                        call: sys.log
+                        args:
+                          text: '${"Secondary region " + secondaryRegion + " job " + jobName + " unavailable: " + secondaryError.message}'
+                          severity: "ERROR"
+                    - select_region
+
+    - mark_primary_healthy:
+        assign:
+          - primaryHealthy: true
+        next: select_region
+
+    - mark_secondary_healthy:
+        assign:
+          - secondaryHealthy: true
+        next: select_region
+
+    - select_region:
+        switch:
+          - condition: ${primaryHealthy}
+            next: use_primary_region
+          - condition: ${secondaryHealthy}
+            next: use_secondary_region
+        next: use_primary_region
+
+    - use_primary_region:
+        assign:
+          - region: ${primaryRegion}
+        next: read_manifest
+
+    - use_secondary_region:
+        assign:
+          - region: ${secondaryRegion}
+        next: read_manifest
+
+    - read_manifest:
+        call: http.get
+        args:
+          url: ${"https://storage.googleapis.com/storage/v1/b/" + manifestBucket + "/o/" + text.url_encode(manifestObject) + "?alt=media"}
+          auth:
+            type: OAuth2
+        result: manifestResponse
+        next: parse_manifest
+
+    - parse_manifest:
+        try:
+          assign:
+            - manifestPayload: ${json.decode(text.decode(manifestResponse.body))}
+        except:
+          as: parseError
+          steps:
+            - log_manifest_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to parse manifest at gs://" + manifestBucket + "/" + manifestObject + ": " + parseError.message}'
+                  severity: "ERROR"
+            - raise_manifest_error:
+                raise: ${"Invalid manifest payload: " + parseError.message}
+        next: set_scene_list
+
+    - set_scene_list:
+        switch:
+          - condition: ${"scenes" in manifestPayload}
+            next: set_scene_list_from_key
+        next: set_scene_list_from_payload
+
+    - set_scene_list_from_key:
+        assign:
+          - sceneList: ${manifestPayload.scenes}
+        next: validate_scene_list
+
+    - set_scene_list_from_payload:
+        assign:
+          - sceneList: ${manifestPayload}
+        next: validate_scene_list
+
+    - validate_scene_list:
+        switch:
+          - condition: ${len(sceneList) == 0}
+            raise: "Manifest scene list is empty"
+        next: encode_scene_list
+
+    - encode_scene_list:
+        assign:
+          - sceneListPayload: ${json.encode({"scenes": sceneList})}
+        next: run_scene_batch_job
+
+    - run_scene_batch_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+          body:
+            overrides:
+              containerOverrides:
+                - env:
+                    - name: SCENE_LIST_JSON
+                      value: ${sceneListPayload}
+                    - name: SCENE_ROOT
+                      value: ${sceneRoot}
+                    - name: REPORTS_DIR
+                      value: ${reportsDir}
+                    - name: CHECKPOINT_STEP
+                      value: ${checkpointStep}
+                    - name: MAX_CONCURRENT
+                      value: '${string(maxConcurrent)}'
+                    - name: RETRY_ATTEMPTS
+                      value: '${string(retryAttempts)}'
+                    - name: RETRY_DELAY
+                      value: '${string(retryDelay)}'
+                    - name: RATE_LIMIT
+                      value: '${string(rateLimit)}'
+                    - name: STEPS
+                      value: ${steps}
+                    - name: RESUME_FROM
+                      value: ${resumeFrom}
+                    - name: VALIDATE
+                      value: '${if(validate, "true", "false")}'
+                    - name: SKIP_COMPLETED
+                      value: '${if(skipCompleted, "true", "false")}'
+                    - name: LOG_LEVEL
+                      value: ${logLevel}
+            timeout: '${string(jobTimeoutSeconds) + "s"}'
+        result: jobExec
+        next: done
+
+    - done:
+        return:
+          job_execution: ${jobExec.name}
+          manifest: ${"gs://" + manifestBucket + "/" + manifestObject}
+          reports_dir: ${reportsDir}
+          scene_count: ${len(sceneList)}
