@@ -14,6 +14,10 @@ google-cloud-storage==2.18.2
 # LLM client (optional, for enhanced planning)
 google-generativeai==0.3.2
 
+# Metrics
+google-cloud-monitoring==2.21.0
+prometheus_client==0.20.0
+
 # Utilities
 tqdm==4.66.5
 pyyaml==6.0.2
