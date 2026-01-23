@@ -24,6 +24,7 @@ data:
   GENIESIM_PORT: "50051"
   GENIESIM_ROOT: "/opt/geniesim"
   ISAAC_SIM_PATH: "/isaac-sim"
+  GENIESIM_CLEANUP_TMP: "0"
   # Production pipeline settings
   PIPELINE_ENV: "production"
   PRODUCTION_MODE: "true"
