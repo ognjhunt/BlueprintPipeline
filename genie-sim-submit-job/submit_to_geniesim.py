@@ -64,6 +64,7 @@ from tools.gcs_upload import (
 from tools.config import load_pipeline_config
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
+from tools.geniesim_adapter.multi_robot_config import validate_geniesim_robot_allowlist
 from tools.logging_config import init_logging
 from tools.quality.quality_config import resolve_quality_settings
 from tools.validation.entrypoint_checks import validate_required_env_vars
@@ -1298,6 +1299,13 @@ def main(input_params: Optional[Dict[str, Any]] = None) -> int:
     job_output_path = os.getenv("JOB_OUTPUT_PATH", f"{geniesim_prefix}/job.json")
 
     robot_types = _resolve_robot_types("franka")
+    production_mode = _is_production_mode()
+    validate_geniesim_robot_allowlist(
+        robot_types,
+        strict=production_mode,
+        logger=logger,
+        context="GENIESIM submit robot_types",
+    )
     robot_type = robot_types[0]
     multi_robot = len(robot_types) > 1
     episodes_per_task = _resolve_episodes_per_task()

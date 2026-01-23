@@ -16,11 +16,112 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 import json
+import logging
 from pathlib import Path
 
 ROBOT_ASSETS_DIR = Path(__file__).resolve().parent / "robot_assets"
+GENIESIM_ROBOT_CATALOG_PATH = Path(__file__).resolve().parent / "geniesim_robot_catalog.json"
+
+_GENIESIM_ROBOT_CATALOG_CACHE: Optional[Dict[str, Any]] = None
+_GENIESIM_ROBOT_CATALOG_PATH_CACHE: Optional[Path] = None
+_GENIESIM_CATALOG_VALIDATED = False
+_CATALOG_LOGGER = logging.getLogger(__name__)
+
+
+def normalize_robot_name(robot_name: str) -> str:
+    return robot_name.strip().lower().replace("-", "_")
+
+
+def load_geniesim_robot_catalog(
+    catalog_path: Optional[Path] = None,
+    use_cache: bool = True,
+) -> Dict[str, Any]:
+    global _GENIESIM_ROBOT_CATALOG_CACHE
+    global _GENIESIM_ROBOT_CATALOG_PATH_CACHE
+
+    resolved_path = (catalog_path or GENIESIM_ROBOT_CATALOG_PATH).resolve()
+    if (
+        use_cache
+        and _GENIESIM_ROBOT_CATALOG_CACHE is not None
+        and _GENIESIM_ROBOT_CATALOG_PATH_CACHE == resolved_path
+    ):
+        return _GENIESIM_ROBOT_CATALOG_CACHE
+
+    with open(resolved_path, "r") as handle:
+        payload = json.load(handle)
+
+    _GENIESIM_ROBOT_CATALOG_CACHE = payload
+    _GENIESIM_ROBOT_CATALOG_PATH_CACHE = resolved_path
+    return payload
+
+
+def get_geniesim_robot_allowlist(
+    catalog: Optional[Dict[str, Any]] = None,
+    catalog_path: Optional[Path] = None,
+) -> List[str]:
+    if catalog is None:
+        catalog = load_geniesim_robot_catalog(catalog_path=catalog_path)
+    robots = catalog.get("robots", [])
+    allowlist: List[str] = []
+    for entry in robots:
+        if isinstance(entry, str):
+            allowlist.append(normalize_robot_name(entry))
+        elif isinstance(entry, dict):
+            name = entry.get("name")
+            if isinstance(name, str) and name.strip():
+                allowlist.append(normalize_robot_name(name))
+    return sorted(set(allowlist))
+
+
+def validate_geniesim_robot_allowlist(
+    robot_types: Iterable[str],
+    *,
+    catalog_path: Optional[Path] = None,
+    strict: bool = True,
+    logger: Optional[logging.Logger] = None,
+    context: str = "Genie Sim robot configuration",
+) -> List[str]:
+    allowlist = set(get_geniesim_robot_allowlist(catalog_path=catalog_path))
+    invalid = []
+    for robot_type in robot_types:
+        if not isinstance(robot_type, str):
+            invalid.append(str(robot_type))
+            continue
+        normalized = normalize_robot_name(robot_type)
+        if normalized not in allowlist:
+            invalid.append(robot_type)
+    if invalid:
+        message = (
+            f"{context} contains unsupported robots: {sorted(set(invalid))}. "
+            f"Supported robots: {sorted(allowlist)}."
+        )
+        if strict:
+            raise ValueError(message)
+        (logger or _CATALOG_LOGGER).warning(message)
+    return sorted(set(invalid))
+
+
+def _validate_catalog_alignment() -> None:
+    global _GENIESIM_CATALOG_VALIDATED
+    if _GENIESIM_CATALOG_VALIDATED:
+        return
+    allowlist = set(get_geniesim_robot_allowlist())
+    spec_names = {robot.value for robot in ROBOT_SPECS.keys()}
+    missing = spec_names.difference(allowlist)
+    if missing:
+        raise ValueError(
+            "Genie Sim robot catalog is missing entries for: "
+            f"{sorted(missing)}."
+        )
+    extra = allowlist.difference(spec_names)
+    if extra:
+        _CATALOG_LOGGER.warning(
+            "Genie Sim robot catalog includes robots without specs: %s.",
+            sorted(extra),
+        )
+    _GENIESIM_CATALOG_VALIDATED = True
 
 
 class RobotCategory(str, Enum):
@@ -359,6 +460,7 @@ FULL_ROBOT_CONFIG = MultiRobotConfig(
 
 def get_robot_spec(robot_type: str | RobotType) -> RobotSpec:
     """Get specification for a robot type."""
+    _validate_catalog_alignment()
     if isinstance(robot_type, str):
         robot_type = RobotType(robot_type)
     return ROBOT_SPECS[robot_type]
@@ -390,6 +492,7 @@ def get_geniesim_robot_config(
     base_position: tuple = (0.0, 0.0, 0.0),
 ) -> Dict[str, Any]:
     """Get Genie Sim compatible robot configuration."""
+    _validate_catalog_alignment()
     spec = ROBOT_SPECS[robot_type]
     validate_robot_assets(spec)
 
