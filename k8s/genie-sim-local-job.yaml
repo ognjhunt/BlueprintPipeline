@@ -25,6 +25,8 @@ data:
   GENIESIM_ROOT: "/opt/geniesim"
   ISAAC_SIM_PATH: "/isaac-sim"
   GENIESIM_FORCE_LOCAL: "true"
+  GENIESIM_VALIDATE_FRAMES: "1"
+  GENIESIM_FAIL_ON_FRAME_VALIDATION: "1"
 
 ---
 apiVersion: batch/v1
