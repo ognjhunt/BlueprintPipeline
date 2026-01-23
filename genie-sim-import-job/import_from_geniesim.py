@@ -97,6 +97,7 @@ from tools.quality_gates.quality_gate import (
     QualityGateResult,
     QualityGateSeverity,
 )
+from tools.geniesim_adapter.multi_robot_config import validate_geniesim_robot_allowlist
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
@@ -4305,6 +4306,22 @@ def main(input_params: Optional[Dict[str, Any]] = None):
     )
 
     artifacts_by_robot = _resolve_artifacts_by_robot(job_metadata, artifacts_by_robot_env)
+    if artifacts_by_robot:
+        validate_geniesim_robot_allowlist(
+            artifacts_by_robot.keys(),
+            strict=production_mode,
+            logger=log.logger,
+            context="GENIESIM import artifacts_by_robot",
+        )
+    else:
+        job_robot_type = (job_metadata or {}).get("robot_type")
+        if isinstance(job_robot_type, str) and job_robot_type.strip():
+            validate_geniesim_robot_allowlist(
+                [job_robot_type],
+                strict=production_mode,
+                logger=log.logger,
+                context="GENIESIM import robot_type",
+            )
 
     # Run import
     try:

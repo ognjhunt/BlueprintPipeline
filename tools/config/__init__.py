@@ -46,8 +46,28 @@ _ENABLE_CONFIG_AUDIT = ensure_config_audit_for_production()
 
 # Configuration file paths
 CONFIG_DIR = Path(__file__).parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_CONFIG_PATH = CONFIG_DIR / "pipeline_config.json"
 QUALITY_CONFIG_PATH = CONFIG_DIR.parent / "quality_gates" / "quality_config.json"
+
+
+def _normalize_robot_name(robot_name: str) -> str:
+    return str(robot_name).strip().lower().replace("-", "_")
+
+
+def _load_geniesim_robot_allowlist(catalog_path: Path) -> List[str]:
+    with open(catalog_path, "r") as handle:
+        payload = json.load(handle)
+    robots = payload.get("robots", [])
+    allowlist: List[str] = []
+    for entry in robots:
+        if isinstance(entry, str):
+            allowlist.append(_normalize_robot_name(entry))
+        elif isinstance(entry, dict):
+            name = entry.get("name")
+            if isinstance(name, str) and name.strip():
+                allowlist.append(_normalize_robot_name(name))
+    return sorted(set(allowlist))
 
 
 @dataclass
@@ -1378,6 +1398,42 @@ class ConfigLoader:
                     gravity = physics["gravity"]
                     if not isinstance(gravity, list) or len(gravity) != 3:
                         errors["physics.gravity"] = "Must be a list of 3 floats [x, y, z]"
+
+        # Validate robot_config section
+        if "robot_config" in config:
+            robot_config = config["robot_config"]
+            if isinstance(robot_config, dict):
+                catalog_path_value = robot_config.get("geniesim_robot_catalog_path")
+                allowlist: Optional[List[str]] = None
+                if catalog_path_value:
+                    catalog_path = Path(str(catalog_path_value))
+                    if not catalog_path.is_absolute():
+                        catalog_path = (REPO_ROOT / catalog_path).resolve()
+                    try:
+                        allowlist = _load_geniesim_robot_allowlist(catalog_path)
+                    except (OSError, json.JSONDecodeError) as exc:
+                        errors["robot_config.geniesim_robot_catalog_path"] = (
+                            f"Failed to load Genie Sim robot catalog: {exc}"
+                        )
+                supported_robots = robot_config.get("supported_robots")
+                if allowlist and isinstance(supported_robots, list):
+                    normalized_allowlist = set(allowlist)
+                    unsupported = [
+                        robot
+                        for robot in supported_robots
+                        if _normalize_robot_name(str(robot)) not in normalized_allowlist
+                    ]
+                    if unsupported:
+                        errors["robot_config.supported_robots"] = (
+                            "Unsupported Genie Sim robots configured: "
+                            f"{sorted(set(unsupported))}"
+                        )
+                default_robot = robot_config.get("default_robot")
+                if allowlist and isinstance(default_robot, str):
+                    if _normalize_robot_name(default_robot) not in set(allowlist):
+                        errors["robot_config.default_robot"] = (
+                            f"Unsupported Genie Sim robot: {default_robot}"
+                        )
 
         # Validate resource_allocation section
         if "resource_allocation" in config:
