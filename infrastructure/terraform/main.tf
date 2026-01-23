@@ -263,6 +263,57 @@ resource "google_storage_bucket" "pipeline_data" {
     }
   }
 
+  lifecycle_rule {
+    condition {
+      age            = 90
+      matches_prefix = ["scenes/"]
+      matches_suffix = ["/input/"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  lifecycle_rule {
+    condition {
+      age            = 30
+      matches_prefix = ["scenes/"]
+      matches_suffix = ["/seg/", "/layout/", "/.checkpoints/"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  lifecycle_rule {
+    condition {
+      age            = 365
+      matches_prefix = ["scenes/"]
+      matches_suffix = [
+        "/assets/",
+        "/usd/",
+        "/replicator/",
+        "/variation_assets/",
+        "/isaac_lab/",
+        "/episodes/",
+      ]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  lifecycle_rule {
+    condition {
+      age            = 180
+      matches_prefix = ["scenes/"]
+      matches_suffix = ["/logs/", "/log/"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
   labels = {
     environment = var.environment
     managed_by  = "terraform"
