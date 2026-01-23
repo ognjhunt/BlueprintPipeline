@@ -1957,6 +1957,20 @@ def main(input_params: Optional[Dict[str, Any]] = None):
         os.getenv("ALLOW_EMBEDDING_FALLBACK"),
         default=False,
     )
+    # In production mode, ALLOW_EMBEDDING_FALLBACK requires explicit acknowledgment
+    # via ALLOW_EMBEDDING_FALLBACK_PRODUCTION_ACK to prevent silent quality degradation
+    allow_embedding_fallback_ack = parse_bool_env(
+        os.getenv("ALLOW_EMBEDDING_FALLBACK_PRODUCTION_ACK"),
+        default=False,
+    )
+    if production_mode and allow_embedding_fallback and not allow_embedding_fallback_ack:
+        log.error(
+            "ALLOW_EMBEDDING_FALLBACK is enabled in production mode, but "
+            "ALLOW_EMBEDDING_FALLBACK_PRODUCTION_ACK is not set. This is a safety check "
+            "to prevent silent quality degradation. If you truly want to allow placeholder "
+            "embeddings in production (not recommended), set ALLOW_EMBEDDING_FALLBACK_PRODUCTION_ACK=true."
+        )
+        sys.exit(1)
     filter_commercial = parse_bool_env(os.getenv("FILTER_COMMERCIAL"), default=True)
     copy_usd = parse_bool_env(os.getenv("COPY_USD"), default=True)
     enable_multi_robot = parse_bool_env(os.getenv("ENABLE_MULTI_ROBOT"), default=True)

@@ -594,15 +594,25 @@ class GenieSimConfig(BaseModel):
     @model_validator(mode="after")
     def _finalize_config(self) -> "GenieSimConfig":
         if self.environment == "production":
+            # P1: Strict production mode validation for collision-aware planning
+            # These flags cannot be enabled in production to prevent robot collisions
             if self.allow_linear_fallback_in_production:
                 raise ValueError(
-                    "Refusing to enable linear fallback in production. "
-                    "GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD is ignored in production."
+                    "[SAFETY-CRITICAL] GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=1 is not permitted in production. "
+                    "Non-collision-aware linear motion can cause physical robot collisions. "
+                    "This flag is ignored and blocked in production mode for safety reasons."
                 )
-            if self.allow_linear_fallback or self.allow_ik_failure_fallback:
+            if self.allow_linear_fallback:
                 raise ValueError(
-                    "Refusing to enable linear fallback in production. "
-                    "Unset GENIESIM_ALLOW_LINEAR_FALLBACK and GENIESIM_ALLOW_IK_FAILURE_FALLBACK."
+                    "[SAFETY-CRITICAL] GENIESIM_ALLOW_LINEAR_FALLBACK=1 is not permitted in production. "
+                    "Non-collision-aware linear motion can cause physical robot collisions. "
+                    "Unset this flag or use a non-production environment for testing."
+                )
+            if self.allow_ik_failure_fallback:
+                raise ValueError(
+                    "[SAFETY-CRITICAL] GENIESIM_ALLOW_IK_FAILURE_FALLBACK=1 is not permitted in production. "
+                    "Falling back to linear motion on IK failure can cause robot collisions. "
+                    "Unset this flag or use a non-production environment for testing."
                 )
             temp_dirs = [
                 (label, path, env_name)
@@ -641,6 +651,72 @@ class GeneratedEpisodeMetadata:
 
 
 @dataclass
+class StallStatistics:
+    """Aggregated stall pattern statistics for analysis."""
+
+    total_stalls: int = 0
+    stalls_by_reason: Dict[str, int] = field(default_factory=dict)
+    stall_events: List[Dict[str, Any]] = field(default_factory=list)
+
+    def record_stall(
+        self,
+        reason: str,
+        episode_idx: int,
+        task_name: str,
+        *,
+        progress_age_s: Optional[float] = None,
+        observations_collected: Optional[int] = None,
+        last_observation_timestamp: Optional[float] = None,
+        trajectory_end_timestamp: Optional[float] = None,
+        extra_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record a stall event for pattern analysis."""
+        self.total_stalls += 1
+        self.stalls_by_reason[reason] = self.stalls_by_reason.get(reason, 0) + 1
+        event = {
+            "reason": reason,
+            "episode_idx": episode_idx,
+            "task_name": task_name,
+            "progress_age_s": progress_age_s,
+            "observations_collected": observations_collected,
+            "last_observation_timestamp": last_observation_timestamp,
+            "trajectory_end_timestamp": trajectory_end_timestamp,
+            "timestamp": time.time(),
+        }
+        if extra_context:
+            event["context"] = extra_context
+        self.stall_events.append(event)
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Get a summary of stall patterns for logging."""
+        return {
+            "total_stalls": self.total_stalls,
+            "stalls_by_reason": dict(self.stalls_by_reason),
+            "most_common_reason": max(
+                self.stalls_by_reason.items(),
+                key=lambda x: x[1],
+                default=(None, 0),
+            )[0] if self.stalls_by_reason else None,
+            "event_count": len(self.stall_events),
+        }
+
+
+# Known stall reason categories for pattern analysis
+class StallReason:
+    """Constants for stall reason categorization."""
+
+    NO_OBSERVATION_PROGRESS = "no_observation_progress"
+    EXECUTION_COMPLETED_NO_FINAL_OBS = "execution_completed_no_final_observation"
+    IK_FAILURE = "ik_failure"
+    COLLISION_DETECTED = "collision_detected"
+    PHYSICS_INSTABILITY = "physics_instability"
+    TRAJECTORY_TIMEOUT = "trajectory_timeout"
+    GRIPPER_FAILURE = "gripper_failure"
+    SERVER_UNRESPONSIVE = "server_unresponsive"
+    UNKNOWN = "unknown"
+
+
+@dataclass
 class DataCollectionResult:
     """Result of a data collection run."""
 
@@ -668,6 +744,9 @@ class DataCollectionResult:
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     server_info: Dict[str, Any] = field(default_factory=dict)
+
+    # Stall tracking (P1 - for pattern analysis)
+    stall_statistics: Optional[StallStatistics] = None
 
 
 @dataclass(frozen=True)
@@ -3448,13 +3527,54 @@ class GenieSimLocalFramework:
                             stall_info = episode_result.get("stall_info") or {}
                             if stall_info.get("stall_detected"):
                                 self._stall_count += 1
+                                stall_reason = stall_info.get("stall_reason", StallReason.UNKNOWN)
+
+                                # Record stall pattern for analysis (P1)
+                                if result.stall_statistics is None:
+                                    result.stall_statistics = StallStatistics()
+                                result.stall_statistics.record_stall(
+                                    reason=stall_reason,
+                                    episode_idx=ep_idx,
+                                    task_name=task_name,
+                                    progress_age_s=stall_info.get("last_progress_age_s"),
+                                    observations_collected=stall_info.get("observations_collected"),
+                                    last_observation_timestamp=stall_info.get("last_observation_timestamp"),
+                                    trajectory_end_timestamp=stall_info.get("trajectory_end_timestamp"),
+                                    extra_context={
+                                        "trajectory_end_tolerance_s": stall_info.get("trajectory_end_tolerance_s"),
+                                        "episode_error": episode_result.get("error"),
+                                    },
+                                )
+
                                 stall_message = (
                                     f"Episode {ep_idx} of {task_name} stalled after "
                                     f"{stall_info.get('last_progress_age_s', 0.0):.1f}s "
-                                    f"(stall {self._stall_count}/{self.config.max_stalls})"
+                                    f"(stall {self._stall_count}/{self.config.max_stalls}, "
+                                    f"reason={stall_reason})"
                                 )
                                 result.warnings.append(stall_message)
+
+                                # Log stall pattern for debugging
+                                self.log(
+                                    f"[STALL-PATTERN] reason={stall_reason}, "
+                                    f"episode={ep_idx}, task={task_name}, "
+                                    f"observations={stall_info.get('observations_collected', 0)}, "
+                                    f"progress_age={stall_info.get('last_progress_age_s', 0.0):.1f}s, "
+                                    f"trajectory_end={stall_info.get('trajectory_end_timestamp')}, "
+                                    f"last_obs={stall_info.get('last_observation_timestamp')}",
+                                    "WARNING",
+                                )
+
                                 if self._stall_count > self.config.max_stalls:
+                                    # Log stall summary before server restart
+                                    if result.stall_statistics:
+                                        summary = result.stall_statistics.get_summary()
+                                        self.log(
+                                            f"[STALL-SUMMARY] Restarting server after {summary['total_stalls']} stalls. "
+                                            f"Reasons: {summary['stalls_by_reason']}. "
+                                            f"Most common: {summary['most_common_reason']}",
+                                            "WARNING",
+                                        )
                                     error_message = (
                                         f"{stall_message}; restarting Genie Sim server "
                                         f"after exceeding max stalls ({self.config.max_stalls})."
@@ -3530,6 +3650,40 @@ class GenieSimLocalFramework:
                 )
             self.log(f"Duration: {result.duration_seconds:.1f}s")
             self.log(f"Output: {run_dir}")
+
+            # Log final stall statistics for pattern analysis (P1)
+            if result.stall_statistics and result.stall_statistics.total_stalls > 0:
+                summary = result.stall_statistics.get_summary()
+                self.log("\n" + "-" * 40)
+                self.log("[STALL-ANALYSIS] Final Stall Summary:")
+                self.log(f"  Total stalls: {summary['total_stalls']}")
+                self.log(f"  By reason: {summary['stalls_by_reason']}")
+                self.log(f"  Most common: {summary['most_common_reason']}")
+                # Recommend actions based on patterns
+                if summary['most_common_reason'] == StallReason.NO_OBSERVATION_PROGRESS:
+                    self.log(
+                        "  [RECOMMENDATION] Frequent observation stalls may indicate: "
+                        "1) Slow physics simulation - check GPU utilization, "
+                        "2) Network latency - check gRPC connection, "
+                        "3) Scene complexity - simplify physics objects",
+                        "INFO",
+                    )
+                elif summary['most_common_reason'] == StallReason.EXECUTION_COMPLETED_NO_FINAL_OBS:
+                    self.log(
+                        "  [RECOMMENDATION] Missing final observations may indicate: "
+                        "1) Trajectory timing mismatch - adjust tolerance, "
+                        "2) Observation collection race condition - increase collection timeout",
+                        "INFO",
+                    )
+                elif summary['most_common_reason'] == StallReason.IK_FAILURE:
+                    self.log(
+                        "  [RECOMMENDATION] IK failures may indicate: "
+                        "1) Unreachable target poses - check workspace bounds, "
+                        "2) Joint limits - verify robot configuration, "
+                        "3) Collision constraints - adjust motion planner",
+                        "INFO",
+                    )
+                self.log("-" * 40)
 
             return result
         finally:
