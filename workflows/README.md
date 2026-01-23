@@ -24,6 +24,7 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 | `regen3d-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.assets_ready` |
 | `retention-cleanup.yaml` | Cloud Scheduler | Daily retention cleanup |
 | `scale-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/layout/scene_layout.json` |
+| `scene-batch.yaml` | Manual only | Provide a manifest object with a scene list |
 | `scene-generation-pipeline.yaml` | Cloud Scheduler / manual | Scheduler (disabled by default) or manual run |
 | `training-pipeline.yaml` | Eventarc custom event | Event type `blueprintpipeline.episodes.imported` |
 | `upsell-features-pipeline.yaml` | Manual only | Manual run with `.episodes_complete` payload |
@@ -64,3 +65,30 @@ This keeps new workloads running during regional outages while preserving idempo
 
 ## How to run locally
 - Run trigger setup scripts directly (e.g., `./setup-all-triggers.sh`) after exporting the required credentials.
+
+## Scene batch workflow usage
+The `scene-batch.yaml` workflow runs the batch pipeline across a list of scene IDs
+provided via a JSON manifest in GCS. The manifest can be either a JSON list of
+scene IDs or an object with a `scenes` array.
+
+Example manifest:
+```json
+{
+  "scenes": ["scene_001", "scene_002", "scene_003"]
+}
+```
+
+Trigger the workflow:
+```bash
+gcloud workflows run scene-batch \
+  --location=us-central1 \
+  --data='{"bucket":"your-bucket","manifest_object":"scene-batches/manifest.json","max_concurrent":10,"retry_attempts":2}'
+```
+
+Parallelism controls:
+- `max_concurrent` controls the number of scenes processed in parallel.
+- `retry_attempts`, `retry_delay`, and `rate_limit` tune retry and throttling behavior.
+
+Outputs:
+- `reports_dir/batch_report.json` now includes `scene_reports` entries with a per-scene
+  `quality_gate_report` path for monitoring.
