@@ -7,6 +7,7 @@ import os
 from typing import Mapping, Optional, Sequence, Tuple
 
 _TRUTHY_VALUES = {"1", "true", "yes", "y", "on"}
+_FALSY_VALUES = {"0", "false", "no", "n", "off"}
 
 _LEGACY_PRODUCTION_FLAGS = (
     "PRODUCTION_MODE",
@@ -84,6 +85,47 @@ def _is_truthy(value: Optional[str]) -> bool:
     if value is None:
         return False
     return value.strip().lower() in _TRUTHY_VALUES
+
+
+def _is_falsy(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in _FALSY_VALUES
+
+
+def _set_env_value(env: Mapping[str, str], key: str, value: str) -> None:
+    if env is os.environ:
+        os.environ[key] = value
+        return
+    if hasattr(env, "__setitem__"):
+        try:
+            env[key] = value
+            return
+        except TypeError:
+            pass
+    os.environ[key] = value
+
+
+def is_config_audit_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
+    source = env or os.environ
+    return _is_truthy(source.get("BP_ENABLE_CONFIG_AUDIT"))
+
+
+def ensure_config_audit_for_production(
+    env: Optional[Mapping[str, str]] = None,
+    log: Optional[logging.Logger] = None,
+) -> bool:
+    source = env or os.environ
+    if resolve_production_mode(source):
+        audit_value = _normalize_env_value(source.get("BP_ENABLE_CONFIG_AUDIT"))
+        if audit_value is None:
+            _set_env_value(source, "BP_ENABLE_CONFIG_AUDIT", "1")
+            return True
+        if _is_falsy(audit_value):
+            return False
+        _set_env_value(source, "BP_ENABLE_CONFIG_AUDIT", "1")
+        return True
+    return is_config_audit_enabled(source)
 
 
 def resolve_production_mode(env: Optional[Mapping[str, str]] = None) -> bool:
