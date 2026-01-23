@@ -60,6 +60,17 @@ variable "bucket_location" {
   default     = "US"
 }
 
+variable "episodes_retention_policy" {
+  type        = string
+  description = "Storage class to transition scene episode data into after retention window."
+  default     = "ARCHIVE"
+
+  validation {
+    condition     = contains(["ARCHIVE", "COLDLINE"], var.episodes_retention_policy)
+    error_message = "Episodes retention policy must be ARCHIVE or COLDLINE."
+  }
+}
+
 variable "environment" {
   type        = string
   description = "Environment name (dev, staging, prod)"
