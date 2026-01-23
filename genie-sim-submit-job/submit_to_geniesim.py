@@ -66,6 +66,7 @@ from tools.config.production_mode import resolve_production_mode
 from tools.logging_config import init_logging
 from tools.quality.quality_config import resolve_quality_settings
 from tools.validation.entrypoint_checks import validate_required_env_vars
+from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
 from monitoring.alerting import send_alert
 
 try:
@@ -1248,7 +1249,9 @@ def _build_local_execution_by_robot(
     }
 
 
-def main() -> int:
+def main(input_params: Optional[Dict[str, Any]] = None) -> int:
+    if input_params is None:
+        input_params = {}
     debug_mode = _resolve_debug_mode()
     if debug_mode:
         os.environ["LOG_LEVEL"] = "DEBUG"
@@ -1288,6 +1291,20 @@ def main() -> int:
     canary_percent = int(os.getenv("CANARY_PERCENT", "0"))
     canary_release_channel = os.getenv("CANARY_RELEASE_CHANNEL", "stable")
     canary_rollback_marker = os.getenv("CANARY_ROLLBACK_MARKER")
+
+    input_params.update(
+        {
+            "bucket": bucket,
+            "scene_id": scene_id,
+            "geniesim_prefix": geniesim_prefix,
+            "job_output_path": job_output_path,
+            "robot_types": robot_types,
+            "episodes_per_task": episodes_per_task,
+            "num_variations": num_variations,
+            "min_quality_score": min_quality_score,
+        }
+    )
+    log.debug("Input params: %s", input_params)
 
     storage_client = storage.Client()
 
@@ -2032,7 +2049,22 @@ if __name__ == "__main__":
     scene_id = os.environ.get("SCENE_ID", "unknown")
     with metrics.track_job("genie-sim-submit-job", scene_id):
         try:
-            raise SystemExit(main())
+            input_params: Dict[str, Any] = {}
+
+            def _run_submit_job() -> Optional[int]:
+                exit_code = main(input_params)
+                if exit_code:
+                    raise SystemExit(exit_code)
+                return 0
+
+            exit_code = run_job_with_dead_letter_queue(
+                _run_submit_job,
+                scene_id=scene_id,
+                job_type=JOB_NAME,
+                step="submit",
+                input_params=input_params,
+            )
+            raise SystemExit(exit_code)
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"
             geniesim_prefix = os.getenv("GENIESIM_PREFIX", f"scenes/{scene_id}/geniesim")
