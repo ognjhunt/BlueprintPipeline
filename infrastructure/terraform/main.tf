@@ -295,11 +295,22 @@ resource "google_storage_bucket" "pipeline_data" {
         "/replicator/",
         "/variation_assets/",
         "/isaac_lab/",
-        "/episodes/",
       ]
     }
     action {
       type = "Delete"
+    }
+  }
+
+  lifecycle_rule {
+    condition {
+      age            = 365
+      matches_prefix = ["scenes/"]
+      matches_suffix = ["/episodes/"]
+    }
+    action {
+      type          = "SetStorageClass"
+      storage_class = var.episodes_retention_policy
     }
   }
 
