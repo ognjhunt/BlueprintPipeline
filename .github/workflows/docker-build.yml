@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 jobs:
   build:
@@ -89,6 +90,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
@@ -99,3 +101,48 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:${{ github.sha }}
             ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:latest
+
+      - name: Install cosign
+        if: github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign and attest image
+        if: github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [[ -z "${DIGEST}" ]]; then
+            echo "Missing image digest from build output."
+            exit 1
+          fi
+
+          cat > cosign-attestation.json <<'EOF'
+          {
+            "_type": "https://in-toto.io/Statement/v1",
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "subject": [
+              {
+                "name": "container-image",
+                "digest": {}
+              }
+            ],
+            "predicate": {
+              "buildType": "github-actions",
+              "builder": {
+                "id": "https://github.com/${{ github.repository }}/.github/workflows/docker-build.yml"
+              },
+              "invocation": {
+                "configSource": {
+                  "uri": "https://github.com/${{ github.repository }}",
+                  "digest": {
+                    "sha1": "${{ github.sha }}"
+                  }
+                }
+              }
+            }
+          }
+          EOF
+
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          cosign attest --yes --predicate cosign-attestation.json --type https://slsa.dev/provenance/v1 "${IMAGE}@${DIGEST}"

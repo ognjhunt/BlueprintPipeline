@@ -94,7 +94,23 @@ master_authorized_networks = [
 enable_private_nodes        = true   # Recommended for production
 enable_workload_identity    = true   # Recommended for security
 enable_network_policy       = true   # Calico network policies
-enable_binary_authorization = false  # Enable for production
+enable_binary_authorization = true  # Required for production environments
+create_binary_authorization_policy  = true
+create_binary_authorization_attestor = true
+binary_authorization_attestor_name   = "blueprint-attestor"
+
+# Provide the ASCII-armored PGP public key used to verify build attestations.
+# Use your CI signing key or an exported key from Cloud KMS / Sigstore.
+binary_authorization_attestor_public_key_id = "blueprint-attestor-key"
+binary_authorization_attestor_public_key = <<EOT
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+REPLACE_WITH_YOUR_PUBLIC_KEY
+-----END PGP PUBLIC KEY BLOCK-----
+EOT
+
+# If you already have attestors, disable creation and list them here:
+# create_binary_authorization_attestor = false
+# binary_authorization_attestors = ["projects/YOUR_PROJECT/attestors/YOUR_ATTESTOR"]
 enable_shielded_nodes       = true   # Secure boot + integrity monitoring
 
 # =============================================================================
