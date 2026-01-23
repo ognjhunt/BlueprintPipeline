@@ -75,12 +75,16 @@ services_cidr = "10.2.0.0/20"
 master_cidr   = "172.16.0.0/28"
 
 # Authorized networks for GKE master access
-# Add your office/VPN IP ranges for production
-authorized_networks = [
-  # {
-  #   cidr_block   = "203.0.113.0/24"
-  #   display_name = "Office Network"
-  # },
+# Add CI/CD runner IPs and developer VPN ranges
+master_authorized_networks = [
+  {
+    cidr_block   = "203.0.113.0/24"
+    display_name = "CI/CD runners"
+  },
+  {
+    cidr_block   = "198.51.100.0/24"
+    display_name = "Developer VPN"
+  },
 ]
 
 # =============================================================================
