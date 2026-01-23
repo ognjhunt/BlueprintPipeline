@@ -557,6 +557,7 @@ Controls LeRobot export formatting in `episode-generation-job/generate_episodes.
 |----------|------|---------|-------------|
 | `LEROBOT_EXPORT_FORMAT` | str | `lerobot_v2` | LeRobot export layout (`lerobot_v2`, `lerobot_v3`, or `lerobot_v0.3.3`; aliases like `v2`/`v3`/`0.3.3` are accepted). |
 | `LEROBOT_REQUIRE_V3` | bool | false | Require v3 exports; when enabled, emit a warning if v3 is not selected by `LEROBOT_EXPORT_FORMAT`. |
+| `LEROBOT_PARQUET_COMPRESSION` | str | `zstd` | Parquet compression codec for LeRobot exports (must be supported by the installed `pyarrow` build, e.g., `zstd`, `snappy`, `gzip`, `brotli`, `lz4`, `lz4_raw`, `bz2`). |
 
 ---
 
