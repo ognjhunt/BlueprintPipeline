@@ -83,7 +83,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from tools.checkpoint import load_checkpoint, should_skip_step, write_checkpoint
+from tools.checkpoint import get_checkpoint_store
 from tools.checkpoint.hash_config import resolve_checkpoint_hash_setting
 from tools.cost_tracking.estimate import (
     estimate_gpu_costs,
@@ -1233,6 +1233,7 @@ class LocalPipelineRunner:
             steps.append(PipelineStep.VALIDATE)
 
         if resume_from is not None:
+            checkpoint_store = get_checkpoint_store(self.scene_dir, self.scene_id)
             if resume_from not in steps:
                 self.log(
                     f"ERROR: resume-from step {resume_from.value} is not in requested steps",
@@ -1243,8 +1244,7 @@ class LocalPipelineRunner:
             prior_steps = steps[:resume_index]
             for step in prior_steps:
                 expected_outputs = self._expected_output_paths(step)
-                if should_skip_step(
-                    self.scene_dir,
+                if checkpoint_store.should_skip_step(
                     step.value,
                     expected_outputs=expected_outputs,
                     require_nonempty=True,
@@ -1293,6 +1293,7 @@ class LocalPipelineRunner:
 
         # Run each step
         all_success = True
+        checkpoint_store = get_checkpoint_store(self.scene_dir, self.scene_id)
         forced_steps = set(force_rerun_steps or [])
         dependencies = self._resolve_step_dependencies(steps)
         for step in steps:
@@ -1338,15 +1339,14 @@ class LocalPipelineRunner:
                 expected_outputs = self._expected_output_paths(step)
                 if step in forced_steps:
                     self.log(f"Force rerun requested for step {step.value}; skipping checkpoint.", "INFO")
-                elif should_skip_step(
-                    self.scene_dir,
+                elif checkpoint_store.should_skip_step(
                     step.value,
                     expected_outputs=expected_outputs,
                     require_nonempty=True,
                     require_fresh_outputs=True,
                     validate_sidecar_metadata=True,
                 ):
-                    checkpoint = load_checkpoint(self.scene_dir, step.value)
+                    checkpoint = checkpoint_store.load_checkpoint(step.value)
                     self.log(f"Skipping step {step.value} (checkpoint found)", "INFO")
                     self.results.append(
                         StepResult(
@@ -1380,15 +1380,13 @@ class LocalPipelineRunner:
             else:
                 # Record success for circuit breaker (P1)
                 self._step_circuit_breaker.record_success()
-                write_checkpoint(
-                    self.scene_dir,
+                checkpoint_store.write_checkpoint(
                     step.value,
                     status="completed",
                     started_at=started_at,
                     completed_at=completed_at,
                     outputs=result.outputs,
                     output_paths=self._expected_output_paths(step),
-                    scene_id=self.scene_id,
                     store_output_hashes=self.enable_checkpoint_hashes,
                 )
             if step == PipelineStep.REGEN3D and self._pending_articulation_preflight:
