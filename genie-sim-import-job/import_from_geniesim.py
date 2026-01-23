@@ -3951,6 +3951,16 @@ def run_local_import_job(
 
     if schema_errors:
         result.errors.extend(schema_errors)
+        result.success = False
+        import_manifest_path = config.output_dir / "import_manifest.json"
+        if import_manifest_path.exists():
+            result.import_manifest_path = import_manifest_path
+            _update_import_manifest_status(
+                import_manifest_path,
+                "failed",
+                success=False,
+            )
+        return result
 
     total_size_bytes = 0
     for episode_file in recordings_dir.rglob("*.json"):
