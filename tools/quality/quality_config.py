@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from tools.config.env import parse_bool_env
 
@@ -17,6 +17,7 @@ class QualityConfig:
     default_min_quality_score: float
     min_allowed: float
     max_allowed: float
+    dimension_thresholds: Mapping[str, float] = field(default_factory=dict)
     default_filter_low_quality: bool = True
     description: str = ""
     source_path: Optional[str] = None
@@ -26,7 +27,29 @@ class QualityConfig:
 class ResolvedQualitySettings:
     min_quality_score: float
     filter_low_quality: bool
+    dimension_thresholds: Mapping[str, float]
     config: QualityConfig
+
+
+def _parse_dimension_thresholds(payload: Mapping[str, Any]) -> Mapping[str, float]:
+    raw = payload.get("dimension_thresholds", {})
+    if not isinstance(raw, Mapping):
+        return {}
+    thresholds: dict[str, float] = {}
+    for key, value in raw.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            raise ValueError(
+                f"dimension_thresholds[{key!r}] must be a number, not a boolean."
+            )
+        try:
+            thresholds[str(key)] = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"dimension_thresholds[{key!r}] must be a number (got {value!r})."
+            ) from exc
+    return thresholds
 
 
 def load_quality_config(
@@ -40,6 +63,7 @@ def load_quality_config(
         default_min_quality_score=float(payload["default_min_quality_score"]),
         min_allowed=float(payload["min_allowed"]),
         max_allowed=float(payload["max_allowed"]),
+        dimension_thresholds=_parse_dimension_thresholds(payload),
         default_filter_low_quality=default_filter_low_quality,
         description=str(payload.get("description", "")),
         source_path=str(path),
@@ -93,6 +117,7 @@ def resolve_quality_settings(
     return ResolvedQualitySettings(
         min_quality_score=min_quality_score,
         filter_low_quality=filter_low_quality,
+        dimension_thresholds=resolved_config.dimension_thresholds,
         config=resolved_config,
     )
 

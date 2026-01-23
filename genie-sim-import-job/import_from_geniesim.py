@@ -57,10 +57,10 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from import_manifest_utils import (
     ENV_SNAPSHOT_KEYS,
@@ -248,6 +248,7 @@ def _stream_realtime_episodes(
                     "validation_passed": episode.validation_passed,
                     "file_size_bytes": episode.file_size_bytes,
                     "quality_score": episode.quality_score,
+                    "quality_components": episode.quality_components,
                     "job_id": job_id,
                     "scene_id": scene_id,
                     "robot_type": robot_type,
@@ -403,6 +404,128 @@ def _coerce_bool(value: Any) -> Optional[bool]:
     return None
 
 
+def _coerce_threshold_map(value: Any) -> Dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    thresholds: Dict[str, float] = {}
+    for key, raw_value in value.items():
+        coerced = _coerce_float(raw_value)
+        if coerced is None:
+            continue
+        thresholds[str(key)] = coerced
+    return thresholds
+
+
+def _coerce_quality_component_value(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_collision_component(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, int) and not isinstance(value, bool):
+        return 1.0 if value <= 0 else 0.0
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric < 0.0:
+        return None
+    if numeric > 1.0:
+        return 0.0
+    return numeric
+
+
+def _extract_quality_components(payload: Dict[str, Any]) -> Dict[str, float]:
+    components: Dict[str, float] = {}
+    for source_key in ("quality_components", "quality_metrics", "quality_scores"):
+        raw = payload.get(source_key)
+        if not isinstance(raw, dict):
+            continue
+        for key, value in raw.items():
+            if key == "collision_count":
+                normalized = _normalize_collision_component(value)
+                if normalized is not None:
+                    components[key] = normalized
+                continue
+            coerced = _coerce_quality_component_value(value)
+            if coerced is not None:
+                components[key] = coerced
+
+    cert = payload.get("quality_certificate")
+    if isinstance(cert, dict):
+        trajectory = cert.get("trajectory_metrics")
+        task = cert.get("task_metrics")
+        sim2real = cert.get("sim2real_metrics")
+        if isinstance(trajectory, dict):
+            smoothness = _coerce_quality_component_value(
+                trajectory.get("smoothness_score")
+            )
+            if smoothness is not None:
+                components.setdefault("trajectory_smoothness", smoothness)
+            collision_count = trajectory.get("collision_count")
+            if collision_count is not None and "collision_count" not in components:
+                normalized = _normalize_collision_component(collision_count)
+                if normalized is not None:
+                    components["collision_count"] = normalized
+        if isinstance(task, dict):
+            completion = _coerce_quality_component_value(
+                task.get("goal_achievement_score")
+            )
+            if completion is not None:
+                components.setdefault("task_completion", completion)
+            grasp_success = _coerce_quality_component_value(
+                task.get("skill_correctness_ratio")
+            )
+            if grasp_success is not None:
+                components.setdefault("grasp_success", grasp_success)
+        if isinstance(sim2real, dict):
+            plausibility = _coerce_quality_component_value(
+                sim2real.get("physics_plausibility_score")
+            )
+            if plausibility is not None:
+                components.setdefault("physics_plausibility", plausibility)
+
+    if "task_success" in payload and "task_completion" not in components:
+        completion = _coerce_quality_component_value(payload.get("task_success"))
+        if completion is not None:
+            components["task_completion"] = completion
+    if "grasp_success" in payload and "grasp_success" not in components:
+        grasp_success = _coerce_quality_component_value(payload.get("grasp_success"))
+        if grasp_success is not None:
+            components["grasp_success"] = grasp_success
+    if "collision_free" in payload and "collision_count" not in components:
+        collision_free = _coerce_quality_component_value(payload.get("collision_free"))
+        if collision_free is not None:
+            components["collision_count"] = collision_free
+
+    return components
+
+
+def _evaluate_quality_component_thresholds(
+    components: Mapping[str, float],
+    thresholds: Mapping[str, float],
+) -> List[str]:
+    if not thresholds:
+        return []
+    failures = []
+    for key, min_value in thresholds.items():
+        if key not in components:
+            continue
+        if components[key] < min_value:
+            failures.append(key)
+    return failures
+
+
 def _guard_quality_thresholds(
     job_metadata: Optional[Dict[str, Any]],
     quality_settings: ResolvedQualitySettings,
@@ -418,6 +541,13 @@ def _guard_quality_thresholds(
     submitted_filter_low_quality = _coerce_bool(
         quality_metadata.get("filter_low_quality")
     )
+    submitted_dimension_thresholds = _coerce_threshold_map(
+        quality_metadata.get("dimension_thresholds")
+    )
+    if not submitted_dimension_thresholds:
+        submitted_dimension_thresholds = _coerce_threshold_map(
+            generation_params.get("dimension_thresholds")
+        )
 
     mismatches = []
     if submitted_min_quality is not None and abs(
@@ -435,6 +565,22 @@ def _guard_quality_thresholds(
             "filter_low_quality "
             f"(submit={submitted_filter_low_quality}, import={quality_settings.filter_low_quality})"
         )
+    if submitted_dimension_thresholds:
+        config_thresholds = dict(quality_settings.dimension_thresholds)
+        threshold_keys = set(submitted_dimension_thresholds) | set(config_thresholds)
+        for key in sorted(threshold_keys):
+            submitted_value = submitted_dimension_thresholds.get(key)
+            config_value = config_thresholds.get(key)
+            if submitted_value is None or config_value is None:
+                mismatches.append(
+                    "dimension_thresholds mismatch "
+                    f"(dimension={key}, submit={submitted_value}, import={config_value})"
+                )
+            elif abs(submitted_value - config_value) > 1e-6:
+                mismatches.append(
+                    "dimension_thresholds mismatch "
+                    f"(dimension={key}, submit={submitted_value}, import={config_value})"
+                )
 
     if not mismatches:
         return
@@ -1527,6 +1673,18 @@ def _write_combined_import_manifest(
     )
     min_quality = min(min_quality_scores) if min_quality_scores else 0.0
     max_quality = max(max_quality_scores) if max_quality_scores else 0.0
+    component_failure_counts: Dict[str, int] = {}
+    component_failed_total = 0
+    for entry in robot_entries:
+        quality = entry.get("quality", {})
+        component_failed_total += int(quality.get("component_failed_episodes", 0))
+        counts = quality.get("component_failure_counts")
+        if isinstance(counts, dict):
+            for key, value in counts.items():
+                if isinstance(value, (int, float)):
+                    component_failure_counts[key] = component_failure_counts.get(key, 0) + int(
+                        value
+                    )
 
     normalized_robot_entries = []
     robot_metrics: Dict[str, Any] = {}
@@ -1660,10 +1818,14 @@ def _write_combined_import_manifest(
             "validation_enabled": any(
                 entry["quality"]["validation_enabled"] for entry in normalized_robot_entries
             ),
+            "component_thresholds": quality_settings.config.dimension_thresholds,
+            "component_failed_episodes": component_failed_total,
+            "component_failure_counts": component_failure_counts,
         },
         "quality_config": {
             "min_quality_score": quality_settings.min_quality_score,
             "filter_low_quality": quality_settings.filter_low_quality,
+            "dimension_thresholds": quality_settings.config.dimension_thresholds,
             "range": {
                 "min_allowed": quality_settings.config.min_allowed,
                 "max_allowed": quality_settings.config.max_allowed,
@@ -1858,6 +2020,7 @@ def _collect_local_episode_metadata(
                     episode_id=payload.get("episode_id", episode_file.stem),
                     task_name=payload.get("task_name", "unknown"),
                     quality_score=float(payload.get("quality_score", 0.0)),
+                    quality_components=_extract_quality_components(payload),
                     frame_count=int(frame_count),
                     duration_seconds=duration_seconds,
                     validation_passed=bool(payload.get("validation_passed", True)),
@@ -1896,6 +2059,7 @@ class ImportConfig(BaseModel):
 
     # Quality filtering
     min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE
+    quality_component_thresholds: Dict[str, float] = Field(default_factory=dict)
     min_episodes_required: int = MIN_EPISODES_REQUIRED
     enable_validation: bool = True
     filter_low_quality: bool = DEFAULT_FILTER_LOW_QUALITY
@@ -2018,6 +2182,9 @@ class ImportResult:
     quality_distribution: Dict[str, int] = field(default_factory=dict)
     quality_min_score: float = 0.0
     quality_max_score: float = 0.0
+    quality_component_failed_count: int = 0
+    quality_component_failure_counts: Dict[str, int] = field(default_factory=dict)
+    quality_component_thresholds: Dict[str, float] = field(default_factory=dict)
 
     # Output
     output_dir: Optional[Path] = None
@@ -2048,6 +2215,7 @@ class ImportedEpisodeValidator:
         self,
         min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE,
         require_parquet_validation: bool = True,
+        dimension_thresholds: Optional[Mapping[str, float]] = None,
     ):
         """
         Initialize validator.
@@ -2057,6 +2225,7 @@ class ImportedEpisodeValidator:
         """
         self.min_quality_score = min_quality_score
         self.require_parquet_validation = require_parquet_validation
+        self.dimension_thresholds = dict(dimension_thresholds or {})
 
     def validate_episode(
         self,
@@ -2124,6 +2293,16 @@ class ImportedEpisodeValidator:
                 f"Quality score {quality_score:.2f} below threshold {self.min_quality_score:.2f}"
             )
 
+        component_failures = _evaluate_quality_component_thresholds(
+            episode_metadata.quality_components,
+            self.dimension_thresholds,
+        )
+        if component_failures:
+            warnings.append(
+                "Quality component thresholds failed for: "
+                + ", ".join(component_failures)
+            )
+
         # Check validation status
         if not episode_metadata.validation_passed:
             warnings.append("Episode failed Genie Sim validation")
@@ -2140,12 +2319,15 @@ class ImportedEpisodeValidator:
         passed = (
             len(errors) == 0
             and quality_score >= self.min_quality_score
+            and not component_failures
             and episode_metadata.validation_passed
         )
 
         return {
             "passed": passed,
             "quality_score": quality_score,
+            "quality_components": episode_metadata.quality_components,
+            "quality_component_failures": component_failures,
             "errors": errors,
             "warnings": warnings,
         }
@@ -2168,6 +2350,11 @@ class ImportedEpisodeValidator:
         results = []
         passed_count = 0
         quality_scores = []
+        component_failure_counts = {
+            key: 0 for key in (self.dimension_thresholds or {}).keys()
+        }
+        component_failed_episodes = []
+        component_failed_count = 0
 
         for episode in episodes:
             episode_file = episode_dir / f"{episode.episode_id}.parquet"
@@ -2181,6 +2368,19 @@ class ImportedEpisodeValidator:
                 passed_count += 1
 
             quality_scores.append(result["quality_score"])
+            component_failures = result.get("quality_component_failures") or []
+            if component_failures:
+                component_failed_count += 1
+                component_failed_episodes.append(
+                    {
+                        "episode_id": episode.episode_id,
+                        "failed_dimensions": component_failures,
+                    }
+                )
+                for dimension in component_failures:
+                    component_failure_counts[dimension] = (
+                        component_failure_counts.get(dimension, 0) + 1
+                    )
 
         return {
             "total_episodes": len(episodes),
@@ -2189,6 +2389,10 @@ class ImportedEpisodeValidator:
             "average_quality_score": np.mean(quality_scores) if quality_scores else 0.0,
             "min_quality_score": np.min(quality_scores) if quality_scores else 0.0,
             "max_quality_score": np.max(quality_scores) if quality_scores else 0.0,
+            "quality_component_thresholds": dict(self.dimension_thresholds),
+            "quality_component_failed_count": component_failed_count,
+            "quality_component_failure_counts": component_failure_counts,
+            "quality_component_failed_episodes": component_failed_episodes,
             "episode_results": results,
         }
 
@@ -2271,6 +2475,7 @@ def convert_to_lerobot(
     output_dir: Path,
     episode_metadata_list: List[GeneratedEpisodeMetadata],
     min_quality_score: float = DEFAULT_MIN_QUALITY_SCORE,
+    quality_component_thresholds: Optional[Mapping[str, float]] = None,
     job_id: str = "unknown",
     scene_id: str = "unknown",
 ) -> Dict[str, Any]:
@@ -2290,6 +2495,7 @@ def convert_to_lerobot(
     Returns:
         Dict with conversion statistics
     """
+    component_thresholds = dict(quality_component_thresholds or {})
     mock_decision = resolve_geniesim_mock_mode()
     if mock_decision.requested and mock_decision.production_mode:
         print(
@@ -2311,7 +2517,11 @@ def convert_to_lerobot(
         quality_scores = []
 
         for ep_metadata in episode_metadata_list:
-            if ep_metadata.quality_score < min_quality_score:
+            component_failures = _evaluate_quality_component_thresholds(
+                ep_metadata.quality_components,
+                component_thresholds,
+            )
+            if ep_metadata.quality_score < min_quality_score or component_failures:
                 skipped_count += 1
                 continue
 
@@ -2335,6 +2545,7 @@ def convert_to_lerobot(
                 "num_frames": ep_metadata.frame_count,
                 "duration_seconds": ep_metadata.duration_seconds,
                 "quality_score": ep_metadata.quality_score,
+                "quality_components": ep_metadata.quality_components,
                 "validation_passed": ep_metadata.validation_passed,
                 "file": str(episode_output.name),
             })
@@ -2422,7 +2633,11 @@ def convert_to_lerobot(
 
     for ep_metadata in episode_metadata_list:
         # Skip low-quality episodes
-        if ep_metadata.quality_score < min_quality_score:
+        component_failures = _evaluate_quality_component_thresholds(
+            ep_metadata.quality_components,
+            component_thresholds,
+        )
+        if ep_metadata.quality_score < min_quality_score or component_failures:
             skipped_count += 1
             continue
 
@@ -2465,6 +2680,10 @@ def convert_to_lerobot(
                     # Quality metrics
                     "quality_score": [ep_metadata.quality_score] * len(df),
                 }
+                for component_name, component_value in ep_metadata.quality_components.items():
+                    lerobot_data[f"quality_components.{component_name}"] = [
+                        component_value
+                    ] * len(df)
 
                 # Add optional fields if available
                 if "depth_image" in df.columns:
@@ -2503,6 +2722,7 @@ def convert_to_lerobot(
                     "num_frames": len(df),
                     "duration_seconds": ep_metadata.duration_seconds,
                     "quality_score": ep_metadata.quality_score,
+                    "quality_components": ep_metadata.quality_components,
                     "validation_passed": ep_metadata.validation_passed,
                     "file": str(episode_output.name),
                 })
@@ -2728,8 +2948,16 @@ def run_local_import_job(
     validator = ImportedEpisodeValidator(
         min_quality_score=config.min_quality_score,
         require_parquet_validation=config.enable_validation,
+        dimension_thresholds=config.quality_component_thresholds,
     )
     validation_summary = validator.validate_batch(episode_metadata_list, recordings_dir)
+    result.quality_component_failed_count = int(
+        validation_summary.get("quality_component_failed_count", 0)
+    )
+    result.quality_component_failure_counts = dict(
+        validation_summary.get("quality_component_failure_counts", {}) or {}
+    )
+    result.quality_component_thresholds = dict(config.quality_component_thresholds)
     failed_episode_ids = [
         entry["episode_id"]
         for entry in validation_summary["episode_results"]
@@ -2829,6 +3057,17 @@ def run_local_import_job(
         for ep in filtered_episode_metadata_list
         if ep.quality_score < config.min_quality_score
     ]
+    component_failed_episodes = []
+    if config.quality_component_thresholds:
+        for ep in filtered_episode_metadata_list:
+            failures = _evaluate_quality_component_thresholds(
+                ep.quality_components,
+                config.quality_component_thresholds,
+            )
+            if failures:
+                component_failed_episodes.append(
+                    {"episode_id": ep.episode_id, "failed_dimensions": failures}
+                )
     result.episodes_passed_validation = validation_summary["passed_count"]
     result.episodes_filtered = len(filtered_episode_ids)
     quality_scores = [ep.quality_score for ep in filtered_episode_metadata_list]
@@ -2841,6 +3080,15 @@ def run_local_import_job(
     if low_quality_episodes:
         result.errors.append(
             f"{len(low_quality_episodes)} local episodes below min_quality_score={config.min_quality_score}"
+        )
+    if component_failed_episodes:
+        failed_dimensions = sorted(
+            {dim for entry in component_failed_episodes for dim in entry["failed_dimensions"]}
+        )
+        result.errors.append(
+            "Local episodes below quality component thresholds: "
+            f"{len(component_failed_episodes)} episode(s) failed "
+            f"({', '.join(failed_dimensions)})."
         )
 
     if config.enable_validation:
@@ -3030,6 +3278,7 @@ def run_local_import_job(
             "gcs_output_path": gcs_output_path,
             "enable_gcs_uploads": config.enable_gcs_uploads,
             "min_quality_score": config.min_quality_score,
+            "quality_component_thresholds": config.quality_component_thresholds,
             "enable_validation": config.enable_validation,
             "filter_low_quality": config.filter_low_quality,
             "require_lerobot": config.require_lerobot,
@@ -3100,10 +3349,14 @@ def run_local_import_job(
             "max_score": quality_max_score,
             "threshold": config.min_quality_score,
             "validation_enabled": config.enable_validation,
+            "component_thresholds": config.quality_component_thresholds,
+            "component_failed_episodes": result.quality_component_failed_count,
+            "component_failure_counts": result.quality_component_failure_counts,
         },
         "quality_config": {
             "min_quality_score": config.min_quality_score,
             "filter_low_quality": config.filter_low_quality,
+            "dimension_thresholds": config.quality_component_thresholds,
             "range": {
                 "min_allowed": QUALITY_CONFIG.min_allowed,
                 "max_allowed": QUALITY_CONFIG.max_allowed,
@@ -3573,6 +3826,11 @@ def main(input_params: Optional[Dict[str, Any]] = None):
     log.info("  Job ID: %s", job_id)
     log.info("  Output Prefix: %s", output_prefix)
     log.info("  Min Quality: %s", min_quality_score)
+    if quality_settings.dimension_thresholds:
+        log.info(
+            "  Quality Component Thresholds: %s",
+            quality_settings.dimension_thresholds,
+        )
     log.info(
         "  Quality Range: %s - %s",
         QUALITY_CONFIG.min_allowed,
@@ -3624,6 +3882,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             "gcs_output_path": gcs_output_path,
             "enable_gcs_uploads": not disable_gcs_upload,
             "min_quality_score": min_quality_score,
+            "quality_component_thresholds": quality_settings.dimension_thresholds,
             "enable_validation": enable_validation,
             "filter_low_quality": filter_low_quality,
             "require_lerobot": require_lerobot,
@@ -3678,6 +3937,9 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                             "max_score": 0.0,
                             "threshold": min_quality_score,
                             "validation_enabled": enable_validation,
+                            "component_thresholds": quality_settings.dimension_thresholds,
+                            "component_failed_episodes": 0,
+                            "component_failure_counts": {},
                         },
                         "errors": error_result.errors,
                         "warnings": [],
@@ -3717,6 +3979,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         "gcs_output_path": robot_gcs_output_path,
                         "enable_gcs_uploads": not disable_gcs_upload,
                         "min_quality_score": min_quality_score,
+                        "quality_component_thresholds": quality_settings.dimension_thresholds,
                         "enable_validation": enable_validation,
                         "filter_low_quality": filter_low_quality,
                         "require_lerobot": require_lerobot,
@@ -3797,6 +4060,9 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         "max_score": result.quality_max_score,
                         "threshold": min_quality_score,
                         "validation_enabled": enable_validation,
+                        "component_thresholds": result.quality_component_thresholds,
+                        "component_failed_episodes": result.quality_component_failed_count,
+                        "component_failure_counts": result.quality_component_failure_counts,
                     },
                     "errors": result.errors,
                     "warnings": result.warnings,
@@ -3818,6 +4084,38 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                 for payload in robot_results
                 if not payload["result"].success
             ]
+            if job_metadata is not None:
+                component_failure_counts: Dict[str, int] = {}
+                component_failed_total = 0
+                per_robot_components: Dict[str, Any] = {}
+                for entry in robot_entries:
+                    quality = entry.get("quality", {})
+                    robot_type = entry.get("robot_type", "unknown")
+                    failed_count = int(quality.get("component_failed_episodes", 0))
+                    component_failed_total += failed_count
+                    counts = quality.get("component_failure_counts", {})
+                    if isinstance(counts, dict):
+                        per_robot_components[robot_type] = {
+                            "failed_episodes": failed_count,
+                            "failure_counts": counts,
+                        }
+                        for key, value in counts.items():
+                            if isinstance(value, (int, float)):
+                                component_failure_counts[key] = (
+                                    component_failure_counts.get(key, 0) + int(value)
+                                )
+                job_summary = job_metadata.setdefault("job_summary", {})
+                job_summary["quality_components"] = {
+                    "thresholds": quality_settings.config.dimension_thresholds,
+                    "failed_episodes": component_failed_total,
+                    "failure_counts": component_failure_counts,
+                    "robots": per_robot_components,
+                }
+                _write_local_job_metadata(
+                    bucket=bucket,
+                    job_metadata_path=job_metadata_path,
+                    job_metadata=job_metadata,
+                )
             partial_failure = bool(failed_robots)
             firebase_upload_suppressed = False
             suppression_reason = None
@@ -3975,6 +4273,18 @@ def main(input_params: Optional[Dict[str, Any]] = None):
         result = None
         with metrics.track_job("genie-sim-import-job", scene_id):
             result = run_local_import_job(config, job_metadata=job_metadata)
+        if job_metadata is not None:
+            job_summary = job_metadata.setdefault("job_summary", {})
+            job_summary["quality_components"] = {
+                "thresholds": result.quality_component_thresholds,
+                "failed_episodes": result.quality_component_failed_count,
+                "failure_counts": result.quality_component_failure_counts,
+            }
+            _write_local_job_metadata(
+                bucket=bucket,
+                job_metadata_path=job_metadata_path,
+                job_metadata=job_metadata,
+            )
         _alert_low_quality(
             scene_id=scene_id,
             job_id=job_id,
