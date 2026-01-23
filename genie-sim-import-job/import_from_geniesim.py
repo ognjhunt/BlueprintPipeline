@@ -2780,6 +2780,7 @@ class ImportedEpisodeValidator:
         errors = []
         warnings = []
         parquet_validation_error: Optional[str] = None
+        parquet_errors: List[str] = []
 
         # Check file exists
         if not episode_file.exists():
@@ -2805,7 +2806,8 @@ class ImportedEpisodeValidator:
                 require_parquet_validation=self.require_parquet_validation,
                 episode_index=episode_index,
             )
-            errors.extend(parquet_results["errors"])
+            parquet_errors = parquet_results["errors"]
+            errors.extend(parquet_errors)
             warnings.extend(parquet_results["warnings"])
         except RuntimeError as exc:
             error_message = str(exc)
@@ -2863,6 +2865,7 @@ class ImportedEpisodeValidator:
             "errors": errors,
             "warnings": warnings,
             "parquet_validation_error": parquet_validation_error,
+            "parquet_errors": parquet_errors,
         }
 
     def validate_batch(
@@ -2904,6 +2907,9 @@ class ImportedEpisodeValidator:
             parquet_validation_error = result.get("parquet_validation_error")
             if parquet_validation_error:
                 parquet_validation_errors.add(str(parquet_validation_error))
+            parquet_errors = result.get("parquet_errors") or []
+            for error in parquet_errors:
+                parquet_validation_errors.add(str(error))
 
             if result["passed"]:
                 passed_count += 1
@@ -3810,8 +3816,12 @@ def run_local_import_job(
     )
     result.quality_component_thresholds = dict(config.quality_component_thresholds)
     parquet_validation_errors = validation_summary.get("parquet_validation_errors") or []
+    production_mode = resolve_production_mode()
     if parquet_validation_errors:
         result.errors.extend(parquet_validation_errors)
+        if config.enable_validation or production_mode:
+            result.success = False
+            return result
     failed_episode_ids = [
         entry["episode_id"]
         for entry in validation_summary["episode_results"]
