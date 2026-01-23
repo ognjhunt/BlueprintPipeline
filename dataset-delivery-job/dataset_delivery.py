@@ -17,7 +17,7 @@ import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import requests
 from google.cloud import storage
@@ -33,6 +33,7 @@ from tools.quality_gates.quality_gate import (
     QualityGateResult,
     QualityGateSeverity,
 )
+from tools.quality_reports.asset_provenance_generator import COMMERCIAL_OK_LICENSES, LicenseType
 
 GCS_ROOT = Path("/mnt/gcs")
 JOB_NAME = "dataset-delivery-job"
@@ -213,6 +214,67 @@ def verify_blob_checksum(
     verify_package_checksum(client, blob_uri, checksums_uri, blob_rel_path)
 
 
+def _normalize_license(license_value: Any) -> LicenseType:
+    if isinstance(license_value, LicenseType):
+        return license_value
+    if isinstance(license_value, str):
+        try:
+            return LicenseType(license_value)
+        except ValueError:
+            return LicenseType.UNKNOWN
+    return LicenseType.UNKNOWN
+
+
+def _offending_asset_licenses(asset_provenance: Dict[str, Any]) -> List[str]:
+    offenders: List[str] = []
+    assets = asset_provenance.get("assets")
+    if isinstance(assets, list) and assets:
+        for asset in assets:
+            if not isinstance(asset, dict):
+                offenders.append("unknown:unknown")
+                continue
+            asset_id = (
+                asset.get("asset_id")
+                or asset.get("id")
+                or asset.get("asset_path")
+                or "unknown"
+            )
+            license_info = asset.get("license")
+            if isinstance(license_info, dict):
+                license_value = license_info.get("type") or license_info.get("license")
+            elif isinstance(license_info, str):
+                license_value = license_info
+            else:
+                license_value = None
+            license_type = _normalize_license(license_value)
+            if license_type not in COMMERCIAL_OK_LICENSES:
+                offenders.append(f"{asset_id}:{license_value or license_type.value}")
+        return offenders
+
+    license_info = asset_provenance.get("license")
+    if isinstance(license_info, dict):
+        license_value = license_info.get("type") or license_info.get("license")
+    elif isinstance(license_info, str):
+        license_value = license_info
+    else:
+        license_value = None
+    license_type = _normalize_license(license_value)
+    if license_type not in COMMERCIAL_OK_LICENSES:
+        offenders.append(f"scene:{license_value or license_type.value}")
+    return offenders
+
+
+def _resolve_asset_provenance_uri(import_manifest: Dict[str, Any], bundle_base: str) -> str:
+    asset_provenance_path = (
+        import_manifest.get("asset_provenance_path")
+        or import_manifest.get("asset_provenance")
+        or "legal/asset_provenance.json"
+    )
+    if not asset_provenance_path:
+        raise ValueError("Import manifest missing asset_provenance_path")
+    return join_gs_uri(bundle_base, asset_provenance_path)
+
+
 def build_dataset_card(import_manifest: Dict[str, Any], scene_id: str, job_id: str) -> Dict[str, Any]:
     return {
         "scene_id": scene_id,
@@ -285,6 +347,16 @@ def main() -> int:
         package_uri = join_gs_uri(bundle_base, package_rel_path)
         checksums_uri = join_gs_uri(bundle_base, checksums_rel_path)
         verify_package_checksum(client, package_uri, checksums_uri, package_rel_path)
+
+        asset_provenance_uri = _resolve_asset_provenance_uri(import_manifest, bundle_base)
+        asset_provenance = read_json_from_gcs(client, asset_provenance_uri)
+        offending_licenses = _offending_asset_licenses(asset_provenance)
+        if offending_licenses:
+            raise RuntimeError(
+                "Compliance error: "
+                f"scene_id={scene_id} has non-commercial or unknown licenses: "
+                f"{', '.join(offending_licenses)}"
+            )
 
         dataset_card = build_dataset_card(import_manifest, scene_id, job_id)
 
