@@ -22,7 +22,7 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 | `interactive-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/scene_assets.json` |
 | `objects-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/layout/scene_layout.json` |
 | `regen3d-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.assets_ready` |
-| `retention-cleanup.yaml` | Cloud Scheduler | Daily retention cleanup |
+| `retention-cleanup.yaml` | Cloud Scheduler | Daily retention cleanup (managed in `infrastructure/terraform`) |
 | `scale-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/layout/scene_layout.json` |
 | `scene-batch.yaml` | Manual only | Provide a manifest object with a scene list |
 | `scene-generation-pipeline.yaml` | Cloud Scheduler / manual | Scheduler (disabled by default) or manual run |
