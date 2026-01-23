@@ -48,6 +48,8 @@ Environment overrides:
       successful robots even if others fail.
     - FIREBASE_REQUIRE_ATOMIC_UPLOAD: When true, rollback all successful uploads if any robot fails.
     - GENIESIM_SUBMIT_TIMEOUT_S: Total wall-clock timeout for the genie-sim-submit step.
+    - GENIESIM_IMPORT_POLL_INTERVAL: Poll interval in seconds for genie-sim-import status checks.
+    - GENIESIM_IMPORT_POLL_TIMEOUT: Timeout in seconds for genie-sim-import status polling.
     - GCS_MOUNT_ROOT: Base path used for local GCS-style mount mapping.
     - PIPELINE_FAIL_FAST: Stop the pipeline on the first failure when true.
     - REQUIRE_BALANCED_ROBOT_EPISODES: Fail validation when cross-robot episode counts mismatch.
@@ -3965,6 +3967,43 @@ class LocalPipelineRunner:
                 message=f"Import error (Genie Sim import job not found): {self._summarize_exception(e)}",
             )
 
+        def _poll_geniesim_job_status() -> tuple[Dict[str, Any], str]:
+            poll_interval = max(
+                1,
+                parse_int_env(os.getenv("GENIESIM_IMPORT_POLL_INTERVAL"), default=10),
+            )
+            poll_timeout = parse_int_env(
+                os.getenv("GENIESIM_IMPORT_POLL_TIMEOUT"),
+                default=3600,
+            )
+            poll_start = time.time()
+            last_status = None
+            last_payload: Dict[str, Any] = {}
+            while True:
+                payload = _load_json(job_path, "Genie Sim job payload")
+                status = str(payload.get("status", "submitted")).strip().lower()
+                last_payload = payload
+                if status != last_status and status:
+                    self.log(
+                        f"Genie Sim job {job_id} status: {status}",
+                        "INFO",
+                    )
+                    last_status = status
+                if status in {"completed", "failed"}:
+                    if status == "failed":
+                        failure_reason = payload.get("failure_reason") or "unknown failure"
+                        raise NonRetryableError(
+                            f"Genie Sim job {job_id} failed: {failure_reason}."
+                        )
+                    return payload, status
+                if poll_timeout and (time.time() - poll_start) >= poll_timeout:
+                    raise NonRetryableError(
+                        "Timed out waiting for Genie Sim job "
+                        f"{job_id} to complete after {poll_timeout}s "
+                        f"(last status: {status})."
+                    )
+                time.sleep(poll_interval)
+
         job_path = self.geniesim_dir / "job.json"
         try:
             if not job_path.is_file():
@@ -3979,8 +4018,8 @@ class LocalPipelineRunner:
                 message=str(exc),
             )
 
-        job_payload = _load_json(job_path, "Genie Sim job payload")
         try:
+            job_payload = _load_json(job_path, "Genie Sim job payload")
             job_id = job_payload.get("job_id")
             if not job_id:
                 raise NonRetryableError("Genie Sim job metadata missing job_id")
@@ -3991,7 +4030,20 @@ class LocalPipelineRunner:
                 duration_seconds=time.time() - start_time,
                 message=str(exc),
             )
-        job_status = job_payload.get("status", "submitted")
+        try:
+            job_payload, job_status = _poll_geniesim_job_status()
+        except NonRetryableError as exc:
+            return StepResult(
+                step=PipelineStep.GENIESIM_IMPORT,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=str(exc),
+                outputs={
+                    "job_id": job_id,
+                    "job_status": job_payload.get("status") if job_payload else None,
+                    "job_payload": str(job_path),
+                },
+            )
         local_execution = job_payload.get("local_execution", {}) if isinstance(job_payload, dict) else {}
         local_success = local_execution.get("success")
         if local_success is None:
