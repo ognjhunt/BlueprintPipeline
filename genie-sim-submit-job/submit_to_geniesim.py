@@ -69,6 +69,7 @@ from tools.logging_config import init_logging
 from tools.quality.quality_config import resolve_quality_settings
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+from tools.firebase_upload import preflight_firebase_connectivity
 from monitoring.alerting import send_alert
 
 try:
@@ -106,6 +107,76 @@ def _resolve_debug_mode() -> bool:
     if debug_flag is None:
         debug_flag = parse_bool_env(os.getenv("DEBUG"), default=False)
     return bool(debug_flag)
+
+
+def _run_firebase_preflight(
+    *,
+    log: logging.LoggerAdapter,
+    firebase_required: bool,
+) -> Optional[Dict[str, Any]]:
+    firebase_enabled = parse_bool_env(os.getenv("ENABLE_FIREBASE_UPLOAD"), default=True)
+    firebase_disabled = parse_bool_env(os.getenv("DISABLE_FIREBASE_UPLOAD"), default=False)
+
+    if firebase_disabled or not firebase_enabled:
+        if firebase_required:
+            error = (
+                "Firebase upload is required but disabled. "
+                "Set ENABLE_FIREBASE_UPLOAD=1 and DISABLE_FIREBASE_UPLOAD=0."
+            )
+            log.error("[GENIESIM-SUBMIT] %s", error)
+            return {
+                "success": False,
+                "error": error,
+                "bucket_name": os.getenv("FIREBASE_STORAGE_BUCKET"),
+            }
+        log.info(
+            "[GENIESIM-SUBMIT] Firebase upload is disabled; skipping connectivity check."
+        )
+        return None
+
+    firebase_bucket = os.getenv("FIREBASE_STORAGE_BUCKET")
+    if not firebase_bucket:
+        if firebase_required:
+            error = "FIREBASE_STORAGE_BUCKET not configured while Firebase upload is required."
+            log.error("[GENIESIM-SUBMIT] %s", error)
+            return {"success": False, "error": error, "bucket_name": None}
+        log.info(
+            "[GENIESIM-SUBMIT] FIREBASE_STORAGE_BUCKET not configured; skipping connectivity check."
+        )
+        return None
+
+    log.info(
+        "[GENIESIM-SUBMIT] Testing Firebase connectivity to bucket: %s",
+        firebase_bucket,
+    )
+    try:
+        result = preflight_firebase_connectivity(timeout_seconds=15.0)
+        if result.get("success"):
+            log.info(
+                "[GENIESIM-SUBMIT] Firebase connectivity verified "
+                "(bucket=%s, latency=%sms)",
+                result.get("bucket_name"),
+                result.get("latency_ms"),
+            )
+        return result
+    except ImportError as exc:
+        return {
+            "success": False,
+            "error": f"Firebase upload module not available: {exc}",
+            "bucket_name": firebase_bucket,
+        }
+    except ValueError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "bucket_name": firebase_bucket,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": f"Unexpected error during Firebase preflight: {exc}",
+            "bucket_name": firebase_bucket,
+        }
 
 
 def _format_validation_error(error: ValidationError) -> str:
@@ -1535,6 +1606,38 @@ def main(input_params: Optional[Dict[str, Any]] = None) -> int:
         canary_scene_ids=canary_scene_ids,
         canary_percent=canary_percent,
     )
+
+    if not skip_local_run:
+        firebase_required = parse_bool_env(
+            os.getenv("FIREBASE_UPLOAD_REQUIRED"),
+            default=_is_production_mode(),
+        )
+        firebase_preflight = _run_firebase_preflight(
+            log=log,
+            firebase_required=firebase_required,
+        )
+        if firebase_preflight is not None:
+            if isinstance(preflight_report, dict):
+                preflight_report["firebase_preflight"] = firebase_preflight
+            if not firebase_preflight.get("success", False):
+                if firebase_required:
+                    submission_message = (
+                        "Firebase connectivity preflight failed; aborting before "
+                        "starting Genie Sim."
+                    )
+                    failure_reason = "Firebase connectivity preflight failed"
+                    failure_details = {
+                        **failure_details,
+                        "firebase_preflight": firebase_preflight,
+                    }
+                    job_status = "failed"
+                    skip_local_run = True
+                    skip_postprocessing = True
+                else:
+                    log.warning(
+                        "[GENIESIM-SUBMIT] Firebase preflight failed (non-fatal): %s",
+                        firebase_preflight.get("error", "unknown error"),
+                    )
 
     if not skip_local_run:
         gcs_root = Path("/mnt/gcs") / bucket
