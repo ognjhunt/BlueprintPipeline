@@ -7,6 +7,7 @@
 #   JOB_NAME=genie-sim-local \
 #   SCENE_ID=scene_123 \
 #   BUCKET=example-bucket \
+#   GENIESIM_HOST=localhost \
 #   envsubst < k8s/genie-sim-local-job.yaml | kubectl apply -f -
 # =============================================================================
 
@@ -19,7 +20,7 @@ data:
   EPISODES_PER_TASK: "10"
   NUM_VARIATIONS: "5"
   ROBOT_TYPE: "franka"
-  GENIESIM_HOST: "localhost"
+  GENIESIM_HOST: "${GENIESIM_HOST}"
   GENIESIM_PORT: "50051"
   GENIESIM_ROOT: "/opt/geniesim"
   ISAAC_SIM_PATH: "/isaac-sim"
