@@ -10,7 +10,7 @@ import base64
 import hashlib
 import shutil
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -27,6 +27,7 @@ _FIREBASE_STORAGE_CLIENT: Optional[storage.Client] = None
 _FIREBASE_STORAGE_BUCKET = None
 _SHA256_METADATA_KEY = "sha256"
 _LOCAL_UPLOAD_ROOT: Optional[Path] = None
+_DEFAULT_FIREBASE_UPLOAD_FILE_TIMEOUT_SECONDS = 300.0
 
 
 class FirebaseUploadError(RuntimeError):
@@ -65,6 +66,22 @@ def _resolve_local_upload_root() -> Path:
         return _LOCAL_UPLOAD_ROOT
     _LOCAL_UPLOAD_ROOT = Path(tempfile.mkdtemp(prefix="firebase-upload-local-"))
     return _LOCAL_UPLOAD_ROOT
+
+
+def _resolve_upload_file_timeout_seconds() -> float:
+    raw_timeout = os.getenv(
+        "FIREBASE_UPLOAD_FILE_TIMEOUT_SECONDS",
+        str(_DEFAULT_FIREBASE_UPLOAD_FILE_TIMEOUT_SECONDS),
+    )
+    try:
+        timeout = float(raw_timeout)
+    except ValueError as exc:
+        raise ValueError(
+            "FIREBASE_UPLOAD_FILE_TIMEOUT_SECONDS must be a number of seconds"
+        ) from exc
+    if timeout <= 0:
+        raise ValueError("FIREBASE_UPLOAD_FILE_TIMEOUT_SECONDS must be > 0")
+    return timeout
 
 
 def resolve_firebase_local_upload_root() -> Path:
@@ -359,6 +376,7 @@ def _upload_firebase_files(
     concurrency = int(os.getenv("FIREBASE_UPLOAD_CONCURRENCY", "8"))
     if concurrency < 1:
         raise ValueError("FIREBASE_UPLOAD_CONCURRENCY must be >= 1")
+    upload_timeout_seconds = _resolve_upload_file_timeout_seconds()
 
     total_files = len(file_paths)
     uploaded_files = 0
@@ -456,7 +474,7 @@ def _upload_firebase_files(
         for future in as_completed(futures):
             info = futures[future]
             try:
-                status_result = future.result()
+                status_result = future.result(timeout=upload_timeout_seconds)
                 status = status_result.get("status")
                 file_statuses.append(status_result)
                 if status == "failed":
@@ -471,6 +489,21 @@ def _upload_firebase_files(
                     skipped_files += 1
                 elif status == "reuploaded":
                     reuploaded_files += 1
+            except TimeoutError as exc:
+                logger.error(
+                    "Timed out uploading %s to %s after %s seconds",
+                    info["local_path"],
+                    info["remote_path"],
+                    upload_timeout_seconds,
+                )
+                failure = {
+                    "local_path": info["local_path"],
+                    "remote_path": info["remote_path"],
+                    "status": "failed",
+                    "error": f"timeout after {upload_timeout_seconds} seconds",
+                }
+                failures.append(failure)
+                file_statuses.append(failure)
             except Exception as exc:
                 logger.error(
                     "Failed to upload %s to %s: %s",
