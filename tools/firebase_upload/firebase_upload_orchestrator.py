@@ -112,6 +112,7 @@ def upload_episodes_with_retry(
     prefix: Optional[str] = None,
     cleanup_on_failure: bool = True,
     second_pass_max: Optional[int] = None,
+    file_paths: Optional[list[Path]] = None,
 ) -> FirebaseUploadResult:
     """Upload episodes with a consistent path layout and retry/backoff."""
     resolved_prefix = resolve_firebase_upload_prefix(prefix)
@@ -127,11 +128,18 @@ def upload_episodes_with_retry(
         raise ValueError("FIREBASE_UPLOAD_SECOND_PASS_MAX must be >= 0")
 
     try:
-        summary = upload_episodes_to_firebase(
-            episodes_dir=episodes_dir,
-            scene_id=upload_scene_id,
-            prefix=resolved_prefix,
-        )
+        if file_paths is None:
+            summary = upload_episodes_to_firebase(
+                episodes_dir=episodes_dir,
+                scene_id=upload_scene_id,
+                prefix=resolved_prefix,
+            )
+        else:
+            summary = upload_firebase_files(
+                file_paths,
+                prefix=resolved_prefix,
+                scene_id=upload_scene_id,
+            )
         return FirebaseUploadResult(
             summary=summary,
             initial_summary=summary,

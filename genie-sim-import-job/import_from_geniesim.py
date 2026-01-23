@@ -104,8 +104,14 @@ from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_forma
 from tools.logging_config import init_logging
 from tools.firebase_upload.firebase_upload_orchestrator import (
     FirebaseUploadOrchestratorError,
+    build_firebase_upload_prefix,
     resolve_firebase_upload_prefix,
     upload_episodes_with_retry,
+)
+from tools.firebase_upload.uploader import (
+    get_firebase_storage_bucket,
+    get_firebase_upload_mode,
+    resolve_firebase_local_upload_root,
 )
 from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
 from tools.gcs_upload import (
@@ -276,6 +282,228 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(8192), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _compute_episode_content_manifest(
+    recordings_dir: Path,
+    episode_id: str,
+) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for path in sorted(recordings_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.stem != episode_id:
+            continue
+        try:
+            rel_path = path.relative_to(recordings_dir).as_posix()
+        except ValueError:
+            rel_path = path.as_posix()
+        entries.append(
+            {
+                "path": rel_path,
+                "sha256": _sha256_file(path),
+                "size_bytes": path.stat().st_size,
+            }
+        )
+    entries.sort(key=lambda entry: entry["path"])
+    return entries
+
+
+def _compute_episode_content_hash(entries: List[Dict[str, Any]]) -> str:
+    payload = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _build_episode_hash_index_path(
+    *,
+    scene_id: str,
+    robot_type: Optional[str],
+    prefix: str,
+    content_hash: str,
+) -> str:
+    base_prefix = build_firebase_upload_prefix(
+        scene_id,
+        robot_type=robot_type,
+        prefix=prefix,
+    )
+    return f"{base_prefix}/episode_hash_index/{content_hash}.json"
+
+
+def _lookup_episode_hash_index(
+    *,
+    episode_hashes: Dict[str, str],
+    scene_id: str,
+    robot_type: Optional[str],
+    prefix: str,
+    log: logging.LoggerAdapter,
+) -> Dict[str, str]:
+    if not episode_hashes:
+        return {}
+    upload_mode = get_firebase_upload_mode()
+    existing: Dict[str, str] = {}
+    try:
+        if upload_mode == "local":
+            local_root = resolve_firebase_local_upload_root()
+            for episode_id, content_hash in episode_hashes.items():
+                index_path = _build_episode_hash_index_path(
+                    scene_id=scene_id,
+                    robot_type=robot_type,
+                    prefix=prefix,
+                    content_hash=content_hash,
+                )
+                if (local_root / index_path).exists():
+                    existing[episode_id] = content_hash
+            return existing
+
+        bucket = get_firebase_storage_bucket()
+        for episode_id, content_hash in episode_hashes.items():
+            blob_path = _build_episode_hash_index_path(
+                scene_id=scene_id,
+                robot_type=robot_type,
+                prefix=prefix,
+                content_hash=content_hash,
+            )
+            blob = bucket.blob(blob_path)
+            if blob.exists():
+                existing[episode_id] = content_hash
+    except Exception as exc:
+        log.warning("Episode hash index lookup failed: %s", exc)
+        return {}
+    return existing
+
+
+def _persist_episode_hash_index(
+    *,
+    episode_hashes: Dict[str, str],
+    scene_id: str,
+    robot_type: Optional[str],
+    prefix: str,
+    job_id: str,
+    log: logging.LoggerAdapter,
+) -> None:
+    if not episode_hashes:
+        return
+    upload_mode = get_firebase_upload_mode()
+    payload_template = {
+        "scene_id": scene_id,
+        "robot_type": robot_type,
+        "job_id": job_id,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+    if upload_mode == "local":
+        local_root = resolve_firebase_local_upload_root()
+        for episode_id, content_hash in episode_hashes.items():
+            index_path = _build_episode_hash_index_path(
+                scene_id=scene_id,
+                robot_type=robot_type,
+                prefix=prefix,
+                content_hash=content_hash,
+            )
+            full_path = local_root / index_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                **payload_template,
+                "episode_id": episode_id,
+                "content_hash": content_hash,
+            }
+            write_json_atomic(full_path, payload, indent=2)
+        return
+
+    try:
+        bucket = get_firebase_storage_bucket()
+    except Exception as exc:
+        log.warning("Episode hash index write skipped: %s", exc)
+        return
+    for episode_id, content_hash in episode_hashes.items():
+        blob_path = _build_episode_hash_index_path(
+            scene_id=scene_id,
+            robot_type=robot_type,
+            prefix=prefix,
+            content_hash=content_hash,
+        )
+        blob = bucket.blob(blob_path)
+        if blob.exists():
+            continue
+        payload = {
+            **payload_template,
+            "episode_id": episode_id,
+            "content_hash": content_hash,
+        }
+        blob.upload_from_string(
+            json.dumps(payload, sort_keys=True),
+            content_type="application/json",
+        )
+
+
+def _resolve_upload_file_list(
+    output_dir: Path,
+    deduplicated_episode_ids: List[str],
+) -> List[Path]:
+    if not deduplicated_episode_ids:
+        return [path for path in sorted(output_dir.rglob("*")) if path.is_file()]
+
+    deduped_set = set(deduplicated_episode_ids)
+    excluded_paths: set[Path] = set()
+    recordings_dir = output_dir / "recordings"
+    if recordings_dir.exists():
+        for path in recordings_dir.rglob("*"):
+            if path.is_file() and path.stem in deduped_set:
+                excluded_paths.add(path)
+
+    lerobot_dir = output_dir / "lerobot"
+    dataset_info_path = lerobot_dir / "dataset_info.json"
+    if dataset_info_path.exists():
+        try:
+            dataset_info = _load_json_file(dataset_info_path)
+        except Exception:
+            dataset_info = {}
+        for entry in dataset_info.get("episodes", []):
+            episode_id = entry.get("episode_id")
+            episode_file = entry.get("file")
+            if episode_id in deduped_set and episode_file:
+                excluded_paths.add(lerobot_dir / episode_file)
+
+    return [
+        path
+        for path in sorted(output_dir.rglob("*"))
+        if path.is_file() and path not in excluded_paths
+    ]
+
+
+def _prepare_deduplication_summary(
+    *,
+    result: ImportResult,
+    scene_id: str,
+    robot_type: Optional[str],
+    prefix: str,
+    log: logging.LoggerAdapter,
+) -> Dict[str, Any]:
+    episode_hashes = result.episode_content_hashes
+    duplicates = _lookup_episode_hash_index(
+        episode_hashes=episode_hashes,
+        scene_id=scene_id,
+        robot_type=robot_type,
+        prefix=prefix,
+        log=log,
+    )
+    deduplicated_episode_ids = sorted(duplicates.keys())
+    result.deduplicated_episode_ids = deduplicated_episode_ids
+    base_prefix = build_firebase_upload_prefix(
+        scene_id,
+        robot_type=robot_type,
+        prefix=prefix,
+    )
+    return {
+        "strategy": "firebase_storage_index_v1",
+        "checked_at": datetime.utcnow().isoformat() + "Z",
+        "scene_id": scene_id,
+        "robot_type": robot_type,
+        "index_prefix": f"{base_prefix}/episode_hash_index",
+        "deduplicated_count": len(deduplicated_episode_ids),
+        "deduplicated_episode_ids": deduplicated_episode_ids,
+        "deduplicated_hashes": duplicates,
+        "content_hash_count": len(episode_hashes),
+    }
 
 
 def _relative_to_bundle(bundle_root: Path, path: Path) -> str:
@@ -1409,6 +1637,35 @@ def _update_import_manifest_firebase_summary(
     write_json_atomic(manifest_path, import_manifest, indent=2)
 
 
+def _update_import_manifest_dedup_summary(
+    manifest_path: Optional[Path],
+    dedup_summary: Dict[str, Any],
+) -> None:
+    if manifest_path is None:
+        return
+    if not manifest_path.exists():
+        print(
+            "[GENIE-SIM-IMPORT] ⚠️  Import manifest not found; "
+            "skipping dedup summary update."
+        )
+        return
+    with open(manifest_path, "r") as handle:
+        import_manifest = json.load(handle)
+    import_manifest["deduplication"] = dedup_summary
+    episodes_summary = import_manifest.setdefault("episodes", {})
+    episodes_summary["deduplicated"] = dedup_summary.get("deduplicated_count", 0)
+    episodes_summary["deduplicated_ids"] = dedup_summary.get(
+        "deduplicated_episode_ids", []
+    )
+    checksums = import_manifest.setdefault("checksums", {})
+    metadata_checksums = checksums.setdefault("metadata", {})
+    metadata_checksums.setdefault("import_manifest.json", {})
+    metadata_checksums["import_manifest.json"]["sha256"] = compute_manifest_checksum(
+        import_manifest
+    )
+    write_json_atomic(manifest_path, import_manifest, indent=2)
+
+
 def _resolve_job_idempotency(job_metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not job_metadata:
         return None
@@ -2012,6 +2269,9 @@ class ImportResult:
     episodes_filtered: int = 0
     episodes_parse_failed: int = 0
     episode_parse_failures: List[Dict[str, str]] = field(default_factory=list)
+    episode_content_hashes: Dict[str, str] = field(default_factory=dict)
+    episode_content_manifests: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    deduplicated_episode_ids: List[str] = field(default_factory=list)
 
     # Quality metrics
     average_quality_score: float = 0.0
@@ -2338,6 +2598,8 @@ def convert_to_lerobot(
                 "validation_passed": ep_metadata.validation_passed,
                 "file": str(episode_output.name),
             })
+            if ep_metadata.episode_content_hash:
+                dataset_info["episodes"][-1]["content_hash"] = ep_metadata.episode_content_hash
 
             converted_count += 1
             total_frames += ep_metadata.frame_count
@@ -2506,6 +2768,8 @@ def convert_to_lerobot(
                     "validation_passed": ep_metadata.validation_passed,
                     "file": str(episode_output.name),
                 })
+                if ep_metadata.episode_content_hash:
+                    dataset_info["episodes"][-1]["content_hash"] = ep_metadata.episode_content_hash
 
                 converted_count += 1
                 total_frames += len(df)
@@ -2758,6 +3022,41 @@ def run_local_import_job(
                     + ", ".join(filtered_episode_ids)
                 )
 
+    episode_content_hashes: Dict[str, str] = {}
+    episode_content_manifests: Dict[str, List[Dict[str, Any]]] = {}
+    missing_content_hashes: List[str] = []
+    for episode in episode_metadata_list:
+        manifest_entries = _compute_episode_content_manifest(
+            recordings_dir,
+            episode.episode_id,
+        )
+        if not manifest_entries:
+            missing_content_hashes.append(episode.episode_id)
+            continue
+        content_hash = _compute_episode_content_hash(manifest_entries)
+        episode.episode_content_hash = content_hash
+        episode_content_hashes[episode.episode_id] = content_hash
+        episode_content_manifests[episode.episode_id] = manifest_entries
+    result.episode_content_hashes = episode_content_hashes
+    result.episode_content_manifests = episode_content_manifests
+    if missing_content_hashes:
+        result.warnings.append(
+            "Missing content hash sources for episodes: "
+            + ", ".join(sorted(missing_content_hashes))
+        )
+    if isinstance(dataset_info_payload, dict):
+        updated = False
+        for entry in dataset_info_payload.get("episodes", []):
+            episode_id = entry.get("episode_id")
+            if not episode_id:
+                continue
+            content_hash = episode_content_hashes.get(episode_id)
+            if content_hash and entry.get("content_hash") != content_hash:
+                entry["content_hash"] = content_hash
+                updated = True
+        if updated and dataset_info_path.exists():
+            write_json_atomic(dataset_info_path, dataset_info_payload, indent=2)
+
     validated_episode_metadata_list = [
         ep for ep in episode_metadata_list if ep.episode_id not in failed_episode_id_set
     ]
@@ -2926,14 +3225,16 @@ def run_local_import_job(
 
     episode_checksums = []
     for episode_file in sorted(recordings_dir.rglob("*.json")):
+        episode_id = episode_file.stem
         episode_checksums.append({
-            "episode_id": episode_file.stem,
+            "episode_id": episode_id,
             "file_name": _relative_recordings_path(
                 recordings_dir,
                 config.output_dir,
                 episode_file,
             ),
             "sha256": _sha256_file(episode_file),
+            "content_hash": episode_content_hashes.get(episode_id),
         })
 
     lerobot_checksums = {
@@ -3006,6 +3307,8 @@ def run_local_import_job(
     checksums_payload = {
         "download_manifest": None,
         "episodes": episode_checksums,
+        "episode_content_hashes": episode_content_hashes,
+        "episode_content_manifest": episode_content_manifests,
         "filtered_episodes": filtered_episode_ids,
         "lerobot": lerobot_checksums,
         "metadata": file_checksums["metadata"],
@@ -3843,6 +4146,30 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                     entry = payload["entry"]
                     if not result.success:
                         continue
+                    dedup_summary = _prepare_deduplication_summary(
+                        result=result,
+                        scene_id=scene_id,
+                        robot_type=robot_type,
+                        prefix=firebase_upload_prefix,
+                        log=log,
+                    )
+                    deduplicated_ids = dedup_summary.get("deduplicated_episode_ids", [])
+                    entry["episodes"]["deduplicated"] = len(deduplicated_ids)
+                    entry["episodes"]["deduplicated_ids"] = deduplicated_ids
+                    _update_import_manifest_dedup_summary(
+                        result.import_manifest_path,
+                        dedup_summary,
+                    )
+                    if deduplicated_ids:
+                        log.info(
+                            "Deduplicating %s episode(s) for robot %s via content hash index.",
+                            len(deduplicated_ids),
+                            robot_type,
+                        )
+                    upload_file_paths = _resolve_upload_file_list(
+                        result.output_dir,
+                        deduplicated_ids,
+                    )
                     log.info(
                         "Uploading episodes to Firebase Storage for robot %s...",
                         robot_type,
@@ -3853,6 +4180,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                             scene_id=scene_id,
                             robot_type=robot_type,
                             prefix=firebase_upload_prefix,
+                            file_paths=upload_file_paths,
                         )
                         firebase_summary = firebase_result.summary
                     except Exception as exc:
@@ -3864,6 +4192,8 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         )
                         log.error("Firebase upload failed: %s", exc)
                         raise
+                    firebase_summary["deduplicated_episodes"] = len(deduplicated_ids)
+                    firebase_summary["deduplicated_episode_ids"] = deduplicated_ids
                     entry["firebase_upload"] = firebase_summary
                     log.info(
                         "Firebase upload complete: uploaded=%s skipped=%s reuploaded=%s failed=%s total=%s",
@@ -3890,6 +4220,29 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                             f"Firebase upload incomplete: {failed_count} file(s) failed"
                         )
                         overall_success = False
+                    elif deduplicated_ids:
+                        new_hashes = {
+                            episode_id: content_hash
+                            for episode_id, content_hash in result.episode_content_hashes.items()
+                            if episode_id not in deduplicated_ids
+                        }
+                        _persist_episode_hash_index(
+                            episode_hashes=new_hashes,
+                            scene_id=scene_id,
+                            robot_type=robot_type,
+                            prefix=firebase_upload_prefix,
+                            job_id=job_id,
+                            log=log,
+                        )
+                    else:
+                        _persist_episode_hash_index(
+                            episode_hashes=result.episode_content_hashes,
+                            scene_id=scene_id,
+                            robot_type=robot_type,
+                            prefix=firebase_upload_prefix,
+                            job_id=job_id,
+                            log=log,
+                        )
             elif enable_firebase_upload and firebase_upload_suppressed:
                 log.warning(
                     "Firebase uploads suppressed (reason=%s).",
@@ -4026,11 +4379,33 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             log.info("Average quality: %.2f", result.average_quality_score)
             if enable_firebase_upload:
                 log.info("Uploading episodes to Firebase Storage...")
+                dedup_summary = _prepare_deduplication_summary(
+                    result=result,
+                    scene_id=scene_id,
+                    robot_type="default",
+                    prefix=firebase_upload_prefix,
+                    log=log,
+                )
+                deduplicated_ids = dedup_summary.get("deduplicated_episode_ids", [])
+                _update_import_manifest_dedup_summary(
+                    result.import_manifest_path,
+                    dedup_summary,
+                )
+                if deduplicated_ids:
+                    log.info(
+                        "Deduplicating %s episode(s) via content hash index.",
+                        len(deduplicated_ids),
+                    )
+                upload_file_paths = _resolve_upload_file_list(
+                    result.output_dir,
+                    deduplicated_ids,
+                )
                 try:
                     firebase_result = upload_episodes_with_retry(
                         episodes_dir=result.output_dir,
                         scene_id=scene_id,
                         prefix=firebase_upload_prefix,
+                        file_paths=upload_file_paths,
                     )
                 except FirebaseUploadOrchestratorError as exc:
                     _alert_firebase_upload_failure(
@@ -4042,6 +4417,8 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                     log.error("Firebase upload failed: %s", exc)
                     raise
                 upload_summary = firebase_result.summary
+                upload_summary["deduplicated_episodes"] = len(deduplicated_ids)
+                upload_summary["deduplicated_episode_ids"] = deduplicated_ids
                 _update_import_manifest_firebase_summary(
                     result.import_manifest_path,
                     upload_summary,
@@ -4068,6 +4445,29 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         failed_count,
                     )
                     sys.exit(1)
+                elif deduplicated_ids:
+                    new_hashes = {
+                        episode_id: content_hash
+                        for episode_id, content_hash in result.episode_content_hashes.items()
+                        if episode_id not in deduplicated_ids
+                    }
+                    _persist_episode_hash_index(
+                        episode_hashes=new_hashes,
+                        scene_id=scene_id,
+                        robot_type="default",
+                        prefix=firebase_upload_prefix,
+                        job_id=job_id,
+                        log=log,
+                    )
+                else:
+                    _persist_episode_hash_index(
+                        episode_hashes=result.episode_content_hashes,
+                        scene_id=scene_id,
+                        robot_type="default",
+                        prefix=firebase_upload_prefix,
+                        job_id=job_id,
+                        log=log,
+                    )
             sys.exit(0)
         else:
             log.error("Import failed")
