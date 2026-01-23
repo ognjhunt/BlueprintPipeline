@@ -252,6 +252,44 @@ variable "secret_rotation_byte_length" {
   default     = 32
 }
 
+# =============================================================================
+# Retention cleanup workflow + scheduler
+# =============================================================================
+
+variable "retention_cleanup_bucket" {
+  type        = string
+  description = "Override bucket name for retention cleanup workflow payload (defaults to pipeline data bucket)."
+  default     = ""
+}
+
+variable "retention_cleanup_schedule" {
+  type        = string
+  description = "Cron schedule for retention cleanup workflow executions"
+  default     = "0 3 * * *"
+}
+
+variable "retention_cleanup_time_zone" {
+  type        = string
+  description = "Time zone for retention cleanup schedule"
+  default     = "Etc/UTC"
+}
+
+# =============================================================================
+# Firebase Storage lifecycle (optional)
+# =============================================================================
+
+variable "firebase_storage_bucket" {
+  type        = string
+  description = "Firebase Storage bucket name to manage lifecycle rules (e.g., <project-id>.appspot.com)."
+  default     = ""
+}
+
+variable "firebase_storage_bucket_location" {
+  type        = string
+  description = "Firebase Storage bucket location (must match the existing bucket)."
+  default     = "US"
+}
+
 variable "authorized_networks" {
   type = list(object({
     cidr_block   = string

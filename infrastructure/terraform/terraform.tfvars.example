@@ -125,3 +125,24 @@ secret_rotation_time_zone = "Etc/UTC"
 
 # Random byte length for generated values
 secret_rotation_byte_length = 32
+
+# =============================================================================
+# Retention cleanup workflow
+# =============================================================================
+
+# Optional override for the retention cleanup payload bucket
+# retention_cleanup_bucket = "your-project-blueprint-data"
+
+# Cron schedule (default: daily at 03:00 UTC)
+retention_cleanup_schedule  = "0 3 * * *"
+retention_cleanup_time_zone = "Etc/UTC"
+
+# =============================================================================
+# Firebase Storage lifecycle (optional)
+# =============================================================================
+
+# Firebase Storage bucket name (e.g., <project-id>.appspot.com)
+# firebase_storage_bucket = "your-project-id.appspot.com"
+
+# Bucket location must match existing Firebase bucket
+firebase_storage_bucket_location = "US"
