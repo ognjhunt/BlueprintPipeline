@@ -966,6 +966,20 @@ def _stream_parquet_validation(
     row_count = 0
     mode = "streaming"
 
+    allow_pandas_fallback = parse_bool_env(
+        os.getenv("ALLOW_PANDAS_PARQUET_FALLBACK"),
+        default=False,
+    )
+    if (
+        importlib.util.find_spec("pyarrow.parquet") is None
+        and require_parquet_validation
+        and not allow_pandas_fallback
+    ):
+        raise RuntimeError(
+            "Parquet validation requires pyarrow; install pyarrow or set "
+            "ALLOW_PANDAS_PARQUET_FALLBACK=1 to use the pandas fallback."
+        )
+
     if importlib.util.find_spec("pyarrow.parquet") is not None:
         pq = importlib.import_module("pyarrow.parquet")
         pf = pq.ParquetFile(episode_file)
@@ -1136,7 +1150,7 @@ def _stream_parquet_validation(
     mode = "pandas-fallback"
     df = _read_parquet_dataframe(
         episode_file,
-        allow_fallback=require_parquet_validation,
+        allow_fallback=allow_pandas_fallback or not require_parquet_validation,
     )
 
     required_fields = ["observation", "action"]
@@ -1496,6 +1510,7 @@ def _resolve_lerobot_v3_paths(
 def _validate_lerobot_metadata_files(
     output_dir: Path,
     lerobot_dir: Path,
+    require_parquet_validation: bool,
 ) -> Dict[str, Any]:
     schema_errors: List[str] = []
     info_path = _resolve_lerobot_info_path(output_dir, lerobot_dir)
@@ -1535,7 +1550,12 @@ def _validate_lerobot_metadata_files(
                             f"missing columns {missing_cols}"
                         )
                 except ImportError:
-                    pass  # pyarrow not available, skip parquet validation
+                    if require_parquet_validation:
+                        schema_errors.append(
+                            "metadata "
+                            f"{_relative_to_bundle(output_dir, episode_index_path)}: "
+                            "pyarrow is required to validate parquet metadata"
+                        )
                 except Exception as exc:
                     schema_errors.append(
                         f"metadata {_relative_to_bundle(output_dir, episode_index_path)}: {exc}"
@@ -2759,6 +2779,7 @@ class ImportedEpisodeValidator:
         """
         errors = []
         warnings = []
+        parquet_validation_error: Optional[str] = None
 
         # Check file exists
         if not episode_file.exists():
@@ -2787,7 +2808,13 @@ class ImportedEpisodeValidator:
             errors.extend(parquet_results["errors"])
             warnings.extend(parquet_results["warnings"])
         except RuntimeError as exc:
-            errors.append(str(exc))
+            error_message = str(exc)
+            errors.append(error_message)
+            if (
+                self.require_parquet_validation
+                and "pyarrow" in error_message.lower()
+            ):
+                parquet_validation_error = error_message
         except Exception as e:
             warnings.append(f"Failed to load episode data for validation: {e}")
 
@@ -2835,6 +2862,7 @@ class ImportedEpisodeValidator:
             "quality_component_failures": component_failures,
             "errors": errors,
             "warnings": warnings,
+            "parquet_validation_error": parquet_validation_error,
         }
 
     def validate_batch(
@@ -2859,6 +2887,7 @@ class ImportedEpisodeValidator:
             key: 0 for key in (self.dimension_thresholds or {}).keys()
         }
         component_failed_episodes = []
+        parquet_validation_errors: set[str] = set()
         component_failed_count = 0
 
         for episode_index, episode in enumerate(episodes):
@@ -2872,6 +2901,9 @@ class ImportedEpisodeValidator:
                 "episode_id": episode.episode_id,
                 **result,
             })
+            parquet_validation_error = result.get("parquet_validation_error")
+            if parquet_validation_error:
+                parquet_validation_errors.add(str(parquet_validation_error))
 
             if result["passed"]:
                 passed_count += 1
@@ -2903,6 +2935,7 @@ class ImportedEpisodeValidator:
             "quality_component_failure_counts": component_failure_counts,
             "quality_component_failed_episodes": component_failed_episodes,
             "episode_results": results,
+            "parquet_validation_errors": sorted(parquet_validation_errors),
         }
 
 
@@ -3776,6 +3809,9 @@ def run_local_import_job(
         validation_summary.get("quality_component_failure_counts", {}) or {}
     )
     result.quality_component_thresholds = dict(config.quality_component_thresholds)
+    parquet_validation_errors = validation_summary.get("parquet_validation_errors") or []
+    if parquet_validation_errors:
+        result.errors.extend(parquet_validation_errors)
     failed_episode_ids = [
         entry["episode_id"]
         for entry in validation_summary["episode_results"]
@@ -3899,6 +3935,7 @@ def run_local_import_job(
     lerobot_metadata_validation = _validate_lerobot_metadata_files(
         config.output_dir,
         lerobot_dir,
+        config.enable_validation,
     )
     schema_errors.extend(lerobot_metadata_validation["schema_errors"])
 
