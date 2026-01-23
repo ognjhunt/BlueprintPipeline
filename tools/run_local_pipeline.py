@@ -179,6 +179,9 @@ class LocalPipelineRunner:
         PipelineStep.SIMREADY,
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
+        PipelineStep.GENIESIM_EXPORT,
+        PipelineStep.GENIESIM_SUBMIT,
+        PipelineStep.GENIESIM_IMPORT,
     ]
 
     DWM_STEPS = [
@@ -1575,7 +1578,7 @@ class LocalPipelineRunner:
     def _resolve_default_steps(self) -> List[PipelineStep]:
         """Resolve default steps, using pipeline selector for Genie Sim mode."""
         try:
-            from tools.pipeline_selector.selector import PipelineSelector, DataGenerationBackend
+            from tools.pipeline_selector.selector import PipelineSelector
         except ImportError:
             self.log("Pipeline selector not available; falling back to default steps", "WARNING")
             steps = self.DEFAULT_STEPS.copy()
@@ -1583,13 +1586,10 @@ class LocalPipelineRunner:
 
         selector = PipelineSelector(scene_root=self.scene_dir)
         decision = selector.select(self.scene_dir)
-        if decision.data_backend == DataGenerationBackend.GENIESIM:
-            steps = self._map_jobs_to_steps(decision.job_sequence)
-            if PipelineStep.GENIESIM_SUBMIT in steps and PipelineStep.GENIESIM_IMPORT not in steps:
-                submit_index = steps.index(PipelineStep.GENIESIM_SUBMIT)
-                steps.insert(submit_index + 1, PipelineStep.GENIESIM_IMPORT)
-        else:
-            steps = self.DEFAULT_STEPS.copy()
+        steps = self._map_jobs_to_steps(decision.job_sequence)
+        if PipelineStep.GENIESIM_SUBMIT in steps and PipelineStep.GENIESIM_IMPORT not in steps:
+            submit_index = steps.index(PipelineStep.GENIESIM_SUBMIT)
+            steps.insert(submit_index + 1, PipelineStep.GENIESIM_IMPORT)
 
         steps = self._apply_optional_steps(steps)
 
