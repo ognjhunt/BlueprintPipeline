@@ -10,7 +10,8 @@ runs the retention cleanup job on a schedule.
 | --- | --- | --- | --- |
 | **Inputs** | `scenes/{scene_id}/input/*` | 90 days | Preserve original uploads for auditability and reruns. |
 | **Intermediate** | `scenes/{scene_id}/seg/*`, `scenes/{scene_id}/layout/*`, `scenes/{scene_id}/.checkpoints/*` | 30 days (via `PIPELINE_RETENTION_DAYS`) | Keep short-lived pipeline products and checkpoints needed for retries. |
-| **Outputs** | `scenes/{scene_id}/assets/*`, `scenes/{scene_id}/usd/*`, `scenes/{scene_id}/replicator/*`, `scenes/{scene_id}/variation_assets/*`, `scenes/{scene_id}/isaac_lab/*`, `scenes/{scene_id}/episodes/*` | 365 days | Retain deliverables for customers, exports, and downstream training. |
+| **Outputs** | `scenes/{scene_id}/assets/*`, `scenes/{scene_id}/usd/*`, `scenes/{scene_id}/replicator/*`, `scenes/{scene_id}/variation_assets/*`, `scenes/{scene_id}/isaac_lab/*` | 365 days | Retain deliverables for customers, exports, and downstream training. |
+| **Episodes** | `scenes/{scene_id}/episodes/*` | 365 days | Retain training datasets; transition to colder storage after 365 days (see Terraform policy). |
 | **Logs** | `scenes/{scene_id}/logs/*` | 180 days | Preserve operational logs for incident response and compliance. |
 
 ## Retention configuration
@@ -32,6 +33,8 @@ Infrastructure-backed defaults:
 - GCS lifecycle rules for `scenes/*` prefixes are managed in Terraform on the pipeline data
   bucket to align with the default retention windows. These rules act as a safety net
   alongside the workflow-driven cleanup job.
+- Episode bundles are transitioned to the storage class defined by `episodes_retention_policy`
+  instead of being deleted by lifecycle rules, so long-term training datasets can be retained.
 - Firebase Storage lifecycle rules (if the Firebase bucket is managed in Terraform) align
   output (`datasets/`) and log (`logs/`) retention with this policy.
 

@@ -19,6 +19,9 @@ zone   = "us-central1-a"
 # Multi-region or dual-region bucket location (e.g., US, EU, NAM4)
 bucket_location = "US"
 
+# Storage class for episodes after retention window (ARCHIVE or COLDLINE)
+episodes_retention_policy = "ARCHIVE"
+
 # Optional secondary region (for GKE failover)
 enable_secondary_region = false
 secondary_region        = "us-east1"
