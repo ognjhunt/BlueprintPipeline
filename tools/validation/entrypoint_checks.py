@@ -8,6 +8,11 @@ from typing import Iterable, Mapping
 
 from pydantic import ValidationError
 
+from tools.config.production_mode import (
+    ensure_config_audit_for_production,
+    is_config_audit_enabled,
+    resolve_production_mode,
+)
 from tools.validation.config_schemas import (
     load_and_validate_env_config,
     load_and_validate_manifest,
@@ -74,3 +79,13 @@ def validate_scene_manifest(manifest_path: Path, label: str) -> None:
         for message in formatted_errors:
             print(f"{label}   - {message}", file=sys.stderr)
         sys.exit(1)
+
+
+def warn_if_production_audit_disabled(label: str) -> None:
+    ensure_config_audit_for_production()
+    if resolve_production_mode() and not is_config_audit_enabled():
+        print(
+            f"{label} WARNING: production mode detected but BP_ENABLE_CONFIG_AUDIT=0; "
+            "config audit trail is disabled.",
+            file=sys.stderr,
+        )

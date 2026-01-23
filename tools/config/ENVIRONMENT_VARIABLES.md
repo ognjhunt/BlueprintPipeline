@@ -424,6 +424,8 @@ Enable configuration audit trail logging.
 | `BP_ENABLE_CONFIG_AUDIT` | bool | "0" | Enable config source tracking |
 
 When enabled, `ConfigLoader.dump_audit_trail()` shows where each config value came from.
+Production runs (`PIPELINE_ENV=production` or equivalent) automatically enable the audit
+trail unless you explicitly disable it by setting `BP_ENABLE_CONFIG_AUDIT=0`.
 
 **Example**:
 ```bash
