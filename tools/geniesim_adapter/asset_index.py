@@ -351,6 +351,7 @@ class AssetIndexBuilder:
         verbose: bool = True,
         strict_category_validation: Optional[bool] = None,
         require_embeddings: Optional[bool] = None,
+        allow_embedding_fallback: Optional[bool] = None,
     ):
         """
         Initialize asset index builder.
@@ -361,6 +362,7 @@ class AssetIndexBuilder:
             embedding_provider: Embedding provider ("openai" or "qwen")
             embedding_dim: Embedding dimensionality (overrides GENIESIM_EMBEDDING_DIM)
             require_embeddings: Require real embeddings (disallow placeholders)
+            allow_embedding_fallback: Allow placeholder embeddings in production
             verbose: Print progress
         """
         self.verbose = verbose
@@ -389,6 +391,19 @@ class AssetIndexBuilder:
                 self.require_embeddings = self._is_production()
         else:
             self.require_embeddings = require_embeddings
+        if allow_embedding_fallback is None:
+            fallback_env = os.getenv("ALLOW_EMBEDDING_FALLBACK")
+            if fallback_env is not None:
+                self.allow_embedding_fallback = fallback_env.strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+            else:
+                self.allow_embedding_fallback = False
+        else:
+            self.allow_embedding_fallback = allow_embedding_fallback
 
         if embedding_dim is None:
             embedding_dim_env = os.getenv("GENIESIM_EMBEDDING_DIM", "").strip()
@@ -460,6 +475,15 @@ class AssetIndexBuilder:
             for asset in assets:
                 asset.embedding_status = "not_requested"
 
+        if not self.generate_embeddings:
+            embedding_mode = "disabled"
+        elif placeholder_embeddings > 0 and self._fallback_enabled():
+            embedding_mode = "fallback"
+        elif self._resolve_embedding_config() is not None:
+            embedding_mode = "provider"
+        else:
+            embedding_mode = "placeholder"
+
         # Build metadata
         metadata = {
             "source_scene": scene_id,
@@ -472,6 +496,8 @@ class AssetIndexBuilder:
             "embedding_failures": embedding_failures,
             "placeholder_embeddings_allowed": not self.require_embeddings,
             "placeholder_embeddings_used": placeholder_embeddings,
+            "embedding_mode": embedding_mode,
+            "embedding_fallback_allowed": self.allow_embedding_fallback,
         }
 
         if embedding_failures > 0 and not self._is_production():
@@ -484,6 +510,9 @@ class AssetIndexBuilder:
 
     def _is_production(self) -> bool:
         return self.environment == "production"
+
+    def _fallback_enabled(self) -> bool:
+        return self._is_production() and self.allow_embedding_fallback and not self.require_embeddings
 
     def _resolve_embedding_config(self) -> Optional[Dict[str, str]]:
         if self._embedding_config is not None:
@@ -846,6 +875,7 @@ class AssetIndexBuilder:
         """Generate embeddings for all assets."""
         self.log(f"Generating embeddings for {len(assets)} assets...")
         production_mode = self._is_production()
+        fallback_enabled = self._fallback_enabled()
         errors: List[Dict[str, str]] = []
         placeholder_count = 0
 
@@ -860,17 +890,17 @@ class AssetIndexBuilder:
                         f"Embedding generation failed with REQUIRE_EMBEDDINGS enabled for asset "
                         f"{asset.asset_id}: {e}"
                     ) from e
-                if production_mode:
+                if production_mode and not fallback_enabled:
                     raise RuntimeError(
                         f"Embedding generation failed in production for asset {asset.asset_id}: {e}"
                     ) from e
                 embedding = self._get_placeholder_embedding(asset.semantic_description)
-                status = "placeholder"
+                status = "fallback" if fallback_enabled else "placeholder"
                 error_message = str(e)
 
             asset.embedding = embedding
             asset.embedding_status = status
-            if status == "placeholder":
+            if status in {"placeholder", "fallback"}:
                 placeholder_count += 1
 
             if status != "ok":
@@ -881,11 +911,17 @@ class AssetIndexBuilder:
                         f"{error_message}"
                     )
 
-        if production_mode and placeholder_count > 0:
+        if production_mode and placeholder_count > 0 and not fallback_enabled:
             raise RuntimeError(
                 "Placeholder embeddings are not allowed in production. "
                 "Configure an embedding provider by setting OPENAI_API_KEY or "
                 "QWEN_API_KEY/DASHSCOPE_API_KEY."
+            )
+        if production_mode and placeholder_count > 0 and fallback_enabled:
+            self.log(
+                "Placeholder embeddings used in production because "
+                "ALLOW_EMBEDDING_FALLBACK is enabled.",
+                "WARNING",
             )
 
         failure_count = len(errors)
@@ -914,7 +950,7 @@ class AssetIndexBuilder:
     def _get_embedding_with_status(self, text: str) -> tuple[List[float], str, str]:
         config = self._resolve_embedding_config()
         if not config:
-            if self._is_production():
+            if self._is_production() and not self._fallback_enabled():
                 raise RuntimeError(
                     "Embeddings are required in production but no embedding provider is configured. "
                     "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
@@ -924,10 +960,11 @@ class AssetIndexBuilder:
                     "Embeddings are required but no embedding provider is configured. "
                     "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
                 )
+            fallback_status = "fallback" if self._fallback_enabled() else "placeholder"
             self.log("Embedding provider unavailable; using placeholder embeddings.", "WARNING")
             return (
                 self._get_placeholder_embedding(text),
-                "placeholder",
+                fallback_status,
                 "Embedding provider unavailable; placeholder embedding used.",
             )
 
@@ -941,12 +978,13 @@ class AssetIndexBuilder:
                     "Embedding request failed while REQUIRE_EMBEDDINGS is enabled; "
                     f"placeholder embeddings are disallowed. Error: {e}"
                 ) from e
-            if self._is_production():
+            if self._is_production() and not self._fallback_enabled():
                 raise
+            fallback_status = "fallback" if self._fallback_enabled() else "placeholder"
             self.log(f"Embedding request failed; using placeholder embeddings: {e}", "WARNING")
             return (
                 self._get_placeholder_embedding(text),
-                "placeholder",
+                fallback_status,
                 f"Embedding request failed; placeholder embedding used: {e}",
             )
 
