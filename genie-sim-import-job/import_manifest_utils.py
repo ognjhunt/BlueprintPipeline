@@ -28,6 +28,7 @@ MANIFEST_SCHEMA_DEFINITION = {
         "quality_config": "Resolved quality thresholds/filters applied during import.",
         "lerobot": "LeRobot conversion status and outputs.",
         "metrics_summary": "Pipeline metrics snapshot.",
+        "cost_summary": "Cost totals and category breakdowns for the imported scene.",
         "file_inventory": "List of all output files (path + size).",
         "checksums": "SHA256 checksums for episodes, metadata, and full bundle files.",
         "provenance": "Source control, pipeline version, config snapshot, and tool versions.",
