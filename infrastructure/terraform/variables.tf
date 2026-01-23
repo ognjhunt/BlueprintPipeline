@@ -336,6 +336,82 @@ variable "enable_binary_authorization" {
   type        = bool
   description = "Enable Binary Authorization"
   default     = false
+
+  validation {
+    condition     = var.environment != "prod" || var.enable_binary_authorization
+    error_message = "Binary Authorization must be enabled when environment is prod."
+  }
+}
+
+variable "create_binary_authorization_attestor" {
+  type        = bool
+  description = "Create and manage a Binary Authorization attestor in this project."
+  default     = true
+}
+
+variable "create_binary_authorization_policy" {
+  type        = bool
+  description = "Create and manage the project-wide Binary Authorization policy."
+  default     = true
+}
+
+variable "binary_authorization_attestor_name" {
+  type        = string
+  description = "Name for the Binary Authorization attestor when managed by Terraform."
+  default     = "blueprint-attestor"
+}
+
+variable "binary_authorization_attestor_description" {
+  type        = string
+  description = "Human-readable description for the Binary Authorization attestor."
+  default     = "Binary Authorization attestor for BlueprintPipeline images."
+}
+
+variable "binary_authorization_attestor_public_key_id" {
+  type        = string
+  description = "Identifier for the attestor public key (used in Binary Authorization)."
+  default     = "blueprint-attestor-key"
+}
+
+variable "binary_authorization_attestor_public_key" {
+  type        = string
+  description = "ASCII-armored PGP public key for the managed attestor (leave empty when using existing attestors)."
+  default     = ""
+
+  validation {
+    condition = !(
+      var.enable_binary_authorization &&
+      var.create_binary_authorization_attestor &&
+      length(trimspace(var.binary_authorization_attestor_public_key)) == 0
+    )
+    error_message = "binary_authorization_attestor_public_key must be set when creating a managed attestor."
+  }
+}
+
+variable "binary_authorization_attestors" {
+  type        = list(string)
+  description = "Existing Binary Authorization attestor resource names to require (projects/*/attestors/*)."
+  default     = []
+
+  validation {
+    condition = !(
+      var.enable_binary_authorization &&
+      !var.create_binary_authorization_attestor &&
+      length(var.binary_authorization_attestors) == 0
+    )
+    error_message = "Provide binary_authorization_attestors when not creating a managed attestor."
+  }
+}
+
+variable "binary_authorization_admission_whitelist" {
+  type        = list(string)
+  description = "Image patterns to always allow in Binary Authorization policies."
+  default = [
+    "gcr.io/gke-release/*",
+    "gke.gcr.io/*",
+    "k8s.gcr.io/*",
+    "gcr.io/google-containers/*",
+  ]
 }
 
 variable "enable_shielded_nodes" {

@@ -22,3 +22,22 @@ Infrastructure-as-code and operational automation for the Blueprint Pipeline.
 - Update `infrastructure/terraform/terraform.tfvars` (or your environment-specific tfvars) to maintain the `master_authorized_networks` list.
 - Add approved CIDR blocks for CI/CD runners and developer VPNs using the `{ cidr_block, display_name }` entries.
 - Re-run `terraform plan` and `terraform apply` from `infrastructure/terraform/` to apply changes.
+
+## Binary Authorization (production)
+Binary Authorization is required for production clusters. Configure it before deploying workloads:
+
+1. **Enable Binary Authorization in Terraform variables.**
+   - Set `enable_binary_authorization = true` for production tfvars.
+   - Provide a managed attestor public key (`binary_authorization_attestor_public_key`) or reference an existing attestor via `binary_authorization_attestors`.
+   - If a policy already exists, set `create_binary_authorization_policy = false` and import or manage it separately.
+2. **Sign container images and publish attestations in CI.**
+   - CI must sign images and push attestations prior to deployment.
+   - The public key used by CI must match the attestor configured in Terraform.
+3. **Apply Terraform.**
+   - `terraform plan` and `terraform apply` will create the policy/attestor and enable enforcement.
+
+### Common failure modes
+- **Unsigned image**: deployment fails with a Binary Authorization policy violation (missing attestations).
+- **Mismatched attestor**: CI signs with a different key than Terraform expects, causing denied admissions.
+- **Unlisted images**: base images outside `binary_authorization_admission_whitelist` are rejected.
+- **Disabled policy in prod**: Terraform validation fails if `enable_binary_authorization` is false in `prod`.

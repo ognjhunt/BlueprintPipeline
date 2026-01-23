@@ -42,3 +42,15 @@ terraform apply \
   -var="tf_state_bucket=YOUR_TF_STATE_BUCKET" \
   -var="tf_state_prefix=YOUR_ENVIRONMENT/terraform/state"
 ```
+
+## Binary Authorization
+
+Production clusters must enable Binary Authorization. Configure it via tfvars:
+
+- `enable_binary_authorization = true`
+- Provide either:
+  - A managed attestor key (`binary_authorization_attestor_public_key`), or
+  - Existing attestors (`binary_authorization_attestors = ["projects/.../attestors/..."]`) with `create_binary_authorization_attestor = false`.
+- If a project policy already exists, set `create_binary_authorization_policy = false` and import or manage it outside this module.
+
+Terraform validates that Binary Authorization is enabled for `environment = "prod"`, and will fail `terraform plan` if it is disabled.
