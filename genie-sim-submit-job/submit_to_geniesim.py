@@ -53,6 +53,7 @@ from geniesim_adapter.local_framework import (
     GenieSimLocalFramework,
     run_geniesim_preflight_or_exit,
 )
+from tools.geniesim_adapter.config import get_geniesim_readiness_timeout_s
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.gcs_upload import (
     calculate_md5_base64,
@@ -975,6 +976,18 @@ def _run_local_data_collection_with_handshake(
         result.errors.append(message)
         return result
 
+    def _ensure_sim_ready(framework: GenieSimLocalFramework) -> Optional[DataCollectionResult]:
+        readiness_timeout = get_geniesim_readiness_timeout_s()
+        readiness_result = framework.check_simulation_ready(timeout=readiness_timeout)
+        if readiness_result.success:
+            return None
+        readiness_error = readiness_result.error or "Simulation readiness probe failed"
+        return _handshake_failure(
+            "Genie Sim readiness probe failed. "
+            "Ensure the simulation loop is running and retry. "
+            f"Details: {readiness_error}"
+        )
+
     try:
         config = GenieSimConfig.from_env()
     except ValidationError as exc:
@@ -1011,6 +1024,9 @@ def _run_local_data_collection_with_handshake(
                 connection_hint=connection_hint,
                 startup_hint=startup_hint,
             )
+            readiness_failure = _ensure_sim_ready(framework)
+            if readiness_failure:
+                return readiness_failure
             result = framework.run_data_collection(
                 task_config,
                 scene_manifest,
@@ -1033,6 +1049,9 @@ def _run_local_data_collection_with_handshake(
                     connection_hint=connection_hint,
                     startup_hint=startup_hint,
                 )
+                readiness_failure = _ensure_sim_ready(fw)
+                if readiness_failure:
+                    return readiness_failure
                 result = fw.run_data_collection(
                     task_config,
                     scene_manifest,

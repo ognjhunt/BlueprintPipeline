@@ -52,6 +52,7 @@ Environment Variables:
     GENIESIM_HOST: Genie Sim gRPC server host (default: localhost)
     GENIESIM_PORT: Genie Sim gRPC server port (default: adapter default port)
     GENIESIM_GRPC_TIMEOUT_S: Connection timeout in seconds (default: 30; legacy: GENIESIM_TIMEOUT)
+    GENIESIM_READINESS_TIMEOUT_S: Readiness probe timeout in seconds (default: 10)
     GENIESIM_ROOT: Path to Genie Sim installation (default: /opt/geniesim)
     GENIESIM_RECORDINGS_DIR: Directory for Genie Sim recordings (default: /tmp/geniesim_recordings; legacy: GENIESIM_RECORDING_DIR)
     GENIESIM_LOG_DIR: Directory for Genie Sim logs (default: /tmp/geniesim_logs)
@@ -123,6 +124,7 @@ from tools.geniesim_adapter.config import (
     get_geniesim_grpc_timeout_s,
     get_geniesim_host,
     get_geniesim_port,
+    get_geniesim_readiness_timeout_s,
 )
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.config.env import parse_bool_env
@@ -890,6 +892,66 @@ class GenieSimGRPCClient:
             return False
         logger.info("✅ Genie Sim gRPC ping succeeded")
         return True
+
+    def get_observation_minimal(
+        self,
+        *,
+        include_joint: bool = True,
+        include_pose: bool = False,
+        timeout: Optional[float] = None,
+    ) -> GrpcCallResult:
+        """
+        Request a minimal observation payload for readiness checks.
+
+        Returns:
+            GrpcCallResult containing a formatted observation payload.
+        """
+        if not self._have_grpc:
+            return self._grpc_unavailable(
+                "get_observation_minimal",
+                "gRPC stubs unavailable",
+            )
+        if self._stub is None:
+            return self._grpc_unavailable(
+                "get_observation_minimal",
+                "gRPC stub not initialized",
+            )
+        effective_timeout = max(self.timeout, timeout) if timeout else self.timeout
+        request = GetObservationReq(
+            isCam=False,
+            isJoint=include_joint,
+            isPose=include_pose,
+            objectPrims=[],
+            isGripper=False,
+        )
+
+        def _request() -> GetObservationRsp:
+            return self._stub.get_observation(request, timeout=effective_timeout)
+
+        response = self._call_grpc(
+            "get_observation(minimal)",
+            _request,
+            None,
+            success_checker=lambda resp: resp is not None,
+        )
+        if response is None:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="gRPC call failed",
+                payload={"success": False, "error": "gRPC call failed"},
+            )
+        formatted = self._format_observation_response(
+            response,
+            camera_ids=[],
+            object_prims=[],
+        )
+        formatted["recording_state"] = response.recordingState
+        return GrpcCallResult(
+            success=True,
+            available=True,
+            payload=formatted,
+        )
 
     def get_server_info(self, timeout: Optional[float] = None) -> GrpcCallResult:
         """
@@ -2873,7 +2935,7 @@ class GenieSimLocalFramework:
 
             def _check_grpc_ready() -> Tuple[bool, Optional[str]]:
                 if not self._client._have_grpc:
-                    return True, "gRPC stubs unavailable; skipping readiness check"
+                    return False, "gRPC stubs unavailable; skipping readiness check"
                 if not self._client.connect():
                     return False, "gRPC channel not ready"
                 server_info = self._client.get_server_info(timeout=5.0)
@@ -2893,10 +2955,14 @@ class GenieSimLocalFramework:
                 if socket_reachable:
                     grpc_ready, grpc_error = _check_grpc_ready()
                     if grpc_ready:
-                        self._status = GenieSimServerStatus.READY
-                        self.log("Server is ready!")
-                        return True
-                    last_grpc_error = grpc_error
+                        readiness_result = self.check_simulation_ready()
+                        if readiness_result.success:
+                            self._status = GenieSimServerStatus.READY
+                            self.log("Server is ready!")
+                            return True
+                        last_grpc_error = readiness_result.error or grpc_error
+                    else:
+                        last_grpc_error = grpc_error
 
                 # Check if process exited
                 if self._server_process.poll() is not None:
@@ -3009,6 +3075,83 @@ class GenieSimLocalFramework:
     def is_ready(self) -> bool:
         """Check if framework is ready for data collection."""
         return self.get_server_status() == GenieSimServerStatus.READY
+
+    def check_simulation_ready(self, timeout: Optional[float] = None) -> GrpcCallResult:
+        """
+        Perform a real readiness workflow against the running simulation.
+
+        This connects over gRPC, issues a reset, and requests joint observations
+        to ensure the sim loop is actively producing data.
+        """
+        if not self._client._have_grpc:
+            return GrpcCallResult(
+                success=False,
+                available=False,
+                error="gRPC stubs unavailable; cannot perform readiness probe",
+            )
+        if not self._client.connect():
+            return GrpcCallResult(
+                success=False,
+                available=False,
+                error="gRPC channel not ready",
+            )
+
+        reset_result = self._client.reset_environment()
+        if not reset_result.available:
+            return GrpcCallResult(
+                success=False,
+                available=False,
+                error=reset_result.error or "Reset unavailable",
+            )
+        if not reset_result.success:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error=reset_result.error or "Reset failed",
+            )
+
+        obs_result = self._client.get_observation_minimal(
+            include_joint=True,
+            timeout=timeout,
+        )
+        if not obs_result.available:
+            return GrpcCallResult(
+                success=False,
+                available=False,
+                error=obs_result.error or "Observation unavailable",
+            )
+        if not obs_result.success:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error=obs_result.error or "Observation failed",
+            )
+
+        payload = obs_result.payload or {}
+        joint_state = payload.get("robot_state", {}).get("joint_state", {})
+        joint_names = joint_state.get("names") or []
+        joint_positions = joint_state.get("positions") or []
+        if not joint_names and not joint_positions:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="Observation missing joint data",
+                payload=payload,
+            )
+        recording_state = payload.get("recording_state")
+        if recording_state is not None and not str(recording_state).strip():
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="Observation recording_state empty",
+                payload=payload,
+            )
+
+        return GrpcCallResult(
+            success=True,
+            available=True,
+            payload=payload,
+        )
 
     # =========================================================================
     # Data Collection
@@ -5791,13 +5934,18 @@ def build_geniesim_preflight_report(
     config: Optional[GenieSimConfig] = None,
     require_server: bool = True,
     require_ready: bool = False,
-    ping_timeout: float = 5.0,
+    readiness_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Build a preflight report with remediation guidance."""
     config = config or GenieSimConfig.from_env()
     missing: List[str] = []
     remediation: List[str] = []
     server_ready = False
+    effective_readiness_timeout = (
+        readiness_timeout
+        if readiness_timeout is not None
+        else get_geniesim_readiness_timeout_s()
+    )
 
     if not status.get("isaac_sim_available", False):
         missing.append("Isaac Sim runtime (ISAAC_SIM_PATH)")
@@ -5862,8 +6010,14 @@ def build_geniesim_preflight_report(
 
     if require_ready:
         if status.get("server_running", False):
-            with GenieSimGRPCClient(config.host, config.port, timeout=ping_timeout) as client:
-                server_ready = client.ping(timeout=ping_timeout)
+            framework = GenieSimLocalFramework(config, verbose=False)
+            try:
+                readiness_result = framework.check_simulation_ready(
+                    timeout=effective_readiness_timeout,
+                )
+                server_ready = readiness_result.success
+            finally:
+                framework.disconnect()
         if not server_ready:
             missing.append("Genie Sim gRPC readiness")
             remediation.append(
@@ -5887,7 +6041,7 @@ def run_geniesim_preflight(
     config: Optional[GenieSimConfig] = None,
     require_server: bool = True,
     require_ready: bool = False,
-    ping_timeout: float = 5.0,
+    readiness_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run a preflight check with remediation guidance and return the report."""
     status = check_geniesim_availability(config)
@@ -5896,7 +6050,7 @@ def run_geniesim_preflight(
         config=config,
         require_server=require_server,
         require_ready=require_ready,
-        ping_timeout=ping_timeout,
+        readiness_timeout=readiness_timeout,
     )
     report["stage"] = stage
     return report
@@ -5920,7 +6074,7 @@ def run_geniesim_preflight_or_exit(
     config: Optional[GenieSimConfig] = None,
     require_server: bool = True,
     require_ready: bool = False,
-    ping_timeout: float = 5.0,
+    readiness_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run a preflight check with remediation guidance, exiting on failure."""
     report = run_geniesim_preflight(
@@ -5928,7 +6082,7 @@ def run_geniesim_preflight_or_exit(
         config=config,
         require_server=require_server,
         require_ready=require_ready,
-        ping_timeout=ping_timeout,
+        readiness_timeout=readiness_timeout,
     )
     if not report["ok"]:
         logger.error("[GENIESIM-PREFLIGHT] %s preflight failed.", stage, extra={"stage": stage})

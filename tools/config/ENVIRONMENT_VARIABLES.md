@@ -585,6 +585,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework). |
 | `GENIESIM_GRPC_TIMEOUT_S` | float | 30.0 | gRPC request timeout for Genie Sim adapters (seconds). Falls back to legacy `GENIESIM_TIMEOUT` if set. |
+| `GENIESIM_READINESS_TIMEOUT_S` | float | 10.0 | Timeout for readiness probes that reset the sim and request minimal observation data (seconds). |
 | `GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | int | 3 | Failures before the Genie Sim gRPC circuit breaker opens. |
 | `GENIESIM_CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | int | 2 | Successes required to close the circuit breaker after half-open. |
 | `GENIESIM_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_S` | float | 30.0 | Recovery timeout (seconds) before the circuit breaker probes again. |
@@ -631,6 +632,9 @@ export PIPELINE_ENV=production
 export ISAACSIM_REQUIRED=true
 export CUROBO_REQUIRED=true
 ```
+
+Genie Sim readiness checks now perform a real gRPC workflow (connect → reset → minimal observation with joint data).
+The `GENIESIM_READINESS_TIMEOUT_S` value governs how long health checks and submit jobs wait for that probe to return.
 
 For production asset indexing/embedding flows, placeholder embeddings are disallowed. Ensure
 `REQUIRE_EMBEDDINGS=true` (or avoid overriding it) whenever `GENERATE_EMBEDDINGS=true`, and configure a valid
