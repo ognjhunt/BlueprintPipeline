@@ -95,6 +95,7 @@ from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
 )
+from tools.validation.config_schemas import load_and_validate_env_config
 from tools.validation.geniesim_export import (
     ExportConsistencyError,
     validate_export_consistency,
@@ -1885,6 +1886,7 @@ def main():
         },
         label="[GENIESIM-EXPORT-JOB]",
     )
+    load_and_validate_env_config()
 
     bucket = os.environ["BUCKET"]
     scene_id = os.environ["SCENE_ID"]
