@@ -100,6 +100,7 @@ from tools.quality_gates.quality_gate import (
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
+from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.logging_config import init_logging
 from tools.firebase_upload.firebase_upload_orchestrator import (
     FirebaseUploadOrchestratorError,
@@ -859,7 +860,35 @@ def _load_contract_schema(schema_name: str) -> Dict[str, Any]:
 
 
 def _validate_minimal_schema(payload: Any, schema: Dict[str, Any], path: str) -> None:
+    any_of = schema.get("anyOf") or schema.get("oneOf")
+    if any_of:
+        errors = []
+        for idx, option in enumerate(any_of):
+            try:
+                _validate_minimal_schema(payload, option, path)
+            except ValueError as exc:
+                errors.append(f"Option {idx}: {exc}")
+            else:
+                return
+        raise ValueError(f"{path}: payload did not match anyOf/oneOf: {errors}")
+    for option in schema.get("allOf", []):
+        _validate_minimal_schema(payload, option, path)
     schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        last_error: Optional[Exception] = None
+        for candidate in schema_type:
+            candidate_schema = dict(schema)
+            candidate_schema["type"] = candidate
+            try:
+                _validate_minimal_schema(payload, candidate_schema, path)
+            except ValueError as exc:
+                last_error = exc
+                continue
+            else:
+                return
+        if last_error is not None:
+            raise last_error
+        return
     if schema_type == "object":
         if not isinstance(payload, dict):
             raise ValueError(f"{path}: expected object")
@@ -897,6 +926,151 @@ def _validate_minimal_schema(payload: Any, schema: Dict[str, Any], path: str) ->
     elif schema_type == "boolean":
         if not isinstance(payload, bool):
             raise ValueError(f"{path}: expected boolean")
+    elif schema_type == "null":
+        if payload is not None:
+            raise ValueError(f"{path}: expected null")
+
+
+def _resolve_lerobot_info_path(output_dir: Path, lerobot_dir: Path) -> Optional[Path]:
+    candidates = [
+        lerobot_dir / "meta" / "info.json",
+        output_dir / "episodes" / "lerobot" / "meta" / "info.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _resolve_info_path(output_dir: Path, path_value: Optional[str]) -> Optional[Path]:
+    if not path_value:
+        return None
+    candidate = Path(path_value)
+    if candidate.is_absolute():
+        return candidate
+    return output_dir / candidate
+
+
+def _detect_lerobot_export_format(
+    info_payload: Optional[Dict[str, Any]],
+) -> Optional[LeRobotExportFormat]:
+    if not isinstance(info_payload, dict):
+        return None
+    raw_value = info_payload.get("export_format") or info_payload.get("format")
+    if raw_value:
+        try:
+            return parse_lerobot_export_format(str(raw_value))
+        except ValueError:
+            return None
+    version = info_payload.get("version")
+    if version and str(version).strip() == "3.0":
+        return LeRobotExportFormat.LEROBOT_V3
+    return LeRobotExportFormat.LEROBOT_V2
+
+
+def _resolve_lerobot_v3_paths(
+    output_dir: Path,
+    lerobot_root: Path,
+    info_payload: Optional[Dict[str, Any]],
+) -> Dict[str, Path]:
+    data_path = None
+    if isinstance(info_payload, dict):
+        data_path = info_payload.get("data_path")
+    data_dir = _resolve_info_path(output_dir, data_path) if data_path else None
+    if data_dir is None:
+        data_dir = lerobot_root / "data"
+    episodes_parquet_path = data_dir / "chunk-000" / "episodes.parquet"
+    episode_index_value = None
+    if isinstance(info_payload, dict):
+        episode_index_value = info_payload.get("episode_index")
+    episode_index_path = _resolve_info_path(output_dir, episode_index_value)
+    if episode_index_path is None:
+        episode_index_path = lerobot_root / "meta" / "episode_index.json"
+    return {
+        "episodes_parquet": episodes_parquet_path,
+        "episode_index": episode_index_path,
+    }
+
+
+def _validate_lerobot_metadata_files(
+    output_dir: Path,
+    lerobot_dir: Path,
+) -> Dict[str, Any]:
+    schema_errors: List[str] = []
+    info_path = _resolve_lerobot_info_path(output_dir, lerobot_dir)
+    info_payload = None
+    if info_path is not None:
+        try:
+            info_payload = _load_json_file(info_path)
+        except Exception as exc:
+            schema_errors.append(
+                f"metadata {_relative_to_bundle(output_dir, info_path)}: {exc}"
+            )
+    export_format = _detect_lerobot_export_format(info_payload)
+    lerobot_root = info_path.parent.parent if info_path is not None else lerobot_dir
+
+    episodes_index_path = lerobot_root / "episodes.jsonl"
+    episodes_parquet_path = None
+    episode_index_path = None
+    if export_format == LeRobotExportFormat.LEROBOT_V3:
+        v3_paths = _resolve_lerobot_v3_paths(output_dir, lerobot_root, info_payload)
+        episodes_parquet_path = v3_paths["episodes_parquet"]
+        episode_index_path = v3_paths["episode_index"]
+        if not episodes_parquet_path.exists():
+            schema_errors.append(
+                f"metadata {_relative_to_bundle(output_dir, episodes_parquet_path)}: missing episodes.parquet"
+            )
+        if episode_index_path.exists():
+            try:
+                episode_index_payload = _load_json_file(episode_index_path)
+                schema_errors.extend(
+                    _validate_schema_payload(
+                        episode_index_payload,
+                        "geniesim_local_episode_index_v3.schema.json",
+                        f"metadata {_relative_to_bundle(output_dir, episode_index_path)}",
+                    )
+                )
+            except Exception as exc:
+                schema_errors.append(
+                    f"metadata {_relative_to_bundle(output_dir, episode_index_path)}: {exc}"
+                )
+        else:
+            schema_errors.append(
+                f"metadata {_relative_to_bundle(output_dir, episode_index_path)}: missing episode_index.json"
+            )
+    else:
+        if episodes_index_path.exists():
+            try:
+                with open(episodes_index_path, "r") as handle:
+                    for line_number, line in enumerate(handle, start=1):
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        entry = json.loads(stripped)
+                        schema_errors.extend(
+                            _validate_schema_payload(
+                                entry,
+                                "geniesim_local_episodes_index.schema.json",
+                                f"metadata {_relative_to_bundle(output_dir, episodes_index_path)}:{line_number}",
+                            )
+                        )
+            except Exception as exc:
+                schema_errors.append(
+                    f"metadata {_relative_to_bundle(output_dir, episodes_index_path)}: {exc}"
+                )
+        else:
+            schema_errors.append(
+                f"metadata {_relative_to_bundle(output_dir, episodes_index_path)}: missing episodes.jsonl"
+            )
+
+    return {
+        "export_format": export_format.value if export_format else None,
+        "schema_errors": schema_errors,
+        "info_path": info_path,
+        "episodes_index_path": episodes_index_path,
+        "episodes_parquet_path": episodes_parquet_path,
+        "episode_index_path": episode_index_path,
+    }
 
 
 def _validate_json_schema(payload: Any, schema: Dict[str, Any]) -> None:
@@ -2496,7 +2670,6 @@ def run_local_import_job(
 
     lerobot_dir = config.output_dir / "lerobot"
     dataset_info_path = lerobot_dir / "dataset_info.json"
-    episodes_index_path = lerobot_dir / "episodes.jsonl"
     dataset_info_payload = None
     if dataset_info_path.exists():
         try:
@@ -2517,29 +2690,11 @@ def run_local_import_job(
             f"metadata {dataset_info_path.relative_to(config.output_dir)}: missing dataset_info.json"
         )
 
-    if episodes_index_path.exists():
-        try:
-            with open(episodes_index_path, "r") as handle:
-                for line_number, line in enumerate(handle, start=1):
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    entry = json.loads(stripped)
-                    schema_errors.extend(
-                        _validate_schema_payload(
-                            entry,
-                            "geniesim_local_episodes_index.schema.json",
-                            f"metadata {episodes_index_path.relative_to(config.output_dir)}:{line_number}",
-                        )
-                    )
-        except Exception as exc:
-            schema_errors.append(
-                f"metadata {episodes_index_path.relative_to(config.output_dir)}: {exc}"
-            )
-    else:
-        schema_errors.append(
-            f"metadata {episodes_index_path.relative_to(config.output_dir)}: missing episodes.jsonl"
-        )
+    lerobot_metadata_validation = _validate_lerobot_metadata_files(
+        config.output_dir,
+        lerobot_dir,
+    )
+    schema_errors.extend(lerobot_metadata_validation["schema_errors"])
 
     if schema_errors:
         result.errors.extend(schema_errors)
@@ -2663,11 +2818,22 @@ def run_local_import_job(
     lerobot_checksums = {
         "dataset_info": None,
         "episodes_index": None,
+        "episodes_parquet": None,
+        "episode_index": None,
         "episodes": [],
     }
     dataset_info_path = lerobot_dir / "dataset_info.json"
     if dataset_info_path.exists():
         lerobot_checksums["dataset_info"] = _sha256_file(dataset_info_path)
+    episodes_index_path = lerobot_metadata_validation.get("episodes_index_path")
+    if isinstance(episodes_index_path, Path) and episodes_index_path.exists():
+        lerobot_checksums["episodes_index"] = _sha256_file(episodes_index_path)
+    episodes_parquet_path = lerobot_metadata_validation.get("episodes_parquet_path")
+    if isinstance(episodes_parquet_path, Path) and episodes_parquet_path.exists():
+        lerobot_checksums["episodes_parquet"] = _sha256_file(episodes_parquet_path)
+    episode_index_path = lerobot_metadata_validation.get("episode_index_path")
+    if isinstance(episode_index_path, Path) and episode_index_path.exists():
+        lerobot_checksums["episode_index"] = _sha256_file(episode_index_path)
     for lerobot_file in sorted(lerobot_episode_files):
         lerobot_checksums["episodes"].append({
             "file_name": lerobot_file.name,
@@ -2677,9 +2843,15 @@ def run_local_import_job(
     episode_paths = sorted(recordings_dir.rglob("*.json"))
     metadata_paths = get_lerobot_metadata_paths(config.output_dir)
     missing_metadata_files = []
-    lerobot_info_path = config.output_dir / "lerobot" / "meta" / "info.json"
-    if not lerobot_info_path.exists():
-        missing_metadata_files.append(lerobot_info_path.relative_to(config.output_dir).as_posix())
+    lerobot_info_path = lerobot_metadata_validation.get("info_path")
+    if isinstance(lerobot_info_path, Path):
+        info_rel_path = lerobot_info_path.relative_to(config.output_dir).as_posix()
+    else:
+        info_rel_path = (config.output_dir / "lerobot" / "meta" / "info.json").relative_to(
+            config.output_dir
+        ).as_posix()
+    if not lerobot_info_path or not Path(lerobot_info_path).exists():
+        missing_metadata_files.append(info_rel_path)
     bundle_root = config.output_dir.resolve()
     readme_path = _write_lerobot_readme(config.output_dir, lerobot_dir)
     directory_checksums = build_directory_checksums(
