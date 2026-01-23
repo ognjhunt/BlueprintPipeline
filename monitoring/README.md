@@ -44,6 +44,14 @@ Run the deployment script to create dashboards, alert policies, and log-based me
    # Select your Prometheus datasource when prompted.
    ```
 
+### Grafana Panels (Prometheus)
+
+The Grafana dashboard includes the following Genie Sim quality/performance panels:
+
+- **Collision-Free Rate** (requires `collision_free_rate`)
+- **Task Success Rate** (requires `task_success_rate`)
+- **Genie Sim Episodes per Hour** (rate of `geniesim_episodes_generated_total`)
+
 ## Key Metrics
 
 ### Pipeline Performance
@@ -71,10 +79,13 @@ Run the deployment script to create dashboards, alert policies, and log-based me
 - **geniesim_job_duration_seconds**: Job duration
 - **geniesim_server_latency_seconds**: Server latency
   - Alert: If unavailable for > 5 minutes
+- **geniesim_episodes_generated_total** (rate): Episodes/hour panel in Grafana
 
 ### Quality Metrics
 - **episode_quality_score**: Episode quality distribution
   - Alert: If average < 0.7
+- **collision_free_rate**: Collision-free episode rate
+- **task_success_rate**: Task success rate
 - **physics_validation_score**: Physics validation scores
 - **blueprint_quality_gate_failures_total**: Quality gate failure count
   - SLO: Quality pass rate >= 98%
