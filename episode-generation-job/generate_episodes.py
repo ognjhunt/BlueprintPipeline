@@ -438,6 +438,7 @@ class EpisodeGenerationConfig:
     sensor_capture_mode: Optional[str] = None  # "isaac_sim", "mock_dev", "fail_closed" (None = auto-detect)
     allow_mock_capture: bool = False  # Explicit dev-only guard for mock capture
     lerobot_export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2
+    lerobot_parquet_compression: Optional[str] = None
 
     # Output
     output_dir: Path = Path("./episodes")
@@ -1738,6 +1739,7 @@ class EpisodeGenerator:
             output_dir=self.config.output_dir / "lerobot",
             strict_alignment=self._is_production_quality_level(),
             export_format=self.config.lerobot_export_format,
+            parquet_compression=self.config.lerobot_parquet_compression,
         )
         export_estimate = _estimate_export_requirements(valid_episodes, self.config)
         self.log(
@@ -3014,6 +3016,7 @@ def run_episode_generation_job(
     allow_mock_capture: bool = False,
     bundle_tier: str = "standard",
     lerobot_export_format: Optional[Union[str, LeRobotExportFormat]] = None,
+    lerobot_parquet_compression: Optional[str] = None,
 ) -> int:
     """
     Run the episode generation job (SOTA Pipeline).
@@ -3042,6 +3045,7 @@ def run_episode_generation_job(
         allow_mock_capture: Allow mock capture (development only)
         bundle_tier: Bundle tier for upsell features (standard, pro, enterprise, foundation)
         lerobot_export_format: LeRobot export format ("lerobot_v2", "lerobot_v3", "lerobot_v0.3.3")
+        lerobot_parquet_compression: Parquet compression codec for LeRobot exports
 
     Returns:
         0 on success, 1 on failure
@@ -3143,6 +3147,7 @@ def run_episode_generation_job(
             lerobot_export_format,
             default=LeRobotExportFormat.LEROBOT_V2,
         ),
+        lerobot_parquet_compression=lerobot_parquet_compression,
         output_dir=output_dir,
     )
 
@@ -3706,6 +3711,7 @@ def _run_main():
     # Data pack configuration (Core/Plus/Full)
     data_pack_tier = os.getenv("DATA_PACK_TIER", "core")
     lerobot_export_format = os.getenv("LEROBOT_EXPORT_FORMAT")
+    lerobot_parquet_compression = os.getenv("LEROBOT_PARQUET_COMPRESSION")
 
     try:
         num_cameras = int(os.getenv("NUM_CAMERAS", "1"))
@@ -3744,6 +3750,11 @@ def _run_main():
     )
     if lerobot_export_format:
         logger.info("[EPISODE-GEN-JOB]   LeRobot export format: %s", lerobot_export_format)
+    if lerobot_parquet_compression:
+        logger.info(
+            "[EPISODE-GEN-JOB]   LeRobot Parquet compression: %s",
+            lerobot_parquet_compression,
+        )
     logger.info("[EPISODE-GEN-JOB]   Cameras: %s", num_cameras)
     logger.info("[EPISODE-GEN-JOB]   Resolution: %s", image_resolution)
     logger.info(
@@ -3777,6 +3788,7 @@ def _run_main():
         allow_mock_capture=allow_mock_capture,
         bundle_tier=bundle_tier,
         lerobot_export_format=lerobot_export_format,
+        lerobot_parquet_compression=lerobot_parquet_compression,
     )
     metrics = get_metrics()
     with metrics.track_job("episode-generation-job", scene_id):
@@ -3804,6 +3816,7 @@ def _run_main():
             allow_mock_capture=allow_mock_capture,
             bundle_tier=bundle_tier,
             lerobot_export_format=lerobot_export_format,
+            lerobot_parquet_compression=lerobot_parquet_compression,
         )
 
     sys.exit(exit_code)
@@ -3849,6 +3862,7 @@ def main() -> None:
         "use_mock_capture": os.getenv("USE_MOCK_CAPTURE", "false"),
         "bundle_tier": os.getenv("BUNDLE_TIER", "standard"),
         "lerobot_export_format": os.getenv("LEROBOT_EXPORT_FORMAT"),
+        "lerobot_parquet_compression": os.getenv("LEROBOT_PARQUET_COMPRESSION"),
     }
     partial_results = {
         "episodes_prefix": episodes_prefix,
