@@ -8,6 +8,8 @@ import mimetypes
 import os
 import base64
 import hashlib
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
@@ -24,6 +26,7 @@ _FIREBASE_APP: Optional[firebase_admin.App] = None
 _FIREBASE_STORAGE_CLIENT: Optional[storage.Client] = None
 _FIREBASE_STORAGE_BUCKET = None
 _SHA256_METADATA_KEY = "sha256"
+_LOCAL_UPLOAD_ROOT: Optional[Path] = None
 
 
 class FirebaseUploadError(RuntimeError):
@@ -43,7 +46,25 @@ def _get_emulator_endpoint() -> Optional[str]:
     return f"http://{emulator_host}"
 
 
+def _resolve_firebase_upload_mode() -> str:
+    return (os.getenv("FIREBASE_UPLOAD_MODE", "firebase") or "firebase").strip().lower()
+
+
+def _resolve_local_upload_root() -> Path:
+    global _LOCAL_UPLOAD_ROOT
+    if _LOCAL_UPLOAD_ROOT is not None:
+        return _LOCAL_UPLOAD_ROOT
+    local_root = os.getenv("FIREBASE_UPLOAD_LOCAL_DIR")
+    if local_root:
+        _LOCAL_UPLOAD_ROOT = Path(local_root).expanduser()
+        return _LOCAL_UPLOAD_ROOT
+    _LOCAL_UPLOAD_ROOT = Path(tempfile.mkdtemp(prefix="firebase-upload-local-"))
+    return _LOCAL_UPLOAD_ROOT
+
+
 def _preflight_firebase_credentials() -> None:
+    if _resolve_firebase_upload_mode() == "local":
+        return
     bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
     if not bucket_name:
         raise ValueError("FIREBASE_STORAGE_BUCKET is required to initialize Firebase storage")
@@ -224,6 +245,14 @@ def _upload_firebase_files(
     scene_id: str,
     prefix: str,
 ) -> dict:
+    if _resolve_firebase_upload_mode() == "local":
+        return _upload_local_files(
+            file_paths,
+            base_dir=base_dir,
+            scene_id=scene_id,
+            prefix=prefix,
+        )
+
     bucket = _get_storage_bucket()
 
     concurrency = int(os.getenv("FIREBASE_UPLOAD_CONCURRENCY", "8"))
@@ -391,6 +420,138 @@ def _upload_firebase_files(
     return summary
 
 
+def _upload_local_files(
+    file_paths: Sequence[Path],
+    *,
+    base_dir: Path,
+    scene_id: str,
+    prefix: str,
+) -> dict:
+    local_root = _resolve_local_upload_root()
+    local_root.mkdir(parents=True, exist_ok=True)
+
+    concurrency = int(os.getenv("FIREBASE_UPLOAD_CONCURRENCY", "8"))
+    if concurrency < 1:
+        raise ValueError("FIREBASE_UPLOAD_CONCURRENCY must be >= 1")
+
+    total_files = len(file_paths)
+    uploaded_files = 0
+    skipped_files = 0
+    reuploaded_files = 0
+    failures = []
+    verification_failed = []
+    file_statuses = []
+
+    def _upload_single(path: Path) -> dict:
+        relative_path = path.relative_to(base_dir).as_posix()
+        remote_path = f"{prefix}/{scene_id}/{relative_path}"
+        dest_path = local_root / remote_path
+        status_payload = {
+            "local_path": str(path),
+            "remote_path": remote_path,
+            "local_destination": str(dest_path),
+        }
+        local_hashes = _calculate_file_hashes(path)
+
+        if dest_path.exists():
+            existing_hashes = _calculate_file_hashes(dest_path)
+            if existing_hashes == local_hashes:
+                return {
+                    **status_payload,
+                    "status": "skipped",
+                }
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dest_path)
+            verified_hashes = _calculate_file_hashes(dest_path)
+            if verified_hashes != local_hashes:
+                return {
+                    **status_payload,
+                    "status": "failed",
+                    "error": "local reupload verification failed",
+                    "verification": {
+                        "expected_sha256": local_hashes["sha256_hex"],
+                        "actual_sha256": verified_hashes["sha256_hex"],
+                    },
+                }
+            return {
+                **status_payload,
+                "status": "reuploaded",
+            }
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, dest_path)
+        verified_hashes = _calculate_file_hashes(dest_path)
+        if verified_hashes != local_hashes:
+            return {
+                **status_payload,
+                "status": "failed",
+                "error": "local upload verification failed",
+                "verification": {
+                    "expected_sha256": local_hashes["sha256_hex"],
+                    "actual_sha256": verified_hashes["sha256_hex"],
+                },
+            }
+        return {
+            **status_payload,
+            "status": "uploaded",
+        }
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(_upload_single, file_path): file_path for file_path in file_paths}
+        for future in as_completed(futures):
+            try:
+                status_result = future.result()
+                status = status_result.get("status")
+                file_statuses.append(status_result)
+                if status == "failed":
+                    failures.append(status_result)
+                    verification = status_result.get("verification")
+                    if verification:
+                        verification_failed.append(verification)
+                    continue
+                if status == "uploaded":
+                    uploaded_files += 1
+                elif status == "skipped":
+                    skipped_files += 1
+                elif status == "reuploaded":
+                    reuploaded_files += 1
+            except Exception as exc:
+                failure = {
+                    "local_path": str(futures[future]),
+                    "remote_path": "unknown",
+                    "status": "failed",
+                    "error": str(exc),
+                }
+                failures.append(failure)
+                file_statuses.append(failure)
+
+    failures.sort(key=lambda failure: failure["local_path"])
+    verification_failed.sort(key=lambda failure: failure["local_path"])
+    file_statuses.sort(key=lambda status: status["local_path"])
+
+    summary = {
+        "total_files": total_files,
+        "uploaded": uploaded_files,
+        "skipped": skipped_files,
+        "reuploaded": reuploaded_files,
+        "failed": len(failures),
+        "file_statuses": file_statuses,
+        "failures": failures,
+        "verification_failed": verification_failed,
+        "verification_strategy": "sha256_local+md5_local",
+        "upload_mode": "local",
+        "local_root": str(local_root),
+    }
+
+    if failures:
+        raise FirebaseUploadError(
+            summary,
+            f"Firebase upload failed for {len(failures)} of {total_files} files"
+        )
+
+    return summary
+
+
 def upload_episodes_to_firebase(
     episodes_dir: Path,
     scene_id: str,
@@ -461,6 +622,43 @@ def cleanup_firebase_paths(
     """Delete Firebase blobs by prefix or by explicit paths."""
     if not prefix and not paths:
         raise ValueError("cleanup_firebase_paths requires a prefix or paths to delete")
+
+    if _resolve_firebase_upload_mode() == "local":
+        local_root = _resolve_local_upload_root()
+        deleted = []
+        failed = []
+        requested = []
+        mode = "paths" if paths else "prefix"
+
+        if paths:
+            for blob_path in paths:
+                if not blob_path:
+                    continue
+                requested.append(blob_path)
+                local_path = local_root / blob_path
+                try:
+                    if local_path.exists():
+                        local_path.unlink()
+                        deleted.append(blob_path)
+                except Exception as exc:
+                    failed.append({"path": blob_path, "error": str(exc)})
+        elif prefix:
+            prefix_path = local_root / prefix
+            requested.append(prefix)
+            try:
+                if prefix_path.exists():
+                    shutil.rmtree(prefix_path)
+                    deleted.append(prefix)
+            except Exception as exc:
+                failed.append({"path": prefix, "error": str(exc)})
+
+        return {
+            "mode": mode,
+            "prefix": prefix,
+            "requested": requested,
+            "deleted": deleted,
+            "failed": failed,
+        }
 
     bucket = _get_storage_bucket()
 
