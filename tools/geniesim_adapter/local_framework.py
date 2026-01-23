@@ -52,6 +52,9 @@ Environment Variables:
     GENIESIM_HOST: Genie Sim gRPC server host (default: localhost)
     GENIESIM_PORT: Genie Sim gRPC server port (default: adapter default port)
     GENIESIM_GRPC_TIMEOUT_S: Connection timeout in seconds (default: 30; legacy: GENIESIM_TIMEOUT)
+    GENIESIM_GRPC_MAX_RETRIES: Max retry attempts for retryable gRPC errors (default: 3)
+    GENIESIM_GRPC_RETRY_BASE_S: Base delay in seconds for gRPC retries (default: 0.5)
+    GENIESIM_GRPC_RETRY_MAX_S: Max delay in seconds for gRPC retries (default: 5.0)
     GENIESIM_READINESS_TIMEOUT_S: Readiness probe timeout in seconds (default: 10)
     GENIESIM_ROOT: Path to Genie Sim installation (default: /opt/geniesim)
     GENIESIM_RECORDINGS_DIR: Directory for Genie Sim recordings (default: /tmp/geniesim_recordings; legacy: GENIESIM_RECORDING_DIR)
@@ -121,11 +124,15 @@ from tools.geniesim_adapter.config import (
     get_geniesim_circuit_breaker_failure_threshold,
     get_geniesim_circuit_breaker_recovery_timeout_s,
     get_geniesim_circuit_breaker_success_threshold,
+    get_geniesim_grpc_max_retries,
+    get_geniesim_grpc_retry_base_s,
+    get_geniesim_grpc_retry_max_s,
     get_geniesim_grpc_timeout_s,
     get_geniesim_host,
     get_geniesim_port,
     get_geniesim_readiness_timeout_s,
 )
+from tools.error_handling.retry import RetryConfig, calculate_delay
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.config.env import parse_bool_env
 
@@ -762,6 +769,22 @@ class GenieSimGRPCClient:
             on_half_open=self._on_circuit_half_open,
             on_close=self._on_circuit_closed,
         )
+        max_retries = max(1, get_geniesim_grpc_max_retries())
+        self._grpc_retry_config = RetryConfig(
+            max_retries=max_retries,
+            base_delay=get_geniesim_grpc_retry_base_s(),
+            max_delay=get_geniesim_grpc_retry_max_s(),
+            backoff_factor=2.0,
+            jitter=False,
+        )
+        if grpc is None:
+            self._grpc_retryable_codes = tuple()
+        else:
+            self._grpc_retryable_codes = (
+                grpc.StatusCode.UNAVAILABLE,
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+            )
 
         # Check if gRPC stubs are available
         self._have_grpc = GRPC_STUBS_AVAILABLE and grpc is not None
@@ -818,6 +841,17 @@ class GenieSimGRPCClient:
             self._grpc_unavailable_logged.add(method_name)
         return GrpcCallResult(success=False, available=False, error=reason)
 
+    def _is_retryable_grpc_error(self, exc: Exception) -> bool:
+        if not self._have_grpc or grpc is None:
+            return False
+        if not isinstance(exc, grpc.RpcError):
+            return False
+        try:
+            code = exc.code()
+        except Exception:
+            return False
+        return code in self._grpc_retryable_codes
+
     def _call_grpc(
         self,
         action: str,
@@ -834,13 +868,28 @@ class GenieSimGRPCClient:
             )
             return fallback
 
-        try:
-            result = func()
-        except Exception as exc:
-            if self._circuit_breaker:
-                self._circuit_breaker.record_failure(exc)
-            logger.error("Genie Sim gRPC %s failed: %s", action, exc)
-            return fallback
+        last_exception: Optional[Exception] = None
+        for attempt in range(1, self._grpc_retry_config.max_retries + 1):
+            try:
+                result = func()
+            except Exception as exc:
+                last_exception = exc
+                if self._circuit_breaker:
+                    self._circuit_breaker.record_failure(exc)
+
+                if self._is_retryable_grpc_error(exc) and attempt < self._grpc_retry_config.max_retries:
+                    delay = calculate_delay(attempt, self._grpc_retry_config)
+                    logger.warning(
+                        "Genie Sim gRPC %s failed with retryable error (%s); retrying in %.2fs",
+                        action,
+                        exc,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                logger.error("Genie Sim gRPC %s failed: %s", action, exc)
+                return fallback
 
         if self._circuit_breaker:
             if success_checker is None:
