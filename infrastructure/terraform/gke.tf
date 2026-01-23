@@ -30,17 +30,11 @@ resource "google_container_cluster" "blueprint" {
   # Master authorized networks
   master_authorized_networks_config {
     dynamic "cidr_blocks" {
-      for_each = var.authorized_networks
+      for_each = var.master_authorized_networks
       content {
         cidr_block   = cidr_blocks.value.cidr_block
         display_name = cidr_blocks.value.display_name
       }
-    }
-
-    # Allow access from anywhere (restrict in production)
-    cidr_blocks {
-      cidr_block   = "0.0.0.0/0"
-      display_name = "All networks (restrict in production)"
     }
   }
 
