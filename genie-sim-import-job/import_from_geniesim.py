@@ -1972,13 +1972,16 @@ def _resolve_manifest_import_status(import_manifest: Dict[str, Any]) -> str:
     success = import_manifest.get("success")
     if isinstance(success, bool):
         return "success" if success else "failed"
-    checksums_success = (
-        import_manifest.get("verification", {}).get("checksums", {}).get("success")
-    )
-    if checksums_success is True:
-        return "success"
-    if checksums_success is False:
-        return "failed"
+    checksums_verification = import_manifest.get("verification", {}).get("checksums", {})
+    if isinstance(checksums_verification, dict):
+        checksums_success = checksums_verification.get("success")
+        if isinstance(checksums_success, bool):
+            return "success" if checksums_success else "failed"
+        output_bundle = checksums_verification.get("output_bundle")
+        if isinstance(output_bundle, dict):
+            checksums_success = output_bundle.get("success")
+            if isinstance(checksums_success, bool):
+                return "success" if checksums_success else "failed"
     return "unknown"
 
 
@@ -1988,6 +1991,37 @@ def _resolve_import_status(result: "ImportResult") -> str:
     if result.episodes_passed_validation or result.episodes_filtered:
         return "partial"
     return "failed"
+
+
+def _format_checksums_verification_errors(
+    checksums_verification: Mapping[str, Any],
+) -> List[str]:
+    verification_errors: List[str] = []
+    for error in checksums_verification.get("errors") or []:
+        verification_errors.append(str(error))
+    if checksums_verification.get("missing_files"):
+        verification_errors.append(
+            "Missing files: " + ", ".join(checksums_verification["missing_files"])
+        )
+    if checksums_verification.get("checksum_mismatches"):
+        mismatch_paths = [
+            mismatch["path"]
+            for mismatch in checksums_verification["checksum_mismatches"]
+            if isinstance(mismatch, dict) and "path" in mismatch
+        ]
+        if mismatch_paths:
+            verification_errors.append(
+                "Checksum mismatches: " + ", ".join(mismatch_paths)
+            )
+    if checksums_verification.get("size_mismatches"):
+        mismatch_paths = [
+            mismatch["path"]
+            for mismatch in checksums_verification["size_mismatches"]
+            if isinstance(mismatch, dict) and "path" in mismatch
+        ]
+        if mismatch_paths:
+            verification_errors.append("Size mismatches: " + ", ".join(mismatch_paths))
+    return verification_errors
 
 
 def _update_import_manifest_status(
@@ -3759,6 +3793,33 @@ def run_local_import_job(
         result.errors.append(f"Failed to resolve recordings directory: {exc}")
         return result
 
+    bundle_root = config.output_dir.resolve()
+    input_checksums_verification = None
+    input_checksums_path = None
+    input_bundle_root = None
+    for candidate_root in (bundle_root, recordings_dir):
+        candidate_path = candidate_root / "checksums.json"
+        if candidate_path.exists():
+            input_checksums_path = candidate_path
+            input_bundle_root = candidate_root
+            input_checksums_verification = verify_checksums_manifest(
+                candidate_root,
+                candidate_path,
+            )
+            if not input_checksums_verification["success"]:
+                verification_errors = _format_checksums_verification_errors(
+                    input_checksums_verification,
+                )
+                if verification_errors:
+                    result.errors.extend(verification_errors)
+                else:
+                    result.errors.append(
+                        "Checksum verification failed for the input bundle."
+                    )
+                result.success = False
+                return result
+            break
+
     schema_errors: List[str] = []
     for episode_file in sorted(recordings_dir.rglob("*.json")):
         try:
@@ -4162,7 +4223,6 @@ def run_local_import_job(
         ).as_posix()
     if not lerobot_info_path or not Path(lerobot_info_path).exists():
         missing_metadata_files.append(info_rel_path)
-    bundle_root = config.output_dir.resolve()
     readme_path = _write_lerobot_readme(config.output_dir, lerobot_dir)
     directory_checksums = build_directory_checksums(
         config.output_dir,
@@ -4259,6 +4319,20 @@ def run_local_import_job(
     except Exception as exc:
         regression_payload["error"] = f"{type(exc).__name__}: {exc}"
 
+    input_checksums_payload = None
+    if input_checksums_verification is not None:
+        input_checksums_payload = dict(input_checksums_verification)
+        if input_checksums_path is not None:
+            input_checksums_payload["path"] = _relative_to_bundle(
+                bundle_root,
+                input_checksums_path,
+            )
+        if input_bundle_root is not None:
+            input_checksums_payload["bundle_root"] = _relative_to_bundle(
+                bundle_root,
+                input_bundle_root,
+            )
+
     import_manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "schema_definition": MANIFEST_SCHEMA_DEFINITION,
@@ -4334,7 +4408,11 @@ def run_local_import_job(
             },
         },
         "verification": {
-            "checksums": {},
+            "checksums": {
+                "input_bundle": input_checksums_payload,
+            }
+            if input_checksums_payload is not None
+            else {},
         },
         "metrics_summary": metrics_summary,
         "regression_metrics": regression_payload,
@@ -4415,7 +4493,9 @@ def run_local_import_job(
         "failed": upload_summary["failed"],
     }
     checksums_verification = verify_checksums_manifest(bundle_root, checksums_path)
-    import_manifest["verification"]["checksums"] = checksums_verification
+    import_manifest.setdefault("verification", {}).setdefault("checksums", {})[
+        "output_bundle"
+    ] = checksums_verification
     import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
         "sha256": compute_manifest_checksum(import_manifest),
     }
@@ -4443,23 +4523,7 @@ def run_local_import_job(
     print("CHECKSUM VERIFICATION")
     print("=" * 80)
     if not checksums_verification["success"]:
-        verification_errors = []
-        if checksums_verification["missing_files"]:
-            verification_errors.append(
-                "Missing files: " + ", ".join(checksums_verification["missing_files"])
-            )
-        if checksums_verification["checksum_mismatches"]:
-            mismatch_paths = [
-                mismatch["path"] for mismatch in checksums_verification["checksum_mismatches"]
-            ]
-            verification_errors.append("Checksum mismatches: " + ", ".join(mismatch_paths))
-        if checksums_verification["size_mismatches"]:
-            mismatch_paths = [
-                mismatch["path"] for mismatch in checksums_verification["size_mismatches"]
-            ]
-            verification_errors.append("Size mismatches: " + ", ".join(mismatch_paths))
-        if checksums_verification["errors"]:
-            verification_errors.extend(checksums_verification["errors"])
+        verification_errors = _format_checksums_verification_errors(checksums_verification)
         result.checksum_verification_errors.extend(verification_errors)
         remediation = (
             "Re-download the bundle to ensure artifacts are intact, or rerun the import "
