@@ -27,6 +27,7 @@ data:
   FAIL_ON_PARTIAL_ERROR: "false"
   DISABLE_GCS_UPLOAD: "false"
   ENABLE_FIREBASE_UPLOAD: "true"
+  ALLOW_PARTIAL_FIREBASE_UPLOADS: "true"
   FIREBASE_STORAGE_BUCKET: "${FIREBASE_STORAGE_BUCKET}"
 
 ---
@@ -108,6 +109,12 @@ spec:
                 configMapKeyRef:
                   name: genie-sim-import-overrides
                   key: LEROBOT_SKIP_RATE_MAX
+                  optional: true
+            - name: ALLOW_PARTIAL_FIREBASE_UPLOADS
+              valueFrom:
+                configMapKeyRef:
+                  name: genie-sim-import-overrides
+                  key: ALLOW_PARTIAL_FIREBASE_UPLOADS
                   optional: true
 
           resources:
