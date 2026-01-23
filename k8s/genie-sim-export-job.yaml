@@ -27,7 +27,7 @@ data:
   ENABLE_RICH_ANNOTATIONS: "true"
   ENABLE_PREMIUM_ANALYTICS: "true"
   REQUIRE_QUALITY_GATES: "true"
-  STRICT_PREMIUM_FEATURES: "false"
+  STRICT_PREMIUM_FEATURES: "true"
 
 ---
 apiVersion: batch/v1

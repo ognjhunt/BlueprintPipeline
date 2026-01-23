@@ -59,7 +59,7 @@ Environment Variables:
     ENABLE_GENERALIZATION_ANALYZER: Enable generalization analysis artifacts - default: true
     ENABLE_SIM2REAL_VALIDATION: Enable sim2real validation artifacts - default: true
     ENABLE_AUDIO_NARRATION: Enable audio narration artifacts - default: true
-    STRICT_PREMIUM_FEATURES: Fail fast on premium feature export errors - default: false
+    STRICT_PREMIUM_FEATURES: Fail fast on premium feature export errors - default: production mode
     GENIESIM_EXPORT_DRY_RUN: Validate/export without writing outputs - default: false
     DRY_RUN: Alias for GENIESIM_EXPORT_DRY_RUN
 """
@@ -198,6 +198,12 @@ except ImportError:
     AUDIO_NARRATION_AVAILABLE = False
 
 JOB_NAME = "genie-sim-export-job"
+
+
+class PremiumFeatureExportError(RuntimeError):
+    """Raised when a premium feature export fails in strict mode."""
+
+
 COMMERCIAL_LICENSE_ALLOWLIST = {"cc0", "cc-by", "mit", "apache-2.0"}
 
 
@@ -563,7 +569,7 @@ def run_geniesim_export_job(
         enable_generalization_analyzer: Enable generalization analysis artifacts (DEFAULT: True)
         enable_sim2real_validation: Enable sim2real validation artifacts (DEFAULT: True)
         enable_audio_narration: Enable audio narration artifacts (DEFAULT: True)
-        strict_premium_features: Fail fast on premium feature export errors (DEFAULT: False)
+        strict_premium_features: Fail fast on premium feature export errors (DEFAULT: production mode)
         require_quality_gates: Fail when quality gates are unavailable or error (DEFAULT: True)
         dry_run: Validate without writing outputs (DEFAULT: False)
         bucket: GCS bucket for failure markers (optional)
@@ -1353,12 +1359,17 @@ def run_geniesim_export_job(
                 )
                 print(f"[GENIESIM-EXPORT-JOB] ⚠️  Output dir: {warning['output_dir']}")
                 if strict_premium_features:
+                    error_message = (
+                        "Premium feature export failed in strict mode: "
+                        f"{feature_name} ({warning['exception_type']}: {warning['exception_message']}) "
+                        f"output_dir={warning['output_dir']}"
+                    )
                     print(
                         "[GENIESIM-EXPORT-JOB] ❌ Premium feature failure blocked export "
                         "due to STRICT_PREMIUM_FEATURES=1"
                     )
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                    raise exc
+                    raise PremiumFeatureExportError(error_message) from exc
 
             if enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting premium analytics manifests (DEFAULT - NO LONGER UPSELL)")
@@ -1850,6 +1861,8 @@ def run_geniesim_export_job(
                 print(f"[GENIESIM-EXPORT-JOB]   - {error}")
             return 1
 
+    except PremiumFeatureExportError:
+        raise
     except Exception as e:
         print(f"[GENIESIM-EXPORT-JOB] ERROR: {e}")
         traceback.print_exc()
@@ -1939,7 +1952,11 @@ def main():
     enable_sim2real_validation = parse_bool_env(os.getenv("ENABLE_SIM2REAL_VALIDATION"), default=True)
     enable_audio_narration = parse_bool_env(os.getenv("ENABLE_AUDIO_NARRATION"), default=True)
     require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
-    strict_premium_features = parse_bool_env(os.getenv("STRICT_PREMIUM_FEATURES"), default=False)
+    strict_premium_features_env = os.getenv("STRICT_PREMIUM_FEATURES")
+    strict_premium_features = parse_bool_env(
+        strict_premium_features_env,
+        default=production_mode,
+    )
     dry_run_env = os.getenv("GENIESIM_EXPORT_DRY_RUN")
     if dry_run_env is None:
         dry_run_env = os.getenv("DRY_RUN")
@@ -1947,6 +1964,11 @@ def main():
     embedding_model = _resolve_embedding_model()
     if production_mode and not require_quality_gates:
         require_quality_gates = True
+    if production_mode and strict_premium_features_env is not None and not strict_premium_features:
+        log.warning(
+            "Production mode enabled but STRICT_PREMIUM_FEATURES explicitly disabled; "
+            "premium feature failures may be missed."
+        )
 
     input_params = {
         "bucket": bucket,
