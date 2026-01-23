@@ -23,8 +23,8 @@
       ],
       "properties": {
         "dataset_type": {"type": "string"},
-        "format_version": {"type": "string"},
-        "schema_version": {"type": "string"},
+        "format_version": {"type": "string", "enum": ["1.0"]},
+        "schema_version": {"type": "string", "enum": ["1.0.0"]},
         "scene_id": {"type": "string"},
         "run_id": {"type": "string"},
         "pipeline_commit": {"type": "string"},
@@ -96,7 +96,7 @@
       "properties": {
         "format": {"type": "string"},
         "export_format": {"type": "string"},
-        "version": {"type": "string"},
+        "version": {"type": "string", "enum": ["0.1.0"]},
         "episodes": {"type": "integer"},
         "skipped": {"type": "integer"},
         "total_frames": {"type": "integer"},

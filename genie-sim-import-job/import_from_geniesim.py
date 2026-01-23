@@ -104,6 +104,12 @@ from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.logging_config import init_logging
+from tools.schema_migrations import (
+    DATASET_INFO_SCHEMA_VERSION,
+    SchemaMigrationError,
+    migrate_dataset_info_payload,
+    migrate_import_manifest_payload,
+)
 from tools.firebase_upload.firebase_upload_orchestrator import (
     FirebaseUploadOrchestratorError,
     build_firebase_upload_prefix,
@@ -152,7 +158,6 @@ except ImportError:
 # Data Models
 # =============================================================================
 
-DATASET_INFO_SCHEMA_VERSION = "1.0.0"
 MIN_EPISODES_REQUIRED = 1
 JOB_NAME = "genie-sim-import-job"
 logger = logging.getLogger(__name__)
@@ -460,15 +465,11 @@ def _resolve_upload_file_list(
     lerobot_dir = output_dir / "lerobot"
     dataset_info_path = lerobot_dir / "dataset_info.json"
     if dataset_info_path.exists():
-        try:
-            dataset_info = _load_json_file(dataset_info_path)
-        except (json.JSONDecodeError, OSError, ValueError) as exc:
-            logger.warning(
-                "Failed to load dataset info from %s: %s",
-                dataset_info_path,
-                exc,
-            )
-            dataset_info = {}
+        dataset_info = _load_dataset_info_with_migration(
+            dataset_info_path,
+            logger,
+            required=True,
+        ) or {}
         for entry in dataset_info.get("episodes", []):
             episode_id = entry.get("episode_id")
             episode_file = entry.get("file")
@@ -1610,6 +1611,54 @@ def _load_json_file(path: Path) -> Any:
         raise ValueError(f"Failed to load JSON file {path}: {exc}") from exc
 
 
+def _load_dataset_info_with_migration(
+    path: Path,
+    log: logging.Logger,
+    *,
+    required: bool = True,
+) -> Optional[Dict[str, Any]]:
+    payload = _load_json_file(path)
+    try:
+        migration = migrate_dataset_info_payload(payload)
+    except SchemaMigrationError as exc:
+        message = f"Unsupported dataset_info schema version in {path}: {exc}"
+        if required:
+            raise ValueError(message) from exc
+        log.warning(message)
+        return None
+    if migration.applied_steps:
+        log.info(
+            "Applied dataset_info migrations for %s: %s",
+            path,
+            ", ".join(migration.applied_steps),
+        )
+    return migration.payload
+
+
+def _load_import_manifest_with_migration(
+    path: Path,
+    log: logging.Logger,
+    *,
+    required: bool = True,
+) -> Optional[Dict[str, Any]]:
+    payload = _load_json_file(path)
+    try:
+        migration = migrate_import_manifest_payload(payload)
+    except SchemaMigrationError as exc:
+        message = f"Unsupported import_manifest schema version in {path}: {exc}"
+        if required:
+            raise ValueError(message) from exc
+        log.warning(message)
+        return None
+    if migration.applied_steps:
+        log.info(
+            "Applied import manifest migrations for %s: %s",
+            path,
+            ", ".join(migration.applied_steps),
+        )
+    return migration.payload
+
+
 def _resolve_dataset_document_id(job_id: str, robot_type: Optional[str]) -> str:
     if robot_type:
         return f"{job_id}-{robot_type}"
@@ -1631,9 +1680,18 @@ def _publish_dataset_catalog_document(
         return
 
     try:
-        import_manifest = _load_json_file(result.import_manifest_path)
+        import_manifest = _load_import_manifest_with_migration(
+            result.import_manifest_path,
+            log,
+            required=False,
+        )
     except ValueError as exc:
         log.warning("Skipping dataset catalog publish: %s", exc)
+        return
+    if import_manifest is None:
+        log.warning(
+            "Skipping dataset catalog publish: import_manifest schema unsupported."
+        )
         return
 
     if result.import_manifest_path:
@@ -1644,7 +1702,11 @@ def _publish_dataset_catalog_document(
         dataset_info_path = result.output_dir / "lerobot" / "dataset_info.json"
         if dataset_info_path.exists():
             try:
-                dataset_info_payload = _load_json_file(dataset_info_path)
+                dataset_info_payload = _load_dataset_info_with_migration(
+                    dataset_info_path,
+                    log,
+                    required=False,
+                )
             except ValueError as exc:
                 log.warning("Failed to load dataset_info.json for catalog: %s", exc)
 
@@ -1857,12 +1919,18 @@ def _write_local_job_metadata(
     write_json_atomic(metadata_path, job_metadata, indent=2)
 
 
-def _load_existing_import_manifest(output_dir: Path) -> Optional[Dict[str, Any]]:
+def _load_existing_import_manifest(
+    output_dir: Path,
+    log: logging.Logger,
+) -> Optional[Dict[str, Any]]:
     manifest_path = output_dir / "import_manifest.json"
     if not manifest_path.exists():
         return None
-    with open(manifest_path, "r") as handle:
-        return json.load(handle)
+    return _load_import_manifest_with_migration(
+        manifest_path,
+        log,
+        required=True,
+    )
 
 
 def _resolve_manifest_import_status(import_manifest: Dict[str, Any]) -> str:
@@ -2123,19 +2191,29 @@ def _write_combined_import_manifest(
             manifest_path = Path(manifest_path_str)
             if manifest_path.exists():
                 try:
-                    manifest_payload = json.loads(manifest_path.read_text())
-                except json.JSONDecodeError as exc:
+                    manifest_payload = _load_import_manifest_with_migration(
+                        manifest_path,
+                        logger,
+                        required=False,
+                    )
+                except ValueError as exc:
                     print(
                         "[GENIE-SIM-IMPORT] ⚠️  Failed to load robot manifest "
                         f"{manifest_path}: {exc}"
                     )
-                else:
-                    robot_metrics_payload = manifest_payload.get("metrics_summary")
-                    if robot_metrics_payload:
-                        robot_metrics[robot_type] = robot_metrics_payload
-                    robot_provenance_payload = manifest_payload.get("provenance")
-                    if robot_provenance_payload:
-                        robot_provenance[robot_type] = robot_provenance_payload
+                    continue
+                if not manifest_payload:
+                    print(
+                        "[GENIE-SIM-IMPORT] ⚠️  Skipping robot manifest with unsupported "
+                        f"schema {manifest_path}."
+                    )
+                    continue
+                robot_metrics_payload = manifest_payload.get("metrics_summary")
+                if robot_metrics_payload:
+                    robot_metrics[robot_type] = robot_metrics_payload
+                robot_provenance_payload = manifest_payload.get("provenance")
+                if robot_provenance_payload:
+                    robot_provenance[robot_type] = robot_provenance_payload
 
     metrics_summary = _aggregate_metrics_summary(robot_metrics)
     bundle_root = output_dir.resolve()
@@ -3460,7 +3538,7 @@ def run_local_import_job(
 
     idempotency = _resolve_job_idempotency(job_metadata)
     if idempotency:
-        existing_manifest = _load_existing_import_manifest(config.output_dir)
+        existing_manifest = _load_existing_import_manifest(config.output_dir, log)
         existing_idempotency = (
             existing_manifest.get("job_idempotency", {}) if existing_manifest else {}
         )
@@ -3678,7 +3756,11 @@ def run_local_import_job(
     dataset_info_payload = None
     if dataset_info_path.exists():
         try:
-            dataset_info_payload = _load_json_file(dataset_info_path)
+            dataset_info_payload = _load_dataset_info_with_migration(
+                dataset_info_path,
+                log,
+                required=True,
+            )
             schema_errors.extend(
                 _validate_schema_payload(
                     dataset_info_payload,
