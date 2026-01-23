@@ -667,6 +667,10 @@ main:
                                     value: ${default(sys.get_env("GENIESIM_ROOT"), "/opt/geniesim")}
                                   - name: ISAAC_SIM_PATH
                                     value: ${default(sys.get_env("ISAAC_SIM_PATH"), "/isaac-sim")}
+                                  - name: GENIESIM_VALIDATE_FRAMES
+                                    value: "1"
+                                  - name: GENIESIM_FAIL_ON_FRAME_VALIDATION
+                                    value: "1"
                                   - name: GOOGLE_APPLICATION_CREDENTIALS
                                     value: /secrets/gcs/key.json
                                   - name: CANARY_ENABLED

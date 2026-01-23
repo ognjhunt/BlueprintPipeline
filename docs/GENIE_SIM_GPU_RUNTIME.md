@@ -29,6 +29,8 @@ These variables map to the same defaults referenced in
 - `GENIESIM_ROOT`: Path to the Genie Sim repository checkout (default: `/opt/geniesim`).
 - `GENIESIM_HOST`: gRPC host for the Genie Sim server (default: `localhost`).
 - `GENIESIM_PORT`: gRPC port for the Genie Sim server (defaults to the adapter port; set for non-local deployments).
+- `GENIESIM_VALIDATE_FRAMES`: Validate recorded frames before saving (set to `1` in production).
+- `GENIESIM_FAIL_ON_FRAME_VALIDATION`: Fail episodes when frame validation errors exist (set to `1` in production).
 
 ## Optional Runtime Inputs
 

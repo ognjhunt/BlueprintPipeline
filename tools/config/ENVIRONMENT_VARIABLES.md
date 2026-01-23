@@ -625,6 +625,8 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_RECORDINGS_DIR` | path | `/tmp/geniesim_recordings` | Output directory for Genie Sim recordings (avoid temp paths in production). |
 | `GENIESIM_RECORDING_DIR` | path | (legacy) | Deprecated alias for `GENIESIM_RECORDINGS_DIR`. |
 | `GENIESIM_LOG_DIR` | path | `/tmp/geniesim_logs` | Output directory for Genie Sim server logs (avoid temp paths in production). |
+| `GENIESIM_VALIDATE_FRAMES` | bool | false | Validate recorded frames before saving (enabled in production). |
+| `GENIESIM_FAIL_ON_FRAME_VALIDATION` | bool | false | Fail episodes when frame validation errors exist (enabled in production). |
 | `GENIESIM_CLEANUP_TMP` | bool | true (local), false (production) | Remove Genie Sim temp directories after a run completes. Keep disabled in production to retain artifacts for auditing/troubleshooting. |
 | `GENIESIM_TASK_CONFIDENCE_THRESHOLD` | float | 0.8 | Affordance confidence threshold for boosting task priority in task generation. |
 | `GENIESIM_TASK_SIZE_SMALL_THRESHOLD` | float | 0.05 | Object size threshold (meters) below which tasks are treated as harder. |
@@ -654,7 +656,12 @@ export GENIESIM_ENV=production
 export PIPELINE_ENV=production
 export ISAACSIM_REQUIRED=true
 export CUROBO_REQUIRED=true
+export GENIESIM_VALIDATE_FRAMES=1
+export GENIESIM_FAIL_ON_FRAME_VALIDATION=1
 ```
+
+Production Genie Sim runs should enforce both `GENIESIM_VALIDATE_FRAMES=1` and
+`GENIESIM_FAIL_ON_FRAME_VALIDATION=1` to block invalid frame data from entering downstream imports.
 
 Genie Sim readiness checks now perform a real gRPC workflow (connect → reset → minimal observation with joint data).
 The `GENIESIM_READINESS_TIMEOUT_S` value governs how long health checks and submit jobs wait for that probe to return.
