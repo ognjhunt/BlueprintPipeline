@@ -16,3 +16,7 @@ firebase-admin==6.5.0
 
 # Optional: API response validation
 pydantic==2.8.2
+
+# Metrics
+google-cloud-monitoring==2.21.0
+prometheus_client==0.20.0
