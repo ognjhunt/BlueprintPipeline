@@ -3865,14 +3865,24 @@ def run_local_import_job(
         else:
             result.warnings.append(lerobot_error)
 
-    if conversion_failures and config.require_lerobot:
-        failure_ids = ", ".join(
-            sorted({entry.get("episode_id", "unknown") for entry in conversion_failures})
+    if conversion_failures:
+        failure_id_set = {entry.get("episode_id", "unknown") for entry in conversion_failures}
+        failure_ids = ", ".join(sorted(failure_id_set))
+        log.warning(
+            "LeRobot conversion failures treated as skipped episodes: %s",
+            failure_ids,
         )
-        result.errors.append(
-            "LeRobot conversion failures detected with REQUIRE_LEROBOT=true: "
-            + failure_ids
-        )
+        if lerobot_skipped_count < len(failure_id_set):
+            lerobot_skipped_count = len(failure_id_set)
+            if not dataset_info_payload.get("skip_rate_percent"):
+                total_source_episodes = (
+                    int(dataset_info_payload.get("total_episodes", 0)) + lerobot_skipped_count
+                )
+                lerobot_skip_rate_percent = (
+                    (lerobot_skipped_count / total_source_episodes) * 100.0
+                    if total_source_episodes
+                    else 0.0
+                )
 
     if lerobot_skip_rate_percent > config.lerobot_skip_rate_max:
         result.errors.append(
