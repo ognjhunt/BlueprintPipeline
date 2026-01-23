@@ -1,0 +1,7 @@
+{
+  "format": "lerobot",
+  "export_format": "lerobot_v3",
+  "version": "3.0",
+  "data_path": "episodes/lerobot/data",
+  "episode_index": "lerobot/meta/episode_index.json"
+}
