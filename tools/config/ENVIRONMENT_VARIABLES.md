@@ -119,6 +119,22 @@ export ALERT_PROVENANCE_GATE_SEVERITY=error
 export ALERT_JOB_EXCEPTION_SEVERITY=critical
 ```
 
+## Text-to-Speech (TTS) Providers
+
+Credentials for `tools.audio.tts_providers` when generating narration audio.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `GOOGLE_APPLICATION_CREDENTIALS` | path | unset | Path to a Google service account JSON credential for Google Cloud Text-to-Speech. |
+| `OPENAI_API_KEY` | str | unset | OpenAI API key for OpenAI Text-to-Speech. |
+| `AZURE_SPEECH_KEY` | str | unset | Azure Speech subscription key for the Speech service. |
+| `AZURE_SPEECH_REGION` | str | unset | Azure region for the Speech service (for example, `westus`). |
+
+**Supported voices**:
+- Google Cloud: `en-US-Neural2-D`, `en-US-Neural2-F`, `en-US-Neural2-J`, `en-US-Standard-B`.
+- OpenAI: `alloy`, `verse`, `nova`, `echo`.
+- Azure: `en-US-AriaNeural`, `en-US-GuyNeural`.
+
 ## Configuration Overrides (BP_ Prefix)
 
 ### BP_SPLIT_* - Dataset Split Configuration
