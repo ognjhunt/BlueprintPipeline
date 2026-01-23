@@ -389,23 +389,38 @@ def main() -> int:
                 delivery_prefix = delivery_prefix_template.format(scene_id=scene_id, job_id=job_id, lab=lab).strip("/")
                 package_object_name = f"{delivery_prefix}/{package_rel_path}"
                 dataset_card_object_name = f"{delivery_prefix}/dataset_card.json"
+                staging_prefix = f"{delivery_prefix}/_staging/{job_id or 'unknown'}"
+                staging_object_name = f"{staging_prefix}/{package_rel_path}"
 
                 dest_bucket = client.bucket(dest_bucket_name)
-                source_bucket.copy_blob(source_blob, dest_bucket, new_name=package_object_name)
-                dest_bucket.blob(dataset_card_object_name).upload_from_filename(dataset_card_path)
-
                 dataset_card_url = f"gs://{dest_bucket_name}/{dataset_card_object_name}"
                 bundle_url = f"gs://{dest_bucket_name}/{package_object_name}"
+                staging_url = f"gs://{dest_bucket_name}/{staging_object_name}"
                 checksum_verified = False
                 checksum_error = None
+                delivery_success = False
+                staging_blob = dest_bucket.blob(staging_object_name)
                 try:
-                    verify_blob_checksum(client, bundle_url, checksums_uri, package_rel_path)
+                    source_bucket.copy_blob(source_blob, dest_bucket, new_name=staging_object_name)
+                    verify_blob_checksum(client, staging_url, checksums_uri, package_rel_path)
                     checksum_verified = True
+                    dest_bucket.copy_blob(staging_blob, dest_bucket, new_name=package_object_name)
+                    staging_blob.delete()
+                    dest_bucket.blob(dataset_card_object_name).upload_from_filename(dataset_card_path)
+                    delivery_success = True
                 except Exception as exc:
                     checksum_error = str(exc)
                     delivery_errors.append(
-                        f"Checksum verification failed for {bundle_url}: {checksum_error}"
+                        "Delivery verification failed for "
+                        f"{staging_url} -> {bundle_url}: {checksum_error}"
                     )
+                    try:
+                        if staging_blob.exists():
+                            staging_blob.delete()
+                    except Exception as cleanup_exc:
+                        delivery_errors.append(
+                            f"Failed to cleanup staging blob {staging_url}: {cleanup_exc}"
+                        )
 
                 delivery_targets.append(
                     {
@@ -414,18 +429,21 @@ def main() -> int:
                         "delivery_prefix": delivery_prefix,
                         "package_object": package_object_name,
                         "dataset_card_object": dataset_card_object_name,
-                        "bundle_url": bundle_url,
-                        "dataset_card_url": dataset_card_url,
+                        "bundle_url": bundle_url if delivery_success else None,
+                        "dataset_card_url": dataset_card_url if delivery_success else None,
+                        "staging_bundle_url": staging_url,
                         "checksum_verified": checksum_verified,
                         "checksum_error": checksum_error,
+                        "delivery_success": delivery_success,
                     }
                 )
-                dataset_card_paths["gcs"][lab] = dataset_card_url
-                artifact_counts["per_lab"][lab] = 2
-                artifact_counts["total_artifacts"] += 2
+                if delivery_success:
+                    dataset_card_paths["gcs"][lab] = dataset_card_url
+                    artifact_counts["per_lab"][lab] = 2
+                    artifact_counts["total_artifacts"] += 2
 
                 webhook_url = lab_webhook_urls.get(lab)
-                if webhook_url and checksum_verified:
+                if webhook_url and delivery_success:
                     send_webhook(
                         webhook_url,
                         {
