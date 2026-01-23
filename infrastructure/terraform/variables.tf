@@ -290,12 +290,12 @@ variable "firebase_storage_bucket_location" {
   default     = "US"
 }
 
-variable "authorized_networks" {
+variable "master_authorized_networks" {
   type = list(object({
     cidr_block   = string
     display_name = string
   }))
-  description = "Networks authorized to access the GKE master"
+  description = "Approved CIDR ranges and descriptions for GKE master access"
   default     = []
 }
 
