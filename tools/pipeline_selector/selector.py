@@ -26,6 +26,7 @@ Environment Variables:
     REGEN3D_AVAILABLE: "true" | "false" (override auto-detection)
     USE_GENIESIM: "true" (default) | "false" (use BlueprintPipeline episode generation)
     GENIESIM_ROBOT_TYPE: Robot type for Genie Sim (franka, g2, ur10)
+    ALLOW_MISSING_VARIATION_ASSETS: "true" | "false" (override compliance check)
 """
 
 from __future__ import annotations
@@ -79,6 +80,11 @@ class PipelineSelector:
     GENIESIM_MARKERS = [
         "geniesim/scene_graph.json",
         "geniesim/export_manifest.json",
+    ]
+
+    VARIATION_ASSET_MARKERS = [
+        "variation_assets/.variation_pipeline_complete",
+        "variation_assets/simready_assets.json",
     ]
 
     def __init__(self, scene_root: Optional[Path] = None):
@@ -142,6 +148,14 @@ class PipelineSelector:
                 return True
         return False
 
+    def has_variation_assets_output(self, scene_dir: Path) -> bool:
+        """Check if variation asset pipeline outputs exist for a scene."""
+        for marker in self.VARIATION_ASSET_MARKERS:
+            marker_path = scene_dir / marker
+            if marker_path.exists():
+                return True
+        return False
+
     def select(self, scene_dir: Optional[Path] = None) -> PipelineDecision:
         """Select the appropriate pipeline for processing.
 
@@ -167,31 +181,34 @@ class PipelineSelector:
             reason_suffix = " → BlueprintPipeline episode generation"
 
         if has_regen3d:
-            return PipelineDecision(
+            decision = PipelineDecision(
                 mode=mode,
                 use_regen3d=True,
                 reason=f"3D-RE-GEN output exists{reason_suffix}",
                 job_sequence=job_sequence,
                 data_backend=data_backend,
             )
+            return self._enforce_variation_assets(decision, scene_dir)
 
         if regen3d_available:
-            return PipelineDecision(
+            decision = PipelineDecision(
                 mode=mode,
                 use_regen3d=True,
                 reason=f"3D-RE-GEN available, will run reconstruction{reason_suffix}",
                 job_sequence=job_sequence,
                 data_backend=data_backend,
             )
+            return self._enforce_variation_assets(decision, scene_dir)
 
         # 3D-RE-GEN not available
-        return PipelineDecision(
+        decision = PipelineDecision(
             mode=mode,
             use_regen3d=False,
             reason=f"Waiting for 3D-RE-GEN reconstruction (set REGEN3D_AVAILABLE=true when ready){reason_suffix}",
             job_sequence=job_sequence,
             data_backend=data_backend,
         )
+        return self._enforce_variation_assets(decision, scene_dir)
 
     def _get_regen3d_jobs(self) -> List[str]:
         """Get job sequence for 3D-RE-GEN pipeline with BlueprintPipeline data generation."""
@@ -243,6 +260,49 @@ class PipelineSelector:
             # - VLM evaluation
             # - LeRobot export
         ]
+
+    def _enforce_variation_assets(
+        self,
+        decision: PipelineDecision,
+        scene_dir: Optional[Path],
+    ) -> PipelineDecision:
+        """Ensure variation assets exist before allowing Genie Sim export."""
+        if decision.data_backend != DataGenerationBackend.GENIESIM:
+            return decision
+
+        allow_missing = parse_bool_env(
+            os.getenv("ALLOW_MISSING_VARIATION_ASSETS"),
+            default=False,
+        )
+        if allow_missing or not scene_dir:
+            return decision
+
+        if self.has_variation_assets_output(scene_dir):
+            return decision
+
+        filtered_jobs = [
+            job
+            for job in decision.job_sequence
+            if job
+            not in {
+                "genie-sim-export-job",
+                "genie-sim-submit-job",
+                "genie-sim-import-job",
+            }
+        ]
+        compliance_reason = (
+            "Compliance check failed: variation assets are required for commercial "
+            "Genie Sim use. Missing variation_assets/.variation_pipeline_complete or "
+            "variation_assets/simready_assets.json under the scene root. "
+            "Set ALLOW_MISSING_VARIATION_ASSETS=true to override."
+        )
+        return PipelineDecision(
+            mode=decision.mode,
+            use_regen3d=decision.use_regen3d,
+            reason=f"{compliance_reason} {decision.reason}",
+            job_sequence=filtered_jobs,
+            data_backend=decision.data_backend,
+        )
 
     def get_job_env_overrides(self, job_name: str) -> Dict[str, str]:
         """Get environment variable overrides for a job."""
