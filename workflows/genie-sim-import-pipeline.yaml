@@ -34,6 +34,10 @@ main:
           - firebase_service_account_json: ${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_JSON"), "")}
           - firebase_service_account_path: ${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_PATH"), "/secrets/firebase/service-account.json")}
           - firebase_upload_prefix: ${default(sys.get_env("FIREBASE_UPLOAD_PREFIX"), "datasets")}
+          - realtime_stream_enabled: ${default(sys.get_env("ENABLE_REALTIME_STREAMING"), "0")}
+          - realtime_stream_endpoint: ${default(sys.get_env("REALTIME_STREAM_ENDPOINT"), "")}
+          - realtime_stream_api_key: ${default(sys.get_env("REALTIME_STREAM_API_KEY"), "")}
+          - realtime_stream_batch_size: ${default(sys.get_env("REALTIME_STREAM_BATCH_SIZE"), "25")}
           - artifacts_by_robot: null
 
     - extract_event:
@@ -397,6 +401,14 @@ main:
                         value: ${firebase_service_account_path}
                       - name: FIREBASE_UPLOAD_PREFIX
                         value: ${firebase_upload_prefix}
+                      - name: ENABLE_REALTIME_STREAMING
+                        value: ${realtime_stream_enabled}
+                      - name: REALTIME_STREAM_ENDPOINT
+                        value: ${realtime_stream_endpoint}
+                      - name: REALTIME_STREAM_API_KEY
+                        value: ${realtime_stream_api_key}
+                      - name: REALTIME_STREAM_BATCH_SIZE
+                        value: ${realtime_stream_batch_size}
                 timeout: "1800s"  # 30 minutes max
           result: import_job_execution
         retry:
