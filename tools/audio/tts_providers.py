@@ -1,9 +1,15 @@
 """TTS provider adapters and capability metadata."""
 from __future__ import annotations
 
+import base64
 import os
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
+from xml.sax.saxutils import escape
+
+import requests
+from google.auth.transport.requests import AuthorizedSession
+from google.oauth2 import service_account
 
 
 @dataclass(frozen=True)
@@ -148,6 +154,45 @@ def _generate_silence_frames(duration_s: float = 1.0, sample_rate: int = 22050, 
     return b"\x00\x00" * frames * channels
 
 
+def _language_code_from_voice(voice: str) -> str:
+    parts = voice.split("-")
+    if len(parts) >= 2:
+        return "-".join(parts[:2])
+    return voice
+
+
+def _map_status_to_error_type(status_code: int) -> str:
+    if status_code in {401, 403}:
+        return "unauthorized"
+    if status_code == 400:
+        return "bad_request"
+    if status_code == 404:
+        return "not_found"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code >= 500:
+        return "provider_unavailable"
+    return "provider_error"
+
+
+def _raise_response_error(provider: str, response: requests.Response) -> None:
+    details: Dict[str, object] = {"status_code": response.status_code}
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if payload is not None:
+        details["response_json"] = payload
+    elif response.text:
+        details["response_text"] = response.text[:500]
+    raise TTSProviderError(
+        provider,
+        f"{provider} TTS request failed with status {response.status_code}",
+        error_type=_map_status_to_error_type(response.status_code),
+        details=details,
+    )
+
+
 class BaseTTSProvider:
     provider: str
 
@@ -173,10 +218,67 @@ class GoogleTTSProvider(BaseTTSProvider):
                 error_type="credentials_missing",
                 details={"env_vars": PROVIDER_CAPABILITIES[self.provider].env_vars},
             )
-        _ = self._resolve_voice(voice)
-        if audio_format == "wav":
-            return _generate_silence_frames()
-        return f"GOOGLE_TTS_PLACEHOLDER:{text}".encode("utf-8")
+        resolved_voice = self._resolve_voice(voice)
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+        try:
+            credentials = service_account.Credentials.from_service_account_file(
+                credentials_path,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise TTSProviderError(
+                self.provider,
+                "Invalid Google application credentials",
+                error_type="credentials_invalid",
+                details={"path": credentials_path, "reason": str(exc)},
+            ) from exc
+        session = AuthorizedSession(credentials)
+        payload = {
+            "input": {"text": text},
+            "voice": {
+                "languageCode": _language_code_from_voice(resolved_voice),
+                "name": resolved_voice,
+            },
+            "audioConfig": {
+                "audioEncoding": {
+                    "mp3": "MP3",
+                    "wav": "LINEAR16",
+                    "ogg": "OGG_OPUS",
+                }[audio_format],
+            },
+        }
+        try:
+            response = session.post(
+                "https://texttospeech.googleapis.com/v1/text:synthesize",
+                json=payload,
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise TTSProviderError(
+                self.provider,
+                "Google TTS request failed",
+                error_type="request_failed",
+                details={"reason": str(exc)},
+            ) from exc
+        if response.status_code != 200:
+            _raise_response_error(self.provider, response)
+        try:
+            audio_content = response.json().get("audioContent")
+        except ValueError as exc:
+            raise TTSProviderError(
+                self.provider,
+                "Google TTS response was not valid JSON",
+                error_type="invalid_response",
+                details={"status_code": response.status_code},
+            ) from exc
+        if not audio_content:
+            raise TTSProviderError(
+                self.provider,
+                "Google TTS response missing audio content",
+                error_type="invalid_response",
+                details={"status_code": response.status_code},
+            )
+        return base64.b64decode(audio_content)
 
 
 class OpenAITTSProvider(BaseTTSProvider):
@@ -191,10 +293,34 @@ class OpenAITTSProvider(BaseTTSProvider):
                 error_type="credentials_missing",
                 details={"env_vars": PROVIDER_CAPABILITIES[self.provider].env_vars},
             )
-        _ = self._resolve_voice(voice)
-        if audio_format == "wav":
-            return _generate_silence_frames()
-        return f"OPENAI_TTS_PLACEHOLDER:{text}".encode("utf-8")
+        resolved_voice = self._resolve_voice(voice)
+        headers = {
+            "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "gpt-4o-mini-tts",
+            "input": text,
+            "voice": resolved_voice,
+            "format": audio_format,
+        }
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/audio/speech",
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise TTSProviderError(
+                self.provider,
+                "OpenAI TTS request failed",
+                error_type="request_failed",
+                details={"reason": str(exc)},
+            ) from exc
+        if response.status_code != 200:
+            _raise_response_error(self.provider, response)
+        return response.content
 
 
 class AzureTTSProvider(BaseTTSProvider):
@@ -209,10 +335,45 @@ class AzureTTSProvider(BaseTTSProvider):
                 error_type="credentials_missing",
                 details={"env_vars": PROVIDER_CAPABILITIES[self.provider].env_vars},
             )
-        _ = self._resolve_voice(voice)
-        if audio_format == "wav":
-            return _generate_silence_frames()
-        return f"AZURE_TTS_PLACEHOLDER:{text}".encode("utf-8")
+        resolved_voice = self._resolve_voice(voice)
+        region = os.getenv("AZURE_SPEECH_REGION", "")
+        endpoint = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+        output_format = {
+            "mp3": "audio-16khz-128kbitrate-mono-mp3",
+            "wav": "riff-16khz-16bit-mono-pcm",
+            "ogg": "ogg-16khz-16bit-mono-opus",
+        }[audio_format]
+        ssml = (
+            "<speak version='1.0' xml:lang='{}'>"
+            "<voice name='{}'>{}</voice>"
+            "</speak>"
+        ).format(
+            _language_code_from_voice(resolved_voice),
+            escape(resolved_voice),
+            escape(text),
+        )
+        headers = {
+            "Ocp-Apim-Subscription-Key": os.getenv("AZURE_SPEECH_KEY", ""),
+            "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": output_format,
+        }
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                data=ssml.encode("utf-8"),
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise TTSProviderError(
+                self.provider,
+                "Azure TTS request failed",
+                error_type="request_failed",
+                details={"reason": str(exc)},
+            ) from exc
+        if response.status_code != 200:
+            _raise_response_error(self.provider, response)
+        return response.content
 
 
 class LocalTTSProvider(BaseTTSProvider):
