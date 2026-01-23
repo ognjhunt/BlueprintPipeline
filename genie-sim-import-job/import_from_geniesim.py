@@ -34,8 +34,14 @@ Environment Variables:
     ARTIFACTS_BY_ROBOT: JSON map of robot type to artifacts payload for multi-robot imports
     ALLOW_IDEMPOTENT_RETRY: Allow retrying a local import when a prior manifest
         indicates a failed or partial run (default: false)
+    ENABLE_REALTIME_STREAMING: Enable real-time feedback streaming (default: false in production)
+    REALTIME_STREAM_PROTOCOL: Streaming protocol (http_post, grpc, websocket, message_queue, file_watch)
+    REALTIME_STREAM_ENDPOINT: Endpoint URL or path for streaming
+    REALTIME_STREAM_API_KEY: API key for streaming authentication
+    REALTIME_STREAM_BATCH_SIZE: Batch size for streaming episodes (default: 10)
 """
 
+import asyncio
 import copy
 import hashlib
 import importlib
@@ -114,6 +120,7 @@ from tools.quality.quality_config import (
     ResolvedQualitySettings,
     resolve_quality_settings,
 )
+from tools.training import DataStreamConfig, DataStreamProtocol, RealtimeFeedbackLoop
 
 # Import quality validation
 try:
@@ -144,6 +151,113 @@ def _resolve_debug_mode() -> bool:
     if debug_flag is None:
         debug_flag = parse_bool_env(os.getenv("DEBUG"), default=False)
     return bool(debug_flag)
+
+
+def _resolve_realtime_stream_config(
+    min_quality_score: float,
+    production_mode: bool,
+    log: logging.LoggerAdapter,
+) -> Optional[DataStreamConfig]:
+    raw_enabled = os.getenv("ENABLE_REALTIME_STREAMING")
+    realtime_enabled = parse_bool_env(
+        raw_enabled,
+        default=not production_mode,
+    )
+    if not realtime_enabled:
+        log.info(
+            "Realtime streaming disabled (ENABLE_REALTIME_STREAMING=%s).",
+            raw_enabled,
+        )
+        return None
+
+    endpoint = os.getenv("REALTIME_STREAM_ENDPOINT")
+    if not endpoint:
+        log.warning(
+            "Realtime streaming enabled but REALTIME_STREAM_ENDPOINT is not set; skipping."
+        )
+        return None
+
+    protocol_raw = os.getenv(
+        "REALTIME_STREAM_PROTOCOL",
+        DataStreamProtocol.HTTP_POST.value,
+    ).lower()
+    try:
+        protocol = DataStreamProtocol(protocol_raw)
+    except ValueError:
+        log.warning(
+            "Unsupported REALTIME_STREAM_PROTOCOL=%s; defaulting to %s.",
+            protocol_raw,
+            DataStreamProtocol.HTTP_POST.value,
+        )
+        protocol = DataStreamProtocol.HTTP_POST
+
+    batch_size = 10
+    batch_size_raw = os.getenv("REALTIME_STREAM_BATCH_SIZE")
+    if batch_size_raw:
+        try:
+            batch_size = int(batch_size_raw)
+            if batch_size <= 0:
+                raise ValueError("batch size must be positive")
+        except ValueError as exc:
+            log.warning(
+                "Invalid REALTIME_STREAM_BATCH_SIZE=%s (%s); using default=%s.",
+                batch_size_raw,
+                exc,
+                batch_size,
+            )
+
+    config = DataStreamConfig(
+        protocol=protocol,
+        endpoint_url=endpoint,
+        api_key=os.getenv("REALTIME_STREAM_API_KEY") or None,
+        batch_size=batch_size,
+        min_quality_score=min_quality_score,
+    )
+    log.info(
+        "Realtime streaming enabled (protocol=%s, endpoint=%s, batch_size=%s).",
+        protocol.value,
+        endpoint,
+        batch_size,
+    )
+    return config
+
+
+def _stream_realtime_episodes(
+    loop: RealtimeFeedbackLoop,
+    episodes: List[GeneratedEpisodeMetadata],
+    job_id: str,
+    scene_id: Optional[str],
+    robot_type: Optional[str],
+    log: logging.LoggerAdapter,
+) -> None:
+    if not episodes:
+        log.info("Realtime streaming enabled but no validated episodes to stream.")
+        return
+
+    async def _run_stream() -> None:
+        await loop.start()
+        try:
+            for episode in episodes:
+                payload = {
+                    "episode_id": episode.episode_id,
+                    "task_name": episode.task_name,
+                    "frame_count": episode.frame_count,
+                    "duration_seconds": episode.duration_seconds,
+                    "validation_passed": episode.validation_passed,
+                    "file_size_bytes": episode.file_size_bytes,
+                    "quality_score": episode.quality_score,
+                    "job_id": job_id,
+                    "scene_id": scene_id,
+                    "robot_type": robot_type,
+                }
+                loop.queue_episode(payload, quality_score=episode.quality_score)
+        finally:
+            await loop.stop()
+
+    try:
+        asyncio.run(_run_stream())
+    except RuntimeError as exc:
+        log.warning("Realtime streaming skipped: %s", exc)
 
 
 def _is_service_mode() -> bool:
@@ -2347,6 +2461,37 @@ def run_local_import_job(
                     "Excluding failed episodes from downstream processing and manifest: "
                     + ", ".join(filtered_episode_ids)
                 )
+
+    validated_episode_metadata_list = [
+        ep for ep in episode_metadata_list if ep.episode_id not in failed_episode_id_set
+    ]
+    realtime_config = _resolve_realtime_stream_config(
+        min_quality_score=config.min_quality_score,
+        production_mode=resolve_production_mode(),
+        log=log,
+    )
+    if realtime_config:
+        feedback_loop = RealtimeFeedbackLoop(realtime_config, enable_logging=True)
+        log.info(
+            "Streaming %s validated episodes to realtime feedback loop.",
+            len(validated_episode_metadata_list),
+        )
+        _stream_realtime_episodes(
+            feedback_loop,
+            validated_episode_metadata_list,
+            job_id=config.job_id,
+            scene_id=scene_id,
+            robot_type=(job_metadata or {}).get("robot_type"),
+            log=log,
+        )
+        stats = feedback_loop.get_statistics()
+        log.info(
+            "Realtime streaming summary: queued=%s filtered=%s sent=%s rejected=%s",
+            stats.get("episodes_queued"),
+            stats.get("episodes_filtered"),
+            stats.get("episodes_sent"),
+            stats.get("episodes_rejected"),
+        )
 
     lerobot_dir = config.output_dir / "lerobot"
     dataset_info_path = lerobot_dir / "dataset_info.json"
