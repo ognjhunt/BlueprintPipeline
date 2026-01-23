@@ -531,6 +531,232 @@ def _prepare_deduplication_summary(
     }
 
 
+def _filter_lerobot_episode_metadata(
+    lerobot_dir: Path,
+    removed_episode_indices: List[int],
+    log: logging.LoggerAdapter,
+) -> int:
+    if not removed_episode_indices:
+        return 0
+
+    meta_root = lerobot_dir / "meta" / "episodes"
+    if not meta_root.exists():
+        return 0
+
+    try:
+        import pyarrow as pa
+        import pyarrow.compute as pc
+        import pyarrow.parquet as pq
+    except ImportError:
+        log.warning(
+            "Skipping LeRobot meta episode filtering; pyarrow is not available.",
+        )
+        return 0
+
+    filtered_count = 0
+    remove_set = set(removed_episode_indices)
+    value_set = pa.array(sorted(remove_set))
+    for meta_file in sorted(meta_root.rglob("*.parquet")):
+        try:
+            table = pq.read_table(meta_file)
+        except Exception as exc:
+            log.warning("Failed to read LeRobot metadata %s: %s", meta_file, exc)
+            continue
+        if "episode_index" not in table.schema.names:
+            continue
+        mask = ~pc.is_in(table["episode_index"], value_set=value_set)
+        filtered_table = table.filter(mask)
+        removed_rows = table.num_rows - filtered_table.num_rows
+        if removed_rows <= 0:
+            continue
+        filtered_count += removed_rows
+        if filtered_table.num_rows == 0:
+            meta_file.unlink(missing_ok=True)
+        else:
+            pq.write_table(filtered_table, meta_file)
+    return filtered_count
+
+
+def _filter_deduplicated_outputs(
+    output_dir: Path,
+    deduplicated_episode_ids: List[str],
+    log: logging.LoggerAdapter,
+) -> Dict[str, Any]:
+    if not deduplicated_episode_ids:
+        return {
+            "filtered_count": 0,
+            "filtered_episode_ids": [],
+            "filtered_from_outputs": False,
+        }
+
+    lerobot_dir = output_dir / "lerobot"
+    dataset_info_path = lerobot_dir / "dataset_info.json"
+    if not dataset_info_path.exists():
+        log.warning(
+            "LeRobot dataset_info.json missing; cannot filter deduplicated episodes."
+        )
+        return {
+            "filtered_count": 0,
+            "filtered_episode_ids": [],
+            "filtered_from_outputs": False,
+        }
+
+    dataset_info = _load_dataset_info_with_migration(
+        dataset_info_path,
+        log,
+        required=True,
+    ) or {}
+    episodes = dataset_info.get("episodes", [])
+    if not isinstance(episodes, list):
+        log.warning(
+            "LeRobot dataset_info episodes payload is invalid; skipping dedup filtering."
+        )
+        return {
+            "filtered_count": 0,
+            "filtered_episode_ids": [],
+            "filtered_from_outputs": False,
+        }
+
+    deduped_set = set(deduplicated_episode_ids)
+    removed_entries = [
+        entry for entry in episodes if entry.get("episode_id") in deduped_set
+    ]
+    if not removed_entries:
+        return {
+            "filtered_count": 0,
+            "filtered_episode_ids": [],
+            "filtered_from_outputs": False,
+        }
+
+    kept_entries = [
+        entry for entry in episodes if entry.get("episode_id") not in deduped_set
+    ]
+    removed_indices: List[int] = []
+    removed_files: List[str] = []
+    for entry in removed_entries:
+        file_name = entry.get("file")
+        if file_name:
+            removed_files.append(str(file_name))
+            (lerobot_dir / file_name).unlink(missing_ok=True)
+        video_paths = entry.get("video_paths")
+        if isinstance(video_paths, dict):
+            for video_path in video_paths.values():
+                if video_path:
+                    (lerobot_dir / video_path).unlink(missing_ok=True)
+        episode_index = entry.get("episode_index")
+        if isinstance(episode_index, int):
+            removed_indices.append(episode_index)
+
+    dataset_info["episodes"] = kept_entries
+    dataset_info["total_episodes"] = len(kept_entries)
+    frame_counts = [
+        entry.get("num_frames")
+        for entry in kept_entries
+        if isinstance(entry.get("num_frames"), int)
+    ]
+    if frame_counts and len(frame_counts) == len(kept_entries):
+        dataset_info["total_frames"] = int(sum(frame_counts))
+    quality_scores = [
+        entry.get("quality_score")
+        for entry in kept_entries
+        if isinstance(entry.get("quality_score"), (int, float))
+    ]
+    if quality_scores:
+        dataset_info["average_quality_score"] = float(np.mean(quality_scores))
+        dataset_info["min_quality_score"] = float(np.min(quality_scores))
+        dataset_info["max_quality_score"] = float(np.max(quality_scores))
+
+    write_json_atomic(dataset_info_path, dataset_info, indent=2)
+
+    episodes_file = lerobot_dir / "episodes.jsonl"
+    episode_lines = [json.dumps(ep_info) for ep_info in kept_entries]
+    episodes_payload = "\n".join(episode_lines)
+    if episodes_payload:
+        episodes_payload += "\n"
+    write_text_atomic(episodes_file, episodes_payload)
+
+    filtered_meta_count = _filter_lerobot_episode_metadata(
+        lerobot_dir,
+        removed_indices,
+        log,
+    )
+
+    log.info(
+        "Filtered %s deduplicated episode(s) from LeRobot outputs (files=%s, meta=%s).",
+        len(removed_entries),
+        len(removed_files),
+        filtered_meta_count,
+    )
+    return {
+        "filtered_count": len(removed_entries),
+        "filtered_episode_ids": [
+            entry.get("episode_id")
+            for entry in removed_entries
+            if entry.get("episode_id")
+        ],
+        "filtered_from_outputs": True,
+        "lerobot_total_episodes": dataset_info.get("total_episodes"),
+        "lerobot_total_frames": dataset_info.get("total_frames"),
+        "quality_average_score": dataset_info.get("average_quality_score"),
+        "quality_min_score": dataset_info.get("min_quality_score"),
+        "quality_max_score": dataset_info.get("max_quality_score"),
+    }
+
+
+def _apply_deduplication_filters(
+    result: ImportResult,
+    dedup_summary: Dict[str, Any],
+    log: logging.LoggerAdapter,
+) -> Dict[str, Any]:
+    deduplicated_ids = dedup_summary.get("deduplicated_episode_ids") or []
+    if not deduplicated_ids or result.output_dir is None:
+        return dedup_summary
+
+    filter_result = _filter_deduplicated_outputs(
+        result.output_dir,
+        deduplicated_ids,
+        log,
+    )
+    filtered_count = int(filter_result.get("filtered_count", 0))
+    if filtered_count:
+        result.episodes_passed_validation = max(
+            0,
+            result.episodes_passed_validation - filtered_count,
+        )
+        result.episodes_filtered += filtered_count
+        avg_score = filter_result.get("quality_average_score")
+        min_score = filter_result.get("quality_min_score")
+        max_score = filter_result.get("quality_max_score")
+        if isinstance(avg_score, (int, float)):
+            result.average_quality_score = float(avg_score)
+        if isinstance(min_score, (int, float)):
+            result.quality_min_score = float(min_score)
+        if isinstance(max_score, (int, float)):
+            result.quality_max_score = float(max_score)
+
+    dedup_summary = dict(dedup_summary)
+    dedup_summary["filtered_from_outputs"] = filter_result.get(
+        "filtered_from_outputs",
+        False,
+    )
+    dedup_summary["filtered_count"] = filtered_count
+    dedup_summary["filtered_episode_ids"] = filter_result.get(
+        "filtered_episode_ids",
+        [],
+    )
+    if filter_result.get("lerobot_total_episodes") is not None:
+        dedup_summary["post_dedup_lerobot_converted_count"] = filter_result.get(
+            "lerobot_total_episodes"
+        )
+    if filter_result.get("lerobot_total_frames") is not None:
+        dedup_summary["post_dedup_lerobot_total_frames"] = filter_result.get(
+            "lerobot_total_frames"
+        )
+    dedup_summary["post_dedup_passed_validation"] = result.episodes_passed_validation
+    dedup_summary["post_dedup_filtered"] = result.episodes_filtered
+    return dedup_summary
+
+
 def _relative_to_bundle(bundle_root: Path, path: Path) -> str:
     try:
         rel_path = path.resolve().relative_to(bundle_root.resolve())
@@ -2090,6 +2316,32 @@ def _update_import_manifest_dedup_summary(
     episodes_summary["deduplicated_ids"] = dedup_summary.get(
         "deduplicated_episode_ids", []
     )
+    episodes_summary["deduplicated_filtered_from_outputs"] = dedup_summary.get(
+        "filtered_from_outputs",
+        False,
+    )
+    episodes_summary["deduplicated_filtered"] = dedup_summary.get(
+        "filtered_count",
+        0,
+    )
+    episodes_summary["deduplicated_filtered_ids"] = dedup_summary.get(
+        "filtered_episode_ids",
+        [],
+    )
+    post_dedup_passed = dedup_summary.get("post_dedup_passed_validation")
+    if isinstance(post_dedup_passed, int):
+        episodes_summary["passed_validation"] = post_dedup_passed
+    post_dedup_filtered = dedup_summary.get("post_dedup_filtered")
+    if isinstance(post_dedup_filtered, int):
+        episodes_summary["filtered"] = post_dedup_filtered
+    post_dedup_converted = dedup_summary.get("post_dedup_lerobot_converted_count")
+    if isinstance(post_dedup_converted, int):
+        lerobot_summary = import_manifest.setdefault("lerobot", {})
+        lerobot_summary["converted_count"] = post_dedup_converted
+    post_dedup_frames = dedup_summary.get("post_dedup_lerobot_total_frames")
+    if isinstance(post_dedup_frames, int):
+        lerobot_summary = import_manifest.setdefault("lerobot", {})
+        lerobot_summary["total_frames"] = post_dedup_frames
     checksums = import_manifest.setdefault("checksums", {})
     metadata_checksums = checksums.setdefault("metadata", {})
     metadata_checksums.setdefault("import_manifest.json", {})
@@ -5205,9 +5457,28 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         prefix=firebase_upload_prefix,
                         log=log,
                     )
+                    dedup_summary = _apply_deduplication_filters(
+                        result,
+                        dedup_summary,
+                        log,
+                    )
                     deduplicated_ids = dedup_summary.get("deduplicated_episode_ids", [])
+                    entry["episodes"]["passed_validation"] = result.episodes_passed_validation
+                    entry["episodes"]["filtered"] = result.episodes_filtered
                     entry["episodes"]["deduplicated"] = len(deduplicated_ids)
                     entry["episodes"]["deduplicated_ids"] = deduplicated_ids
+                    entry["episodes"]["deduplicated_filtered_from_outputs"] = dedup_summary.get(
+                        "filtered_from_outputs",
+                        False,
+                    )
+                    entry["episodes"]["deduplicated_filtered"] = dedup_summary.get(
+                        "filtered_count",
+                        0,
+                    )
+                    entry["episodes"]["deduplicated_filtered_ids"] = dedup_summary.get(
+                        "filtered_episode_ids",
+                        [],
+                    )
                     _update_import_manifest_dedup_summary(
                         result.import_manifest_path,
                         dedup_summary,
@@ -5459,6 +5730,11 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                     robot_type="default",
                     prefix=firebase_upload_prefix,
                     log=log,
+                )
+                dedup_summary = _apply_deduplication_filters(
+                    result,
+                    dedup_summary,
+                    log,
                 )
                 deduplicated_ids = dedup_summary.get("deduplicated_episode_ids", [])
                 _update_import_manifest_dedup_summary(
