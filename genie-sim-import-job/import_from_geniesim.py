@@ -256,6 +256,7 @@ def _stream_realtime_episodes(
     async def _run_stream() -> None:
         await loop.start()
         try:
+            max_queue_size = max(loop.config.batch_size * 10, 100)
             for episode in episodes:
                 payload = {
                     "episode_id": episode.episode_id,
@@ -271,6 +272,17 @@ def _stream_realtime_episodes(
                     "robot_type": robot_type,
                 }
                 loop.queue_episode(payload, quality_score=episode.quality_score)
+                while True:
+                    async with loop.queue_lock:
+                        queue_size = len(loop.queue)
+                    if queue_size < max_queue_size:
+                        break
+                    log.warning(
+                        "Realtime streaming queue at %s episodes (max=%s); pausing enqueue.",
+                        queue_size,
+                        max_queue_size,
+                    )
+                    await asyncio.sleep(0.5)
         finally:
             await loop.stop()
 

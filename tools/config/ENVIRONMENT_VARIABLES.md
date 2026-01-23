@@ -211,7 +211,12 @@ Controls for streaming validated episode metadata into the real-time feedback lo
 | `REALTIME_STREAM_PROTOCOL` | str | `http_post` | Streaming protocol (`http_post`, `grpc`, `websocket`, `message_queue`, `file_watch`). |
 | `REALTIME_STREAM_ENDPOINT` | str | unset | Endpoint URL or file path for streaming batches. |
 | `REALTIME_STREAM_API_KEY` | str | unset | API key for authenticating with the streaming endpoint. |
-| `REALTIME_STREAM_BATCH_SIZE` | int | 10 | Episodes per batch for streaming. |
+| `REALTIME_STREAM_BATCH_SIZE` | int | 25 | Episodes per batch for streaming. |
+
+**Rate limiting expectations:**
+- Expect bursty uploads of up to `REALTIME_STREAM_BATCH_SIZE` episodes per request (sent when the batch fills or after a short wait).
+- Set `REALTIME_STREAM_BATCH_SIZE` so the downstream endpoint can comfortably accept the payload size and QPS.
+- Return 429/503 (or equivalent) to trigger retries if the endpoint needs to apply backpressure.
 
 **Example**:
 ```bash
