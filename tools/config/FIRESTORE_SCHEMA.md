@@ -130,6 +130,65 @@ Stores scene-level configurations and settings.
 
 ---
 
+### datasets
+
+Stores dataset import/export metadata for Genie Sim pipelines.
+
+**Document ID**: `dataset_id` (string, required)
+
+**Fields**:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `schema_version` | integer | Yes | Schema version for this document (start at `1`) |
+| `scene_id` | string | Yes | Scene ID associated with the dataset |
+| `job_id` | string | Yes | Import job ID that produced the dataset |
+| `dataset_version` | string | No | Dataset schema/version from `dataset_info.json` |
+| `export_schema_version` | string | No | Export schema version from Genie Sim conversion |
+| `export_format` | string | No | Export format (for example, `lerobot`) |
+| `robot_types` | array | No | Robot types included in the dataset |
+| `total_episodes` | integer | No | Total number of episodes in the dataset |
+| `quality_summary` | map | No | Aggregate quality metrics (average/min/max/threshold) |
+| `timestamps` | map | No | Generated/uploaded timestamps |
+| `storage_locations` | map | No | GCS/Firebase storage paths and bundle references |
+| `dataset_info` | map | No | Snapshot of `dataset_info.json` metadata |
+| `import_status` | string | No | Import status from the manifest |
+| `success` | boolean | No | Whether the import completed successfully |
+
+**Indexes**:
+- `scene_id` (for querying datasets per scene)
+- `job_id` (for linking job metadata)
+
+**Example**:
+```json
+{
+  "schema_version": 1,
+  "scene_id": "scene_001",
+  "job_id": "job_123",
+  "dataset_version": "1.0.0",
+  "export_schema_version": "2024-05-01",
+  "export_format": "lerobot",
+  "robot_types": ["franka"],
+  "total_episodes": 120,
+  "quality_summary": {
+    "average_score": 0.92,
+    "min_score": 0.85,
+    "max_score": 0.99,
+    "threshold": 0.9
+  },
+  "timestamps": {
+    "generated_at": "2025-01-10T12:00:00Z",
+    "upload_completed_at": "2025-01-10T12:15:00Z"
+  },
+  "storage_locations": {
+    "gcs_output_path": "gs://bucket/scenes/scene_001",
+    "firebase_prefix": "datasets/scene_001"
+  }
+}
+```
+
+---
+
 ### feature_flags
 
 Stores dynamic feature flags for customers and global overrides.
