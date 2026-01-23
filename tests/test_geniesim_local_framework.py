@@ -1,6 +1,8 @@
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from enum import Enum
 
 import pytest
 
@@ -170,3 +172,113 @@ def test_local_servicer_stream_observations_yields_responses():
 
     assert responses
     assert all(response.success for response in responses)
+
+
+class DummyCircuitBreaker:
+    def __init__(self):
+        self.failures = 0
+        self.successes = 0
+
+    def allow_request(self) -> bool:
+        return True
+
+    def record_failure(self, exc: Exception) -> None:
+        self.failures += 1
+
+    def record_success(self) -> None:
+        self.successes += 1
+
+    def get_time_until_retry(self) -> float:
+        return 0.0
+
+
+@pytest.mark.unit
+def test_call_grpc_retries_retryable_errors(monkeypatch):
+    monkeypatch.setenv("GENIESIM_GRPC_MAX_RETRIES", "3")
+    monkeypatch.setenv("GENIESIM_GRPC_RETRY_BASE_S", "0.1")
+    monkeypatch.setenv("GENIESIM_GRPC_RETRY_MAX_S", "1.0")
+
+    class StatusCode(Enum):
+        UNAVAILABLE = 1
+        DEADLINE_EXCEEDED = 2
+        RESOURCE_EXHAUSTED = 3
+        PERMISSION_DENIED = 4
+
+    class FakeRpcError(Exception):
+        def __init__(self, code):
+            super().__init__(f"code={code}")
+            self._code = code
+
+        def code(self):
+            return self._code
+
+    fake_grpc = SimpleNamespace(RpcError=FakeRpcError, StatusCode=StatusCode)
+    monkeypatch.setattr(lf, "grpc", fake_grpc)
+    monkeypatch.setattr(lf, "GRPC_STUBS_AVAILABLE", True)
+
+    sleep_calls = []
+    monkeypatch.setattr(lf.time, "sleep", lambda delay: sleep_calls.append(delay))
+
+    client = lf.GenieSimGRPCClient(host="localhost", port=1234, timeout=1.0)
+    client._circuit_breaker = DummyCircuitBreaker()
+
+    calls = {"count": 0}
+
+    def flaky_call():
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise FakeRpcError(StatusCode.UNAVAILABLE)
+        return "ok"
+
+    result = client._call_grpc("flaky", flaky_call, fallback="fallback")
+
+    assert result == "ok"
+    assert calls["count"] == 3
+    assert sleep_calls == [0.1, 0.2]
+    assert client._circuit_breaker.failures == 2
+    assert client._circuit_breaker.successes == 1
+
+
+@pytest.mark.unit
+def test_call_grpc_non_retryable_error_no_retry(monkeypatch):
+    monkeypatch.setenv("GENIESIM_GRPC_MAX_RETRIES", "3")
+    monkeypatch.setenv("GENIESIM_GRPC_RETRY_BASE_S", "0.1")
+    monkeypatch.setenv("GENIESIM_GRPC_RETRY_MAX_S", "1.0")
+
+    class StatusCode(Enum):
+        UNAVAILABLE = 1
+        DEADLINE_EXCEEDED = 2
+        RESOURCE_EXHAUSTED = 3
+        PERMISSION_DENIED = 4
+
+    class FakeRpcError(Exception):
+        def __init__(self, code):
+            super().__init__(f"code={code}")
+            self._code = code
+
+        def code(self):
+            return self._code
+
+    fake_grpc = SimpleNamespace(RpcError=FakeRpcError, StatusCode=StatusCode)
+    monkeypatch.setattr(lf, "grpc", fake_grpc)
+    monkeypatch.setattr(lf, "GRPC_STUBS_AVAILABLE", True)
+
+    sleep_calls = []
+    monkeypatch.setattr(lf.time, "sleep", lambda delay: sleep_calls.append(delay))
+
+    client = lf.GenieSimGRPCClient(host="localhost", port=1234, timeout=1.0)
+    client._circuit_breaker = DummyCircuitBreaker()
+
+    calls = {"count": 0}
+
+    def failing_call():
+        calls["count"] += 1
+        raise FakeRpcError(StatusCode.PERMISSION_DENIED)
+
+    result = client._call_grpc("fail", failing_call, fallback="fallback")
+
+    assert result == "fallback"
+    assert calls["count"] == 1
+    assert sleep_calls == []
+    assert client._circuit_breaker.failures == 1
+    assert client._circuit_breaker.successes == 0

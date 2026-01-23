@@ -18,6 +18,9 @@ GENIESIM_AUTH_CERT_ENV = "GENIESIM_AUTH_CERT"
 GENIESIM_AUTH_KEY_ENV = "GENIESIM_AUTH_KEY"
 GENIESIM_GRPC_TIMEOUT_S_ENV = "GENIESIM_GRPC_TIMEOUT_S"
 GENIESIM_READINESS_TIMEOUT_S_ENV = "GENIESIM_READINESS_TIMEOUT_S"
+GENIESIM_GRPC_MAX_RETRIES_ENV = "GENIESIM_GRPC_MAX_RETRIES"
+GENIESIM_GRPC_RETRY_BASE_S_ENV = "GENIESIM_GRPC_RETRY_BASE_S"
+GENIESIM_GRPC_RETRY_MAX_S_ENV = "GENIESIM_GRPC_RETRY_MAX_S"
 # Legacy alias for GENIESIM_GRPC_TIMEOUT_S_ENV.
 GENIESIM_TIMEOUT_LEGACY_ENV = "GENIESIM_TIMEOUT"
 GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD_ENV = "GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD"
@@ -33,6 +36,9 @@ DEFAULT_GENIESIM_HOST = "localhost"
 DEFAULT_GENIESIM_PORT = 50051
 DEFAULT_GENIESIM_GRPC_TIMEOUT_S = 30.0
 DEFAULT_GENIESIM_READINESS_TIMEOUT_S = 10.0
+DEFAULT_GENIESIM_GRPC_MAX_RETRIES = 3
+DEFAULT_GENIESIM_GRPC_RETRY_BASE_S = 0.5
+DEFAULT_GENIESIM_GRPC_RETRY_MAX_S = 5.0
 DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3
 DEFAULT_CIRCUIT_BREAKER_SUCCESS_THRESHOLD = 2
 DEFAULT_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_S = 30.0
@@ -128,6 +134,39 @@ def get_geniesim_readiness_timeout_s(env: Optional[Mapping[str, str]] = None) ->
         default=DEFAULT_GENIESIM_READINESS_TIMEOUT_S,
         min_value=0.0,
         name=GENIESIM_READINESS_TIMEOUT_S_ENV,
+    )
+
+
+def get_geniesim_grpc_max_retries(env: Optional[Mapping[str, str]] = None) -> int:
+    """Return the configured gRPC max retry attempts."""
+    source = env or os.environ
+    return parse_int_env(
+        source.get(GENIESIM_GRPC_MAX_RETRIES_ENV),
+        default=DEFAULT_GENIESIM_GRPC_MAX_RETRIES,
+        min_value=0,
+        name=GENIESIM_GRPC_MAX_RETRIES_ENV,
+    )
+
+
+def get_geniesim_grpc_retry_base_s(env: Optional[Mapping[str, str]] = None) -> float:
+    """Return the configured gRPC retry base delay in seconds."""
+    source = env or os.environ
+    return parse_float_env(
+        source.get(GENIESIM_GRPC_RETRY_BASE_S_ENV),
+        default=DEFAULT_GENIESIM_GRPC_RETRY_BASE_S,
+        min_value=0.0,
+        name=GENIESIM_GRPC_RETRY_BASE_S_ENV,
+    )
+
+
+def get_geniesim_grpc_retry_max_s(env: Optional[Mapping[str, str]] = None) -> float:
+    """Return the configured gRPC retry max delay in seconds."""
+    source = env or os.environ
+    return parse_float_env(
+        source.get(GENIESIM_GRPC_RETRY_MAX_S_ENV),
+        default=DEFAULT_GENIESIM_GRPC_RETRY_MAX_S,
+        min_value=0.0,
+        name=GENIESIM_GRPC_RETRY_MAX_S_ENV,
     )
 
 
