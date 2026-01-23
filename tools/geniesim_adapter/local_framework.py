@@ -629,6 +629,7 @@ class GeneratedEpisodeMetadata:
     duration_seconds: float
     validation_passed: bool
     file_size_bytes: int
+    episode_content_hash: Optional[str] = None
 
 
 @dataclass

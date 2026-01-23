@@ -50,6 +50,11 @@ def _resolve_firebase_upload_mode() -> str:
     return (os.getenv("FIREBASE_UPLOAD_MODE", "firebase") or "firebase").strip().lower()
 
 
+def get_firebase_upload_mode() -> str:
+    """Public wrapper for resolving Firebase upload mode."""
+    return _resolve_firebase_upload_mode()
+
+
 def _resolve_local_upload_root() -> Path:
     global _LOCAL_UPLOAD_ROOT
     if _LOCAL_UPLOAD_ROOT is not None:
@@ -60,6 +65,11 @@ def _resolve_local_upload_root() -> Path:
         return _LOCAL_UPLOAD_ROOT
     _LOCAL_UPLOAD_ROOT = Path(tempfile.mkdtemp(prefix="firebase-upload-local-"))
     return _LOCAL_UPLOAD_ROOT
+
+
+def resolve_firebase_local_upload_root() -> Path:
+    """Public wrapper for resolving local Firebase upload root."""
+    return _resolve_local_upload_root()
 
 
 def _preflight_firebase_credentials() -> None:
@@ -162,6 +172,12 @@ def _get_storage_bucket():
 
     init_firebase()
     return storage.bucket()
+
+
+def get_firebase_storage_bucket():
+    """Public wrapper for resolving Firebase storage bucket."""
+    _preflight_firebase_credentials()
+    return _get_storage_bucket()
 
 
 @retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=10.0)
