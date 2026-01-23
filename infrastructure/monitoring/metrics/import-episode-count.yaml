@@ -1,0 +1,15 @@
+# Log-based metric: blueprint_import_episode_count
+name: blueprint_import_episode_count
+description: "Episode counts imported per scene/job from Genie Sim import logs."
+filter: >
+  resource.type="k8s_container" AND
+  resource.labels.namespace_name="blueprint" AND
+  jsonPayload.message=~"Episodes imported:"
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+valueExtractor: REGEXP_EXTRACT(jsonPayload.message, "Episodes imported: ([0-9]+)")
+labelExtractors:
+  job_id: EXTRACT(jsonPayload.job_id)
+  scene_id: EXTRACT(jsonPayload.scene_id)
