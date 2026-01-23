@@ -120,6 +120,7 @@ from tools.gcs_upload import (
     verify_blob_upload,
 )
 from tools.dataset_catalog import DatasetCatalogClient, build_dataset_document
+from tools.cost_tracking import get_cost_tracker
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.utils.atomic_write import write_json_atomic, write_text_atomic
 from tools.quality.quality_config import (
@@ -1213,6 +1214,58 @@ def _build_dataset_info(
         "source": source,
         "converted_at": converted_at,
     }
+
+
+def _build_cost_summary(
+    scene_id: str,
+    log: logging.LoggerAdapter,
+) -> Optional[Dict[str, Any]]:
+    if not scene_id:
+        return None
+    try:
+        tracker = get_cost_tracker()
+        breakdown = tracker.get_scene_cost(scene_id)
+    except Exception as exc:
+        log.warning("Cost tracking unavailable for scene %s: %s", scene_id, exc)
+        return None
+
+    gcs_total = breakdown.gcs_storage + breakdown.gcs_operations
+    return {
+        "total_usd": breakdown.total,
+        "categories": {
+            "geniesim": breakdown.geniesim,
+            "cloud_run": breakdown.cloud_run,
+            "cloud_build": breakdown.cloud_build,
+            "gcs": gcs_total,
+            "gcs_storage": breakdown.gcs_storage,
+            "gcs_operations": breakdown.gcs_operations,
+            "gemini": breakdown.gemini,
+            "other_apis": breakdown.other_apis,
+        },
+        "by_job": dict(breakdown.by_job),
+        "pricing_source": tracker.pricing_source,
+    }
+
+
+def _update_dataset_info_cost_summary(
+    cost_summary: Optional[Dict[str, Any]],
+    dataset_info_payload: Optional[Dict[str, Any]],
+    dataset_info_path: Optional[Path],
+) -> None:
+    if not cost_summary or not isinstance(dataset_info_payload, dict):
+        return
+    dataset_info_payload["cost_summary"] = cost_summary
+    if dataset_info_path and dataset_info_path.exists():
+        write_json_atomic(dataset_info_path, dataset_info_payload, indent=2)
+
+
+def _attach_cost_summary(
+    import_manifest: Dict[str, Any],
+    cost_summary: Optional[Dict[str, Any]],
+) -> None:
+    if cost_summary is None:
+        return
+    import_manifest["cost_summary"] = cost_summary
 
 
 def _write_lerobot_readme(output_dir: Path, lerobot_dir: Path) -> Path:
@@ -3550,6 +3603,13 @@ def run_local_import_job(
             f"{lerobot_skipped_count} ({lerobot_skip_rate_percent:.2f}%)"
         )
 
+    cost_summary = _build_cost_summary(scene_id, log)
+    _update_dataset_info_cost_summary(
+        cost_summary=cost_summary,
+        dataset_info_payload=dataset_info_payload,
+        dataset_info_path=dataset_info_path if dataset_info_path.exists() else None,
+    )
+
     # Write machine-readable import manifest for workflows
     import_manifest_path = config.output_dir / "import_manifest.json"
     gcs_output_path = config.gcs_output_path
@@ -3803,6 +3863,8 @@ def run_local_import_job(
         "checksums": checksums_payload,
         "provenance": provenance,
     }
+
+    _attach_cost_summary(import_manifest, cost_summary)
 
     with open(import_manifest_path, "w") as f:
         json.dump(import_manifest, f, indent=2)
