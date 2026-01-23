@@ -167,6 +167,29 @@ export PIPELINE_SEED=1234
 
 ---
 
+## Real-Time Streaming
+
+Controls for streaming validated episode metadata into the real-time feedback loop.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ENABLE_REALTIME_STREAMING` | bool | false (in production) | Enables real-time streaming in the Genie Sim import job. |
+| `REALTIME_STREAM_PROTOCOL` | str | `http_post` | Streaming protocol (`http_post`, `grpc`, `websocket`, `message_queue`, `file_watch`). |
+| `REALTIME_STREAM_ENDPOINT` | str | unset | Endpoint URL or file path for streaming batches. |
+| `REALTIME_STREAM_API_KEY` | str | unset | API key for authenticating with the streaming endpoint. |
+| `REALTIME_STREAM_BATCH_SIZE` | int | 10 | Episodes per batch for streaming. |
+
+**Example**:
+```bash
+export ENABLE_REALTIME_STREAMING=true
+export REALTIME_STREAM_PROTOCOL=http_post
+export REALTIME_STREAM_ENDPOINT="https://trainer.example.com/episodes"
+export REALTIME_STREAM_API_KEY="secret-token"
+export REALTIME_STREAM_BATCH_SIZE=25
+```
+
+---
+
 ## Cost Tracking
 
 Cost tracking loads canonical defaults from `tools/cost_tracking/pricing_defaults.json`.
