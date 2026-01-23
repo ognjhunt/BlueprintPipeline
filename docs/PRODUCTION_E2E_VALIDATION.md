@@ -31,6 +31,10 @@ These flags must be enforced for production validation runs:
 - `ENABLE_VALIDATION=true`
 - `FILTER_LOW_QUALITY=true`
 
+### Genie Sim Local Execution
+- `GENIESIM_VALIDATE_FRAMES=1`
+- `GENIESIM_FAIL_ON_FRAME_VALIDATION=1`
+
 ## Expected Artifacts & Metrics by Stage
 
 ### 1) Genie Sim Export
