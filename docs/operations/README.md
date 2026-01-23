@@ -115,6 +115,7 @@ When a pipeline gate is overridden (manual approval to proceed despite validatio
 2. **Restart or redeploy**
    - Use `scripts/run-isaacsim-local.sh` for local restarts.
    - Redeploy Genie Sim jobs via `scripts/deploy-genie-sim-gpu-job.sh` or the runbook.
+   - Confirm production Genie Sim jobs enforce `GENIESIM_VALIDATE_FRAMES=1` and `GENIESIM_FAIL_ON_FRAME_VALIDATION=1`.
 3. **Validate recovery**
    - Re-run a known-good scene or a small smoke test through the pipeline.
 

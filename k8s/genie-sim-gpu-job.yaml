@@ -35,6 +35,8 @@ data:
   # Quality enforcement
   ENABLE_VALIDATION: "true"
   FILTER_LOW_QUALITY: "true"
+  GENIESIM_VALIDATE_FRAMES: "1"
+  GENIESIM_FAIL_ON_FRAME_VALIDATION: "1"
 
 ---
 apiVersion: batch/v1

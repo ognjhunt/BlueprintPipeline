@@ -280,6 +280,7 @@ full rollout.
 4. Monitor the canary run:
    - Watch `scenes/<scene_id>/geniesim/job.json` for `canary` metadata and status.
    - Verify the `geniesim` outputs before expanding tags or raising the canary image to stable.
+   - Confirm production Genie Sim jobs enforce `GENIESIM_VALIDATE_FRAMES=1` and `GENIESIM_FAIL_ON_FRAME_VALIDATION=1`.
 
 ## Canary rollback steps
 
