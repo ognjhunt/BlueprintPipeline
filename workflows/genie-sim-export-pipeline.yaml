@@ -127,6 +127,13 @@ main:
           - geniesimFailedMarker: '${"scenes/" + sceneId + "/geniesim/.failed"}'
           - geniesimLegacyFailedMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_failed"}'
           - canaryRollbackObject: ${if(canaryRollbackMarker == "", geniesimPrefix + "/.canary_rollback", canaryRollbackMarker)}
+        next: log_canary_routing
+
+    - log_canary_routing:
+        call: sys.log
+        args:
+          text: '${"Genie Sim export routing for scene " + sceneId + ": canary_enabled=" + string(canaryEnabled) + ", image_tag=" + geniesimImageTag + ", canary_percent=" + string(canaryPercent) + ", rollback_marker=" + canaryRollbackObject}'
+          severity: "INFO"
         next: check_rollback_marker
 
     - check_rollback_marker:
