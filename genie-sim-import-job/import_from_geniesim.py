@@ -100,6 +100,7 @@ from tools.firebase_upload.firebase_upload_orchestrator import (
     resolve_firebase_upload_prefix,
     upload_episodes_with_retry,
 )
+from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
 from tools.gcs_upload import (
     calculate_file_md5_base64,
     upload_blob_from_filename,
@@ -2987,8 +2988,10 @@ def _quality_gate_failure_detected(
     return False
 
 
-def main():
+def main(input_params: Optional[Dict[str, Any]] = None):
     """Main entry point for import job."""
+    if input_params is None:
+        input_params = {}
     debug_mode = _resolve_debug_mode()
     if debug_mode:
         os.environ["LOG_LEVEL"] = "DEBUG"
@@ -3019,6 +3022,17 @@ def main():
     job_metadata_path = os.getenv("JOB_METADATA_PATH") or None
     local_episodes_prefix = os.getenv("LOCAL_EPISODES_PREFIX") or None
     artifacts_by_robot_env = os.getenv("ARTIFACTS_BY_ROBOT") or None
+    input_params.update(
+        {
+            "bucket": bucket,
+            "scene_id": scene_id,
+            "job_id": job_id,
+            "output_prefix": output_prefix,
+            "job_metadata_path": job_metadata_path,
+            "local_episodes_prefix": local_episodes_prefix,
+        }
+    )
+    log.debug("Input params: %s", input_params)
 
     job_metadata = None
     if job_metadata_path:
@@ -3601,7 +3615,18 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        input_params: Dict[str, Any] = {}
+
+        def _run_import_job() -> Optional[int]:
+            return main(input_params)
+
+        run_job_with_dead_letter_queue(
+            _run_import_job,
+            scene_id=os.getenv("SCENE_ID"),
+            job_type=JOB_NAME,
+            step="import",
+            input_params=input_params,
+        )
     except Exception as exc:
         send_alert(
             event_type="geniesim_import_job_fatal_exception",
