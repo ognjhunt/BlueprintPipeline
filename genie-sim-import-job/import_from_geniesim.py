@@ -119,6 +119,7 @@ from tools.gcs_upload import (
     upload_blob_from_filename,
     verify_blob_upload,
 )
+from tools.dataset_catalog import DatasetCatalogClient, build_dataset_document
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.utils.atomic_write import write_json_atomic, write_text_atomic
 from tools.quality.quality_config import (
@@ -1511,6 +1512,62 @@ def _load_json_file(path: Path) -> Any:
             return json.load(handle)
     except (FileNotFoundError, PermissionError, json.JSONDecodeError, OSError) as exc:
         raise ValueError(f"Failed to load JSON file {path}: {exc}") from exc
+
+
+def _resolve_dataset_document_id(job_id: str, robot_type: Optional[str]) -> str:
+    if robot_type:
+        return f"{job_id}-{robot_type}"
+    return job_id
+
+
+def _publish_dataset_catalog_document(
+    *,
+    scene_id: str,
+    job_id: str,
+    robot_type: Optional[str],
+    result: "ImportResult",
+    firebase_summary: Optional[Dict[str, Any]],
+    gcs_output_path: Optional[str],
+    log: logging.LoggerAdapter,
+) -> None:
+    if not result.import_manifest_path:
+        log.warning("Skipping dataset catalog publish: missing import manifest path.")
+        return
+
+    try:
+        import_manifest = _load_json_file(result.import_manifest_path)
+    except ValueError as exc:
+        log.warning("Skipping dataset catalog publish: %s", exc)
+        return
+
+    if result.import_manifest_path:
+        import_manifest["import_manifest_path"] = _resolve_gcs_path(result.import_manifest_path)
+
+    dataset_info_payload: Optional[Dict[str, Any]] = None
+    if result.output_dir:
+        dataset_info_path = result.output_dir / "lerobot" / "dataset_info.json"
+        if dataset_info_path.exists():
+            try:
+                dataset_info_payload = _load_json_file(dataset_info_path)
+            except ValueError as exc:
+                log.warning("Failed to load dataset_info.json for catalog: %s", exc)
+
+    document_id = _resolve_dataset_document_id(job_id, robot_type)
+    dataset_document = build_dataset_document(
+        scene_id=scene_id,
+        job_id=job_id,
+        import_manifest=import_manifest,
+        dataset_info=dataset_info_payload,
+        firebase_summary=firebase_summary,
+        gcs_output_path=gcs_output_path,
+        robot_types=[robot_type] if robot_type else [],
+        document_id=document_id,
+    )
+    try:
+        DatasetCatalogClient().upsert_dataset_document(dataset_document)
+        log.info("Published dataset catalog entry %s.", document_id)
+    except Exception as exc:  # pragma: no cover - network/firestore errors
+        log.warning("Failed to publish dataset catalog entry %s: %s", document_id, exc)
 
 
 def _create_bundle_package(
@@ -4492,6 +4549,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         raise
                     firebase_summary["deduplicated_episodes"] = len(deduplicated_ids)
                     firebase_summary["deduplicated_episode_ids"] = deduplicated_ids
+                    firebase_summary["remote_prefix"] = firebase_result.remote_prefix
                     entry["firebase_upload"] = firebase_summary
                     log.info(
                         "Firebase upload complete: uploaded=%s skipped=%s reuploaded=%s failed=%s total=%s",
@@ -4541,6 +4599,15 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                             job_id=job_id,
                             log=log,
                         )
+                    _publish_dataset_catalog_document(
+                        scene_id=scene_id,
+                        job_id=job_id,
+                        robot_type=robot_type,
+                        result=result,
+                        firebase_summary=firebase_summary,
+                        gcs_output_path=robot_gcs_output_path,
+                        log=log,
+                    )
             elif enable_firebase_upload and firebase_upload_suppressed:
                 log.warning(
                     "Firebase uploads suppressed (reason=%s).",
@@ -4729,6 +4796,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                 upload_summary = firebase_result.summary
                 upload_summary["deduplicated_episodes"] = len(deduplicated_ids)
                 upload_summary["deduplicated_episode_ids"] = deduplicated_ids
+                upload_summary["remote_prefix"] = firebase_result.remote_prefix
                 _update_import_manifest_firebase_summary(
                     result.import_manifest_path,
                     upload_summary,
@@ -4778,6 +4846,15 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         job_id=job_id,
                         log=log,
                     )
+                _publish_dataset_catalog_document(
+                    scene_id=scene_id,
+                    job_id=job_id,
+                    robot_type="default",
+                    result=result,
+                    firebase_summary=upload_summary,
+                    gcs_output_path=gcs_output_path,
+                    log=log,
+                )
             sys.exit(0)
         else:
             log.error("Import failed")
