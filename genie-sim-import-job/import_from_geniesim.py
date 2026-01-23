@@ -4485,6 +4485,24 @@ def _emit_import_quality_gate(
         episodes_collected = local_execution.get("episodes_collected")
         by_robot = local_execution.get("by_robot")
 
+    def _maybe_emit_rate(metric_name: str, metric_value: Any) -> None:
+        if metric_value is None:
+            return
+        try:
+            rate_value = float(metric_value)
+        except (TypeError, ValueError):
+            return
+        metrics = get_metrics()
+        labels = {"scene_id": scene_id, "job": JOB_NAME}
+        if robot_type:
+            labels["robot_type"] = robot_type
+        metric = getattr(metrics, metric_name, None)
+        if metric is not None:
+            metric.set(rate_value, labels=labels)
+
+    _maybe_emit_rate("collision_free_rate", collision_free_rate)
+    _maybe_emit_rate("task_success_rate", task_success_rate)
+
     def _check_import(ctx: Dict[str, Any]) -> QualityGateResult:
         passed = ctx["success"]
         # If GCS upload was configured and failed, the import is not complete
