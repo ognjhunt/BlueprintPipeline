@@ -92,3 +92,46 @@ Parallelism controls:
 Outputs:
 - `reports_dir/batch_report.json` now includes `scene_reports` entries with a per-scene
   `quality_gate_report` path for monitoring.
+## Canary staging validation runbook
+Use the staging script below before production releases to validate canary routing
+and rollback handling for `genie-sim-export-pipeline.yaml`.
+
+### Prerequisites
+- `gcloud` authenticated to the staging project.
+- `jq` installed (used by the script to parse execution IDs).
+- Two scene IDs with completed variation assets:
+  - `CANARY_SCENE_ID` (should route to canary image tag).
+  - `STABLE_SCENE_ID` (should route to stable image tag).
+
+### Optional rollback marker
+To validate rollback behavior, create the rollback marker object for the canary
+scene before running the rollback validation:
+
+```bash
+gsutil cp /dev/null gs://$BUCKET/scenes/$CANARY_SCENE_ID/geniesim/.canary_rollback
+```
+
+### Run the staging validation
+```bash
+export PROJECT_ID="your-project"
+export BUCKET="your-staging-bucket"
+export CANARY_SCENE_ID="scene_canary_001"
+export STABLE_SCENE_ID="scene_stable_001"
+export CANARY_IMAGE_TAG="isaacsim-canary"
+export CANARY_PERCENT="5"
+export CANARY_RELEASE_CHANNEL="canary"
+export CANARY_ROLLBACK_MARKER="scenes/$CANARY_SCENE_ID/geniesim/.canary_rollback"
+
+./run-canary-staging.sh
+```
+
+### Validation checklist
+The script writes logs/artifacts to `workflows/artifacts/canary-validation/<timestamp>/`:
+- `stable-workflow-logs.json` should include the routing log with
+  `canary_enabled=false` and `image_tag` set to the stable image tag.
+- `canary-workflow-logs.json` should include the routing log with
+  `canary_enabled=true` and `image_tag` set to the canary image tag.
+- `rollback-workflow-logs.json` (if run) should include
+  `Rollback marker present ... Skipping Genie Sim export.`
+
+Use `jq` or `rg` against the JSON logs to confirm the routing lines.

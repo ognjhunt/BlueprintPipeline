@@ -98,7 +98,7 @@ Alerting controls for `monitoring.alerting.send_alert`.
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ALERT_BACKEND` | str | "none" | Alert backend (`none` to disable, `webhook` for webhook alerts). |
-| `ALERT_WEBHOOK_URL` | str | unset | Webhook URL for alert delivery when `ALERT_BACKEND=webhook`. |
+| `ALERT_WEBHOOK_URL` | str | unset | Webhook URL for alert delivery (required when `ALERT_BACKEND=webhook`). |
 | `ALERT_SOURCE` | str | "blueprint_pipeline" | Source identifier included in alert payloads. |
 | `ALERT_MIN_SEVERITY` | str | "warning" | Minimum severity to emit (`debug`, `info`, `warning`, `error`, `critical`). |
 | `ALERT_JOB_FAILURE_SEVERITY` | str | "error" | Severity for Genie Sim submit job failures. |
@@ -118,6 +118,22 @@ export ALERT_FIREBASE_UPLOAD_SEVERITY=error
 export ALERT_PROVENANCE_GATE_SEVERITY=error
 export ALERT_JOB_EXCEPTION_SEVERITY=critical
 ```
+
+## Text-to-Speech (TTS) Providers
+
+Credentials for `tools.audio.tts_providers` when generating narration audio.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `GOOGLE_APPLICATION_CREDENTIALS` | path | unset | Path to a Google service account JSON credential for Google Cloud Text-to-Speech. |
+| `OPENAI_API_KEY` | str | unset | OpenAI API key for OpenAI Text-to-Speech. |
+| `AZURE_SPEECH_KEY` | str | unset | Azure Speech subscription key for the Speech service. |
+| `AZURE_SPEECH_REGION` | str | unset | Azure region for the Speech service (for example, `westus`). |
+
+**Supported voices**:
+- Google Cloud: `en-US-Neural2-D`, `en-US-Neural2-F`, `en-US-Neural2-J`, `en-US-Standard-B`.
+- OpenAI: `alloy`, `verse`, `nova`, `echo`.
+- Azure: `en-US-AriaNeural`, `en-US-GuyNeural`.
 
 ## Configuration Overrides (BP_ Prefix)
 
@@ -163,6 +179,29 @@ export BP_SPLIT_TEST_RATIO=0.15
 ```bash
 # Ensure deterministic pipeline outputs
 export PIPELINE_SEED=1234
+```
+
+---
+
+## Real-Time Streaming
+
+Controls for streaming validated episode metadata into the real-time feedback loop.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ENABLE_REALTIME_STREAMING` | bool | false (in production) | Enables real-time streaming in the Genie Sim import job. |
+| `REALTIME_STREAM_PROTOCOL` | str | `http_post` | Streaming protocol (`http_post`, `grpc`, `websocket`, `message_queue`, `file_watch`). |
+| `REALTIME_STREAM_ENDPOINT` | str | unset | Endpoint URL or file path for streaming batches. |
+| `REALTIME_STREAM_API_KEY` | str | unset | API key for authenticating with the streaming endpoint. |
+| `REALTIME_STREAM_BATCH_SIZE` | int | 10 | Episodes per batch for streaming. |
+
+**Example**:
+```bash
+export ENABLE_REALTIME_STREAMING=true
+export REALTIME_STREAM_PROTOCOL=http_post
+export REALTIME_STREAM_ENDPOINT="https://trainer.example.com/episodes"
+export REALTIME_STREAM_API_KEY="secret-token"
+export REALTIME_STREAM_BATCH_SIZE=25
 ```
 
 ---
@@ -536,7 +575,11 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 |----------|------|---------|-------------|
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
 | `GENIESIM_ENV` | str | `development` | Environment toggle for Genie Sim integrations (`production` disables mock/fallback behavior). |
+| `GENERATE_EMBEDDINGS` | bool | false | Generate embeddings for Genie Sim asset indexing. Defaults to `true` when `GENIESIM_ENV`/`PIPELINE_ENV` resolves to production. Requires provider credentials when `REQUIRE_EMBEDDINGS=true`. |
 | `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (placeholders disallowed in production). Defaults to `true` when `GENIESIM_ENV`/`BP_ENV` resolves to production. |
+| `OPENAI_API_KEY` | str | unset | OpenAI API key (required when embeddings are enabled with OpenAI as the provider). |
+| `QWEN_API_KEY` | str | unset | Qwen API key (DashScope) for embeddings; required when embeddings are enabled with the Qwen provider. |
+| `DASHSCOPE_API_KEY` | str | unset | DashScope API key (alias of `QWEN_API_KEY`) for Qwen embeddings; required when embeddings are enabled. |
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework). |
 | `GENIESIM_GRPC_TIMEOUT_S` | float | 30.0 | gRPC request timeout for Genie Sim adapters (seconds). Falls back to legacy `GENIESIM_TIMEOUT` if set. |
@@ -589,8 +632,8 @@ export CUROBO_REQUIRED=true
 
 For production asset indexing/embedding flows, placeholder embeddings are disallowed. Ensure
 `REQUIRE_EMBEDDINGS=true` (or avoid overriding it) whenever `GENERATE_EMBEDDINGS=true`, and configure a valid
-embedding provider (`OPENAI_API_KEY` or `QWEN_API_KEY`/`DASHSCOPE_API_KEY`, plus the corresponding embedding
-model) or exports will fail fast.
+embedding provider or exports will fail fast. Supported providers are OpenAI (`OPENAI_API_KEY`) and Qwen via
+DashScope (`QWEN_API_KEY` or `DASHSCOPE_API_KEY`), plus the corresponding embedding model.
 
 ---
 

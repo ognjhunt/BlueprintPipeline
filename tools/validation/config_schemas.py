@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
 
 # ============================================================================
 # Scene Manifest Schemas
@@ -345,6 +346,10 @@ class EnvironmentConfig(BaseModel):
     enable_cuRobo: bool = Field(default=True)
     enable_cp_gen: bool = Field(default=True)
 
+    # Alerting
+    alert_backend: str = Field(default="none")
+    alert_webhook_url: Optional[str] = None
+
     # External services
     particulate_endpoint: Optional[str] = None
 
@@ -352,6 +357,13 @@ class EnvironmentConfig(BaseModel):
     max_tasks: int = Field(default=10, ge=1, le=100)
     episodes_per_variation: int = Field(default=5, ge=1, le=50)
     num_variations: int = Field(default=3, ge=1, le=20)
+
+    # Embedding settings
+    generate_embeddings: bool = Field(default=False)
+    require_embeddings: bool = Field(default=False)
+    openai_api_key: Optional[str] = None
+    qwen_api_key: Optional[str] = None
+    dashscope_api_key: Optional[str] = None
 
     @field_validator('bucket')
     @classmethod
@@ -362,6 +374,34 @@ class EnvironmentConfig(BaseModel):
                 f"Invalid bucket name: {v}. Must be lowercase alphanumeric with hyphens/underscores"
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_embedding_credentials(self) -> "EnvironmentConfig":
+        if self.generate_embeddings and self.require_embeddings:
+            if not (self.openai_api_key or self.qwen_api_key or self.dashscope_api_key):
+                raise ValueError(
+                    "Embedding provider credentials are required when "
+                    "GENERATE_EMBEDDINGS=true and REQUIRE_EMBEDDINGS=true. "
+                    "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
+                )
+    @field_validator('alert_backend')
+    @classmethod
+    def normalize_alert_backend(cls, v: str) -> str:
+        return v.strip().lower()
+
+    @field_validator('alert_webhook_url')
+    @classmethod
+    def normalize_alert_webhook_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        stripped = v.strip()
+        return stripped or None
+
+    @model_validator(mode='after')
+    def validate_alerting(self) -> 'EnvironmentConfig':
+        if self.alert_backend == "webhook" and not self.alert_webhook_url:
+            raise ValueError("ALERT_WEBHOOK_URL is required when ALERT_BACKEND=webhook")
+        return self
 
 
 # ============================================================================
@@ -510,6 +550,7 @@ def load_and_validate_env_config() -> EnvironmentConfig:
     """
     import os
 
+    production_mode = resolve_production_mode()
     return EnvironmentConfig(
         bucket=os.getenv("BUCKET", ""),
         scene_id=os.getenv("SCENE_ID", ""),
@@ -519,8 +560,21 @@ def load_and_validate_env_config() -> EnvironmentConfig:
         enable_multi_robot=parse_bool_env(os.getenv("ENABLE_MULTI_ROBOT"), default=True),
         enable_cuRobo=parse_bool_env(os.getenv("ENABLE_CUROBO"), default=True),
         enable_cp_gen=parse_bool_env(os.getenv("ENABLE_CP_GEN"), default=True),
+        alert_backend=os.getenv("ALERT_BACKEND", "none"),
+        alert_webhook_url=os.getenv("ALERT_WEBHOOK_URL"),
         particulate_endpoint=os.getenv("PARTICULATE_ENDPOINT"),
         max_tasks=int(os.getenv("MAX_TASKS", "10")),
         episodes_per_variation=int(os.getenv("EPISODES_PER_VARIATION", "5")),
         num_variations=int(os.getenv("NUM_VARIATIONS", "3")),
+        generate_embeddings=parse_bool_env(
+            os.getenv("GENERATE_EMBEDDINGS"),
+            default=production_mode,
+        ),
+        require_embeddings=parse_bool_env(
+            os.getenv("REQUIRE_EMBEDDINGS"),
+            default=production_mode,
+        ),
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        qwen_api_key=os.getenv("QWEN_API_KEY"),
+        dashscope_api_key=os.getenv("DASHSCOPE_API_KEY"),
     )
