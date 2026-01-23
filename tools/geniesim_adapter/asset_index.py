@@ -365,6 +365,7 @@ class AssetIndexBuilder:
             allow_embedding_fallback: Allow placeholder embeddings in production
             verbose: Print progress
         """
+        allowed_embedding_dims = {768, 1024, 2048, 3072}
         self.verbose = verbose
         self.generate_embeddings = generate_embeddings
         self.embedding_model = embedding_model
@@ -410,17 +411,20 @@ class AssetIndexBuilder:
             if embedding_dim_env:
                 try:
                     embedding_dim = int(embedding_dim_env)
-                except ValueError:
-                    self.log(
-                        f"Invalid GENIESIM_EMBEDDING_DIM={embedding_dim_env!r}; "
-                        "using default embedding_dim of 2048.",
-                        "WARNING",
-                    )
-                    embedding_dim = None
+                except ValueError as exc:
+                    raise ValueError(
+                        "GENIESIM_EMBEDDING_DIM must be an integer value, "
+                        f"got {embedding_dim_env!r}."
+                    ) from exc
         if embedding_dim is None:
             embedding_dim = 2048
         if embedding_dim <= 0:
             raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
+        if embedding_dim not in allowed_embedding_dims:
+            raise ValueError(
+                "Unsupported embedding_dim. Genie Sim requires one of "
+                f"{sorted(allowed_embedding_dims)}; got {embedding_dim}."
+            )
         self.embedding_dim = embedding_dim
 
         # Embedding client (initialized lazily)
