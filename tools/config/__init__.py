@@ -30,6 +30,7 @@ from .constants import (
     DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN,
     DEFAULT_VARIATION_MIN_OBJECTS,
 )
+from .production_mode import ensure_config_audit_for_production
 
 try:
     from pydantic import BaseModel, ConfigDict, ValidationError, validator
@@ -39,6 +40,8 @@ except ImportError:
     ValidationError = Exception  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+_ENABLE_CONFIG_AUDIT = ensure_config_audit_for_production()
 
 
 # Configuration file paths
@@ -539,7 +542,7 @@ class ConfigLoader:
     _pipeline_config_cache: Optional[Dict] = None
     _quality_audit_trail: Optional[ConfigAuditTrail] = None
     _pipeline_audit_trail: Optional[ConfigAuditTrail] = None
-    _enable_audit_trail: bool = os.environ.get("BP_ENABLE_CONFIG_AUDIT", "0") == "1"
+    _enable_audit_trail: bool = _ENABLE_CONFIG_AUDIT
 
     @classmethod
     def _load_json(cls, path: Path, validate: bool = True, config_type: str = "pipeline") -> Dict[str, Any]:

@@ -50,6 +50,7 @@ from tools.config.production_mode import resolve_production_mode
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
+    warn_if_production_audit_disabled,
 )
 
 
@@ -201,6 +202,7 @@ def main():
         },
         label="[DWM-ENTRYPOINT]",
     )
+    warn_if_production_audit_disabled("[DWM-ENTRYPOINT]")
 
     # Get required environment variables
     bucket_name = os.environ.get("BUCKET")
