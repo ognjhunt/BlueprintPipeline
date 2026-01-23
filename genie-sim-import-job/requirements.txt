@@ -4,6 +4,8 @@
 numpy==1.26.4
 pandas==2.2.2
 pyarrow==14.0.2
+imageio==2.36.0
+imageio-ffmpeg==0.4.9
 
 # HTTP clients for general use
 requests==2.32.3
