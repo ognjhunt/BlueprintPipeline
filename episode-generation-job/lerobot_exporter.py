@@ -58,7 +58,13 @@ LeRobot Dataset Structure (v3.0):
     │   └── chunk-000/
     │       └── file-000.parquet  # Multi-episode data Parquet file
     ├── videos/                   # Video data (RGB per camera)
-    │   └── chunk-000/
+    │   ├── wrist/
+    │   │   └── chunk-000/
+    │   │       └── file-0000.mp4
+    │   ├── overhead/
+    │   │   └── chunk-000/
+    │   │       └── file-0000.mp4
+    │   └── ...
     └── ground_truth/             # Ground-truth labels (Plus/Full packs)
         └── chunk-000/
 
@@ -2813,6 +2819,12 @@ class LeRobotExporter:
         chunk_idx = episode_index // self.config.chunk_size
         return base_dir / f"chunk-{chunk_idx:03d}"
 
+    def _get_v3_chunk_file_indices(self, episode_index: int) -> Tuple[int, int]:
+        """Resolve v3 chunk/file indices aligned with the v3 Parquet writer."""
+        chunk_idx = episode_index // self.config.chunk_size
+        file_idx = chunk_idx
+        return chunk_idx, file_idx
+
     def _summarize_alignment_mismatches(
         self,
         invalid_entries: List[Dict[str, Any]],
@@ -3059,9 +3071,11 @@ class LeRobotExporter:
         if self._is_v3_export():
             data_path_template = "data/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet"
             episodes_path_template = "meta/episodes/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet"
+            videos_path_template = "videos/{camera_id}/chunk-{chunk_idx:03d}/file-{file_idx:04d}.mp4"
         else:
             data_path_template = None
             episodes_path_template = None
+            videos_path_template = None
 
         info = {
             "format": "lerobot",
@@ -3079,6 +3093,7 @@ class LeRobotExporter:
             "data_path_template": data_path_template,
             "episodes_path_template": episodes_path_template,
             "videos_path": "videos" if self.config.include_images else None,
+            "videos_path_template": videos_path_template if self.config.include_images else None,
             "ground_truth_path": "ground_truth" if any([
                 self.config.include_depth,
                 self.config.include_segmentation,
@@ -3322,10 +3337,8 @@ class LeRobotExporter:
             is_production = self._is_production_mode()
 
             for episode in self.episodes:
-                chunk_dir = self._get_chunk_dir(videos_dir, episode.episode_index)
-
                 if episode.sensor_data is not None:
-                    self._write_episode_videos(episode, chunk_dir)
+                    self._write_episode_videos(episode, videos_dir)
                     if episode.dropped_frames_total > 0:
                         dropped_frames_entries.append({
                             "episode_index": episode.episode_index,
@@ -3345,7 +3358,7 @@ class LeRobotExporter:
                             )
                 elif episode.camera_video_path is not None:
                     # Legacy: copy existing video if available
-                    self._copy_video(episode.camera_video_path, chunk_dir, episode.episode_index)
+                    self._copy_video(episode.camera_video_path, videos_dir, episode.episode_index)
             if dropped_frames_entries:
                 self._write_invalid_episodes(
                     meta_dir,
@@ -3381,7 +3394,7 @@ class LeRobotExporter:
             self._cleanup_failed_export("Failed during visual observations write", exc)
             raise
 
-    def _write_episode_videos(self, episode: LeRobotEpisode, chunk_dir: Path) -> None:
+    def _write_episode_videos(self, episode: LeRobotEpisode, videos_dir: Path) -> None:
         """Write video files with per-frame validation."""
         sensor_data = episode.sensor_data
         if sensor_data is None or not hasattr(sensor_data, 'frames'):
@@ -3390,13 +3403,24 @@ class LeRobotExporter:
         total_expected = 0
         total_written = 0
         total_dropped = 0
+        chunk_dir = None
+        chunk_idx = None
+        file_idx = None
+        if self._is_v3_export():
+            chunk_idx, file_idx = self._get_v3_chunk_file_indices(episode.episode_index)
+        else:
+            chunk_dir = self._get_chunk_dir(videos_dir, episode.episode_index)
 
         # Write video for each camera
         for camera_id in sensor_data.camera_ids if hasattr(sensor_data, 'camera_ids') else []:
-            video_dir = chunk_dir / f"observation.images.{camera_id}"
-            video_dir.mkdir(parents=True, exist_ok=True)
-
-            video_path = video_dir / f"episode_{episode.episode_index:06d}.mp4"
+            if self._is_v3_export():
+                video_dir = videos_dir / camera_id / f"chunk-{chunk_idx:03d}"
+                video_dir.mkdir(parents=True, exist_ok=True)
+                video_path = video_dir / f"file-{file_idx:04d}.mp4"
+            else:
+                video_dir = chunk_dir / f"observation.images.{camera_id}"
+                video_dir.mkdir(parents=True, exist_ok=True)
+                video_path = video_dir / f"episode_{episode.episode_index:06d}.mp4"
 
             # Collect RGB frames with validation
             frames = []
@@ -3494,11 +3518,24 @@ class LeRobotExporter:
                     lambda tmp_path, frame=frame: np.save(tmp_path, frame),
                 )
 
-    def _copy_video(self, src_path: Path, chunk_dir: Path, episode_index: int) -> None:
+    def _copy_video(
+        self,
+        src_path: Path,
+        videos_dir: Path,
+        episode_index: int,
+        camera_id: str = "camera",
+    ) -> None:
         """Copy an existing video file to the output directory."""
-        video_dir = chunk_dir / "observation.images.camera"
-        video_dir.mkdir(parents=True, exist_ok=True)
-        dst_path = video_dir / f"episode_{episode_index:06d}.mp4"
+        if self._is_v3_export():
+            chunk_idx, file_idx = self._get_v3_chunk_file_indices(episode_index)
+            video_dir = videos_dir / camera_id / f"chunk-{chunk_idx:03d}"
+            video_dir.mkdir(parents=True, exist_ok=True)
+            dst_path = video_dir / f"file-{file_idx:04d}.mp4"
+        else:
+            chunk_dir = self._get_chunk_dir(videos_dir, episode_index)
+            video_dir = chunk_dir / "observation.images.camera"
+            video_dir.mkdir(parents=True, exist_ok=True)
+            dst_path = video_dir / f"episode_{episode_index:06d}.mp4"
         try:
             self._atomic_write(
                 dst_path,
