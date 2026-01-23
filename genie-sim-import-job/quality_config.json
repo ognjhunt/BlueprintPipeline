@@ -2,5 +2,25 @@
   "default_min_quality_score": 0.85,
   "min_allowed": 0.5,
   "max_allowed": 0.95,
-  "description": "Minimum acceptable quality score for Genie Sim imports. Override via MIN_QUALITY_SCORE if within allowed range (0.5 - 0.95)."
+  "dimension_thresholds": {
+    "trajectory_smoothness": 0.7,
+    "task_completion": 0.7,
+    "physics_plausibility": 0.7,
+    "grasp_success": 0.7,
+    "collision_count": 1.0
+  },
+  "schema": {
+    "default_min_quality_score": "float (0-1) minimum overall quality score used when MIN_QUALITY_SCORE is unset",
+    "min_allowed": "float lower bound for MIN_QUALITY_SCORE env overrides",
+    "max_allowed": "float upper bound for MIN_QUALITY_SCORE env overrides",
+    "dimension_thresholds": {
+      "trajectory_smoothness": "float (0-1) minimum trajectory smoothness component score",
+      "task_completion": "float (0-1) minimum task completion component score",
+      "physics_plausibility": "float (0-1) minimum physics plausibility component score",
+      "grasp_success": "float (0-1) minimum grasp success component score",
+      "collision_count": "float (0-1) minimum collision-free component score (1.0 = collision-free)"
+    },
+    "notes": "Per-dimension thresholds are enforced only when the episode metadata includes matching quality_components entries."
+  },
+  "description": "Minimum acceptable quality score for Genie Sim imports. Override via MIN_QUALITY_SCORE if within allowed range (0.5 - 0.95). Per-dimension thresholds apply when matching quality_components are present in episode metadata."
 }
