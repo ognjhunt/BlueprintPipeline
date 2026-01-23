@@ -38,7 +38,12 @@ def _render_human_report(report: Dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Genie Sim health check")
-    parser.add_argument("--timeout", type=float, default=5.0, help="Ping timeout in seconds")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=5.0,
+        help="Readiness probe timeout in seconds",
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     args = parser.parse_args()
 
@@ -56,7 +61,7 @@ def main() -> int:
         status,
         require_server=True,
         require_ready=True,
-        ping_timeout=args.timeout,
+        readiness_timeout=args.timeout,
     )
 
     if args.json:
