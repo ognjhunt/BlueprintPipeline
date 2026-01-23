@@ -2,6 +2,8 @@
   "format": "lerobot",
   "export_format": "lerobot_v3",
   "version": "3.0",
-  "data_path": "episodes/lerobot/data",
-  "episode_index": "lerobot/meta/episode_index.json"
+  "data_path": "data",
+  "episodes_path": "meta/episodes/chunk-000/file-0000.parquet",
+  "data_path_template": "data/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet",
+  "episodes_path_template": "meta/episodes/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet"
 }

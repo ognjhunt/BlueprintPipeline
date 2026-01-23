@@ -133,11 +133,16 @@ def validate_lerobot_dataset(lerobot_dir: Path) -> List[str]:
 
     parquet_files: List[Path] = []
     if is_v3:
-        episodes_parquet = data_dir / "episodes.parquet"
-        if not episodes_parquet.is_file():
-            errors.append(f"Missing v3 episodes parquet: {episodes_parquet}")
+        # v3 official spec: file-{idx:04d}.parquet
+        v3_parquet = data_dir / "file-0000.parquet"
+        # Legacy fallback: episodes.parquet
+        legacy_parquet = data_dir / "episodes.parquet"
+        if v3_parquet.is_file():
+            parquet_files.append(v3_parquet)
+        elif legacy_parquet.is_file():
+            parquet_files.append(legacy_parquet)
         else:
-            parquet_files.append(episodes_parquet)
+            errors.append(f"Missing v3 data parquet: expected {v3_parquet} or {legacy_parquet}")
     else:
         parquet_files = list(data_dir.glob("episode_*.parquet"))
         if not parquet_files:

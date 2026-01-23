@@ -49,15 +49,17 @@ LeRobot Dataset Structure (v3.0):
     dataset/
     ├── meta/
     │   ├── info.json
+    │   ├── stats.json
     │   ├── tasks.jsonl
-    │   ├── episodes.jsonl
-    │   └── episode_index.json   # Episode row-group index (v3)
+    │   └── episodes/
+    │       └── chunk-000/
+    │           └── file-000.parquet  # Episode metadata (per-episode records)
     ├── data/
     │   └── chunk-000/
-    │       └── episodes.parquet # Multi-episode Parquet file
-    ├── videos/                  # Video data (RGB per camera)
+    │       └── file-000.parquet  # Multi-episode data Parquet file
+    ├── videos/                   # Video data (RGB per camera)
     │   └── chunk-000/
-    └── ground_truth/            # Ground-truth labels (Plus/Full packs)
+    └── ground_truth/             # Ground-truth labels (Plus/Full packs)
         └── chunk-000/
 
 See: https://github.com/huggingface/lerobot
@@ -1734,7 +1736,7 @@ class LeRobotExporter:
                 errors = []
 
                 try:
-                    if self._is_v3_export() and parquet_path.name == "episodes.parquet":
+                    if self._is_v3_export() and parquet_path.name.startswith("file-") and parquet_path.parent.name.startswith("chunk-") and parquet_path.parent.parent == data_dir:
                         if backend == "pyarrow":
                             parquet_file = pq.ParquetFile(parquet_path)
                             schema = parquet_file.schema_arrow
@@ -2314,9 +2316,19 @@ class LeRobotExporter:
                 episode_path = chunk_dir / f"episode_{episode.episode_index:06d}.parquet"
 
                 if HAVE_PYARROW:
+                    expected_rows = episode_data.num_rows
+
+                    def _write_and_validate(tmp_path: Path, table=episode_data, n_rows=expected_rows) -> None:
+                        pq.write_table(table, tmp_path)
+                        self._validate_parquet_integrity(
+                            tmp_path,
+                            expected_num_rows=n_rows,
+                            expected_num_row_groups=1,
+                        )
+
                     self._atomic_write(
                         episode_path,
-                        lambda tmp_path: pq.write_table(episode_data, tmp_path),
+                        _write_and_validate,
                         fsync_target=True,
                     )
                     episode.parquet_row_count = episode_data.num_rows
@@ -2338,15 +2350,22 @@ class LeRobotExporter:
             raise
 
     def _write_episodes_v3(self, data_dir: Path) -> None:
-        """Write multi-episode Parquet file for LeRobot v3 layout."""
+        """Write multi-episode Parquet file for LeRobot v3 layout.
+
+        Uses the official LeRobot v3.0 naming convention:
+        - data/chunk-{idx:03d}/file-{idx:04d}.parquet (data files)
+        - meta/episodes/chunk-{idx:03d}/file-{idx:04d}.parquet (episode metadata)
+        """
         if not HAVE_PYARROW:
             raise RuntimeError(
                 "pyarrow is required for LeRobot v3 export (multi-episode Parquet)."
             )
 
-        chunk_dir = data_dir / "chunk-000"
+        chunk_idx = 0
+        file_idx = 0
+        chunk_dir = data_dir / f"chunk-{chunk_idx:03d}"
         chunk_dir.mkdir(exist_ok=True)
-        episode_path = chunk_dir / "episodes.parquet"
+        episode_path = chunk_dir / f"file-{file_idx:04d}.parquet"
         self._v3_episode_index = {}
 
         def write_parquet(tmp_path: Path) -> None:
@@ -2369,28 +2388,90 @@ class LeRobotExporter:
                         self.output_dir.resolve()
                     ).as_posix()
 
-                episode_id = f"episode_{episode.episode_index:06d}"
-                self._v3_episode_index[episode_id] = {
+                self._v3_episode_index[episode.episode_index] = {
                     "episode_index": episode.episode_index,
-                    "frames": episode.trajectory.num_frames,
-                    "row_group": row_group_index,
+                    "num_frames": episode.trajectory.num_frames,
+                    "length": episode.trajectory.num_frames,
                     "task_index": episode.task_index,
                     "task": episode.task_description,
                     "scene_id": episode.scene_id,
                     "variation_index": episode.variation_index,
                     "success": episode.success,
                     "quality_score": episode.quality_score,
-                    "parquet_path": f"data/chunk-000/{episode_path.name}",
+                    "data_path": f"data/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet",
                 }
                 row_group_index += 1
 
             if parquet_writer:
                 parquet_writer.close()
+            # Validate written file before atomic rename
+            self._validate_parquet_integrity(
+                tmp_path,
+                expected_num_rows=sum(
+                    ep.trajectory.num_frames for ep in self.episodes
+                ),
+                expected_num_row_groups=len(self.episodes),
+            )
 
         self._atomic_write(
             episode_path,
             write_parquet,
             fsync_target=True,
+        )
+
+    def _validate_parquet_integrity(
+        self,
+        parquet_path: Path,
+        expected_num_rows: int,
+        expected_num_row_groups: Optional[int] = None,
+    ) -> None:
+        """Validate a Parquet file by reading it back after write.
+
+        Checks:
+        1. File is readable (valid footer metadata)
+        2. Total row count matches expected
+        3. Row group count matches expected (if provided)
+        4. Required columns are present
+        """
+        if not HAVE_PYARROW:
+            return
+        try:
+            parquet_file = pq.ParquetFile(parquet_path)
+        except Exception as exc:
+            raise IOError(
+                f"Parquet integrity check failed: file is not readable "
+                f"({parquet_path.name}): {exc}"
+            ) from exc
+
+        metadata = parquet_file.metadata
+        actual_rows = metadata.num_rows
+        if actual_rows != expected_num_rows:
+            raise ValueError(
+                f"Parquet integrity check failed: expected {expected_num_rows} rows "
+                f"but file contains {actual_rows} ({parquet_path.name})"
+            )
+
+        if expected_num_row_groups is not None:
+            actual_groups = metadata.num_row_groups
+            if actual_groups != expected_num_row_groups:
+                raise ValueError(
+                    f"Parquet integrity check failed: expected {expected_num_row_groups} "
+                    f"row groups but file contains {actual_groups} ({parquet_path.name})"
+                )
+
+        # Verify required columns exist in schema
+        schema_names = set(parquet_file.schema_arrow.names)
+        required = {"observation.state", "action", "episode_index"}
+        missing = required - schema_names
+        if missing:
+            raise ValueError(
+                f"Parquet integrity check failed: missing columns {missing} "
+                f"({parquet_path.name})"
+            )
+
+        self.log(
+            f"  Parquet integrity verified: {actual_rows} rows, "
+            f"{metadata.num_row_groups} row groups ({parquet_path.name})"
         )
 
     def _validate_lerobot_schema(
@@ -2415,7 +2496,7 @@ class LeRobotExporter:
             ValueError: If validation fails
         """
         # Validate state dimensions
-        expected_state_dim = self.robot_config.num_dof
+        expected_state_dim = self.robot_config.num_joints
         for i, state in enumerate(state_data):
             if len(state) != expected_state_dim:
                 raise ValueError(
@@ -2424,7 +2505,7 @@ class LeRobotExporter:
                 )
 
         # Validate action dimensions (DOF + gripper)
-        expected_action_dim = self.robot_config.num_dof + 1
+        expected_action_dim = self.robot_config.num_joints + 1
         for i, action in enumerate(action_data):
             if len(action) != expected_action_dim:
                 raise ValueError(
@@ -2711,10 +2792,7 @@ class LeRobotExporter:
 
     def _get_chunk_dir(self, base_dir: Path, episode_index: int) -> Path:
         """Resolve chunk directory for an episode based on export format."""
-        if self._is_v3_export():
-            chunk_idx = 0
-        else:
-            chunk_idx = episode_index // self.config.chunk_size
+        chunk_idx = episode_index // self.config.chunk_size if not self._is_v3_export() else 0
         return base_dir / f"chunk-{chunk_idx:03d}"
 
     def _summarize_alignment_mismatches(
@@ -2959,6 +3037,13 @@ class LeRobotExporter:
         total_episodes = len(self.episodes)
         total_chunks = 1 if self._is_v3_export() else (total_episodes - 1) // self.config.chunk_size + 1
         chunk_size = total_episodes if self._is_v3_export() else self.config.chunk_size
+        # v3 uses file-based path templates per the official LeRobot v3.0 spec
+        if self._is_v3_export():
+            data_path_template = "data/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet"
+            episodes_path_template = "meta/episodes/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet"
+        else:
+            data_path_template = None
+            episodes_path_template = None
 
         info = {
             "format": "lerobot",
@@ -2973,6 +3058,8 @@ class LeRobotExporter:
             "total_chunks": total_chunks,
             "chunks_size": chunk_size,
             "data_path": "data",
+            "data_path_template": data_path_template,
+            "episodes_path_template": episodes_path_template,
             "videos_path": "videos" if self.config.include_images else None,
             "ground_truth_path": "ground_truth" if any([
                 self.config.include_depth,
@@ -3046,16 +3133,17 @@ class LeRobotExporter:
                 {
                     "layout": "multi-episode",
                     "chunking": {
-                        "strategy": "aggregated",
-                        "chunk_dir": "chunk-000",
+                        "strategy": "file-based",
+                        "data_path_template": data_path_template,
+                        "episodes_path_template": episodes_path_template,
                         "files": [
                             {
-                                "path": "chunk-000/episodes.parquet",
+                                "path": "data/chunk-000/file-0000.parquet",
                                 "episodes": total_episodes,
                             }
                         ],
                     },
-                    "episode_index": "meta/episode_index.json",
+                    "episodes_path": "meta/episodes/chunk-000/file-0000.parquet",
                 }
             )
 
@@ -3117,13 +3205,74 @@ class LeRobotExporter:
         self._atomic_write(episodes_path, write_episodes)
 
     def _write_episode_index(self, meta_dir: Path) -> None:
-        """Write v3 episode index JSON."""
+        """Write v3 episode metadata as chunked Parquet in meta/episodes/.
+
+        LeRobot v3.0 stores per-episode records (lengths, tasks, offsets) as
+        chunked Parquet files at meta/episodes/chunk-{idx:03d}/file-{idx:04d}.parquet.
+        """
         if not self._is_v3_export():
             return
-        episode_index_path = meta_dir / "episode_index.json"
+
+        episodes_meta_dir = meta_dir / "episodes" / "chunk-000"
+        episodes_meta_dir.mkdir(parents=True, exist_ok=True)
+        episodes_meta_path = episodes_meta_dir / "file-0000.parquet"
+
+        if not HAVE_PYARROW:
+            # Fallback: write as JSON for environments without pyarrow
+            fallback_path = meta_dir / "episodes" / "episode_index.json"
+            fallback_path.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_write(
+                fallback_path,
+                lambda tmp_path: tmp_path.write_text(json.dumps(self._v3_episode_index, indent=2)),
+            )
+            return
+
+        # Build episode metadata records
+        episode_records = []
+        for episode in self.episodes:
+            ep_meta = self._v3_episode_index.get(episode.episode_index, {})
+            episode_records.append({
+                "episode_index": episode.episode_index,
+                "num_frames": episode.trajectory.num_frames,
+                "length": episode.trajectory.num_frames,
+                "task_index": episode.task_index,
+                "task": episode.task_description or "",
+                "scene_id": episode.scene_id or "",
+                "data_path": ep_meta.get("data_path", ""),
+            })
+
+        # Write as Parquet
+        import pyarrow as pa
+        schema = pa.schema([
+            ("episode_index", pa.int64()),
+            ("num_frames", pa.int64()),
+            ("length", pa.int64()),
+            ("task_index", pa.int64()),
+            ("task", pa.string()),
+            ("scene_id", pa.string()),
+            ("data_path", pa.string()),
+        ])
+        table = pa.table(
+            {col: [rec[col] for rec in episode_records] for col in schema.names},
+            schema=schema,
+        )
+
+        num_episodes = len(episode_records)
+
+        def write_episodes_meta(tmp_path: Path) -> None:
+            pq.write_table(table, tmp_path, compression="zstd")
+            # Validate the written file is readable and has correct row count
+            readback = pq.ParquetFile(tmp_path)
+            if readback.metadata.num_rows != num_episodes:
+                raise ValueError(
+                    f"Episode metadata integrity check failed: expected {num_episodes} "
+                    f"rows but file contains {readback.metadata.num_rows}"
+                )
+
         self._atomic_write(
-            episode_index_path,
-            lambda tmp_path: tmp_path.write_text(json.dumps(self._v3_episode_index, indent=2)),
+            episodes_meta_path,
+            write_episodes_meta,
+            fsync_target=True,
         )
 
     def _write_checksums_manifest(self, meta_dir: Path) -> None:

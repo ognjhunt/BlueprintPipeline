@@ -148,12 +148,21 @@ def get_episode_file_paths(
 def get_lerobot_metadata_paths(output_dir: Path) -> List[Path]:
     candidates = [
         output_dir / "lerobot" / "meta" / "info.json",
+        output_dir / "lerobot" / "meta" / "stats.json",
+        # v3 official: meta/episodes/chunk-000/file-0000.parquet
+        output_dir / "lerobot" / "meta" / "episodes" / "chunk-000" / "file-0000.parquet",
+        # Legacy v3: meta/episode_index.json
         output_dir / "lerobot" / "meta" / "episode_index.json",
         output_dir / "lerobot" / "dataset_info.json",
         output_dir / "lerobot" / "episodes.jsonl",
+        # v3 official: data/chunk-000/file-0000.parquet
+        output_dir / "lerobot" / "data" / "chunk-000" / "file-0000.parquet",
+        # Legacy v3: data/chunk-000/episodes.parquet
         output_dir / "lerobot" / "data" / "chunk-000" / "episodes.parquet",
         output_dir / "episodes" / "lerobot" / "meta" / "info.json",
+        output_dir / "episodes" / "lerobot" / "meta" / "episodes" / "chunk-000" / "file-0000.parquet",
         output_dir / "episodes" / "lerobot" / "meta" / "episode_index.json",
+        output_dir / "episodes" / "lerobot" / "data" / "chunk-000" / "file-0000.parquet",
         output_dir / "episodes" / "lerobot" / "data" / "chunk-000" / "episodes.parquet",
     ]
     return [path for path in candidates if path.exists()]
