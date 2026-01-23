@@ -93,6 +93,7 @@ from tools.config.env import parse_bool_env, parse_int_env
 from tools.config.production_mode import resolve_pipeline_environment, resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
 from tools.error_handling.errors import classify_exception
+from tools.error_handling.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from tools.error_handling.retry import (
     NonRetryableError,
     RetryConfig,
@@ -263,6 +264,10 @@ class LocalPipelineRunner:
         self.retry_config = self._resolve_retry_config()
         self._geniesim_local_run_results: Dict[str, Any] = {}
         self._geniesim_output_dirs: Dict[str, Path] = {}
+
+        # Step-level circuit breaker to prevent cascading failures (P1)
+        # Opens after consecutive failures to avoid wasting time on doomed pipelines
+        self._step_circuit_breaker = self._initialize_step_circuit_breaker()
 
     def _resolve_step_dependencies(
         self,
@@ -1147,6 +1152,46 @@ class LocalPipelineRunner:
 
         return report
 
+    def _initialize_step_circuit_breaker(self) -> CircuitBreaker:
+        """
+        Initialize circuit breaker for step-level failure protection (P1).
+
+        Opens after consecutive step failures to prevent cascading failures.
+        When open, remaining steps are skipped until recovery timeout.
+        """
+        failure_threshold = int(os.getenv("PIPELINE_CIRCUIT_BREAKER_FAILURES", "3"))
+        success_threshold = int(os.getenv("PIPELINE_CIRCUIT_BREAKER_SUCCESSES", "2"))
+        recovery_timeout = float(os.getenv("PIPELINE_CIRCUIT_BREAKER_RECOVERY_S", "60"))
+
+        def on_open(name: str, failure_count: int) -> None:
+            self.log(
+                f"[CIRCUIT-BREAKER] Pipeline circuit breaker opened after {failure_count} "
+                f"consecutive step failures. Remaining steps will be skipped until recovery.",
+                "ERROR",
+            )
+
+        def on_half_open(name: str) -> None:
+            self.log(
+                "[CIRCUIT-BREAKER] Pipeline circuit breaker half-open. Testing if pipeline can recover.",
+                "WARNING",
+            )
+
+        def on_close(name: str) -> None:
+            self.log(
+                "[CIRCUIT-BREAKER] Pipeline circuit breaker closed. Normal operation resumed.",
+                "INFO",
+            )
+
+        return CircuitBreaker(
+            name=f"pipeline_{self.scene_id}",
+            failure_threshold=failure_threshold,
+            success_threshold=success_threshold,
+            recovery_timeout=recovery_timeout,
+            on_open=on_open,
+            on_half_open=on_half_open,
+            on_close=on_close,
+        )
+
     def run(
         self,
         steps: Optional[List[PipelineStep]] = None,
@@ -1250,6 +1295,27 @@ class LocalPipelineRunner:
         forced_steps = set(force_rerun_steps or [])
         dependencies = self._resolve_step_dependencies(steps)
         for step in steps:
+            # Check circuit breaker before running step (P1)
+            if not self._step_circuit_breaker.allow_request():
+                time_until_retry = self._step_circuit_breaker.get_time_until_retry()
+                self.log(
+                    f"[CIRCUIT-BREAKER] Step {step.value} skipped - circuit breaker open. "
+                    f"Retry in {time_until_retry:.1f}s after {self._step_circuit_breaker.config.failure_threshold} "
+                    "consecutive failures.",
+                    "WARNING",
+                )
+                self.results.append(
+                    StepResult(
+                        step=step,
+                        success=False,
+                        duration_seconds=0,
+                        message=f"Skipped (circuit breaker open, retry in {time_until_retry:.1f}s)",
+                        outputs={"circuit_breaker_open": True},
+                    )
+                )
+                all_success = False
+                continue
+
             prerequisite_result = self._check_step_prerequisites(
                 step,
                 dependencies,
@@ -1259,6 +1325,10 @@ class LocalPipelineRunner:
                 self.results.append(prerequisite_result)
                 all_success = False
                 self.log(f"Step {step.value} skipped: {prerequisite_result.message}", "ERROR")
+                # Record as failure for circuit breaker
+                self._step_circuit_breaker.record_failure(
+                    Exception(f"Prerequisite check failed: {prerequisite_result.message}")
+                )
                 if self.fail_fast:
                     self.log("Fail-fast enabled; stopping pipeline.", "ERROR")
                     break
@@ -1286,6 +1356,8 @@ class LocalPipelineRunner:
                             outputs=checkpoint.outputs if checkpoint else {},
                         )
                     )
+                    # Checkpointed step counts as success for circuit breaker
+                    self._step_circuit_breaker.record_success()
                     continue
 
             started_at = datetime.utcnow().isoformat() + "Z"
@@ -1298,11 +1370,15 @@ class LocalPipelineRunner:
             if not result.success:
                 all_success = False
                 self.log(f"Step {step.value} failed: {result.message}", "ERROR")
+                # Record failure for circuit breaker (P1)
+                self._step_circuit_breaker.record_failure(Exception(result.message or "Step failed"))
                 # Continue with remaining steps for partial results
                 if self.fail_fast:
                     self.log("Fail-fast enabled; stopping pipeline.", "ERROR")
                     break
             else:
+                # Record success for circuit breaker (P1)
+                self._step_circuit_breaker.record_success()
                 write_checkpoint(
                     self.scene_dir,
                     step.value,
@@ -1380,6 +1456,35 @@ class LocalPipelineRunner:
                 "Genie Sim server is not running; the local framework will start it automatically if needed.",
                 "WARNING",
             )
+
+        # Run Firebase connectivity preflight if Firebase upload is configured
+        firebase_preflight_result = self._run_firebase_preflight()
+        if firebase_preflight_result is not None:
+            report["firebase_preflight"] = firebase_preflight_result
+            _safe_write_text(
+                preflight_report_path,
+                json.dumps(report, indent=2),
+                context="geniesim preflight report (with firebase)",
+            )
+            if not firebase_preflight_result.get("success", False):
+                firebase_required = parse_bool_env(
+                    os.getenv("FIREBASE_UPLOAD_REQUIRED"),
+                    default=resolve_production_mode(),
+                )
+                if firebase_required:
+                    self.log(
+                        f"[FIREBASE-PREFLIGHT] Firebase connectivity check failed: "
+                        f"{firebase_preflight_result.get('error', 'unknown error')}",
+                        "ERROR",
+                    )
+                    return False
+                else:
+                    self.log(
+                        f"[FIREBASE-PREFLIGHT] Firebase connectivity check failed (non-fatal): "
+                        f"{firebase_preflight_result.get('error', 'unknown error')}",
+                        "WARNING",
+                    )
+
         if report.get("ok", False):
             return True
 
@@ -1398,6 +1503,59 @@ class LocalPipelineRunner:
         )
         self.log(message, "ERROR")
         return False
+
+    def _run_firebase_preflight(self) -> Optional[Dict[str, Any]]:
+        """
+        Run Firebase connectivity preflight check.
+
+        Returns None if Firebase upload is disabled, otherwise returns the
+        connectivity check result dict.
+        """
+        # Check if Firebase upload is enabled
+        firebase_enabled = parse_bool_env(os.getenv("ENABLE_FIREBASE_UPLOAD"), default=True)
+        firebase_disabled = parse_bool_env(os.getenv("DISABLE_FIREBASE_UPLOAD"), default=False)
+
+        if firebase_disabled or not firebase_enabled:
+            self.log("[FIREBASE-PREFLIGHT] Firebase upload is disabled, skipping connectivity check.", "INFO")
+            return None
+
+        # Check if Firebase bucket is configured
+        firebase_bucket = os.getenv("FIREBASE_STORAGE_BUCKET")
+        if not firebase_bucket:
+            self.log("[FIREBASE-PREFLIGHT] FIREBASE_STORAGE_BUCKET not configured, skipping connectivity check.", "INFO")
+            return None
+
+        self.log(f"[FIREBASE-PREFLIGHT] Testing Firebase connectivity to bucket: {firebase_bucket}", "INFO")
+
+        try:
+            from tools.firebase_upload import preflight_firebase_connectivity
+
+            result = preflight_firebase_connectivity(timeout_seconds=15.0)
+            if result.get("success"):
+                self.log(
+                    f"[FIREBASE-PREFLIGHT] Firebase connectivity verified "
+                    f"(bucket={result.get('bucket_name')}, latency={result.get('latency_ms')}ms)",
+                    "INFO",
+                )
+            return result
+        except ImportError as e:
+            return {
+                "success": False,
+                "error": f"Firebase upload module not available: {e}",
+                "bucket_name": firebase_bucket,
+            }
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "bucket_name": firebase_bucket,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Unexpected error during Firebase preflight: {e}",
+                "bucket_name": firebase_bucket,
+            }
 
     def _apply_labs_flags(self, run_validation: bool) -> None:
         """Apply production/labs flags for staging or lab validation runs."""

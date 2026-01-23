@@ -4705,9 +4705,11 @@ def main(input_params: Optional[Dict[str, Any]] = None):
 
     # Error handling configuration
     fail_on_partial_error = parse_bool_env(os.getenv("FAIL_ON_PARTIAL_ERROR"), default=False)
+    # Default to True: upload successful robots even if some fail
+    # This prevents wasting compute by discarding successful robot data
     allow_partial_firebase_uploads = parse_bool_env(
         os.getenv("ALLOW_PARTIAL_FIREBASE_UPLOADS"),
-        default=False,
+        default=True,
     )
 
     # Validate credentials at startup
@@ -5045,16 +5047,28 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                 firebase_upload_suppressed = True
                 suppression_reason = "quality_gate_failure"
             if partial_failure:
-                if production_mode or fail_on_partial_error:
-                    firebase_upload_suppressed = True
-                    if suppression_reason is None:
-                        suppression_reason = (
-                            "partial_failure_production_or_fail_on_partial_error"
-                        )
-                elif not allow_partial_firebase_uploads:
+                # Respect allow_partial_firebase_uploads even in production mode:
+                # - If allow_partial_firebase_uploads=True (new default), upload successful robots
+                # - If allow_partial_firebase_uploads=False, suppress all uploads on partial failure
+                # - fail_on_partial_error controls job exit code, not upload behavior
+                if not allow_partial_firebase_uploads:
                     firebase_upload_suppressed = True
                     if suppression_reason is None:
                         suppression_reason = "partial_failure_partial_uploads_disabled"
+                elif fail_on_partial_error and not allow_partial_firebase_uploads:
+                    # Only suppress if BOTH fail_on_partial_error AND disallow partial uploads
+                    firebase_upload_suppressed = True
+                    if suppression_reason is None:
+                        suppression_reason = "partial_failure_fail_on_partial_error"
+                else:
+                    # Log that we're uploading partial results
+                    log.warning(
+                        "Partial failure detected (%d robot(s) failed), but uploading "
+                        "successful robots since ALLOW_PARTIAL_FIREBASE_UPLOADS=true. "
+                        "Failed robots: %s",
+                        len(failed_robots),
+                        list(failed_robots),
+                    )
 
             if enable_firebase_upload and not firebase_upload_suppressed:
                 for payload in robot_results:

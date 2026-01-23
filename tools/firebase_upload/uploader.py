@@ -100,6 +100,91 @@ def _preflight_firebase_credentials() -> None:
         )
 
 
+def preflight_firebase_connectivity(*, timeout_seconds: float = 10.0) -> dict:
+    """
+    Test actual connectivity to Firebase Storage bucket.
+
+    This performs a lightweight check to verify:
+    1. Credentials are valid and can authenticate
+    2. The bucket exists and is accessible
+    3. We have permission to list/write to the bucket
+
+    Returns a dict with connectivity status and any errors.
+    Raises ValueError or FirebaseUploadError on failure.
+
+    Args:
+        timeout_seconds: Maximum time to wait for connectivity check
+
+    Returns:
+        dict with keys: success, bucket_name, mode, latency_ms, error (if any)
+    """
+    import time
+
+    start_time = time.time()
+    mode = _resolve_firebase_upload_mode()
+
+    result = {
+        "success": False,
+        "bucket_name": os.getenv("FIREBASE_STORAGE_BUCKET"),
+        "mode": mode,
+        "latency_ms": None,
+        "error": None,
+    }
+
+    if mode == "local":
+        # For local mode, just verify the local root is writable
+        try:
+            local_root = _resolve_local_upload_root()
+            local_root.mkdir(parents=True, exist_ok=True)
+            test_file = local_root / ".connectivity_check"
+            test_file.write_text("connectivity_check")
+            test_file.unlink()
+            result["success"] = True
+            result["latency_ms"] = int((time.time() - start_time) * 1000)
+            result["local_root"] = str(local_root)
+            logger.info("Firebase local mode connectivity check passed: %s", local_root)
+            return result
+        except Exception as exc:
+            result["error"] = f"Local mode connectivity check failed: {exc}"
+            logger.error(result["error"])
+            raise ValueError(result["error"]) from exc
+
+    # Validate credentials first
+    try:
+        _preflight_firebase_credentials()
+    except (ValueError, FileNotFoundError) as exc:
+        result["error"] = f"Firebase credentials invalid: {exc}"
+        logger.error(result["error"])
+        raise
+
+    # Test actual bucket connectivity
+    try:
+        bucket = _get_storage_bucket()
+        bucket_name = bucket.name
+
+        # Try to list blobs with a limit of 1 to verify read access
+        # This is a lightweight operation that confirms bucket exists and is accessible
+        blobs = list(bucket.list_blobs(max_results=1, timeout=timeout_seconds))
+
+        # Connectivity verified
+        result["success"] = True
+        result["bucket_name"] = bucket_name
+        result["latency_ms"] = int((time.time() - start_time) * 1000)
+        result["blobs_found"] = len(blobs)
+        logger.info(
+            "Firebase connectivity check passed: bucket=%s, latency=%dms",
+            bucket_name,
+            result["latency_ms"],
+        )
+        return result
+
+    except Exception as exc:
+        result["error"] = f"Firebase bucket connectivity check failed: {exc}"
+        result["latency_ms"] = int((time.time() - start_time) * 1000)
+        logger.error(result["error"])
+        raise ValueError(result["error"]) from exc
+
+
 def init_firebase() -> firebase_admin.App:
     """Initialize the Firebase app singleton."""
     global _FIREBASE_APP

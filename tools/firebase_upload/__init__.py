@@ -3,6 +3,7 @@
 from tools.firebase_upload.uploader import (
     FirebaseUploadError,
     init_firebase,
+    preflight_firebase_connectivity,
     upload_firebase_files,
     upload_episodes_to_firebase,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "build_firebase_upload_scene_id",
     "cleanup_firebase_upload_prefix",
     "init_firebase",
+    "preflight_firebase_connectivity",
     "resolve_firebase_upload_prefix",
     "upload_episodes_with_retry",
     "upload_firebase_files",
