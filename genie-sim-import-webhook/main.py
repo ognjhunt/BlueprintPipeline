@@ -292,6 +292,82 @@ def _is_production_mode() -> bool:
     return os.getenv("ENV", "").lower() == "production"
 
 
+def _parse_healthz_bearer_token() -> str | None:
+    token = os.getenv("HEALTHZ_BEARER_TOKEN", "").strip()
+    return token or None
+
+
+def _parse_healthz_ip_allowlist() -> list[ipaddress._BaseNetwork]:
+    raw_allowlist = os.getenv("HEALTHZ_IP_ALLOWLIST", "")
+    if not raw_allowlist:
+        return []
+    allowlist: list[ipaddress._BaseNetwork] = []
+    for item in raw_allowlist.split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        try:
+            allowlist.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            app.logger.warning("Invalid healthz allowlist entry: %s", entry)
+    return allowlist
+
+
+def _healthz_client_ip() -> str | None:
+    forwarded_for = request.headers.get("X-Forwarded-For", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip() or None
+    return request.remote_addr
+
+
+def _authorize_health_check():
+    if not _is_production_mode():
+        return True, None
+
+    bearer_token = _parse_healthz_bearer_token()
+    if bearer_token:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return False, (jsonify({
+                "status": "error",
+                "message": "Missing bearer token",
+            }), 401)
+        provided_token = auth_header.split(" ", 1)[1]
+        if not hmac.compare_digest(provided_token, bearer_token):
+            return False, (jsonify({
+                "status": "error",
+                "message": "Invalid bearer token",
+            }), 403)
+        return True, None
+
+    allowlist = _parse_healthz_ip_allowlist()
+    if allowlist:
+        client_ip = _healthz_client_ip()
+        if not client_ip:
+            return False, (jsonify({
+                "status": "error",
+                "message": "Client IP not available",
+            }), 403)
+        try:
+            ip_obj = ipaddress.ip_address(client_ip)
+        except ValueError:
+            return False, (jsonify({
+                "status": "error",
+                "message": "Invalid client IP",
+            }), 403)
+        if not any(ip_obj in network for network in allowlist):
+            return False, (jsonify({
+                "status": "error",
+                "message": "Client IP not allowed",
+            }), 403)
+        return True, None
+
+    return False, (jsonify({
+        "status": "error",
+        "message": "Health check authentication not configured",
+    }), 403)
+
+
 def _validate_startup_auth_configuration() -> None:
     secret = os.getenv("WEBHOOK_HMAC_SECRET")
     audience = os.getenv("WEBHOOK_OIDC_AUDIENCE")
@@ -314,6 +390,10 @@ _validate_startup_auth_configuration()
 
 @app.get("/healthz")
 def health_check():
+    authorized, response = _authorize_health_check()
+    if not authorized:
+        return response
+
     deps_ok, dep_details = _dependency_health()
     if not deps_ok:
         return jsonify({
