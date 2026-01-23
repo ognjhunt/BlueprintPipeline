@@ -457,7 +457,12 @@ def _resolve_upload_file_list(
     if dataset_info_path.exists():
         try:
             dataset_info = _load_json_file(dataset_info_path)
-        except Exception:
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            logger.warning(
+                "Failed to load dataset info from %s: %s",
+                dataset_info_path,
+                exc,
+            )
             dataset_info = {}
         for entry in dataset_info.get("episodes", []):
             episode_id = entry.get("episode_id")
@@ -935,6 +940,7 @@ def _collect_parquet_column_names(schema: Any) -> List[str]:
 def _stream_parquet_validation(
     episode_file: Path,
     require_parquet_validation: bool,
+    episode_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
@@ -977,6 +983,9 @@ def _stream_parquet_validation(
         last_timestamps: Dict[str, Optional[float]] = {col: None for col in timestamp_cols}
         obs_shapes: Dict[str, set] = {col: set() for col in obs_cols}
         action_max_abs: Dict[str, Optional[float]] = {col: None for col in action_cols}
+
+        obs_shape_error_cols: set[str] = set()
+        action_value_error_cols: set[str] = set()
 
         for batch in pf.iter_batches(batch_size=batch_size):
             batch_count += 1
@@ -1021,7 +1030,17 @@ def _stream_parquet_validation(
                     if hasattr(value, "__len__"):
                         try:
                             obs_shapes[obs_col].add(np.array(value).shape)
-                        except Exception:
+                        except (TypeError, ValueError, np.AxisError) as exc:
+                            if obs_col not in obs_shape_error_cols:
+                                obs_shape_error_cols.add(obs_col)
+                                logger.warning(
+                                    "Failed to parse observation shape "
+                                    "(episode_index=%s, column=%s, record_count=%s): %s",
+                                    episode_index,
+                                    obs_col,
+                                    row_count,
+                                    exc,
+                                )
                             continue
 
             for action_col in action_cols:
@@ -1044,11 +1063,31 @@ def _stream_parquet_validation(
                         if arr.size == 0:
                             continue
                         batch_max = float(np.nanmax(np.abs(arr)))
-                    except Exception:
+                    except (TypeError, ValueError, np.AxisError) as exc:
                         try:
                             batch_max = abs(float(value))
-                        except Exception:
+                        except (TypeError, ValueError) as inner_exc:
+                            if action_col not in action_value_error_cols:
+                                action_value_error_cols.add(action_col)
+                                logger.warning(
+                                    "Failed to parse action values "
+                                    "(episode_index=%s, column=%s, record_count=%s): %s",
+                                    episode_index,
+                                    action_col,
+                                    row_count,
+                                    inner_exc,
+                                )
                             continue
+                        if action_col not in action_value_error_cols:
+                            action_value_error_cols.add(action_col)
+                            logger.warning(
+                                "Failed to parse action array values "
+                                "(episode_index=%s, column=%s, record_count=%s): %s",
+                                episode_index,
+                                action_col,
+                                row_count,
+                                exc,
+                            )
                     if current_max is None or batch_max > current_max:
                         current_max = batch_max
                         action_max_abs[action_col] = current_max
@@ -2548,6 +2587,7 @@ class ImportedEpisodeValidator:
         self,
         episode_metadata: GeneratedEpisodeMetadata,
         episode_file: Path,
+        episode_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Validate a single episode.
@@ -2595,6 +2635,7 @@ class ImportedEpisodeValidator:
             parquet_results = _stream_parquet_validation(
                 episode_file,
                 require_parquet_validation=self.require_parquet_validation,
+                episode_index=episode_index,
             )
             errors.extend(parquet_results["errors"])
             warnings.extend(parquet_results["warnings"])
@@ -2673,9 +2714,13 @@ class ImportedEpisodeValidator:
         component_failed_episodes = []
         component_failed_count = 0
 
-        for episode in episodes:
+        for episode_index, episode in enumerate(episodes):
             episode_file = episode_dir / f"{episode.episode_id}.parquet"
-            result = self.validate_episode(episode, episode_file)
+            result = self.validate_episode(
+                episode,
+                episode_file,
+                episode_index=episode_index,
+            )
             results.append({
                 "episode_id": episode.episode_id,
                 **result,
