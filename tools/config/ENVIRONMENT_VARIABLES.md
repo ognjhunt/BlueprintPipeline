@@ -33,6 +33,27 @@ export BLUEPRINT_DEBUG=true
 export LOG_LEVEL=DEBUG
 ```
 
+## Metrics & Observability
+
+Controls for `tools.metrics.pipeline_metrics` and the real-time pipeline observability stack.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `METRICS_BACKEND` | str | "in_memory" | Metrics backend selector (`cloud_monitoring`, `prometheus`, or `in_memory`). |
+| `GCP_PROJECT_ID` | str | unset | GCP project ID used when `METRICS_BACKEND=cloud_monitoring`. |
+| `PROMETHEUS_METRICS_PORT` | int | 8000 | Port for the Prometheus HTTP metrics endpoint when `METRICS_BACKEND=prometheus`. |
+
+**Example**:
+```bash
+# Cloud Monitoring
+export METRICS_BACKEND=cloud_monitoring
+export GCP_PROJECT_ID="blueprint-prod"
+
+# Prometheus
+export METRICS_BACKEND=prometheus
+export PROMETHEUS_METRICS_PORT=8000
+```
+
 ## Canonical Boolean Values
 
 Boolean environment variables are parsed by the shared helper in `tools/config/env.py`. The canonical accepted values

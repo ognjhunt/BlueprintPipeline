@@ -9,3 +9,7 @@ jsonschema==4.23.0
 # Optional: Embedding generation (if GENERATE_EMBEDDINGS=true)
 # sentence-transformers>=2.2.0  # For local embeddings
 # openai>=1.0.0                 # For API-based embeddings
+
+# Metrics
+google-cloud-monitoring==2.21.0
+prometheus_client==0.20.0
