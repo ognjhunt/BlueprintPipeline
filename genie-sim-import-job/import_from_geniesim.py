@@ -99,6 +99,7 @@ from tools.quality_gates.quality_gate import (
 )
 from tools.geniesim_adapter.multi_robot_config import validate_geniesim_robot_allowlist
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
+from tools.config import load_pipeline_config
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
@@ -155,6 +156,8 @@ DATASET_INFO_SCHEMA_VERSION = "1.0.0"
 MIN_EPISODES_REQUIRED = 1
 JOB_NAME = "genie-sim-import-job"
 logger = logging.getLogger(__name__)
+DEFAULT_VIDEO_CAMERA_ID = "camera"
+VIDEO_CHUNK_SIZE = 1000
 
 
 def _resolve_debug_mode() -> bool:
@@ -2886,6 +2889,145 @@ def _compute_lerobot_stats(
     return stats if stats else None
 
 
+def _resolve_video_config() -> Any:
+    pipeline_config = load_pipeline_config(use_cache=False)
+    return pipeline_config.video
+
+
+def _resolve_video_codec(codec: str) -> str:
+    codec_map = {
+        "h264": "libx264",
+        "h265": "libx265",
+    }
+    normalized = codec.strip().lower()
+    return codec_map.get(normalized, codec)
+
+
+def _normalize_rgb_frame(
+    frame: Any,
+    expected_height: int,
+    expected_width: int,
+    *,
+    episode_id: str,
+    frame_index: int,
+    camera_id: str,
+) -> np.ndarray:
+    array = np.asarray(frame)
+    if array.ndim != 3 or array.shape[-1] != 3:
+        raise ValueError(
+            "RGB frame has invalid shape for "
+            f"{episode_id} (camera={camera_id}, frame={frame_index}): "
+            f"expected HxWx3 but got {array.shape}"
+        )
+    height, width = array.shape[:2]
+    if height != expected_height or width != expected_width:
+        raise ValueError(
+            "RGB frame resolution mismatch for "
+            f"{episode_id} (camera={camera_id}, frame={frame_index}): "
+            f"expected {expected_height}x{expected_width} but got {height}x{width}"
+        )
+    if array.dtype != np.uint8:
+        array = np.clip(array, 0, 255).astype(np.uint8)
+    return array
+
+
+def _collect_video_frames(
+    rgb_frames: List[Any],
+    *,
+    episode_id: str,
+    expected_height: int,
+    expected_width: int,
+) -> Dict[str, List[np.ndarray]]:
+    camera_frames: Dict[str, List[np.ndarray]] = {}
+    camera_ids: Optional[set[str]] = None
+    for frame_index, frame_value in enumerate(rgb_frames):
+        if frame_value is None:
+            raise ValueError(
+                f"Missing RGB frame for {episode_id} at index {frame_index}."
+            )
+        if isinstance(frame_value, dict):
+            frame_camera_ids = set(frame_value.keys())
+            if camera_ids is None:
+                camera_ids = frame_camera_ids
+                for camera_id in camera_ids:
+                    camera_frames[camera_id] = []
+            elif frame_camera_ids != camera_ids:
+                raise ValueError(
+                    "Inconsistent camera IDs for "
+                    f"{episode_id} at frame {frame_index}: "
+                    f"expected {sorted(camera_ids)} but got {sorted(frame_camera_ids)}"
+                )
+            for camera_id, camera_frame in frame_value.items():
+                camera_frames[camera_id].append(
+                    _normalize_rgb_frame(
+                        camera_frame,
+                        expected_height,
+                        expected_width,
+                        episode_id=episode_id,
+                        frame_index=frame_index,
+                        camera_id=camera_id,
+                    )
+                )
+        else:
+            if camera_ids is None:
+                camera_ids = {DEFAULT_VIDEO_CAMERA_ID}
+                camera_frames[DEFAULT_VIDEO_CAMERA_ID] = []
+            elif camera_ids != {DEFAULT_VIDEO_CAMERA_ID}:
+                raise ValueError(
+                    "Mixed RGB frame formats for "
+                    f"{episode_id}: expected camera map but found single frame."
+                )
+            camera_frames[DEFAULT_VIDEO_CAMERA_ID].append(
+                _normalize_rgb_frame(
+                    frame_value,
+                    expected_height,
+                    expected_width,
+                    episode_id=episode_id,
+                    frame_index=frame_index,
+                    camera_id=DEFAULT_VIDEO_CAMERA_ID,
+                )
+            )
+    return camera_frames
+
+
+def _get_video_rel_path(episode_index: int, camera_id: str) -> str:
+    chunk_idx = episode_index // VIDEO_CHUNK_SIZE
+    file_idx = episode_index % VIDEO_CHUNK_SIZE
+    return f"videos/{camera_id}/chunk-{chunk_idx:03d}/file-{file_idx:04d}.mp4"
+
+
+def _write_video_frames(
+    frames: List[np.ndarray],
+    output_path: Path,
+    *,
+    fps: int,
+    codec: str,
+) -> None:
+    if not frames:
+        return
+    if importlib.util.find_spec("imageio") is None:
+        raise ImportError("imageio is required for video encoding.")
+    import imageio
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_handle = tempfile.NamedTemporaryFile(
+        delete=False,
+        dir=output_path.parent,
+        suffix=output_path.suffix,
+    )
+    tmp_path = Path(tmp_handle.name)
+    tmp_handle.close()
+    writer = imageio.get_writer(
+        str(tmp_path),
+        fps=fps,
+        codec=codec,
+        quality=8,
+    )
+    for frame in frames:
+        writer.append_data(frame)
+    writer.close()
+    tmp_path.replace(output_path)
+
+
 def convert_to_lerobot(
     episodes_dir: Path,
     output_dir: Path,
@@ -3032,6 +3174,9 @@ def convert_to_lerobot(
     )
 
     quality_scores = []
+    v3_episode_records: List[Dict[str, Any]] = []
+    video_config = _resolve_video_config()
+    video_codec = _resolve_video_codec(video_config.codec)
 
     retryable_exceptions = {
         OSError,
@@ -3079,6 +3224,31 @@ def convert_to_lerobot(
                 # Read Genie Sim episode
                 table = pq.read_table(episode_file)
                 df = table.to_pandas()
+                rgb_column = None
+                if "rgb_image" in df.columns:
+                    rgb_column = "rgb_image"
+                elif "image" in df.columns:
+                    rgb_column = "image"
+
+                video_paths: Dict[str, str] = {}
+                if rgb_column is not None:
+                    rgb_frames = df[rgb_column].tolist()
+                    camera_frames = _collect_video_frames(
+                        rgb_frames,
+                        episode_id=ep_metadata.episode_id,
+                        expected_height=video_config.height,
+                        expected_width=video_config.width,
+                    )
+                    for camera_id, frames in camera_frames.items():
+                        rel_path = _get_video_rel_path(converted_count, camera_id)
+                        video_path = output_dir / rel_path
+                        _write_video_frames(
+                            frames,
+                            video_path,
+                            fps=video_config.fps,
+                            codec=video_codec,
+                        )
+                        video_paths[camera_id] = rel_path
 
                 # Convert to LeRobot schema
                 # LeRobot expects: observations, actions, rewards, episode metadata
@@ -3144,8 +3314,17 @@ def convert_to_lerobot(
                     "validation_passed": ep_metadata.validation_passed,
                     "file": str(episode_output.name),
                 })
+                if video_paths:
+                    dataset_info["episodes"][-1]["video_paths"] = dict(video_paths)
                 if ep_metadata.episode_content_hash:
                     dataset_info["episodes"][-1]["content_hash"] = ep_metadata.episode_content_hash
+                v3_episode_records.append(
+                    {
+                        "episode_index": converted_count,
+                        "num_frames": len(df),
+                        "video_paths": json.dumps(video_paths) if video_paths else "",
+                    }
+                )
 
                 converted_count += 1
                 total_frames += len(df)
@@ -3198,6 +3377,28 @@ def convert_to_lerobot(
     if stats:
         stats_file = output_dir / "stats.json"
         write_json_atomic(stats_file, stats, indent=2)
+
+    if v3_episode_records:
+        episodes_meta_root = output_dir / "meta" / "episodes"
+        episodes_meta_root.mkdir(parents=True, exist_ok=True)
+        schema = pa.schema([
+            ("episode_index", pa.int64()),
+            ("num_frames", pa.int64()),
+            ("video_paths", pa.string()),
+        ])
+        for chunk_start in range(0, len(v3_episode_records), VIDEO_CHUNK_SIZE):
+            chunk_idx = chunk_start // VIDEO_CHUNK_SIZE
+            chunk_dir = episodes_meta_root / f"chunk-{chunk_idx:03d}"
+            chunk_dir.mkdir(parents=True, exist_ok=True)
+            episodes_meta_path = chunk_dir / f"file-{chunk_idx:04d}.parquet"
+            chunk_records = v3_episode_records[
+                chunk_start:chunk_start + VIDEO_CHUNK_SIZE
+            ]
+            table = pa.table(
+                {col: [rec[col] for rec in chunk_records] for col in schema.names},
+                schema=schema,
+            )
+            pq.write_table(table, episodes_meta_path)
 
     # Write dataset metadata
     metadata_file = output_dir / "dataset_info.json"
@@ -3654,6 +3855,7 @@ def run_local_import_job(
         "episodes_parquet": None,
         "episode_index": None,
         "episodes": [],
+        "videos": [],
     }
     dataset_info_path = lerobot_dir / "dataset_info.json"
     if dataset_info_path.exists():
@@ -3672,6 +3874,13 @@ def run_local_import_job(
             "file_name": lerobot_file.name,
             "sha256": _sha256_file(lerobot_file),
         })
+    videos_dir = lerobot_dir / "videos"
+    if videos_dir.exists():
+        for video_file in sorted(videos_dir.rglob("*.mp4")):
+            lerobot_checksums["videos"].append({
+                "file_name": video_file.relative_to(lerobot_dir).as_posix(),
+                "sha256": _sha256_file(video_file),
+            })
 
     episode_paths = sorted(recordings_dir.rglob("*.json"))
     metadata_paths = get_lerobot_metadata_paths(config.output_dir)

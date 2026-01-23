@@ -67,9 +67,16 @@ def test_geniesim_local_mock_deterministic_seed(tmp_path: Path) -> None:
 def test_geniesim_local_mock_converts_without_warnings(
     tmp_path: Path,
     load_job_module,
+    monkeypatch,
 ) -> None:
     pytest.importorskip("pyarrow")
+    pytest.importorskip("imageio")
     module = load_job_module("geniesim_import", "import_from_geniesim.py")
+
+    monkeypatch.setenv("BP_PIPELINE_VIDEO_RESOLUTION_WIDTH", "8")
+    monkeypatch.setenv("BP_PIPELINE_VIDEO_RESOLUTION_HEIGHT", "8")
+    monkeypatch.setenv("BP_PIPELINE_VIDEO_FPS", "30")
+    monkeypatch.setenv("BP_PIPELINE_VIDEO_CODEC", "h264")
 
     output_dir = generate_mock_geniesim_local(
         output_dir=tmp_path,
@@ -119,3 +126,79 @@ def test_geniesim_local_mock_converts_without_warnings(
     ]
     assert validation["errors"] == []
     assert filtered_warnings == []
+
+
+def test_geniesim_local_mock_writes_videos_and_metadata(
+    tmp_path: Path,
+    load_job_module,
+    monkeypatch,
+) -> None:
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("imageio")
+    module = load_job_module("geniesim_import", "import_from_geniesim.py")
+
+    monkeypatch.setenv("BP_PIPELINE_VIDEO_RESOLUTION_WIDTH", "8")
+    monkeypatch.setenv("BP_PIPELINE_VIDEO_RESOLUTION_HEIGHT", "8")
+    monkeypatch.setenv("BP_PIPELINE_VIDEO_FPS", "30")
+    monkeypatch.setenv("BP_PIPELINE_VIDEO_CODEC", "h264")
+
+    output_dir = generate_mock_geniesim_local(
+        output_dir=tmp_path,
+        run_id="video_run",
+        episodes=1,
+        seed=7,
+    )
+    recordings_dir = output_dir / "recordings"
+    episode_path = recordings_dir / "episode_000000.json"
+    episode = _load_episode(episode_path)
+    frames = episode["frames"]
+
+    parquet_path = recordings_dir / "episode_000000.parquet"
+    _write_parquet_episode(frames, parquet_path)
+
+    metadata = MockEpisodeMetadata(
+        episode_id=episode["episode_id"],
+        task_name=episode["task_name"],
+        quality_score=float(episode["quality_score"]),
+        quality_components=episode.get("quality_components", {}),
+        frame_count=int(episode["frame_count"]),
+        duration_seconds=float(frames[-1]["timestamp"]),
+        validation_passed=bool(episode["validation_passed"]),
+        file_size_bytes=parquet_path.stat().st_size,
+    )
+
+    lerobot_dir = tmp_path / "lerobot_video_output"
+    conversion = module.convert_to_lerobot(
+        episodes_dir=recordings_dir,
+        output_dir=lerobot_dir,
+        episode_metadata_list=[metadata],
+        min_quality_score=0.0,
+    )
+    assert conversion["conversion_failures"] == []
+
+    expected_video = (
+        lerobot_dir
+        / "videos"
+        / "camera"
+        / "chunk-000"
+        / "file-0000.mp4"
+    )
+    assert expected_video.exists()
+
+    dataset_info = json.loads((lerobot_dir / "dataset_info.json").read_text())
+    assert dataset_info["episodes"][0]["video_paths"]["camera"] == (
+        "videos/camera/chunk-000/file-0000.mp4"
+    )
+
+    episodes_meta_path = (
+        lerobot_dir
+        / "meta"
+        / "episodes"
+        / "chunk-000"
+        / "file-0000.parquet"
+    )
+    assert episodes_meta_path.exists()
+    pq = pytest.importorskip("pyarrow.parquet")
+    table = pq.read_table(episodes_meta_path)
+    video_paths = json.loads(table.column("video_paths")[0].as_py())
+    assert video_paths["camera"] == "videos/camera/chunk-000/file-0000.mp4"
