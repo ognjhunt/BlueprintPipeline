@@ -88,7 +88,7 @@ from tools.cost_tracking.estimate import (
     format_estimate_summary,
     load_estimate_config,
 )
-from tools.config import load_quality_config as load_quality_gate_config
+from tools.config import load_pipeline_config, load_quality_config as load_quality_gate_config
 from tools.config.env import parse_bool_env, parse_int_env
 from tools.config.production_mode import resolve_pipeline_environment, resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
@@ -3205,16 +3205,27 @@ class LocalPipelineRunner:
         asset_index = _load_json(asset_index_path, "Genie Sim asset index")
         task_config = _load_json(task_config_path, "Genie Sim task config")
 
+        pipeline_config = load_pipeline_config()
         robot_types = self._resolve_geniesim_robot_types()
         if not robot_types:
             raise NonRetryableError("No robot types configured")
         robot_type = robot_types[0]
         multi_robot = len(robot_types) > 1
+        episodes_per_task_env = os.getenv("EPISODES_PER_TASK")
+        episodes_per_task_source = (
+            "environment variable EPISODES_PER_TASK"
+            if episodes_per_task_env not in (None, "")
+            else "pipeline config episode_generation.episodes_per_task"
+        )
         episodes_per_task = parse_int_env(
-            os.getenv("EPISODES_PER_TASK"),
-            default=10,
+            episodes_per_task_env if episodes_per_task_env not in (None, "") else None,
+            default=pipeline_config.episode_generation.episodes_per_task,
             min_value=1,
             name="EPISODES_PER_TASK",
+        )
+        self.log(
+            f"Resolved episodes_per_task={episodes_per_task} from {episodes_per_task_source}.",
+            "INFO",
         )
         num_variations = parse_int_env(
             os.getenv("NUM_VARIATIONS"),
