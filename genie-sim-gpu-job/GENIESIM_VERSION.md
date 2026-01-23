@@ -12,7 +12,11 @@ lives in `genie-sim-gpu-job/GENIESIM_REF` and is used in two places:
 
 1. Pick a full git SHA or release tag from `AgibotTech/genie_sim`.
 2. Update `genie-sim-gpu-job/GENIESIM_REF` with the new value.
-3. (Optional) Override during a local build:
+3. Run the proto sync script to pull the updated `geniesim_grpc.proto` and regenerate stubs:
+   ```bash
+   python tools/geniesim_adapter/update_geniesim_proto.py
+   ```
+4. (Optional) Override during a local build:
    ```bash
    docker build --build-arg GENIESIM_REF=<sha-or-tag> -f genie-sim-gpu-job/Dockerfile genie-sim-gpu-job
    ```
