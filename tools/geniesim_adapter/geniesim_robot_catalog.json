@@ -1,0 +1,85 @@
+{
+  "schema_version": "1.0.0",
+  "geniesim_version": "3.0.0",
+  "updated_at": "2025-01-15",
+  "robots": [
+    {
+      "name": "g2",
+      "category": "humanoid",
+      "vendor": "AGIBOT",
+      "notes": "Genie Sim native humanoid."
+    },
+    {
+      "name": "gr1",
+      "category": "humanoid",
+      "vendor": "Fourier",
+      "notes": "Fourier GR1 humanoid."
+    },
+    {
+      "name": "figure_01",
+      "category": "humanoid",
+      "vendor": "Figure AI",
+      "notes": "Figure 01 humanoid."
+    },
+    {
+      "name": "h1",
+      "category": "humanoid",
+      "vendor": "Unitree",
+      "notes": "Unitree H1 humanoid."
+    },
+    {
+      "name": "franka",
+      "category": "arm",
+      "vendor": "Franka Emika",
+      "notes": "Franka Panda arm."
+    },
+    {
+      "name": "ur10",
+      "category": "arm",
+      "vendor": "Universal Robots",
+      "notes": "UR10 arm."
+    },
+    {
+      "name": "ur5e",
+      "category": "arm",
+      "vendor": "Universal Robots",
+      "notes": "UR5e arm."
+    },
+    {
+      "name": "kuka_iiwa",
+      "category": "arm",
+      "vendor": "KUKA",
+      "notes": "KUKA LBR iiwa."
+    },
+    {
+      "name": "fetch",
+      "category": "mobile_manipulator",
+      "vendor": "Fetch Robotics",
+      "notes": "Fetch mobile manipulator."
+    },
+    {
+      "name": "tiago",
+      "category": "mobile_manipulator",
+      "vendor": "PAL Robotics",
+      "notes": "TIAGo mobile manipulator."
+    },
+    {
+      "name": "spot",
+      "category": "mobile_manipulator",
+      "vendor": "Boston Dynamics",
+      "notes": "Spot with arm."
+    },
+    {
+      "name": "yumi",
+      "category": "dual_arm",
+      "vendor": "ABB",
+      "notes": "ABB YuMi dual-arm."
+    },
+    {
+      "name": "baxter",
+      "category": "dual_arm",
+      "vendor": "Rethink Robotics",
+      "notes": "Baxter dual-arm."
+    }
+  ]
+}
