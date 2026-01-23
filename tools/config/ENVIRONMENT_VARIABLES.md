@@ -676,6 +676,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_VALIDATE_FRAMES` | bool | false | Validate recorded frames before saving (enabled in production). |
 | `GENIESIM_FAIL_ON_FRAME_VALIDATION` | bool | false | Fail episodes when frame validation errors exist (enabled in production). |
 | `GENIESIM_CLEANUP_TMP` | bool | true (local), false (production) | Remove Genie Sim temp directories after a run completes. Keep disabled in production to retain artifacts for auditing/troubleshooting. |
+| `GENIESIM_CLEANUP_RETENTION_HOURS` | int | 168 | Retention window (hours) before Genie Sim recordings/logs are eligible for cleanup in production. |
 | `GENIESIM_TASK_CONFIDENCE_THRESHOLD` | float | 0.8 | Affordance confidence threshold for boosting task priority in task generation. |
 | `GENIESIM_TASK_SIZE_SMALL_THRESHOLD` | float | 0.05 | Object size threshold (meters) below which tasks are treated as harder. |
 | `GENIESIM_TASK_SIZE_LARGE_THRESHOLD` | float | 0.3 | Object size threshold (meters) above which tasks are treated as harder. |

@@ -1,0 +1,66 @@
+# =============================================================================
+# Kubernetes CronJob: Genie Sim Retention Cleanup
+# =============================================================================
+# Cleans up Genie Sim recordings/logs after a retention window.
+#
+# Apply:
+#   envsubst < k8s/genie-sim-cleanup-cronjob.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: geniesim-cleanup-config
+  namespace: blueprint
+data:
+  GENIESIM_CLEANUP_RETENTION_HOURS: "168"
+  GENIESIM_RECORDINGS_DIR: "/tmp/geniesim_recordings"
+  GENIESIM_LOG_DIR: "/tmp/geniesim_logs"
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: geniesim-cleanup
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: geniesim-cleanup
+spec:
+  schedule: "0 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app: blueprint-pipeline
+            component: geniesim-cleanup
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: blueprint-pipeline-sa
+          containers:
+            - name: geniesim-cleanup
+              image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-local:latest
+              imagePullPolicy: Always
+              command: ["python", "/app/tools/geniesim_adapter/cleanup_retention.py"]
+              envFrom:
+                - configMapRef:
+                    name: geniesim-cleanup-config
+                - configMapRef:
+                    name: cost-tracking-pricing
+              env:
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              volumeMounts:
+                - name: cost-tracking-pricing
+                  mountPath: /etc/blueprint/pricing
+                  readOnly: true
+          volumes:
+            - name: cost-tracking-pricing
+              configMap:
+                name: cost-tracking-pricing-files
