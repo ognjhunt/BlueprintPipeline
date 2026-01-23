@@ -204,6 +204,15 @@ def verify_package_checksum(
         )
 
 
+def verify_blob_checksum(
+    client: storage.Client,
+    blob_uri: str,
+    checksums_uri: str,
+    blob_rel_path: str,
+) -> None:
+    verify_package_checksum(client, blob_uri, checksums_uri, blob_rel_path)
+
+
 def build_dataset_card(import_manifest: Dict[str, Any], scene_id: str, job_id: str) -> Dict[str, Any]:
     return {
         "scene_id": scene_id,
@@ -315,6 +324,17 @@ def main() -> int:
 
                 dataset_card_url = f"gs://{dest_bucket_name}/{dataset_card_object_name}"
                 bundle_url = f"gs://{dest_bucket_name}/{package_object_name}"
+                checksum_verified = False
+                checksum_error = None
+                try:
+                    verify_blob_checksum(client, bundle_url, checksums_uri, package_rel_path)
+                    checksum_verified = True
+                except Exception as exc:
+                    checksum_error = str(exc)
+                    delivery_errors.append(
+                        f"Checksum verification failed for {bundle_url}: {checksum_error}"
+                    )
+
                 delivery_targets.append(
                     {
                         "lab": lab,
@@ -324,6 +344,8 @@ def main() -> int:
                         "dataset_card_object": dataset_card_object_name,
                         "bundle_url": bundle_url,
                         "dataset_card_url": dataset_card_url,
+                        "checksum_verified": checksum_verified,
+                        "checksum_error": checksum_error,
                     }
                 )
                 dataset_card_paths["gcs"][lab] = dataset_card_url
@@ -331,7 +353,7 @@ def main() -> int:
                 artifact_counts["total_artifacts"] += 2
 
                 webhook_url = lab_webhook_urls.get(lab)
-                if webhook_url:
+                if webhook_url and checksum_verified:
                     send_webhook(
                         webhook_url,
                         {
@@ -344,11 +366,12 @@ def main() -> int:
                     )
 
         report_path = _gate_report_path(GCS_ROOT, scene_id)
+        success = not delivery_errors
         _emit_delivery_quality_gate(
             scene_id,
             {
                 "scene_id": scene_id,
-                "success": True,
+                "success": success,
                 "delivery_targets": delivery_targets,
                 "artifact_counts": artifact_counts,
                 "dataset_card_paths": dataset_card_paths,
@@ -357,6 +380,14 @@ def main() -> int:
             },
             report_path,
         )
+
+        if not success:
+            error_details = "Checksum verification failed for delivered artifacts."
+            if delivery_errors:
+                error_details = "\n".join(delivery_errors)
+            write_failure_marker(client, bucket_name, scene_id, job_id or "unknown", error_details)
+            print("Dataset delivery completed with errors", file=sys.stderr)
+            return 1
 
         print("Dataset delivery completed")
         return 0
