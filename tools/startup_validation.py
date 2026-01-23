@@ -164,6 +164,17 @@ def validate_firebase_credentials(required: bool = False) -> Dict[str, Any]:
     Returns:
         Dict with validation results
     """
+    if (os.getenv("FIREBASE_UPLOAD_MODE", "") or "").strip().lower() == "local":
+        local_dir = os.getenv("FIREBASE_UPLOAD_LOCAL_DIR")
+        return {
+            "valid": True,
+            "errors": [],
+            "warnings": [
+                "FIREBASE_UPLOAD_MODE=local enabled; skipping Firebase credential validation."
+            ],
+            "local_upload_dir": local_dir,
+        }
+
     bucket = os.getenv("FIREBASE_STORAGE_BUCKET")
     emulator_host = os.getenv("FIREBASE_STORAGE_EMULATOR_HOST")
     service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
