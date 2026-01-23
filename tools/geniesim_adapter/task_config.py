@@ -340,6 +340,27 @@ class TaskConfigGenerator:
             else:
                 continue
 
+            affordance_confidence = None
+            if isinstance(aff, dict) and "confidence" in aff:
+                raw_confidence = aff.get("confidence")
+                if isinstance(raw_confidence, (list, tuple)):
+                    affordance_confidence = max(raw_confidence) if raw_confidence else None
+                elif isinstance(raw_confidence, dict):
+                    affordance_confidence = (
+                        max(raw_confidence.values()) if raw_confidence else None
+                    )
+                else:
+                    try:
+                        affordance_confidence = float(raw_confidence)
+                    except (TypeError, ValueError):
+                        affordance_confidence = None
+
+            if (
+                affordance_confidence is not None
+                and affordance_confidence < self.task_confidence_threshold
+            ):
+                continue
+
             # Get task type
             key = (sim_role, aff_name)
             task_type = TASK_TYPE_MAPPING.get(key)
