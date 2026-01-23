@@ -17,6 +17,10 @@
     "num_frames": {"type": "integer"},
     "duration_seconds": {"type": "number"},
     "quality_score": {"type": "number"},
+    "quality_components": {
+      "type": "object",
+      "additionalProperties": {"type": "number"}
+    },
     "validation_passed": {"type": "boolean"},
     "file": {"type": "string"}
   },

@@ -32,6 +32,10 @@
     },
     "frame_count": {"type": "integer"},
     "quality_score": {"type": "number"},
+    "quality_components": {
+      "type": "object",
+      "additionalProperties": {"type": "number"}
+    },
     "validation_passed": {"type": "boolean"}
   },
   "additionalProperties": true
