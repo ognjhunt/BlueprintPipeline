@@ -585,6 +585,9 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework). |
 | `GENIESIM_GRPC_TIMEOUT_S` | float | 30.0 | gRPC request timeout for Genie Sim adapters (seconds). Falls back to legacy `GENIESIM_TIMEOUT` if set. |
+| `GENIESIM_GRPC_MAX_RETRIES` | int | 3 | Maximum number of gRPC attempts for retryable Genie Sim errors. |
+| `GENIESIM_GRPC_RETRY_BASE_S` | float | 0.5 | Base delay (seconds) for Genie Sim gRPC retry backoff. |
+| `GENIESIM_GRPC_RETRY_MAX_S` | float | 5.0 | Maximum delay (seconds) for Genie Sim gRPC retry backoff. |
 | `GENIESIM_READINESS_TIMEOUT_S` | float | 10.0 | Timeout for readiness probes that reset the sim and request minimal observation data (seconds). |
 | `GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | int | 3 | Failures before the Genie Sim gRPC circuit breaker opens. |
 | `GENIESIM_CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | int | 2 | Successes required to close the circuit breaker after half-open. |
