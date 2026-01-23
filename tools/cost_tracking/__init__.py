@@ -9,11 +9,12 @@ from .estimate import (
     estimate_gpu_costs,
     load_estimate_config,
 )
-from .tracker import CostBreakdown, CostTracker, get_cost_tracker
+from .tracker import CostBreakdown, CostQuotaExceeded, CostTracker, get_cost_tracker
 
 __all__ = [
     "CostTracker",
     "CostBreakdown",
+    "CostQuotaExceeded",
     "get_cost_tracker",
     "EstimateConfig",
     "EstimateSummary",
