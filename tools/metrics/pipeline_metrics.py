@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol
 
 logger = logging.getLogger(__name__)
+_PROMETHEUS_SERVER_STARTED = False
 
 
 class MetricsBackend(str, Enum):
@@ -369,35 +370,59 @@ class PipelineMetricsCollector:
             project_id: GCP project ID (for Cloud Monitoring)
             enable_logging: Whether to log metrics to stdout
         """
-        self.backend = backend or self._detect_backend()
+        self.backend = self._resolve_backend(backend)
         self.project_id = project_id
         self.enable_logging = enable_logging
 
         # Initialize metrics
         self._init_metrics()
+        self._maybe_start_prometheus_server()
 
         logger.info(f"Initialized metrics collector with backend: {self.backend}")
 
-    def _detect_backend(self) -> MetricsBackend:
-        """Auto-detect metrics backend."""
-        # Check for Cloud Monitoring
-        if os.getenv("GCP_PROJECT_ID"):
+    def _resolve_backend(self, backend: Optional[MetricsBackend]) -> MetricsBackend:
+        """Resolve metrics backend from explicit config or environment."""
+        if backend is not None:
+            return backend
+
+        env_backend = os.getenv("METRICS_BACKEND")
+        if env_backend:
             try:
-                import google.cloud.monitoring_v3
-                return MetricsBackend.CLOUD_MONITORING
-            except ImportError:
-                pass
+                return MetricsBackend(env_backend)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Unsupported METRICS_BACKEND '{env_backend}'. "
+                    f"Choose from {[backend.value for backend in MetricsBackend]}."
+                ) from exc
 
-        # Check for Prometheus
-        try:
-            import prometheus_client
-            return MetricsBackend.PROMETHEUS
-        except ImportError:
-            pass
-
-        # Fallback to in-memory
-        logger.warning("No metrics backend detected, using in-memory storage")
+        logger.warning(
+            "METRICS_BACKEND not set. Defaulting to in-memory metrics backend."
+        )
         return MetricsBackend.IN_MEMORY
+
+    def _maybe_start_prometheus_server(self) -> None:
+        """Start Prometheus metrics endpoint when configured."""
+        if self.backend != MetricsBackend.PROMETHEUS:
+            return
+
+        global _PROMETHEUS_SERVER_STARTED
+        if _PROMETHEUS_SERVER_STARTED:
+            return
+
+        port = int(os.getenv("PROMETHEUS_METRICS_PORT", "8000"))
+        try:
+            from prometheus_client import start_http_server
+
+            start_http_server(port)
+            _PROMETHEUS_SERVER_STARTED = True
+            logger.info("Prometheus metrics endpoint started on port %s", port)
+        except ImportError:
+            logger.warning(
+                "prometheus_client not installed. "
+                "Install with: pip install prometheus_client"
+            )
+        except Exception as exc:
+            logger.warning("Failed to start Prometheus metrics endpoint: %s", exc)
 
     def _create_metric(
         self,

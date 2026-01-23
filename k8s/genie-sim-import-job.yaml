@@ -80,6 +80,10 @@ spec:
               value: "${SCENE_ID}"
             - name: OUTPUT_PREFIX
               value: "scenes/$(SCENE_ID)/episodes"
+            - name: METRICS_BACKEND
+              value: "cloud_monitoring"
+            - name: GCP_PROJECT_ID
+              value: "${PROJECT_ID}"
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /secrets/gcs/key.json
             - name: FIREBASE_SERVICE_ACCOUNT_PATH

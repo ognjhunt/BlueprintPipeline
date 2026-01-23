@@ -167,6 +167,10 @@ spec:
               value: "scenes/$(SCENE_ID)/assets"
             - name: EPISODES_PREFIX
               value: "scenes/$(SCENE_ID)/episodes"
+            - name: METRICS_BACKEND
+              value: "cloud_monitoring"
+            - name: GCP_PROJECT_ID
+              value: "${PROJECT_ID}"
 
             # GCS credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -275,6 +279,10 @@ spec:
                     configMapKeyRef:
                       name: episode-gen-runtime
                       key: BUCKET
+                - name: METRICS_BACKEND
+                  value: "cloud_monitoring"
+                - name: GCP_PROJECT_ID
+                  value: "${PROJECT_ID}"
               resources:
                 requests:
                   nvidia.com/gpu: 1
