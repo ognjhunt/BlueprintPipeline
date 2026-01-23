@@ -89,14 +89,17 @@ from .exporter import (
     GenieSimExportConfig,
     GenieSimExportResult,
 )
-from .local_framework import (
-    GenieSimLocalFramework,
-    GenieSimConfig,
-    GenieSimServerStatus,
-    DataCollectionResult,
-    check_geniesim_availability,
-    run_local_data_collection,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .local_framework import (  # pragma: no cover
+        GenieSimLocalFramework,
+        GenieSimConfig,
+        GenieSimServerStatus,
+        DataCollectionResult,
+        check_geniesim_availability,
+        run_local_data_collection,
+    )
 
 __all__ = [
     # Scene Graph
@@ -134,3 +137,24 @@ __all__ = [
     "check_geniesim_availability",
     "run_local_data_collection",
 ]
+
+_LOCAL_FRAMEWORK_EXPORTS = {
+    "GenieSimLocalFramework",
+    "GenieSimConfig",
+    "GenieSimServerStatus",
+    "DataCollectionResult",
+    "check_geniesim_availability",
+    "run_local_data_collection",
+}
+
+
+def __getattr__(name: str):
+    if name in _LOCAL_FRAMEWORK_EXPORTS:
+        from . import local_framework
+
+        return getattr(local_framework, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals().keys()) + list(_LOCAL_FRAMEWORK_EXPORTS))
