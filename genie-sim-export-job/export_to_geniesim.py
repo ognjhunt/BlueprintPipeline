@@ -59,7 +59,7 @@ Environment Variables:
     ENABLE_GENERALIZATION_ANALYZER: Enable generalization analysis artifacts - default: true
     ENABLE_SIM2REAL_VALIDATION: Enable sim2real validation artifacts - default: true
     ENABLE_AUDIO_NARRATION: Enable audio narration artifacts - default: true
-    STRICT_PREMIUM_FEATURES: Fail fast on premium feature export errors - default: false
+    STRICT_PREMIUM_FEATURES: Fail fast on premium feature export errors - default: production mode
     GENIESIM_EXPORT_DRY_RUN: Validate/export without writing outputs - default: false
     DRY_RUN: Alias for GENIESIM_EXPORT_DRY_RUN
 """
@@ -91,10 +91,12 @@ from tools.geniesim_adapter import (
 from tools.quality_reports import generate_asset_provenance
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.workflow.failure_markers import FailureMarkerWriter
+from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
 )
+from tools.validation.config_schemas import load_and_validate_env_config
 from tools.validation.geniesim_export import (
     ExportConsistencyError,
     validate_export_consistency,
@@ -198,6 +200,12 @@ except ImportError:
     AUDIO_NARRATION_AVAILABLE = False
 
 JOB_NAME = "genie-sim-export-job"
+
+
+class PremiumFeatureExportError(RuntimeError):
+    """Raised when a premium feature export fails in strict mode."""
+
+
 COMMERCIAL_LICENSE_ALLOWLIST = {"cc0", "cc-by", "mit", "apache-2.0"}
 
 
@@ -563,7 +571,7 @@ def run_geniesim_export_job(
         enable_generalization_analyzer: Enable generalization analysis artifacts (DEFAULT: True)
         enable_sim2real_validation: Enable sim2real validation artifacts (DEFAULT: True)
         enable_audio_narration: Enable audio narration artifacts (DEFAULT: True)
-        strict_premium_features: Fail fast on premium feature export errors (DEFAULT: False)
+        strict_premium_features: Fail fast on premium feature export errors (DEFAULT: production mode)
         require_quality_gates: Fail when quality gates are unavailable or error (DEFAULT: True)
         dry_run: Validate without writing outputs (DEFAULT: False)
         bucket: GCS bucket for failure markers (optional)
@@ -1353,12 +1361,17 @@ def run_geniesim_export_job(
                 )
                 print(f"[GENIESIM-EXPORT-JOB] ⚠️  Output dir: {warning['output_dir']}")
                 if strict_premium_features:
+                    error_message = (
+                        "Premium feature export failed in strict mode: "
+                        f"{feature_name} ({warning['exception_type']}: {warning['exception_message']}) "
+                        f"output_dir={warning['output_dir']}"
+                    )
                     print(
                         "[GENIESIM-EXPORT-JOB] ❌ Premium feature failure blocked export "
                         "due to STRICT_PREMIUM_FEATURES=1"
                     )
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                    raise exc
+                    raise PremiumFeatureExportError(error_message) from exc
 
             if enable_premium_analytics and PREMIUM_ANALYTICS_AVAILABLE:
                 print("\n[GENIESIM-EXPORT-JOB] Exporting premium analytics manifests (DEFAULT - NO LONGER UPSELL)")
@@ -1850,14 +1863,18 @@ def run_geniesim_export_job(
                 print(f"[GENIESIM-EXPORT-JOB]   - {error}")
             return 1
 
+    except PremiumFeatureExportError:
+        raise
     except Exception as e:
         print(f"[GENIESIM-EXPORT-JOB] ERROR: {e}")
         traceback.print_exc()
         return 1
 
 
-def main():
+def main(input_params: Optional[Dict[str, Any]] = None):
     """Main entry point."""
+    if input_params is None:
+        input_params = {}
     debug_mode = _resolve_debug_mode()
     if debug_mode:
         os.environ["LOG_LEVEL"] = "DEBUG"
@@ -1885,6 +1902,7 @@ def main():
         },
         label="[GENIESIM-EXPORT-JOB]",
     )
+    load_and_validate_env_config()
 
     bucket = os.environ["BUCKET"]
     scene_id = os.environ["SCENE_ID"]
@@ -1939,7 +1957,11 @@ def main():
     enable_sim2real_validation = parse_bool_env(os.getenv("ENABLE_SIM2REAL_VALIDATION"), default=True)
     enable_audio_narration = parse_bool_env(os.getenv("ENABLE_AUDIO_NARRATION"), default=True)
     require_quality_gates = parse_bool(os.getenv("REQUIRE_QUALITY_GATES"), True)
-    strict_premium_features = parse_bool_env(os.getenv("STRICT_PREMIUM_FEATURES"), default=False)
+    strict_premium_features_env = os.getenv("STRICT_PREMIUM_FEATURES")
+    strict_premium_features = parse_bool_env(
+        strict_premium_features_env,
+        default=production_mode,
+    )
     dry_run_env = os.getenv("GENIESIM_EXPORT_DRY_RUN")
     if dry_run_env is None:
         dry_run_env = os.getenv("DRY_RUN")
@@ -1947,40 +1969,47 @@ def main():
     embedding_model = _resolve_embedding_model()
     if production_mode and not require_quality_gates:
         require_quality_gates = True
+    if production_mode and strict_premium_features_env is not None and not strict_premium_features:
+        log.warning(
+            "Production mode enabled but STRICT_PREMIUM_FEATURES explicitly disabled; "
+            "premium feature failures may be missed."
+        )
 
-    input_params = {
-        "bucket": bucket,
-        "scene_id": scene_id,
-        "assets_prefix": assets_prefix,
-        "geniesim_prefix": geniesim_prefix,
-        "variation_assets_prefix": variation_assets_prefix,
-        "replicator_prefix": replicator_prefix,
-        "robot_type": robot_type,
-        "urdf_path": urdf_path,
-        "max_tasks": max_tasks,
-        "generate_embeddings": generate_embeddings,
-        "require_embeddings": require_embeddings,
-        "embedding_model": embedding_model,
-        "filter_commercial": filter_commercial,
-        "copy_usd": copy_usd,
-        "enable_multi_robot": enable_multi_robot,
-        "enable_bimanual": enable_bimanual,
-        "enable_vla_packages": enable_vla_packages,
-        "enable_rich_annotations": enable_rich_annotations,
-        "enable_premium_analytics": enable_premium_analytics,
-        "enable_sim2real_fidelity": enable_sim2real_fidelity,
-        "enable_embodiment_transfer": enable_embodiment_transfer,
-        "enable_trajectory_optimality": enable_trajectory_optimality,
-        "enable_policy_leaderboard": enable_policy_leaderboard,
-        "enable_tactile_sensors": enable_tactile_sensors,
-        "enable_language_annotations": enable_language_annotations,
-        "enable_generalization_analyzer": enable_generalization_analyzer,
-        "enable_sim2real_validation": enable_sim2real_validation,
-        "enable_audio_narration": enable_audio_narration,
-        "strict_premium_features": strict_premium_features,
-        "require_quality_gates": require_quality_gates,
-        "dry_run": dry_run,
-    }
+    input_params.update(
+        {
+            "bucket": bucket,
+            "scene_id": scene_id,
+            "assets_prefix": assets_prefix,
+            "geniesim_prefix": geniesim_prefix,
+            "variation_assets_prefix": variation_assets_prefix,
+            "replicator_prefix": replicator_prefix,
+            "robot_type": robot_type,
+            "urdf_path": urdf_path,
+            "max_tasks": max_tasks,
+            "generate_embeddings": generate_embeddings,
+            "require_embeddings": require_embeddings,
+            "embedding_model": embedding_model,
+            "filter_commercial": filter_commercial,
+            "copy_usd": copy_usd,
+            "enable_multi_robot": enable_multi_robot,
+            "enable_bimanual": enable_bimanual,
+            "enable_vla_packages": enable_vla_packages,
+            "enable_rich_annotations": enable_rich_annotations,
+            "enable_premium_analytics": enable_premium_analytics,
+            "enable_sim2real_fidelity": enable_sim2real_fidelity,
+            "enable_embodiment_transfer": enable_embodiment_transfer,
+            "enable_trajectory_optimality": enable_trajectory_optimality,
+            "enable_policy_leaderboard": enable_policy_leaderboard,
+            "enable_tactile_sensors": enable_tactile_sensors,
+            "enable_language_annotations": enable_language_annotations,
+            "enable_generalization_analyzer": enable_generalization_analyzer,
+            "enable_sim2real_validation": enable_sim2real_validation,
+            "enable_audio_narration": enable_audio_narration,
+            "strict_premium_features": strict_premium_features,
+            "require_quality_gates": require_quality_gates,
+            "dry_run": dry_run,
+        }
+    )
     partial_results = {
         "geniesim_output_prefix": geniesim_prefix,
         "merged_manifest_path": (
@@ -1999,131 +2028,143 @@ def main():
             partial_results=partial_results,
         )
 
-    if production_mode and generate_embeddings and not require_embeddings:
-        message = (
-            "Production mode requires real embeddings; placeholder embeddings are disallowed. "
-            "Set REQUIRE_EMBEDDINGS=true (or remove the override) when GENERATE_EMBEDDINGS is enabled."
-        )
-        log.error("%s", message)
-        _write_failure_marker(RuntimeError(message), "embedding_requirement_validation")
-        sys.exit(1)
+    def _execute_job() -> None:
+        nonlocal generate_embeddings
+        nonlocal require_embeddings
 
-    embedding_provider_available = _embedding_provider_available()
-    if production_mode and generate_embeddings and not embedding_provider_available:
-        message = (
-            "Production mode requires embeddings, but no embedding provider keys were found. "
-            "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY, or explicitly disable "
-            "GENERATE_EMBEDDINGS/REQUIRE_EMBEDDINGS."
-        )
-        log.error("%s", message)
-        _write_failure_marker(RuntimeError(message), "embedding_provider_validation")
-        sys.exit(1)
-    if generate_embeddings and not require_embeddings and not embedding_provider_available:
-        log.warning(
-            "Embedding provider unavailable; placeholder embeddings will be used."
-        )
-
-    if generate_embeddings and embedding_provider_available:
-        try:
-            generate_embeddings, require_embeddings = _validate_embedding_provider_credentials(
-                generate_embeddings=generate_embeddings,
-                require_embeddings=require_embeddings,
-                embedding_model=embedding_model,
+        if production_mode and generate_embeddings and not require_embeddings:
+            message = (
+                "Production mode requires real embeddings; placeholder embeddings are disallowed. "
+                "Set REQUIRE_EMBEDDINGS=true (or remove the override) when GENERATE_EMBEDDINGS is enabled."
             )
-        except RuntimeError as exc:
-            _write_failure_marker(exc, "embedding_provider_validation")
+            log.error("%s", message)
+            _write_failure_marker(RuntimeError(message), "embedding_requirement_validation")
             sys.exit(1)
-        input_params["generate_embeddings"] = generate_embeddings
-        input_params["require_embeddings"] = require_embeddings
 
-    validated = False
-    try:
-        assets_root = Path(gcs_mount_path) / assets_prefix
-        validate_scene_manifest(assets_root / "scene_manifest.json", label="[GENIESIM-EXPORT-JOB]")
-        validated = True
-
-        log.info("Configuration:")
-        log.info("  Bucket: %s", bucket)
-        log.info("  Scene ID: %s", scene_id)
-        log.info("  GCS Mount Path: %s", gcs_mount_path)
-        log.info("  Variation Assets: %s", variation_assets_prefix)
-        log.info("  Replicator Bundle: %s", replicator_prefix)
-        log.info("  Primary Robot Type: %s", robot_type)
-        log.info("  Max Tasks: %s", max_tasks)
-        log.info("  Require Embeddings: %s", require_embeddings)
-        log.info("  Multi-Robot: %s", enable_multi_robot)
-        log.info("  Bimanual: %s", enable_bimanual)
-        log.info("  VLA Packages: %s", enable_vla_packages)
-        log.info("  Rich Annotations: %s", enable_rich_annotations)
-        log.info("  Commercial Filter: %s", filter_commercial)
-        log.info(
-            "  Premium Analytics: %s (DEFAULT - NO LONGER UPSELL!)",
-            enable_premium_analytics,
-        )
-        log.info("  Sim2Real Fidelity: %s", enable_sim2real_fidelity)
-        log.info("  Embodiment Transfer: %s", enable_embodiment_transfer)
-        log.info("  Trajectory Optimality: %s", enable_trajectory_optimality)
-        log.info("  Policy Leaderboard: %s", enable_policy_leaderboard)
-        log.info("  Tactile Sensors: %s", enable_tactile_sensors)
-        log.info("  Language Annotations: %s", enable_language_annotations)
-        log.info("  Generalization Analyzer: %s", enable_generalization_analyzer)
-        log.info("  Sim2Real Validation: %s", enable_sim2real_validation)
-        log.info("  Audio Narration: %s", enable_audio_narration)
-        log.info("  Strict Premium Features: %s", strict_premium_features)
-        log.info("  Require Quality Gates: %s", require_quality_gates)
-
-        GCS_ROOT = Path(gcs_mount_path)
-
-        metrics = get_metrics()
-        with metrics.track_job(JOB_NAME, scene_id):
-            exit_code = run_geniesim_export_job(
-                root=GCS_ROOT,
-                scene_id=scene_id,
-                assets_prefix=assets_prefix,
-                geniesim_prefix=geniesim_prefix,
-                robot_type=robot_type,
-                urdf_path=urdf_path,
-                max_tasks=max_tasks,
-                generate_embeddings=generate_embeddings,
-                require_embeddings=require_embeddings,
-                embedding_model=embedding_model,
-                filter_commercial=filter_commercial,
-                copy_usd=copy_usd,
-                # Enhanced features (DEFAULT: ENABLED)
-                enable_multi_robot=enable_multi_robot,
-                enable_bimanual=enable_bimanual,
-                enable_vla_packages=enable_vla_packages,
-                enable_rich_annotations=enable_rich_annotations,
-                # YOUR commercial assets for domain randomization
-                variation_assets_prefix=variation_assets_prefix,
-                replicator_prefix=replicator_prefix,
-                # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
-                enable_premium_analytics=enable_premium_analytics,
-                enable_sim2real_fidelity=enable_sim2real_fidelity,
-                enable_embodiment_transfer=enable_embodiment_transfer,
-                enable_trajectory_optimality=enable_trajectory_optimality,
-                enable_policy_leaderboard=enable_policy_leaderboard,
-                enable_tactile_sensors=enable_tactile_sensors,
-                enable_language_annotations=enable_language_annotations,
-                enable_generalization_analyzer=enable_generalization_analyzer,
-                enable_sim2real_validation=enable_sim2real_validation,
-                enable_audio_narration=enable_audio_narration,
-                strict_premium_features=strict_premium_features,
-                require_quality_gates=require_quality_gates,
-                dry_run=dry_run,
-                bucket=bucket,
-                debug=debug_mode,
+        embedding_provider_available = _embedding_provider_available()
+        if production_mode and generate_embeddings and not embedding_provider_available:
+            message = (
+                "Production mode requires embeddings, but no embedding provider keys were found. "
+                "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY, or explicitly disable "
+                "GENERATE_EMBEDDINGS/REQUIRE_EMBEDDINGS."
+            )
+            log.error("%s", message)
+            _write_failure_marker(RuntimeError(message), "embedding_provider_validation")
+            sys.exit(1)
+        if generate_embeddings and not require_embeddings and not embedding_provider_available:
+            log.warning(
+                "Embedding provider unavailable; placeholder embeddings will be used."
             )
 
-        sys.exit(exit_code)
-    except SystemExit as exc:
-        if exc.code not in (0, None):
-            failed_step = "entrypoint_validation" if not validated else "entrypoint_exit"
-            _write_failure_marker(RuntimeError("Job exited early"), failed_step)
-        raise
-    except Exception as exc:
-        _write_failure_marker(exc, "entrypoint")
-        raise
+        if generate_embeddings and embedding_provider_available:
+            try:
+                generate_embeddings, require_embeddings = _validate_embedding_provider_credentials(
+                    generate_embeddings=generate_embeddings,
+                    require_embeddings=require_embeddings,
+                    embedding_model=embedding_model,
+                )
+            except RuntimeError as exc:
+                _write_failure_marker(exc, "embedding_provider_validation")
+                sys.exit(1)
+            input_params["generate_embeddings"] = generate_embeddings
+            input_params["require_embeddings"] = require_embeddings
+
+        validated = False
+        try:
+            assets_root = Path(gcs_mount_path) / assets_prefix
+            validate_scene_manifest(assets_root / "scene_manifest.json", label="[GENIESIM-EXPORT-JOB]")
+            validated = True
+
+            log.info("Configuration:")
+            log.info("  Bucket: %s", bucket)
+            log.info("  Scene ID: %s", scene_id)
+            log.info("  GCS Mount Path: %s", gcs_mount_path)
+            log.info("  Variation Assets: %s", variation_assets_prefix)
+            log.info("  Replicator Bundle: %s", replicator_prefix)
+            log.info("  Primary Robot Type: %s", robot_type)
+            log.info("  Max Tasks: %s", max_tasks)
+            log.info("  Require Embeddings: %s", require_embeddings)
+            log.info("  Multi-Robot: %s", enable_multi_robot)
+            log.info("  Bimanual: %s", enable_bimanual)
+            log.info("  VLA Packages: %s", enable_vla_packages)
+            log.info("  Rich Annotations: %s", enable_rich_annotations)
+            log.info("  Commercial Filter: %s", filter_commercial)
+            log.info(
+                "  Premium Analytics: %s (DEFAULT - NO LONGER UPSELL!)",
+                enable_premium_analytics,
+            )
+            log.info("  Sim2Real Fidelity: %s", enable_sim2real_fidelity)
+            log.info("  Embodiment Transfer: %s", enable_embodiment_transfer)
+            log.info("  Trajectory Optimality: %s", enable_trajectory_optimality)
+            log.info("  Policy Leaderboard: %s", enable_policy_leaderboard)
+            log.info("  Tactile Sensors: %s", enable_tactile_sensors)
+            log.info("  Language Annotations: %s", enable_language_annotations)
+            log.info("  Generalization Analyzer: %s", enable_generalization_analyzer)
+            log.info("  Sim2Real Validation: %s", enable_sim2real_validation)
+            log.info("  Audio Narration: %s", enable_audio_narration)
+            log.info("  Strict Premium Features: %s", strict_premium_features)
+            log.info("  Require Quality Gates: %s", require_quality_gates)
+
+            GCS_ROOT = Path(gcs_mount_path)
+
+            metrics = get_metrics()
+            with metrics.track_job(JOB_NAME, scene_id):
+                exit_code = run_geniesim_export_job(
+                    root=GCS_ROOT,
+                    scene_id=scene_id,
+                    assets_prefix=assets_prefix,
+                    geniesim_prefix=geniesim_prefix,
+                    robot_type=robot_type,
+                    urdf_path=urdf_path,
+                    max_tasks=max_tasks,
+                    generate_embeddings=generate_embeddings,
+                    require_embeddings=require_embeddings,
+                    embedding_model=embedding_model,
+                    filter_commercial=filter_commercial,
+                    copy_usd=copy_usd,
+                    # Enhanced features (DEFAULT: ENABLED)
+                    enable_multi_robot=enable_multi_robot,
+                    enable_bimanual=enable_bimanual,
+                    enable_vla_packages=enable_vla_packages,
+                    enable_rich_annotations=enable_rich_annotations,
+                    # YOUR commercial assets for domain randomization
+                    variation_assets_prefix=variation_assets_prefix,
+                    replicator_prefix=replicator_prefix,
+                    # Premium analytics (DEFAULT: ENABLED - NO LONGER UPSELL!)
+                    enable_premium_analytics=enable_premium_analytics,
+                    enable_sim2real_fidelity=enable_sim2real_fidelity,
+                    enable_embodiment_transfer=enable_embodiment_transfer,
+                    enable_trajectory_optimality=enable_trajectory_optimality,
+                    enable_policy_leaderboard=enable_policy_leaderboard,
+                    enable_tactile_sensors=enable_tactile_sensors,
+                    enable_language_annotations=enable_language_annotations,
+                    enable_generalization_analyzer=enable_generalization_analyzer,
+                    enable_sim2real_validation=enable_sim2real_validation,
+                    enable_audio_narration=enable_audio_narration,
+                    strict_premium_features=strict_premium_features,
+                    require_quality_gates=require_quality_gates,
+                    dry_run=dry_run,
+                    bucket=bucket,
+                    debug=debug_mode,
+                )
+
+            sys.exit(exit_code)
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                failed_step = "entrypoint_validation" if not validated else "entrypoint_exit"
+                _write_failure_marker(RuntimeError("Job exited early"), failed_step)
+            raise
+        except Exception as exc:
+            _write_failure_marker(exc, "entrypoint")
+            raise
+
+    return run_job_with_dead_letter_queue(
+        _execute_job,
+        scene_id=scene_id,
+        job_type=JOB_NAME,
+        step="export",
+        input_params=input_params,
+    )
 
 
 if __name__ == "__main__":

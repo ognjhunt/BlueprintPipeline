@@ -34,8 +34,14 @@ Environment Variables:
     ARTIFACTS_BY_ROBOT: JSON map of robot type to artifacts payload for multi-robot imports
     ALLOW_IDEMPOTENT_RETRY: Allow retrying a local import when a prior manifest
         indicates a failed or partial run (default: false)
+    ENABLE_REALTIME_STREAMING: Enable real-time feedback streaming (default: false in production)
+    REALTIME_STREAM_PROTOCOL: Streaming protocol (http_post, grpc, websocket, message_queue, file_watch)
+    REALTIME_STREAM_ENDPOINT: Endpoint URL or path for streaming
+    REALTIME_STREAM_API_KEY: API key for streaming authentication
+    REALTIME_STREAM_BATCH_SIZE: Batch size for streaming episodes (default: 10)
 """
 
+import asyncio
 import copy
 import hashlib
 import importlib
@@ -100,6 +106,7 @@ from tools.firebase_upload.firebase_upload_orchestrator import (
     resolve_firebase_upload_prefix,
     upload_episodes_with_retry,
 )
+from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
 from tools.gcs_upload import (
     calculate_file_md5_base64,
     upload_blob_from_filename,
@@ -114,6 +121,7 @@ from tools.quality.quality_config import (
     ResolvedQualitySettings,
     resolve_quality_settings,
 )
+from tools.training import DataStreamConfig, DataStreamProtocol, RealtimeFeedbackLoop
 
 # Import quality validation
 try:
@@ -144,6 +152,113 @@ def _resolve_debug_mode() -> bool:
     if debug_flag is None:
         debug_flag = parse_bool_env(os.getenv("DEBUG"), default=False)
     return bool(debug_flag)
+
+
+def _resolve_realtime_stream_config(
+    min_quality_score: float,
+    production_mode: bool,
+    log: logging.LoggerAdapter,
+) -> Optional[DataStreamConfig]:
+    raw_enabled = os.getenv("ENABLE_REALTIME_STREAMING")
+    realtime_enabled = parse_bool_env(
+        raw_enabled,
+        default=not production_mode,
+    )
+    if not realtime_enabled:
+        log.info(
+            "Realtime streaming disabled (ENABLE_REALTIME_STREAMING=%s).",
+            raw_enabled,
+        )
+        return None
+
+    endpoint = os.getenv("REALTIME_STREAM_ENDPOINT")
+    if not endpoint:
+        log.warning(
+            "Realtime streaming enabled but REALTIME_STREAM_ENDPOINT is not set; skipping."
+        )
+        return None
+
+    protocol_raw = os.getenv(
+        "REALTIME_STREAM_PROTOCOL",
+        DataStreamProtocol.HTTP_POST.value,
+    ).lower()
+    try:
+        protocol = DataStreamProtocol(protocol_raw)
+    except ValueError:
+        log.warning(
+            "Unsupported REALTIME_STREAM_PROTOCOL=%s; defaulting to %s.",
+            protocol_raw,
+            DataStreamProtocol.HTTP_POST.value,
+        )
+        protocol = DataStreamProtocol.HTTP_POST
+
+    batch_size = 10
+    batch_size_raw = os.getenv("REALTIME_STREAM_BATCH_SIZE")
+    if batch_size_raw:
+        try:
+            batch_size = int(batch_size_raw)
+            if batch_size <= 0:
+                raise ValueError("batch size must be positive")
+        except ValueError as exc:
+            log.warning(
+                "Invalid REALTIME_STREAM_BATCH_SIZE=%s (%s); using default=%s.",
+                batch_size_raw,
+                exc,
+                batch_size,
+            )
+
+    config = DataStreamConfig(
+        protocol=protocol,
+        endpoint_url=endpoint,
+        api_key=os.getenv("REALTIME_STREAM_API_KEY") or None,
+        batch_size=batch_size,
+        min_quality_score=min_quality_score,
+    )
+    log.info(
+        "Realtime streaming enabled (protocol=%s, endpoint=%s, batch_size=%s).",
+        protocol.value,
+        endpoint,
+        batch_size,
+    )
+    return config
+
+
+def _stream_realtime_episodes(
+    loop: RealtimeFeedbackLoop,
+    episodes: List[GeneratedEpisodeMetadata],
+    job_id: str,
+    scene_id: Optional[str],
+    robot_type: Optional[str],
+    log: logging.LoggerAdapter,
+) -> None:
+    if not episodes:
+        log.info("Realtime streaming enabled but no validated episodes to stream.")
+        return
+
+    async def _run_stream() -> None:
+        await loop.start()
+        try:
+            for episode in episodes:
+                payload = {
+                    "episode_id": episode.episode_id,
+                    "task_name": episode.task_name,
+                    "frame_count": episode.frame_count,
+                    "duration_seconds": episode.duration_seconds,
+                    "validation_passed": episode.validation_passed,
+                    "file_size_bytes": episode.file_size_bytes,
+                    "quality_score": episode.quality_score,
+                    "job_id": job_id,
+                    "scene_id": scene_id,
+                    "robot_type": robot_type,
+                }
+                loop.queue_episode(payload, quality_score=episode.quality_score)
+        finally:
+            await loop.stop()
+
+    try:
+        asyncio.run(_run_stream())
+    except RuntimeError as exc:
+        log.warning("Realtime streaming skipped: %s", exc)
 
 
 def _is_service_mode() -> bool:
@@ -2348,6 +2463,37 @@ def run_local_import_job(
                     + ", ".join(filtered_episode_ids)
                 )
 
+    validated_episode_metadata_list = [
+        ep for ep in episode_metadata_list if ep.episode_id not in failed_episode_id_set
+    ]
+    realtime_config = _resolve_realtime_stream_config(
+        min_quality_score=config.min_quality_score,
+        production_mode=resolve_production_mode(),
+        log=log,
+    )
+    if realtime_config:
+        feedback_loop = RealtimeFeedbackLoop(realtime_config, enable_logging=True)
+        log.info(
+            "Streaming %s validated episodes to realtime feedback loop.",
+            len(validated_episode_metadata_list),
+        )
+        _stream_realtime_episodes(
+            feedback_loop,
+            validated_episode_metadata_list,
+            job_id=config.job_id,
+            scene_id=scene_id,
+            robot_type=(job_metadata or {}).get("robot_type"),
+            log=log,
+        )
+        stats = feedback_loop.get_statistics()
+        log.info(
+            "Realtime streaming summary: queued=%s filtered=%s sent=%s rejected=%s",
+            stats.get("episodes_queued"),
+            stats.get("episodes_filtered"),
+            stats.get("episodes_sent"),
+            stats.get("episodes_rejected"),
+        )
+
     lerobot_dir = config.output_dir / "lerobot"
     dataset_info_path = lerobot_dir / "dataset_info.json"
     episodes_index_path = lerobot_dir / "episodes.jsonl"
@@ -2987,8 +3133,10 @@ def _quality_gate_failure_detected(
     return False
 
 
-def main():
+def main(input_params: Optional[Dict[str, Any]] = None):
     """Main entry point for import job."""
+    if input_params is None:
+        input_params = {}
     debug_mode = _resolve_debug_mode()
     if debug_mode:
         os.environ["LOG_LEVEL"] = "DEBUG"
@@ -3019,6 +3167,17 @@ def main():
     job_metadata_path = os.getenv("JOB_METADATA_PATH") or None
     local_episodes_prefix = os.getenv("LOCAL_EPISODES_PREFIX") or None
     artifacts_by_robot_env = os.getenv("ARTIFACTS_BY_ROBOT") or None
+    input_params.update(
+        {
+            "bucket": bucket,
+            "scene_id": scene_id,
+            "job_id": job_id,
+            "output_prefix": output_prefix,
+            "job_metadata_path": job_metadata_path,
+            "local_episodes_prefix": local_episodes_prefix,
+        }
+    )
+    log.debug("Input params: %s", input_params)
 
     job_metadata = None
     if job_metadata_path:
@@ -3601,7 +3760,18 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        input_params: Dict[str, Any] = {}
+
+        def _run_import_job() -> Optional[int]:
+            return main(input_params)
+
+        run_job_with_dead_letter_queue(
+            _run_import_job,
+            scene_id=os.getenv("SCENE_ID"),
+            job_type=JOB_NAME,
+            step="import",
+            input_params=input_params,
+        )
     except Exception as exc:
         send_alert(
             event_type="geniesim_import_job_fatal_exception",

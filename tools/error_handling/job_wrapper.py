@@ -98,9 +98,17 @@ def publish_failure(
     if step and not message.step:
         message.step = step
 
+    logger.info(
+        "Publishing failure to DLQ (job_type=%s, step=%s, scene_id=%s)",
+        job_type,
+        step,
+        scene_id,
+    )
     dlq = get_dead_letter_queue()
     try:
-        return dlq.publish(message)
+        message_id = dlq.publish(message)
+        logger.info("DLQ publish attempt complete (message_id=%s)", message_id)
+        return message_id
     except Exception:  # pragma: no cover - DLQ failures should not mask original error
         logger.exception("Failed to publish dead letter message")
         return None
