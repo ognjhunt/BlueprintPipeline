@@ -1,0 +1,26 @@
+{
+  "dataset_type": "lerobot",
+  "format_version": "1.0",
+  "schema_version": "1.0.0",
+  "scene_id": "scene_v2",
+  "run_id": "run_v2",
+  "pipeline_commit": "deadbeef",
+  "export_schema_version": "1.0.0",
+  "episodes": [
+    {
+      "episode_id": "episode_000000",
+      "episode_index": 0,
+      "num_frames": 10,
+      "duration_seconds": 1.0,
+      "quality_score": 0.95,
+      "validation_passed": true,
+      "file": "episode_000000.parquet"
+    }
+  ],
+  "total_frames": 10,
+  "average_quality_score": 0.95,
+  "source": "genie_sim",
+  "converted_at": "2025-01-01T00:00:00Z",
+  "total_episodes": 1,
+  "skipped_episodes": 0
+}
