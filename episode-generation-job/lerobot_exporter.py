@@ -56,9 +56,11 @@ LeRobot Dataset Structure (v3.0):
     │           └── file-000.parquet  # Episode metadata (per-episode records)
     ├── data/
     │   └── chunk-000/
-    │       └── file-000.parquet  # Multi-episode data Parquet file
+    │       └── file-000.parquet  # Episode data Parquet file
     ├── videos/                   # Video data (RGB per camera)
-    │   └── chunk-000/
+    │   └── {camera_id}/
+    │       └── chunk-000/
+    │           └── file-0000.mp4
     └── ground_truth/             # Ground-truth labels (Plus/Full packs)
         └── chunk-000/
 
@@ -2350,7 +2352,7 @@ class LeRobotExporter:
             raise
 
     def _write_episodes_v3(self, data_dir: Path) -> None:
-        """Write multi-episode Parquet file for LeRobot v3 layout.
+        """Write Parquet files for LeRobot v3 layout.
 
         Uses the official LeRobot v3.0 naming convention:
         - data/chunk-{idx:03d}/file-{idx:04d}.parquet (data files)
@@ -2358,66 +2360,51 @@ class LeRobotExporter:
         """
         if not HAVE_PYARROW:
             raise RuntimeError(
-                "pyarrow is required for LeRobot v3 export (multi-episode Parquet)."
+                "pyarrow is required for LeRobot v3 export (chunked Parquet)."
             )
 
-        chunk_idx = 0
-        file_idx = 0
-        chunk_dir = data_dir / f"chunk-{chunk_idx:03d}"
-        chunk_dir.mkdir(exist_ok=True)
-        episode_path = chunk_dir / f"file-{file_idx:04d}.parquet"
         self._v3_episode_index = {}
 
-        def write_parquet(tmp_path: Path) -> None:
-            parquet_writer = None
-            row_group_index = 0
+        for episode in self.episodes:
+            chunk_idx, file_idx = self._get_v3_chunk_file_indices(episode.episode_index)
+            chunk_dir = data_dir / f"chunk-{chunk_idx:03d}"
+            chunk_dir.mkdir(exist_ok=True)
+            episode_path = chunk_dir / f"file-{file_idx:04d}.parquet"
+            episode_data = self._trajectory_to_arrow_table(episode)
 
-            for episode in self.episodes:
-                episode_data = self._trajectory_to_arrow_table(episode)
-                if parquet_writer is None:
-                    parquet_writer = pq.ParquetWriter(
-                        tmp_path,
-                        schema=episode_data.schema,
-                        compression="zstd",
-                    )
-                parquet_writer.write_table(episode_data)
-                episode.parquet_row_count = episode_data.num_rows
-                episode.parquet_row_group = row_group_index
-                if self.output_dir:
-                    episode.parquet_path = episode_path.resolve().relative_to(
-                        self.output_dir.resolve()
-                    ).as_posix()
+            def write_parquet(tmp_path: Path, table=episode_data) -> None:
+                pq.write_table(table, tmp_path, compression="zstd")
+                self._validate_parquet_integrity(
+                    tmp_path,
+                    expected_num_rows=table.num_rows,
+                    expected_num_row_groups=1,
+                )
 
-                self._v3_episode_index[episode.episode_index] = {
-                    "episode_index": episode.episode_index,
-                    "num_frames": episode.trajectory.num_frames,
-                    "length": episode.trajectory.num_frames,
-                    "task_index": episode.task_index,
-                    "task": episode.task_description,
-                    "scene_id": episode.scene_id,
-                    "variation_index": episode.variation_index,
-                    "success": episode.success,
-                    "quality_score": episode.quality_score,
-                    "data_path": f"data/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet",
-                }
-                row_group_index += 1
-
-            if parquet_writer:
-                parquet_writer.close()
-            # Validate written file before atomic rename
-            self._validate_parquet_integrity(
-                tmp_path,
-                expected_num_rows=sum(
-                    ep.trajectory.num_frames for ep in self.episodes
-                ),
-                expected_num_row_groups=len(self.episodes),
+            self._atomic_write(
+                episode_path,
+                write_parquet,
+                fsync_target=True,
             )
 
-        self._atomic_write(
-            episode_path,
-            write_parquet,
-            fsync_target=True,
-        )
+            episode.parquet_row_count = episode_data.num_rows
+            episode.parquet_row_group = 0
+            if self.output_dir:
+                episode.parquet_path = episode_path.resolve().relative_to(
+                    self.output_dir.resolve()
+                ).as_posix()
+
+            self._v3_episode_index[episode.episode_index] = {
+                "episode_index": episode.episode_index,
+                "num_frames": episode.trajectory.num_frames,
+                "length": episode.trajectory.num_frames,
+                "task_index": episode.task_index,
+                "task": episode.task_description,
+                "scene_id": episode.scene_id,
+                "variation_index": episode.variation_index,
+                "success": episode.success,
+                "quality_score": episode.quality_score,
+                "data_path": f"data/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet",
+            }
 
     def _validate_parquet_integrity(
         self,
@@ -2792,8 +2779,18 @@ class LeRobotExporter:
 
     def _get_chunk_dir(self, base_dir: Path, episode_index: int) -> Path:
         """Resolve chunk directory for an episode based on export format."""
-        chunk_idx = episode_index // self.config.chunk_size if not self._is_v3_export() else 0
+        if self._is_v3_export():
+            chunk_idx, _ = self._get_v3_chunk_file_indices(episode_index)
+        else:
+            chunk_idx = episode_index // self.config.chunk_size
         return base_dir / f"chunk-{chunk_idx:03d}"
+
+    def _get_v3_chunk_file_indices(self, episode_index: int) -> Tuple[int, int]:
+        """Compute (chunk_idx, file_idx) for v3 layouts based on episode index."""
+        chunk_size = max(self.config.chunk_size, 1)
+        chunk_idx = episode_index // chunk_size
+        file_idx = episode_index % chunk_size
+        return chunk_idx, file_idx
 
     def _summarize_alignment_mismatches(
         self,
@@ -2918,7 +2915,7 @@ class LeRobotExporter:
     ) -> None:
         if self._is_v3_export():
             self.log(
-                "  Skipping episode file drop for v3 export (multi-episode parquet cannot be pruned).",
+                "  Skipping episode file drop for v3 export (chunked parquet pruning not supported).",
                 "WARNING",
             )
             return
@@ -3035,15 +3032,21 @@ class LeRobotExporter:
         self._validate_lineage_requirements(lineage, data_source_info.get("production_mode", False))
 
         total_episodes = len(self.episodes)
-        total_chunks = 1 if self._is_v3_export() else (total_episodes - 1) // self.config.chunk_size + 1
-        chunk_size = total_episodes if self._is_v3_export() else self.config.chunk_size
+        if self._is_v3_export():
+            total_chunks = (total_episodes - 1) // self.config.chunk_size + 1 if total_episodes else 0
+            chunk_size = self.config.chunk_size
+        else:
+            total_chunks = (total_episodes - 1) // self.config.chunk_size + 1
+            chunk_size = self.config.chunk_size
         # v3 uses file-based path templates per the official LeRobot v3.0 spec
         if self._is_v3_export():
             data_path_template = "data/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet"
             episodes_path_template = "meta/episodes/chunk-{chunk_idx:03d}/file-{file_idx:04d}.parquet"
+            videos_path_template = "videos/{camera_id}/chunk-{chunk_idx:03d}/file-{file_idx:04d}.mp4"
         else:
             data_path_template = None
             episodes_path_template = None
+            videos_path_template = None
 
         info = {
             "format": "lerobot",
@@ -3061,6 +3064,7 @@ class LeRobotExporter:
             "data_path_template": data_path_template,
             "episodes_path_template": episodes_path_template,
             "videos_path": "videos" if self.config.include_images else None,
+            "videos_path_template": videos_path_template if self.config.include_images else None,
             "ground_truth_path": "ground_truth" if any([
                 self.config.include_depth,
                 self.config.include_segmentation,
@@ -3131,19 +3135,15 @@ class LeRobotExporter:
         if self._is_v3_export():
             info.update(
                 {
-                    "layout": "multi-episode",
+                    "layout": "file-per-episode",
                     "chunking": {
                         "strategy": "file-based",
                         "data_path_template": data_path_template,
                         "episodes_path_template": episodes_path_template,
-                        "files": [
-                            {
-                                "path": "data/chunk-000/file-0000.parquet",
-                                "episodes": total_episodes,
-                            }
-                        ],
+                        "videos_path_template": videos_path_template,
+                        "chunk_size": chunk_size,
                     },
-                    "episodes_path": "meta/episodes/chunk-000/file-0000.parquet",
+                    "episodes_path": "meta/episodes",
                 }
             )
 
@@ -3213,10 +3213,6 @@ class LeRobotExporter:
         if not self._is_v3_export():
             return
 
-        episodes_meta_dir = meta_dir / "episodes" / "chunk-000"
-        episodes_meta_dir.mkdir(parents=True, exist_ok=True)
-        episodes_meta_path = episodes_meta_dir / "file-0000.parquet"
-
         if not HAVE_PYARROW:
             # Fallback: write as JSON for environments without pyarrow
             fallback_path = meta_dir / "episodes" / "episode_index.json"
@@ -3228,20 +3224,6 @@ class LeRobotExporter:
             return
 
         # Build episode metadata records
-        episode_records = []
-        for episode in self.episodes:
-            ep_meta = self._v3_episode_index.get(episode.episode_index, {})
-            episode_records.append({
-                "episode_index": episode.episode_index,
-                "num_frames": episode.trajectory.num_frames,
-                "length": episode.trajectory.num_frames,
-                "task_index": episode.task_index,
-                "task": episode.task_description or "",
-                "scene_id": episode.scene_id or "",
-                "data_path": ep_meta.get("data_path", ""),
-            })
-
-        # Write as Parquet
         import pyarrow as pa
         schema = pa.schema([
             ("episode_index", pa.int64()),
@@ -3252,28 +3234,41 @@ class LeRobotExporter:
             ("scene_id", pa.string()),
             ("data_path", pa.string()),
         ])
-        table = pa.table(
-            {col: [rec[col] for rec in episode_records] for col in schema.names},
-            schema=schema,
-        )
 
-        num_episodes = len(episode_records)
+        for episode in self.episodes:
+            ep_meta = self._v3_episode_index.get(episode.episode_index, {})
+            record = {
+                "episode_index": episode.episode_index,
+                "num_frames": episode.trajectory.num_frames,
+                "length": episode.trajectory.num_frames,
+                "task_index": episode.task_index,
+                "task": episode.task_description or "",
+                "scene_id": episode.scene_id or "",
+                "data_path": ep_meta.get("data_path", ""),
+            }
+            chunk_idx, file_idx = self._get_v3_chunk_file_indices(episode.episode_index)
+            episodes_meta_dir = meta_dir / "episodes" / f"chunk-{chunk_idx:03d}"
+            episodes_meta_dir.mkdir(parents=True, exist_ok=True)
+            episodes_meta_path = episodes_meta_dir / f"file-{file_idx:04d}.parquet"
+            table = pa.table(
+                {col: [record[col]] for col in schema.names},
+                schema=schema,
+            )
 
-        def write_episodes_meta(tmp_path: Path) -> None:
-            pq.write_table(table, tmp_path, compression="zstd")
-            # Validate the written file is readable and has correct row count
-            readback = pq.ParquetFile(tmp_path)
-            if readback.metadata.num_rows != num_episodes:
-                raise ValueError(
-                    f"Episode metadata integrity check failed: expected {num_episodes} "
-                    f"rows but file contains {readback.metadata.num_rows}"
-                )
+            def write_episodes_meta(tmp_path: Path, meta_table=table) -> None:
+                pq.write_table(meta_table, tmp_path, compression="zstd")
+                readback = pq.ParquetFile(tmp_path)
+                if readback.metadata.num_rows != 1:
+                    raise ValueError(
+                        "Episode metadata integrity check failed: expected 1 "
+                        f"row but file contains {readback.metadata.num_rows}"
+                    )
 
-        self._atomic_write(
-            episodes_meta_path,
-            write_episodes_meta,
-            fsync_target=True,
-        )
+            self._atomic_write(
+                episodes_meta_path,
+                write_episodes_meta,
+                fsync_target=True,
+            )
 
     def _write_checksums_manifest(self, meta_dir: Path) -> None:
         """Write checksums manifest for generated files."""
@@ -3297,10 +3292,12 @@ class LeRobotExporter:
             is_production = self._is_production_mode()
 
             for episode in self.episodes:
-                chunk_dir = self._get_chunk_dir(videos_dir, episode.episode_index)
+                chunk_dir = None
+                if not self._is_v3_export():
+                    chunk_dir = self._get_chunk_dir(videos_dir, episode.episode_index)
 
                 if episode.sensor_data is not None:
-                    self._write_episode_videos(episode, chunk_dir)
+                    self._write_episode_videos(episode, chunk_dir or videos_dir)
                     if episode.dropped_frames_total > 0:
                         dropped_frames_entries.append({
                             "episode_index": episode.episode_index,
@@ -3320,7 +3317,11 @@ class LeRobotExporter:
                             )
                 elif episode.camera_video_path is not None:
                     # Legacy: copy existing video if available
-                    self._copy_video(episode.camera_video_path, chunk_dir, episode.episode_index)
+                    self._copy_video(
+                        episode.camera_video_path,
+                        chunk_dir or videos_dir,
+                        episode.episode_index,
+                    )
             if dropped_frames_entries:
                 self._write_invalid_episodes(
                     meta_dir,
@@ -3368,10 +3369,15 @@ class LeRobotExporter:
 
         # Write video for each camera
         for camera_id in sensor_data.camera_ids if hasattr(sensor_data, 'camera_ids') else []:
-            video_dir = chunk_dir / f"observation.images.{camera_id}"
-            video_dir.mkdir(parents=True, exist_ok=True)
-
-            video_path = video_dir / f"episode_{episode.episode_index:06d}.mp4"
+            if self._is_v3_export():
+                chunk_idx, file_idx = self._get_v3_chunk_file_indices(episode.episode_index)
+                video_dir = chunk_dir / camera_id / f"chunk-{chunk_idx:03d}"
+                video_dir.mkdir(parents=True, exist_ok=True)
+                video_path = video_dir / f"file-{file_idx:04d}.mp4"
+            else:
+                video_dir = chunk_dir / f"observation.images.{camera_id}"
+                video_dir.mkdir(parents=True, exist_ok=True)
+                video_path = video_dir / f"episode_{episode.episode_index:06d}.mp4"
 
             # Collect RGB frames with validation
             frames = []
@@ -3471,9 +3477,15 @@ class LeRobotExporter:
 
     def _copy_video(self, src_path: Path, chunk_dir: Path, episode_index: int) -> None:
         """Copy an existing video file to the output directory."""
-        video_dir = chunk_dir / "observation.images.camera"
-        video_dir.mkdir(parents=True, exist_ok=True)
-        dst_path = video_dir / f"episode_{episode_index:06d}.mp4"
+        if self._is_v3_export():
+            chunk_idx, file_idx = self._get_v3_chunk_file_indices(episode_index)
+            video_dir = chunk_dir / "camera" / f"chunk-{chunk_idx:03d}"
+            video_dir.mkdir(parents=True, exist_ok=True)
+            dst_path = video_dir / f"file-{file_idx:04d}.mp4"
+        else:
+            video_dir = chunk_dir / "observation.images.camera"
+            video_dir.mkdir(parents=True, exist_ok=True)
+            dst_path = video_dir / f"episode_{episode_index:06d}.mp4"
         try:
             self._atomic_write(
                 dst_path,
