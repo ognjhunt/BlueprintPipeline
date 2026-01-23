@@ -195,6 +195,56 @@ def _parse_optional_float_env(var_name: str) -> Optional[float]:
     return value
 
 
+def _parse_parquet_compression_env(var_name: str, default: str = "zstd") -> str:
+    raw_value = os.getenv(var_name)
+    if raw_value is None:
+        return default
+    value = raw_value.strip().lower()
+    return value if value else default
+
+
+def _normalize_parquet_compression(value: Optional[str]) -> str:
+    if value is None:
+        return "zstd"
+    normalized = str(value).strip().lower()
+    return normalized if normalized else "zstd"
+
+
+def _get_supported_parquet_compressions() -> List[str]:
+    candidates = ["snappy", "gzip", "brotli", "lz4", "lz4_raw", "bz2", "zstd"]
+    if not HAVE_PYARROW:
+        return candidates
+    supported: List[str] = []
+    for name in candidates:
+        try:
+            if pa.Codec.is_available(name):
+                supported.append(name)
+        except ValueError:
+            continue
+    return supported
+
+
+def _validate_parquet_compression(codec: str) -> None:
+    if not HAVE_PYARROW:
+        return
+    try:
+        available = pa.Codec.is_available(codec)
+    except ValueError as exc:
+        supported = _get_supported_parquet_compressions()
+        supported_msg = ", ".join(supported) if supported else "none"
+        raise ValueError(
+            f"Unsupported parquet compression '{codec}'. "
+            f"Supported codecs in this pyarrow build: {supported_msg}."
+        ) from exc
+    if not available:
+        supported = _get_supported_parquet_compressions()
+        supported_msg = ", ".join(supported) if supported else "none"
+        raise ValueError(
+            f"Parquet compression '{codec}' is not available in this pyarrow build. "
+            f"Supported codecs: {supported_msg}."
+        )
+
+
 @dataclass
 class LeRobotEpisode:
     """A single episode in LeRobot format."""
@@ -309,6 +359,12 @@ class LeRobotDatasetConfig:
     parquet_verification_mode: str = field(
         default_factory=lambda: os.getenv("PARQUET_VERIFICATION_MODE", "required").lower()
     )
+    parquet_compression: str = field(
+        default_factory=lambda: _parse_parquet_compression_env(
+            "LEROBOT_PARQUET_COMPRESSION",
+            default="zstd",
+        )
+    )
 
     @classmethod
     def from_data_pack(
@@ -323,6 +379,7 @@ class LeRobotDatasetConfig:
         strict_alignment: Optional[bool] = None,
         tier_compliance_action: str = "fail",
         export_format: Optional[Union[str, LeRobotExportFormat]] = None,
+        parquet_compression: Optional[str] = None,
     ) -> "LeRobotDatasetConfig":
         """Create config from data pack tier."""
         camera_types = ["wrist"]
@@ -333,21 +390,25 @@ class LeRobotDatasetConfig:
         if num_cameras >= 4:
             camera_types.append("front")
 
-        config = cls(
-            dataset_name=dataset_name,
-            robot_type=robot_type,
-            fps=fps,
-            image_resolution=resolution,
-            camera_types=camera_types[:num_cameras],
-            data_pack_tier=data_pack_tier,
-            output_dir=output_dir,
-            strict_alignment=strict_alignment if strict_alignment is not None else True,
-            tier_compliance_action=tier_compliance_action,
-            export_format=parse_lerobot_export_format(
+        config_kwargs = {
+            "dataset_name": dataset_name,
+            "robot_type": robot_type,
+            "fps": fps,
+            "image_resolution": resolution,
+            "camera_types": camera_types[:num_cameras],
+            "data_pack_tier": data_pack_tier,
+            "output_dir": output_dir,
+            "strict_alignment": strict_alignment if strict_alignment is not None else True,
+            "tier_compliance_action": tier_compliance_action,
+            "export_format": parse_lerobot_export_format(
                 export_format,
                 default=LeRobotExportFormat.LEROBOT_V2,
             ),
-        )
+        }
+        if parquet_compression is not None:
+            config_kwargs["parquet_compression"] = parquet_compression
+
+        config = cls(**config_kwargs)
 
         # Configure based on tier
         tier = data_pack_tier.lower()
@@ -403,6 +464,10 @@ class LeRobotExporter:
             config.export_format,
             default=LeRobotExportFormat.LEROBOT_V2,
         )
+        self.config.parquet_compression = _normalize_parquet_compression(
+            self.config.parquet_compression
+        )
+        _validate_parquet_compression(self.config.parquet_compression)
         self.robot_config = ROBOT_CONFIGS.get(config.robot_type, ROBOT_CONFIGS["franka"])
         self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
         self._path_redaction_regex = re.compile(r"(?:[A-Za-z]:\\\\|/)[^\\s]+")
@@ -2390,6 +2455,7 @@ class LeRobotExporter:
             chunk_dir.mkdir(exist_ok=True)
             episode_path = chunk_dir / f"file-{file_idx:04d}.parquet"
             chunk_episodes = self.episodes[chunk_start:chunk_start + chunk_size]
+            compression = self.config.parquet_compression
 
             def write_parquet(tmp_path: Path, episodes=chunk_episodes) -> None:
                 parquet_writer = None
@@ -2402,7 +2468,7 @@ class LeRobotExporter:
                         parquet_writer = pq.ParquetWriter(
                             tmp_path,
                             schema=episode_data.schema,
-                            compression="zstd",
+                            compression=compression,
                         )
                     parquet_writer.write_table(episode_data)
                     episode.parquet_row_count = episode_data.num_rows
@@ -3347,7 +3413,7 @@ class LeRobotExporter:
             num_episodes = len(episode_records)
 
             def write_episodes_meta(tmp_path: Path, num_rows=num_episodes) -> None:
-                pq.write_table(table, tmp_path, compression="zstd")
+                pq.write_table(table, tmp_path, compression=self.config.parquet_compression)
                 # Validate the written file is readable and has correct row count
                 readback = pq.ParquetFile(tmp_path)
                 if readback.metadata.num_rows != num_rows:
