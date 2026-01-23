@@ -28,6 +28,9 @@ data:
   DISABLE_GCS_UPLOAD: "false"
   ENABLE_FIREBASE_UPLOAD: "true"
   ALLOW_PARTIAL_FIREBASE_UPLOADS: "true"
+  # Static delay applied before each retry. Kubernetes Job retries do not support exponential backoff;
+  # handle that at the workflow/orchestrator layer if needed.
+  RETRY_DELAY_SECONDS: "30"
   FIREBASE_STORAGE_BUCKET: "${FIREBASE_STORAGE_BUCKET}"
 
 ---
@@ -40,7 +43,7 @@ metadata:
     app: blueprint-pipeline
     component: genie-sim-import
 spec:
-  backoffLimit: 3
+  backoffLimit: 4
   ttlSecondsAfterFinished: 3600
   activeDeadlineSeconds: 14400
 
@@ -60,6 +63,7 @@ spec:
         - name: genie-sim-import
           image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-import:latest
           imagePullPolicy: Always
+          command: ["/app/genie-sim-import-job/scripts/import_with_delay.sh"]
 
           envFrom:
             - configMapRef:
