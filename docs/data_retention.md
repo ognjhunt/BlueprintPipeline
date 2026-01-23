@@ -25,6 +25,16 @@ The maintenance job uses a pipeline-level retention setting to drive deletion de
 These settings are read by `tools/checkpoint/retention_cleanup.py` and can be supplied via
 Cloud Run job environment variables.
 
+Infrastructure-backed defaults:
+
+- The retention cleanup workflow and daily Cloud Scheduler trigger are provisioned in
+  `infrastructure/terraform` (see `retention-cleanup.tf`).
+- GCS lifecycle rules for `scenes/*` prefixes are managed in Terraform on the pipeline data
+  bucket to align with the default retention windows. These rules act as a safety net
+  alongside the workflow-driven cleanup job.
+- Firebase Storage lifecycle rules (if the Firebase bucket is managed in Terraform) align
+  output (`datasets/`) and log (`logs/`) retention with this policy.
+
 ## Deletion triggers
 
 Artifacts are deleted when **both** conditions are met:
@@ -56,6 +66,10 @@ The retention cleanup runs as a dedicated maintenance workflow (`workflows/reten
 It triggers a Cloud Run job (`retention-cleanup-job`) that executes
 `tools/checkpoint/retention_cleanup.py` against the canonical storage layout under
 `gs://{BUCKET}/scenes/{scene_id}/`.
+
+The workflow is scheduled daily via Cloud Scheduler when the Terraform configuration is
+applied. Adjust the schedule and lifecycle rules in `infrastructure/terraform` to change
+the default retention cadence or bucket policies.
 
 The job emits structured audit logs for each deletion, which can be correlated with the
 workflow execution ID in Cloud Logging.
