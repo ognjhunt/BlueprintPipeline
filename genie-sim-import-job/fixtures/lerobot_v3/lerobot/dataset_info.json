@@ -1,0 +1,11 @@
+{
+  "format": "lerobot",
+  "export_format": "lerobot_v3",
+  "version": "3.0",
+  "episodes": 1,
+  "skipped": 0,
+  "total_frames": 10,
+  "exported_at": "2025-01-01T00:00:00Z",
+  "lerobot_info": "lerobot/meta/info.json",
+  "debug_json_output": false
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Genie Sim Local Episode Index (LeRobot v3)",
+  "type": "object",
+  "additionalProperties": {
+    "type": "object",
+    "required": [
+      "frames",
+      "row_group"
+    ],
+    "properties": {
+      "frames": {"type": "integer"},
+      "row_group": {"type": "integer"},
+      "task_id": {"type": ["string", "null"]},
+      "task_name": {"type": ["string", "null"]}
+    },
+    "additionalProperties": true
+  }
+}
