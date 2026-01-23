@@ -235,7 +235,8 @@ class PipelineSelector:
             # NOTE: episode-generation-job removed - Genie Sim handles data collection
             "genie-sim-export-job",  # Export to Genie Sim format (uses YOUR assets)
             "genie-sim-submit-job",  # Submit/run Genie Sim generation (API or local)
-            # After this, Genie Sim takes over for:
+            "genie-sim-import-job",  # Import results back into BlueprintPipeline
+            # After submit, Genie Sim takes over for:
             # - LLM task generation
             # - cuRobo trajectory planning
             # - Automated/teleop data collection
