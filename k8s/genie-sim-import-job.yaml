@@ -28,6 +28,10 @@ data:
   DISABLE_GCS_UPLOAD: "false"
   ENABLE_FIREBASE_UPLOAD: "true"
   ALLOW_PARTIAL_FIREBASE_UPLOADS: "true"
+  ENABLE_REALTIME_STREAMING: "1"
+  REALTIME_STREAM_ENDPOINT: "${REALTIME_STREAM_ENDPOINT}"
+  REALTIME_STREAM_API_KEY: "${REALTIME_STREAM_API_KEY}"
+  REALTIME_STREAM_BATCH_SIZE: "25"
   # Static delay applied before each retry. Kubernetes Job retries do not support exponential backoff;
   # handle that at the workflow/orchestrator layer if needed.
   RETRY_DELAY_SECONDS: "30"
