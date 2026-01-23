@@ -500,6 +500,79 @@ spec:
     autoClose: 1800s  # 30 minutes
 
 ---
+# Firebase Upload Failure Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-firebase-upload-failure
+spec:
+  displayName: "[Blueprint] Firebase Upload Failure Detected"
+  documentation:
+    content: |
+      Firebase Storage uploads failed for one or more pipeline jobs.
+
+      Actions:
+      1. Review the job logs for the scene/job ID and the error details.
+      2. Verify Firebase service account credentials and bucket access.
+      3. Confirm FIREBASE_STORAGE_BUCKET/FIREBASE_SERVICE_ACCOUNT_* env vars.
+      4. Re-run the import or episode-generation workflow to retry uploads.
+    mimeType: text/markdown
+  conditions:
+    - displayName: Firebase Upload Failures > 0
+      conditionThreshold:
+        filter: >
+          resource.type="global" AND
+          metric.type="logging.googleapis.com/user/blueprint_firebase_upload_failure_events"
+        comparison: COMPARISON_GT
+        thresholdValue: 0
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_SUM
+            crossSeriesReducer: REDUCE_SUM
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
+# Episode Count Below Minimum Alert
+apiVersion: monitoring.googleapis.com/v1
+kind: AlertPolicy
+metadata:
+  name: blueprint-episode-count-below-minimum
+spec:
+  displayName: "[Blueprint] Episode Count Below Minimum"
+  documentation:
+    content: |
+      Imported episode count is below the configured minimum for a scene/job.
+
+      Actions:
+      1. Check Genie Sim import logs for "Episodes imported" and "Min Episodes Required".
+      2. Inspect the import manifest under scenes/<scene_id>/episodes for counts/errors.
+      3. Validate upstream episode generation completed successfully for the scene.
+      4. Re-run the import or episode generation job to regenerate missing episodes.
+    mimeType: text/markdown
+  conditions:
+    - displayName: Episodes Imported < Min Episodes Required
+      conditionMonitoringQueryLanguage:
+        query: |
+          fetch global
+          | metric 'logging.googleapis.com/user/blueprint_import_episode_count'
+          | align max(1h)
+          | group_by [metric.label.scene_id, metric.label.job_id], [episodes: max(value)]
+          | join (
+              fetch global
+              | metric 'logging.googleapis.com/user/blueprint_import_min_episodes_required'
+              | align max(1h)
+              | group_by [metric.label.scene_id, metric.label.job_id], [min_required: max(value)]
+            )
+          | value [episodes, min_required]
+          | condition episodes < min_required
+  combiner: OR
+  notificationChannels:
+    - projects/${PROJECT_ID}/notificationChannels/${NOTIFICATION_CHANNEL}
+
+---
 # Job Failure Rate Alert
 apiVersion: monitoring.googleapis.com/v1
 kind: AlertPolicy
