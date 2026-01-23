@@ -24,6 +24,17 @@ data:
   GENIESIM_PORT: "50051"
   GENIESIM_ROOT: "/opt/geniesim"
   ISAAC_SIM_PATH: "/isaac-sim"
+  # Production pipeline settings
+  PIPELINE_ENV: "production"
+  PRODUCTION_MODE: "true"
+  LEROBOT_EXPORT_FORMAT: "lerobot_v3"
+  REQUIRE_LEROBOT: "true"
+  # Firebase upload settings (auto-upload after import)
+  ENABLE_FIREBASE_UPLOAD: "true"
+  FIREBASE_UPLOAD_PREFIX: "datasets"
+  # Quality enforcement
+  ENABLE_VALIDATION: "true"
+  FILTER_LOW_QUALITY: "true"
 
 ---
 apiVersion: batch/v1
@@ -98,6 +109,10 @@ spec:
               value: "franka"
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /secrets/gcs/key.json
+            - name: FIREBASE_STORAGE_BUCKET
+              value: "${FIREBASE_STORAGE_BUCKET}"
+            - name: FIREBASE_SERVICE_ACCOUNT_PATH
+              value: /secrets/firebase/service-account.json
 
           resources:
             requests:
@@ -113,6 +128,9 @@ spec:
             - name: gcs-credentials
               mountPath: /secrets/gcs
               readOnly: true
+            - name: firebase-credentials
+              mountPath: /secrets/firebase
+              readOnly: true
             - name: dshm
               mountPath: /dev/shm
             - name: isaac-cache
@@ -125,6 +143,9 @@ spec:
         - name: gcs-credentials
           secret:
             secretName: gcs-service-account
+        - name: firebase-credentials
+          secret:
+            secretName: firebase-service-account
         - name: dshm
           emptyDir:
             medium: Memory

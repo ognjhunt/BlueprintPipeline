@@ -182,11 +182,18 @@ def test_lerobot_exporter_writes_v3_layout(load_job_module, tmp_path: Path) -> N
 
     info = json.loads((meta_dir / "info.json").read_text())
     assert info["export_format"] == LeRobotExportFormat.LEROBOT_V3.value
-    assert info["layout"] == "multi-episode"
-    assert info["episode_index"] == "meta/episode_index.json"
-    assert (data_dir / "episodes.parquet").exists()
+    assert info["version"] == "3.0"
+    # v3 uses file-based naming per official LeRobot v3.0 spec
+    assert (data_dir / "file-0000.parquet").exists()
 
-    episode_index = json.loads((meta_dir / "episode_index.json").read_text())
-    assert "episode_000000" in episode_index
-    assert episode_index["episode_000000"]["row_group"] == 0
-    assert episode_index["episode_000001"]["row_group"] == 1
+    # Episode metadata stored as Parquet in meta/episodes/
+    episodes_meta_dir = meta_dir / "episodes" / "chunk-000"
+    assert episodes_meta_dir.exists()
+    assert (episodes_meta_dir / "file-0000.parquet").exists()
+
+    if lerobot_exporter.HAVE_PYARROW:
+        import pyarrow.parquet as pq
+        episodes_meta = pq.read_table(episodes_meta_dir / "file-0000.parquet")
+        assert "episode_index" in episodes_meta.column_names
+        assert "num_frames" in episodes_meta.column_names
+        assert episodes_meta.num_rows == 2

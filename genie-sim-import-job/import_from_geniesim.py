@@ -979,16 +979,33 @@ def _resolve_lerobot_v3_paths(
     data_dir = _resolve_info_path(output_dir, data_path) if data_path else None
     if data_dir is None:
         data_dir = lerobot_root / "data"
-    episodes_parquet_path = data_dir / "chunk-000" / "episodes.parquet"
-    episode_index_value = None
-    if isinstance(info_payload, dict):
-        episode_index_value = info_payload.get("episode_index")
-    episode_index_path = _resolve_info_path(output_dir, episode_index_value)
-    if episode_index_path is None:
-        episode_index_path = lerobot_root / "meta" / "episode_index.json"
+
+    # LeRobot v3.0 official spec: data/chunk-{idx}/file-{idx}.parquet
+    # Also support legacy episodes.parquet for backward compatibility
+    data_parquet_path = data_dir / "chunk-000" / "file-0000.parquet"
+    if not data_parquet_path.exists():
+        legacy_path = data_dir / "chunk-000" / "episodes.parquet"
+        if legacy_path.exists():
+            data_parquet_path = legacy_path
+
+    # Episode metadata: meta/episodes/chunk-000/file-0000.parquet (v3 official spec)
+    # Fallback to legacy meta/episode_index.json for backward compatibility
+    episodes_meta_path = lerobot_root / "meta" / "episodes" / "chunk-000" / "file-0000.parquet"
+    if not episodes_meta_path.exists():
+        legacy_index = lerobot_root / "meta" / "episode_index.json"
+        if legacy_index.exists():
+            episodes_meta_path = legacy_index
+        else:
+            episode_index_value = None
+            if isinstance(info_payload, dict):
+                episode_index_value = info_payload.get("episode_index")
+            resolved = _resolve_info_path(output_dir, episode_index_value)
+            if resolved is not None:
+                episodes_meta_path = resolved
+
     return {
-        "episodes_parquet": episodes_parquet_path,
-        "episode_index": episode_index_path,
+        "episodes_parquet": data_parquet_path,
+        "episode_index": episodes_meta_path,
     }
 
 
@@ -1018,25 +1035,44 @@ def _validate_lerobot_metadata_files(
         episode_index_path = v3_paths["episode_index"]
         if not episodes_parquet_path.exists():
             schema_errors.append(
-                f"metadata {_relative_to_bundle(output_dir, episodes_parquet_path)}: missing episodes.parquet"
+                f"metadata {_relative_to_bundle(output_dir, episodes_parquet_path)}: missing data parquet file"
             )
         if episode_index_path.exists():
-            try:
-                episode_index_payload = _load_json_file(episode_index_path)
-                schema_errors.extend(
-                    _validate_schema_payload(
-                        episode_index_payload,
-                        "geniesim_local_episode_index_v3.schema.json",
-                        f"metadata {_relative_to_bundle(output_dir, episode_index_path)}",
+            # Handle both Parquet (v3 official) and JSON (legacy) episode metadata
+            if episode_index_path.suffix == ".parquet":
+                try:
+                    import pyarrow.parquet as _pq
+                    _meta_table = _pq.read_table(episode_index_path)
+                    required_cols = {"episode_index", "num_frames"}
+                    missing_cols = required_cols - set(_meta_table.column_names)
+                    if missing_cols:
+                        schema_errors.append(
+                            f"metadata {_relative_to_bundle(output_dir, episode_index_path)}: "
+                            f"missing columns {missing_cols}"
+                        )
+                except ImportError:
+                    pass  # pyarrow not available, skip parquet validation
+                except Exception as exc:
+                    schema_errors.append(
+                        f"metadata {_relative_to_bundle(output_dir, episode_index_path)}: {exc}"
                     )
-                )
-            except Exception as exc:
-                schema_errors.append(
-                    f"metadata {_relative_to_bundle(output_dir, episode_index_path)}: {exc}"
-                )
+            else:
+                try:
+                    episode_index_payload = _load_json_file(episode_index_path)
+                    schema_errors.extend(
+                        _validate_schema_payload(
+                            episode_index_payload,
+                            "geniesim_local_episode_index_v3.schema.json",
+                            f"metadata {_relative_to_bundle(output_dir, episode_index_path)}",
+                        )
+                    )
+                except Exception as exc:
+                    schema_errors.append(
+                        f"metadata {_relative_to_bundle(output_dir, episode_index_path)}: {exc}"
+                    )
         else:
             schema_errors.append(
-                f"metadata {_relative_to_bundle(output_dir, episode_index_path)}: missing episode_index.json"
+                f"metadata {_relative_to_bundle(output_dir, episode_index_path)}: missing episode metadata"
             )
     else:
         if episodes_index_path.exists():
@@ -2162,6 +2198,74 @@ class ImportedEpisodeValidator:
 # =============================================================================
 
 
+def _compute_lerobot_stats(
+    output_dir: Path,
+    num_episodes: int,
+) -> Optional[Dict[str, Any]]:
+    """Compute per-feature normalization statistics (min/max/mean/std).
+
+    Reads all converted episode Parquet files and computes running statistics
+    for observation.state and action features. Required by LeRobot v3 for
+    dataset.meta.stats normalization in training scripts.
+
+    Returns:
+        Dict with per-feature stats, or None if computation fails.
+    """
+    if num_episodes == 0:
+        return None
+
+    try:
+        import pyarrow.parquet as _pq
+    except ImportError:
+        logger.warning("pyarrow not available; skipping stats.json generation")
+        return None
+
+    all_states = []
+    all_actions = []
+
+    for ep_idx in range(num_episodes):
+        ep_path = output_dir / f"episode_{ep_idx:06d}.parquet"
+        if not ep_path.exists():
+            continue
+        try:
+            table = _pq.read_table(ep_path)
+            if "observation.state" in table.column_names:
+                col = table["observation.state"]
+                for row in col.to_pylist():
+                    if isinstance(row, (list, np.ndarray)):
+                        all_states.append(np.array(row, dtype=np.float64))
+            if "action" in table.column_names:
+                col = table["action"]
+                for row in col.to_pylist():
+                    if isinstance(row, (list, np.ndarray)):
+                        all_actions.append(np.array(row, dtype=np.float64))
+        except Exception as exc:
+            logger.warning("Failed to read episode %d for stats: %s", ep_idx, exc)
+            continue
+
+    stats: Dict[str, Any] = {}
+
+    if all_states:
+        states_arr = np.array(all_states)
+        stats["observation.state"] = {
+            "min": states_arr.min(axis=0).tolist(),
+            "max": states_arr.max(axis=0).tolist(),
+            "mean": states_arr.mean(axis=0).tolist(),
+            "std": states_arr.std(axis=0).tolist(),
+        }
+
+    if all_actions:
+        actions_arr = np.array(all_actions)
+        stats["action"] = {
+            "min": actions_arr.min(axis=0).tolist(),
+            "max": actions_arr.max(axis=0).tolist(),
+            "mean": actions_arr.mean(axis=0).tolist(),
+            "std": actions_arr.std(axis=0).tolist(),
+        }
+
+    return stats if stats else None
+
+
 def convert_to_lerobot(
     episodes_dir: Path,
     output_dir: Path,
@@ -2381,6 +2485,17 @@ def convert_to_lerobot(
                 episode_output = output_dir / f"episode_{converted_count:06d}.parquet"
                 pq.write_table(lerobot_table, episode_output)
 
+                # Validate written Parquet file integrity
+                readback = pq.ParquetFile(episode_output)
+                readback_rows = readback.metadata.num_rows
+                expected_rows = len(df)
+                if readback_rows != expected_rows:
+                    raise IOError(
+                        f"Parquet integrity check failed for episode "
+                        f"{ep_metadata.episode_id}: expected {expected_rows} rows "
+                        f"but file contains {readback_rows}"
+                    )
+
                 # Update dataset info
                 dataset_info["episodes"].append({
                     "episode_id": ep_metadata.episode_id,
@@ -2437,6 +2552,12 @@ def convert_to_lerobot(
         dataset_info["average_quality_score"] = float(np.mean(quality_scores))
         dataset_info["min_quality_score"] = float(np.min(quality_scores))
         dataset_info["max_quality_score"] = float(np.max(quality_scores))
+
+    # Compute and write per-feature normalization stats (required by LeRobot v3)
+    stats = _compute_lerobot_stats(output_dir, converted_count)
+    if stats:
+        stats_file = output_dir / "stats.json"
+        write_json_atomic(stats_file, stats, indent=2)
 
     # Write dataset metadata
     metadata_file = output_dir / "dataset_info.json"
@@ -3060,6 +3181,11 @@ def run_local_import_job(
     result.upload_failures = upload_summary["failures"]
     result.upload_started_at = upload_summary["started_at"]
     result.upload_completed_at = upload_summary["completed_at"]
+    if upload_summary["status"] == "failed":
+        failed_count = upload_summary.get("failed", 0)
+        result.errors.append(
+            f"GCS upload failed: {failed_count} file(s) could not be uploaded"
+        )
 
     asset_provenance_path = _resolve_asset_provenance_reference(
         bundle_root=bundle_root,
@@ -3232,6 +3358,10 @@ def _emit_import_quality_gate(
 
     def _check_import(ctx: Dict[str, Any]) -> QualityGateResult:
         passed = ctx["success"]
+        # If GCS upload was configured and failed, the import is not complete
+        upload_status = ctx.get("upload_status")
+        if upload_status == "failed":
+            passed = False
         severity = QualityGateSeverity.INFO if passed else QualityGateSeverity.ERROR
         message = (
             "Genie Sim import completed successfully"
@@ -3247,7 +3377,8 @@ def _emit_import_quality_gate(
             "errors": ctx["errors"],
             "warnings": ctx["warnings"],
             "checksum_verification_passed": ctx["checksum_verification_passed"],
-            "upload_status": ctx["upload_status"],
+            "upload_status": upload_status,
+            "firebase_upload_required": ctx.get("firebase_upload_required", False),
         }
         return QualityGateResult(
             gate_id="import_complete",
@@ -3742,6 +3873,23 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         firebase_summary.get("failed", 0),
                         firebase_summary.get("total_files", 0),
                     )
+                    failed_count = firebase_summary.get("failed", 0)
+                    if failed_count > 0:
+                        _alert_firebase_upload_failure(
+                            scene_id=scene_id,
+                            job_id=job_id,
+                            robot_type=robot_type,
+                            error=f"{failed_count} file(s) failed to upload to Firebase",
+                        )
+                        log.error(
+                            "Firebase upload incomplete for robot %s: %d file(s) failed.",
+                            robot_type,
+                            failed_count,
+                        )
+                        entry["errors"].append(
+                            f"Firebase upload incomplete: {failed_count} file(s) failed"
+                        )
+                        overall_success = False
             elif enable_firebase_upload and firebase_upload_suppressed:
                 log.warning(
                     "Firebase uploads suppressed (reason=%s).",
@@ -3906,6 +4054,20 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                     upload_summary.get("failed", 0),
                     upload_summary.get("total_files", 0),
                 )
+                failed_count = upload_summary.get("failed", 0)
+                if failed_count > 0:
+                    _alert_firebase_upload_failure(
+                        scene_id=scene_id,
+                        job_id=job_id,
+                        robot_type="default",
+                        error=f"{failed_count} file(s) failed to upload to Firebase",
+                    )
+                    log.error(
+                        "Firebase upload incomplete: %d file(s) failed. "
+                        "Completion marker will NOT be written.",
+                        failed_count,
+                    )
+                    sys.exit(1)
             sys.exit(0)
         else:
             log.error("Import failed")
