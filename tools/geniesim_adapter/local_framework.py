@@ -625,6 +625,7 @@ class GeneratedEpisodeMetadata:
     episode_id: str
     task_name: str
     quality_score: float
+    quality_components: Dict[str, float] = field(default_factory=dict)
     frame_count: int
     duration_seconds: float
     validation_passed: bool
