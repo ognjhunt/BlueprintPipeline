@@ -663,7 +663,7 @@ class PipelineMetricsCollector:
             )
 
             try:
-                from tools.cost_tracking import get_cost_tracker
+                from tools.cost_tracking import CostQuotaExceeded, get_cost_tracker
 
                 cost_tracker = get_cost_tracker()
                 cost_tracker.track_compute(
@@ -671,6 +671,14 @@ class PipelineMetricsCollector:
                     job_name=job_name,
                     duration_seconds=duration,
                 )
+            except CostQuotaExceeded as exc:
+                logger.error(
+                    "[METRICS] Cost hard quota exceeded for %s/%s: %s",
+                    job_name,
+                    scene_id,
+                    exc,
+                )
+                raise
             except Exception as e:
                 logger.debug(
                     "[METRICS] Cost tracking skipped for %s/%s: %s",

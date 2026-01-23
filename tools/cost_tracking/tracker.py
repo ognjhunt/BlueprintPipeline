@@ -42,6 +42,8 @@ COST_TRACKING_PRICING_PATH_ENV = "COST_TRACKING_PRICING_PATH"
 DEFAULT_PRICING_PATH = Path(__file__).with_name("pricing_defaults.json")
 COST_ALERT_PER_SCENE_ENV = "COST_ALERT_PER_SCENE_USD"
 COST_ALERT_TOTAL_ENV = "COST_ALERT_TOTAL_USD"
+COST_HARD_QUOTA_PER_SCENE_ENV = "COST_HARD_QUOTA_PER_SCENE_USD"
+COST_HARD_QUOTA_TOTAL_ENV = "COST_HARD_QUOTA_TOTAL_USD"
 
 DEFAULT_GENIESIM_GPU_RATES = {
     "default": {
@@ -69,6 +71,39 @@ def _parse_optional_threshold(env_var: str) -> Optional[float]:
         logger.warning("Ignoring non-positive %s=%s for cost alert threshold.", env_var, value)
         return None
     return threshold
+
+
+def _parse_optional_quota(env_var: str) -> Optional[float]:
+    value = os.getenv(env_var)
+    if value is None or value == "":
+        return None
+    quota = _parse_float(value, env_var=env_var)
+    if quota <= 0:
+        raise ValueError(f"{env_var} must be greater than zero.")
+    return quota
+
+
+class CostQuotaExceeded(RuntimeError):
+    """Raised when cost hard quotas are exceeded."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        scene_id: str,
+        scene_total: float,
+        total_cost: float,
+        scene_quota: Optional[float],
+        total_quota: Optional[float],
+        entry: CostEntry,
+    ) -> None:
+        super().__init__(message)
+        self.scene_id = scene_id
+        self.scene_total = scene_total
+        self.total_cost = total_cost
+        self.scene_quota = scene_quota
+        self.total_quota = total_quota
+        self.entry = entry
 
 
 def _sanitize_pricing_payload(parsed: Any, *, source: str) -> Dict[str, float]:
@@ -484,6 +519,8 @@ class CostTracker:
         self.total_cost: float = 0.0
         self.scene_alert_threshold = _parse_optional_threshold(COST_ALERT_PER_SCENE_ENV)
         self.total_alert_threshold = _parse_optional_threshold(COST_ALERT_TOTAL_ENV)
+        self.scene_hard_quota = _parse_optional_quota(COST_HARD_QUOTA_PER_SCENE_ENV)
+        self.total_hard_quota = _parse_optional_quota(COST_HARD_QUOTA_TOTAL_ENV)
         self.last_scene_alert_totals: Dict[str, float] = {}
         self.last_total_alert_total: float = 0.0
 
@@ -969,7 +1006,42 @@ class CostTracker:
             )
         if entry is None:
             return
+        self._enforce_hard_quotas(scene_id, entry)
         self._maybe_alert_thresholds(scene_id, entry)
+
+    def _enforce_hard_quotas(self, scene_id: str, entry: CostEntry) -> None:
+        scene_total = self.scene_totals.get(scene_id, 0.0)
+        total_cost = self.total_cost
+        if self.scene_hard_quota is not None and scene_total > self.scene_hard_quota:
+            message = (
+                "Scene cost hard quota exceeded "
+                f"(${scene_total:.2f} > ${self.scene_hard_quota:.2f}) "
+                f"for scene {scene_id} after {entry.category}/{entry.subcategory}."
+            )
+            raise CostQuotaExceeded(
+                message,
+                scene_id=scene_id,
+                scene_total=scene_total,
+                total_cost=total_cost,
+                scene_quota=self.scene_hard_quota,
+                total_quota=self.total_hard_quota,
+                entry=entry,
+            )
+        if self.total_hard_quota is not None and total_cost > self.total_hard_quota:
+            message = (
+                "Total cost hard quota exceeded "
+                f"(${total_cost:.2f} > ${self.total_hard_quota:.2f}) "
+                f"after {entry.category}/{entry.subcategory} for scene {scene_id}."
+            )
+            raise CostQuotaExceeded(
+                message,
+                scene_id=scene_id,
+                scene_total=scene_total,
+                total_cost=total_cost,
+                scene_quota=self.scene_hard_quota,
+                total_quota=self.total_hard_quota,
+                entry=entry,
+            )
 
     def _maybe_alert_thresholds(self, scene_id: str, entry: CostEntry) -> None:
         if not self.scene_alert_threshold and not self.total_alert_threshold:
