@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from tools.metrics.pipeline_metrics import get_metrics
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
 from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
 from tools.scene_batch_reporting import _summarize_batch_results
+from tools.locking.gcs_lock import DEFAULT_HEARTBEAT_SECONDS, DEFAULT_TTL_SECONDS, GCSLock
 
 logger = logging.getLogger(__name__)
 
@@ -359,6 +361,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_scene_batch_lock() -> tuple[Optional[GCSLock], float]:
+    bucket = os.getenv("GCS_LOCK_BUCKET")
+    prefix = os.getenv("GCS_LOCK_PREFIX")
+    if not bucket or not prefix:
+        return None, 0.0
+    ttl_seconds = int(os.getenv("GCS_LOCK_TTL_SECONDS", str(DEFAULT_TTL_SECONDS)))
+    heartbeat_seconds = int(os.getenv("GCS_LOCK_HEARTBEAT_SECONDS", str(DEFAULT_HEARTBEAT_SECONDS)))
+    wait_timeout = float(os.getenv("GCS_LOCK_WAIT_SECONDS", "0"))
+    lock_name = os.getenv("GCS_LOCK_NAME", "scene-batch.lock").lstrip("/")
+    object_name = f"{prefix.rstrip('/')}/{lock_name}".lstrip("/")
+    lock = GCSLock(
+        bucket_name=bucket,
+        object_name=object_name,
+        ttl_seconds=ttl_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+    )
+    return lock, wait_timeout
+
+
 def main() -> int:
     parser = _build_arg_parser()
     args = parser.parse_args()
@@ -420,23 +441,37 @@ def main() -> int:
 
     scene_map = {item.scene_id: item for item in items}
 
-    async def _run() -> Dict[str, Any]:
-        batch_result = await runner.process_batch(
-            scene_ids=[item.scene_id for item in items],
-            process_fn=lambda scene_id: process_scene(scene_map[scene_id]),
-            progress_callback=progress_callback,
-        )
+    lock, wait_timeout = _build_scene_batch_lock()
+    if lock:
+        logger.info("Attempting to acquire GCS lock %s", lock.gcs_uri)
+        if not lock.acquire(wait_timeout=wait_timeout):
+            logger.error("Failed to acquire GCS lock %s; another worker is active.", lock.gcs_uri)
+            return 3
+    else:
+        logger.info("GCS lock not configured; proceeding without global lock.")
 
-        summary = _summarize_batch_results(batch_result.results, args.reports_dir, dlq_path=args.dlq_path)
-        logger.info(
-            "Batch complete: %s success, %s failed, %s cancelled",
-            summary["success"],
-            summary["failed"],
-            summary["cancelled"],
-        )
-        return summary
+    try:
+        async def _run() -> Dict[str, Any]:
+            batch_result = await runner.process_batch(
+                scene_ids=[item.scene_id for item in items],
+                process_fn=lambda scene_id: process_scene(scene_map[scene_id]),
+                progress_callback=progress_callback,
+            )
 
-    summary = asyncio.run(_run())
+            summary = _summarize_batch_results(batch_result.results, args.reports_dir, dlq_path=args.dlq_path)
+            logger.info(
+                "Batch complete: %s success, %s failed, %s cancelled",
+                summary["success"],
+                summary["failed"],
+                summary["cancelled"],
+            )
+            return summary
+
+        summary = asyncio.run(_run())
+    finally:
+        if lock:
+            lock.release()
+
     return 0 if summary["failed"] == 0 else 2
 
 

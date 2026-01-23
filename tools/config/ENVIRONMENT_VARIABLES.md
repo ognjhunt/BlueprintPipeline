@@ -511,6 +511,28 @@ export GOOGLE_CLOUD_PROJECT=my-blueprint-project
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
 ```
 
+### GCS Locking (Scene Batch)
+
+Use these variables to enable the GCS-backed global lock used by `tools/run_scene_batch.py`. The lock object
+is created with `ifGenerationMatch=0` and refreshed periodically to prevent concurrent workers from running.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `GCS_LOCK_BUCKET` | str | None | GCS bucket name to store the lock object. |
+| `GCS_LOCK_PREFIX` | str | None | GCS prefix (folder) for lock objects. |
+| `GCS_LOCK_TTL_SECONDS` | int | 1800 | TTL for the lock before it is considered stale and can be evicted. |
+| `GCS_LOCK_HEARTBEAT_SECONDS` | int | 300 | Heartbeat interval to refresh the lock TTL. |
+| `GCS_LOCK_WAIT_SECONDS` | float | 0 | Optional time to wait for the lock before exiting. |
+| `GCS_LOCK_NAME` | str | `scene-batch.lock` | Lock object name within the prefix. |
+
+**Example**:
+```bash
+export GCS_LOCK_BUCKET=blueprint-8c1ca.appspot.com
+export GCS_LOCK_PREFIX=locks/scene-batch
+export GCS_LOCK_TTL_SECONDS=1800
+export GCS_LOCK_HEARTBEAT_SECONDS=300
+```
+
 ### Service Keys
 
 | Variable | Type | Required | Description |
