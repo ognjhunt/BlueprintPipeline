@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from tools.lerobot_format import LeRobotExportFormat
+from tools.config.production_mode import resolve_production_mode
 
 from .scene_graph import SceneGraphConverter, GenieSimSceneGraph
 from .asset_index import AssetIndexBuilder, GenieSimAssetIndex
@@ -74,7 +75,7 @@ class GenieSimExportConfig:
     multi_robot_config: Optional[MultiRobotConfig] = None  # Uses DEFAULT if None
 
     # Export options
-    generate_embeddings: bool = False
+    generate_embeddings: bool = field(default_factory=resolve_production_mode)
     embedding_model: str = "qwen-text-embedding-v4"
     require_embeddings: bool = False
     max_tasks: int = 50

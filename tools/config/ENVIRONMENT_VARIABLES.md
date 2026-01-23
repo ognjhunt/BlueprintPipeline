@@ -536,7 +536,11 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 |----------|------|---------|-------------|
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
 | `GENIESIM_ENV` | str | `development` | Environment toggle for Genie Sim integrations (`production` disables mock/fallback behavior). |
+| `GENERATE_EMBEDDINGS` | bool | false | Generate embeddings for Genie Sim asset indexing. Defaults to `true` when `GENIESIM_ENV`/`PIPELINE_ENV` resolves to production. Requires provider credentials when `REQUIRE_EMBEDDINGS=true`. |
 | `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (placeholders disallowed in production). Defaults to `true` when `GENIESIM_ENV`/`BP_ENV` resolves to production. |
+| `OPENAI_API_KEY` | str | unset | OpenAI API key (required when embeddings are enabled with OpenAI as the provider). |
+| `QWEN_API_KEY` | str | unset | Qwen API key (DashScope) for embeddings; required when embeddings are enabled with the Qwen provider. |
+| `DASHSCOPE_API_KEY` | str | unset | DashScope API key (alias of `QWEN_API_KEY`) for Qwen embeddings; required when embeddings are enabled. |
 | `GENIESIM_HOST` | str | `localhost` | Genie Sim gRPC host (local framework) |
 | `GENIESIM_PORT` | int | 50051 | Genie Sim gRPC port (local framework). |
 | `GENIESIM_GRPC_TIMEOUT_S` | float | 30.0 | gRPC request timeout for Genie Sim adapters (seconds). Falls back to legacy `GENIESIM_TIMEOUT` if set. |
@@ -589,8 +593,8 @@ export CUROBO_REQUIRED=true
 
 For production asset indexing/embedding flows, placeholder embeddings are disallowed. Ensure
 `REQUIRE_EMBEDDINGS=true` (or avoid overriding it) whenever `GENERATE_EMBEDDINGS=true`, and configure a valid
-embedding provider (`OPENAI_API_KEY` or `QWEN_API_KEY`/`DASHSCOPE_API_KEY`, plus the corresponding embedding
-model) or exports will fail fast.
+embedding provider or exports will fail fast. Supported providers are OpenAI (`OPENAI_API_KEY`) and Qwen via
+DashScope (`QWEN_API_KEY` or `DASHSCOPE_API_KEY`), plus the corresponding embedding model.
 
 ---
 
