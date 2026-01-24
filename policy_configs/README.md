@@ -8,6 +8,7 @@ Configuration files that define policy behaviors, environments, and defaults use
 - `environment_policies.json` environment policy definitions.
 - `physics_profiles.json` physics profile definitions.
 - `planning_defaults.yaml` planning defaults.
+- `retry_policy.yaml` retry/backoff defaults for workflows and local tools.
 - `robot_embodiments.json` robot embodiment definitions.
 
 ## Primary entrypoints
@@ -22,4 +23,3 @@ Configuration files that define policy behaviors, environments, and defaults use
 
 ## How to run locally
 - These files are static configs; update them and run the consuming job or tests to validate changes.
-
