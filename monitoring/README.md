@@ -97,6 +97,11 @@ The Grafana dashboard includes the following Genie Sim quality/performance panel
 - **errors_total**: Errors by type
 - **retries_total**: Retry attempts
 
+### Delivery Integrity Audit
+- **pipeline_runs_total** (`job=dataset-delivery-integrity-audit-job`): Per-bundle integrity pass/fail counts
+- **errors_total** (`job=dataset-delivery-integrity-audit-job`): Audit failures by error type
+- **storage_bytes_written_total** (`job=dataset-delivery-integrity-audit-job`): Bytes written for audit reports
+
 ### Cost Metrics
 - **cost_per_scene**: Rolling total cost per scene (USD)
 
@@ -198,6 +203,24 @@ endpoint when health checks fail or jobs crash.
    ```
 
 ## Setting Up Alerts
+
+## Delivery Integrity Audit (Weekly)
+
+The delivery integrity audit verifies delivered bundles against their `checksums.json` manifests and writes a report to
+GCS. The workflow is defined in `workflows/delivery-integrity-audit.yaml` and is intended to be invoked weekly via
+Cloud Scheduler (for example: `0 3 * * 1` for Mondays at 03:00 UTC).【F:workflows/delivery-integrity-audit.yaml†L1-L170】
+
+### Expected Outputs
+- **Audit report**: `gs://<audit-report-bucket>/audit-reports/delivery-integrity/<timestamp>_integrity_audit.json`
+  - Includes per-bundle pass/fail status, missing files, checksum mismatches, and size mismatches.
+- **Logs**: Structured audit events with `bp_metric=delivery_integrity_audit`, plus workflow start/complete entries.
+- **Metrics**: `pipeline_runs_total`, `errors_total`, and `storage_bytes_written_total` labeled with the audit job.
+
+### Remediation Steps
+1. **Identify failing bundles** in the audit report under `bundles` or `errors`.
+2. **Re-run dataset delivery** for the affected scene/job to regenerate the bundle in the delivery bucket.
+3. **Recompute checksums** if source files changed, then re-run the audit.
+4. **Escalate storage corruption** if checksum mismatches persist after re-delivery.
 
 ### Google Cloud Monitoring
 
