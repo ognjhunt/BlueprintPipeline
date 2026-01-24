@@ -64,6 +64,8 @@ from typing import Any, Dict, List, Mapping, Optional
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from tools.metrics.job_metrics_exporter import export_job_metrics
+
 from import_manifest_utils import (
     ENV_SNAPSHOT_KEYS,
     MANIFEST_SCHEMA_DEFINITION,
@@ -4762,6 +4764,14 @@ def run_local_import_job(
         "backend": metrics.backend.value,
         "stats": metrics.get_stats(),
     }
+    try:
+        if job_metadata:
+            export_job_metrics(job_payload=job_metadata, scene_id=scene_id)
+        elif config.job_metadata_path and bucket:
+            job_metadata_path = _resolve_local_path(bucket, config.job_metadata_path)
+            export_job_metrics(job_json_path=job_metadata_path, scene_id=scene_id)
+    except Exception as exc:
+        log.warning("Failed to export Genie Sim job metrics summary: %s", exc)
 
     episode_checksums = []
     for episode_file in sorted(recordings_dir.rglob("*.json")):
