@@ -102,6 +102,26 @@ def test_init_firebase_missing_service_account_path_raises(monkeypatch, tmp_path
         uploader.init_firebase()
 
 
+def test_preflight_allows_adc_credentials(monkeypatch):
+    monkeypatch.setenv("FIREBASE_STORAGE_BUCKET", "test-bucket")
+    monkeypatch.delenv("FIREBASE_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.delenv("FIREBASE_SERVICE_ACCOUNT_PATH", raising=False)
+    monkeypatch.delenv("FIREBASE_STORAGE_EMULATOR_HOST", raising=False)
+
+    called = {"adc": False}
+
+    def _fake_default():
+        called["adc"] = True
+        return object(), "test-project"
+
+    monkeypatch.setattr(uploader.google.auth, "default", _fake_default)
+
+    auth_mode = uploader._preflight_firebase_credentials()
+
+    assert called["adc"] is True
+    assert auth_mode == "adc"
+
+
 def test_upload_episodes_to_firebase_uploads(monkeypatch, tmp_path):
     _setup_firebase_env(monkeypatch)
     bucket = FakeBucket()
