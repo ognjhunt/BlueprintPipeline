@@ -21,12 +21,14 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Type
 
 logger = logging.getLogger(__name__)
@@ -128,6 +130,7 @@ class CircuitBreaker:
         success_threshold: int = 2,
         recovery_timeout: float = 30.0,
         failure_window: float = 60.0,
+        persistence_path: Optional[str | Path] = None,
         on_open: Optional[Callable[[str, int], None]] = None,
         on_close: Optional[Callable[[str], None]] = None,
         on_half_open: Optional[Callable[[str], None]] = None,
@@ -149,6 +152,10 @@ class CircuitBreaker:
         self._last_failure_time: Optional[float] = None
         self._opened_at: Optional[float] = None
         self._lock = threading.RLock()
+        self._persistence_path = Path(persistence_path) if persistence_path else None
+
+        if self._persistence_path:
+            self._load_state()
 
         # Register in global registry
         with CircuitBreaker._registry_lock:
@@ -212,6 +219,7 @@ class CircuitBreaker:
 
         if self.config.on_open:
             self.config.on_open(self.name, failure_count)
+        self._persist_state()
 
     def _transition_to_half_open(self) -> None:
         """Transition to half-open state."""
@@ -222,6 +230,7 @@ class CircuitBreaker:
 
         if self.config.on_half_open:
             self.config.on_half_open(self.name)
+        self._persist_state()
 
     def _transition_to_closed(self) -> None:
         """Transition to closed state."""
@@ -234,6 +243,7 @@ class CircuitBreaker:
 
         if self.config.on_close:
             self.config.on_close(self.name)
+        self._persist_state()
 
     def record_success(self) -> None:
         """Record a successful call."""
@@ -242,6 +252,8 @@ class CircuitBreaker:
                 self._success_count += 1
                 if self._success_count >= self.config.success_threshold:
                     self._transition_to_closed()
+                else:
+                    self._persist_state()
 
     def record_failure(self, exception: Exception) -> None:
         """Record a failed call."""
@@ -270,6 +282,10 @@ class CircuitBreaker:
                 # Check if we should open
                 if len(self._failures) >= self.config.failure_threshold:
                     self._transition_to_open(len(self._failures))
+                else:
+                    self._persist_state()
+            else:
+                self._persist_state()
 
     def allow_request(self) -> bool:
         """Check if a request should be allowed."""
@@ -341,6 +357,79 @@ class CircuitBreaker:
             with self:
                 return func(*args, **kwargs)
         return wrapper
+
+    def _serialize_state(self) -> Dict[str, Any]:
+        return {
+            "state": self._state.value,
+            "last_failure_time": self._last_failure_time,
+            "opened_at": self._opened_at,
+            "success_count": self._success_count,
+            "failures": [
+                {
+                    "timestamp": failure.timestamp,
+                    "exception_type": failure.exception_type,
+                    "message": failure.message,
+                }
+                for failure in self._failures
+            ],
+        }
+
+    def _deserialize_state(self, payload: Dict[str, Any]) -> None:
+        state_value = payload.get("state", CircuitState.CLOSED.value)
+        try:
+            self._state = CircuitState(state_value)
+        except ValueError:
+            logger.warning(
+                "Circuit breaker '%s' persisted state '%s' is invalid; defaulting to closed",
+                self.name,
+                state_value,
+            )
+            self._state = CircuitState.CLOSED
+
+        self._last_failure_time = payload.get("last_failure_time")
+        self._opened_at = payload.get("opened_at")
+        self._success_count = int(payload.get("success_count", 0))
+        self._failures = [
+            FailureRecord(
+                timestamp=item.get("timestamp", 0.0),
+                exception_type=item.get("exception_type", "Exception"),
+                message=item.get("message", ""),
+            )
+            for item in payload.get("failures", [])
+            if isinstance(item, dict)
+        ]
+
+        self._check_state_transition()
+
+    def _load_state(self) -> None:
+        if not self._persistence_path or not self._persistence_path.exists():
+            return
+        try:
+            with self._persistence_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict):
+                with self._lock:
+                    self._deserialize_state(payload)
+        except Exception:
+            logger.exception(
+                "Failed to load circuit breaker state from %s", self._persistence_path
+            )
+
+    def _persist_state(self) -> None:
+        if not self._persistence_path:
+            return
+        try:
+            self._persistence_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._persistence_path.with_suffix(
+                f"{self._persistence_path.suffix}.tmp"
+            )
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(self._serialize_state(), handle)
+            tmp_path.replace(self._persistence_path)
+        except Exception:
+            logger.exception(
+                "Failed to persist circuit breaker state to %s", self._persistence_path
+            )
 
 
 class CircuitBreakerGroup:
