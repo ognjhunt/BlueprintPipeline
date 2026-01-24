@@ -14,12 +14,12 @@
     "checksums"
   ],
   "properties": {
-    "schema_version": {"type": "string"},
+    "schema_version": {"type": "string", "enum": ["3.0"]},
     "schema_definition": {
       "type": "object",
       "required": ["version", "description", "fields"],
       "properties": {
-        "version": {"type": "string"},
+        "version": {"type": "string", "enum": ["3.0"]},
         "description": {"type": "string"},
         "fields": {
           "type": "object",
