@@ -7,7 +7,7 @@ numpy==1.26.4
 jsonschema==4.23.0
 
 # Optional: Embedding generation (if GENERATE_EMBEDDINGS=true)
-# sentence-transformers>=2.2.0  # For local embeddings
+sentence-transformers==3.3.1    # For local embeddings (LOCAL_EMBEDDING_FALLBACK)
 # openai>=1.0.0                 # For API-based embeddings
 
 # Metrics

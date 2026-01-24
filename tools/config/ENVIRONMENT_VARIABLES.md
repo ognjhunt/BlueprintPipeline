@@ -656,6 +656,8 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENERATE_EMBEDDINGS` | bool | false | Generate embeddings for Genie Sim asset indexing. Defaults to `true` when `GENIESIM_ENV`/`PIPELINE_ENV` resolves to production. Requires provider credentials when `REQUIRE_EMBEDDINGS=true`. |
 | `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (placeholders disallowed in production). Defaults to `true` when `GENIESIM_ENV`/`BP_ENV` resolves to production. |
 | `ALLOW_EMBEDDING_FALLBACK` | bool | false | Allow deterministic placeholder embeddings in production when `REQUIRE_EMBEDDINGS=false` (logs warnings instead of failing fast). |
+| `LOCAL_EMBEDDING_FALLBACK` | bool | false | Enable local embedding generation via `sentence-transformers` before falling back to placeholders. Treated as acceptable when `REQUIRE_EMBEDDINGS=true`. |
+| `LOCAL_EMBEDDING_MODEL` | str | `all-MiniLM-L6-v2` | Sentence-transformers model name to use for local embedding fallback. |
 | `OPENAI_API_KEY` | str | unset | OpenAI API key (required when embeddings are enabled with OpenAI as the provider). |
 | `QWEN_API_KEY` | str | unset | Qwen API key (DashScope) for embeddings; required when embeddings are enabled with the Qwen provider. |
 | `DASHSCOPE_API_KEY` | str | unset | DashScope API key (alias of `QWEN_API_KEY`) for Qwen embeddings; required when embeddings are enabled. |
@@ -726,8 +728,9 @@ The `GENIESIM_READINESS_TIMEOUT_S` value governs how long health checks and subm
 
 For production asset indexing/embedding flows, placeholder embeddings are disallowed. Ensure
 `REQUIRE_EMBEDDINGS=true` (or avoid overriding it) whenever `GENERATE_EMBEDDINGS=true`, and configure a valid
-embedding provider or exports will fail fast. Supported providers are OpenAI (`OPENAI_API_KEY`) and Qwen via
-DashScope (`QWEN_API_KEY` or `DASHSCOPE_API_KEY`), plus the corresponding embedding model.
+embedding provider or enable `LOCAL_EMBEDDING_FALLBACK` with `sentence-transformers` installed. Supported providers
+are OpenAI (`OPENAI_API_KEY`) and Qwen via DashScope (`QWEN_API_KEY` or `DASHSCOPE_API_KEY`), plus the corresponding
+embedding model.
 
 ---
 

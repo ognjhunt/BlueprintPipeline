@@ -405,6 +405,20 @@ class AssetIndexBuilder:
                 self.allow_embedding_fallback = False
         else:
             self.allow_embedding_fallback = allow_embedding_fallback
+        local_fallback_env = os.getenv("LOCAL_EMBEDDING_FALLBACK")
+        if local_fallback_env is not None:
+            self.local_embedding_fallback = local_fallback_env.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        else:
+            self.local_embedding_fallback = False
+        self.local_embedding_model = os.getenv(
+            "LOCAL_EMBEDDING_MODEL",
+            "all-MiniLM-L6-v2",
+        )
 
         if embedding_dim is None:
             embedding_dim_env = os.getenv("GENIESIM_EMBEDDING_DIM", "").strip()
@@ -430,6 +444,7 @@ class AssetIndexBuilder:
         # Embedding client (initialized lazily)
         self._embedding_client = None
         self._embedding_config: Optional[Dict[str, str]] = None
+        self._local_embedding_client = None
 
     def log(self, msg: str, level: str = "INFO") -> None:
         if self.verbose:
@@ -467,6 +482,7 @@ class AssetIndexBuilder:
         embedding_failure_rate = 0.0
         embedding_failures = 0
         placeholder_embeddings = 0
+        local_fallback_embeddings = 0
 
         # Generate embeddings if requested
         if self.generate_embeddings and assets:
@@ -475,6 +491,7 @@ class AssetIndexBuilder:
             embedding_failure_rate = embedding_result["failure_rate"]
             embedding_failures = embedding_result["failure_count"]
             placeholder_embeddings = embedding_result["placeholder_count"]
+            local_fallback_embeddings = embedding_result["local_fallback_count"]
         else:
             for asset in assets:
                 asset.embedding_status = "not_requested"
@@ -483,6 +500,8 @@ class AssetIndexBuilder:
             embedding_mode = "disabled"
         elif placeholder_embeddings > 0 and self._fallback_enabled():
             embedding_mode = "fallback"
+        elif local_fallback_embeddings > 0:
+            embedding_mode = "fallback_local"
         elif self._resolve_embedding_config() is not None:
             embedding_mode = "provider"
         else:
@@ -500,6 +519,7 @@ class AssetIndexBuilder:
             "embedding_failures": embedding_failures,
             "placeholder_embeddings_allowed": not self.require_embeddings,
             "placeholder_embeddings_used": placeholder_embeddings,
+            "local_fallback_embeddings_used": local_fallback_embeddings,
             "embedding_mode": embedding_mode,
             "embedding_fallback_allowed": self.allow_embedding_fallback,
         }
@@ -880,8 +900,10 @@ class AssetIndexBuilder:
         self.log(f"Generating embeddings for {len(assets)} assets...")
         production_mode = self._is_production()
         fallback_enabled = self._fallback_enabled()
+        local_fallback_enabled = self._local_fallback_enabled()
         errors: List[Dict[str, str]] = []
         placeholder_count = 0
+        local_fallback_count = 0
 
         for asset in assets:
             try:
@@ -906,8 +928,10 @@ class AssetIndexBuilder:
             asset.embedding_status = status
             if status in {"placeholder", "fallback"}:
                 placeholder_count += 1
+            elif status == "fallback_local":
+                local_fallback_count += 1
 
-            if status != "ok":
+            if status not in {"ok", "fallback_local"}:
                 errors.append({"asset_id": asset.asset_id, "error": error_message})
                 if production_mode and self.require_embeddings:
                     raise RuntimeError(
@@ -925,6 +949,12 @@ class AssetIndexBuilder:
             self.log(
                 "Placeholder embeddings used in production because "
                 "ALLOW_EMBEDDING_FALLBACK is enabled.",
+                "WARNING",
+            )
+        if production_mode and local_fallback_count > 0 and local_fallback_enabled:
+            self.log(
+                "Local fallback embeddings used in production because "
+                "LOCAL_EMBEDDING_FALLBACK is enabled.",
                 "WARNING",
             )
 
@@ -949,11 +979,17 @@ class AssetIndexBuilder:
             "failure_rate": failure_rate,
             "failure_count": failure_count,
             "placeholder_count": placeholder_count,
+            "local_fallback_count": local_fallback_count,
         }
+
+    def _local_fallback_enabled(self) -> bool:
+        return self.local_embedding_fallback
 
     def _get_embedding_with_status(self, text: str) -> tuple[List[float], str, str]:
         config = self._resolve_embedding_config()
         if not config:
+            if self._local_fallback_enabled():
+                return self._get_local_embedding_with_status(text)
             if self._is_production() and not self._fallback_enabled():
                 raise RuntimeError(
                     "Embeddings are required in production but no embedding provider is configured. "
@@ -977,6 +1013,11 @@ class AssetIndexBuilder:
             embedding = self._normalize_embedding_length(embedding, source="provider")
             return embedding, "ok", ""
         except Exception as e:
+            if self._local_fallback_enabled():
+                return self._get_local_embedding_with_status(
+                    text,
+                    error_prefix=f"Embedding request failed; using local fallback: {e}",
+                )
             if self.require_embeddings:
                 raise RuntimeError(
                     "Embedding request failed while REQUIRE_EMBEDDINGS is enabled; "
@@ -992,14 +1033,69 @@ class AssetIndexBuilder:
                 f"Embedding request failed; placeholder embedding used: {e}",
             )
 
-    def _normalize_embedding_length(self, embedding: List[float], source: str) -> List[float]:
+    def _get_local_embedding_with_status(
+        self,
+        text: str,
+        error_prefix: Optional[str] = None,
+    ) -> tuple[List[float], str, str]:
+        try:
+            embedding = self._get_local_embedding(text)
+            embedding = self._normalize_embedding_length(
+                embedding,
+                source="local_fallback",
+                allow_resize_in_production=True,
+            )
+            message = error_prefix or "Embedding provider unavailable; using local fallback embeddings."
+            self.log(message, "WARNING")
+            return embedding, "fallback_local", message
+        except Exception as e:
+            if self.require_embeddings:
+                raise RuntimeError(
+                    "Local embedding fallback failed while REQUIRE_EMBEDDINGS is enabled; "
+                    f"placeholders are disallowed. Error: {e}"
+                ) from e
+            if self._is_production() and not self._fallback_enabled():
+                raise
+            fallback_status = "fallback" if self._fallback_enabled() else "placeholder"
+            self.log(f"Local embedding fallback failed; using placeholder embeddings: {e}", "WARNING")
+            return (
+                self._get_placeholder_embedding(text),
+                fallback_status,
+                f"Local embedding fallback failed; placeholder embedding used: {e}",
+            )
+
+    def _get_local_embedding(self, text: str) -> List[float]:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Local embedding fallback requested but sentence-transformers is not installed."
+            ) from exc
+
+        if self._local_embedding_client is None:
+            self._local_embedding_client = SentenceTransformer(self.local_embedding_model)
+
+        embedding = self._local_embedding_client.encode([text])
+        if hasattr(embedding, "tolist"):
+            embedding = embedding.tolist()
+        if not embedding or not isinstance(embedding, list):
+            raise RuntimeError("Local embedding model returned invalid data")
+        vector = embedding[0] if isinstance(embedding[0], list) else embedding
+        return list(vector)
+
+    def _normalize_embedding_length(
+        self,
+        embedding: List[float],
+        source: str,
+        allow_resize_in_production: bool = False,
+    ) -> List[float]:
         if len(embedding) == self.embedding_dim:
             return embedding
         message = (
             f"Embedding length {len(embedding)} from {source} does not match "
             f"expected {self.embedding_dim}."
         )
-        if self.require_embeddings or self._is_production():
+        if not allow_resize_in_production and (self.require_embeddings or self._is_production()):
             raise RuntimeError(message)
         self.log(f"{message} Resizing to expected size.", "WARNING")
         return self._resize_embedding(embedding)
