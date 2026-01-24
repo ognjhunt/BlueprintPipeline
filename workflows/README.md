@@ -197,3 +197,22 @@ The script writes logs/artifacts to `workflows/artifacts/canary-validation/<time
   `Rollback marker present ... Skipping Genie Sim export.`
 
 Use `jq` or `rg` against the JSON logs to confirm the routing lines.
+
+### Canary export artifact validation
+After the canary execution completes, `run-canary-staging.sh` downloads Genie Sim
+export outputs from `gs://$BUCKET/scenes/$CANARY_SCENE_ID/geniesim/` and validates:
+- Required artifacts exist: `scene_graph.json`, `asset_index.json`, `task_config.json`.
+- JSON schema checks using fixtures in `fixtures/contracts/`:
+  - `scene_graph.schema.json`
+  - `asset_index.schema.json`
+  - `task_config.schema.json`
+- Cross-file consistency via `tools/validation/geniesim_export.validate_export_consistency`.
+
+Validation results are written to:
+- `${ARTIFACT_ROOT}/canary-validation.json` (structured success report).
+- `${ARTIFACT_ROOT}/canary-validation.log` (schema or consistency errors).
+
+If validation fails, the script exits non-zero and writes a failure marker to:
+`gs://$BUCKET/scenes/$CANARY_SCENE_ID/canary-validation/` using the shared failure
+marker format. Review the validation log and the failure marker payload before
+promoting a canary image.
