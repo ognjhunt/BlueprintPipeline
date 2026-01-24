@@ -530,6 +530,11 @@ export SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1
 
 > **Migration note:** `FIREBASE_EPISODE_PREFIX` has been replaced by `FIREBASE_UPLOAD_PREFIX` to keep dataset paths consistent across Genie Sim submit/import flows.
 
+> **Workload Identity / ADC note:** When running on GKE with Workload Identity (or any environment that provides
+> Application Default Credentials), you can omit `FIREBASE_SERVICE_ACCOUNT_JSON` and
+> `FIREBASE_SERVICE_ACCOUNT_PATH`. Firebase uploads will use ADC, so ensure the workload identity has
+> Storage access to the Firebase bucket.
+
 Scene asset input path example (GCS):
 ```
 gs://blueprint-8c1ca.appspot.com/scenes/{SCENE_ID}/images/room.png
