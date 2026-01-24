@@ -49,6 +49,33 @@ default unless explicitly enabled (e.g., `ENABLE_DREAM2FLOW=true`,
 - `WORKFLOW_REGION`: legacy override for workflows that do not yet use primary/secondary routing.
 - `PRIMARY_BUCKET`: default bucket for manual or scheduler-driven workflows (replaces hardcoded bucket names).
 - `FIREBASE_STORAGE_BUCKET`: required in production workflow environments that enable Firebase uploads for Genie Sim export/import.
+- `GENIESIM_CIRCUIT_BREAKER_THRESHOLD`: maximum consecutive failures before Genie Sim export/import workflows short-circuit. Defaults to `3`.
+
+## Genie Sim circuit breaker
+The Genie Sim export/import workflows maintain a per-scene circuit breaker file at:
+
+```
+scenes/<scene_id>/geniesim/.circuit_breaker.json
+```
+
+The file is updated after failures and reset on successful runs to prevent repeated job retries when a scene is unhealthy.
+The structure is:
+
+```json
+{
+  "scene_id": "scene_123",
+  "failure_count": 2,
+  "threshold": 3,
+  "status": "open",
+  "updated_at": "2024-05-01T12:34:56Z",
+  "last_failure_at": "2024-05-01T12:34:56Z",
+  "last_failure_reason": "geniesim_export_failed",
+  "last_success_at": "2024-04-30T10:12:00Z"
+}
+```
+
+When `failure_count` meets or exceeds `GENIESIM_CIRCUIT_BREAKER_THRESHOLD`, the workflows log the circuit breaker
+state and exit early until a successful run resets the counter.
 
 ## Region routing logic
 Selected workflows perform regional health checks before invoking Cloud Run jobs:
