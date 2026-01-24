@@ -134,6 +134,7 @@ from tools.firebase_upload.uploader import (
     resolve_firebase_local_upload_root,
 )
 from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+from tools.tracing import init_tracing
 from tools.gcs_upload import (
     calculate_file_md5_base64,
     upload_blob_from_filename,
@@ -6455,6 +6456,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
 
 if __name__ == "__main__":
     try:
+        init_tracing(service_name=os.getenv("OTEL_SERVICE_NAME", JOB_NAME))
         input_params: Dict[str, Any] = {}
 
         def _run_import_job() -> Optional[int]:

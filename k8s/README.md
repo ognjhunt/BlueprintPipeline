@@ -13,6 +13,26 @@ Kubernetes manifests for deploying pipeline jobs and supporting infrastructure.
 ## Key environment variables
 - `KUBECONFIG` or other cluster credentials used by `kubectl`.
 
+## Tracing (OpenTelemetry)
+Production jobs ship OpenTelemetry spans via **OTLP** to a collector.
+
+### Required values
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: Collector endpoint (for gRPC, e.g. `http://otel-collector:4317`).
+- `OTEL_EXPORTER_OTLP_HEADERS`: Authentication headers for the collector (for example,
+  `Authorization=Bearer <token>`). Leave unset for unauthenticated collectors.
+
+### Optional values
+- `OTEL_SERVICE_NAME`: Overrides the default per-job service name.
+- `OTEL_RESOURCE_ATTRIBUTES`: Extra resource attributes (pre-populated in job manifests with
+  Kubernetes metadata and `deployment.environment=production`).
+
+### Example
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 \
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ${OTEL_TOKEN}" \
+envsubst < k8s/genie-sim-import-job.yaml | kubectl apply -f -
+```
+
 ## How to run locally
 - Apply manifests with `kubectl apply -f <file>.yaml` after configuring cluster access.
 
