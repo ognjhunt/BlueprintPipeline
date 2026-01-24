@@ -44,7 +44,8 @@ Environment Variables:
     GENERATE_EMBEDDINGS: Generate semantic embeddings - default: false (true in production)
     REQUIRE_EMBEDDINGS: Require real embeddings (no placeholders) - default: false (true in production)
     ALLOW_EMBEDDING_FALLBACK: Allow placeholder embeddings in non-production with warning - default: false
-    ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD: Emergency bypass to allow placeholder embeddings in production - default: false
+    ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD: Emergency bypass to allow placeholder embeddings in production
+        (requires allow_placeholder_embeddings_override input param) - default: false
     FILTER_COMMERCIAL: Only include commercial-use assets - default: true
     COPY_USD: Copy USD files to output - default: true
     ENABLE_MULTI_ROBOT: Generate for multiple robot types - default: true
@@ -230,6 +231,14 @@ def parse_bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def parse_bool_input(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return parse_bool(str(value), default=default)
 
 
 def _compute_sha256(path: Path) -> str:
@@ -558,6 +567,7 @@ def run_geniesim_export_job(
         require_embeddings: Require real embeddings (no placeholders)
         allow_embedding_fallback: Allow placeholder embeddings in non-production
         allow_placeholder_embeddings_in_prod: Emergency bypass to allow placeholders in production
+            (requires allow_placeholder_embeddings_override job input param)
         embedding_model: Embedding model name (e.g., qwen-text-embedding-v4)
         filter_commercial: Only include commercial-use assets (DEFAULT: True)
         copy_usd: Copy USD files to output
@@ -1873,6 +1883,8 @@ def run_geniesim_export_job(
             }
             if "premium_analytics" in premium_feature_counts:
                 marker_data["premium_analytics_manifests"] = premium_feature_counts["premium_analytics"]
+            if embedding_placeholder_override:
+                marker_data["embedding_status"] = "placeholder_override"
             if premium_feature_counts:
                 marker_data["premium_feature_counts"] = premium_feature_counts
             if premium_feature_artifact_counts:
@@ -1970,9 +1982,16 @@ def main(input_params: Optional[Dict[str, Any]] = None):
         os.getenv("ALLOW_EMBEDDING_FALLBACK"),
         default=False,
     )
-    allow_placeholder_embeddings_in_prod = parse_bool_env(
+    # Placeholder override requires BOTH the env var and an explicit job input param.
+    allow_placeholder_embeddings_in_prod_env = parse_bool_env(
         os.getenv("ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD"),
         default=False,
+    )
+    allow_placeholder_embeddings_override = parse_bool_input(
+        input_params.get("allow_placeholder_embeddings_override")
+    )
+    allow_placeholder_embeddings_in_prod = bool(
+        allow_placeholder_embeddings_in_prod_env and allow_placeholder_embeddings_override
     )
     # In production mode, ALLOW_EMBEDDING_FALLBACK requires explicit acknowledgment
     # via ALLOW_EMBEDDING_FALLBACK_PRODUCTION_ACK to prevent silent quality degradation
@@ -1988,6 +2007,13 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             "embeddings in production (not recommended), set ALLOW_EMBEDDING_FALLBACK_PRODUCTION_ACK=true."
         )
         sys.exit(1)
+    if allow_placeholder_embeddings_in_prod_env and not allow_placeholder_embeddings_override:
+        log.warning(
+            "ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD is set but "
+            "allow_placeholder_embeddings_override input param is missing/false; "
+            "placeholder override disabled. Disable placeholders in production by setting "
+            "REQUIRE_EMBEDDINGS=true and unsetting ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD."
+        )
     filter_commercial = parse_bool_env(os.getenv("FILTER_COMMERCIAL"), default=True)
     copy_usd = parse_bool_env(os.getenv("COPY_USD"), default=True)
     enable_multi_robot = parse_bool_env(os.getenv("ENABLE_MULTI_ROBOT"), default=True)
@@ -2038,6 +2064,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             "require_embeddings": require_embeddings,
             "allow_embedding_fallback": allow_embedding_fallback,
             "allow_placeholder_embeddings_in_prod": allow_placeholder_embeddings_in_prod,
+            "allow_placeholder_embeddings_override": allow_placeholder_embeddings_override,
             "embedding_model": embedding_model,
             "filter_commercial": filter_commercial,
             "copy_usd": copy_usd,
@@ -2088,13 +2115,18 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             if allow_placeholder_embeddings_in_prod:
                 log.warning(
                     "Production mode with REQUIRE_EMBEDDINGS=false; "
-                    "ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD enabled so placeholder embeddings may be used."
+                    "placeholder override enabled so placeholder embeddings may be used. "
+                    "Disable placeholders by setting REQUIRE_EMBEDDINGS=true and unsetting "
+                    "ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD/allow_placeholder_embeddings_override."
                 )
             else:
                 message = (
                     "Production mode requires real embeddings; placeholder embeddings are disallowed. "
                     "Set REQUIRE_EMBEDDINGS=true (or remove the override) when GENERATE_EMBEDDINGS is enabled. "
-                    "To override for emergencies, set ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD=true."
+                    "To override for emergencies, set ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD=true and "
+                    "pass allow_placeholder_embeddings_override=true in the job input params. "
+                    "Disable placeholders by setting REQUIRE_EMBEDDINGS=true and unsetting "
+                    "ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD/allow_placeholder_embeddings_override."
                 )
                 log.error("%s", message)
                 _write_failure_marker(RuntimeError(message), "embedding_requirement_validation_production")
@@ -2105,14 +2137,19 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             if allow_placeholder_embeddings_in_prod and not require_embeddings:
                 log.warning(
                     "Production mode embedding provider unavailable; "
-                    "ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD enabled so placeholder embeddings will be used."
+                    "placeholder override enabled so placeholder embeddings will be used. "
+                    "Disable placeholders by setting REQUIRE_EMBEDDINGS=true and unsetting "
+                    "ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD/allow_placeholder_embeddings_override."
                 )
             else:
                 message = (
                     "Production mode requires embeddings, but no embedding provider keys were found. "
                     "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY, or explicitly disable "
                     "GENERATE_EMBEDDINGS/REQUIRE_EMBEDDINGS. For emergency placeholder embeddings, "
-                    "set ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD=true."
+                    "set ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD=true and pass "
+                    "allow_placeholder_embeddings_override=true in the job input params. "
+                    "Disable placeholders by setting REQUIRE_EMBEDDINGS=true and unsetting "
+                    "ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD/allow_placeholder_embeddings_override."
                 )
                 log.error("%s", message)
                 _write_failure_marker(RuntimeError(message), "embedding_provider_unavailable_production")
@@ -2152,6 +2189,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             log.info("  Require Embeddings: %s", require_embeddings)
             log.info("  Allow Embedding Fallback: %s", allow_embedding_fallback)
             log.info("  Allow Placeholder Embeddings In Prod: %s", allow_placeholder_embeddings_in_prod)
+            log.info("  Allow Placeholder Embeddings Override: %s", allow_placeholder_embeddings_override)
             log.info("  Multi-Robot: %s", enable_multi_robot)
             log.info("  Bimanual: %s", enable_bimanual)
             log.info("  VLA Packages: %s", enable_vla_packages)
