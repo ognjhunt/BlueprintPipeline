@@ -28,6 +28,8 @@ data:
   ENABLE_PREMIUM_ANALYTICS: "true"
   REQUIRE_QUALITY_GATES: "true"
   STRICT_PREMIUM_FEATURES: "true"
+  ALERT_BACKEND: "webhook"
+  ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL}"
 
 ---
 apiVersion: batch/v1
