@@ -55,7 +55,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.config.env import parse_bool_env
-from tools.config.production_mode import resolve_env_with_legacy, resolve_production_mode
+from tools.config.production_mode import (
+    resolve_pipeline_environment,
+    resolve_production_mode,
+    resolve_production_mode_detail,
+)
 
 # Import Isaac Sim integration for availability checking
 try:
@@ -107,34 +111,13 @@ def _mock_capture_disallowed() -> bool:
 
 def _mock_capture_block_reason() -> str:
     """Return the first production flag that disallows mock capture."""
-    pipeline_env = (os.getenv("PIPELINE_ENV", "") or "").strip().lower()
-    if pipeline_env in {"prod", "production"}:
-        return f"PIPELINE_ENV={pipeline_env}"
-    geniesim_env = (os.getenv("GENIESIM_ENV", "") or "").strip().lower()
-    if geniesim_env in {"prod", "production"}:
-        return f"GENIESIM_ENV={geniesim_env}"
-    bp_env, _ = resolve_env_with_legacy(
-        canonical_names=(),
-        legacy_names=("BP_ENV",),
-        env=os.environ,
-        preferred_name="PIPELINE_ENV",
-        log=logger,
-    )
-    if (bp_env or "").strip().lower() in {"prod", "production"}:
-        return f"BP_ENV={bp_env}"
-    if parse_bool_env(os.getenv("REQUIRE_REAL_PHYSICS"), default=False):
-        return "REQUIRE_REAL_PHYSICS=true"
-    if os.getenv("DATA_QUALITY_LEVEL", "").lower() == "production":
-        return "DATA_QUALITY_LEVEL=production"
-    if parse_bool_env(os.getenv("PRODUCTION_MODE"), default=False):
-        return "PRODUCTION_MODE=true"
-    if parse_bool_env(os.getenv("ISAAC_SIM_REQUIRED"), default=False):
-        return "ISAAC_SIM_REQUIRED=true"
-    if parse_bool_env(os.getenv("PRODUCTION"), default=False):
-        return "PRODUCTION=true"
-    if os.getenv("LABS_STAGING", "").lower() in {"1", "true", "yes", "y"}:
-        return "LABS_STAGING=true"
-    return "production environment detected"
+    production_mode, source, value = resolve_production_mode_detail()
+    if production_mode and source:
+        normalized_value = (value or "").strip()
+        if normalized_value:
+            return f"{source}={normalized_value}"
+        return f"{source}=true"
+    return f"PIPELINE_ENV={resolve_pipeline_environment()}"
 
 
 def _log_mock_capture_blocked(
@@ -143,17 +126,19 @@ def _log_mock_capture_blocked(
     details: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Emit a structured log entry when mock capture is blocked in production."""
+    production_mode, source, value = resolve_production_mode_detail()
     payload: Dict[str, Any] = {
         "event": "mock_capture_blocked",
         "reason": reason,
         "capture_mode": capture_mode.value if capture_mode else None,
+        "production_mode": production_mode,
+        "production_mode_source": source,
+        "production_mode_value": value,
+        "pipeline_env": resolve_pipeline_environment(),
         "use_mock": parse_bool_env(os.getenv("USE_MOCK_CAPTURE"), default=False),
         "allow_mock_capture": parse_bool_env(os.getenv("ALLOW_MOCK_CAPTURE"), default=False),
         "allow_mock_data": parse_bool_env(os.getenv("ALLOW_MOCK_DATA"), default=False),
         "sensor_capture_mode": os.getenv("SENSOR_CAPTURE_MODE", ""),
-        "data_quality_level": os.getenv("DATA_QUALITY_LEVEL", ""),
-        "labs_staging": os.getenv("LABS_STAGING", ""),
-        "isaac_sim_required": os.getenv("ISAAC_SIM_REQUIRED", ""),
     }
     if details:
         payload.update(details)
@@ -1648,8 +1633,7 @@ class MockSensorCapture(IsaacSimSensorCapture):
             reason = f"MockSensorCapture initialization blocked by {_mock_capture_block_reason()}"
             _log_mock_capture_blocked(reason, None)
             raise RuntimeError(
-                "MockSensorCapture is not allowed when DATA_QUALITY_LEVEL=production, "
-                "LABS_STAGING is enabled, or ISAAC_SIM_REQUIRED=true. "
+                "MockSensorCapture is not allowed when production mode is enabled. "
                 "Use create_sensor_capture() to enforce production-safe behavior."
             )
         super().__init__(config=config, verbose=verbose)

@@ -328,9 +328,9 @@ enables production mode; there is no explicit "false override" once any flag is 
 
 **Canonical flag (preferred)**:
 1. `PIPELINE_ENV=production` or `PIPELINE_ENV=prod`
-2. (GenieSim integrations) `GENIESIM_ENV=production` or `GENIESIM_ENV=prod`
 
 **Legacy compatibility flags (deprecated; removal after 2025-12-31)**:
+- `GENIESIM_ENV=production|prod`
 - `BP_ENV=production|prod`
 - `PRODUCTION_MODE=1|true|yes`
 - `SIMREADY_PRODUCTION_MODE=1|true|yes`
@@ -342,7 +342,7 @@ enables production mode; there is no explicit "false override" once any flag is 
 
 **Migration guidance**:
 - Replace any legacy production toggles with `PIPELINE_ENV=production`.
-- GenieSim-only services may use `GENIESIM_ENV=production` alongside `PIPELINE_ENV`.
+- For GenieSim integrations, migrate `GENIESIM_ENV=production` to `PIPELINE_ENV=production`.
 - Plan to remove legacy flags from job manifests and scripts before **2025-12-31**.
 
 **Example**:
@@ -494,7 +494,7 @@ Environment variables that control simready physics estimation behavior.
 |----------|------|---------|-------------|
 | `SIMREADY_PHYSICS_MODE` | str | "auto" | Physics estimation mode: "auto", "gemini", or "deterministic". Production workflows set this to "deterministic" to avoid Gemini dependencies. |
 | `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | bool | "0" | When `SIMREADY_PHYSICS_MODE=auto`, allow deterministic physics when Gemini is unavailable. |
-| `SIMREADY_PRODUCTION_MODE` | bool | "0" | Force production-mode behavior (Secret Manager required for Gemini). |
+| `SIMREADY_PRODUCTION_MODE` | bool | "0" | Deprecated (removal after 2025-12-31). Use `PIPELINE_ENV=production` to enable production behavior. |
 | `SIMREADY_ALLOW_HEURISTIC_FALLBACK` | bool | "0" | Allow heuristic-only fallback when Gemini is unavailable in non-production runs. |
 | `SIMREADY_FALLBACK_MIN_COVERAGE` | float | 0.6 | Minimum coverage ratio required for deterministic fallback physics. |
 | `SIMREADY_NON_LLM_MIN_QUALITY` | float | 0.85 | Minimum quality threshold for non-LLM physics estimation. |
