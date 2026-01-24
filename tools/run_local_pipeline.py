@@ -264,7 +264,8 @@ class LocalPipelineRunner:
 
         # Derive scene ID from directory name
         self.scene_id = self.scene_dir.name
-        self.run_id = os.getenv("BP_RUN_ID") or uuid4().hex
+        self.run_id = os.getenv("BP_RUN_ID") or str(uuid4())
+        os.environ.setdefault("RUN_ID", self.run_id)
         self._current_step: Optional[PipelineStep] = None
         self._logger = self._configure_logger()
 
@@ -414,7 +415,7 @@ class LocalPipelineRunner:
         if self.json_logging:
             self._logger.log(log_level, json.dumps(payload))
         else:
-            self._logger.log(log_level, msg)
+            self._logger.log(log_level, f"[run_id={self.run_id}] {msg}")
 
     def _configure_logger(self) -> logging.Logger:
         logger = logging.getLogger(f"local-pipeline.{self.scene_id}.{self.run_id}")
@@ -2671,6 +2672,7 @@ class LocalPipelineRunner:
         # Generate bundle metadata
         bundle_metadata = {
             "scene_id": self.scene_id,
+            "run_id": self.run_id,
             "environment_type": self.environment_type,
             "policies": ["manipulation", "navigation"],
             "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -3558,6 +3560,7 @@ class LocalPipelineRunner:
         job_payload = {
             "job_id": job_id,
             "scene_id": self.scene_id,
+            "run_id": self.run_id,
             "status": job_status,
             "submitted_at": datetime.utcnow().isoformat() + "Z",
             "message": submission_message,
