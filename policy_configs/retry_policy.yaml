@@ -1,0 +1,5 @@
+# Canonical retry defaults used across workflows and local tooling.
+max_retries: 5
+base_delay_seconds: 1
+max_delay_seconds: 60
+backoff_factor: 2
