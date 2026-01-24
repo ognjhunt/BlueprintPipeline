@@ -26,6 +26,7 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib import error as url_error
 from urllib import request as url_request
+import warnings
 
 import numpy as np
 
@@ -250,6 +251,10 @@ MATERIAL_ALIASES = {
     "liquid": "water",
 }
 
+MATERIAL_PHYSICS_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2] / "policy_configs" / "material_physics.json"
+)
+
 
 def normalize_material_type(material_type: Optional[str]) -> str:
     if not material_type:
@@ -258,6 +263,99 @@ def normalize_material_type(material_type: Optional[str]) -> str:
     normalized = normalized.replace("-", "_")
     normalized = re.sub(r"\s+", "_", normalized)
     return MATERIAL_ALIASES.get(normalized, normalized)
+
+
+def _load_material_physics_overrides(
+    config_path: Optional[Path] = None,
+) -> Dict[str, GenieSimMaterial]:
+    path = config_path or MATERIAL_PHYSICS_CONFIG_PATH
+    if not path.exists():
+        return {}
+
+    try:
+        with open(path, "r") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        warnings.warn(f"Failed to read material physics overrides from {path}: {exc}")
+        return {}
+
+    if not isinstance(payload, dict):
+        warnings.warn(f"Material physics overrides in {path} must be a JSON object.")
+        return {}
+
+    materials = payload.get("materials")
+    if materials is None:
+        warnings.warn(f"Material physics overrides in {path} missing 'materials' mapping.")
+        return {}
+    if not isinstance(materials, dict):
+        warnings.warn(f"Material physics overrides in {path} must define a 'materials' object.")
+        return {}
+
+    overrides: Dict[str, GenieSimMaterial] = {}
+    for name, values in materials.items():
+        if not isinstance(name, str) or not name.strip():
+            warnings.warn(
+                f"Ignoring material physics override with invalid name: {name!r}."
+            )
+            continue
+        if not isinstance(values, dict):
+            warnings.warn(
+                f"Ignoring material physics override for {name!r}: expected an object."
+            )
+            continue
+
+        normalized_name = normalize_material_type(name)
+        base_material = MATERIAL_PHYSICS.get(normalized_name, MATERIAL_PHYSICS["default"])
+
+        invalid = False
+        friction = base_material.friction
+        restitution = base_material.restitution
+        density = base_material.density
+
+        for key, setter in (
+            ("friction", "friction"),
+            ("restitution", "restitution"),
+            ("density", "density"),
+        ):
+            if key not in values:
+                continue
+            value = values[key]
+            if not isinstance(value, (int, float)):
+                warnings.warn(
+                    f"Ignoring material physics override for {name!r}: "
+                    f"{key} must be numeric."
+                )
+                invalid = True
+                break
+            if value < 0 or (key == "density" and value == 0):
+                warnings.warn(
+                    f"Ignoring material physics override for {name!r}: "
+                    f"{key} must be positive."
+                )
+                invalid = True
+                break
+            if setter == "friction":
+                friction = float(value)
+            elif setter == "restitution":
+                restitution = float(value)
+            else:
+                density = float(value)
+
+        if invalid:
+            continue
+
+        overrides[normalized_name] = GenieSimMaterial(
+            friction=friction,
+            restitution=restitution,
+            density=density,
+        )
+
+    return overrides
+
+
+_MATERIAL_OVERRIDES = _load_material_physics_overrides()
+if _MATERIAL_OVERRIDES:
+    MATERIAL_PHYSICS = {**MATERIAL_PHYSICS, **_MATERIAL_OVERRIDES}
 
 
 # =============================================================================

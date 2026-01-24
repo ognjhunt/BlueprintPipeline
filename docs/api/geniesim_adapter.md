@@ -47,6 +47,21 @@ Exporter scene config overrides (applies when writing `scene_config.yaml`):
 - `GENIESIM_EVAL_SCENARIOS` (default: `1000`, integer ≥ 1)
 - `GENIESIM_EXPORT_FORMAT` (default: `lerobot_v2`, string)
 
+### Customizing material physics
+
+To override the default material friction/restitution/density values used by `AssetIndexBuilder`, add entries in `policy_configs/material_physics.json`. The file must contain a top-level `materials` object mapping material names (canonical keys or aliases) to physics properties. Invalid entries are ignored with warnings.
+
+Example structure:
+
+```json
+{
+  "materials": {
+    "wood": { "friction": 0.65, "restitution": 0.2, "density": 650.0 },
+    "carbon_fiber": { "friction": 0.35, "restitution": 0.25, "density": 1600.0 }
+  }
+}
+```
+
 ## Supported multi-robot embodiments
 
 The multi-robot adapter ships with built-in specs for humanoids (G2, GR1, Figure 01, H1), arms (Franka, UR10, UR5e, KUKA iiwa), mobile manipulators (Fetch, Tiago, Spot), and dual-arm platforms (YuMi, Baxter). Robot asset paths are resolved relative to `tools/geniesim_adapter/robot_assets`, and URDF/USD presence is validated when generating Genie Sim robot configs.【F:tools/geniesim_adapter/multi_robot_config.py†L22-L430】
