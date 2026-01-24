@@ -33,6 +33,10 @@ export BLUEPRINT_DEBUG=true
 export LOG_LEVEL=DEBUG
 ```
 
+Structured JSON logs may include `error_category` and `error_severity` fields (for example when a
+`PipelineError` is logged). Filter for specific classes of failures by querying those fields in your
+logging backend (e.g., `error_category="validation"` or `error_severity="critical"`).
+
 ## Pipeline Execution
 
 Per-step timeouts for the local pipeline runner.

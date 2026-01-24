@@ -92,6 +92,8 @@ from monitoring.alerting import send_alert
 
 from tools.dataset_regression.metrics import compute_regression_metrics
 from tools.error_handling.retry import NonRetryableError, RetryConfig, RetryContext
+from tools.error_handling.errors import classify_exception
+from tools.error_handling.logging import log_pipeline_error
 from tools.geniesim_adapter.local_framework import GeneratedEpisodeMetadata
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.quality_gates.quality_gate import (
@@ -5389,7 +5391,11 @@ def main(input_params: Optional[Dict[str, Any]] = None):
     try:
         quality_settings = resolve_quality_settings()
     except ValueError as exc:
-        log.error("%s", exc)
+        log_pipeline_error(
+            classify_exception(exc),
+            "Failed to resolve quality settings",
+            logger=log,
+        )
         sys.exit(1)
     quality_settings = _apply_production_filter_override(
         quality_settings,
@@ -5425,14 +5431,22 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             os.getenv("LEROBOT_SKIP_RATE_MAX")
         )
     except ValueError as exc:
-        log.error("%s", exc)
+        log_pipeline_error(
+            classify_exception(exc),
+            "Failed to resolve LeRobot skip rate max",
+            logger=log,
+        )
         sys.exit(1)
     try:
         min_episodes_required = _resolve_min_episodes_required(
             os.getenv("MIN_EPISODES_REQUIRED")
         )
     except ValueError as exc:
-        log.error("%s", exc)
+        log_pipeline_error(
+            classify_exception(exc),
+            "Failed to resolve minimum episodes required",
+            logger=log,
+        )
         sys.exit(1)
 
     # Polling configuration
@@ -5452,7 +5466,11 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             os.getenv("FIREBASE_UPLOAD_MAX_WORKERS")
         )
     except ValueError as exc:
-        log.error("%s", exc)
+        log_pipeline_error(
+            classify_exception(exc),
+            "Failed to resolve Firebase upload max workers",
+            logger=log,
+        )
         sys.exit(1)
 
     # Validate credentials at startup
@@ -5479,7 +5497,11 @@ def main(input_params: Optional[Dict[str, Any]] = None):
         try:
             firebase_preflight = preflight_firebase_connectivity(timeout_seconds=30)
         except Exception as exc:
-            log.error("Firebase preflight failed: %s", exc)
+            log_pipeline_error(
+                classify_exception(exc),
+                "Firebase preflight failed",
+                logger=log,
+            )
             sys.exit(1)
     elif enable_firebase_upload:
         firebase_preflight = {
@@ -6099,6 +6121,11 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                 log.error("  - %s", error)
             sys.exit(1)
     except Exception as exc:
+        log_pipeline_error(
+            classify_exception(exc),
+            "Import failed with exception",
+            logger=log,
+        )
         log.exception("Import failed with exception: %s", exc)
         send_alert(
             event_type="geniesim_import_job_fatal_exception",
