@@ -53,6 +53,26 @@ def _is_v3_export(dataset_info: dict[str, Any], info: dict[str, Any], chunk_dir:
     return (chunk_dir / "episodes.parquet").is_file()
 
 
+def _resolve_data_dir(lerobot_dir: Path) -> Optional[Path]:
+    chunk_dir = lerobot_dir / "data" / "chunk-000"
+    if chunk_dir.is_dir():
+        return chunk_dir
+    data_dir = lerobot_dir / "data"
+    if data_dir.is_dir():
+        return data_dir
+    return None
+
+
+def _resolve_episodes_index_path(lerobot_dir: Path) -> Path:
+    primary = lerobot_dir / "episodes.jsonl"
+    meta_candidate = lerobot_dir / "meta" / "episodes.jsonl"
+    if primary.is_file():
+        return primary
+    if meta_candidate.is_file():
+        return meta_candidate
+    return primary
+
+
 def _count_episode_index(payload: Any) -> Optional[int]:
     if isinstance(payload, dict):
         return len(payload)
@@ -122,9 +142,9 @@ def validate_lerobot_dataset(lerobot_dir: Path) -> List[str]:
                 f"but lerobot/meta/info.json has '{info_version}'"
             )
 
-    data_dir = lerobot_dir / "data" / "chunk-000"
-    if not data_dir.is_dir():
-        errors.append(f"Missing LeRobot data directory: {data_dir}")
+    data_dir = _resolve_data_dir(lerobot_dir)
+    if data_dir is None:
+        errors.append(f"Missing LeRobot data directory: {lerobot_dir / 'data'}")
         return errors
 
     is_v3 = False
@@ -149,8 +169,16 @@ def validate_lerobot_dataset(lerobot_dir: Path) -> List[str]:
             errors.append(f"Missing v2 episode parquet files under {data_dir}")
 
     if is_v3:
-        episode_index_path = lerobot_dir / "meta" / "episode_index.json"
-        episode_index = _load_json(episode_index_path, "lerobot/meta/episode_index.json", errors)
+        episode_index_path = lerobot_dir / "meta" / "episodes" / "chunk-000" / "file-0000.parquet"
+        if episode_index_path.is_file():
+            episode_index = None
+        else:
+            episode_index_path = lerobot_dir / "meta" / "episode_index.json"
+            episode_index = _load_json(
+                episode_index_path,
+                "lerobot/meta/episode_index.json",
+                errors,
+            )
         if isinstance(info, dict):
             expected_episodes = info.get("total_episodes")
         else:
@@ -162,6 +190,13 @@ def validate_lerobot_dataset(lerobot_dir: Path) -> List[str]:
                     "Episode index count mismatch: "
                     f"info.json has {expected_episodes} but episode_index.json has {actual_episodes}"
                 )
+    else:
+        episodes_index_path = _resolve_episodes_index_path(lerobot_dir)
+        _load_json(
+            episodes_index_path,
+            f"{episodes_index_path.relative_to(lerobot_dir)}",
+            errors,
+        )
 
     parquet_to_check = _select_parquet_for_schema(parquet_files)
     if parquet_to_check:

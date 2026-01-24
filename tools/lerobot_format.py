@@ -12,6 +12,7 @@ class LeRobotExportFormat(str, Enum):
     LEROBOT_V2 = "lerobot_v2"
     LEROBOT_V3 = "lerobot_v3"
     LEROBOT_V0_3_3 = "lerobot_v0.3.3"
+    LEROBOT_V0_4 = "lerobot_v0.4"
 
 
 def parse_lerobot_export_format(
@@ -28,9 +29,13 @@ def parse_lerobot_export_format(
         "lerobot_v2": LeRobotExportFormat.LEROBOT_V2,
         "lerobot_v3": LeRobotExportFormat.LEROBOT_V3,
         "lerobot_v0.3.3": LeRobotExportFormat.LEROBOT_V0_3_3,
+        "lerobot_v0.4": LeRobotExportFormat.LEROBOT_V0_4,
+        "lerobot_v0.4.0": LeRobotExportFormat.LEROBOT_V0_4,
         "v2": LeRobotExportFormat.LEROBOT_V2,
         "v3": LeRobotExportFormat.LEROBOT_V3,
         "0.3.3": LeRobotExportFormat.LEROBOT_V0_3_3,
+        "0.4": LeRobotExportFormat.LEROBOT_V0_4,
+        "0.4.0": LeRobotExportFormat.LEROBOT_V0_4,
     }
     if normalized in aliases:
         return aliases[normalized]
