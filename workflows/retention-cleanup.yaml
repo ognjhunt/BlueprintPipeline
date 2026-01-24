@@ -11,6 +11,7 @@ main:
           - bucket: ${default(event.bucket, sys.get_env("GCS_BUCKET", "blueprintpipeline-data"))}
           - jobName: "retention-cleanup-job"
           - retentionDays: ${default(event.retention_days, sys.get_env("PIPELINE_RETENTION_DAYS", "30"))}
+          - markerRetentionDays: ${default(event.marker_retention_days, sys.get_env("PIPELINE_MARKER_RETENTION_DAYS", "30"))}
           - dryRun: ${default(event.dry_run, sys.get_env("PIPELINE_RETENTION_DRY_RUN", "false"))}
           - cleanupTimeoutSeconds: 3600
         next: log_start
@@ -25,6 +26,7 @@ main:
             job: ${jobName}
             bucket: ${bucket}
             retention_days: ${retentionDays}
+            marker_retention_days: ${markerRetentionDays}
             dry_run: ${dryRun}
             start_time: ${time.format(sys.now())}
           severity: "INFO"
@@ -45,6 +47,8 @@ main:
                         value: ${bucket}
                       - name: PIPELINE_RETENTION_DAYS
                         value: ${retentionDays}
+                      - name: PIPELINE_MARKER_RETENTION_DAYS
+                        value: ${markerRetentionDays}
                       - name: PIPELINE_RETENTION_DRY_RUN
                         value: ${dryRun}
             timeout: '${string(cleanupTimeoutSeconds) + "s"}'
@@ -162,6 +166,7 @@ main:
             job: ${jobName}
             bucket: ${bucket}
             retention_days: ${retentionDays}
+            marker_retention_days: ${markerRetentionDays}
             dry_run: ${dryRun}
             end_time: ${time.format(sys.now())}
           severity: "INFO"
