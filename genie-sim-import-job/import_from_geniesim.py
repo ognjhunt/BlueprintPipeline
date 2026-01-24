@@ -242,6 +242,32 @@ def _resolve_realtime_stream_config(
     return config
 
 
+def _apply_production_filter_override(
+    quality_settings: ResolvedQualitySettings,
+    production_mode: bool,
+    log: logging.Logger,
+    env: Mapping[str, str],
+) -> ResolvedQualitySettings:
+    if not production_mode:
+        return quality_settings
+    if quality_settings.filter_low_quality:
+        return quality_settings
+    raw_value = env.get("FILTER_LOW_QUALITY") if env else None
+    parsed = parse_bool_env(raw_value, default=None)
+    if parsed is False:
+        log.warning(
+            "Production mode forces FILTER_LOW_QUALITY=true; overriding "
+            "FILTER_LOW_QUALITY=%s.",
+            raw_value,
+        )
+    return ResolvedQualitySettings(
+        min_quality_score=quality_settings.min_quality_score,
+        filter_low_quality=True,
+        dimension_thresholds=quality_settings.dimension_thresholds,
+        config=quality_settings.config,
+    )
+
+
 def _stream_realtime_episodes(
     loop: RealtimeFeedbackLoop,
     episodes: List[GeneratedEpisodeMetadata],
@@ -5029,15 +5055,21 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                 sys.exit(1)
 
     # Quality configuration
+    production_mode = resolve_production_mode()
     try:
         quality_settings = resolve_quality_settings()
     except ValueError as exc:
         log.error("%s", exc)
         sys.exit(1)
+    quality_settings = _apply_production_filter_override(
+        quality_settings,
+        production_mode=production_mode,
+        log=log,
+        env=os.environ,
+    )
     min_quality_score = quality_settings.min_quality_score
     enable_validation = parse_bool_env(os.getenv("ENABLE_VALIDATION"), default=True)
     filter_low_quality = quality_settings.filter_low_quality
-    production_mode = resolve_production_mode()
     service_mode = _is_service_mode()
     require_lerobot_resolution = _resolve_require_lerobot(
         os.getenv("REQUIRE_LEROBOT"),
