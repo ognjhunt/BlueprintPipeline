@@ -321,6 +321,78 @@ def _validate_scene_graph_threshold(
     return value
 
 
+def _is_isaac_sim_available() -> bool:
+    """Check if Isaac Sim is available in the environment.
+
+    Returns True if either:
+    1. ISAAC_SIM_PATH environment variable is set to a valid path
+    2. omni.isaac.core can be imported (Isaac Sim Python environment)
+    """
+    # Check environment variable first (fastest check)
+    isaac_sim_path = os.getenv("ISAAC_SIM_PATH")
+    if isaac_sim_path:
+        isaac_sim_path = Path(isaac_sim_path)
+        if isaac_sim_path.exists() and isaac_sim_path.is_dir():
+            logger.debug("Isaac Sim detected via ISAAC_SIM_PATH: %s", isaac_sim_path)
+            return True
+
+    # Check for Isaac Sim Python module
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("omni.isaac.core")
+        if spec is not None:
+            logger.debug("Isaac Sim detected via omni.isaac.core module")
+            return True
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+    return False
+
+
+def _resolve_physics_validation_default() -> bool:
+    """P0 FIX: Resolve physics validation default based on environment.
+
+    Physics validation ensures spatial relations (on, in) are physically accurate
+    by using actual physics simulation data rather than heuristics.
+
+    In production mode:
+    - If Isaac Sim is available: ENABLE physics validation (more accurate)
+    - If Isaac Sim is not available: DISABLE but log a WARNING
+
+    In development mode:
+    - Default to False (faster iteration)
+
+    The BP_SCENE_GRAPH_ENABLE_PHYSICS_VALIDATION env var can override this default.
+    """
+    production_mode = resolve_production_mode()
+
+    if not production_mode:
+        logger.debug(
+            "Physics validation disabled by default in development mode. "
+            "Set BP_SCENE_GRAPH_ENABLE_PHYSICS_VALIDATION=true to enable."
+        )
+        return False
+
+    # Production mode: enable if Isaac Sim is available
+    isaac_available = _is_isaac_sim_available()
+
+    if isaac_available:
+        logger.info(
+            "P0 FIX: Physics validation ENABLED in production (Isaac Sim detected). "
+            "Spatial relations will be validated against physics simulation data."
+        )
+        return True
+    else:
+        logger.warning(
+            "P0 WARNING: Physics validation DISABLED in production because Isaac Sim is not available. "
+            "Spatial relations will use heuristics only, which may be less accurate. "
+            "To enable physics validation, set ISAAC_SIM_PATH to the Isaac Sim installation directory, "
+            "or run in an Isaac Sim Python environment. "
+            "To suppress this warning, explicitly set BP_SCENE_GRAPH_ENABLE_PHYSICS_VALIDATION=false."
+        )
+        return False
+
+
 def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
     global _SCENE_GRAPH_CONFIG
     if _SCENE_GRAPH_CONFIG is not None:
@@ -366,7 +438,10 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         vertical_default = 0.05
         horizontal_default = 0.15
         alignment_default = 5.0
-        physics_validation_default = False
+        # P0 FIX: Enable physics validation by default when Isaac Sim is available
+        # Physics validation ensures spatial relations (on, in) are physically accurate
+        # In production, heuristics-only validation can produce invalid relations
+        physics_validation_default = _resolve_physics_validation_default()
         contact_depth_default = 0.001
         containment_ratio_default = 0.8
         heuristic_confidence_default = 0.6
@@ -376,7 +451,7 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         horizontal_source = "scene_graph.defaults.horizontal_proximity_threshold"
         alignment_source = "scene_graph.defaults.alignment_angle_threshold"
         batch_source = "scene_graph.defaults.streaming_batch_size"
-        physics_validation_source = "scene_graph.defaults.enable_physics_validation"
+        physics_validation_source = "scene_graph.defaults.enable_physics_validation (auto-detected)"
         contact_depth_source = "scene_graph.defaults.physics_contact_depth_threshold"
         containment_ratio_source = "scene_graph.defaults.physics_containment_ratio_threshold"
         heuristic_confidence_source = "scene_graph.defaults.heuristic_confidence_scale"

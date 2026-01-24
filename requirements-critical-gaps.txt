@@ -19,3 +19,7 @@ google-cloud-storage==2.18.2
 
 # Optional: python-json-logger for structured logging
 python-json-logger==2.0.7
+
+# P0 FIX: pyarrow is REQUIRED for LeRobot parquet export (GAP-DATA-001)
+# Without pyarrow, episode metadata is silently skipped, breaking datasets
+pyarrow>=14.0.0

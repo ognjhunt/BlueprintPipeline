@@ -6,9 +6,9 @@ import logging
 import os
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from tools.firebase_upload.uploader import (
     FirebaseUploadError,
@@ -17,11 +17,29 @@ from tools.firebase_upload.uploader import (
     upload_episodes_to_firebase,
     verify_firebase_upload_manifest,
 )
+from tools.config.production_mode import resolve_production_mode
 
 logger = logging.getLogger(__name__)
 
 FIREBASE_UPLOAD_PREFIX_ENV = "FIREBASE_UPLOAD_PREFIX"
 DEFAULT_FIREBASE_UPLOAD_PREFIX = "datasets"
+FIREBASE_REQUIRE_ATOMIC_UPLOAD_ENV = "FIREBASE_REQUIRE_ATOMIC_UPLOAD"
+
+
+def _resolve_require_atomic_upload() -> bool:
+    """Resolve whether atomic uploads are required.
+
+    In production mode, atomic uploads are REQUIRED by default to prevent
+    partial dataset delivery. This ensures all robots either succeed together
+    or all uploads are rolled back.
+
+    Set FIREBASE_REQUIRE_ATOMIC_UPLOAD=false to disable (not recommended).
+    """
+    raw_value = os.getenv(FIREBASE_REQUIRE_ATOMIC_UPLOAD_ENV)
+    if raw_value is not None:
+        return raw_value.lower() in ("true", "1", "yes")
+    # Default to True in production mode
+    return resolve_production_mode()
 
 
 @dataclass
@@ -34,6 +52,85 @@ class FirebaseUploadResult:
     retry_summary: Optional[dict] = None
     retry_attempted: bool = False
     retry_failed_count: int = 0
+
+
+@dataclass
+class AtomicUploadTransaction:
+    """Tracks an atomic multi-robot upload transaction.
+
+    This ensures that if any robot upload fails, all successful uploads
+    are rolled back to prevent partial dataset delivery.
+    """
+
+    scene_id: str
+    successful_prefixes: List[str] = field(default_factory=list)
+    successful_results: Dict[str, FirebaseUploadResult] = field(default_factory=dict)
+    failed_robots: List[Tuple[str, BaseException]] = field(default_factory=list)
+    committed: bool = False
+    rolled_back: bool = False
+
+    def record_success(self, robot_type: str, result: FirebaseUploadResult) -> None:
+        """Record a successful robot upload."""
+        self.successful_prefixes.append(result.remote_prefix)
+        self.successful_results[robot_type] = result
+
+    def record_failure(self, robot_type: str, error: BaseException) -> None:
+        """Record a failed robot upload."""
+        self.failed_robots.append((robot_type, error))
+
+    def should_rollback(self) -> bool:
+        """Check if transaction should be rolled back."""
+        return len(self.failed_robots) > 0 and not self.committed
+
+    def rollback(self) -> Dict[str, any]:
+        """Roll back all successful uploads.
+
+        Returns:
+            Summary of rollback operations with cleanup results per prefix.
+        """
+        if self.rolled_back:
+            return {"status": "already_rolled_back", "prefixes": []}
+
+        rollback_results = {
+            "status": "rollback_complete",
+            "prefixes": [],
+            "errors": [],
+        }
+
+        for prefix in self.successful_prefixes:
+            try:
+                cleanup_result = cleanup_firebase_paths(prefix=prefix)
+                rollback_results["prefixes"].append({
+                    "prefix": prefix,
+                    "status": "cleaned",
+                    "result": cleanup_result,
+                })
+                logger.info(
+                    "Atomic rollback: cleaned Firebase prefix %s (deleted=%d)",
+                    prefix,
+                    cleanup_result.get("deleted", 0) if cleanup_result else 0,
+                )
+            except Exception as exc:
+                rollback_results["errors"].append({
+                    "prefix": prefix,
+                    "error": str(exc),
+                })
+                logger.error(
+                    "Atomic rollback: failed to clean prefix %s: %s",
+                    prefix,
+                    exc,
+                )
+
+        self.rolled_back = True
+        rollback_results["status"] = (
+            "rollback_complete" if not rollback_results["errors"]
+            else "rollback_partial"
+        )
+        return rollback_results
+
+    def commit(self) -> None:
+        """Mark transaction as committed (no rollback possible)."""
+        self.committed = True
 
 
 class FirebaseUploadOrchestratorError(RuntimeError):
@@ -305,3 +402,41 @@ def verify_firebase_upload(
         )
 
     return result
+
+
+def create_atomic_upload_transaction(scene_id: str) -> AtomicUploadTransaction:
+    """Create a new atomic upload transaction for multi-robot uploads.
+
+    Use this when uploading multiple robots to ensure all-or-nothing semantics.
+    If any robot upload fails, call transaction.rollback() to clean up all
+    successful uploads.
+
+    Example:
+        transaction = create_atomic_upload_transaction(scene_id)
+        for robot_type in robot_types:
+            try:
+                result = upload_episodes_with_retry(...)
+                transaction.record_success(robot_type, result)
+            except Exception as exc:
+                transaction.record_failure(robot_type, exc)
+                if require_atomic:
+                    transaction.rollback()
+                    raise
+        transaction.commit()
+
+    Args:
+        scene_id: Scene identifier for the transaction
+
+    Returns:
+        AtomicUploadTransaction for tracking the multi-robot upload
+    """
+    return AtomicUploadTransaction(scene_id=scene_id)
+
+
+def require_atomic_upload() -> bool:
+    """Check if atomic uploads are required for this environment.
+
+    Returns True in production mode by default. Can be overridden with
+    FIREBASE_REQUIRE_ATOMIC_UPLOAD environment variable.
+    """
+    return _resolve_require_atomic_upload()
