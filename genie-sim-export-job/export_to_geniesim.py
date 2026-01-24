@@ -102,6 +102,7 @@ from tools.validation.entrypoint_checks import (
 from tools.validation.config_schemas import load_and_validate_env_config
 from tools.validation.geniesim_export import (
     ExportConsistencyError,
+    _parse_workspace_bounds,
     validate_export_consistency,
     validate_export_consistency_data,
 )
@@ -466,6 +467,62 @@ def _validate_export_consistency(
             f"Scene graph: {scene_graph_path}, Asset index: {asset_index_path}, "
             f"Task config: {task_config_path}. Error: {exc}"
         ) from exc
+
+
+def _validate_workspace_bounds(
+    bounds: tuple[List[float], List[float]],
+    *,
+    context: str,
+    path: Path,
+) -> None:
+    min_pt, max_pt = bounds
+    if len(min_pt) != 3 or len(max_pt) != 3:
+        raise ValueError(
+            f"Workspace bounds must be 2x3 in {context} at {path}."
+        )
+    for axis, min_val, max_val in zip(("x", "y", "z"), min_pt, max_pt):
+        if min_val > max_val:
+            raise ValueError(
+                "Workspace bounds min/max ordering invalid for "
+                f"{axis} in {context} at {path}: min {min_val} > max {max_val}."
+            )
+
+
+def _resolve_workspace_bounds(
+    manifest: Dict[str, Any],
+    *,
+    manifest_path: Path,
+) -> Optional[tuple[List[float], List[float]]]:
+    bounds_override = os.getenv("GENIESIM_WORKSPACE_BOUNDS_JSON")
+    context = "scene manifest"
+    bounds = None
+
+    if bounds_override:
+        context = "GENIESIM_WORKSPACE_BOUNDS_JSON"
+        try:
+            bounds = json.loads(bounds_override)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "GENIESIM_WORKSPACE_BOUNDS_JSON must be valid JSON formatted as "
+                "[[min_x, min_y, min_z], [max_x, max_y, max_z]]."
+            ) from exc
+    else:
+        scene_config = manifest.get("scene") or manifest.get("scene_config") or {}
+        room = scene_config.get("room", {}) if isinstance(scene_config, dict) else {}
+        bounds = room.get("bounds") if isinstance(room, dict) else None
+
+    if bounds is None:
+        return None
+
+    try:
+        parsed = _parse_workspace_bounds(bounds, context=context, path=manifest_path)
+    except ExportConsistencyError as exc:
+        raise ValueError(str(exc)) from exc
+    except Exception as exc:
+        raise ValueError(f"Invalid workspace bounds in {context} at {manifest_path}.") from exc
+
+    _validate_workspace_bounds(parsed, context=context, path=manifest_path)
+    return parsed
 
 
 def _fail_variation_assets_requirement(
@@ -965,6 +1022,47 @@ def run_geniesim_export_job(
         )
         return 1
     print("[GENIESIM-EXPORT-JOB] ✅ Merged manifest validation passed.")
+
+    print("[GENIESIM-EXPORT-JOB] Preflight: validating workspace bounds...")
+    missing_bounds = False
+    try:
+        workspace_bounds = _resolve_workspace_bounds(
+            manifest,
+            manifest_path=manifest_path,
+        )
+        if production_mode and workspace_bounds is None:
+            missing_bounds = True
+            raise ValueError(
+                "Workspace bounds are required in production. Provide room.bounds in the "
+                "scene manifest or set GENIESIM_WORKSPACE_BOUNDS_JSON to "
+                "[[min_x, min_y, min_z], [max_x, max_y, max_z]]."
+            )
+    except ValueError as exc:
+        print(f"[GENIESIM-EXPORT-JOB] ❌ ERROR: {exc}")
+        if bucket and scene_id:
+            FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+                exception=exc,
+                failed_step="workspace_bounds_validation",
+                input_params={
+                    "scene_id": scene_id,
+                    "assets_prefix": assets_prefix,
+                    "geniesim_prefix": geniesim_prefix,
+                    "production_mode": production_mode,
+                    "workspace_bounds_override": bool(os.getenv("GENIESIM_WORKSPACE_BOUNDS_JSON")),
+                },
+                recommendations=[
+                    "Provide room.bounds in the scene manifest.",
+                    "Set GENIESIM_WORKSPACE_BOUNDS_JSON to "
+                    "[[min_x, min_y, min_z], [max_x, max_y, max_z]].",
+                ],
+                error_code=(
+                    "workspace_bounds_missing"
+                    if missing_bounds
+                    else "workspace_bounds_invalid"
+                ),
+            )
+        return 1
+    print("[GENIESIM-EXPORT-JOB] ✅ Workspace bounds preflight check passed.")
 
     print("\n[GENIESIM-EXPORT-JOB] Generating asset provenance...")
     provenance_scene_root = _resolve_scene_root_for_provenance(assets_dir)
