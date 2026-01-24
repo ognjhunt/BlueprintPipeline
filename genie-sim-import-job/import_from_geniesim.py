@@ -30,6 +30,7 @@ Environment Variables:
     FIREBASE_SERVICE_ACCOUNT_PATH: Path to service account JSON for Firebase
     FIREBASE_UPLOAD_PREFIX: Remote prefix for Firebase uploads (default: datasets)
     FIREBASE_UPLOAD_MAX_WORKERS: Max workers for parallel Firebase uploads
+    FIREBASE_VERIFY_CHECKSUMS: Verify Firebase upload checksums (default: true)
     ALLOW_PARTIAL_FIREBASE_UPLOADS: Allow Firebase uploads to proceed for
         successful robots even if others fail (default: true)
     ARTIFACTS_BY_ROBOT: JSON map of robot type to artifacts payload for multi-robot imports
@@ -121,6 +122,7 @@ from tools.firebase_upload.firebase_upload_orchestrator import (
     build_firebase_upload_prefix,
     resolve_firebase_upload_prefix,
     upload_episodes_with_retry,
+    verify_firebase_upload,
 )
 from tools.firebase_upload.uploader import (
     get_firebase_storage_bucket,
@@ -817,6 +819,8 @@ def _upload_robot_payload_to_firebase(
     scene_id: str,
     job_id: str,
     firebase_upload_prefix: str,
+    allow_partial_firebase_uploads: bool,
+    fail_on_partial_error: bool,
     log: logging.LoggerAdapter,
 ) -> tuple[str, Optional[Dict[str, Any]], Optional[BaseException]]:
     robot_type = payload["robot_type"]
@@ -868,6 +872,16 @@ def _upload_robot_payload_to_firebase(
         result.output_dir,
         deduplicated_ids,
     )
+    expected_paths = [
+        path.relative_to(result.output_dir).as_posix() for path in upload_file_paths
+    ]
+    local_path_map = {
+        rel_path: path.resolve()
+        for rel_path, path in zip(expected_paths, upload_file_paths)
+    }
+    verify_checksums = _resolve_firebase_verify_checksums(
+        os.getenv("FIREBASE_VERIFY_CHECKSUMS"),
+    )
     log.info(
         "Uploading episodes to Firebase Storage for robot %s...",
         robot_type,
@@ -881,6 +895,25 @@ def _upload_robot_payload_to_firebase(
             file_paths=upload_file_paths,
         )
         firebase_summary = firebase_result.summary
+        try:
+            firebase_verification = verify_firebase_upload(
+                scene_id=scene_id,
+                robot_type=robot_type,
+                prefix=firebase_upload_prefix,
+                expected_paths=expected_paths,
+                verify_checksums=verify_checksums,
+                local_path_map=local_path_map,
+            )
+        except Exception as exc:
+            firebase_verification = {
+                "success": False,
+                "verified": [],
+                "missing": [],
+                "extra": [],
+                "checksum_mismatches": [],
+                "errors": [str(exc)],
+            }
+        firebase_summary["firebase_verification"] = firebase_verification
     except Exception as exc:
         _alert_firebase_upload_failure(
             scene_id=scene_id,
@@ -894,6 +927,27 @@ def _upload_robot_payload_to_firebase(
     firebase_summary["deduplicated_episodes"] = len(deduplicated_ids)
     firebase_summary["deduplicated_episode_ids"] = deduplicated_ids
     firebase_summary["remote_prefix"] = firebase_result.remote_prefix
+    _update_import_manifest_firebase_summary(
+        result.import_manifest_path,
+        firebase_summary,
+    )
+    firebase_verification = firebase_summary.get("firebase_verification") or {}
+    if firebase_verification and not firebase_verification.get("success", True):
+        verification_errors = _format_firebase_verification_errors(firebase_verification)
+        error_message = "Firebase upload verification failed"
+        if verification_errors:
+            error_message += f": {'; '.join(verification_errors)}"
+        log.warning("%s for robot %s.", error_message, robot_type)
+        entry.setdefault("errors", []).append(error_message)
+        if _should_fail_firebase_verification(
+            allow_partial_firebase_uploads,
+            fail_on_partial_error,
+        ):
+            return (
+                robot_type,
+                firebase_summary,
+                FirebaseUploadOrchestratorError(error_message),
+            )
     return robot_type, firebase_summary, None
 
 
@@ -905,6 +959,7 @@ def _run_firebase_uploads_for_robot_payloads(
     firebase_upload_prefix: str,
     firebase_upload_max_workers: int,
     allow_partial_firebase_uploads: bool,
+    fail_on_partial_error: bool,
     log: logging.LoggerAdapter,
     overall_success: bool,
 ) -> bool:
@@ -923,6 +978,8 @@ def _run_firebase_uploads_for_robot_payloads(
                 scene_id=scene_id,
                 job_id=job_id,
                 firebase_upload_prefix=firebase_upload_prefix,
+                allow_partial_firebase_uploads=allow_partial_firebase_uploads,
+                fail_on_partial_error=fail_on_partial_error,
                 log=log,
             ): payload
             for payload in successful_payloads
@@ -968,6 +1025,8 @@ def _run_firebase_uploads_for_robot_payloads(
                 firebase_summary.get("total_files", 0),
             )
             failed_count = firebase_summary.get("failed", 0)
+            verification_failed = False
+            verification_should_fail = False
             if failed_count > 0:
                 _alert_firebase_upload_failure(
                     scene_id=scene_id,
@@ -984,33 +1043,53 @@ def _run_firebase_uploads_for_robot_payloads(
                     f"Firebase upload incomplete: {failed_count} file(s) failed"
                 )
                 overall_success = False
-            elif firebase_summary.get("deduplicated_episode_ids"):
-                deduplicated_ids = firebase_summary.get(
-                    "deduplicated_episode_ids",
-                    [],
+            firebase_verification = firebase_summary.get("firebase_verification") or {}
+            if firebase_verification and not firebase_verification.get("success", True):
+                verification_failed = True
+                verification_should_fail = _should_fail_firebase_verification(
+                    allow_partial_firebase_uploads,
+                    fail_on_partial_error,
                 )
-                new_hashes = {
-                    episode_id: content_hash
-                    for episode_id, content_hash in result.episode_content_hashes.items()
-                    if episode_id not in deduplicated_ids
-                }
-                _persist_episode_hash_index(
-                    episode_hashes=new_hashes,
-                    scene_id=scene_id,
-                    robot_type=robot_type,
-                    prefix=firebase_upload_prefix,
-                    job_id=job_id,
-                    log=log,
+                verification_errors = _format_firebase_verification_errors(
+                    firebase_verification
                 )
-            else:
-                _persist_episode_hash_index(
-                    episode_hashes=result.episode_content_hashes,
-                    scene_id=scene_id,
-                    robot_type=robot_type,
-                    prefix=firebase_upload_prefix,
-                    job_id=job_id,
-                    log=log,
+                error_message = "Firebase upload verification failed"
+                if verification_errors:
+                    error_message += f": {'; '.join(verification_errors)}"
+                entry.setdefault("errors", []).append(error_message)
+                firebase_upload_failures.append(
+                    (robot_type, FirebaseUploadOrchestratorError(error_message))
                 )
+                if verification_should_fail:
+                    overall_success = False
+            if failed_count == 0 and not (verification_failed and verification_should_fail):
+                if firebase_summary.get("deduplicated_episode_ids"):
+                    deduplicated_ids = firebase_summary.get(
+                        "deduplicated_episode_ids",
+                        [],
+                    )
+                    new_hashes = {
+                        episode_id: content_hash
+                        for episode_id, content_hash in result.episode_content_hashes.items()
+                        if episode_id not in deduplicated_ids
+                    }
+                    _persist_episode_hash_index(
+                        episode_hashes=new_hashes,
+                        scene_id=scene_id,
+                        robot_type=robot_type,
+                        prefix=firebase_upload_prefix,
+                        job_id=job_id,
+                        log=log,
+                    )
+                else:
+                    _persist_episode_hash_index(
+                        episode_hashes=result.episode_content_hashes,
+                        scene_id=scene_id,
+                        robot_type=robot_type,
+                        prefix=firebase_upload_prefix,
+                        job_id=job_id,
+                        log=log,
+                    )
             _publish_dataset_catalog_document(
                 scene_id=scene_id,
                 job_id=job_id,
@@ -1123,6 +1202,38 @@ def _resolve_firebase_upload_max_workers(raw_value: Optional[str]) -> Optional[i
     if max_workers < 1:
         raise ValueError("FIREBASE_UPLOAD_MAX_WORKERS must be >= 1")
     return max_workers
+
+
+def _resolve_firebase_verify_checksums(raw_value: Optional[str]) -> bool:
+    return parse_bool_env(raw_value, default=True)
+
+
+def _should_fail_firebase_verification(
+    allow_partial_firebase_uploads: bool,
+    fail_on_partial_error: bool,
+) -> bool:
+    if not allow_partial_firebase_uploads:
+        return True
+    return fail_on_partial_error
+
+
+def _format_firebase_verification_errors(result: Mapping[str, Any]) -> List[str]:
+    errors: List[str] = []
+    for error in result.get("errors") or []:
+        errors.append(str(error))
+    if result.get("missing"):
+        errors.append("Missing files: " + ", ".join(result["missing"]))
+    if result.get("checksum_mismatches"):
+        mismatch_paths = [
+            mismatch.get("path")
+            for mismatch in result["checksum_mismatches"]
+            if isinstance(mismatch, dict) and mismatch.get("path")
+        ]
+        if mismatch_paths:
+            errors.append("Checksum mismatches: " + ", ".join(mismatch_paths))
+    if result.get("extra"):
+        errors.append("Extra files: " + ", ".join(result["extra"]))
+    return errors
 
 
 @dataclass(frozen=True)
@@ -2582,6 +2693,11 @@ def _update_import_manifest_firebase_summary(
     with open(manifest_path, "r") as handle:
         import_manifest = json.load(handle)
     import_manifest["firebase_upload"] = firebase_summary
+    firebase_verification = firebase_summary.get("firebase_verification")
+    if firebase_verification is not None:
+        import_manifest.setdefault("verification", {})[
+            "firebase_upload"
+        ] = firebase_verification
     checksums = import_manifest.setdefault("checksums", {})
     metadata_checksums = checksums.setdefault("metadata", {})
     metadata_checksums.setdefault("import_manifest.json", {})
@@ -5859,6 +5975,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                     firebase_upload_prefix=firebase_upload_prefix,
                     firebase_upload_max_workers=firebase_upload_max_workers,
                     allow_partial_firebase_uploads=allow_partial_firebase_uploads,
+                    fail_on_partial_error=fail_on_partial_error,
                     log=log,
                     overall_success=overall_success,
                 )
@@ -6036,6 +6153,18 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                     result.output_dir,
                     deduplicated_ids,
                 )
+                expected_paths = [
+                    path.relative_to(result.output_dir).as_posix()
+                    for path in upload_file_paths
+                ]
+                local_path_map = {
+                    rel_path: path.resolve()
+                    for rel_path, path in zip(expected_paths, upload_file_paths)
+                }
+                verify_checksums = _resolve_firebase_verify_checksums(
+                    os.getenv("FIREBASE_VERIFY_CHECKSUMS"),
+                )
+                robot_type = None
                 try:
                     firebase_result = upload_episodes_with_retry(
                         episodes_dir=result.output_dir,
@@ -6053,6 +6182,25 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                     log.error("Firebase upload failed: %s", exc)
                     raise
                 upload_summary = firebase_result.summary
+                try:
+                    firebase_verification = verify_firebase_upload(
+                        scene_id=scene_id,
+                        robot_type=robot_type,
+                        prefix=firebase_upload_prefix,
+                        expected_paths=expected_paths,
+                        verify_checksums=verify_checksums,
+                        local_path_map=local_path_map,
+                    )
+                except Exception as exc:
+                    firebase_verification = {
+                        "success": False,
+                        "verified": [],
+                        "missing": [],
+                        "extra": [],
+                        "checksum_mismatches": [],
+                        "errors": [str(exc)],
+                    }
+                upload_summary["firebase_verification"] = firebase_verification
                 upload_summary["deduplicated_episodes"] = len(deduplicated_ids)
                 upload_summary["deduplicated_episode_ids"] = deduplicated_ids
                 upload_summary["remote_prefix"] = firebase_result.remote_prefix
@@ -6082,6 +6230,33 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         failed_count,
                     )
                     sys.exit(1)
+                if firebase_verification and not firebase_verification.get("success", True):
+                    verification_errors = _format_firebase_verification_errors(
+                        firebase_verification
+                    )
+                    error_message = "Firebase upload verification failed"
+                    if verification_errors:
+                        error_message += f": {'; '.join(verification_errors)}"
+                    _alert_firebase_upload_failure(
+                        scene_id=scene_id,
+                        job_id=job_id,
+                        robot_type="default",
+                        error=error_message,
+                    )
+                    if _should_fail_firebase_verification(
+                        allow_partial_firebase_uploads,
+                        fail_on_partial_error,
+                    ):
+                        log.error(
+                            "%s Completion marker will NOT be written.",
+                            error_message,
+                        )
+                        sys.exit(1)
+                    log.warning(
+                        "%s Continuing because ALLOW_PARTIAL_FIREBASE_UPLOADS=true "
+                        "and FAIL_ON_PARTIAL_ERROR=false.",
+                        error_message,
+                    )
                 elif deduplicated_ids:
                     new_hashes = {
                         episode_id: content_hash
