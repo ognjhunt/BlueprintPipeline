@@ -26,6 +26,7 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
   - `FIREBASE_STORAGE_BUCKET`
   - `FIREBASE_SERVICE_ACCOUNT_JSON` or `FIREBASE_SERVICE_ACCOUNT_PATH`
   - Optional prefix: `FIREBASE_UPLOAD_PREFIX` (used by import after validation).
+  - Optional total timeout: `FIREBASE_UPLOAD_TIMEOUT_TOTAL_SECONDS` (global budget for batch uploads).
   - `ENABLE_FIREBASE_UPLOAD=true` to force uploads outside production/service mode (import defaults to enabled in production/service mode).
 
 ### Migration note: Firebase upload prefix rename
