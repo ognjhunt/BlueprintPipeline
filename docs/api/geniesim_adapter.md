@@ -37,6 +37,7 @@ Local framework configuration uses environment variables when instantiating `Gen
 - `ALLOW_GENIESIM_MOCK` (default: `0`)
 - `HEADLESS` (default: `1`)
 - `ROBOT_TYPE` (default: `franka`)
+- `GENIESIM_WORKSPACE_BOUNDS_JSON` (optional; JSON array `[[min_x, min_y, min_z], [max_x, max_y, max_z]]` used when `scene.room.bounds` is missing; required in production if room bounds are absent)
 
 These are referenced directly by the local framework adapter, along with additional settings derived from `GenieSimConfig` for episodes per task and robot selection.【F:tools/geniesim_adapter/local_framework.py†L52-L96】【F:tools/geniesim_adapter/local_framework.py†L214-L249】
 
