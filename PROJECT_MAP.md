@@ -1,6 +1,6 @@
 # BlueprintPipeline - Project Map for Coding Agents
 
-> **Last Updated:** 2026-01-18
+> **Last Updated:** 2026-01-24
 > **Purpose:** Comprehensive reference for coding agents to understand the project structure, workflows, and dependencies without reading every file.
 
 ## Table of Contents
@@ -37,7 +37,7 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 - **Replicator Bundles** - Domain randomization configurations
 - **Isaac Lab Tasks** - RL environment configurations
 - **Episode Data** - Training data from simulation runs
-- **VLA Fine-tuning Packages** - Data for vision-language-action models
+- **VLA Fine-tuning Packages** - Data for vision-language-action models (OpenVLA, Pi0, SmolVLA, GR00T, Cosmos Policy)
 
 ---
 
@@ -165,6 +165,12 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 │   │   ├── quality_gate.py       # Gate enforcement
 │   │   ├── sli_gate_runner.py    # SLI tracking
 │   │   └── quality_config.json   # QA thresholds
+│   │
+│   ├── cosmos_policy_adapter/    # Cosmos Policy export format
+│   │   ├── __init__.py           # Module entry point
+│   │   ├── config.py             # Training/export configuration
+│   │   ├── exporter.py           # Dataset export (Parquet + videos)
+│   │   └── normalizer.py         # Action/state normalization [-1,+1]
 │   │
 │   ├── isaac_lab_tasks/          # Isaac Lab helpers
 │   ├── inventory_enrichment/     # Metadata enrichment
@@ -314,6 +320,7 @@ Steps: regen3d → scale → interactive → simready → usd → replicator →
 |--------|---------|-----------|
 | `config/` | Configuration management | `env.py`, `pipeline_config.json` |
 | `geniesim_adapter/` | Genie Sim gRPC integration | `local_framework.py`, `scene_graph.py` |
+| `cosmos_policy_adapter/` | Cosmos Policy export | `exporter.py`, `normalizer.py`, `config.py` |
 | `llm_client/` | LLM provider abstraction | `client.py` (Gemini/OpenAI/Anthropic) |
 | `scene_manifest/` | Manifest validation | `loader.py`, `manifest_schema.json` |
 | `quality_gates/` | Quality assurance | `quality_gate.py`, `sli_gate_runner.py` |
@@ -373,6 +380,10 @@ Workflows auto-trigger on GCS completion markers:
 | `GENIESIM_ROOT` | Genie Sim repo | `/opt/geniesim` |
 | `LLM_PROVIDER` | LLM provider | `auto` |
 | `PIPELINE_ENV` | Environment mode | `development` |
+| `ENABLE_COSMOS_POLICY_EXPORT` | Cosmos Policy export | `true` |
+| `COSMOS_POLICY_ACTION_CHUNK_SIZE` | Action chunk size | `16` |
+| `COSMOS_POLICY_IMAGE_SIZE` | Image resize target | `256` |
+| `COSMOS_POLICY_CAMERAS` | Camera list | `wrist,overhead` |
 
 ### Production Mode
 
@@ -446,7 +457,15 @@ scenes/{scene_id}/
 │   ├── scene_graph.json
 │   ├── asset_index.json
 │   └── task_config.json
-└── episodes/                   # Generated episodes
+├── episodes/                   # Generated episodes
+│   └── geniesim_{job_id}/
+│       ├── lerobot/            # LeRobot format
+│       └── cosmos_policy/      # Cosmos Policy format
+│           ├── meta/           # info.json, tasks, normalization
+│           ├── data/           # Parquet files per episode
+│           ├── videos/         # Multi-camera MP4s
+│           └── config/         # Training YAML
+└── vla_finetuning/             # VLA fine-tuning packages
 ```
 
 ---
@@ -640,6 +659,26 @@ scenes/{scene_id}/episodes/geniesim_{job_id}/
 │   └── metadata.json
 └── import_manifest.json      # Import summary
 ```
+
+### Supported Export Formats
+
+| Format | Description | Output Path |
+|--------|-------------|-------------|
+| LeRobot v2/v3/0.4 | HuggingFace LeRobot (default) | `episodes/lerobot/` |
+| Cosmos Policy | NVIDIA video diffusion policy | `episodes/cosmos_policy/` |
+| RLDS | TensorFlow Datasets | `episodes/rlds/` |
+| HDF5 | Robomimic / academic labs | `episodes/hdf5/` |
+| ROS Bag | Legacy ROS systems | `episodes/rosbag/` |
+
+### Supported VLA Models
+
+| Model | Size | Recommended GPU |
+|-------|------|-----------------|
+| OpenVLA | 7B | A100-80GB |
+| Pi0 | 3B+300M | A100-40GB |
+| SmolVLA | 450M | RTX 4090 / A10 |
+| GR00T N1.5 | N1.5 | A100-80GB |
+| Cosmos Policy | 2B | H100-80GB (×8) |
 
 ### Supported Robots
 

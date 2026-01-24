@@ -1124,6 +1124,16 @@ class MultiFormatExporter:
                 )
                 outputs["rosbag"] = exporter.export_episodes(episodes, robot_type)
 
+            elif fmt_lower in ("cosmos_policy", "cosmos-policy", "cosmospolicy"):
+                from tools.cosmos_policy_adapter import CosmosPolicyExporter
+                cosmos_exporter = CosmosPolicyExporter(
+                    output_dir=self.output_dir / "cosmos_policy",
+                    verbose=self.verbose,
+                )
+                outputs["cosmos_policy"] = cosmos_exporter.export_episodes(
+                    episodes, robot_type=robot_type,
+                )
+
             else:
                 self.log(f"Unknown format: {fmt}, skipping")
 

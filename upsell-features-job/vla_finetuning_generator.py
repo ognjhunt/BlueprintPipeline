@@ -39,6 +39,7 @@ class VLAModel(str, Enum):
     PI0 = "pi0"
     SMOLVLA = "smolvla"
     GROOT_N1 = "groot_n1"
+    COSMOS_POLICY = "cosmos_policy"
     ALL = "all"
 
 
@@ -185,6 +186,25 @@ VLA_CONFIGS: Dict[VLAModel, VLAFinetuningConfig] = {
         action_dim=7,
         pretrained_checkpoint="nvidia/gr00t-n1.5-base",
         vision_encoder="dinov2",
+    ),
+    VLAModel.COSMOS_POLICY: VLAFinetuningConfig(
+        model=VLAModel.COSMOS_POLICY,
+        model_name="nvidia/Cosmos-Policy-Predict2-2B",
+        model_size="2B",
+        learning_rate=1e-4,
+        batch_size=32,
+        num_epochs=100,
+        warmup_steps=1000,
+        gradient_accumulation_steps=4,
+        use_lora=False,  # Full fine-tuning (video diffusion model)
+        min_gpu_memory_gb=80,
+        recommended_gpu="H100-80GB",
+        multi_gpu=True,
+        image_size=(256, 256),
+        max_seq_length=1024,
+        action_dim=8,  # 7 joints + gripper
+        pretrained_checkpoint="nvidia/Cosmos-Policy-Predict2-2B",
+        vision_encoder="wan2.1_vae",  # Cosmos uses Wan2.1 VAE tokenizer
     ),
 }
 
@@ -347,7 +367,7 @@ class VLAFinetuningGenerator:
         self.episodes_dir = Path(episodes_dir)
         self.output_dir = Path(output_dir)
         self.scene_id = scene_id
-        self.models = models or [VLAModel.OPENVLA, VLAModel.PI0, VLAModel.SMOLVLA]
+        self.models = models or [VLAModel.OPENVLA, VLAModel.PI0, VLAModel.SMOLVLA, VLAModel.COSMOS_POLICY]
         self.verbose = verbose
 
         self.output_dir.mkdir(parents=True, exist_ok=True)

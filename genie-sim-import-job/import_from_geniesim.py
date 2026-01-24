@@ -41,6 +41,11 @@ Environment Variables:
     REALTIME_STREAM_ENDPOINT: Endpoint URL or path for streaming
     REALTIME_STREAM_API_KEY: API key for streaming authentication
     REALTIME_STREAM_BATCH_SIZE: Batch size for streaming episodes (default: 10)
+    ENABLE_COSMOS_POLICY_EXPORT: Enable Cosmos Policy format export (default: true)
+    COSMOS_POLICY_ACTION_CHUNK_SIZE: Action chunk size for Cosmos Policy (default: 16)
+    COSMOS_POLICY_IMAGE_SIZE: Image resize target for Cosmos Policy (default: 256)
+    COSMOS_POLICY_CAMERAS: Comma-separated camera list for Cosmos Policy (default: wrist,overhead)
+    COSMOS_POLICY_FIREBASE_PREFIX: Firebase upload prefix for Cosmos Policy (default: datasets/cosmos_policy)
 """
 
 import asyncio
@@ -1977,6 +1982,83 @@ def _stream_parquet_validation(
         "row_count": len(df),
         "mode": mode,
     }
+
+
+def _load_episode_frames_for_cosmos(episode_file: Path) -> List[Dict[str, Any]]:
+    """Load episode frames from a Parquet file for Cosmos Policy export.
+
+    Reads the Parquet file and converts rows to the frame dict format
+    expected by CosmosPolicyExporter.
+
+    Returns:
+        List of frame dicts, or empty list if loading fails.
+    """
+    try:
+        import pyarrow.parquet as pq
+        table = pq.read_table(episode_file)
+        df_dict = table.to_pydict()
+    except Exception:
+        try:
+            with open(episode_file) as f:
+                df_dict = json.load(f)
+        except Exception:
+            return []
+
+    num_rows = len(next(iter(df_dict.values()))) if df_dict else 0
+    if num_rows == 0:
+        return []
+
+    frames: List[Dict[str, Any]] = []
+    for i in range(num_rows):
+        frame: Dict[str, Any] = {}
+
+        # Timestamp
+        if "timestamp" in df_dict:
+            frame["timestamp"] = float(df_dict["timestamp"][i])
+        else:
+            frame["timestamp"] = i / 30.0
+
+        # Joint positions
+        jp_keys = sorted(k for k in df_dict if k.startswith("observation.state.") or k.startswith("joint_position"))
+        if jp_keys:
+            frame["joint_positions"] = [float(df_dict[k][i]) for k in jp_keys[:7]]
+        elif "joint_positions" in df_dict:
+            val = df_dict["joint_positions"][i]
+            frame["joint_positions"] = list(val) if hasattr(val, "__iter__") else [float(val)]
+
+        # Gripper
+        if "gripper_position" in df_dict:
+            frame["gripper_position"] = float(df_dict["gripper_position"][i])
+        elif "observation.gripper_position" in df_dict:
+            frame["gripper_position"] = float(df_dict["observation.gripper_position"][i])
+        else:
+            frame["gripper_position"] = 0.0
+
+        # Actions
+        action_keys = sorted(k for k in df_dict if k.startswith("action.") or k == "action")
+        if action_keys and action_keys[0] == "action":
+            val = df_dict["action"][i]
+            frame["action"] = list(val) if hasattr(val, "__iter__") else [float(val)]
+        elif action_keys:
+            frame["action"] = [float(df_dict[k][i]) for k in action_keys[:8]]
+
+        # End-effector
+        ee_pos_keys = sorted(k for k in df_dict if k.startswith("ee_position") or k.startswith("observation.ee_position"))
+        if ee_pos_keys:
+            frame["ee_position"] = [float(df_dict[k][i]) for k in ee_pos_keys[:3]]
+
+        ee_orient_keys = sorted(k for k in df_dict if k.startswith("ee_orientation") or k.startswith("observation.ee_orientation"))
+        if ee_orient_keys:
+            frame["ee_orientation"] = [float(df_dict[k][i]) for k in ee_orient_keys[:4]]
+
+        # Joint velocities (optional)
+        jv_keys = sorted(k for k in df_dict if k.startswith("joint_velocit"))
+        if jv_keys:
+            frame["joint_velocities"] = [float(df_dict[k][i]) for k in jv_keys[:7]]
+
+        frames.append(frame)
+
+    return frames
 
 
 def _build_dataset_info(
@@ -4784,6 +4866,66 @@ def run_local_import_job(
                 result.errors.append(lerobot_error)
             else:
                 result.warnings.append(lerobot_error)
+
+    # =========================================================================
+    # Cosmos Policy Export (runs alongside LeRobot conversion)
+    # =========================================================================
+    cosmos_policy_dir = config.output_dir / "cosmos_policy"
+    cosmos_policy_error = None
+    cosmos_policy_enabled = parse_bool_env(
+        os.getenv("ENABLE_COSMOS_POLICY_EXPORT"), default=True
+    )
+    if cosmos_policy_enabled and result.lerobot_conversion_success:
+        try:
+            from tools.cosmos_policy_adapter import CosmosPolicyExporter, CosmosPolicyConfig
+
+            cosmos_config = CosmosPolicyConfig()
+            cosmos_exporter = CosmosPolicyExporter(
+                output_dir=cosmos_policy_dir,
+                config=cosmos_config,
+                verbose=True,
+            )
+
+            # Build episode dicts from validated metadata + parquet files
+            cosmos_episodes = []
+            for ep_metadata in validated_episode_metadata_list:
+                episode_file = recordings_dir / f"{ep_metadata.episode_id}.parquet"
+                if not episode_file.exists():
+                    continue
+
+                # Load frame data from parquet
+                frames = _load_episode_frames_for_cosmos(episode_file)
+                if not frames:
+                    continue
+
+                cosmos_episodes.append({
+                    "episode_id": ep_metadata.episode_id,
+                    "task": ep_metadata.task_description if hasattr(ep_metadata, "task_description") else "manipulation task",
+                    "frames": frames,
+                    "success": ep_metadata.validation_passed,
+                    "quality_score": ep_metadata.quality_score,
+                })
+
+            if cosmos_episodes:
+                robot_type = os.getenv("ROBOT_TYPE", "franka")
+                cosmos_exporter.export_episodes(
+                    episodes=cosmos_episodes,
+                    robot_type=robot_type,
+                    scene_id=scene_id or "unknown",
+                    source_videos_dir=config.output_dir / "lerobot" / "videos",
+                )
+                log.info(
+                    "Cosmos Policy export complete: %d episodes -> %s",
+                    len(cosmos_episodes),
+                    cosmos_policy_dir,
+                )
+            else:
+                log.warning("No valid episodes for Cosmos Policy export")
+        except Exception as exc:
+            cosmos_policy_error = f"Cosmos Policy export failed: {exc}"
+            result.warnings.append(cosmos_policy_error)
+            log.warning(cosmos_policy_error)
+
     if dataset_info_path.exists():
         try:
             dataset_info_payload = _load_dataset_info_with_migration(
@@ -5270,6 +5412,12 @@ def run_local_import_job(
             "required_raw_value": config.require_lerobot_raw_value,
             "skip_rate_max": config.lerobot_skip_rate_max,
         },
+        "cosmos_policy": {
+            "enabled": cosmos_policy_enabled,
+            "export_success": cosmos_policy_dir.exists() and cosmos_policy_error is None,
+            "output_dir": _relative_to_bundle(bundle_root, cosmos_policy_dir) if cosmos_policy_dir.exists() else None,
+            "error": cosmos_policy_error,
+        },
         "validation": {
             "episodes": {
                 **validation_summary,
@@ -5297,11 +5445,14 @@ def run_local_import_job(
     with open(import_manifest_path, "w") as f:
         json.dump(import_manifest, f, indent=2)
 
+    bundle_directories = [lerobot_dir]
+    if cosmos_policy_dir.exists():
+        bundle_directories.append(cosmos_policy_dir)
     package_path = _create_bundle_package(
         config.output_dir,
         f"lerobot_bundle_{config.job_id}.tar.gz",
         files=[import_manifest_path, readme_path, checksums_path],
-        directories=[lerobot_dir],
+        directories=bundle_directories,
     )
     package_checksum = _sha256_file(package_path)
     checksums_payload["bundle_files"][_relative_to_bundle(bundle_root, package_path)] = {
@@ -6446,6 +6597,35 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                     gcs_output_path=gcs_output_path,
                     log=log,
                 )
+
+                # Upload Cosmos Policy dataset to Firebase (separate prefix)
+                cosmos_policy_output = result.output_dir / "cosmos_policy"
+                if cosmos_policy_output.exists():
+                    try:
+                        cosmos_upload_prefix = os.getenv(
+                            "COSMOS_POLICY_FIREBASE_PREFIX",
+                            "datasets/cosmos_policy",
+                        )
+                        cosmos_files = list(cosmos_policy_output.rglob("*"))
+                        cosmos_files = [f for f in cosmos_files if f.is_file()]
+                        if cosmos_files:
+                            cosmos_firebase_result = upload_episodes_with_retry(
+                                episodes_dir=cosmos_policy_output,
+                                scene_id=scene_id,
+                                prefix=cosmos_upload_prefix,
+                                file_paths=cosmos_files,
+                            )
+                            log.info(
+                                "Cosmos Policy Firebase upload complete: uploaded=%s failed=%s",
+                                cosmos_firebase_result.summary.get("uploaded", 0),
+                                cosmos_firebase_result.summary.get("failed", 0),
+                            )
+                    except Exception as cosmos_upload_exc:
+                        log.warning(
+                            "Cosmos Policy Firebase upload failed (non-fatal): %s",
+                            cosmos_upload_exc,
+                        )
+
             sys.exit(0)
         else:
             log.error("Import failed")
