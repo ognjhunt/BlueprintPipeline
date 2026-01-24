@@ -6,6 +6,8 @@ import time
 import urllib.request
 from typing import Any, Dict, Optional
 
+DEFAULT_WEBHOOK_TIMEOUT_SECONDS = 10.0
+
 SEVERITY_LEVELS = {
     "debug": 10,
     "info": 20,
@@ -44,6 +46,25 @@ def _build_payload(
     }
 
 
+def _webhook_timeout_seconds() -> float:
+    raw = os.getenv("ALERT_WEBHOOK_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_WEBHOOK_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        print(
+            "[alerting] ALERT_WEBHOOK_TIMEOUT_SECONDS must be a positive number; using default."
+        )
+        return DEFAULT_WEBHOOK_TIMEOUT_SECONDS
+    if value <= 0:
+        print(
+            "[alerting] ALERT_WEBHOOK_TIMEOUT_SECONDS must be a positive number; using default."
+        )
+        return DEFAULT_WEBHOOK_TIMEOUT_SECONDS
+    return value
+
+
 def _send_webhook(payload: Dict[str, Any]) -> bool:
     url = os.getenv("ALERT_WEBHOOK_URL", "").strip()
     if not url:
@@ -58,7 +79,9 @@ def _send_webhook(payload: Dict[str, Any]) -> bool:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(
+            request, timeout=_webhook_timeout_seconds()
+        ) as response:
             status = response.status
             if 200 <= status < 300:
                 return True
