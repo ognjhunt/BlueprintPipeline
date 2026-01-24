@@ -20,6 +20,12 @@ Resource needs vary by scene size and number of objects. Use these as starting p
 - **isaac-lab-job**: CPU for config generation; GPU only needed for training runs.
 - **dwm-preparation-job**: GPU for rendering, with extra disk for video bundles.
 
+## Sizing and capacity planning
+
+For GPU-specific sizing guidance, including baseline recommendations and example
+benchmark tables, see [GPU sizing](GPU_SIZING.md). Align sizing decisions with
+budget planning in [GPU Cost Estimation](cost_tracking_estimates.md).
+
 ## Isaac Sim tuning
 
 ### Headless execution
