@@ -38,6 +38,7 @@ main:
           - realtime_stream_endpoint: ${default(sys.get_env("REALTIME_STREAM_ENDPOINT"), "")}
           - realtime_stream_api_key: ${default(sys.get_env("REALTIME_STREAM_API_KEY"), "")}
           - realtime_stream_batch_size: ${default(sys.get_env("REALTIME_STREAM_BATCH_SIZE"), "25")}
+          - circuitBreakerThreshold: ${int(default(sys.get_env("GENIESIM_CIRCUIT_BREAKER_THRESHOLD"), "3"))}
           - artifacts_by_robot: null
 
     - extract_event:
@@ -68,7 +69,91 @@ main:
               - scene_id: ${default(event.scene_id, "unknown")}
               - local_episodes_prefix: ${default(event.local_episodes_prefix, null)}
               - job_metadata_path: ${default(event.job_metadata_path, null)}
+        next: init_circuit_breaker
+
+    - init_circuit_breaker:
+        assign:
+          - circuitBreakerObject: ${scene_id != null and scene_id != "" and scene_id != "unknown" ? "scenes/" + scene_id + "/geniesim/.circuit_breaker.json" : null}
+          - circuitBreakerFailureCount: 0
+          - circuitBreakerLastFailureAt: null
+          - circuitBreakerLastSuccessAt: null
+        next: read_circuit_breaker_state
+
+    - read_circuit_breaker_state:
+        switch:
+          - condition: ${circuitBreakerObject == null}
+            next: log_circuit_breaker_skip
+        next: fetch_circuit_breaker_state
+
+    - log_circuit_breaker_skip:
+        call: sys.log
+        args:
+          text: "Skipping circuit breaker check; scene_id is missing."
+          severity: "WARNING"
         next: resolve_job_id
+
+    - fetch_circuit_breaker_state:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${circuitBreakerObject}
+            alt: "media"
+          result: circuitBreakerRaw
+        except:
+          as: circuitBreakerError
+          steps:
+            - handle_missing_circuit_breaker_state:
+                switch:
+                  - condition: ${circuitBreakerError.code == 404}
+                    next: set_empty_circuit_breaker_state
+                next: log_circuit_breaker_read_error
+            - set_empty_circuit_breaker_state:
+                assign:
+                  - circuitBreakerRaw: "{}"
+                next: parse_circuit_breaker_state
+            - log_circuit_breaker_read_error:
+                call: sys.log
+                args:
+                  text: ${"Unable to read circuit breaker state for scene " + scene_id + ": " + circuitBreakerError.message}
+                  severity: "WARNING"
+                next: set_circuit_breaker_state_after_error
+            - set_circuit_breaker_state_after_error:
+                assign:
+                  - circuitBreakerRaw: "{}"
+                next: log_circuit_breaker_state
+        next: parse_circuit_breaker_state
+
+    - parse_circuit_breaker_state:
+        assign:
+          - circuitBreakerState: ${json.decode(circuitBreakerRaw)}
+          - circuitBreakerFailureCount: ${default(map.get(circuitBreakerState, "failure_count"), 0)}
+          - circuitBreakerLastFailureAt: ${default(map.get(circuitBreakerState, "last_failure_at"), null)}
+          - circuitBreakerLastSuccessAt: ${default(map.get(circuitBreakerState, "last_success_at"), null)}
+        next: log_circuit_breaker_state
+
+    - log_circuit_breaker_state:
+        call: sys.log
+        args:
+          text: ${"Circuit breaker state for scene " + scene_id + ": failures=" + string(circuitBreakerFailureCount) + ", threshold=" + string(circuitBreakerThreshold) + ", object=" + circuitBreakerObject}
+          severity: "INFO"
+        next: check_circuit_breaker_threshold
+
+    - check_circuit_breaker_threshold:
+        switch:
+          - condition: ${circuitBreakerFailureCount >= circuitBreakerThreshold}
+            next: circuit_breaker_open
+        next: resolve_job_id
+
+    - circuit_breaker_open:
+        call: sys.log
+        args:
+          text: ${"Circuit breaker open for scene " + scene_id + " (failures=" + string(circuitBreakerFailureCount) + ", threshold=" + string(circuitBreakerThreshold) + "). Skipping Genie Sim import."}
+          severity: "ERROR"
+        next: stop_for_circuit_breaker
+
+    - stop_for_circuit_breaker:
+        return: ${"Circuit breaker open for scene " + scene_id + ". Skipping Genie Sim import."}
 
     - resolve_job_id:
         switch:
@@ -480,6 +565,37 @@ main:
                       }
                     }
                   })}
+            - update_circuit_breaker_on_import_start_failure:
+                switch:
+                  - condition: ${circuitBreakerObject == null}
+                    next: raise_import_job_error
+                next: increment_circuit_breaker_import_start_failure
+            - increment_circuit_breaker_import_start_failure:
+                assign:
+                  - circuitBreakerFailureCount: ${circuitBreakerFailureCount + 1}
+                next: write_circuit_breaker_import_start_failure
+            - write_circuit_breaker_import_start_failure:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${circuitBreakerObject}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": scene_id,
+                    "failure_count": circuitBreakerFailureCount,
+                    "threshold": circuitBreakerThreshold,
+                    "status": "open",
+                    "updated_at": time.format(sys.now()),
+                    "last_failure_at": time.format(sys.now()),
+                    "last_failure_reason": "geniesim_import_start_failed",
+                    "last_success_at": circuitBreakerLastSuccessAt
+                  })}
+                next: log_circuit_breaker_import_start_failure
+            - log_circuit_breaker_import_start_failure:
+                call: sys.log
+                args:
+                  text: ${"Circuit breaker failure count updated to " + string(circuitBreakerFailureCount) + " after import start failure for scene " + scene_id}
+                  severity: "WARNING"
             - raise_import_job_error:
                 raise: ${e}
 
@@ -550,6 +666,42 @@ main:
         args:
           text: ${"Import job failed for job " + job_id}
           severity: ERROR
+        next: update_circuit_breaker_on_import_failure
+
+    - update_circuit_breaker_on_import_failure:
+        switch:
+          - condition: ${circuitBreakerObject == null}
+            next: raise_import_error
+        next: increment_circuit_breaker_import_failure
+
+    - increment_circuit_breaker_import_failure:
+        assign:
+          - circuitBreakerFailureCount: ${circuitBreakerFailureCount + 1}
+        next: write_circuit_breaker_import_failure
+
+    - write_circuit_breaker_import_failure:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${circuitBreakerObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": scene_id,
+            "failure_count": circuitBreakerFailureCount,
+            "threshold": circuitBreakerThreshold,
+            "status": "open",
+            "updated_at": time.format(sys.now()),
+            "last_failure_at": time.format(sys.now()),
+            "last_failure_reason": "geniesim_import_failed",
+            "last_success_at": circuitBreakerLastSuccessAt
+          })}
+        next: log_circuit_breaker_import_failure
+
+    - log_circuit_breaker_import_failure:
+        call: sys.log
+        args:
+          text: ${"Circuit breaker failure count updated to " + string(circuitBreakerFailureCount) + " after import failure for scene " + scene_id}
+          severity: "WARNING"
         next: raise_import_error
 
     - raise_import_error:
@@ -750,6 +902,38 @@ main:
                           scene_id: ${scene_id}
                           output_path: ${output_path}
                           episode_count: ${episodes_imported}
+        next: reset_circuit_breaker_success
+
+    - reset_circuit_breaker_success:
+        switch:
+          - condition: ${circuitBreakerObject == null}
+            next: return_success
+        next: write_circuit_breaker_success
+
+    - write_circuit_breaker_success:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${circuitBreakerObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": scene_id,
+            "failure_count": 0,
+            "threshold": circuitBreakerThreshold,
+            "status": "closed",
+            "updated_at": time.format(sys.now()),
+            "last_success_at": time.format(sys.now()),
+            "last_failure_at": circuitBreakerLastFailureAt,
+            "last_failure_reason": null
+          })}
+        next: log_circuit_breaker_success
+
+    - log_circuit_breaker_success:
+        call: sys.log
+        args:
+          text: ${"Circuit breaker reset for scene " + scene_id + " after successful import."}
+          severity: "INFO"
+        next: return_success
 
     # Return success
     - return_success:
