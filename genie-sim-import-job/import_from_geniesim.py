@@ -2217,9 +2217,30 @@ def _detect_lerobot_export_format(
         except ValueError:
             return None
     version = info_payload.get("version")
-    if version and str(version).strip() == "3.0":
-        return LeRobotExportFormat.LEROBOT_V3
+    if version:
+        normalized = str(version).strip()
+        if normalized == "3.0":
+            return LeRobotExportFormat.LEROBOT_V3
+        if normalized.startswith("0.4"):
+            return LeRobotExportFormat.LEROBOT_V0_4
+        if normalized == "0.3.3":
+            return LeRobotExportFormat.LEROBOT_V0_3_3
     return LeRobotExportFormat.LEROBOT_V2
+
+
+def _resolve_lerobot_episode_index_path(
+    lerobot_root: Path,
+    export_format: Optional[LeRobotExportFormat],
+) -> Path:
+    primary = lerobot_root / "episodes.jsonl"
+    meta_candidate = lerobot_root / "meta" / "episodes.jsonl"
+    if primary.exists():
+        return primary
+    if meta_candidate.exists():
+        return meta_candidate
+    if export_format == LeRobotExportFormat.LEROBOT_V0_4:
+        return meta_candidate
+    return primary
 
 
 def _resolve_lerobot_v3_paths(
@@ -2281,7 +2302,7 @@ def _validate_lerobot_metadata_files(
     export_format = _detect_lerobot_export_format(info_payload)
     lerobot_root = info_path.parent.parent if info_path is not None else lerobot_dir
 
-    episodes_index_path = lerobot_root / "episodes.jsonl"
+    episodes_index_path = _resolve_lerobot_episode_index_path(lerobot_root, export_format)
     episodes_parquet_path = None
     episode_index_path = None
     if export_format == LeRobotExportFormat.LEROBOT_V3:
