@@ -69,6 +69,7 @@ from tools.logging_config import init_logging
 from tools.quality.quality_config import resolve_quality_settings
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+from tools.tracing import init_tracing
 from tools.firebase_upload import preflight_firebase_connectivity
 from monitoring.alerting import send_alert
 
@@ -2174,6 +2175,7 @@ if __name__ == "__main__":
     from tools.startup_validation import validate_and_fail_fast
 
     init_logging()
+    init_tracing(service_name=os.getenv("OTEL_SERVICE_NAME", JOB_NAME))
     validate_and_fail_fast(job_name="GENIE-SIM-SUBMIT", validate_gcs=True)
     metrics = get_metrics()
     scene_id = os.environ.get("SCENE_ID", "unknown")
