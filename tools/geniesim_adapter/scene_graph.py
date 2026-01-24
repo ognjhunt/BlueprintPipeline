@@ -193,6 +193,13 @@ class SceneGraphRuntimeConfig:
 
 
 _SCENE_GRAPH_CONFIG: Optional[SceneGraphRuntimeConfig] = None
+# Threshold ranges follow Genie Sim 3.0 scene graph relation heuristics
+# (see "Scene Graph Relations" section in the Genie Sim 3.0 paper).
+_SCENE_GRAPH_THRESHOLD_RANGES = {
+    "vertical_proximity_threshold": (0.0, 0.2),  # meters
+    "horizontal_proximity_threshold": (0.0, 0.5),  # meters
+    "alignment_angle_threshold": (0.0, 45.0),  # degrees
+}
 _FALLBACK_ALLOWED_CATEGORIES = frozenset(
     {
         "object",
@@ -260,39 +267,57 @@ def _sanitize_fallback_category(value: Any) -> Tuple[str, bool]:
     return "object", True
 
 
-def _parse_env_float(key: str, default: float) -> float:
+def _resolve_env_float(key: str, default: float, default_source: str) -> Tuple[float, str]:
     raw = os.getenv(key)
     if raw is None:
-        return default
+        return default, default_source
     try:
-        return float(raw)
+        return float(raw), f"env:{key}"
     except ValueError:
         logger.warning("Invalid %s=%s; using default %.3f", key, raw, default)
-        return default
+        return default, default_source
 
 
-def _parse_env_int(key: str, default: int) -> int:
+def _resolve_env_int(key: str, default: int, default_source: str) -> Tuple[int, str]:
     raw = os.getenv(key)
     if raw is None:
-        return default
+        return default, default_source
     try:
-        return int(raw)
+        return int(raw), f"env:{key}"
     except ValueError:
         logger.warning("Invalid %s=%s; using default %d", key, raw, default)
-        return default
+        return default, default_source
 
 
-def _parse_env_bool(key: str, default: bool) -> bool:
+def _resolve_env_bool(key: str, default: bool, default_source: str) -> Tuple[bool, str]:
     raw = os.getenv(key)
     if raw is None:
-        return default
+        return default, default_source
     normalized = raw.strip().lower()
     if normalized in {"1", "true", "yes", "on"}:
-        return True
+        return True, f"env:{key}"
     if normalized in {"0", "false", "no", "off"}:
-        return False
+        return False, f"env:{key}"
     logger.warning("Invalid %s=%s; using default %s", key, raw, default)
-    return default
+    return default, default_source
+
+
+def _validate_scene_graph_threshold(
+    name: str,
+    value: float,
+    source: str,
+) -> float:
+    min_value, max_value = _SCENE_GRAPH_THRESHOLD_RANGES[name]
+    if min_value <= value <= max_value:
+        return value
+    message = (
+        f"{name}={value} out of range [{min_value}, {max_value}] per Genie Sim 3.0 "
+        f"scene graph relation heuristics. Source: {source}."
+    )
+    if resolve_production_mode():
+        raise ValueError(message)
+    logger.warning(message)
+    return value
 
 
 def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
@@ -313,6 +338,29 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         heuristic_confidence_default = relation_config.heuristic_confidence_scale
         batch_default = streaming_config.batch_size
         allow_unvalidated_default = pipeline_config.scene_graph.validation.allow_unvalidated_input
+        vertical_source = (
+            "pipeline_config.scene_graph.relation_inference.vertical_proximity_threshold"
+        )
+        horizontal_source = (
+            "pipeline_config.scene_graph.relation_inference.horizontal_proximity_threshold"
+        )
+        alignment_source = (
+            "pipeline_config.scene_graph.relation_inference.alignment_angle_threshold"
+        )
+        batch_source = "pipeline_config.scene_graph.streaming.batch_size"
+        physics_validation_source = (
+            "pipeline_config.scene_graph.relation_inference.enable_physics_validation"
+        )
+        contact_depth_source = (
+            "pipeline_config.scene_graph.relation_inference.physics_contact_depth_threshold"
+        )
+        containment_ratio_source = (
+            "pipeline_config.scene_graph.relation_inference.physics_containment_ratio_threshold"
+        )
+        heuristic_confidence_source = (
+            "pipeline_config.scene_graph.relation_inference.heuristic_confidence_scale"
+        )
+        allow_unvalidated_source = "pipeline_config.scene_graph.validation.allow_unvalidated_input"
     else:
         vertical_default = 0.05
         horizontal_default = 0.15
@@ -323,44 +371,84 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         heuristic_confidence_default = 0.6
         batch_default = 100
         allow_unvalidated_default = True
+        vertical_source = "scene_graph.defaults.vertical_proximity_threshold"
+        horizontal_source = "scene_graph.defaults.horizontal_proximity_threshold"
+        alignment_source = "scene_graph.defaults.alignment_angle_threshold"
+        batch_source = "scene_graph.defaults.streaming_batch_size"
+        physics_validation_source = "scene_graph.defaults.enable_physics_validation"
+        contact_depth_source = "scene_graph.defaults.physics_contact_depth_threshold"
+        containment_ratio_source = "scene_graph.defaults.physics_containment_ratio_threshold"
+        heuristic_confidence_source = "scene_graph.defaults.heuristic_confidence_scale"
+        allow_unvalidated_source = "scene_graph.defaults.allow_unvalidated_input"
+
+    vertical_value, vertical_value_source = _resolve_env_float(
+        "BP_SCENE_GRAPH_VERTICAL_PROXIMITY_THRESHOLD",
+        vertical_default,
+        vertical_source,
+    )
+    horizontal_value, horizontal_value_source = _resolve_env_float(
+        "BP_SCENE_GRAPH_HORIZONTAL_PROXIMITY_THRESHOLD",
+        horizontal_default,
+        horizontal_source,
+    )
+    alignment_value, alignment_value_source = _resolve_env_float(
+        "BP_SCENE_GRAPH_ALIGNMENT_ANGLE_THRESHOLD",
+        alignment_default,
+        alignment_source,
+    )
+    streaming_batch_value, streaming_batch_source = _resolve_env_int(
+        "BP_SCENE_GRAPH_STREAMING_BATCH_SIZE",
+        batch_default,
+        batch_source,
+    )
+    physics_validation_value, physics_validation_source = _resolve_env_bool(
+        "BP_SCENE_GRAPH_ENABLE_PHYSICS_VALIDATION",
+        physics_validation_default,
+        physics_validation_source,
+    )
+    contact_depth_value, contact_depth_source = _resolve_env_float(
+        "BP_SCENE_GRAPH_PHYSICS_CONTACT_DEPTH_THRESHOLD",
+        contact_depth_default,
+        contact_depth_source,
+    )
+    containment_ratio_value, containment_ratio_source = _resolve_env_float(
+        "BP_SCENE_GRAPH_PHYSICS_CONTAINMENT_RATIO_THRESHOLD",
+        containment_ratio_default,
+        containment_ratio_source,
+    )
+    heuristic_confidence_value, heuristic_confidence_source = _resolve_env_float(
+        "BP_SCENE_GRAPH_HEURISTIC_CONFIDENCE_SCALE",
+        heuristic_confidence_default,
+        heuristic_confidence_source,
+    )
+    allow_unvalidated_value, allow_unvalidated_source = _resolve_env_bool(
+        "BP_SCENE_GRAPH_ALLOW_UNVALIDATED_INPUT",
+        allow_unvalidated_default,
+        allow_unvalidated_source,
+    )
 
     config = SceneGraphRuntimeConfig(
-        vertical_proximity_threshold=_parse_env_float(
-            "BP_SCENE_GRAPH_VERTICAL_PROXIMITY_THRESHOLD",
-            vertical_default,
+        vertical_proximity_threshold=_validate_scene_graph_threshold(
+            "vertical_proximity_threshold",
+            vertical_value,
+            vertical_value_source,
         ),
-        horizontal_proximity_threshold=_parse_env_float(
-            "BP_SCENE_GRAPH_HORIZONTAL_PROXIMITY_THRESHOLD",
-            horizontal_default,
+        horizontal_proximity_threshold=_validate_scene_graph_threshold(
+            "horizontal_proximity_threshold",
+            horizontal_value,
+            horizontal_value_source,
         ),
-        alignment_angle_threshold=_parse_env_float(
-            "BP_SCENE_GRAPH_ALIGNMENT_ANGLE_THRESHOLD",
-            alignment_default,
+        alignment_angle_threshold=_validate_scene_graph_threshold(
+            "alignment_angle_threshold",
+            alignment_value,
+            alignment_value_source,
         ),
-        streaming_batch_size=_parse_env_int(
-            "BP_SCENE_GRAPH_STREAMING_BATCH_SIZE",
-            batch_default,
-        ),
-        enable_physics_validation=_parse_env_bool(
-            "BP_SCENE_GRAPH_ENABLE_PHYSICS_VALIDATION",
-            physics_validation_default,
-        ),
-        physics_contact_depth_threshold=_parse_env_float(
-            "BP_SCENE_GRAPH_PHYSICS_CONTACT_DEPTH_THRESHOLD",
-            contact_depth_default,
-        ),
-        physics_containment_ratio_threshold=_parse_env_float(
-            "BP_SCENE_GRAPH_PHYSICS_CONTAINMENT_RATIO_THRESHOLD",
-            containment_ratio_default,
-        ),
-        heuristic_confidence_scale=_parse_env_float(
-            "BP_SCENE_GRAPH_HEURISTIC_CONFIDENCE_SCALE",
-            heuristic_confidence_default,
-        ),
-        allow_unvalidated_input=_parse_env_bool(
-            "BP_SCENE_GRAPH_ALLOW_UNVALIDATED_INPUT",
-            allow_unvalidated_default,
-        ),
+        streaming_batch_size=streaming_batch_value,
+        enable_physics_validation=physics_validation_value,
+        physics_contact_depth_threshold=contact_depth_value,
+        physics_containment_ratio_threshold=containment_ratio_value,
+        heuristic_confidence_scale=heuristic_confidence_value,
+        allow_unvalidated_input=allow_unvalidated_value,
     )
 
     logger.info(
