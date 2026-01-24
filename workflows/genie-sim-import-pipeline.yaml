@@ -39,6 +39,7 @@ main:
           - realtime_stream_api_key: ${default(sys.get_env("REALTIME_STREAM_API_KEY"), "")}
           - realtime_stream_batch_size: ${default(sys.get_env("REALTIME_STREAM_BATCH_SIZE"), "25")}
           - circuitBreakerThreshold: ${int(default(sys.get_env("GENIESIM_CIRCUIT_BREAKER_THRESHOLD"), "3"))}
+          - circuitBreakerRecoverySeconds: ${int(default(sys.get_env("GENIESIM_CIRCUIT_BREAKER_RECOVERY_SECONDS"), "600"))}
           - artifacts_by_robot: null
 
     - extract_event:
@@ -77,6 +78,9 @@ main:
           - circuitBreakerFailureCount: 0
           - circuitBreakerLastFailureAt: null
           - circuitBreakerLastSuccessAt: null
+          - circuitBreakerStatus: "closed"
+          - circuitBreakerOpenedAt: null
+          - circuitBreakerLastProbeAt: null
         next: read_circuit_breaker_state
 
     - read_circuit_breaker_state:
@@ -130,14 +134,129 @@ main:
           - circuitBreakerFailureCount: ${default(map.get(circuitBreakerState, "failure_count"), 0)}
           - circuitBreakerLastFailureAt: ${default(map.get(circuitBreakerState, "last_failure_at"), null)}
           - circuitBreakerLastSuccessAt: ${default(map.get(circuitBreakerState, "last_success_at"), null)}
+          - circuitBreakerStatus: ${default(map.get(circuitBreakerState, "status"), if(circuitBreakerFailureCount >= circuitBreakerThreshold, "open", "closed"))}
+          - circuitBreakerOpenedAt: ${default(map.get(circuitBreakerState, "opened_at"), circuitBreakerLastFailureAt)}
+          - circuitBreakerLastProbeAt: ${default(map.get(circuitBreakerState, "last_probe_at"), null)}
         next: log_circuit_breaker_state
 
     - log_circuit_breaker_state:
         call: sys.log
         args:
-          text: ${"Circuit breaker state for scene " + scene_id + ": failures=" + string(circuitBreakerFailureCount) + ", threshold=" + string(circuitBreakerThreshold) + ", object=" + circuitBreakerObject}
+          text: ${"Circuit breaker state for scene " + scene_id + ": status=" + circuitBreakerStatus + ", failures=" + string(circuitBreakerFailureCount) + ", threshold=" + string(circuitBreakerThreshold) + ", opened_at=" + string(circuitBreakerOpenedAt) + ", last_probe_at=" + string(circuitBreakerLastProbeAt) + ", object=" + circuitBreakerObject}
           severity: "INFO"
+        next: set_circuit_breaker_now
+
+    - set_circuit_breaker_now:
+        assign:
+          - circuitBreakerNow: ${time.format(sys.now())}
+        next: check_circuit_breaker_status
+
+    - check_circuit_breaker_status:
+        switch:
+          - condition: ${circuitBreakerStatus == "open"}
+            next: check_circuit_breaker_recovery
+          - condition: ${circuitBreakerStatus == "half_open"}
+            next: transition_circuit_breaker_half_open
         next: check_circuit_breaker_threshold
+
+    - check_circuit_breaker_recovery:
+        switch:
+          - condition: ${circuitBreakerOpenedAt != null and (time.parse(circuitBreakerNow) - time.parse(circuitBreakerOpenedAt)) >= circuitBreakerRecoverySeconds}
+            next: transition_circuit_breaker_half_open
+        next: circuit_breaker_open
+
+    - transition_circuit_breaker_half_open:
+        assign:
+          - circuitBreakerStatus: "half_open"
+          - circuitBreakerOpenedAt: ${default(circuitBreakerOpenedAt, circuitBreakerNow)}
+          - circuitBreakerLastProbeAt: ${circuitBreakerNow}
+        next: write_circuit_breaker_half_open
+
+    - write_circuit_breaker_half_open:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${circuitBreakerObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": scene_id,
+            "failure_count": circuitBreakerFailureCount,
+            "threshold": circuitBreakerThreshold,
+            "status": circuitBreakerStatus,
+            "opened_at": circuitBreakerOpenedAt,
+            "last_probe_at": circuitBreakerLastProbeAt,
+            "updated_at": circuitBreakerNow,
+            "last_failure_at": circuitBreakerLastFailureAt,
+            "last_success_at": circuitBreakerLastSuccessAt
+          })}
+        next: probe_circuit_breaker_import_job
+
+    - probe_circuit_breaker_import_job:
+        try:
+          call: googleapis.run.v1.projects.locations.jobs.get
+          args:
+            name: ${"projects/" + project_id + "/locations/" + region + "/jobs/genie-sim-import-job"}
+          result: circuitBreakerProbeImport
+        next: circuit_breaker_probe_success
+        except:
+          as: circuitBreakerProbeError
+          steps:
+            - circuit_breaker_probe_failure:
+                assign:
+                  - circuitBreakerStatus: "open"
+                  - circuitBreakerFailureCount: ${circuitBreakerFailureCount + 1}
+                  - circuitBreakerOpenedAt: ${circuitBreakerNow}
+                  - circuitBreakerLastProbeAt: ${circuitBreakerNow}
+                  - circuitBreakerLastFailureAt: ${circuitBreakerNow}
+                next: write_circuit_breaker_probe_failure
+
+    - write_circuit_breaker_probe_failure:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${circuitBreakerObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": scene_id,
+            "failure_count": circuitBreakerFailureCount,
+            "threshold": circuitBreakerThreshold,
+            "status": circuitBreakerStatus,
+            "opened_at": circuitBreakerOpenedAt,
+            "last_probe_at": circuitBreakerLastProbeAt,
+            "updated_at": circuitBreakerNow,
+            "last_failure_at": circuitBreakerLastFailureAt,
+            "last_failure_reason": "circuit_breaker_probe_failed",
+            "last_success_at": circuitBreakerLastSuccessAt
+          })}
+        next: stop_for_circuit_breaker
+
+    - circuit_breaker_probe_success:
+        assign:
+          - circuitBreakerStatus: "closed"
+          - circuitBreakerFailureCount: 0
+          - circuitBreakerOpenedAt: null
+          - circuitBreakerLastProbeAt: ${circuitBreakerNow}
+          - circuitBreakerLastSuccessAt: ${circuitBreakerNow}
+        next: write_circuit_breaker_probe_success
+
+    - write_circuit_breaker_probe_success:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${circuitBreakerObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": scene_id,
+            "failure_count": circuitBreakerFailureCount,
+            "threshold": circuitBreakerThreshold,
+            "status": circuitBreakerStatus,
+            "opened_at": circuitBreakerOpenedAt,
+            "last_probe_at": circuitBreakerLastProbeAt,
+            "updated_at": circuitBreakerNow,
+            "last_failure_at": circuitBreakerLastFailureAt,
+            "last_success_at": circuitBreakerLastSuccessAt
+          })}
+        next: resolve_job_id
 
     - check_circuit_breaker_threshold:
         switch:
@@ -628,6 +747,9 @@ main:
             - increment_circuit_breaker_import_start_failure:
                 assign:
                   - circuitBreakerFailureCount: ${circuitBreakerFailureCount + 1}
+                  - circuitBreakerStatus: "open"
+                  - circuitBreakerOpenedAt: ${time.format(sys.now())}
+                  - circuitBreakerLastFailureAt: ${time.format(sys.now())}
                 next: write_circuit_breaker_import_start_failure
             - write_circuit_breaker_import_start_failure:
                 call: googleapis.storage.v1.objects.insert
@@ -639,9 +761,11 @@ main:
                     "scene_id": scene_id,
                     "failure_count": circuitBreakerFailureCount,
                     "threshold": circuitBreakerThreshold,
-                    "status": "open",
+                    "status": circuitBreakerStatus,
+                    "opened_at": circuitBreakerOpenedAt,
+                    "last_probe_at": circuitBreakerLastProbeAt,
                     "updated_at": time.format(sys.now()),
-                    "last_failure_at": time.format(sys.now()),
+                    "last_failure_at": circuitBreakerLastFailureAt,
                     "last_failure_reason": "geniesim_import_start_failed",
                     "last_success_at": circuitBreakerLastSuccessAt
                   })}
@@ -732,6 +856,9 @@ main:
     - increment_circuit_breaker_import_failure:
         assign:
           - circuitBreakerFailureCount: ${circuitBreakerFailureCount + 1}
+          - circuitBreakerStatus: "open"
+          - circuitBreakerOpenedAt: ${time.format(sys.now())}
+          - circuitBreakerLastFailureAt: ${time.format(sys.now())}
         next: write_circuit_breaker_import_failure
 
     - write_circuit_breaker_import_failure:
@@ -744,9 +871,11 @@ main:
             "scene_id": scene_id,
             "failure_count": circuitBreakerFailureCount,
             "threshold": circuitBreakerThreshold,
-            "status": "open",
+            "status": circuitBreakerStatus,
+            "opened_at": circuitBreakerOpenedAt,
+            "last_probe_at": circuitBreakerLastProbeAt,
             "updated_at": time.format(sys.now()),
-            "last_failure_at": time.format(sys.now()),
+            "last_failure_at": circuitBreakerLastFailureAt,
             "last_failure_reason": "geniesim_import_failed",
             "last_success_at": circuitBreakerLastSuccessAt
           })}
@@ -984,6 +1113,14 @@ main:
         switch:
           - condition: ${circuitBreakerObject == null}
             next: return_success
+        next: set_circuit_breaker_success_state
+
+    - set_circuit_breaker_success_state:
+        assign:
+          - circuitBreakerStatus: "closed"
+          - circuitBreakerOpenedAt: null
+          - circuitBreakerFailureCount: 0
+          - circuitBreakerLastSuccessAt: ${time.format(sys.now())}
         next: write_circuit_breaker_success
 
     - write_circuit_breaker_success:
@@ -994,11 +1131,13 @@ main:
           uploadType: "media"
           body: ${json.encode({
             "scene_id": scene_id,
-            "failure_count": 0,
+            "failure_count": circuitBreakerFailureCount,
             "threshold": circuitBreakerThreshold,
-            "status": "closed",
+            "status": circuitBreakerStatus,
+            "opened_at": circuitBreakerOpenedAt,
+            "last_probe_at": circuitBreakerLastProbeAt,
             "updated_at": time.format(sys.now()),
-            "last_success_at": time.format(sys.now()),
+            "last_success_at": circuitBreakerLastSuccessAt,
             "last_failure_at": circuitBreakerLastFailureAt,
             "last_failure_reason": null
           })}
