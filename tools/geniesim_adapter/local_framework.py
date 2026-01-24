@@ -5964,10 +5964,16 @@ class GenieSimLocalFramework:
                 "episodes_meta": "meta/episodes/chunk-000/file-0000.parquet",
             }
         else:
+            if resolved_format == LeRobotExportFormat.LEROBOT_V0_3_3:
+                version_value = "0.3.3"
+            elif resolved_format == LeRobotExportFormat.LEROBOT_V0_4:
+                version_value = "0.4.0"
+            else:
+                version_value = "2.0"
             info = {
                 "format": "lerobot",
                 "export_format": resolved_format.value,
-                "version": "0.3.3" if resolved_format == LeRobotExportFormat.LEROBOT_V0_3_3 else "2.0",
+                "version": version_value,
                 "episodes": exported_count,
                 "skipped": skipped_count,
                 "total_frames": total_frames,
