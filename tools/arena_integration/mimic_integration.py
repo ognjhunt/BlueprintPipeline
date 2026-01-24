@@ -873,7 +873,11 @@ class MimicAugmenter:
         """Save augmented demonstrations."""
         output_dir.mkdir(parents=True, exist_ok=True)
         export_format = parse_lerobot_export_format(self.config.output_format)
-        if export_format in (LeRobotExportFormat.LEROBOT_V2, LeRobotExportFormat.LEROBOT_V0_3_3):
+        if export_format in (
+            LeRobotExportFormat.LEROBOT_V2,
+            LeRobotExportFormat.LEROBOT_V0_3_3,
+            LeRobotExportFormat.LEROBOT_V0_4,
+        ):
             self._save_lerobot_format(demos, output_dir, export_format=export_format)
         elif export_format == LeRobotExportFormat.LEROBOT_V3:
             self._save_lerobot_v3_format(demos, output_dir)
@@ -942,11 +946,17 @@ class MimicAugmenter:
             json.dump(episode_metadata, f, indent=2)
 
         # Save info
+        if export_format == LeRobotExportFormat.LEROBOT_V0_3_3:
+            version_value = "0.3.3"
+        elif export_format == LeRobotExportFormat.LEROBOT_V0_4:
+            version_value = "0.4.0"
+        else:
+            version_value = "2.0"
         info = {
             "codebase_version": "2.0",
             "format": "lerobot",
             "export_format": export_format.value,
-            "version": "0.3.3" if export_format == LeRobotExportFormat.LEROBOT_V0_3_3 else "2.0",
+            "version": version_value,
             "total_episodes": len(demos),
             "total_frames": sum(len(d) for d in demos),
             "fps": 120,
