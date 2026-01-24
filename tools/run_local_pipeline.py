@@ -76,6 +76,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import logging
 import re
 import os
 import shutil
@@ -88,6 +89,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 import numpy as np
 
@@ -208,6 +210,7 @@ class LocalPipelineRunner:
         self,
         scene_dir: Path,
         verbose: bool = True,
+        json_logging: Optional[bool] = None,
         skip_interactive: bool = True,
         environment_type: str = "kitchen",
         enable_dwm: bool = False,
@@ -229,6 +232,13 @@ class LocalPipelineRunner:
         """
         self.scene_dir = Path(scene_dir).resolve()
         self.verbose = verbose
+        if json_logging is None:
+            self.json_logging = parse_bool_env(
+                os.getenv("BP_JSON_LOGS"),
+                default=True,
+            )
+        else:
+            self.json_logging = json_logging
         self.skip_interactive = skip_interactive
         self.environment_type = environment_type
         self.enable_dwm = enable_dwm
@@ -254,6 +264,9 @@ class LocalPipelineRunner:
 
         # Derive scene ID from directory name
         self.scene_id = self.scene_dir.name
+        self.run_id = os.getenv("BP_RUN_ID") or uuid4().hex
+        self._current_step: Optional[PipelineStep] = None
+        self._logger = self._configure_logger()
 
         # Setup paths
         self.regen3d_dir = self.scene_dir / "regen3d"
@@ -383,8 +396,39 @@ class LocalPipelineRunner:
 
     def log(self, msg: str, level: str = "INFO") -> None:
         """Log a message."""
-        if self.verbose:
-            print(f"[LOCAL-PIPELINE] [{level}] {msg}")
+        if not self.verbose:
+            return
+        level_name = level.upper()
+        log_level = logging._nameToLevel.get(level_name, logging.INFO)
+        step_value = None
+        if self._current_step is not None:
+            step_value = self._current_step.value
+        payload = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "level": level_name,
+            "scene_id": self.scene_id,
+            "step": step_value,
+            "run_id": self.run_id,
+            "message": msg,
+        }
+        if self.json_logging:
+            self._logger.log(log_level, json.dumps(payload))
+        else:
+            self._logger.log(log_level, msg)
+
+    def _configure_logger(self) -> logging.Logger:
+        logger = logging.getLogger(f"local-pipeline.{self.scene_id}.{self.run_id}")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        logger.handlers.clear()
+        handler = logging.StreamHandler(stream=sys.stdout)
+        if self.json_logging:
+            formatter = logging.Formatter("%(message)s")
+        else:
+            formatter = logging.Formatter("[LOCAL-PIPELINE] [%(levelname)s] %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        return logger
 
     def _sanitize_error_message(self, message: str) -> str:
         if not message:
@@ -1762,6 +1806,7 @@ class LocalPipelineRunner:
         import time
         start_time = time.time()
 
+        self._current_step = step
         self.log(f"\n--- Running step: {step.value} ---")
 
         try:
@@ -1832,6 +1877,7 @@ class LocalPipelineRunner:
         result.duration_seconds = time.time() - start_time
         status = "OK" if result.success else "FAILED"
         self.log(f"Step {step.value}: {status} ({result.duration_seconds:.2f}s)")
+        self._current_step = None
 
         return result
 
