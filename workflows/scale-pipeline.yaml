@@ -122,7 +122,7 @@ main:
           result: scaleExec
         retry:
           predicate: ${http.default_retry_predicate}
-          max_retries: 5
+          max_retries: 5  # default per policy_configs/retry_policy.yaml
           backoff:
             initial_delay: 1
             max_delay: 60
