@@ -10,6 +10,7 @@ import base64
 import hashlib
 import shutil
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
@@ -29,6 +30,7 @@ _FIREBASE_STORAGE_BUCKET = None
 _SHA256_METADATA_KEY = "sha256"
 _LOCAL_UPLOAD_ROOT: Optional[Path] = None
 _DEFAULT_FIREBASE_UPLOAD_FILE_TIMEOUT_SECONDS = 300.0
+_DEFAULT_FIREBASE_UPLOAD_TOTAL_TIMEOUT_SECONDS = 3600.0
 
 
 class FirebaseUploadError(RuntimeError):
@@ -82,6 +84,22 @@ def _resolve_upload_file_timeout_seconds() -> float:
         ) from exc
     if timeout <= 0:
         raise ValueError("FIREBASE_UPLOAD_FILE_TIMEOUT_SECONDS must be > 0")
+    return timeout
+
+
+def _resolve_upload_total_timeout_seconds() -> float:
+    raw_timeout = os.getenv(
+        "FIREBASE_UPLOAD_TIMEOUT_TOTAL_SECONDS",
+        str(_DEFAULT_FIREBASE_UPLOAD_TOTAL_TIMEOUT_SECONDS),
+    )
+    try:
+        timeout = float(raw_timeout)
+    except ValueError as exc:
+        raise ValueError(
+            "FIREBASE_UPLOAD_TIMEOUT_TOTAL_SECONDS must be a number of seconds"
+        ) from exc
+    if timeout <= 0:
+        raise ValueError("FIREBASE_UPLOAD_TIMEOUT_TOTAL_SECONDS must be > 0")
     return timeout
 
 
@@ -385,6 +403,7 @@ def _upload_firebase_files(
     if concurrency < 1:
         raise ValueError("FIREBASE_UPLOAD_CONCURRENCY must be >= 1")
     upload_timeout_seconds = _resolve_upload_file_timeout_seconds()
+    total_timeout_seconds = _resolve_upload_total_timeout_seconds()
 
     total_files = len(file_paths)
     uploaded_files = 0
@@ -467,6 +486,19 @@ def _upload_firebase_files(
             "status": "uploaded",
         }
 
+    def _record_global_timeout(pending_futures: Iterable) -> None:
+        for pending_future in pending_futures:
+            info = futures[pending_future]
+            failure = {
+                "local_path": info["local_path"],
+                "remote_path": info["remote_path"],
+                "status": "failed",
+                "error": f"global timeout after {total_timeout_seconds} seconds",
+            }
+            failures.append(failure)
+            file_statuses.append(failure)
+
+    start_time = time.monotonic()
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {}
         for file_path in file_paths:
@@ -479,54 +511,73 @@ def _upload_firebase_files(
                 "remote_path": remote_path,
             }
 
-        for future in as_completed(futures):
-            info = futures[future]
+        pending_futures = set(futures)
+        while pending_futures:
+            remaining = total_timeout_seconds - (time.monotonic() - start_time)
+            if remaining <= 0:
+                _record_global_timeout(pending_futures)
+                break
             try:
-                status_result = future.result(timeout=upload_timeout_seconds)
-                status = status_result.get("status")
-                file_statuses.append(status_result)
-                if status == "failed":
-                    failures.append(status_result)
-                    verification = status_result.get("verification")
-                    if verification:
-                        verification_failed.append(verification)
-                    continue
-                if status == "uploaded":
-                    uploaded_files += 1
-                elif status == "skipped":
-                    skipped_files += 1
-                elif status == "reuploaded":
-                    reuploaded_files += 1
-            except TimeoutError as exc:
-                logger.error(
-                    "Timed out uploading %s to %s after %s seconds",
-                    info["local_path"],
-                    info["remote_path"],
-                    upload_timeout_seconds,
-                )
-                failure = {
-                    "local_path": info["local_path"],
-                    "remote_path": info["remote_path"],
-                    "status": "failed",
-                    "error": f"timeout after {upload_timeout_seconds} seconds",
-                }
-                failures.append(failure)
-                file_statuses.append(failure)
-            except Exception as exc:
-                logger.error(
-                    "Failed to upload %s to %s: %s",
-                    info["local_path"],
-                    info["remote_path"],
-                    exc,
-                )
-                failure = {
-                    "local_path": info["local_path"],
-                    "remote_path": info["remote_path"],
-                    "status": "failed",
-                    "error": str(exc),
-                }
-                failures.append(failure)
-                file_statuses.append(failure)
+                for future in as_completed(pending_futures, timeout=remaining):
+                    info = futures[future]
+                    remaining = total_timeout_seconds - (time.monotonic() - start_time)
+                    if remaining <= 0:
+                        _record_global_timeout(pending_futures)
+                        pending_futures.clear()
+                        break
+                    try:
+                        status_result = future.result(
+                            timeout=min(upload_timeout_seconds, remaining)
+                        )
+                        status = status_result.get("status")
+                        file_statuses.append(status_result)
+                        if status == "failed":
+                            failures.append(status_result)
+                            verification = status_result.get("verification")
+                            if verification:
+                                verification_failed.append(verification)
+                            pending_futures.remove(future)
+                            continue
+                        if status == "uploaded":
+                            uploaded_files += 1
+                        elif status == "skipped":
+                            skipped_files += 1
+                        elif status == "reuploaded":
+                            reuploaded_files += 1
+                    except TimeoutError:
+                        logger.error(
+                            "Timed out uploading %s to %s after %s seconds",
+                            info["local_path"],
+                            info["remote_path"],
+                            upload_timeout_seconds,
+                        )
+                        failure = {
+                            "local_path": info["local_path"],
+                            "remote_path": info["remote_path"],
+                            "status": "failed",
+                            "error": f"timeout after {upload_timeout_seconds} seconds",
+                        }
+                        failures.append(failure)
+                        file_statuses.append(failure)
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to upload %s to %s: %s",
+                            info["local_path"],
+                            info["remote_path"],
+                            exc,
+                        )
+                        failure = {
+                            "local_path": info["local_path"],
+                            "remote_path": info["remote_path"],
+                            "status": "failed",
+                            "error": str(exc),
+                        }
+                        failures.append(failure)
+                        file_statuses.append(failure)
+                    pending_futures.remove(future)
+            except TimeoutError:
+                _record_global_timeout(pending_futures)
+                break
 
     failures.sort(key=lambda failure: failure["local_path"])
     verification_failed.sort(key=lambda failure: failure["local_path"])
@@ -575,6 +626,8 @@ def _upload_local_files(
     concurrency = int(os.getenv("FIREBASE_UPLOAD_CONCURRENCY", "8"))
     if concurrency < 1:
         raise ValueError("FIREBASE_UPLOAD_CONCURRENCY must be >= 1")
+    upload_timeout_seconds = _resolve_upload_file_timeout_seconds()
+    total_timeout_seconds = _resolve_upload_total_timeout_seconds()
 
     total_files = len(file_paths)
     uploaded_files = 0
@@ -638,34 +691,84 @@ def _upload_local_files(
             "status": "uploaded",
         }
 
+    def _record_global_timeout(pending_futures: Iterable) -> None:
+        for pending_future in pending_futures:
+            info = futures[pending_future]
+            failure = {
+                "local_path": info["local_path"],
+                "remote_path": info["remote_path"],
+                "status": "failed",
+                "error": f"global timeout after {total_timeout_seconds} seconds",
+            }
+            failures.append(failure)
+            file_statuses.append(failure)
+
+    start_time = time.monotonic()
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(_upload_single, file_path): file_path for file_path in file_paths}
-        for future in as_completed(futures):
+        futures = {}
+        for file_path in file_paths:
+            relative_path = file_path.relative_to(base_dir).as_posix()
+            remote_path = f"{prefix}/{scene_id}/{relative_path}"
+            futures[executor.submit(_upload_single, file_path)] = {
+                "local_path": str(file_path),
+                "remote_path": remote_path,
+            }
+
+        pending_futures = set(futures)
+        while pending_futures:
+            remaining = total_timeout_seconds - (time.monotonic() - start_time)
+            if remaining <= 0:
+                _record_global_timeout(pending_futures)
+                break
             try:
-                status_result = future.result()
-                status = status_result.get("status")
-                file_statuses.append(status_result)
-                if status == "failed":
-                    failures.append(status_result)
-                    verification = status_result.get("verification")
-                    if verification:
-                        verification_failed.append(verification)
-                    continue
-                if status == "uploaded":
-                    uploaded_files += 1
-                elif status == "skipped":
-                    skipped_files += 1
-                elif status == "reuploaded":
-                    reuploaded_files += 1
-            except Exception as exc:
-                failure = {
-                    "local_path": str(futures[future]),
-                    "remote_path": "unknown",
-                    "status": "failed",
-                    "error": str(exc),
-                }
-                failures.append(failure)
-                file_statuses.append(failure)
+                for future in as_completed(pending_futures, timeout=remaining):
+                    info = futures[future]
+                    remaining = total_timeout_seconds - (time.monotonic() - start_time)
+                    if remaining <= 0:
+                        _record_global_timeout(pending_futures)
+                        pending_futures.clear()
+                        break
+                    try:
+                        status_result = future.result(
+                            timeout=min(upload_timeout_seconds, remaining)
+                        )
+                        status = status_result.get("status")
+                        file_statuses.append(status_result)
+                        if status == "failed":
+                            failures.append(status_result)
+                            verification = status_result.get("verification")
+                            if verification:
+                                verification_failed.append(verification)
+                            pending_futures.remove(future)
+                            continue
+                        if status == "uploaded":
+                            uploaded_files += 1
+                        elif status == "skipped":
+                            skipped_files += 1
+                        elif status == "reuploaded":
+                            reuploaded_files += 1
+                    except TimeoutError:
+                        failure = {
+                            "local_path": info["local_path"],
+                            "remote_path": info["remote_path"],
+                            "status": "failed",
+                            "error": f"timeout after {upload_timeout_seconds} seconds",
+                        }
+                        failures.append(failure)
+                        file_statuses.append(failure)
+                    except Exception as exc:
+                        failure = {
+                            "local_path": info["local_path"],
+                            "remote_path": info["remote_path"],
+                            "status": "failed",
+                            "error": str(exc),
+                        }
+                        failures.append(failure)
+                        file_statuses.append(failure)
+                    pending_futures.remove(future)
+            except TimeoutError:
+                _record_global_timeout(pending_futures)
+                break
 
     failures.sort(key=lambda failure: failure["local_path"])
     verification_failed.sort(key=lambda failure: failure["local_path"])
