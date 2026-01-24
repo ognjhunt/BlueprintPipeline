@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Optional
 
 from tools.config.env import parse_bool_env
@@ -38,6 +39,14 @@ class JsonLogFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         message = record.getMessage()
+        pipeline_error = self._resolve_pipeline_error(record)
+        error_category = getattr(record, "error_category", None)
+        error_severity = getattr(record, "error_severity", None)
+        error_context = getattr(record, "error_context", None)
+        if pipeline_error:
+            error_category = error_category or pipeline_error.get("category")
+            error_severity = error_severity or pipeline_error.get("severity")
+            error_context = error_context or pipeline_error.get("context")
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
@@ -47,9 +56,35 @@ class JsonLogFormatter(logging.Formatter):
             "request_id": _resolve_context_value(record, "request_id", "REQUEST_ID"),
             "message": message,
         }
+        if pipeline_error is not None:
+            payload["pipeline_error"] = pipeline_error
+        if error_category is not None:
+            payload["error_category"] = self._serialize_enum(error_category)
+        if error_severity is not None:
+            payload["error_severity"] = self._serialize_enum(error_severity)
+        if error_context is not None:
+            payload["error_context"] = error_context
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload)
+
+    @staticmethod
+    def _serialize_enum(value: Any) -> Any:
+        if isinstance(value, Enum):
+            return value.value
+        return value
+
+    @staticmethod
+    def _resolve_pipeline_error(record: logging.LogRecord) -> Optional[dict[str, Any]]:
+        pipeline_error = getattr(record, "pipeline_error", None)
+        if pipeline_error is None:
+            return None
+        if isinstance(pipeline_error, dict):
+            return pipeline_error
+        to_dict = getattr(pipeline_error, "to_dict", None)
+        if callable(to_dict):
+            return to_dict()
+        return {"detail": str(pipeline_error)}
 
 
 class PlainTextFormatter(logging.Formatter):

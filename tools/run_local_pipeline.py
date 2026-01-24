@@ -113,6 +113,7 @@ from tools.config.seed_manager import configure_pipeline_seed
 from tools.error_handling.errors import ErrorCategory, ErrorContext, PipelineError
 from tools.error_handling.errors import classify_exception
 from tools.error_handling.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
+from tools.error_handling.logging import log_pipeline_error
 from tools.error_handling.retry import (
     NonRetryableError,
     RetryConfig,
@@ -904,6 +905,7 @@ class LocalPipelineRunner:
         duration_seconds: float = 0,
     ) -> StepResult:
         pipeline_error = classify_exception(exc)
+        log_pipeline_error(pipeline_error, f"{step.value} failed")
         self._log_exception_traceback(context, exc)
         error_context = None
         if getattr(pipeline_error, "context", None) is not None:
