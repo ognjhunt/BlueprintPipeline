@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 import tools.error_handling.circuit_breaker as circuit_breaker
@@ -106,3 +108,61 @@ def test_circuit_breaker_defaults_and_overrides() -> None:
     assert override_breaker.config.success_threshold == 3
     assert override_breaker.config.recovery_timeout == 7.5
     assert override_breaker.config.failure_window == 15.0
+
+
+@pytest.mark.unit
+def test_circuit_breaker_persists_and_restores_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = TimeController()
+    monkeypatch.setattr(circuit_breaker.time, "time", controller.time)
+
+    persistence_path = tmp_path / "breaker_state.json"
+    breaker = circuit_breaker.CircuitBreaker(
+        "test-circuit-breaker-persistence",
+        failure_threshold=1,
+        success_threshold=2,
+        recovery_timeout=5.0,
+        failure_window=60.0,
+        persistence_path=persistence_path,
+    )
+
+    breaker.record_failure(RuntimeError("initial failure"))
+    assert breaker.state == circuit_breaker.CircuitState.OPEN
+
+    controller.advance(5.0)
+    assert breaker.state == circuit_breaker.CircuitState.HALF_OPEN
+
+    breaker.record_success()
+    assert breaker.get_stats()["success_count"] == 1
+
+    restored = circuit_breaker.CircuitBreaker(
+        "test-circuit-breaker-persistence",
+        failure_threshold=1,
+        success_threshold=2,
+        recovery_timeout=5.0,
+        failure_window=60.0,
+        persistence_path=persistence_path,
+    )
+
+    assert restored.state == circuit_breaker.CircuitState.HALF_OPEN
+    stats = restored.get_stats()
+    assert stats["failure_count"] == 1
+    assert stats["success_count"] == 1
+    assert stats["last_failure_time"] == pytest.approx(0.0)
+    assert stats["opened_at"] == pytest.approx(0.0)
+
+    restored.record_success()
+    assert restored.state == circuit_breaker.CircuitState.CLOSED
+
+    restarted = circuit_breaker.CircuitBreaker(
+        "test-circuit-breaker-persistence",
+        failure_threshold=1,
+        success_threshold=2,
+        recovery_timeout=5.0,
+        failure_window=60.0,
+        persistence_path=persistence_path,
+    )
+    assert restarted.state == circuit_breaker.CircuitState.CLOSED
+    assert restarted.get_stats()["failure_count"] == 0
