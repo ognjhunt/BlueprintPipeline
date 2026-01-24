@@ -10,8 +10,10 @@ import base64
 import hashlib
 import shutil
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+from math import ceil
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -31,6 +33,80 @@ _SHA256_METADATA_KEY = "sha256"
 _LOCAL_UPLOAD_ROOT: Optional[Path] = None
 _DEFAULT_FIREBASE_UPLOAD_FILE_TIMEOUT_SECONDS = 300.0
 _DEFAULT_FIREBASE_UPLOAD_TOTAL_TIMEOUT_SECONDS = 3600.0
+_DEFAULT_FIREBASE_UPLOAD_RATE_LIMIT_PER_SEC = 0.0
+
+
+class _RateLimiter:
+    def __init__(self, rate_per_sec: float, burst: int) -> None:
+        self._rate_per_sec = rate_per_sec
+        self._capacity = burst
+        self._tokens = float(burst)
+        self._updated_at = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self, *, remote_path: str) -> None:
+        if self._rate_per_sec <= 0:
+            return
+
+        while True:
+            wait_seconds = 0.0
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._updated_at
+                if elapsed > 0:
+                    self._tokens = min(
+                        self._capacity,
+                        self._tokens + elapsed * self._rate_per_sec,
+                    )
+                    self._updated_at = now
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
+                wait_seconds = (1 - self._tokens) / self._rate_per_sec
+            if wait_seconds > 0:
+                logger.info(
+                    "Rate limiting Firebase upload for %s; sleeping %.2f seconds",
+                    remote_path,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+
+
+def _resolve_upload_rate_limit_per_sec() -> float:
+    raw_rate = os.getenv(
+        "FIREBASE_UPLOAD_RATE_LIMIT_PER_SEC",
+        str(_DEFAULT_FIREBASE_UPLOAD_RATE_LIMIT_PER_SEC),
+    )
+    try:
+        rate_limit = float(raw_rate)
+    except ValueError as exc:
+        raise ValueError("FIREBASE_UPLOAD_RATE_LIMIT_PER_SEC must be a number") from exc
+    if rate_limit < 0:
+        raise ValueError("FIREBASE_UPLOAD_RATE_LIMIT_PER_SEC must be >= 0")
+    return rate_limit
+
+
+def _resolve_upload_burst(rate_limit_per_sec: float) -> int:
+    raw_burst = os.getenv("FIREBASE_UPLOAD_BURST")
+    if raw_burst is None or raw_burst == "":
+        if rate_limit_per_sec <= 0:
+            return 0
+        return max(1, int(ceil(rate_limit_per_sec)))
+    try:
+        burst = int(raw_burst)
+    except ValueError as exc:
+        raise ValueError("FIREBASE_UPLOAD_BURST must be an integer") from exc
+    if burst < 1:
+        raise ValueError("FIREBASE_UPLOAD_BURST must be >= 1 when rate limiting is enabled")
+    return burst
+
+
+def _build_upload_rate_limiter() -> Optional[_RateLimiter]:
+    rate_limit = _resolve_upload_rate_limit_per_sec()
+    if rate_limit <= 0:
+        return None
+    burst = _resolve_upload_burst(rate_limit)
+    return _RateLimiter(rate_limit, burst)
 
 
 class FirebaseUploadError(RuntimeError):
@@ -404,6 +480,7 @@ def _upload_firebase_files(
         raise ValueError("FIREBASE_UPLOAD_CONCURRENCY must be >= 1")
     upload_timeout_seconds = _resolve_upload_file_timeout_seconds()
     total_timeout_seconds = _resolve_upload_total_timeout_seconds()
+    rate_limiter = _build_upload_rate_limiter()
 
     total_files = len(file_paths)
     uploaded_files = 0
@@ -418,6 +495,8 @@ def _upload_firebase_files(
         remote_path: str,
         content_type: Optional[str],
     ) -> dict:
+        if rate_limiter:
+            rate_limiter.acquire(remote_path=remote_path)
         blob = bucket.blob(remote_path)
         local_hashes = _calculate_file_hashes(path)
         status_payload = {
@@ -628,6 +707,7 @@ def _upload_local_files(
         raise ValueError("FIREBASE_UPLOAD_CONCURRENCY must be >= 1")
     upload_timeout_seconds = _resolve_upload_file_timeout_seconds()
     total_timeout_seconds = _resolve_upload_total_timeout_seconds()
+    rate_limiter = _build_upload_rate_limiter()
 
     total_files = len(file_paths)
     uploaded_files = 0
@@ -640,6 +720,8 @@ def _upload_local_files(
     def _upload_single(path: Path) -> dict:
         relative_path = path.relative_to(base_dir).as_posix()
         remote_path = f"{prefix}/{scene_id}/{relative_path}"
+        if rate_limiter:
+            rate_limiter.acquire(remote_path=remote_path)
         dest_path = local_root / remote_path
         status_payload = {
             "local_path": str(path),
