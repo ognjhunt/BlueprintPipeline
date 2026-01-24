@@ -43,6 +43,9 @@ Controls for `tools.metrics.pipeline_metrics` and the real-time pipeline observa
 | `GCP_PROJECT_ID` | str | unset | GCP project ID used when `METRICS_BACKEND=cloud_monitoring`. |
 | `PROMETHEUS_METRICS_PORT` | int | 8000 | Port for the Prometheus HTTP metrics endpoint when `METRICS_BACKEND=prometheus`. |
 
+**Production requirement**: production job definitions should set `METRICS_BACKEND=cloud_monitoring` and provide
+`GCP_PROJECT_ID` so custom metrics flow to Cloud Monitoring.
+
 **Example**:
 ```bash
 # Cloud Monitoring

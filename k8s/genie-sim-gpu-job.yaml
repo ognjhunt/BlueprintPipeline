@@ -114,6 +114,10 @@ spec:
               value: "scenes/${SCENE_ID}/episodes"
             - name: ROBOT_TYPE
               value: "franka"
+            - name: METRICS_BACKEND
+              value: "cloud_monitoring"
+            - name: GCP_PROJECT_ID
+              value: "${PROJECT_ID}"
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /secrets/gcs/key.json
             - name: FIREBASE_STORAGE_BUCKET
