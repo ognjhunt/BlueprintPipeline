@@ -893,6 +893,147 @@ def _upload_robot_payload_to_firebase(
     return robot_type, firebase_summary, None
 
 
+def _run_firebase_uploads_for_robot_payloads(
+    *,
+    robot_results: List[Dict[str, Any]],
+    scene_id: str,
+    job_id: str,
+    firebase_upload_prefix: str,
+    firebase_upload_max_workers: int,
+    allow_partial_firebase_uploads: bool,
+    log: logging.LoggerAdapter,
+    overall_success: bool,
+) -> bool:
+    successful_payloads = [
+        payload for payload in robot_results if payload["result"].success
+    ]
+    if not successful_payloads:
+        return overall_success
+
+    firebase_upload_failures: List[tuple[str, BaseException]] = []
+    with ThreadPoolExecutor(max_workers=firebase_upload_max_workers) as executor:
+        futures = {
+            executor.submit(
+                _upload_robot_payload_to_firebase,
+                payload=payload,
+                scene_id=scene_id,
+                job_id=job_id,
+                firebase_upload_prefix=firebase_upload_prefix,
+                log=log,
+            ): payload
+            for payload in successful_payloads
+        }
+        for future in as_completed(futures):
+            payload = futures[future]
+            entry = payload["entry"]
+            result = payload["result"]
+            robot_type = payload.get("robot_type", "unknown")
+            try:
+                resolved_robot_type, firebase_summary, error = future.result()
+            except Exception as exc:
+                _alert_firebase_upload_failure(
+                    scene_id=scene_id,
+                    job_id=job_id,
+                    robot_type=robot_type,
+                    error=str(exc),
+                )
+                log.error("Firebase upload failed for robot %s: %s", robot_type, exc)
+                entry.setdefault("errors", []).append(f"Firebase upload failed: {exc}")
+                firebase_upload_failures.append((robot_type, exc))
+                overall_success = False
+                continue
+            if resolved_robot_type:
+                robot_type = resolved_robot_type
+            if error is not None:
+                log.error("Firebase upload failed for robot %s: %s", robot_type, error)
+                entry.setdefault("errors", []).append(
+                    f"Firebase upload failed: {error}"
+                )
+                firebase_upload_failures.append((robot_type, error))
+                overall_success = False
+                continue
+            if not firebase_summary:
+                continue
+            entry["firebase_upload"] = firebase_summary
+            log.info(
+                "Firebase upload complete: uploaded=%s skipped=%s reuploaded=%s failed=%s total=%s",
+                firebase_summary.get("uploaded", 0),
+                firebase_summary.get("skipped", 0),
+                firebase_summary.get("reuploaded", 0),
+                firebase_summary.get("failed", 0),
+                firebase_summary.get("total_files", 0),
+            )
+            failed_count = firebase_summary.get("failed", 0)
+            if failed_count > 0:
+                _alert_firebase_upload_failure(
+                    scene_id=scene_id,
+                    job_id=job_id,
+                    robot_type=robot_type,
+                    error=f"{failed_count} file(s) failed to upload to Firebase",
+                )
+                log.error(
+                    "Firebase upload incomplete for robot %s: %d file(s) failed.",
+                    robot_type,
+                    failed_count,
+                )
+                entry.setdefault("errors", []).append(
+                    f"Firebase upload incomplete: {failed_count} file(s) failed"
+                )
+                overall_success = False
+            elif firebase_summary.get("deduplicated_episode_ids"):
+                deduplicated_ids = firebase_summary.get(
+                    "deduplicated_episode_ids",
+                    [],
+                )
+                new_hashes = {
+                    episode_id: content_hash
+                    for episode_id, content_hash in result.episode_content_hashes.items()
+                    if episode_id not in deduplicated_ids
+                }
+                _persist_episode_hash_index(
+                    episode_hashes=new_hashes,
+                    scene_id=scene_id,
+                    robot_type=robot_type,
+                    prefix=firebase_upload_prefix,
+                    job_id=job_id,
+                    log=log,
+                )
+            else:
+                _persist_episode_hash_index(
+                    episode_hashes=result.episode_content_hashes,
+                    scene_id=scene_id,
+                    robot_type=robot_type,
+                    prefix=firebase_upload_prefix,
+                    job_id=job_id,
+                    log=log,
+                )
+            _publish_dataset_catalog_document(
+                scene_id=scene_id,
+                job_id=job_id,
+                robot_type=robot_type,
+                result=result,
+                firebase_summary=firebase_summary,
+                gcs_output_path=entry.get("gcs_output_path"),
+                log=log,
+            )
+
+    if firebase_upload_failures:
+        failed_robot_types = sorted({robot for robot, _ in firebase_upload_failures})
+        if allow_partial_firebase_uploads:
+            log.warning(
+                "Firebase uploads failed for robot(s) %s; continuing because "
+                "ALLOW_PARTIAL_FIREBASE_UPLOADS=true.",
+                failed_robot_types,
+            )
+        else:
+            raise FirebaseUploadOrchestratorError(
+                "Firebase uploads failed for robot types: "
+                + ", ".join(failed_robot_types)
+            )
+
+    return overall_success
+
+
 def _relative_to_bundle(bundle_root: Path, path: Path) -> str:
     try:
         rel_path = path.resolve().relative_to(bundle_root.resolve())
@@ -5623,103 +5764,16 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                 )
 
             if enable_firebase_upload and not firebase_upload_suppressed:
-                successful_payloads = [
-                    payload for payload in robot_results if payload["result"].success
-                ]
-                with ThreadPoolExecutor(
-                    max_workers=firebase_upload_max_workers
-                ) as executor:
-                    futures = {
-                        executor.submit(
-                            _upload_robot_payload_to_firebase,
-                            payload=payload,
-                            scene_id=scene_id,
-                            job_id=job_id,
-                            firebase_upload_prefix=firebase_upload_prefix,
-                            log=log,
-                        ): payload
-                        for payload in successful_payloads
-                    }
-                    for future in as_completed(futures):
-                        payload = futures[future]
-                        entry = payload["entry"]
-                        result = payload["result"]
-                        try:
-                            robot_type, firebase_summary, error = future.result()
-                        except Exception as exc:
-                            for pending in futures:
-                                if pending is not future:
-                                    pending.cancel()
-                            raise exc
-                        if error is not None:
-                            for pending in futures:
-                                if pending is not future:
-                                    pending.cancel()
-                            raise error
-                        if not firebase_summary:
-                            continue
-                        entry["firebase_upload"] = firebase_summary
-                        log.info(
-                            "Firebase upload complete: uploaded=%s skipped=%s reuploaded=%s failed=%s total=%s",
-                            firebase_summary.get("uploaded", 0),
-                            firebase_summary.get("skipped", 0),
-                            firebase_summary.get("reuploaded", 0),
-                            firebase_summary.get("failed", 0),
-                            firebase_summary.get("total_files", 0),
-                        )
-                        failed_count = firebase_summary.get("failed", 0)
-                        if failed_count > 0:
-                            _alert_firebase_upload_failure(
-                                scene_id=scene_id,
-                                job_id=job_id,
-                                robot_type=robot_type,
-                                error=f"{failed_count} file(s) failed to upload to Firebase",
-                            )
-                            log.error(
-                                "Firebase upload incomplete for robot %s: %d file(s) failed.",
-                                robot_type,
-                                failed_count,
-                            )
-                            entry["errors"].append(
-                                f"Firebase upload incomplete: {failed_count} file(s) failed"
-                            )
-                            overall_success = False
-                        elif firebase_summary.get("deduplicated_episode_ids"):
-                            deduplicated_ids = firebase_summary.get(
-                                "deduplicated_episode_ids",
-                                [],
-                            )
-                            new_hashes = {
-                                episode_id: content_hash
-                                for episode_id, content_hash in result.episode_content_hashes.items()
-                                if episode_id not in deduplicated_ids
-                            }
-                            _persist_episode_hash_index(
-                                episode_hashes=new_hashes,
-                                scene_id=scene_id,
-                                robot_type=robot_type,
-                                prefix=firebase_upload_prefix,
-                                job_id=job_id,
-                                log=log,
-                            )
-                        else:
-                            _persist_episode_hash_index(
-                                episode_hashes=result.episode_content_hashes,
-                                scene_id=scene_id,
-                                robot_type=robot_type,
-                                prefix=firebase_upload_prefix,
-                                job_id=job_id,
-                                log=log,
-                            )
-                        _publish_dataset_catalog_document(
-                            scene_id=scene_id,
-                            job_id=job_id,
-                            robot_type=robot_type,
-                            result=result,
-                            firebase_summary=firebase_summary,
-                            gcs_output_path=robot_gcs_output_path,
-                            log=log,
-                        )
+                overall_success = _run_firebase_uploads_for_robot_payloads(
+                    robot_results=robot_results,
+                    scene_id=scene_id,
+                    job_id=job_id,
+                    firebase_upload_prefix=firebase_upload_prefix,
+                    firebase_upload_max_workers=firebase_upload_max_workers,
+                    allow_partial_firebase_uploads=allow_partial_firebase_uploads,
+                    log=log,
+                    overall_success=overall_success,
+                )
             elif enable_firebase_upload and firebase_upload_suppressed:
                 log.warning(
                     "Firebase uploads suppressed (reason=%s).",
