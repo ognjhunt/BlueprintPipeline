@@ -1,0 +1,185 @@
+# Delivery integrity audit workflow
+# Expected schedule: weekly via Cloud Scheduler.
+
+main:
+  params: [event]
+  steps:
+    - init:
+        assign:
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
+          - jobName: "dataset-delivery-integrity-audit-job"
+          - deliveryBucket: ${default(event.delivery_bucket, sys.get_env("DELIVERY_BUCKET", sys.get_env("GCS_BUCKET", "blueprintpipeline-data")))}
+          - deliveryPrefix: ${default(event.delivery_prefix, sys.get_env("DELIVERY_PREFIX", "deliveries/"))}
+          - reportBucket: ${default(event.report_bucket, sys.get_env("AUDIT_REPORT_BUCKET", deliveryBucket))}
+          - reportPrefix: ${default(event.report_prefix, sys.get_env("AUDIT_REPORT_PREFIX", "audit-reports/delivery-integrity"))}
+          - maxBundles: ${default(event.max_bundles, sys.get_env("MAX_BUNDLES", "100"))}
+          - maxFilesPerBundle: ${default(event.max_files_per_bundle, sys.get_env("MAX_FILES_PER_BUNDLE", "0"))}
+          - auditTimeoutSeconds: 7200
+        next: log_start
+
+    - log_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "maintenance_job"
+            event: "start"
+            workflow: "delivery-integrity-audit"
+            job: ${jobName}
+            delivery_bucket: ${deliveryBucket}
+            delivery_prefix: ${deliveryPrefix}
+            report_bucket: ${reportBucket}
+            report_prefix: ${reportPrefix}
+            max_bundles: ${maxBundles}
+            max_files_per_bundle: ${maxFilesPerBundle}
+            start_time: ${time.format(sys.now())}
+          severity: "INFO"
+        next: run_audit_job
+
+    - run_audit_job:
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: ${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}
+            body:
+              overrides:
+                containerOverrides:
+                  - command: ["python", "integrity_audit.py"]
+                    env:
+                      - name: DELIVERY_BUCKET
+                        value: ${deliveryBucket}
+                      - name: DELIVERY_PREFIX
+                        value: ${deliveryPrefix}
+                      - name: AUDIT_REPORT_BUCKET
+                        value: ${reportBucket}
+                      - name: AUDIT_REPORT_PREFIX
+                        value: ${reportPrefix}
+                      - name: MAX_BUNDLES
+                        value: ${maxBundles}
+                      - name: MAX_FILES_PER_BUNDLE
+                        value: ${maxFilesPerBundle}
+            timeout: '${string(auditTimeoutSeconds) + "s"}'
+          result: auditExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 30
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_audit_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "delivery-integrity-audit"
+                    job: ${jobName}
+                    delivery_bucket: ${deliveryBucket}
+                    retry_max: 3
+                    error: ${e.message}
+                  severity: "ERROR"
+            - log_audit_start_failure:
+                call: sys.log
+                args:
+                  text: '${"Failed to start delivery integrity audit job after retries: " + e.message}'
+                  severity: "ERROR"
+            - raise_audit_start_error:
+                raise: ${e}
+        next: set_execution_name
+
+    - set_execution_name:
+        assign:
+          - auditExecutionName: '${if(auditExec.metadata != null and auditExec.metadata.name != null, auditExec.metadata.name, auditExec.name)}'
+          - auditPollStartTime: '${time.format(sys.now())}'
+        next: wait_for_audit
+
+    - wait_for_audit:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${auditExecutionName}
+        result: auditStatus
+        next: check_audit_status
+
+    - check_audit_status:
+        assign:
+          - auditState: '${if(auditStatus.state != null, auditStatus.state, if(auditStatus.status != null, auditStatus.status.state, null))}'
+          - auditFailedCount: '${if(auditStatus.failedCount != null, auditStatus.failedCount, if(auditStatus.status != null, auditStatus.status.failedCount, null))}'
+          - auditSucceededCount: '${if(auditStatus.succeededCount != null, auditStatus.succeededCount, if(auditStatus.status != null, auditStatus.status.succeededCount, null))}'
+          - auditErrorMessage: '${if(auditStatus.status != null and auditStatus.status.message != null, auditStatus.status.message, if(auditStatus.error != null and auditStatus.error.message != null, auditStatus.error.message, "Unknown error"))}'
+          - auditPollElapsedSeconds: '${time.parse(time.format(sys.now())) - time.parse(auditPollStartTime)}'
+          - auditPollTimedOut: '${auditPollElapsedSeconds >= auditTimeoutSeconds}'
+        next: audit_status_switch
+
+    - audit_status_switch:
+        switch:
+          - condition: '${auditPollTimedOut}'
+            next: audit_timeout
+          - condition: '${auditState == "FAILED" or (auditFailedCount != null and auditFailedCount > 0)}'
+            next: audit_failed
+          - condition: '${auditState == "SUCCEEDED" or (auditSucceededCount != null and auditSucceededCount > 0)}'
+            next: log_complete
+        next: wait_audit_poll
+
+    - wait_audit_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_audit
+
+    - audit_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "maintenance_job"
+            event: "failed"
+            workflow: "delivery-integrity-audit"
+            job: ${jobName}
+            delivery_bucket: ${deliveryBucket}
+            execution: ${auditExecutionName}
+            error: ${auditErrorMessage}
+          severity: "ERROR"
+        next: raise_audit_failed
+
+    - audit_timeout:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "maintenance_job"
+            event: "timeout"
+            workflow: "delivery-integrity-audit"
+            job: ${jobName}
+            delivery_bucket: ${deliveryBucket}
+            execution: ${auditExecutionName}
+            error: '${"Audit execution timed out after " + string(auditTimeoutSeconds) + "s"}'
+          severity: "ERROR"
+        next: raise_audit_timeout
+
+    - raise_audit_failed:
+        raise: '${"Delivery integrity audit failed: " + auditExecutionName + " - " + auditErrorMessage}'
+
+    - raise_audit_timeout:
+        raise: '${"Delivery integrity audit timed out: " + auditExecutionName}'
+
+    - log_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "maintenance_job"
+            event: "complete"
+            workflow: "delivery-integrity-audit"
+            job: ${jobName}
+            delivery_bucket: ${deliveryBucket}
+            delivery_prefix: ${deliveryPrefix}
+            report_bucket: ${reportBucket}
+            report_prefix: ${reportPrefix}
+            max_bundles: ${maxBundles}
+            max_files_per_bundle: ${maxFilesPerBundle}
+            end_time: ${time.format(sys.now())}
+          severity: "INFO"
+        next: done
+
+    - done:
+        return: ${"Delivery integrity audit triggered for bucket " + deliveryBucket}
