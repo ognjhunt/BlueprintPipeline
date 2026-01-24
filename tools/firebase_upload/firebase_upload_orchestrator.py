@@ -221,7 +221,10 @@ def upload_episodes_with_retry(
         prefix=resolved_prefix,
     )
     if second_pass_max is None:
-        second_pass_max = int(os.getenv("FIREBASE_UPLOAD_SECOND_PASS_MAX", "1"))
+        default_second_pass_max = "3" if resolve_production_mode() else "1"
+        second_pass_max = int(
+            os.getenv("FIREBASE_UPLOAD_SECOND_PASS_MAX", default_second_pass_max)
+        )
     if second_pass_max < 0:
         raise ValueError("FIREBASE_UPLOAD_SECOND_PASS_MAX must be >= 0")
 
