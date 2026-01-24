@@ -636,6 +636,33 @@ class TestGenieSimExporter:
         assert len(asset_index["assets"]) == 1
         assert asset_index["assets"][0]["asset_id"] == "own_mug_001"
 
+    def test_scene_config_env_overrides(self, sample_manifest, tmp_path, monkeypatch):
+        """Ensure env overrides are reflected in the scene config YAML."""
+        manifest_path = tmp_path / "scene_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(sample_manifest, f)
+
+        monkeypatch.setenv("GENIESIM_EPISODES_PER_TASK", "42")
+        monkeypatch.setenv("GENIESIM_USE_CUROBO", "false")
+        monkeypatch.setenv("GENIESIM_EVAL_SCENARIOS", "7")
+        monkeypatch.setenv("GENIESIM_EXPORT_FORMAT", "custom_format")
+
+        output_dir = tmp_path / "geniesim"
+        config = GenieSimExportConfig(
+            robot_type="franka",
+            generate_embeddings=False,
+        )
+        exporter = GenieSimExporter(config, verbose=False)
+        result = exporter.export(manifest_path, output_dir)
+
+        assert result.success is True
+        scene_config_text = result.scene_config_path.read_text()
+
+        assert "episodes_per_task: 42" in scene_config_text
+        assert "use_curobo: false" in scene_config_text
+        assert "scenarios: 7" in scene_config_text
+        assert "format: \"custom_format\"" in scene_config_text
+
 
 # =============================================================================
 # Pipeline Selector Tests
