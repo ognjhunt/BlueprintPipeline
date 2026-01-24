@@ -13,6 +13,7 @@ runs the retention cleanup job on a schedule.
 | **Outputs** | `scenes/{scene_id}/assets/*`, `scenes/{scene_id}/usd/*`, `scenes/{scene_id}/replicator/*`, `scenes/{scene_id}/variation_assets/*`, `scenes/{scene_id}/isaac_lab/*` | 365 days | Retain deliverables for customers, exports, and downstream training. |
 | **Episodes** | `scenes/{scene_id}/episodes/*` | 365 days | Retain training datasets; transition to colder storage after 365 days (see Terraform policy). |
 | **Logs** | `scenes/{scene_id}/logs/*` | 180 days | Preserve operational logs for incident response and compliance. |
+| **Markers** | `scenes/{scene_id}/.circuit_breaker.json`, `scenes/{scene_id}/geniesim/.geniesim_complete`, `scenes/{scene_id}/**/.failed*`, `scenes/{scene_id}/geniesim/idempotency/*.json` | 30 days | Retain short-lived pipeline marker files for troubleshooting and retries. |
 
 ## Retention configuration
 
@@ -21,7 +22,7 @@ The maintenance job uses a pipeline-level retention setting to drive deletion de
 - `PIPELINE_RETENTION_DAYS` (default: **30**) controls the intermediate artifact window.
 - Optional overrides are supported per class: `PIPELINE_INPUT_RETENTION_DAYS`,
   `PIPELINE_INTERMEDIATE_RETENTION_DAYS`, `PIPELINE_OUTPUT_RETENTION_DAYS`,
-  and `PIPELINE_LOG_RETENTION_DAYS`.
+  `PIPELINE_LOG_RETENTION_DAYS`, and `PIPELINE_MARKER_RETENTION_DAYS`.
 
 These settings are read by `tools/checkpoint/retention_cleanup.py` and can be supplied via
 Cloud Run job environment variables.

@@ -19,6 +19,7 @@ DEFAULT_PIPELINE_RETENTION_DAYS = 30
 DEFAULT_INPUT_RETENTION_DAYS = 90
 DEFAULT_OUTPUT_RETENTION_DAYS = 365
 DEFAULT_LOG_RETENTION_DAYS = 180
+DEFAULT_MARKER_RETENTION_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class RetentionPolicy:
     intermediate_days: int
     outputs_days: int
     logs_days: int
+    markers_days: int
     fallback_days: int
 
     def days_for_class(self, class_name: str) -> int:
@@ -40,6 +42,8 @@ class RetentionPolicy:
             return self.outputs_days
         if class_name == "logs":
             return self.logs_days
+        if class_name == "markers":
+            return self.markers_days
         return self.fallback_days
 
 
@@ -62,6 +66,7 @@ def load_retention_policy(base_days: Optional[int]) -> RetentionPolicy:
         intermediate_days=_int_env("PIPELINE_INTERMEDIATE_RETENTION_DAYS", pipeline_days),
         outputs_days=_int_env("PIPELINE_OUTPUT_RETENTION_DAYS", DEFAULT_OUTPUT_RETENTION_DAYS),
         logs_days=_int_env("PIPELINE_LOG_RETENTION_DAYS", DEFAULT_LOG_RETENTION_DAYS),
+        markers_days=_int_env("PIPELINE_MARKER_RETENTION_DAYS", DEFAULT_MARKER_RETENTION_DAYS),
         fallback_days=pipeline_days,
     )
 
@@ -129,6 +134,28 @@ def _gather_candidates(scene_root: Path) -> Dict[Path, str]:
     return candidates
 
 
+def _gather_marker_candidates(scene_root: Path) -> Dict[Path, str]:
+    candidates: Dict[Path, str] = {}
+    marker_paths = [
+        scene_root / ".circuit_breaker.json",
+        scene_root / ".geniesim_complete",
+        scene_root / "geniesim" / ".geniesim_complete",
+        scene_root / "geniesim" / ".circuit_breaker.json",
+    ]
+    for marker in marker_paths:
+        if marker.exists() and marker.is_file():
+            candidates[marker] = "markers"
+    for marker in scene_root.rglob(".failed*"):
+        if marker.is_file():
+            candidates[marker] = "markers"
+    idempotency_dir = scene_root / "geniesim" / "idempotency"
+    if idempotency_dir.exists():
+        for marker in idempotency_dir.glob("*.json"):
+            if marker.is_file():
+                candidates[marker] = "markers"
+    return candidates
+
+
 def _remove_empty_dirs(start: Path, stop: Path) -> None:
     current = start
     while current != stop and current.exists():
@@ -149,12 +176,17 @@ def cleanup_scene(
     *,
     now: datetime,
     dry_run: bool,
-) -> Tuple[int, int]:
+) -> Tuple[int, int, int, int]:
     deleted = 0
     considered = 0
+    deleted_markers = 0
+    considered_markers = 0
     candidates = _gather_candidates(scene_root)
+    candidates.update(_gather_marker_candidates(scene_root))
     for file_path, class_name in candidates.items():
         considered += 1
+        if class_name == "markers":
+            considered_markers += 1
         retention_days = policy.days_for_class(class_name)
         cutoff = now - timedelta(days=retention_days)
         mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
@@ -175,10 +207,12 @@ def cleanup_scene(
             file_path.unlink()
             _remove_empty_dirs(file_path.parent, scene_root)
             deleted += 1
+            if class_name == "markers":
+                deleted_markers += 1
             _log_action("deleted", payload)
         except OSError as exc:
             _log_action("delete_failed", {**payload, "error": str(exc)})
-    return deleted, considered
+    return deleted, considered, deleted_markers, considered_markers
 
 
 def parse_args() -> argparse.Namespace:
@@ -229,12 +263,18 @@ def main() -> int:
         return 0
     total_deleted = 0
     total_considered = 0
+    total_deleted_markers = 0
+    total_considered_markers = 0
     for scene_root in root.iterdir():
         if not scene_root.is_dir():
             continue
-        deleted, considered = cleanup_scene(scene_root, policy, now=now, dry_run=args.dry_run)
+        deleted, considered, deleted_markers, considered_markers = cleanup_scene(
+            scene_root, policy, now=now, dry_run=args.dry_run
+        )
         total_deleted += deleted
         total_considered += considered
+        total_deleted_markers += deleted_markers
+        total_considered_markers += considered_markers
     _log_action(
         "summary",
         {
@@ -243,6 +283,8 @@ def main() -> int:
             "dry_run": args.dry_run,
             "deleted": total_deleted,
             "considered": total_considered,
+            "markers_deleted": total_deleted_markers,
+            "markers_considered": total_considered_markers,
             "completed_at": datetime.now(timezone.utc).isoformat(),
         },
     )
