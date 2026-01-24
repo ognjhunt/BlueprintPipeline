@@ -94,6 +94,22 @@ spec:
                   name: genie-sim-export-overrides
                   key: URDF_PATH
                   optional: true
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: "${OTEL_EXPORTER_OTLP_HEADERS}"
+            - name: OTEL_SERVICE_NAME
+              value: "genie-sim-export-job"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=${JOB_NAME},deployment.environment=production"
 
           resources:
             requests:

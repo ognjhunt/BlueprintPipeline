@@ -13,3 +13,11 @@ sentence-transformers==3.3.1    # For local embeddings (LOCAL_EMBEDDING_FALLBACK
 # Metrics
 google-cloud-monitoring==2.21.0
 prometheus_client==0.20.0
+
+# Telemetry (OpenTelemetry)
+opentelemetry-api==1.20.0
+opentelemetry-sdk==1.20.0
+opentelemetry-exporter-gcp-trace==1.5.0
+opentelemetry-exporter-otlp==1.20.0
+opentelemetry-exporter-otlp-proto-grpc==1.20.0
+opentelemetry-propagator-gcp==1.5.0

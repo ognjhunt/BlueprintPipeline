@@ -25,8 +25,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.config import load_pipeline_config
 from tools.config.env import parse_bool_env
+from tools.tracing import init_tracing
 
 app = Flask(__name__)
+init_tracing(service_name=os.getenv("OTEL_SERVICE_NAME", "genie-sim-import-webhook"))
 
 _SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",

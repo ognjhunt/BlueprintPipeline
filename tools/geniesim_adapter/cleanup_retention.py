@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from tools.config.env import parse_int_env
+from tools.tracing import init_tracing
 
 GENIESIM_RECORDINGS_DIR_ENV = "GENIESIM_RECORDINGS_DIR"
 GENIESIM_LOG_DIR_ENV = "GENIESIM_LOG_DIR"
@@ -118,6 +119,7 @@ def cleanup_paths(
 
 
 def main() -> int:
+    init_tracing(service_name=os.getenv("OTEL_SERVICE_NAME", "genie-sim-cleanup-job"))
     args = _parse_args()
     retention_hours = _resolve_retention_hours(args.retention_hours)
     if retention_hours <= 0:

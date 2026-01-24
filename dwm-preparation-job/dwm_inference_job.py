@@ -564,6 +564,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+    from tools.tracing import init_tracing
 
     cli_args = argparse.ArgumentParser(add_help=False)
     cli_args.add_argument("--bundles-dir", type=Path)
@@ -587,6 +588,7 @@ if __name__ == "__main__":
         "scene_id": parsed_args.scene_id,
     }
 
+    init_tracing(service_name=os.getenv("OTEL_SERVICE_NAME", "dwm-preparation-job"))
     exit_code = run_job_with_dead_letter_queue(
         lambda: main(),
         scene_id=parsed_args.scene_id,

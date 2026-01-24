@@ -96,6 +96,7 @@ from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_forma
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import set_global_seed
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.tracing import init_tracing
 
 REQUIRED_ISAAC_SIM_VERSION = "2024.1.0+"
 REQUIRED_ISAAC_SIM_CONTAINER = "nvcr.io/nvidia/isaac-sim:2024.1.0"
@@ -3905,6 +3906,7 @@ if __name__ == "__main__":
         from tools.logging_config import init_logging
 
         init_logging()
+        init_tracing(service_name=os.getenv("OTEL_SERVICE_NAME", JOB_NAME))
         validate_and_fail_fast(job_name="EPISODE-GEN", validate_gcs=True)
         main()
     except Exception as exc:
