@@ -1721,16 +1721,8 @@ def convert_manifest_to_scene_graph(
         # Stream process objects in batches
         usd_base_path = manifest_metadata.get("usd_file")
 
-        batch_count = 0
         batch_size = runtime_config.streaming_batch_size
-        for batch in parser.stream_objects(batch_size=batch_size):
-            batch_count += 1
-            if verbose and batch_count % 10 == 0:
-                logger.info(
-                    "[SCENE-GRAPH-CONVERTER] Processed %d objects...",
-                    batch_count * batch_size,
-                    extra={"manifest_path": str(manifest_path)},
-                )
+
         def stream_progress(processed_objects: int, elapsed: float) -> None:
             if verbose:
                 logger.info(
@@ -1741,7 +1733,7 @@ def convert_manifest_to_scene_graph(
                 )
 
         for batch in parser.stream_objects(
-            batch_size=100,
+            batch_size=batch_size,
             progress_callback=stream_progress,
             progress_interval_s=5.0,
         ):
