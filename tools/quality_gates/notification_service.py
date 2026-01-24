@@ -38,7 +38,12 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tools.config import QualityConfig
 
 
 class NotificationChannel(str, Enum):
@@ -471,6 +476,111 @@ class NotificationService:
             recipient="console",
             message=payload.subject,
         )
+
+
+def _normalize_recipients(raw_recipients: Optional[object]) -> list[str]:
+    if raw_recipients is None:
+        return []
+    if isinstance(raw_recipients, str):
+        return [item.strip() for item in raw_recipients.split(",") if item.strip()]
+    if isinstance(raw_recipients, Sequence):
+        return [str(item).strip() for item in raw_recipients if str(item).strip()]
+    if isinstance(raw_recipients, Iterable):
+        return [str(item).strip() for item in raw_recipients if str(item).strip()]
+    return []
+
+
+def _normalize_channels(raw_channels: Optional[object]) -> list[str]:
+    if raw_channels is None:
+        return []
+    if isinstance(raw_channels, str):
+        return [item.strip().lower() for item in raw_channels.split(",") if item.strip()]
+    if isinstance(raw_channels, Sequence):
+        return [str(item).strip().lower() for item in raw_channels if str(item).strip()]
+    if isinstance(raw_channels, Iterable):
+        return [str(item).strip().lower() for item in raw_channels if str(item).strip()]
+    return []
+
+
+def _channel_from_string(value: str) -> Optional[NotificationChannel]:
+    normalized = value.strip().lower()
+    for channel in NotificationChannel:
+        if channel.value == normalized:
+            return channel
+    return None
+
+
+def build_notification_service(
+    config: Optional["QualityConfig"],
+    *,
+    env: Optional[Mapping[str, str]] = None,
+    verbose: bool = True,
+) -> Optional["NotificationService"]:
+    """Build a NotificationService from quality config and environment variables."""
+    env_map = dict(env) if env is not None else os.environ
+    notifications = getattr(config, "notifications", None)
+
+    email_recipients = _normalize_recipients(
+        getattr(notifications, "email_recipients", None) if notifications else None
+    )
+    sms_recipients = _normalize_recipients(
+        getattr(notifications, "sms_recipients", None) if notifications else None
+    )
+    slack_webhook_url = (
+        getattr(notifications, "slack_webhook_url", None) if notifications else None
+    )
+
+    env_email = env_map.get("BP_QUALITY_NOTIFICATIONS_EMAIL_RECIPIENTS")
+    if env_email:
+        email_recipients = _normalize_recipients(env_email)
+
+    env_sms = env_map.get("BP_QUALITY_NOTIFICATIONS_SMS_RECIPIENTS")
+    if env_sms:
+        sms_recipients = _normalize_recipients(env_sms)
+
+    env_slack = env_map.get("BP_QUALITY_NOTIFICATIONS_SLACK_WEBHOOK_URL")
+    if env_slack:
+        slack_webhook_url = env_slack
+
+    if env_map.get("QA_SLACK_WEBHOOK_URL") and not slack_webhook_url:
+        slack_webhook_url = env_map.get("QA_SLACK_WEBHOOK_URL")
+
+    channels = _normalize_channels(env_map.get("BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS"))
+    if not channels and config and getattr(config, "human_approval", None):
+        channels = _normalize_channels(config.human_approval.notification_channels)
+
+    if not channels:
+        if email_recipients:
+            channels.append(NotificationChannel.EMAIL.value)
+        if sms_recipients:
+            channels.append(NotificationChannel.SMS.value)
+        if slack_webhook_url:
+            channels.append(NotificationChannel.SLACK.value)
+
+    if not channels:
+        return None
+
+    resolved_channels: List[NotificationChannel] = []
+    seen = set()
+    for entry in channels:
+        channel = _channel_from_string(entry)
+        if channel and channel.value not in seen:
+            resolved_channels.append(channel)
+            seen.add(channel.value)
+
+    if not resolved_channels:
+        return None
+
+    email = email_recipients[0] if email_recipients else None
+    phone = sms_recipients[0] if sms_recipients else None
+
+    return NotificationService(
+        email=email,
+        phone=phone,
+        slack_webhook_url=slack_webhook_url,
+        channels=resolved_channels,
+        verbose=verbose,
+    )
 
 
 # Convenience functions

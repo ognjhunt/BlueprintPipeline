@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.config import load_quality_config
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.quality_gates import build_notification_service
 from tools.quality_gates.quality_gate import QualityGateCheckpoint, QualityGateRegistry
 
 
@@ -186,6 +187,7 @@ def main() -> int:
     )
 
     config = load_quality_config()
+    notification_service = build_notification_service(config, verbose=True)
     episode_metadata_path = None
     lerobot_dataset_path = None
     if scene_dir:
@@ -213,6 +215,7 @@ def main() -> int:
     registry.run_checkpoint(
         checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
         context=quality_context,
+        notification_service=notification_service,
     )
 
     if args.report_path:

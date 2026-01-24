@@ -26,9 +26,10 @@ if str(REPO_ROOT) not in sys.path:
 from tools.batch_processing.parallel_runner import ParallelPipelineRunner, SceneStatus
 from tools.checkpoint import get_checkpoint_store
 from tools.checkpoint.hash_config import resolve_checkpoint_hash_setting
+from tools.config import load_quality_config
 from tools.metrics import track_pipeline_run, update_pipeline_status
 from tools.metrics.pipeline_metrics import get_metrics
-from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
+from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry, build_notification_service
 from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
 from tools.scene_batch_reporting import _summarize_batch_results
 from tools.locking.gcs_lock import DEFAULT_HEARTBEAT_SECONDS, DEFAULT_TTL_SECONDS, GCSLock
@@ -192,13 +193,16 @@ def _run_quality_gates(
     enable_dwm: bool,
 ) -> Dict[str, Any]:
     checklist = _build_readiness_checklist(scene_dir, results, enable_dwm=enable_dwm)
-    registry = QualityGateRegistry(verbose=True)
+    config = load_quality_config()
+    notification_service = build_notification_service(config, verbose=True)
+    registry = QualityGateRegistry(verbose=True, config=config)
     registry.run_checkpoint(
         checkpoint=QualityGateCheckpoint.SCENE_READY,
         context={
             "scene_id": scene_id,
             "readiness_checklist": checklist,
         },
+        notification_service=notification_service,
     )
     registry.save_report(scene_id, report_path)
     return registry.to_report(scene_id)

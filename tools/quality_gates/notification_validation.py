@@ -25,12 +25,20 @@ def ensure_production_notification_channels(
     env: Optional[Mapping[str, str]] = None,
 ) -> None:
     """Ensure production runs have notification channels configured."""
-    if not resolve_production_mode(env):
+    env_map = dict(env) if env is not None else None
+    if not resolve_production_mode(env_map):
         return
+
+    env_channels = _normalize_channels(
+        (env_map or {}).get("BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS")
+    )
 
     channels: list[str] = []
     if config and getattr(config, "human_approval", None):
         channels = _normalize_channels(config.human_approval.notification_channels)
+
+    if env_channels:
+        channels = env_channels
 
     if not channels:
         raise ValueError(
