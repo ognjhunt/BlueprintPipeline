@@ -74,6 +74,7 @@ main:
           - geniesimExportTimeoutSeconds: 2700
           - geniesimSubmissionTimeoutSeconds: 14400
           - geniesimGenerationSlaSeconds: 14400
+          - circuitBreakerThreshold: '${int(default(sys.get_env("GENIESIM_CIRCUIT_BREAKER_THRESHOLD"), "3"))}'
           # Default to commercial-only assets (your own assets, not GenieSimAssets)
           - filterCommercial: true
           # Robot type (franka, g2, ur10)
@@ -127,7 +128,74 @@ main:
           - geniesimFailedMarker: '${"scenes/" + sceneId + "/geniesim/.failed"}'
           - geniesimLegacyFailedMarker: '${"scenes/" + sceneId + "/geniesim/.geniesim_failed"}'
           - canaryRollbackObject: ${if(canaryRollbackMarker == "", geniesimPrefix + "/.canary_rollback", canaryRollbackMarker)}
+          - circuitBreakerObject: '${"scenes/" + sceneId + "/geniesim/.circuit_breaker.json"}'
+          - circuitBreakerFailureCount: 0
+          - circuitBreakerLastFailureAt: null
+          - circuitBreakerLastSuccessAt: null
+        next: read_circuit_breaker_state
+
+    - read_circuit_breaker_state:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${circuitBreakerObject}
+            alt: "media"
+          result: circuitBreakerRaw
+        except:
+          as: circuitBreakerError
+          steps:
+            - handle_missing_circuit_breaker_state:
+                switch:
+                  - condition: ${circuitBreakerError.code == 404}
+                    next: set_empty_circuit_breaker_state
+                next: log_circuit_breaker_read_error
+            - set_empty_circuit_breaker_state:
+                assign:
+                  - circuitBreakerRaw: "{}"
+                next: parse_circuit_breaker_state
+            - log_circuit_breaker_read_error:
+                call: sys.log
+                args:
+                  text: '${"Unable to read circuit breaker state for scene " + sceneId + ": " + circuitBreakerError.message}'
+                  severity: "WARNING"
+                next: set_circuit_breaker_state_after_error
+            - set_circuit_breaker_state_after_error:
+                assign:
+                  - circuitBreakerRaw: "{}"
+                next: log_circuit_breaker_state
+        next: parse_circuit_breaker_state
+
+    - parse_circuit_breaker_state:
+        assign:
+          - circuitBreakerState: ${json.decode(circuitBreakerRaw)}
+          - circuitBreakerFailureCount: ${default(map.get(circuitBreakerState, "failure_count"), 0)}
+          - circuitBreakerLastFailureAt: ${default(map.get(circuitBreakerState, "last_failure_at"), null)}
+          - circuitBreakerLastSuccessAt: ${default(map.get(circuitBreakerState, "last_success_at"), null)}
+        next: log_circuit_breaker_state
+
+    - log_circuit_breaker_state:
+        call: sys.log
+        args:
+          text: '${"Circuit breaker state for scene " + sceneId + ": failures=" + string(circuitBreakerFailureCount) + ", threshold=" + string(circuitBreakerThreshold) + ", object=" + circuitBreakerObject}'
+          severity: "INFO"
+        next: check_circuit_breaker_threshold
+
+    - check_circuit_breaker_threshold:
+        switch:
+          - condition: ${circuitBreakerFailureCount >= circuitBreakerThreshold}
+            next: circuit_breaker_open
         next: log_canary_routing
+
+    - circuit_breaker_open:
+        call: sys.log
+        args:
+          text: '${"Circuit breaker open for scene " + sceneId + " (failures=" + string(circuitBreakerFailureCount) + ", threshold=" + string(circuitBreakerThreshold) + "). Skipping Genie Sim export."}'
+          severity: "ERROR"
+        next: stop_for_circuit_breaker
+
+    - stop_for_circuit_breaker:
+        return: ${"Circuit breaker open for scene " + sceneId + ". Skipping Genie Sim export."}
 
     - log_canary_routing:
         call: sys.log
@@ -449,6 +517,31 @@ main:
                 args:
                   text: '${"Failed to start Genie Sim job after retries: " + e.message}'
                   severity: "ERROR"
+            - update_circuit_breaker_on_export_start_failure:
+                assign:
+                  - circuitBreakerFailureCount: ${circuitBreakerFailureCount + 1}
+                next: write_circuit_breaker_export_start_failure
+            - write_circuit_breaker_export_start_failure:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${circuitBreakerObject}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "failure_count": circuitBreakerFailureCount,
+                    "threshold": circuitBreakerThreshold,
+                    "status": "open",
+                    "updated_at": time.format(sys.now()),
+                    "last_failure_at": time.format(sys.now()),
+                    "last_failure_reason": "geniesim_export_start_failed",
+                    "last_success_at": circuitBreakerLastSuccessAt
+                  })}
+            - log_circuit_breaker_export_start_failure:
+                call: sys.log
+                args:
+                  text: '${"Circuit breaker failure count updated to " + string(circuitBreakerFailureCount) + " after export start failure for scene " + sceneId}'
+                  severity: "WARNING"
             - raise_job_error:
                 raise: ${e}
         next: set_execution_name
@@ -819,6 +912,31 @@ main:
                 args:
                   text: '${"Failed to execute local Genie Sim job on GKE: " + e.message}'
                   severity: "ERROR"
+            - update_circuit_breaker_on_gpu_failure:
+                assign:
+                  - circuitBreakerFailureCount: ${circuitBreakerFailureCount + 1}
+                next: write_circuit_breaker_gpu_failure
+            - write_circuit_breaker_gpu_failure:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${circuitBreakerObject}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "failure_count": circuitBreakerFailureCount,
+                    "threshold": circuitBreakerThreshold,
+                    "status": "open",
+                    "updated_at": time.format(sys.now()),
+                    "last_failure_at": time.format(sys.now()),
+                    "last_failure_reason": "geniesim_gpu_start_failed",
+                    "last_success_at": circuitBreakerLastSuccessAt
+                  })}
+            - log_circuit_breaker_gpu_failure:
+                call: sys.log
+                args:
+                  text: '${"Circuit breaker failure count updated to " + string(circuitBreakerFailureCount) + " after GPU submission failure for scene " + sceneId}'
+                  severity: "WARNING"
             - raise_submission_error:
                 raise: ${e}
         next: set_gke_submission_execution_name
@@ -883,6 +1001,36 @@ main:
         args:
           text: '${"ERROR: Genie Sim submission failed for scene " + sceneId}'
           severity: "ERROR"
+        next: update_circuit_breaker_on_submission_failure
+
+    - update_circuit_breaker_on_submission_failure:
+        assign:
+          - circuitBreakerFailureCount: ${circuitBreakerFailureCount + 1}
+        next: write_circuit_breaker_submission_failure
+
+    - write_circuit_breaker_submission_failure:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${circuitBreakerObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "failure_count": circuitBreakerFailureCount,
+            "threshold": circuitBreakerThreshold,
+            "status": "open",
+            "updated_at": time.format(sys.now()),
+            "last_failure_at": time.format(sys.now()),
+            "last_failure_reason": "geniesim_submission_failed",
+            "last_success_at": circuitBreakerLastSuccessAt
+          })}
+        next: log_circuit_breaker_submission_failure
+
+    - log_circuit_breaker_submission_failure:
+        call: sys.log
+        args:
+          text: '${"Circuit breaker failure count updated to " + string(circuitBreakerFailureCount) + " after submission failure for scene " + sceneId}'
+          severity: "WARNING"
         next: raise_submission_failed
 
     - raise_submission_failed:
@@ -1113,6 +1261,37 @@ main:
           uploadType: "media"
           body: '${"{\"scene_id\": \"" + sceneId + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\", \"robot_type\": \"" + robotType + "\", \"commercial_only\": true, \"ready_for_geniesim\": true}"}'
         result: markerResult
+        next: reset_circuit_breaker_success
+
+    - reset_circuit_breaker_success:
+        assign:
+          - circuitBreakerFailureCount: 0
+          - circuitBreakerLastSuccessAt: ${time.format(sys.now())}
+        next: write_circuit_breaker_success
+
+    - write_circuit_breaker_success:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${circuitBreakerObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "failure_count": circuitBreakerFailureCount,
+            "threshold": circuitBreakerThreshold,
+            "status": "closed",
+            "updated_at": time.format(sys.now()),
+            "last_success_at": circuitBreakerLastSuccessAt,
+            "last_failure_at": circuitBreakerLastFailureAt,
+            "last_failure_reason": null
+          })}
+        next: log_circuit_breaker_success
+
+    - log_circuit_breaker_success:
+        call: sys.log
+        args:
+          text: '${"Circuit breaker reset for scene " + sceneId + " after successful export."}'
+          severity: "INFO"
         next: done
 
     - job_failed:
@@ -1120,6 +1299,36 @@ main:
         args:
           text: '${"ERROR: Genie Sim export failed for scene " + sceneId}'
           severity: "ERROR"
+        next: update_circuit_breaker_on_export_failure
+
+    - update_circuit_breaker_on_export_failure:
+        assign:
+          - circuitBreakerFailureCount: ${circuitBreakerFailureCount + 1}
+        next: write_circuit_breaker_export_failure
+
+    - write_circuit_breaker_export_failure:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${circuitBreakerObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "failure_count": circuitBreakerFailureCount,
+            "threshold": circuitBreakerThreshold,
+            "status": "open",
+            "updated_at": time.format(sys.now()),
+            "last_failure_at": time.format(sys.now()),
+            "last_failure_reason": "geniesim_export_failed",
+            "last_success_at": circuitBreakerLastSuccessAt
+          })}
+        next: log_circuit_breaker_export_failure
+
+    - log_circuit_breaker_export_failure:
+        call: sys.log
+        args:
+          text: '${"Circuit breaker failure count updated to " + string(circuitBreakerFailureCount) + " after export failure for scene " + sceneId}'
+          severity: "WARNING"
         next: capture_export_failure_metrics
 
     - capture_export_failure_metrics:
