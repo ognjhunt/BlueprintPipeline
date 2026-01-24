@@ -50,6 +50,7 @@ from .multi_robot_config import (
 
 logger = logging.getLogger(__name__)
 
+GENIESIM_TARGET_VERSION = "3.0"
 GENIESIM_EPISODES_PER_TASK_ENV = "GENIESIM_EPISODES_PER_TASK"
 GENIESIM_USE_CUROBO_ENV = "GENIESIM_USE_CUROBO"
 GENIESIM_EVAL_SCENARIOS_ENV = "GENIESIM_EVAL_SCENARIOS"
@@ -304,6 +305,7 @@ class GenieSimExporter:
 
             scene_graph_path = output_dir / "scene_graph.json"
             result.scene_graph_data = scene_graph.to_dict()
+            self._validate_schema_versions(result.scene_graph_data, "scene_graph.json")
             self._write_text(scene_graph_path, scene_graph.to_json(), "scene graph")
             result.scene_graph_path = scene_graph_path
 
@@ -338,6 +340,7 @@ class GenieSimExporter:
 
             asset_index_path = output_dir / "asset_index.json"
             result.asset_index_data = asset_index.to_dict()
+            self._validate_schema_versions(result.asset_index_data, "asset_index.json")
             self._write_text(asset_index_path, asset_index.to_json(), "asset index")
             result.asset_index_path = asset_index_path
 
@@ -354,6 +357,7 @@ class GenieSimExporter:
 
             task_config_path = output_dir / "task_config.json"
             result.task_config_data = task_config.to_dict()
+            self._validate_schema_versions(result.task_config_data, "task_config.json")
             self._write_text(task_config_path, task_config.to_json(), "task config")
             result.task_config_path = task_config_path
 
@@ -561,7 +565,7 @@ source:
         output_path: Path,
     ) -> None:
         """Write export manifest JSON."""
-        schema_version = "2.0"
+        schema_version = GENIESIM_TARGET_VERSION
         schema_definition = {
             "version": schema_version,
             "description": "Genie Sim export manifest schema for BlueprintPipeline exports.",
@@ -610,7 +614,7 @@ source:
             },
             "result": result.to_dict(),
             "geniesim_compatibility": {
-                "version": "3.0",
+                "version": GENIESIM_TARGET_VERSION,
                 "isaac_sim_version": "5.1.0",
                 "formats": {
                     "scene_graph": "json",
@@ -631,6 +635,29 @@ source:
         }
 
         self._write_json(output_path, manifest, "export manifest")
+
+    def _validate_schema_versions(self, payload: Dict[str, Any], filename: str) -> None:
+        version_entries = []
+        if "schema_version" in payload:
+            version_entries.append(("schema_version", payload["schema_version"]))
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict) and "schema_version" in metadata:
+            version_entries.append(("metadata.schema_version", metadata["schema_version"]))
+
+        if not version_entries:
+            return
+
+        mismatches = []
+        for field, version in version_entries:
+            if version != GENIESIM_TARGET_VERSION:
+                mismatches.append(f"{field}={version}")
+
+        if mismatches:
+            mismatch_text = ", ".join(mismatches)
+            raise RuntimeError(
+                f"{filename} schema version mismatch ({mismatch_text}); "
+                f"expected {GENIESIM_TARGET_VERSION}."
+            )
 
     @staticmethod
     def _compute_sha256(path: Path) -> str:
