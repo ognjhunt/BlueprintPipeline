@@ -124,7 +124,62 @@ main:
           - condition: ${job_metadata_path == null and scene_id != null and scene_id != "" and scene_id != "unknown"}
             assign:
               - job_metadata_path: '${"scenes/" + scene_id + "/geniesim/job.json"}'
+        next: init_import_idempotency
+
+    - init_import_idempotency:
+        switch:
+          - condition: ${scene_id == null or scene_id == "" or scene_id == "unknown"}
+            next: maybe_read_job_metadata_for_import
+        assign:
+          - importIdempotencyBasePath: ${"scenes/" + scene_id + "/geniesim/idempotency/import"}
+          - importIdempotencyObject: ${importIdempotencyBasePath + "/" + job_id + ".json"}
+        next: check_import_idempotency
+
+    - check_import_idempotency:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${importIdempotencyObject}
+            alt: "media"
+          result: importIdempotencyRaw
+        except:
+          as: importIdempotencyError
+          steps:
+            - handle_import_idempotency_missing:
+                switch:
+                  - condition: ${importIdempotencyError.code == 404}
+                    next: maybe_read_job_metadata_for_import
+                next: raise_import_idempotency_error
+            - raise_import_idempotency_error:
+                raise: ${importIdempotencyError}
+        next: parse_import_idempotency_marker
+
+    - parse_import_idempotency_marker:
+        assign:
+          - importIdempotencyMarker: ${json.decode(importIdempotencyRaw)}
+          - importIdempotencyStatus: ${default(map.get(importIdempotencyMarker, "status"), "unknown")}
+        next: evaluate_import_idempotency_marker
+
+    - evaluate_import_idempotency_marker:
+        switch:
+          - condition: ${importIdempotencyStatus == "completed"}
+            next: return_idempotent_import_skip
         next: maybe_read_job_metadata_for_import
+
+    - return_idempotent_import_skip:
+        call: sys.log
+        args:
+          text: ${"Idempotency marker present for import job " + job_id + " (scene: " + scene_id + "). Skipping import."}
+          severity: "INFO"
+        next: return_import_idempotency_skip
+
+    - return_import_idempotency_skip:
+        return:
+          status: "skipped"
+          job_id: ${job_id}
+          scene_id: ${scene_id}
+          reason: "Idempotency marker indicates import already completed."
 
     - maybe_read_job_metadata_for_import:
         switch:
@@ -666,6 +721,27 @@ main:
           uploadType: "media"
           body: ${"{\"scene_id\": \"" + scene_id + "\", \"job_id\": \"" + job_id + "\", \"status\": \"completed\", \"timestamp\": \"" + time.format(sys.now()) + "\"}"}
         result: import_marker
+        next: maybe_write_import_idempotency_marker
+
+    - maybe_write_import_idempotency_marker:
+        switch:
+          - condition: ${scene_id == null or scene_id == "" or scene_id == "unknown"}
+            next: copy_import_manifest_for_delivery
+        next: write_import_idempotency_marker
+
+    - write_import_idempotency_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${importIdempotencyObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": scene_id,
+            "job_id": job_id,
+            "status": "completed",
+            "timestamp": time.format(sys.now())
+          })}
+        result: importIdempotencyWriteResult
         next: copy_import_manifest_for_delivery
 
     - copy_import_manifest_for_delivery:
