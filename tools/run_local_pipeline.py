@@ -92,6 +92,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import numpy as np
+import yaml
 
 from tools.checkpoint import get_checkpoint_store
 from tools.checkpoint.hash_config import resolve_checkpoint_hash_setting
@@ -127,6 +128,13 @@ from tools.validation.geniesim_export import ExportConsistencyError, validate_ex
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+RETRY_POLICY_FALLBACK = {
+    "max_retries": 5,
+    "base_delay_seconds": 1.0,
+    "max_delay_seconds": 60.0,
+    "backoff_factor": 2.0,
+}
 
 
 def _load_json(path: Path, context: str) -> Any:
@@ -441,14 +449,99 @@ class LocalPipelineRunner:
             return f"{type(exc).__name__}: {sanitized_message}"
         return type(exc).__name__
 
+    def _load_retry_policy_defaults(self) -> Dict[str, float]:
+        policy_path = REPO_ROOT / "policy_configs" / "retry_policy.yaml"
+        if not policy_path.exists():
+            message = f"Retry policy defaults not found at {policy_path}; using fallback defaults."
+            if self._is_production_mode():
+                raise NonRetryableError(message)
+            self.log(message, "WARNING")
+            return dict(RETRY_POLICY_FALLBACK)
+        try:
+            payload = yaml.safe_load(policy_path.read_text()) or {}
+        except yaml.YAMLError as exc:
+            message = f"Failed to parse retry policy defaults at {policy_path}: {exc}"
+            if self._is_production_mode():
+                raise NonRetryableError(message) from exc
+            self.log(message, "WARNING")
+            return dict(RETRY_POLICY_FALLBACK)
+
+        if not isinstance(payload, dict):
+            message = f"Retry policy defaults at {policy_path} must be a mapping."
+            if self._is_production_mode():
+                raise NonRetryableError(message)
+            self.log(message, "WARNING")
+            return dict(RETRY_POLICY_FALLBACK)
+
+        def _coerce(name: str, cast, fallback_key: str) -> float:
+            value = payload.get(name, RETRY_POLICY_FALLBACK[fallback_key])
+            try:
+                return cast(value)
+            except (TypeError, ValueError) as exc:
+                message = (
+                    f"Invalid retry policy value for '{name}' in {policy_path}: {value}"
+                )
+                if self._is_production_mode():
+                    raise NonRetryableError(message) from exc
+                self.log(message + "; using fallback.", "WARNING")
+                return RETRY_POLICY_FALLBACK[fallback_key]
+
+        return {
+            "max_retries": int(_coerce("max_retries", int, "max_retries")),
+            "base_delay_seconds": float(_coerce("base_delay_seconds", float, "base_delay_seconds")),
+            "max_delay_seconds": float(_coerce("max_delay_seconds", float, "max_delay_seconds")),
+            "backoff_factor": float(_coerce("backoff_factor", float, "backoff_factor")),
+        }
+
     def _resolve_retry_config(self) -> RetryConfig:
-        max_retries = self._parse_env_int("PIPELINE_RETRY_MAX", default=3)
-        base_delay = self._parse_env_float("PIPELINE_RETRY_BASE_DELAY", default=1.0)
-        max_delay = self._parse_env_float("PIPELINE_RETRY_MAX_DELAY", default=60.0)
+        defaults = self._load_retry_policy_defaults()
+        max_retries_source = "policy_configs/retry_policy.yaml"
+        base_delay_source = "policy_configs/retry_policy.yaml"
+        max_delay_source = "policy_configs/retry_policy.yaml"
+
+        if os.getenv("PIPELINE_RETRY_MAX"):
+            max_retries = self._parse_env_int(
+                "PIPELINE_RETRY_MAX",
+                default=int(defaults["max_retries"]),
+            )
+            max_retries_source = "PIPELINE_RETRY_MAX"
+        else:
+            max_retries = int(defaults["max_retries"])
+
+        if os.getenv("PIPELINE_RETRY_BASE_DELAY"):
+            base_delay = self._parse_env_float(
+                "PIPELINE_RETRY_BASE_DELAY",
+                default=float(defaults["base_delay_seconds"]),
+            )
+            base_delay_source = "PIPELINE_RETRY_BASE_DELAY"
+        else:
+            base_delay = float(defaults["base_delay_seconds"])
+
+        if os.getenv("PIPELINE_RETRY_MAX_DELAY"):
+            max_delay = self._parse_env_float(
+                "PIPELINE_RETRY_MAX_DELAY",
+                default=float(defaults["max_delay_seconds"]),
+            )
+            max_delay_source = "PIPELINE_RETRY_MAX_DELAY"
+        else:
+            max_delay = float(defaults["max_delay_seconds"])
+
+        backoff_factor = float(defaults["backoff_factor"])
+
+        self.log(
+            "Resolved retry policy: "
+            f"max_retries={max_retries} ({max_retries_source}), "
+            f"base_delay={base_delay}s ({base_delay_source}), "
+            f"max_delay={max_delay}s ({max_delay_source}), "
+            f"backoff_factor={backoff_factor} (policy_configs/retry_policy.yaml)",
+            "INFO",
+        )
+
         return RetryConfig(
             max_retries=max_retries,
             base_delay=base_delay,
             max_delay=max_delay,
+            backoff_factor=backoff_factor,
         )
 
     def _is_production_mode(self) -> bool:

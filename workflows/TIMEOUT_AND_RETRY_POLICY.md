@@ -18,6 +18,9 @@ retry:
     multiplier: 2
 ```
 
+Canonical defaults for retry/backoff live in `policy_configs/retry_policy.yaml` and should be
+referenced directly in workflow definitions unless explicitly overridden.
+
 ### When Retries Apply
 
 Retries are applied to transient failures:
@@ -37,6 +40,16 @@ Retries are applied to transient failures:
 - Invalid parameters (400, 422)
 - Unauthorized (401, 403)
 - Job logic errors (application-level failures)
+
+### Retry Overrides
+
+The following workflows intentionally deviate from the shared retry defaults. These overrides
+must be annotated inline in the workflow YAML and documented here:
+
+- **Interactive Pipeline:** `max_retries: 3` for the particulate service and upload/polling
+  calls to fail fast on repeated failures.
+- **Genie Sim Export Pipeline:** `max_retries: 3` for the local GPU submission job to avoid
+  thrashing cluster capacity on repeated scheduling failures.
 
 ## Timeout Policies by Pipeline
 

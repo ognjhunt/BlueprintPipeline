@@ -124,7 +124,7 @@ main:
           result: interactiveJobExecution
         retry:
           predicate: ${http.default_retry_predicate}
-          max_retries: 5
+          max_retries: 5  # default per policy_configs/retry_policy.yaml
           backoff:
             initial_delay: 1
             max_delay: 60
@@ -181,7 +181,7 @@ main:
                   result: interactiveCleanupList
                 retry:
                   predicate: ${http.default_retry_predicate}
-                  max_retries: 3
+                  max_retries: 3  # override (see TIMEOUT_AND_RETRY_POLICY.md)
                   backoff:
                     initial_delay: 2
                     max_delay: 30
@@ -209,7 +209,7 @@ main:
                             object: ${interactiveCleanupItem.name}
                         retry:
                           predicate: ${http.default_retry_predicate}
-                          max_retries: 3
+                          max_retries: 3  # override (see TIMEOUT_AND_RETRY_POLICY.md)
                           backoff:
                             initial_delay: 2
                             max_delay: 30
@@ -254,7 +254,7 @@ main:
                     })}
                 retry:
                   predicate: ${http.default_retry_predicate}
-                  max_retries: 3
+                  max_retries: 3  # override (see TIMEOUT_AND_RETRY_POLICY.md)
                   backoff:
                     initial_delay: 2
                     max_delay: 30
@@ -370,7 +370,7 @@ main:
             })}
         retry:
           predicate: ${http.default_retry_predicate}
-          max_retries: 3
+          max_retries: 3  # override (see TIMEOUT_AND_RETRY_POLICY.md)
           backoff:
             initial_delay: 2
             max_delay: 30
@@ -397,7 +397,7 @@ main:
           result: interactiveFailurePayload
         retry:
           predicate: ${http.default_retry_predicate}
-          max_retries: 3
+          max_retries: 3  # override (see TIMEOUT_AND_RETRY_POLICY.md)
           backoff:
             initial_delay: 2
             max_delay: 30
@@ -464,7 +464,7 @@ main:
           result: markerResult
         retry:
           predicate: ${http.default_retry_predicate}
-          max_retries: 3
+          max_retries: 3  # override (see TIMEOUT_AND_RETRY_POLICY.md)
           backoff:
             initial_delay: 2
             max_delay: 30
