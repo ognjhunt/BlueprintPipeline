@@ -1633,16 +1633,15 @@ class LocalPipelineRunner:
     def _apply_labs_flags(self, run_validation: bool) -> None:
         """Apply production/labs flags for staging or lab validation runs."""
         staging_e2e = os.environ.get("RUN_STAGING_E2E") == "1"
-        labs_staging = os.environ.get("LABS_STAGING", "").lower() in {"1", "true", "yes"}
         labs_validation = os.environ.get("LABS_VALIDATION", "").lower() in {"1", "true", "yes"}
+        production_mode = resolve_production_mode()
 
-        if not (staging_e2e or labs_staging or (labs_validation and run_validation)):
+        if not (staging_e2e or production_mode or (labs_validation and run_validation)):
             return
 
-        os.environ.setdefault("LABS_STAGING", "1")
+        os.environ.setdefault("PIPELINE_ENV", "production")
         os.environ.setdefault("DATA_QUALITY_LEVEL", "production")
         os.environ.setdefault("ISAAC_SIM_REQUIRED", "true")
-        os.environ.setdefault("PRODUCTION_MODE", "true")
         self.log("Applied labs/production flags for staging or lab validation runs")
 
     def _resolve_default_steps(self) -> List[PipelineStep]:
@@ -2382,7 +2381,7 @@ class LocalPipelineRunner:
             "REGEN3D_PREFIX": str(self.regen3d_dir),
             "SCENE_ID": self.scene_id,
             "PARTICULATE_ENDPOINT": endpoint,
-            "PRODUCTION_MODE": "false",
+            "PIPELINE_ENV": os.getenv("PIPELINE_ENV", "development"),
             "DISALLOW_PLACEHOLDER_URDF": os.getenv("DISALLOW_PLACEHOLDER_URDF", "false"),
         })
 
@@ -2480,7 +2479,6 @@ class LocalPipelineRunner:
         os.environ.setdefault("SIMREADY_PHYSICS_MODE", "deterministic")
         os.environ.setdefault("SIMREADY_ALLOW_DETERMINISTIC_PHYSICS", "1")
         os.environ.setdefault("SIMREADY_ALLOW_HEURISTIC_FALLBACK", "1")
-        os.environ.setdefault("SIMREADY_PRODUCTION_MODE", "0")
 
         return_code = run_from_env(root=self.scene_dir)
         if return_code != 0:

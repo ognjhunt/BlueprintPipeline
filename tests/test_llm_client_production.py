@@ -4,7 +4,7 @@ from tools.llm_client import client as llm_client
 
 
 def test_production_rejects_env_fallback(monkeypatch):
-    monkeypatch.setenv("PRODUCTION", "true")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.setenv("GEMINI_API_KEY", "env-only")
 
     def _raise_secret(*args, **kwargs):
