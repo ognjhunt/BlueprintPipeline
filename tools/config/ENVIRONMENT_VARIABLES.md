@@ -548,6 +548,7 @@ export SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | str | None | JSON payload for Firebase service account credentials (required for Genie Sim import in production/service mode) |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | path | None | Path to Firebase service account JSON credentials (required for Genie Sim import in production/service mode) |
 | `FIREBASE_UPLOAD_PREFIX` | str | `datasets` | Firebase upload prefix for Genie Sim episode artifacts (import job uploads after validation) |
+| `FIREBASE_UPLOAD_TIMEOUT_TOTAL_SECONDS` | float | `3600` | Total time budget in seconds for a batch of Firebase uploads before marking remaining files as failed with a global timeout. |
 
 > **Migration note:** `FIREBASE_EPISODE_PREFIX` has been replaced by `FIREBASE_UPLOAD_PREFIX` to keep dataset paths consistent across Genie Sim submit/import flows.
 
