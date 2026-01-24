@@ -16,9 +16,12 @@ Usage:
     # Run with validation
     python tools/run_local_pipeline.py --scene-dir ./scene --validate
 
-    # Auto-trigger import after a successful Genie Sim submit
+    # Genie Sim submit now auto-triggers import by default when import not in steps
     python tools/run_local_pipeline.py --scene-dir ./scene \
-        --steps genie-sim-export,genie-sim-submit --auto-trigger-import
+        --steps genie-sim-export,genie-sim-submit
+    # To explicitly disable auto-import:
+    python tools/run_local_pipeline.py --scene-dir ./scene \
+        --steps genie-sim-export,genie-sim-submit --no-auto-trigger-import
 
 Pipeline Steps:
     1. regen3d   - Adapt 3D-RE-GEN outputs to BlueprintPipeline format
@@ -35,9 +38,9 @@ Pipeline Steps:
     12. genie-sim-import - Import Genie Sim episodes into local bundle
     13. validate  - QA validation
 
-    Auto-trigger import: When --auto-trigger-import is set, a successful
-    genie-sim-submit step (status=completed) will immediately run
-    genie-sim-import if it is not already scheduled after submit.
+    Auto-trigger import: By default, a successful genie-sim-submit step
+    (status=completed) will automatically run genie-sim-import if it is
+    not already scheduled. Use --no-auto-trigger-import to disable this.
 
 Experimental Steps (disabled by default; enable with --enable-dwm,
 --enable-dream2flow, or --enable-experimental):
@@ -269,9 +272,11 @@ class LocalPipelineRunner:
             self.enable_inventory_enrichment = enable_inventory_enrichment
         self.disable_articulated_assets = disable_articulated_assets
         if fail_fast is None:
+            # Default to True in production mode for faster failure detection
+            production_default = resolve_production_mode()
             self.fail_fast = parse_bool_env(
                 os.getenv("PIPELINE_FAIL_FAST"),
-                default=False,
+                default=production_default,
             )
         else:
             self.fail_fast = fail_fast
@@ -1419,7 +1424,7 @@ class LocalPipelineRunner:
         run_validation: bool = False,
         resume_from: Optional[PipelineStep] = None,
         force_rerun_steps: Optional[List[PipelineStep]] = None,
-        auto_trigger_import: bool = False,
+        auto_trigger_import: Optional[bool] = None,
     ) -> bool:
         """Run the pipeline.
 
@@ -1428,7 +1433,8 @@ class LocalPipelineRunner:
             run_validation: Run QA validation at the end
             resume_from: Resume from the given step (skip completed steps with checkpoints)
             force_rerun_steps: Steps to rerun even if checkpoints exist
-            auto_trigger_import: Run genie-sim-import after a completed submit when not scheduled
+            auto_trigger_import: Run genie-sim-import after a completed submit when not scheduled.
+                Defaults to True if genie-sim-submit is in steps and import is not.
 
         Returns:
             True if all steps succeeded
@@ -1446,6 +1452,13 @@ class LocalPipelineRunner:
 
         if steps is None:
             steps = self._resolve_default_steps()
+
+        # Default auto_trigger_import to True if submit is in steps and import is not
+        if auto_trigger_import is None:
+            auto_trigger_import = (
+                PipelineStep.GENIESIM_SUBMIT in steps
+                and PipelineStep.GENIESIM_IMPORT not in steps
+            )
 
         if run_validation and PipelineStep.VALIDATE not in steps:
             steps.append(PipelineStep.VALIDATE)
@@ -4914,10 +4927,18 @@ def main():
     parser.add_argument(
         "--auto-trigger-import",
         action="store_true",
+        default=None,
         help=(
             "Run genie-sim-import automatically after a completed submit when import "
-            "is not in the remaining steps."
+            "is not in the remaining steps. Defaults to True if submit is requested "
+            "but import is not."
         ),
+    )
+    parser.add_argument(
+        "--no-auto-trigger-import",
+        action="store_true",
+        dest="no_auto_trigger_import",
+        help="Disable automatic import triggering after submit.",
     )
     parser.add_argument(
         "--estimate-costs",
@@ -5021,12 +5042,20 @@ def main():
         summary = estimate_gpu_costs(step_names, config)
         print(format_estimate_summary(summary))
 
+    # Resolve auto_trigger_import: explicit flags override smart default
+    if args.no_auto_trigger_import:
+        auto_trigger_import = False
+    elif args.auto_trigger_import:
+        auto_trigger_import = True
+    else:
+        auto_trigger_import = None  # Let run() determine smart default
+
     success = runner.run(
         steps=steps,
         run_validation=args.validate,
         resume_from=resume_from,
         force_rerun_steps=force_rerun_steps,
-        auto_trigger_import=args.auto_trigger_import,
+        auto_trigger_import=auto_trigger_import,
     )
 
     sys.exit(0 if success else 1)
