@@ -60,6 +60,7 @@ Environment overrides:
     - GENIESIM_IMPORT_POLL_TIMEOUT: Timeout in seconds for genie-sim-import status polling.
     - GCS_MOUNT_ROOT: Base path used for local GCS-style mount mapping.
     - PIPELINE_FAIL_FAST: Stop the pipeline on the first failure when true.
+    - PIPELINE_STEP_TIMEOUTS_JSON: JSON mapping of pipeline step names to timeout seconds.
     - REQUIRE_BALANCED_ROBOT_EPISODES: Fail validation when cross-robot episode counts mismatch.
 
 References:
@@ -101,10 +102,15 @@ from tools.cost_tracking.estimate import (
     format_estimate_summary,
     load_estimate_config,
 )
-from tools.config import load_pipeline_config, load_quality_config as load_quality_gate_config
+from tools.config import (
+    load_pipeline_config,
+    load_pipeline_step_timeouts,
+    load_quality_config as load_quality_gate_config,
+)
 from tools.config.env import parse_bool_env, parse_int_env
 from tools.config.production_mode import resolve_pipeline_environment, resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
+from tools.error_handling.errors import ErrorCategory, ErrorContext, PipelineError
 from tools.error_handling.errors import classify_exception
 from tools.error_handling.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from tools.error_handling.retry import (
@@ -113,6 +119,7 @@ from tools.error_handling.retry import (
     RetryableError,
     retry_with_backoff,
 )
+from tools.error_handling.timeout import TimeoutError, timeout_thread
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.lerobot_validation import validate_lerobot_dataset
@@ -298,6 +305,7 @@ class LocalPipelineRunner:
         self._quality_gates = QualityGateRegistry(verbose=self.verbose)
         self._quality_gate_report_path = self._resolve_quality_gate_report_path()
         self.retry_config = self._resolve_retry_config()
+        self._step_timeouts = self._resolve_step_timeouts()
         self._geniesim_local_run_results: Dict[str, Any] = {}
         self._geniesim_output_dirs: Dict[str, Path] = {}
 
@@ -794,8 +802,39 @@ class LocalPipelineRunner:
         legacy_robot = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
         return [legacy_robot] if legacy_robot else ["franka"]
 
+    def _resolve_step_timeouts(self) -> Dict[PipelineStep, float]:
+        raw_timeouts = load_pipeline_step_timeouts()
+        resolved: Dict[PipelineStep, float] = {}
+        unknown: Dict[str, float] = {}
+        for step_name, timeout_value in raw_timeouts.items():
+            try:
+                step = PipelineStep(step_name)
+            except ValueError:
+                unknown[step_name] = timeout_value
+                continue
+            resolved[step] = timeout_value
+
+        if unknown:
+            formatted = ", ".join(f"{key}={value}s" for key, value in sorted(unknown.items()))
+            self.log(
+                f"Unrecognized pipeline step timeouts ignored: {formatted}",
+                "WARNING",
+            )
+
+        for step in PipelineStep:
+            timeout_value = resolved.get(step)
+            if timeout_value is None:
+                self.log(f"Resolved step timeout: step={step.value} timeout=none", "INFO")
+            else:
+                self.log(
+                    f"Resolved step timeout: step={step.value} timeout={timeout_value:.0f}s",
+                    "INFO",
+                )
+        return resolved
+
     def _run_with_retry(self, step: PipelineStep, action: Any) -> Any:
         config = self.retry_config
+        timeout_seconds = self._step_timeouts.get(step)
 
         def on_retry(attempt: int, exc: Exception, delay: float) -> None:
             self.log(
@@ -812,6 +851,34 @@ class LocalPipelineRunner:
                 "ERROR",
             )
 
+        def action_with_timeout() -> Any:
+            if timeout_seconds is None:
+                return action()
+            try:
+                with timeout_thread(
+                    timeout_seconds,
+                    f"{step.value} timed out after {timeout_seconds:.0f}s",
+                ):
+                    return action()
+            except TimeoutError as exc:
+                context = ErrorContext(
+                    scene_id=self.scene_id,
+                    step=step.value,
+                    max_attempts=config.max_retries,
+                    additional={"timeout_seconds": timeout_seconds},
+                )
+                message = (
+                    f"{step.value} timed out after {timeout_seconds:.0f}s "
+                    f"for scene {self.scene_id}"
+                )
+                raise PipelineError(
+                    message,
+                    category=ErrorCategory.EXTERNAL_SERVICE,
+                    retryable=True,
+                    context=context,
+                    cause=exc,
+                ) from exc
+
         decorator = retry_with_backoff(
             max_retries=config.max_retries,
             base_delay=config.base_delay,
@@ -821,7 +888,7 @@ class LocalPipelineRunner:
             on_retry=on_retry,
             on_failure=on_failure,
         )
-        return decorator(action)()
+        return decorator(action_with_timeout)()
 
     def _log_exception_traceback(self, context: str, exc: Exception) -> None:
         self.log(f"{context}: {self._summarize_exception(exc)}", "ERROR")
