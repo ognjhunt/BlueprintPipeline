@@ -22,12 +22,16 @@ data:
   GENIE_SIM_POLL_INTERVAL: "30"
   ENABLE_VALIDATION: "true"
   FILTER_LOW_QUALITY: "true"
-  REQUIRE_LEROBOT: "false"
+  REQUIRE_LEROBOT: "true"
   WAIT_FOR_COMPLETION: "true"
-  FAIL_ON_PARTIAL_ERROR: "false"
+  FAIL_ON_PARTIAL_ERROR: "true"
   DISABLE_GCS_UPLOAD: "false"
   ENABLE_FIREBASE_UPLOAD: "true"
-  ALLOW_PARTIAL_FIREBASE_UPLOADS: "true"
+  # P0 FIX: Partial uploads DISABLED in production to prevent incomplete datasets
+  # All robots must succeed or the entire upload is rolled back (atomic upload)
+  ALLOW_PARTIAL_FIREBASE_UPLOADS: "false"
+  # P0 FIX: Atomic uploads REQUIRED in production - all robots succeed or all fail
+  FIREBASE_REQUIRE_ATOMIC_UPLOAD: "true"
   ENABLE_REALTIME_STREAMING: "1"
   REALTIME_STREAM_ENDPOINT: "${REALTIME_STREAM_ENDPOINT}"
   REALTIME_STREAM_API_KEY: "${REALTIME_STREAM_API_KEY}"

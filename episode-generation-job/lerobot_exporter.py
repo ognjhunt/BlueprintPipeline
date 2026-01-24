@@ -95,6 +95,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 
 from trajectory_solver import JointTrajectory, JointState, RobotConfig, ROBOT_CONFIGS
@@ -107,7 +108,9 @@ except ImportError:
     HAVE_REWARD_COMPUTATION = False
     RewardComputer = None
 
-# Try to import pyarrow for Parquet support
+# P0 FIX: pyarrow is REQUIRED for LeRobot parquet export
+# In production mode, fail immediately if pyarrow is not available
+# This prevents silent skipping of episode metadata which breaks downstream consumers
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -116,6 +119,21 @@ except ImportError:
     HAVE_PYARROW = False
     pa = None
     pq = None
+    # P0 FIX: Fail fast in production if pyarrow is missing
+    if resolve_production_mode():
+        raise ImportError(
+            "P0 CRITICAL: pyarrow is REQUIRED for LeRobot parquet export in production. "
+            "Install it with: pip install pyarrow>=14.0.0. "
+            "LeRobot episode data cannot be exported without pyarrow, which will cause "
+            "missing episode metadata and broken datasets. "
+            "Set PIPELINE_ENV=development to skip this check (not recommended)."
+        )
+    else:
+        logger.warning(
+            "pyarrow not available - LeRobot parquet export will be skipped. "
+            "This is only acceptable in development mode. "
+            "Install pyarrow for production: pip install pyarrow>=14.0.0"
+        )
 
 # Try to import video writing libraries
 try:

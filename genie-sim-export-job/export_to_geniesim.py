@@ -1982,7 +1982,11 @@ def main(input_params: Optional[Dict[str, Any]] = None):
         os.getenv("ALLOW_EMBEDDING_FALLBACK"),
         default=False,
     )
-    # Placeholder override requires BOTH the env var and an explicit job input param.
+
+    # P0 FIX: REMOVE placeholder embeddings bypass in production
+    # The ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD escape hatch has been REMOVED.
+    # In production mode, real embeddings are ALWAYS required - no exceptions.
+    # Placeholder embeddings cause invalid RAG retrieval for labs, which is unacceptable.
     allow_placeholder_embeddings_in_prod_env = parse_bool_env(
         os.getenv("ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD"),
         default=False,
@@ -1990,9 +1994,31 @@ def main(input_params: Optional[Dict[str, Any]] = None):
     allow_placeholder_embeddings_override = parse_bool_input(
         input_params.get("allow_placeholder_embeddings_override")
     )
-    allow_placeholder_embeddings_in_prod = bool(
-        allow_placeholder_embeddings_in_prod_env and allow_placeholder_embeddings_override
-    )
+
+    # P0 FIX: In production, placeholder bypass is ALWAYS disabled regardless of env vars
+    if production_mode:
+        if allow_placeholder_embeddings_in_prod_env or allow_placeholder_embeddings_override:
+            log.error(
+                "P0 FIX: ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD bypass has been REMOVED. "
+                "In production mode, real embeddings are ALWAYS required. "
+                "Placeholder embeddings cause invalid RAG retrieval for labs. "
+                "To fix: Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY, "
+                "or set REQUIRE_EMBEDDINGS=false and GENERATE_EMBEDDINGS=false to disable embeddings. "
+                "The bypass flag is IGNORED in production."
+            )
+        # Force disable placeholder bypass in production
+        allow_placeholder_embeddings_in_prod = False
+    else:
+        # Only allow bypass in non-production (development/testing)
+        allow_placeholder_embeddings_in_prod = bool(
+            allow_placeholder_embeddings_in_prod_env and allow_placeholder_embeddings_override
+        )
+        if allow_placeholder_embeddings_in_prod:
+            log.warning(
+                "DEVELOPMENT MODE: Placeholder embeddings bypass ENABLED. "
+                "This is acceptable for development/testing but MUST NOT be used in production."
+            )
+
     # In production mode, ALLOW_EMBEDDING_FALLBACK requires explicit acknowledgment
     # via ALLOW_EMBEDDING_FALLBACK_PRODUCTION_ACK to prevent silent quality degradation
     allow_embedding_fallback_ack = parse_bool_env(
@@ -2007,11 +2033,11 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             "embeddings in production (not recommended), set ALLOW_EMBEDDING_FALLBACK_PRODUCTION_ACK=true."
         )
         sys.exit(1)
-    if allow_placeholder_embeddings_in_prod_env and not allow_placeholder_embeddings_override:
+    if not production_mode and allow_placeholder_embeddings_in_prod_env and not allow_placeholder_embeddings_override:
         log.warning(
             "ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD is set but "
             "allow_placeholder_embeddings_override input param is missing/false; "
-            "placeholder override disabled. Disable placeholders in production by setting "
+            "placeholder override disabled. Disable placeholders by setting "
             "REQUIRE_EMBEDDINGS=true and unsetting ALLOW_PLACEHOLDER_EMBEDDINGS_IN_PROD."
         )
     filter_commercial = parse_bool_env(os.getenv("FILTER_COMMERCIAL"), default=True)

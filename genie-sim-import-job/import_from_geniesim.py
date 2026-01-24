@@ -118,8 +118,11 @@ from tools.schema_migrations import (
     migrate_import_manifest_payload,
 )
 from tools.firebase_upload.firebase_upload_orchestrator import (
+    AtomicUploadTransaction,
     FirebaseUploadOrchestratorError,
     build_firebase_upload_prefix,
+    create_atomic_upload_transaction,
+    require_atomic_upload,
     resolve_firebase_upload_prefix,
     upload_episodes_with_retry,
     verify_firebase_upload,
@@ -963,13 +966,40 @@ def _run_firebase_uploads_for_robot_payloads(
     log: logging.LoggerAdapter,
     overall_success: bool,
 ) -> bool:
+    """Upload robot payloads to Firebase with atomic transaction support.
+
+    P0 FIX: Implements atomic uploads - if any robot fails and atomic uploads
+    are required, ALL successful uploads are rolled back to prevent partial
+    dataset delivery to labs.
+
+    Atomic upload behavior:
+    - In production mode (default): If ANY robot upload fails, ALL successful
+      uploads are rolled back automatically.
+    - Set FIREBASE_REQUIRE_ATOMIC_UPLOAD=false to disable (not recommended).
+    - ALLOW_PARTIAL_FIREBASE_UPLOADS only affects error handling AFTER atomic
+      rollback decision - it cannot prevent rollback in production.
+    """
     successful_payloads = [
         payload for payload in robot_results if payload["result"].success
     ]
     if not successful_payloads:
         return overall_success
 
+    # P0 FIX: Create atomic transaction for multi-robot uploads
+    atomic_required = require_atomic_upload()
+    transaction = create_atomic_upload_transaction(scene_id) if atomic_required else None
+
+    if atomic_required:
+        log.info(
+            "Atomic Firebase upload enabled for scene %s with %d robot(s). "
+            "All uploads will be rolled back if any robot fails.",
+            scene_id,
+            len(successful_payloads),
+        )
+
     firebase_upload_failures: List[tuple[str, BaseException]] = []
+    successful_uploads: List[Dict[str, Any]] = []  # Track for potential rollback
+
     with ThreadPoolExecutor(max_workers=firebase_upload_max_workers) as executor:
         futures = {
             executor.submit(
@@ -1001,6 +1031,8 @@ def _run_firebase_uploads_for_robot_payloads(
                 log.error("Firebase upload failed for robot %s: %s", robot_type, exc)
                 entry.setdefault("errors", []).append(f"Firebase upload failed: {exc}")
                 firebase_upload_failures.append((robot_type, exc))
+                if transaction:
+                    transaction.record_failure(robot_type, exc)
                 overall_success = False
                 continue
             if resolved_robot_type:
@@ -1011,10 +1043,33 @@ def _run_firebase_uploads_for_robot_payloads(
                     f"Firebase upload failed: {error}"
                 )
                 firebase_upload_failures.append((robot_type, error))
+                if transaction:
+                    transaction.record_failure(robot_type, error)
                 overall_success = False
                 continue
             if not firebase_summary:
                 continue
+
+            # P0 FIX: Track successful upload for atomic transaction
+            remote_prefix = firebase_summary.get("remote_prefix") or build_firebase_upload_prefix(
+                scene_id, robot_type=robot_type, prefix=firebase_upload_prefix
+            )
+            if transaction:
+                from tools.firebase_upload.firebase_upload_orchestrator import FirebaseUploadResult
+                upload_result = FirebaseUploadResult(
+                    summary=firebase_summary,
+                    remote_prefix=remote_prefix,
+                )
+                transaction.record_success(robot_type, upload_result)
+
+            successful_uploads.append({
+                "robot_type": robot_type,
+                "remote_prefix": remote_prefix,
+                "entry": entry,
+                "result": result,
+                "firebase_summary": firebase_summary,
+            })
+
             entry["firebase_upload"] = firebase_summary
             log.info(
                 "Firebase upload complete: uploaded=%s skipped=%s reuploaded=%s failed=%s total=%s",
@@ -1042,6 +1097,14 @@ def _run_firebase_uploads_for_robot_payloads(
                 entry.setdefault("errors", []).append(
                     f"Firebase upload incomplete: {failed_count} file(s) failed"
                 )
+                firebase_upload_failures.append(
+                    (robot_type, FirebaseUploadOrchestratorError(f"{failed_count} file(s) failed"))
+                )
+                if transaction:
+                    transaction.record_failure(
+                        robot_type,
+                        FirebaseUploadOrchestratorError(f"{failed_count} file(s) failed to upload"),
+                    )
                 overall_success = False
             firebase_verification = firebase_summary.get("firebase_verification") or {}
             if firebase_verification and not firebase_verification.get("success", True):
@@ -1060,52 +1123,112 @@ def _run_firebase_uploads_for_robot_payloads(
                 firebase_upload_failures.append(
                     (robot_type, FirebaseUploadOrchestratorError(error_message))
                 )
+                if transaction:
+                    transaction.record_failure(
+                        robot_type,
+                        FirebaseUploadOrchestratorError(error_message),
+                    )
                 if verification_should_fail:
                     overall_success = False
-            if failed_count == 0 and not (verification_failed and verification_should_fail):
-                if firebase_summary.get("deduplicated_episode_ids"):
-                    deduplicated_ids = firebase_summary.get(
-                        "deduplicated_episode_ids",
-                        [],
-                    )
-                    new_hashes = {
-                        episode_id: content_hash
-                        for episode_id, content_hash in result.episode_content_hashes.items()
-                        if episode_id not in deduplicated_ids
-                    }
-                    _persist_episode_hash_index(
-                        episode_hashes=new_hashes,
-                        scene_id=scene_id,
-                        robot_type=robot_type,
-                        prefix=firebase_upload_prefix,
-                        job_id=job_id,
-                        log=log,
-                    )
-                else:
-                    _persist_episode_hash_index(
-                        episode_hashes=result.episode_content_hashes,
-                        scene_id=scene_id,
-                        robot_type=robot_type,
-                        prefix=firebase_upload_prefix,
-                        job_id=job_id,
-                        log=log,
-                    )
-            _publish_dataset_catalog_document(
-                scene_id=scene_id,
-                job_id=job_id,
-                robot_type=robot_type,
-                result=result,
-                firebase_summary=firebase_summary,
-                gcs_output_path=entry.get("gcs_output_path"),
-                log=log,
+
+    # P0 FIX: Atomic rollback if any failures occurred
+    if transaction and transaction.should_rollback():
+        failed_robot_types = sorted({robot for robot, _ in firebase_upload_failures})
+        log.error(
+            "Atomic Firebase upload: Rolling back %d successful upload(s) because "
+            "robot(s) %s failed. This prevents partial dataset delivery.",
+            len(transaction.successful_prefixes),
+            failed_robot_types,
+        )
+        rollback_result = transaction.rollback()
+        log.info(
+            "Atomic rollback complete: status=%s, cleaned_prefixes=%d, errors=%d",
+            rollback_result.get("status"),
+            len(rollback_result.get("prefixes", [])),
+            len(rollback_result.get("errors", [])),
+        )
+
+        # Clear successful uploads since they've been rolled back
+        for upload_info in successful_uploads:
+            entry = upload_info["entry"]
+            entry["firebase_upload"] = {
+                "status": "rolled_back",
+                "reason": f"Atomic rollback due to failure of robot(s): {failed_robot_types}",
+                "rollback_result": rollback_result,
+            }
+            entry.setdefault("errors", []).append(
+                f"Firebase upload rolled back due to atomic transaction failure"
             )
 
-    if firebase_upload_failures:
+        raise FirebaseUploadOrchestratorError(
+            f"Atomic Firebase upload failed: {len(firebase_upload_failures)} robot(s) failed "
+            f"({', '.join(failed_robot_types)}). All {len(transaction.successful_prefixes)} "
+            f"successful upload(s) have been rolled back to prevent partial dataset delivery."
+        )
+
+    # Commit transaction if no failures
+    if transaction:
+        transaction.commit()
+        log.info(
+            "Atomic Firebase upload committed: %d robot(s) uploaded successfully.",
+            len(transaction.successful_results),
+        )
+
+    # Process successful uploads (persist hash index, publish catalog)
+    for upload_info in successful_uploads:
+        robot_type = upload_info["robot_type"]
+        entry = upload_info["entry"]
+        result = upload_info["result"]
+        firebase_summary = upload_info["firebase_summary"]
+
+        # Check if this robot had failures (already tracked above)
+        robot_failed = any(r == robot_type for r, _ in firebase_upload_failures)
+        if robot_failed:
+            continue
+
+        if firebase_summary.get("deduplicated_episode_ids"):
+            deduplicated_ids = firebase_summary.get(
+                "deduplicated_episode_ids",
+                [],
+            )
+            new_hashes = {
+                episode_id: content_hash
+                for episode_id, content_hash in result.episode_content_hashes.items()
+                if episode_id not in deduplicated_ids
+            }
+            _persist_episode_hash_index(
+                episode_hashes=new_hashes,
+                scene_id=scene_id,
+                robot_type=robot_type,
+                prefix=firebase_upload_prefix,
+                job_id=job_id,
+                log=log,
+            )
+        else:
+            _persist_episode_hash_index(
+                episode_hashes=result.episode_content_hashes,
+                scene_id=scene_id,
+                robot_type=robot_type,
+                prefix=firebase_upload_prefix,
+                job_id=job_id,
+                log=log,
+            )
+        _publish_dataset_catalog_document(
+            scene_id=scene_id,
+            job_id=job_id,
+            robot_type=robot_type,
+            result=result,
+            firebase_summary=firebase_summary,
+            gcs_output_path=entry.get("gcs_output_path"),
+            log=log,
+        )
+
+    if firebase_upload_failures and not atomic_required:
         failed_robot_types = sorted({robot for robot, _ in firebase_upload_failures})
         if allow_partial_firebase_uploads:
             log.warning(
                 "Firebase uploads failed for robot(s) %s; continuing because "
-                "ALLOW_PARTIAL_FIREBASE_UPLOADS=true.",
+                "ALLOW_PARTIAL_FIREBASE_UPLOADS=true and atomic uploads not required.",
                 failed_robot_types,
             )
         else:
@@ -5570,13 +5693,25 @@ def main(input_params: Optional[Dict[str, Any]] = None):
     wait_for_completion = parse_bool_env(os.getenv("WAIT_FOR_COMPLETION"), default=True)
 
     # Error handling configuration
-    fail_on_partial_error = parse_bool_env(os.getenv("FAIL_ON_PARTIAL_ERROR"), default=False)
-    # Default to True: upload successful robots even if some fail
-    # This prevents wasting compute by discarding successful robot data
+    # P0 FIX: Default to True in production to fail fast on partial errors
+    fail_on_partial_error = parse_bool_env(
+        os.getenv("FAIL_ON_PARTIAL_ERROR"),
+        default=production_mode,  # Default True in production, False otherwise
+    )
+    # P0 FIX: Partial uploads DISABLED by default in production mode
+    # In production, atomic uploads are required - all robots succeed or all fail
+    # This prevents delivering incomplete datasets to labs
+    # Set ALLOW_PARTIAL_FIREBASE_UPLOADS=true to override (not recommended in production)
     allow_partial_firebase_uploads = parse_bool_env(
         os.getenv("ALLOW_PARTIAL_FIREBASE_UPLOADS"),
-        default=True,
+        default=not production_mode,  # Default False in production, True otherwise
     )
+    if production_mode and allow_partial_firebase_uploads:
+        log.warning(
+            "ALLOW_PARTIAL_FIREBASE_UPLOADS=true in production mode. "
+            "This may result in incomplete datasets being delivered. "
+            "Consider setting ALLOW_PARTIAL_FIREBASE_UPLOADS=false for production safety."
+        )
     try:
         firebase_upload_max_workers = _resolve_firebase_upload_max_workers(
             os.getenv("FIREBASE_UPLOAD_MAX_WORKERS")
