@@ -299,6 +299,9 @@ class PrometheusMetric:
                 "scene_id",
                 "status",
                 "error_type",
+                "function",
+                "exception_type",
+                "attempt",
                 "api",
                 "operation",
                 "job_id",
@@ -306,7 +309,17 @@ class PrometheusMetric:
                 "variant",
             ]
         if metric_type == MetricType.HISTOGRAM:
-            return ["job", "scene_id", "api", "operation", "job_id", "variant"]
+            return [
+                "job",
+                "scene_id",
+                "function",
+                "exception_type",
+                "attempt",
+                "api",
+                "operation",
+                "job_id",
+                "variant",
+            ]
         return ["job", "scene_id", "variant"]
 
     def _coerce_labels(self, labels: Optional[Dict[str, str]]) -> Dict[str, str]:
@@ -597,6 +610,25 @@ class PipelineMetricsCollector:
             "retries_total",
             "Total number of retries",
             MetricType.COUNTER,
+        )
+
+        self.retry_attempts_total = self._create_metric(
+            "retry_attempts_total",
+            "Total number of retry attempts",
+            MetricType.COUNTER,
+        )
+
+        self.retry_failures_total = self._create_metric(
+            "retry_failures_total",
+            "Total number of retries that exhausted attempts or failed fast",
+            MetricType.COUNTER,
+        )
+
+        self.retry_delay_seconds = self._create_metric(
+            "retry_delay_seconds",
+            "Delay between retry attempts",
+            MetricType.HISTOGRAM,
+            "s",
         )
 
     def _with_variant(self, labels: Dict[str, str], variant: Optional[str]) -> Dict[str, str]:

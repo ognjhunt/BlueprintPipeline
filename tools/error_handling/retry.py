@@ -20,6 +20,8 @@ from .errors import PipelineError, ErrorContext, classify_exception
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+_METRICS_UNAVAILABLE = object()
+_metrics_instance: object | None = None
 
 
 class RetryableError(Exception):
@@ -30,6 +32,60 @@ class RetryableError(Exception):
 class NonRetryableError(Exception):
     """Marker exception indicating the error should NOT be retried."""
     pass
+
+
+def _get_metrics() -> Optional[Any]:
+    global _metrics_instance
+    if _metrics_instance is _METRICS_UNAVAILABLE:
+        return None
+    if _metrics_instance is None:
+        try:
+            from tools.metrics.pipeline_metrics import get_metrics
+
+            _metrics_instance = get_metrics()
+        except Exception as exc:  # pragma: no cover - metrics optional
+            logger.debug("Metrics unavailable for retry tracking: %s", exc)
+            _metrics_instance = _METRICS_UNAVAILABLE
+            return None
+    return _metrics_instance  # type: ignore[return-value]
+
+
+def _retry_metric_labels(
+    function_name: str,
+    exception: Exception,
+    attempt: int,
+) -> dict[str, str]:
+    return {
+        "function": function_name,
+        "exception_type": type(exception).__name__,
+        "attempt": str(attempt),
+    }
+
+
+def _record_retry_attempt(
+    function_name: str,
+    exception: Exception,
+    attempt: int,
+    delay: float,
+) -> None:
+    metrics = _get_metrics()
+    if not metrics:
+        return
+    labels = _retry_metric_labels(function_name, exception, attempt)
+    metrics.retry_attempts_total.inc(labels=labels)
+    metrics.retry_delay_seconds.observe(delay, labels=labels)
+
+
+def _record_retry_failure(
+    function_name: str,
+    exception: Exception,
+    attempt: int,
+) -> None:
+    metrics = _get_metrics()
+    if not metrics:
+        return
+    labels = _retry_metric_labels(function_name, exception, attempt)
+    metrics.retry_failures_total.inc(labels=labels)
 
 
 @dataclass
@@ -190,6 +246,7 @@ def retry_with_backoff(
                         logger.warning(
                             f"Non-retryable error in {func.__name__}: {e}"
                         )
+                        _record_retry_failure(func.__name__, e, attempt)
                         if config.on_failure:
                             config.on_failure(attempt, e)
                         raise
@@ -198,6 +255,7 @@ def retry_with_backoff(
                         logger.error(
                             f"Max retries ({config.max_retries}) exceeded for {func.__name__}: {e}"
                         )
+                        _record_retry_failure(func.__name__, e, attempt)
                         if config.on_failure:
                             config.on_failure(attempt, e)
                         raise
@@ -211,6 +269,8 @@ def retry_with_backoff(
 
                     if config.on_retry:
                         config.on_retry(attempt, e, delay)
+
+                    _record_retry_attempt(func.__name__, e, attempt, delay)
 
                     time.sleep(delay)
 
@@ -276,6 +336,7 @@ def async_retry_with_backoff(
                         logger.warning(
                             f"Non-retryable error in {func.__name__}: {e}"
                         )
+                        _record_retry_failure(func.__name__, e, attempt)
                         if config.on_failure:
                             config.on_failure(attempt, e)
                         raise
@@ -284,6 +345,7 @@ def async_retry_with_backoff(
                         logger.error(
                             f"Max retries ({config.max_retries}) exceeded for {func.__name__}: {e}"
                         )
+                        _record_retry_failure(func.__name__, e, attempt)
                         if config.on_failure:
                             config.on_failure(attempt, e)
                         raise
@@ -297,6 +359,8 @@ def async_retry_with_backoff(
 
                     if config.on_retry:
                         config.on_retry(attempt, e, delay)
+
+                    _record_retry_attempt(func.__name__, e, attempt, delay)
 
                     await asyncio.sleep(delay)
 
@@ -346,9 +410,11 @@ class RetryContext:
         self.last_exception = exception
 
         if not should_retry(exception, self.attempt, self.config):
+            _record_retry_failure("retry_context", exception, self.attempt)
             return False
 
         if self.attempt >= self.config.max_retries:
+            _record_retry_failure("retry_context", exception, self.attempt)
             return False
 
         delay = calculate_delay(self.attempt, self.config)
@@ -356,6 +422,8 @@ class RetryContext:
 
         if self.config.on_retry:
             self.config.on_retry(self.attempt, exception, delay)
+
+        _record_retry_attempt("retry_context", exception, self.attempt, delay)
 
         time.sleep(delay)
         return True
