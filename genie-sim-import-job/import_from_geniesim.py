@@ -4292,41 +4292,6 @@ def run_local_import_job(
                     + ", ".join(filtered_episode_ids)
                 )
 
-    episode_content_hashes: Dict[str, str] = {}
-    episode_content_manifests: Dict[str, List[Dict[str, Any]]] = {}
-    missing_content_hashes: List[str] = []
-    for episode in episode_metadata_list:
-        manifest_entries = _compute_episode_content_manifest(
-            recordings_dir,
-            episode.episode_id,
-        )
-        if not manifest_entries:
-            missing_content_hashes.append(episode.episode_id)
-            continue
-        content_hash = _compute_episode_content_hash(manifest_entries)
-        episode.episode_content_hash = content_hash
-        episode_content_hashes[episode.episode_id] = content_hash
-        episode_content_manifests[episode.episode_id] = manifest_entries
-    result.episode_content_hashes = episode_content_hashes
-    result.episode_content_manifests = episode_content_manifests
-    if missing_content_hashes:
-        result.warnings.append(
-            "Missing content hash sources for episodes: "
-            + ", ".join(sorted(missing_content_hashes))
-        )
-    if isinstance(dataset_info_payload, dict):
-        updated = False
-        for entry in dataset_info_payload.get("episodes", []):
-            episode_id = entry.get("episode_id")
-            if not episode_id:
-                continue
-            content_hash = episode_content_hashes.get(episode_id)
-            if content_hash and entry.get("content_hash") != content_hash:
-                entry["content_hash"] = content_hash
-                updated = True
-        if updated and dataset_info_path.exists():
-            write_json_atomic(dataset_info_path, dataset_info_payload, indent=2)
-
     validated_episode_metadata_list = [
         ep for ep in episode_metadata_list if ep.episode_id not in failed_episode_id_set
     ]
@@ -4361,6 +4326,37 @@ def run_local_import_job(
     lerobot_dir = config.output_dir / "lerobot"
     dataset_info_path = lerobot_dir / "dataset_info.json"
     dataset_info_payload = None
+    conversion_result: Optional[Dict[str, Any]] = None
+    lerobot_error = None
+    force_conversion_raw = os.getenv("FORCE_LEROBOT_CONVERSION")
+    force_conversion = parse_bool_env(force_conversion_raw, default=False)
+    require_lerobot_explicit = (
+        config.require_lerobot_raw_value is not None and config.require_lerobot
+    )
+    should_convert = force_conversion or require_lerobot_explicit or not lerobot_dir.exists()
+    if should_convert:
+        try:
+            conversion_result = convert_to_lerobot(
+                episodes_dir=recordings_dir,
+                output_dir=lerobot_dir,
+                episode_metadata_list=validated_episode_metadata_list,
+                min_quality_score=config.min_quality_score,
+                quality_component_thresholds=config.quality_component_thresholds,
+                job_id=config.job_id,
+                scene_id=scene_id,
+            )
+            result.lerobot_conversion_success = bool(
+                conversion_result.get("success", False)
+                if conversion_result is not None
+                else False
+            )
+        except Exception as exc:
+            result.lerobot_conversion_success = False
+            lerobot_error = f"LeRobot conversion failed: {exc}"
+            if config.require_lerobot:
+                result.errors.append(lerobot_error)
+            else:
+                result.warnings.append(lerobot_error)
     if dataset_info_path.exists():
         try:
             dataset_info_payload = _load_dataset_info_with_migration(
@@ -4403,6 +4399,41 @@ def run_local_import_job(
                 success=False,
             )
         return result
+
+    episode_content_hashes: Dict[str, str] = {}
+    episode_content_manifests: Dict[str, List[Dict[str, Any]]] = {}
+    missing_content_hashes: List[str] = []
+    for episode in episode_metadata_list:
+        manifest_entries = _compute_episode_content_manifest(
+            recordings_dir,
+            episode.episode_id,
+        )
+        if not manifest_entries:
+            missing_content_hashes.append(episode.episode_id)
+            continue
+        content_hash = _compute_episode_content_hash(manifest_entries)
+        episode.episode_content_hash = content_hash
+        episode_content_hashes[episode.episode_id] = content_hash
+        episode_content_manifests[episode.episode_id] = manifest_entries
+    result.episode_content_hashes = episode_content_hashes
+    result.episode_content_manifests = episode_content_manifests
+    if missing_content_hashes:
+        result.warnings.append(
+            "Missing content hash sources for episodes: "
+            + ", ".join(sorted(missing_content_hashes))
+        )
+    if isinstance(dataset_info_payload, dict):
+        updated = False
+        for entry in dataset_info_payload.get("episodes", []):
+            episode_id = entry.get("episode_id")
+            if not episode_id:
+                continue
+            content_hash = episode_content_hashes.get(episode_id)
+            if content_hash and entry.get("content_hash") != content_hash:
+                entry["content_hash"] = content_hash
+                updated = True
+        if updated and dataset_info_path.exists():
+            write_json_atomic(dataset_info_path, dataset_info_payload, indent=2)
 
     total_size_bytes = 0
     for episode_file in recordings_dir.rglob("*.json"):
@@ -4450,17 +4481,27 @@ def run_local_import_job(
     if config.enable_validation:
         result.warnings.append("Local import skipped API validation; local episodes are assumed valid.")
 
-    lerobot_error = None
     lerobot_episode_files = []
     lerobot_skipped_count = 0
     lerobot_skip_rate_percent = 0.0
-    conversion_failures: List[Dict[str, str]] = []
+    conversion_failures: List[Dict[str, Any]] = []
+    converted_count: Optional[int] = None
+    if conversion_result is not None:
+        converted_count = int(conversion_result.get("converted_count", 0))
+        lerobot_skipped_count = int(conversion_result.get("skipped_count", 0))
+        lerobot_skip_rate_percent = float(conversion_result.get("skip_rate_percent", 0.0))
+        conversion_failures = conversion_result.get("conversion_failures", []) or []
     if lerobot_dir.exists():
         lerobot_episode_files = [
             path for path in lerobot_dir.glob("*.json") if path.name != "dataset_info.json"
         ]
-        result.lerobot_conversion_success = True
+        if conversion_result is None:
+            result.lerobot_conversion_success = True
         if isinstance(dataset_info_payload, dict):
+            if converted_count is None:
+                converted_count = int(
+                    dataset_info_payload.get("total_episodes", len(lerobot_episode_files))
+                )
             lerobot_skipped_count = int(dataset_info_payload.get("skipped_episodes", 0))
             lerobot_skip_rate_percent = float(
                 dataset_info_payload.get("skip_rate_percent", 0.0)
@@ -4476,12 +4517,14 @@ def run_local_import_job(
                     else 0.0
                 )
     else:
-        result.lerobot_conversion_success = False
-        lerobot_error = "LeRobot output directory not found for local import."
-        if config.require_lerobot:
-            result.errors.append(lerobot_error)
-        else:
-            result.warnings.append(lerobot_error)
+        if conversion_result is None:
+            result.lerobot_conversion_success = False
+            if lerobot_error is None:
+                lerobot_error = "LeRobot output directory not found for local import."
+            if config.require_lerobot:
+                result.errors.append(lerobot_error)
+            else:
+                result.warnings.append(lerobot_error)
 
     if conversion_failures:
         failure_id_set = {entry.get("episode_id", "unknown") for entry in conversion_failures}
@@ -4492,15 +4535,28 @@ def run_local_import_job(
         )
         if lerobot_skipped_count < len(failure_id_set):
             lerobot_skipped_count = len(failure_id_set)
-            if not dataset_info_payload.get("skip_rate_percent"):
+            if not (
+                isinstance(dataset_info_payload, dict)
+                and dataset_info_payload.get("skip_rate_percent")
+            ):
                 total_source_episodes = (
-                    int(dataset_info_payload.get("total_episodes", 0)) + lerobot_skipped_count
-                )
+                    int(dataset_info_payload.get("total_episodes", 0))
+                    if isinstance(dataset_info_payload, dict)
+                    else max(converted_count or 0, 0)
+                ) + lerobot_skipped_count
                 lerobot_skip_rate_percent = (
                     (lerobot_skipped_count / total_source_episodes) * 100.0
                     if total_source_episodes
                     else 0.0
                 )
+        if config.require_lerobot:
+            result.errors.append(
+                "LeRobot conversion failures: "
+                + ", ".join(sorted(failure_id_set))
+            )
+
+    if converted_count is None:
+        converted_count = len(lerobot_episode_files)
 
     if lerobot_skip_rate_percent > config.lerobot_skip_rate_max:
         result.errors.append(
@@ -4767,7 +4823,7 @@ def run_local_import_job(
         },
         "lerobot": {
             "conversion_success": result.lerobot_conversion_success,
-            "converted_count": len(lerobot_episode_files),
+            "converted_count": converted_count,
             "skipped_episodes": lerobot_skipped_count,
             "skip_rate_percent": lerobot_skip_rate_percent,
             "conversion_failures": conversion_failures,
