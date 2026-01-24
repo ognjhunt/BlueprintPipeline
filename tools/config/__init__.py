@@ -1703,6 +1703,44 @@ def load_pipeline_config(**kwargs) -> PipelineConfig:
     return ConfigLoader.load_pipeline_config(**kwargs)
 
 
+def load_pipeline_step_timeouts() -> Dict[str, float]:
+    """Load pipeline step timeouts from environment configuration.
+
+    Expects PIPELINE_STEP_TIMEOUTS_JSON to be a JSON object mapping pipeline
+    step names to timeout seconds.
+    """
+    raw = os.getenv("PIPELINE_STEP_TIMEOUTS_JSON")
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "PIPELINE_STEP_TIMEOUTS_JSON must be valid JSON mapping step names to timeout seconds."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "PIPELINE_STEP_TIMEOUTS_JSON must be a JSON object mapping step names to timeout seconds."
+        )
+    timeouts: Dict[str, float] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(
+                "PIPELINE_STEP_TIMEOUTS_JSON keys must be non-empty strings."
+            )
+        if not isinstance(value, (int, float)):
+            raise ValueError(
+                f"PIPELINE_STEP_TIMEOUTS_JSON timeout for '{key}' must be a number."
+            )
+        timeout_value = float(value)
+        if timeout_value <= 0:
+            raise ValueError(
+                f"PIPELINE_STEP_TIMEOUTS_JSON timeout for '{key}' must be > 0 seconds."
+            )
+        timeouts[key.strip()] = timeout_value
+    return timeouts
+
+
 def get_physics_profile(profile_name: str) -> Dict[str, Any]:
     """Get a physics profile by name."""
     return ConfigLoader.get_physics_profile(profile_name)
