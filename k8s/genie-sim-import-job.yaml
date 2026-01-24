@@ -37,6 +37,8 @@ data:
   REALTIME_STREAM_ENDPOINT: "${REALTIME_STREAM_ENDPOINT}"
   REALTIME_STREAM_API_KEY: "${REALTIME_STREAM_API_KEY}"
   REALTIME_STREAM_BATCH_SIZE: "25"
+  ALERT_BACKEND: "webhook"
+  ALERT_WEBHOOK_URL: "${ALERT_WEBHOOK_URL}"
   # Static delay applied before each retry. Kubernetes Job retries do not support exponential backoff;
   # handle that at the workflow/orchestrator layer if needed.
   RETRY_DELAY_SECONDS: "30"
