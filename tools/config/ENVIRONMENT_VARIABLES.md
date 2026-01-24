@@ -233,6 +233,7 @@ export BP_SPLIT_TEST_RATIO=0.15
 | `PIPELINE_INTERMEDIATE_RETENTION_DAYS` | int | 30 | Retention window (days) for intermediate artifacts |
 | `PIPELINE_OUTPUT_RETENTION_DAYS` | int | 365 | Retention window (days) for output artifacts |
 | `PIPELINE_LOG_RETENTION_DAYS` | int | 180 | Retention window (days) for pipeline logs |
+| `PIPELINE_MARKER_RETENTION_DAYS` | int | 30 | Retention window (days) for marker files under `scenes/*` |
 | `PIPELINE_RETENTION_DRY_RUN` | bool | false | Log retention deletions without removing files |
 
 **Example**:
