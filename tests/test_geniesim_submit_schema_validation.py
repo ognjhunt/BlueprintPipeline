@@ -19,9 +19,9 @@ def submit_module() -> types.ModuleType:
 
 def _build_export_manifest() -> dict:
     return {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "schema_definition": {
-            "version": "2.0",
+            "version": "3.0",
             "description": "Test schema",
             "fields": {"schema_version": "Schema version"},
             "notes": ["note"],
