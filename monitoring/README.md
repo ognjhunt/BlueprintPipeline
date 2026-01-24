@@ -124,6 +124,7 @@ endpoint when health checks fail or jobs crash.
 **Environment variables**
 - `ALERT_BACKEND`: Alert backend selector (`webhook` or `none`, default: `none`).
 - `ALERT_WEBHOOK_URL`: Destination webhook URL for alert payloads (required when `ALERT_BACKEND=webhook`).
+- `ALERT_WEBHOOK_TIMEOUT_SECONDS`: Webhook timeout in seconds (positive number; default: `10`).
 - `ALERT_MIN_SEVERITY`: Minimum severity to emit (`info`, `warning`, `error`, `critical`; default: `warning`).
 - `ALERT_SOURCE`: Identifier included in the payload (default: `blueprint_pipeline`).
 - `ALERT_HEALTHCHECK_ENABLED`: Enable health check alerts (`true`/`false`, default: `true`).
