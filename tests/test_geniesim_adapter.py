@@ -611,6 +611,28 @@ class TestGenieSimExporter:
         export_manifest = output_dir / "export_manifest.json"
         assert export_manifest.exists()
 
+    def test_export_manifest_schema_version(self, sample_manifest, tmp_path):
+        """Ensure export manifest schema version matches target."""
+        from tools.geniesim_adapter.exporter import GENIESIM_TARGET_VERSION
+
+        manifest_path = tmp_path / "scene_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(sample_manifest, f)
+
+        output_dir = tmp_path / "geniesim"
+        config = GenieSimExportConfig(
+            robot_type="franka",
+            generate_embeddings=False,
+        )
+        exporter = GenieSimExporter(config, verbose=False)
+        result = exporter.export(manifest_path, output_dir)
+
+        assert result.success is True
+        export_manifest = output_dir / "export_manifest.json"
+        assert export_manifest.exists()
+        export_payload = json.loads(export_manifest.read_text())
+        assert export_payload["schema_version"] == GENIESIM_TARGET_VERSION
+
     def test_commercial_only_export(self, manifest_with_external_assets, tmp_path):
         """Test export with commercial-only filter."""
         manifest_path = tmp_path / "scene_manifest.json"
