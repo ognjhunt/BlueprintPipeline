@@ -42,6 +42,41 @@ default unless explicitly enabled (e.g., `ENABLE_DREAM2FLOW=true`,
 - **Inputs:** workflow parameters, referenced container images, and pipeline configuration.
 - **Outputs:** triggered pipeline runs, workflow logs, and artifacts.
 
+## Genie Sim idempotency markers
+Genie Sim workflows record idempotency markers in GCS to prevent duplicate submissions/imports.
+
+### Export submission marker
+- **Path:** `scenes/{scene_id}/geniesim/idempotency/{hash}.json`
+- **Hash inputs:** `scene_id`, `task_config`, `robot_types`, `episodes_per_task`, `quality_thresholds`
+- **Body (example):**
+```json
+{
+  "scene_id": "scene_001",
+  "status": "submitted",
+  "job_id": "job_abc123",
+  "timestamp": "2024-01-01T00:00:00Z",
+  "hash": "4b825dc642cb6eb9a060e54bf8d69288",
+  "inputs": {
+    "task_config": {},
+    "robot_types": ["franka"],
+    "episodes_per_task": "10",
+    "quality_thresholds": {}
+  }
+}
+```
+
+### Import marker
+- **Path:** `scenes/{scene_id}/geniesim/idempotency/import/{job_id}.json`
+- **Body (example):**
+```json
+{
+  "scene_id": "scene_001",
+  "job_id": "job_abc123",
+  "status": "completed",
+  "timestamp": "2024-01-01T00:30:00Z"
+}
+```
+
 ## Key environment variables
 - Environment variables used by trigger setup scripts and workflow runtime configuration.
 - `PRIMARY_WORKFLOW_REGION`: primary region for Cloud Run job invocations. Defaults to `us-central1`.

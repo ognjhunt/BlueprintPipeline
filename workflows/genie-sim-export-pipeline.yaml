@@ -79,8 +79,11 @@ main:
           - filterCommercial: true
           # Robot type (franka, g2, ur10)
           - robotType: '${default(map.get(event, "robot_type"), "franka")}'
+          - robotTypes: '${default(map.get(event, "robot_types"), [robotType])}'
           # Max tasks to generate hints for
           - maxTasks: '${default(map.get(event, "max_tasks"), "50")}'
+          - episodesPerTask: '${default(map.get(event, "episodes_per_task"), "10")}'
+          - qualityThresholds: '${default(map.get(event, "quality_thresholds"), {})}'
           - gkeCluster: '${default(map.get(event, "gke_cluster"), "blueprint-cluster")}'
           - gkeZone: '${default(map.get(event, "gke_zone"), "us-central1-a")}'
           - gkeNamespace: '${default(map.get(event, "gke_namespace"), "blueprint")}'
@@ -330,6 +333,9 @@ main:
             - useGeniesim: '${default(map.get(sceneConfig, "use_geniesim"), true)}'
             # Get robot type from config if specified
             - robotType: '${default(map.get(sceneConfig, "robot_type"), robotType)}'
+            - robotTypes: '${default(map.get(sceneConfig, "robot_types"), robotTypes)}'
+            - episodesPerTask: '${default(map.get(sceneConfig, "episodes_per_task"), episodesPerTask)}'
+            - qualityThresholds: '${default(map.get(sceneConfig, "quality_thresholds"), qualityThresholds)}'
         except:
           as: e
           steps:
@@ -637,7 +643,138 @@ main:
             - raise_asset_provenance_report_error:
                 raise:
                   message: '${"Missing asset provenance report at gs://" + bucket + "/" + geniesimPrefix + "/legal/asset_provenance.json"}'
+        next: init_idempotency_inputs
+
+    - init_idempotency_inputs:
+        assign:
+          - taskConfigObject: ${geniesimPrefix + "/task_config.json"}
+          - idempotencyBasePath: ${"scenes/" + sceneId + "/geniesim/idempotency"}
+        next: read_task_config_for_idempotency
+
+    - read_task_config_for_idempotency:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${taskConfigObject}
+            alt: "media"
+          result: taskConfigRaw
+        except:
+          as: taskConfigError
+          steps:
+            - handle_task_config_missing:
+                switch:
+                  - condition: ${taskConfigError.code == 404}
+                    next: log_task_config_missing
+                next: raise_task_config_error
+            - log_task_config_missing:
+                call: sys.log
+                args:
+                  text: '${"Task config missing at " + taskConfigObject + " for idempotency hash: " + taskConfigError.message}'
+                  severity: "WARNING"
+                next: set_empty_task_config
+            - set_empty_task_config:
+                assign:
+                  - taskConfigRaw: "{}"
+                next: parse_task_config_for_idempotency
+            - raise_task_config_error:
+                raise: ${taskConfigError}
+        next: parse_task_config_for_idempotency
+
+    - parse_task_config_for_idempotency:
+        try:
+          assign:
+            - taskConfig: ${json.decode(taskConfigRaw)}
+        except:
+          as: taskConfigParseError
+          steps:
+            - log_task_config_parse_error:
+                call: sys.log
+                args:
+                  text: '${"Unable to parse task config for idempotency hash: " + taskConfigParseError.message}'
+                  severity: "WARNING"
+            - set_empty_task_config_after_parse_error:
+                assign:
+                  - taskConfig: {}
+        next: build_idempotency_key
+
+    - build_idempotency_key:
+        assign:
+          - idempotencyInputs:
+              scene_id: ${sceneId}
+              task_config: ${taskConfig}
+              robot_types: ${robotTypes}
+              episodes_per_task: ${episodesPerTask}
+              quality_thresholds: ${qualityThresholds}
+          - idempotencyHashInput: ${json.encode(idempotencyInputs)}
+          - idempotencyHash: ${text.md5(idempotencyHashInput)}
+          - idempotencyObject: ${idempotencyBasePath + "/" + idempotencyHash + ".json"}
+        next: check_idempotency_marker
+
+    - check_idempotency_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${idempotencyObject}
+            alt: "media"
+          result: idempotencyMarkerRaw
+        except:
+          as: idempotencyError
+          steps:
+            - handle_idempotency_missing:
+                switch:
+                  - condition: ${idempotencyError.code == 404}
+                    next: init_submission_metrics
+                next: raise_idempotency_error
+            - raise_idempotency_error:
+                raise: ${idempotencyError}
+        next: parse_idempotency_marker
+
+    - parse_idempotency_marker:
+        assign:
+          - idempotencyMarker: ${json.decode(idempotencyMarkerRaw)}
+          - idempotencyStatus: ${default(map.get(idempotencyMarker, "status"), "unknown")}
+          - idempotencyJobId: ${default(map.get(idempotencyMarker, "job_id"), "unknown")}
+        next: handle_idempotency_marker
+
+    - handle_idempotency_marker:
+        switch:
+          - condition: ${idempotencyStatus == "completed"}
+            next: skip_idempotent_submission
+          - condition: ${idempotencyStatus == "failed" or idempotencyStatus == "partial"}
+            next: check_idempotent_retry_allowed
         next: init_submission_metrics
+
+    - skip_idempotent_submission:
+        call: sys.log
+        args:
+          text: '${"Idempotency marker present for scene " + sceneId + " (job: " + idempotencyJobId + ", status: " + idempotencyStatus + "). Skipping submit."}'
+          severity: "INFO"
+        next: return_idempotency_skip
+
+    - return_idempotency_skip:
+        return:
+          status: "SKIPPED"
+          scene_id: ${sceneId}
+          message: '${"Idempotency marker present for scene " + sceneId + " (job: " + idempotencyJobId + ", status: " + idempotencyStatus + "). Skipping submit."}'
+
+    - check_idempotent_retry_allowed:
+        switch:
+          - condition: '${default(sys.get_env("ALLOW_IDEMPOTENT_RETRY"), "") != ""}'
+            next: log_idempotent_retry_allowed
+        next: block_idempotent_retry
+
+    - log_idempotent_retry_allowed:
+        call: sys.log
+        args:
+          text: '${"Idempotency marker status " + idempotencyStatus + " for scene " + sceneId + " (job: " + idempotencyJobId + "). Retrying because ALLOW_IDEMPOTENT_RETRY is set."}'
+          severity: "WARNING"
+        next: init_submission_metrics
+
+    - block_idempotent_retry:
+        raise:
+          message: '${"Idempotency marker status " + idempotencyStatus + " for scene " + sceneId + " (job: " + idempotencyJobId + "). Set ALLOW_IDEMPOTENT_RETRY to retry."}'
 
     - init_submission_metrics:
         assign:
@@ -745,7 +882,7 @@ main:
                                   - name: ROBOT_TYPE
                                     value: ${robotType}
                                   - name: EPISODES_PER_TASK
-                                    value: "10"
+                                    value: ${string(episodesPerTask)}
                                   - name: NUM_VARIATIONS
                                     value: "5"
                                   - name: OUTPUT_PREFIX
@@ -1096,7 +1233,7 @@ main:
                   - submittedFailureReason: "unknown"
                   - submittedFailureDetails: null
             - skip_import_trigger_missing:
-                next: write_submitted_marker
+                next: write_idempotency_marker
         next: parse_submission_metadata
 
     - parse_submission_metadata:
@@ -1111,6 +1248,23 @@ main:
           - submittedMetricsDuration: ${default(map.get(submittedJobMetrics, "duration_seconds"), null)}
           - submittedMetricsStatus: ${default(map.get(submittedJobMetrics, "status"), null)}
           - submittedMetricsQualityPassRate: ${default(map.get(submittedJobMetrics, "quality_pass_rate"), null)}
+        next: write_idempotency_marker
+
+    - write_idempotency_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${idempotencyObject}
+          uploadType: "media"
+          body: ${json.encode({
+            "scene_id": sceneId,
+            "status": submittedJobStatus,
+            "job_id": submittedJobId,
+            "timestamp": time.format(sys.now()),
+            "hash": idempotencyHash,
+            "inputs": idempotencyInputs
+          })}
+        result: idempotencyMarkerWriteResult
         next: evaluate_submission_metrics
 
     - evaluate_submission_metrics:
