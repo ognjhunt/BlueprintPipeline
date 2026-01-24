@@ -115,6 +115,7 @@ from tools.error_handling.retry import (
 from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.lerobot_validation import validate_lerobot_dataset
+from tools.metrics.job_metrics_exporter import export_job_metrics
 from tools.quality.quality_config import resolve_quality_settings
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
 from tools.startup_validation import (
@@ -4013,6 +4014,13 @@ class LocalPipelineRunner:
             json.dumps(job_payload, indent=2),
             context="geniesim job payload",
         )
+        try:
+            export_job_metrics(job_json_path=job_path)
+        except Exception as exc:
+            self.log(
+                f"Failed to export Genie Sim job metrics summary: {exc}",
+                "WARNING",
+            )
         self._geniesim_local_run_results = local_run_results
         self._geniesim_output_dirs = output_dirs
 
