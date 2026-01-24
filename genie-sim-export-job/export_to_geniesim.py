@@ -95,6 +95,7 @@ from tools.quality_reports import generate_asset_provenance
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.workflow.failure_markers import FailureMarkerWriter
 from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+from tools.tracing import init_tracing
 from tools.validation.entrypoint_checks import (
     validate_required_env_vars,
     validate_scene_manifest,
@@ -2401,6 +2402,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
 
 if __name__ == "__main__":
     try:
+        init_tracing(service_name=os.getenv("OTEL_SERVICE_NAME", JOB_NAME))
         main()
     except Exception as exc:
         send_alert(

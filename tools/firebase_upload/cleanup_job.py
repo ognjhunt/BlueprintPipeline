@@ -12,6 +12,7 @@ from typing import Iterable, Optional, Set, Tuple
 from firebase_admin import storage
 
 from tools.firebase_upload.uploader import cleanup_firebase_paths, init_firebase
+from tools.tracing import init_tracing
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,7 @@ def main() -> None:
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    init_tracing(service_name=os.getenv("OTEL_SERVICE_NAME", "firebase-cleanup-job"))
     cleanup_orphaned_blobs()
 
 
