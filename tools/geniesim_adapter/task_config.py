@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
+from json import JSONDecodeError, loads as json_loads
 from pathlib import Path
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
+from tools.config.production_mode import resolve_production_mode
 from tools.geniesim_adapter.config import (
     get_geniesim_task_confidence_threshold,
     get_geniesim_task_max_per_object,
@@ -702,6 +705,7 @@ class TaskConfigGenerator:
         # Calculate workspace from scene bounds
         room = scene_config.get("room", {})
         bounds = room.get("bounds", {})
+        workspace_bounds: List[List[float]]
 
         if bounds:
             workspace_bounds = [
@@ -709,8 +713,18 @@ class TaskConfigGenerator:
                 [bounds.get("depth", 1.0), bounds.get("width", 1.0) / 2, bounds.get("height", 2.0)],
             ]
         else:
-            # Default workspace
-            workspace_bounds = [[-0.5, -0.5, 0.0], [1.0, 1.0, 1.5]]
+            bounds_override = os.getenv("GENIESIM_WORKSPACE_BOUNDS_JSON")
+            if bounds_override:
+                workspace_bounds = self._parse_workspace_bounds_override(bounds_override)
+            elif resolve_production_mode():
+                raise ValueError(
+                    "Workspace bounds are required in production. Provide room.bounds in the "
+                    "scene manifest or set GENIESIM_WORKSPACE_BOUNDS_JSON to "
+                    "[[min_x, min_y, min_z], [max_x, max_y, max_z]]."
+                )
+            else:
+                # Default workspace
+                workspace_bounds = [[-0.5, -0.5, 0.0], [1.0, 1.0, 1.5]]
 
         # Robot base position (center of workspace, on floor)
         base_position = [
@@ -725,6 +739,36 @@ class TaskConfigGenerator:
             base_position=base_position,
             workspace_bounds=workspace_bounds,
         )
+
+    @staticmethod
+    def _parse_workspace_bounds_override(bounds_override: str) -> List[List[float]]:
+        try:
+            parsed = json_loads(bounds_override)
+        except JSONDecodeError as exc:
+            raise ValueError(
+                "GENIESIM_WORKSPACE_BOUNDS_JSON must be valid JSON formatted as "
+                "[[min_x, min_y, min_z], [max_x, max_y, max_z]]."
+            ) from exc
+
+        if not isinstance(parsed, list) or len(parsed) != 2:
+            raise ValueError(
+                "GENIESIM_WORKSPACE_BOUNDS_JSON must be a JSON array with two 3-element lists."
+            )
+
+        bounds: List[List[float]] = []
+        for index, point in enumerate(parsed):
+            if not isinstance(point, list) or len(point) != 3:
+                raise ValueError(
+                    "GENIESIM_WORKSPACE_BOUNDS_JSON must contain two 3-element lists of numbers."
+                )
+            try:
+                bounds.append([float(coord) for coord in point])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "GENIESIM_WORKSPACE_BOUNDS_JSON must contain numeric bounds values."
+                ) from exc
+
+        return bounds
 
 
 # =============================================================================
