@@ -33,6 +33,20 @@ export BLUEPRINT_DEBUG=true
 export LOG_LEVEL=DEBUG
 ```
 
+## Pipeline Execution
+
+Per-step timeouts for the local pipeline runner.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PIPELINE_STEP_TIMEOUTS_JSON` | json | unset | JSON object mapping `PipelineStep` names to timeout seconds (each attempt is bounded). |
+
+**Example**:
+```bash
+# Bound individual steps with custom timeouts
+export PIPELINE_STEP_TIMEOUTS_JSON='{"regen3d": 1800, "genie-sim-submit": 7200, "genie-sim-import": 3600}'
+```
+
 ## Metrics & Observability
 
 Controls for `tools.metrics.pipeline_metrics` and the real-time pipeline observability stack.
