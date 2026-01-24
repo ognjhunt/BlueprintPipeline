@@ -119,6 +119,7 @@ from tools.firebase_upload.firebase_upload_orchestrator import (
 from tools.firebase_upload.uploader import (
     get_firebase_storage_bucket,
     get_firebase_upload_mode,
+    preflight_firebase_connectivity,
     resolve_firebase_local_upload_root,
 )
 from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
@@ -5103,6 +5104,27 @@ def main(input_params: Optional[Dict[str, Any]] = None):
         # Re-raise to exit immediately
         raise
 
+    firebase_upload_mode = get_firebase_upload_mode()
+    firebase_preflight = None
+    if enable_firebase_upload and firebase_upload_mode != "local":
+        try:
+            firebase_preflight = preflight_firebase_connectivity(timeout_seconds=30)
+        except Exception as exc:
+            log.error("Firebase preflight failed: %s", exc)
+            sys.exit(1)
+    elif enable_firebase_upload:
+        firebase_preflight = {
+            "success": True,
+            "mode": firebase_upload_mode,
+            "note": "local mode preflight skipped",
+        }
+    else:
+        firebase_preflight = {
+            "success": False,
+            "mode": firebase_upload_mode,
+            "note": "firebase uploads disabled",
+        }
+
     log.info("Configuration:")
     log.info("  Job ID: %s", job_id)
     log.info("  Output Prefix: %s", output_prefix)
@@ -5132,6 +5154,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
         enable_firebase_upload,
         disable_firebase_upload,
     )
+    log.info("  Firebase Preflight: %s", firebase_preflight)
     log.info(
         "  Allow Partial Firebase Uploads: %s",
         allow_partial_firebase_uploads,
