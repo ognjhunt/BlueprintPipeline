@@ -5,7 +5,7 @@ import pytest
 
 def test_require_lerobot_defaults_in_production(monkeypatch, load_job_module):
     monkeypatch.delenv("REQUIRE_LEROBOT", raising=False)
-    monkeypatch.setenv("PRODUCTION_MODE", "1")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.delenv("SERVICE_MODE", raising=False)
     monkeypatch.delenv("K_SERVICE", raising=False)
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)

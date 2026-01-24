@@ -3538,10 +3538,9 @@ def _run_main():
         # Production indicators: running in container, K8s, or Cloud Run
         production_env_flags = resolve_production_mode()
         is_production = (
-            os.getenv("KUBERNETES_SERVICE_HOST") is not None or  # K8s
-            os.getenv("K_SERVICE") is not None or  # Cloud Run
-            os.path.exists("/.dockerenv") or  # Docker
-            parse_bool_env(os.getenv("PRODUCTION"), default=False)
+            os.getenv("KUBERNETES_SERVICE_HOST") is not None  # K8s
+            or os.getenv("K_SERVICE") is not None  # Cloud Run
+            or os.path.exists("/.dockerenv")  # Docker
             or production_env_flags
         )
 
