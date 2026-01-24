@@ -100,6 +100,7 @@ class GenieSimTaskConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "schema_version": "3.0",
             "scene_id": self.scene_id,
             "environment_type": self.environment_type,
             "suggested_tasks": [t.to_dict() for t in self.suggested_tasks],

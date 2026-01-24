@@ -116,6 +116,7 @@ class GenieSimAssetIndex:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "schema_version": "3.0",
             "assets": [a.to_dict() for a in self.assets],
             "metadata": self.metadata,
         }

@@ -17,7 +17,7 @@ from tools.geniesim_adapter.config import (
     get_geniesim_host,
     get_geniesim_port,
 )
-from tools.config.production_mode import resolve_pipeline_environment
+from tools.config.production_mode import resolve_pipeline_environment, resolve_production_mode
 
 
 class ValidationError(Exception):
@@ -344,6 +344,12 @@ def validate_and_fail_fast(
     """
     skip_flag = os.getenv("SKIP_STARTUP_VALIDATION", "").strip().lower()
     if skip_flag in {"1", "true", "yes", "y"}:
+        # Prevent skipping validation in production mode
+        if resolve_production_mode():
+            raise ValidationError(
+                "Cannot skip startup validation in production mode. "
+                "Set PIPELINE_ENV to 'development' or remove SKIP_STARTUP_VALIDATION."
+            )
         print(f"[{job_name}] ⚠️ Skipping startup validation (SKIP_STARTUP_VALIDATION={skip_flag})")
         return
 

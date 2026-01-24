@@ -15,6 +15,7 @@ from tools.firebase_upload.uploader import (
     cleanup_firebase_paths,
     upload_firebase_files,
     upload_episodes_to_firebase,
+    verify_firebase_upload_manifest,
 )
 
 logger = logging.getLogger(__name__)
@@ -251,3 +252,56 @@ def cleanup_firebase_upload_prefix(
         prefix=prefix,
     )
     return cleanup_firebase_paths(prefix=remote_prefix)
+
+
+def verify_firebase_upload(
+    *,
+    scene_id: str,
+    expected_paths: list[str],
+    robot_type: Optional[str] = None,
+    prefix: Optional[str] = None,
+    verify_checksums: bool = False,
+    local_path_map: Optional[dict[str, Path]] = None,
+) -> dict:
+    """Verify that all expected files exist in Firebase Storage after upload.
+
+    This is a post-upload verification step to ensure data integrity.
+    Call this after upload_episodes_with_retry to confirm all files
+    actually exist in Firebase Storage.
+
+    Args:
+        scene_id: Scene identifier
+        expected_paths: List of relative paths expected to exist
+        robot_type: Optional robot type for prefix construction
+        prefix: Optional Firebase prefix override
+        verify_checksums: If True, also verify SHA256 checksums
+        local_path_map: Map of relative path -> local Path for checksum verification
+
+    Returns:
+        dict with keys: success, verified, missing, extra, checksum_mismatches, errors
+
+    Raises:
+        FirebaseUploadOrchestratorError: If verification fails and strict mode enabled
+    """
+    remote_prefix = build_firebase_upload_prefix(
+        scene_id,
+        robot_type=robot_type,
+        prefix=prefix,
+    )
+
+    result = verify_firebase_upload_manifest(
+        remote_prefix=remote_prefix,
+        expected_paths=expected_paths,
+        verify_checksums=verify_checksums,
+        local_path_map=local_path_map,
+    )
+
+    if not result["success"]:
+        logger.warning(
+            "Firebase upload verification failed for %s: missing=%d, checksum_mismatches=%d",
+            remote_prefix,
+            len(result.get("missing", [])),
+            len(result.get("checksum_mismatches", [])),
+        )
+
+    return result

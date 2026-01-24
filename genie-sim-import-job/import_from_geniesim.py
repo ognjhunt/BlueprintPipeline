@@ -31,7 +31,7 @@ Environment Variables:
     FIREBASE_UPLOAD_PREFIX: Remote prefix for Firebase uploads (default: datasets)
     FIREBASE_UPLOAD_MAX_WORKERS: Max workers for parallel Firebase uploads
     ALLOW_PARTIAL_FIREBASE_UPLOADS: Allow Firebase uploads to proceed for
-        successful robots even if others fail (default: false)
+        successful robots even if others fail (default: true)
     ARTIFACTS_BY_ROBOT: JSON map of robot type to artifacts payload for multi-robot imports
     ALLOW_IDEMPOTENT_RETRY: Allow retrying a local import when a prior manifest
         indicates a failed or partial run (default: false)

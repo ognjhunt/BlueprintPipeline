@@ -836,3 +836,172 @@ def cleanup_firebase_paths(
         "deleted": deleted,
         "failed": failed,
     }
+
+
+def verify_firebase_upload_manifest(
+    *,
+    remote_prefix: str,
+    expected_paths: Sequence[str],
+    verify_checksums: bool = False,
+    local_path_map: Optional[dict[str, Path]] = None,
+) -> dict:
+    """Verify that all expected paths exist in Firebase Storage.
+
+    This is a post-upload verification step to ensure data integrity.
+    After uploading files, call this function to confirm all files
+    actually exist in Firebase Storage.
+
+    Args:
+        remote_prefix: The Firebase Storage prefix to check (e.g., datasets/scene_id)
+        expected_paths: List of relative paths expected to exist under the prefix
+        verify_checksums: If True, also verify SHA256 checksums (requires local_path_map)
+        local_path_map: Map of relative path -> local Path for checksum verification
+
+    Returns:
+        dict with keys: success, verified, missing, extra, checksum_mismatches, errors
+    """
+    mode = _resolve_firebase_upload_mode()
+
+    # For local mode, verify files exist on disk
+    if mode == "local":
+        local_root = _resolve_local_upload_root()
+        return _verify_local_upload_manifest(
+            local_root=local_root,
+            remote_prefix=remote_prefix,
+            expected_paths=expected_paths,
+            verify_checksums=verify_checksums,
+            local_path_map=local_path_map,
+        )
+
+    # For Firebase mode, list blobs and compare
+    _preflight_firebase_credentials()
+    bucket = _get_storage_bucket()
+
+    result = {
+        "success": False,
+        "remote_prefix": remote_prefix,
+        "verified": [],
+        "missing": [],
+        "extra": [],
+        "checksum_mismatches": [],
+        "errors": [],
+    }
+
+    # List all blobs under the prefix
+    try:
+        remote_blobs = {}
+        for blob in bucket.list_blobs(prefix=remote_prefix):
+            # Strip prefix to get relative path
+            relative_path = blob.name
+            if relative_path.startswith(remote_prefix):
+                relative_path = relative_path[len(remote_prefix):].lstrip("/")
+            remote_blobs[relative_path] = blob
+    except Exception as exc:
+        result["errors"].append(f"Failed to list blobs under {remote_prefix}: {exc}")
+        return result
+
+    # Check for expected paths
+    expected_set = set(expected_paths)
+    remote_set = set(remote_blobs.keys())
+
+    result["missing"] = list(expected_set - remote_set)
+    result["extra"] = list(remote_set - expected_set)
+
+    # Verify files that exist
+    for path in expected_set & remote_set:
+        blob = remote_blobs[path]
+        try:
+            if verify_checksums and local_path_map and path in local_path_map:
+                local_path = local_path_map[path]
+                verified, detail = _verify_blob_checksum(blob, local_path)
+                if not verified:
+                    result["checksum_mismatches"].append({
+                        "path": path,
+                        "detail": detail,
+                    })
+                else:
+                    result["verified"].append(path)
+            else:
+                # Just verify existence
+                result["verified"].append(path)
+        except Exception as exc:
+            result["errors"].append(f"Error verifying {path}: {exc}")
+
+    result["success"] = (
+        len(result["missing"]) == 0
+        and len(result["checksum_mismatches"]) == 0
+        and len(result["errors"]) == 0
+    )
+
+    logger.info(
+        "Firebase manifest verification: prefix=%s, verified=%d, missing=%d, extra=%d, checksum_mismatches=%d",
+        remote_prefix,
+        len(result["verified"]),
+        len(result["missing"]),
+        len(result["extra"]),
+        len(result["checksum_mismatches"]),
+    )
+
+    return result
+
+
+def _verify_local_upload_manifest(
+    *,
+    local_root: Path,
+    remote_prefix: str,
+    expected_paths: Sequence[str],
+    verify_checksums: bool = False,
+    local_path_map: Optional[dict[str, Path]] = None,
+) -> dict:
+    """Verify manifest for local upload mode."""
+    result = {
+        "success": False,
+        "remote_prefix": remote_prefix,
+        "verified": [],
+        "missing": [],
+        "extra": [],
+        "checksum_mismatches": [],
+        "errors": [],
+    }
+
+    target_dir = local_root / remote_prefix
+
+    if not target_dir.exists():
+        result["missing"] = list(expected_paths)
+        return result
+
+    # List files that exist
+    existing_files = set()
+    for file_path in target_dir.rglob("*"):
+        if file_path.is_file():
+            relative = file_path.relative_to(target_dir).as_posix()
+            existing_files.add(relative)
+
+    expected_set = set(expected_paths)
+    result["missing"] = list(expected_set - existing_files)
+    result["extra"] = list(existing_files - expected_set)
+
+    for path in expected_set & existing_files:
+        if verify_checksums and local_path_map and path in local_path_map:
+            local_path = local_path_map[path]
+            target_path = target_dir / path
+            local_hashes = _calculate_file_hashes(local_path)
+            target_hashes = _calculate_file_hashes(target_path)
+            if local_hashes["sha256_hex"] != target_hashes["sha256_hex"]:
+                result["checksum_mismatches"].append({
+                    "path": path,
+                    "expected_sha256": local_hashes["sha256_hex"],
+                    "actual_sha256": target_hashes["sha256_hex"],
+                })
+            else:
+                result["verified"].append(path)
+        else:
+            result["verified"].append(path)
+
+    result["success"] = (
+        len(result["missing"]) == 0
+        and len(result["checksum_mismatches"]) == 0
+        and len(result["errors"]) == 0
+    )
+
+    return result

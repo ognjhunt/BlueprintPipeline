@@ -156,6 +156,7 @@ class GenieSimSceneGraph:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "schema_version": "3.0",
             "scene_id": self.scene_id,
             "coordinate_system": self.coordinate_system,
             "meters_per_unit": self.meters_per_unit,
