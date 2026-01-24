@@ -30,7 +30,7 @@ import warnings
 
 import numpy as np
 
-from tools.config.production_mode import resolve_pipeline_environment
+from tools.config.production_mode import resolve_pipeline_environment, resolve_production_mode
 from tools.quality_reports import COMMERCIAL_OK_LICENSES, LicenseType
 from tools.validation import ALLOWED_ASSET_CATEGORIES, ValidationError, validate_category
 
@@ -265,11 +265,22 @@ def normalize_material_type(material_type: Optional[str]) -> str:
     return MATERIAL_ALIASES.get(normalized, normalized)
 
 
+def _handle_missing_material_physics_config(path: Path) -> None:
+    message = (
+        "Material physics config not found. Expected file at "
+        f"{path}."
+    )
+    if resolve_production_mode():
+        raise FileNotFoundError(message)
+    warnings.warn(message)
+
+
 def _load_material_physics_overrides(
     config_path: Optional[Path] = None,
 ) -> Dict[str, GenieSimMaterial]:
     path = config_path or MATERIAL_PHYSICS_CONFIG_PATH
     if not path.exists():
+        _handle_missing_material_physics_config(path)
         return {}
 
     try:
