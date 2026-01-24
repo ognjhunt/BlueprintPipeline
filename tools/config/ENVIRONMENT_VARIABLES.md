@@ -549,6 +549,8 @@ export SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | path | None | Path to Firebase service account JSON credentials (required for Genie Sim import in production/service mode) |
 | `FIREBASE_UPLOAD_PREFIX` | str | `datasets` | Firebase upload prefix for Genie Sim episode artifacts (import job uploads after validation) |
 | `FIREBASE_UPLOAD_TIMEOUT_TOTAL_SECONDS` | float | `3600` | Total time budget in seconds for a batch of Firebase uploads before marking remaining files as failed with a global timeout. |
+| `FIREBASE_UPLOAD_RATE_LIMIT_PER_SEC` | float | `0` | Maximum Firebase upload submissions per second (0 disables rate limiting). |
+| `FIREBASE_UPLOAD_BURST` | int | ceil(rate limit) | Token bucket burst size for Firebase uploads (defaults to `ceil(FIREBASE_UPLOAD_RATE_LIMIT_PER_SEC)` when rate limiting is enabled). |
 
 > **Migration note:** `FIREBASE_EPISODE_PREFIX` has been replaced by `FIREBASE_UPLOAD_PREFIX` to keep dataset paths consistent across Genie Sim submit/import flows.
 
