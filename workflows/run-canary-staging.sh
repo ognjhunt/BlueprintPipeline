@@ -13,6 +13,10 @@ CANARY_RELEASE_CHANNEL="${CANARY_RELEASE_CHANNEL:-canary}"
 CANARY_ROLLBACK_MARKER="${CANARY_ROLLBACK_MARKER:-}"
 RUN_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-workflows/artifacts/canary-validation/${RUN_TIMESTAMP}}"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+VALIDATION_SCRIPT="${VALIDATION_SCRIPT:-${REPO_ROOT}/workflows/validate-geniesim-export-artifacts.py}"
+SCHEMA_DIR="${SCHEMA_DIR:-${REPO_ROOT}/fixtures/contracts}"
+VALIDATION_JOB_NAME="${VALIDATION_JOB_NAME:-canary-validation}"
 
 if [[ -z "${PROJECT_ID}" ]]; then
   echo "PROJECT_ID is not set and no gcloud default project found." >&2
@@ -97,11 +101,96 @@ run_execution() {
   echo "Stored workflow logs to ${ARTIFACT_ROOT}/${label}-workflow-logs.json"
 }
 
+write_failure_marker() {
+  local scene_id="$1"
+  local label="$2"
+  local validation_log="$3"
+
+  python - <<PY
+from pathlib import Path
+
+from tools.workflow.failure_markers import FailureMarkerWriter
+
+scene_id = "${scene_id}"
+label = "${label}"
+validation_log = Path("${validation_log}")
+message = validation_log.read_text().strip() if validation_log.exists() else "Canary validation failed."
+
+writer = FailureMarkerWriter(
+    bucket="${BUCKET}",
+    scene_id=scene_id,
+    job_name="${VALIDATION_JOB_NAME}",
+)
+
+writer.write_failure(
+    exception=RuntimeError(message),
+    failed_step="validate_geniesim_exports",
+    input_params={
+        "scene_id": scene_id,
+        "label": label,
+        "bucket": "${BUCKET}",
+        "schema_dir": "${SCHEMA_DIR}",
+    },
+    partial_results={"validation_log": str(validation_log)},
+    recommendations=[
+        "Inspect the validation log for missing artifacts or schema errors.",
+        "Re-run genie-sim-export for the scene after fixing export issues.",
+    ],
+    error_code="CANARY_VALIDATION_FAILED",
+)
+PY
+}
+
+validate_geniesim_artifacts() {
+  local label="$1"
+  local scene_id="$2"
+  local artifacts_dir="${ARTIFACT_ROOT}/${label}-geniesim"
+  local validation_log="${ARTIFACT_ROOT}/${label}-validation.log"
+  local validation_report="${ARTIFACT_ROOT}/${label}-validation.json"
+  local gcs_prefix="gs://${BUCKET}/scenes/${scene_id}/geniesim"
+
+  mkdir -p "${artifacts_dir}"
+  : > "${validation_log}"
+
+  echo "Downloading Genie Sim artifacts for ${label} (${scene_id})."
+  if ! gsutil cp "${gcs_prefix}/scene_graph.json" "${artifacts_dir}/" 2>>"${validation_log}"; then
+    echo "Missing scene_graph.json for ${scene_id}." >> "${validation_log}"
+    write_failure_marker "${scene_id}" "${label}" "${validation_log}"
+    return 1
+  fi
+  if ! gsutil cp "${gcs_prefix}/asset_index.json" "${artifacts_dir}/" 2>>"${validation_log}"; then
+    echo "Missing asset_index.json for ${scene_id}." >> "${validation_log}"
+    write_failure_marker "${scene_id}" "${label}" "${validation_log}"
+    return 1
+  fi
+  if ! gsutil cp "${gcs_prefix}/task_config.json" "${artifacts_dir}/" 2>>"${validation_log}"; then
+    echo "Missing task_config.json for ${scene_id}." >> "${validation_log}"
+    write_failure_marker "${scene_id}" "${label}" "${validation_log}"
+    return 1
+  fi
+
+  if ! python "${VALIDATION_SCRIPT}" \
+    --scene-graph "${artifacts_dir}/scene_graph.json" \
+    --asset-index "${artifacts_dir}/asset_index.json" \
+    --task-config "${artifacts_dir}/task_config.json" \
+    --schema-dir "${SCHEMA_DIR}" \
+    > "${validation_report}" 2>>"${validation_log}"; then
+    echo "Canary artifact validation failed for ${label}; see ${validation_log}." >&2
+    write_failure_marker "${scene_id}" "${label}" "${validation_log}"
+    return 1
+  fi
+
+  echo "Canary artifact validation passed for ${label}. Report: ${validation_report}"
+}
+
 echo "Running stable execution (expected stable image tag)."
 run_execution "stable" "${STABLE_SCENE_ID}" "false" "${CANARY_ROLLBACK_MARKER}"
 
 echo "Running canary execution (expected canary image tag)."
 run_execution "canary" "${CANARY_SCENE_ID}" "true" "${CANARY_ROLLBACK_MARKER}"
+
+echo "Validating canary export artifacts."
+validate_geniesim_artifacts "canary" "${CANARY_SCENE_ID}"
 
 if [[ -n "${CANARY_ROLLBACK_MARKER}" ]]; then
   echo "Running rollback marker execution (expected rollback skip)."
