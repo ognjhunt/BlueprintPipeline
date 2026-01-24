@@ -81,6 +81,15 @@ The Grafana dashboard includes the following Genie Sim quality/performance panel
   - Alert: If unavailable for > 5 minutes
 - **geniesim_episodes_generated_total** (rate): Episodes/hour panel in Grafana
 
+**Job.json metrics export**
+- The `geniesim/job.json` summaries (`job_metrics_by_robot`, `job_metrics`, or `job_metrics_summary`) are exported as:
+  - `geniesim_jobs_submitted_total` (counter, 1 per summary)
+  - `geniesim_episodes_generated_total` (counter, uses `episodes_collected` or `total_episodes`)
+  - `geniesim_job_duration_seconds` (histogram, uses `duration_seconds`)
+- Labels are emitted consistently: `scene_id`, `job_id`, `robot_type`.
+- Validate in Cloud Monitoring by filtering `custom.googleapis.com/blueprint_pipeline/geniesim_*` and checking labels
+  for the scene/job you just ran (Metrics Explorer or `gcloud monitoring time-series list` with a label filter).
+
 ### Quality Metrics
 - **episode_quality_score**: Episode quality distribution
   - Alert: If average < 0.7
