@@ -353,7 +353,7 @@ def test_provenance_missing_fails_in_production_even_with_override(
         blob_payloads=blobs,
         env_overrides={
             "ALLOW_MISSING_ASSET_PROVENANCE": "true",
-            "PRODUCTION_MODE": "true",
+            "PIPELINE_ENV": "production",
         },
     )
 

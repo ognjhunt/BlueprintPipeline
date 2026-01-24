@@ -16,16 +16,15 @@ def test_curobo_availability_helpers(load_job_module, monkeypatch) -> None:
 def test_requires_curobo_env_flag(load_job_module, monkeypatch) -> None:
     curobo_planner = load_job_module("episode_generation", "curobo_planner.py")
 
+    monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.delenv("DATA_QUALITY_LEVEL", raising=False)
+    assert curobo_planner._requires_curobo() is True
+
+    monkeypatch.setenv("PIPELINE_ENV", "development")
     monkeypatch.setenv("DATA_QUALITY_LEVEL", "production")
-    monkeypatch.delenv("LABS_STAGING", raising=False)
     assert curobo_planner._requires_curobo() is True
 
     monkeypatch.setenv("DATA_QUALITY_LEVEL", "")
-    monkeypatch.setenv("LABS_STAGING", "true")
-    assert curobo_planner._requires_curobo() is True
-
-    monkeypatch.setenv("DATA_QUALITY_LEVEL", "")
-    monkeypatch.setenv("LABS_STAGING", "0")
     assert curobo_planner._requires_curobo() is False
 
 
@@ -34,8 +33,8 @@ def test_create_curobo_planner_missing_dependency(load_job_module, monkeypatch) 
     curobo_planner = load_job_module("episode_generation", "curobo_planner.py")
 
     monkeypatch.setattr(curobo_planner, "CUROBO_AVAILABLE", False)
-    monkeypatch.setenv("DATA_QUALITY_LEVEL", "")
-    monkeypatch.setenv("LABS_STAGING", "0")
+    monkeypatch.setenv("PIPELINE_ENV", "development")
+    monkeypatch.delenv("DATA_QUALITY_LEVEL", raising=False)
 
     assert curobo_planner.create_curobo_planner() is None
 
@@ -45,7 +44,7 @@ def test_create_curobo_planner_missing_dependency_required(load_job_module, monk
     curobo_planner = load_job_module("episode_generation", "curobo_planner.py")
 
     monkeypatch.setattr(curobo_planner, "CUROBO_AVAILABLE", False)
-    monkeypatch.setenv("DATA_QUALITY_LEVEL", "production")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
 
     with pytest.raises(RuntimeError, match="cuRobo is required for production"):
         curobo_planner.create_curobo_planner()
