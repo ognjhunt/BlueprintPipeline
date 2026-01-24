@@ -45,6 +45,7 @@ class OutputFormat(Enum):
     HF_DATASETS = "hf_datasets"  # HuggingFace Datasets
     ROSBAG = "rosbag"  # ROS bag format (legacy systems)
     RAW = "raw"  # Raw files (images, JSON, etc.)
+    COSMOS_POLICY = "cosmos_policy"  # NVIDIA Cosmos Policy (video diffusion policy)
 
 
 @dataclass

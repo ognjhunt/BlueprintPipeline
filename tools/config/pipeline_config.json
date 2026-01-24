@@ -195,11 +195,20 @@
   },
   "export_formats": {
     "default_format": "lerobot",
-    "available_formats": ["lerobot", "isaac_lab", "arena", "hdf5", "tfrecord", "rosbag"],
+    "available_formats": ["lerobot", "isaac_lab", "arena", "hdf5", "tfrecord", "rosbag", "cosmos_policy"],
     "compression": "parquet",
     "include_metadata": true,
     "include_videos": true,
     "include_depth": true,
+    "cosmos_policy": {
+      "enabled_by_default": true,
+      "action_chunk_size": 16,
+      "image_size": [256, 256],
+      "normalize_actions": true,
+      "cameras": ["wrist", "overhead"],
+      "firebase_upload_prefix": "datasets/cosmos_policy",
+      "description": "NVIDIA Cosmos Policy fine-tuning format (video diffusion policy)"
+    },
     "description": "Data export format options"
   },
   "quality_gates": {
