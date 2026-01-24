@@ -129,7 +129,7 @@ from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.lerobot_validation import validate_lerobot_dataset
 from tools.metrics.job_metrics_exporter import export_job_metrics
 from tools.quality.quality_config import resolve_quality_settings
-from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry
+from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry, build_notification_service
 from tools.startup_validation import (
     validate_firebase_credentials,
     validate_gcs_credentials,
@@ -309,6 +309,10 @@ class LocalPipelineRunner:
         self._pending_articulation_preflight = False
         self._path_redaction_regex = re.compile(r"(?:[A-Za-z]:\\\\|/)[^\\s]+")
         self._quality_gates = QualityGateRegistry(verbose=self.verbose)
+        self._notification_service = build_notification_service(
+            self._quality_gates.config,
+            verbose=self.verbose,
+        )
         self._quality_gate_report_path = self._resolve_quality_gate_report_path()
         self.retry_config = self._resolve_retry_config()
         self._step_timeouts = self._resolve_step_timeouts()
@@ -1226,12 +1230,14 @@ class LocalPipelineRunner:
                     self._quality_gates.run_checkpoint(
                         checkpoint=checkpoint,
                         context=entry,
+                        notification_service=self._notification_service,
                     )
                 )
         else:
             gate_results = self._quality_gates.run_checkpoint(
                 checkpoint=checkpoint,
                 context=context,
+                notification_service=self._notification_service,
             )
         self._quality_gates.save_report(self.scene_id, self._quality_gate_report_path)
         report = self._quality_gates.to_report(self.scene_id)

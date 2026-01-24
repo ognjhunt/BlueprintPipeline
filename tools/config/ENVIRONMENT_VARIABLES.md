@@ -161,6 +161,32 @@ export ALERT_PROVENANCE_GATE_SEVERITY=error
 export ALERT_JOB_EXCEPTION_SEVERITY=critical
 ```
 
+## Quality Gate Notifications
+
+Notification settings for `tools/quality_gates` and the main pipeline entrypoints
+(`tools/run_local_pipeline.py`, `tools/run_scene_batch.py`, and
+`tools/quality_gates/sli_gate_runner.py`). Production runs must configure at least
+one channel via `BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS` or
+`quality_config.json`.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS` | str | unset | Comma-separated list of channels (`email`, `sms`, `slack`, `console`). Required in production if `human_approval.notification_channels` is empty. |
+| `BP_QUALITY_NOTIFICATIONS_EMAIL_RECIPIENTS` | str | unset | Comma-separated email recipients for quality gate notifications (first entry used). |
+| `BP_QUALITY_NOTIFICATIONS_SMS_RECIPIENTS` | str | unset | Comma-separated SMS recipients for quality gate notifications (first entry used). |
+| `BP_QUALITY_NOTIFICATIONS_SLACK_WEBHOOK_URL` | str | unset | Slack webhook URL for quality gate notifications. |
+| `QA_EMAIL` | str | "ohstnhunt@gmail.com" | Default email recipient when none is supplied in config or overrides. |
+| `QA_PHONE` | str | "9196389913" | Default SMS recipient when none is supplied in config or overrides. |
+| `QA_SLACK_WEBHOOK_URL` | str | unset | Slack webhook URL used when `BP_QUALITY_NOTIFICATIONS_SLACK_WEBHOOK_URL` is unset. |
+
+**Example**:
+```bash
+export PRODUCTION_MODE=true
+export BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS="email,slack"
+export BP_QUALITY_NOTIFICATIONS_EMAIL_RECIPIENTS="qa-team@example.com"
+export BP_QUALITY_NOTIFICATIONS_SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+```
+
 ## Dataset Catalog (Firestore)
 
 Controls for publishing dataset metadata to Firestore after successful Genie Sim imports.

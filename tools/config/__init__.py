@@ -224,6 +224,18 @@ class HumanApprovalConfig:
 
 
 @dataclass
+class NotificationsConfig:
+    """Notification defaults for quality gate alerts."""
+    email_recipients: List[str] = field(default_factory=list)
+    sms_recipients: List[str] = field(default_factory=list)
+    slack_webhook_url: Optional[str] = None
+    notify_on_pass: bool = False
+    notify_on_warning: bool = True
+    notify_on_error: bool = True
+    notify_on_approval_required: bool = True
+
+
+@dataclass
 class ApprovalStoreConfig:
     """Approval request storage configuration."""
     backend: str = "firestore"
@@ -276,6 +288,7 @@ class QualityConfig:
         default_factory=GenieSimDataCollectionThresholds
     )
     human_approval: HumanApprovalConfig = field(default_factory=HumanApprovalConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     approval_store: ApprovalStoreConfig = field(default_factory=ApprovalStoreConfig)
     gate_overrides: GateOverrideConfig = field(default_factory=GateOverrideConfig)
 
@@ -990,6 +1003,18 @@ class ConfigLoader:
                 ),
                 approval_methods=config.get("human_approval", {}).get("approval_methods", ["dashboard", "email", "api"]),
                 notification_channels=config.get("human_approval", {}).get("notification_channels", []),
+            ),
+            notifications=NotificationsConfig(
+                email_recipients=config.get("notifications", {}).get("email_recipients", []),
+                sms_recipients=config.get("notifications", {}).get("sms_recipients", []),
+                slack_webhook_url=config.get("notifications", {}).get("slack_webhook_url"),
+                notify_on_pass=config.get("notifications", {}).get("notify_on_pass", False),
+                notify_on_warning=config.get("notifications", {}).get("notify_on_warning", True),
+                notify_on_error=config.get("notifications", {}).get("notify_on_error", True),
+                notify_on_approval_required=config.get("notifications", {}).get(
+                    "notify_on_approval_required",
+                    True,
+                ),
             ),
             approval_store=ApprovalStoreConfig(
                 backend=config.get("approval_store", {}).get("backend", "filesystem"),

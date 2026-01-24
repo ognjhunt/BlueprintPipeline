@@ -5,6 +5,13 @@ Quality gate approvals must have at least one notification channel configured wh
 `PRODUCTION_MODE` (or `PIPELINE_ENV=production`) is enabled. The pipeline will
 raise an error if `human_approval.notification_channels` is empty in production.
 
+The primary pipeline entrypoints (for example `tools/run_local_pipeline.py`,
+`tools/run_scene_batch.py`, and `tools/quality_gates/sli_gate_runner.py`) now
+construct a default `NotificationService` from `quality_config.json` and
+environment overrides. The service is passed into
+`QualityGateRegistry.run_checkpoint(...)` / `run_checkpoint_with_approval(...)`
+so `notify_on_fail` and `notify_on_pass` gates emit alerts.
+
 Configure channels in `tools/quality_gates/quality_config.json`, for example:
 
 ```json
@@ -23,6 +30,13 @@ You can override notification configuration without editing JSON:
 | Channels | `BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS` | `email,slack` |
 | Email recipient | `QA_EMAIL` | `qa-team@example.com` |
 | Slack webhook | `BP_QUALITY_NOTIFICATIONS_SLACK_WEBHOOK_URL` | `https://hooks.slack.com/services/...` |
+| SMS recipient | `QA_PHONE` | `15551234567` |
+| Override email recipients | `BP_QUALITY_NOTIFICATIONS_EMAIL_RECIPIENTS` | `qa-team@example.com,qa-lead@example.com` |
+| Override SMS recipients | `BP_QUALITY_NOTIFICATIONS_SMS_RECIPIENTS` | `15551234567,15557654321` |
+
+When multiple recipients are supplied, the notification service uses the first
+entry for delivery (configure a shared inbox or distribution list for emails
+if you need multiple recipients).
 
 Email delivery relies on standard provider configuration (e.g. `SENDGRID_API_KEY`
 or SMTP settings) as described in `notification_service.py`.

@@ -6,6 +6,7 @@ Human-in-the-loop quality validation with notifications.
 from .notification_service import (
     NotificationService,
     NotificationChannel,
+    build_notification_service,
     send_email_notification,
     send_sms_notification,
 )
@@ -24,6 +25,7 @@ from .ai_qa_context import (
 __all__ = [
     "NotificationService",
     "NotificationChannel",
+    "build_notification_service",
     "send_email_notification",
     "send_sms_notification",
     "QualityGate",
