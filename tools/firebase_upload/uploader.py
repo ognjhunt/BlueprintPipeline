@@ -16,6 +16,7 @@ from typing import Iterable, Optional, Sequence
 
 import firebase_admin
 from firebase_admin import credentials, storage
+import google.auth
 from google.auth.credentials import AnonymousCredentials
 
 from tools.error_handling.retry import retry_with_backoff
@@ -89,15 +90,15 @@ def resolve_firebase_local_upload_root() -> Path:
     return _resolve_local_upload_root()
 
 
-def _preflight_firebase_credentials() -> None:
+def _preflight_firebase_credentials() -> str:
     if _resolve_firebase_upload_mode() == "local":
-        return
+        return "local"
     bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")
     if not bucket_name:
         raise ValueError("FIREBASE_STORAGE_BUCKET is required to initialize Firebase storage")
 
     if _get_emulator_endpoint():
-        return
+        return "emulator"
 
     service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
@@ -106,15 +107,23 @@ def _preflight_firebase_credentials() -> None:
             json.loads(service_account_json)
         except json.JSONDecodeError as exc:
             raise ValueError("FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON") from exc
+        return "service_account_json"
     elif service_account_path:
         path = Path(service_account_path).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"FIREBASE_SERVICE_ACCOUNT_PATH not found: {path}")
-    else:
+        return "service_account_path"
+
+    try:
+        adc_credentials, _ = google.auth.default()
+    except Exception as exc:
         raise ValueError(
-            "Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH to "
-            "initialize Firebase storage"
-        )
+            "Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH, or configure "
+            "Application Default Credentials to initialize Firebase storage"
+        ) from exc
+    if isinstance(adc_credentials, AnonymousCredentials):
+        raise ValueError("Application Default Credentials are anonymous")
+    return "adc"
 
 
 def preflight_firebase_connectivity(*, timeout_seconds: float = 10.0) -> dict:
@@ -133,7 +142,7 @@ def preflight_firebase_connectivity(*, timeout_seconds: float = 10.0) -> dict:
         timeout_seconds: Maximum time to wait for connectivity check
 
     Returns:
-        dict with keys: success, bucket_name, mode, latency_ms, error (if any)
+        dict with keys: success, bucket_name, mode, auth_mode, latency_ms, error (if any)
     """
     import time
 
@@ -144,6 +153,7 @@ def preflight_firebase_connectivity(*, timeout_seconds: float = 10.0) -> dict:
         "success": False,
         "bucket_name": os.getenv("FIREBASE_STORAGE_BUCKET"),
         "mode": mode,
+        "auth_mode": None,
         "latency_ms": None,
         "error": None,
     }
@@ -159,6 +169,7 @@ def preflight_firebase_connectivity(*, timeout_seconds: float = 10.0) -> dict:
             result["success"] = True
             result["latency_ms"] = int((time.time() - start_time) * 1000)
             result["local_root"] = str(local_root)
+            result["auth_mode"] = "local"
             logger.info("Firebase local mode connectivity check passed: %s", local_root)
             return result
         except Exception as exc:
@@ -168,7 +179,7 @@ def preflight_firebase_connectivity(*, timeout_seconds: float = 10.0) -> dict:
 
     # Validate credentials first
     try:
-        _preflight_firebase_credentials()
+        result["auth_mode"] = _preflight_firebase_credentials()
     except (ValueError, FileNotFoundError) as exc:
         result["error"] = f"Firebase credentials invalid: {exc}"
         logger.error(result["error"])
@@ -235,10 +246,7 @@ def init_firebase() -> firebase_admin.App:
             raise FileNotFoundError(f"FIREBASE_SERVICE_ACCOUNT_PATH not found: {path}")
         cred = credentials.Certificate(str(path))
     else:
-        raise ValueError(
-            "Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH to "
-            "initialize Firebase storage"
-        )
+        cred = credentials.ApplicationDefault()
 
     _FIREBASE_APP = firebase_admin.initialize_app(
         cred,

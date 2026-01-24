@@ -24,12 +24,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tools.config.env import parse_bool_env, parse_int_env
 from tools.lerobot_format import LeRobotExportFormat
 from tools.config.production_mode import resolve_production_mode
 
@@ -49,6 +51,16 @@ from .multi_robot_config import (
 logger = logging.getLogger(__name__)
 
 GENIESIM_TARGET_VERSION = "3.0"
+GENIESIM_EPISODES_PER_TASK_ENV = "GENIESIM_EPISODES_PER_TASK"
+GENIESIM_USE_CUROBO_ENV = "GENIESIM_USE_CUROBO"
+GENIESIM_EVAL_SCENARIOS_ENV = "GENIESIM_EVAL_SCENARIOS"
+GENIESIM_EXPORT_FORMAT_ENV = "GENIESIM_EXPORT_FORMAT"
+
+DEFAULT_EPISODES_PER_TASK = 100
+DEFAULT_USE_CUROBO = True
+DEFAULT_EVAL_SCENARIOS = 1000
+DEFAULT_EXPORT_FORMAT = "lerobot_v2"
+
 
 # =============================================================================
 # Configuration
@@ -433,6 +445,26 @@ class GenieSimExporter:
         room = scene_config.get("room", {})
         bounds = room.get("bounds", {})
 
+        episodes_per_task = parse_int_env(
+            os.getenv(GENIESIM_EPISODES_PER_TASK_ENV),
+            default=DEFAULT_EPISODES_PER_TASK,
+            min_value=1,
+            name=GENIESIM_EPISODES_PER_TASK_ENV,
+        )
+        use_curobo = parse_bool_env(
+            os.getenv(GENIESIM_USE_CUROBO_ENV),
+            default=DEFAULT_USE_CUROBO,
+        )
+        eval_scenarios = parse_int_env(
+            os.getenv(GENIESIM_EVAL_SCENARIOS_ENV),
+            default=DEFAULT_EVAL_SCENARIOS,
+            min_value=1,
+            name=GENIESIM_EVAL_SCENARIOS_ENV,
+        )
+        raw_export_format = os.getenv(GENIESIM_EXPORT_FORMAT_ENV)
+        export_format = raw_export_format.strip() if raw_export_format else DEFAULT_EXPORT_FORMAT
+        export_format = export_format or DEFAULT_EXPORT_FORMAT
+
         # Build YAML content
         yaml_content = f"""# Genie Sim 3.0 Scene Configuration
 # Auto-generated from BlueprintPipeline
@@ -477,18 +509,18 @@ geniesim:
   # Data collection settings
   collection:
     mode: "automated"  # automated or teleop
-    episodes_per_task: 100
-    use_curobo: true
+    episodes_per_task: {episodes_per_task}
+    use_curobo: {str(use_curobo).lower()}
 
   # Evaluation settings
   evaluation:
     enabled: true
     vlm_scoring: true
-    scenarios: 1000
+    scenarios: {eval_scenarios}
 
   # Export settings
   export:
-    format: "lerobot_v2"
+    format: "{export_format}"
     include_visual_obs: true
     include_depth: true
 

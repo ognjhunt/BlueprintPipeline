@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -18,7 +19,6 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-
 import requests
 from google.cloud import storage
 
@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.error_handling.retry import NonRetryableError, RetryableError, retry_with_backoff
 from tools.quality_gates.quality_gate import (
     QualityGate,
     QualityGateCheckpoint,
@@ -37,6 +38,7 @@ from tools.quality_reports.asset_provenance_generator import COMMERCIAL_OK_LICEN
 
 GCS_ROOT = Path("/mnt/gcs")
 JOB_NAME = "dataset-delivery-job"
+logger = logging.getLogger(__name__)
 
 
 def _gate_report_path(root: Path, scene_id: str) -> Path:
@@ -287,12 +289,50 @@ def build_dataset_card(import_manifest: Dict[str, Any], scene_id: str, job_id: s
     }
 
 
-def send_webhook(webhook_url: str, payload: Dict[str, Any]) -> None:
-    response = requests.post(webhook_url, json=payload, timeout=15)
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"Webhook {webhook_url} failed with {response.status_code}: {response.text}"
+def _log_webhook_retry(attempt: int, error: Exception, delay: float) -> None:
+    logger.warning(
+        "Retrying webhook attempt %s after %.2fs: %s",
+        attempt,
+        delay,
+        error,
+    )
+
+
+def _log_webhook_failure(attempt: int, error: Exception) -> None:
+    logger.error(
+        "Webhook failed after %s attempts: %s",
+        attempt,
+        error,
+    )
+
+
+def _classify_webhook_response(webhook_url: str, response: requests.Response) -> None:
+    status_code = response.status_code
+    if status_code == 429 or status_code >= 500:
+        raise RetryableError(
+            f"Webhook {webhook_url} failed with {status_code}: {response.text}"
         )
+    if status_code >= 400:
+        raise NonRetryableError(
+            f"Webhook {webhook_url} failed with {status_code}: {response.text}"
+        )
+
+
+@retry_with_backoff(
+    max_retries=3,
+    base_delay=1.0,
+    max_delay=30.0,
+    backoff_factor=2.0,
+    jitter=True,
+    on_retry=_log_webhook_retry,
+    on_failure=_log_webhook_failure,
+)
+def send_webhook(webhook_url: str, payload: Dict[str, Any]) -> None:
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=15)
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+        raise RetryableError(f"Webhook {webhook_url} failed: {exc}") from exc
+    _classify_webhook_response(webhook_url, response)
 
 
 def write_failure_marker(

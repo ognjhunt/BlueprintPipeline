@@ -16,6 +16,10 @@ Usage:
     # Run with validation
     python tools/run_local_pipeline.py --scene-dir ./scene --validate
 
+    # Auto-trigger import after a successful Genie Sim submit
+    python tools/run_local_pipeline.py --scene-dir ./scene \
+        --steps genie-sim-export,genie-sim-submit --auto-trigger-import
+
 Pipeline Steps:
     1. regen3d   - Adapt 3D-RE-GEN outputs to BlueprintPipeline format
     2. scale     - (Optional) Scale calibration
@@ -30,6 +34,10 @@ Pipeline Steps:
     11. genie-sim-submit - Submit/run Genie Sim generation (API or local)
     12. genie-sim-import - Import Genie Sim episodes into local bundle
     13. validate  - QA validation
+
+    Auto-trigger import: When --auto-trigger-import is set, a successful
+    genie-sim-submit step (status=completed) will immediately run
+    genie-sim-import if it is not already scheduled after submit.
 
 Experimental Steps (disabled by default; enable with --enable-dwm,
 --enable-dream2flow, or --enable-experimental):
@@ -1203,6 +1211,7 @@ class LocalPipelineRunner:
         run_validation: bool = False,
         resume_from: Optional[PipelineStep] = None,
         force_rerun_steps: Optional[List[PipelineStep]] = None,
+        auto_trigger_import: bool = False,
     ) -> bool:
         """Run the pipeline.
 
@@ -1211,6 +1220,7 @@ class LocalPipelineRunner:
             run_validation: Run QA validation at the end
             resume_from: Resume from the given step (skip completed steps with checkpoints)
             force_rerun_steps: Steps to rerun even if checkpoints exist
+            auto_trigger_import: Run genie-sim-import after a completed submit when not scheduled
 
         Returns:
             True if all steps succeeded
@@ -1296,7 +1306,8 @@ class LocalPipelineRunner:
         checkpoint_store = get_checkpoint_store(self.scene_dir, self.scene_id)
         forced_steps = set(force_rerun_steps or [])
         dependencies = self._resolve_step_dependencies(steps)
-        for step in steps:
+        def _execute_step(step: PipelineStep) -> bool:
+            nonlocal all_success
             # Check circuit breaker before running step (P1)
             if not self._step_circuit_breaker.allow_request():
                 time_until_retry = self._step_circuit_breaker.get_time_until_retry()
@@ -1316,7 +1327,7 @@ class LocalPipelineRunner:
                     )
                 )
                 all_success = False
-                continue
+                return True
 
             prerequisite_result = self._check_step_prerequisites(
                 step,
@@ -1333,8 +1344,8 @@ class LocalPipelineRunner:
                 )
                 if self.fail_fast:
                     self.log("Fail-fast enabled; stopping pipeline.", "ERROR")
-                    break
-                continue
+                    return False
+                return True
             if resume_from is not None:
                 expected_outputs = self._expected_output_paths(step)
                 if step in forced_steps:
@@ -1359,7 +1370,7 @@ class LocalPipelineRunner:
                     )
                     # Checkpointed step counts as success for circuit breaker
                     self._step_circuit_breaker.record_success()
-                    continue
+                    return True
 
             started_at = datetime.utcnow().isoformat() + "Z"
             result = self._run_step(step)
@@ -1376,7 +1387,7 @@ class LocalPipelineRunner:
                 # Continue with remaining steps for partial results
                 if self.fail_fast:
                     self.log("Fail-fast enabled; stopping pipeline.", "ERROR")
-                    break
+                    return False
             else:
                 # Record success for circuit breaker (P1)
                 self._step_circuit_breaker.record_success()
@@ -1392,6 +1403,24 @@ class LocalPipelineRunner:
             if step == PipelineStep.REGEN3D and self._pending_articulation_preflight:
                 if not self._preflight_articulation_requirements(steps):
                     return False
+            return True
+
+        for index, step in enumerate(steps):
+            should_continue = _execute_step(step)
+            if not should_continue:
+                break
+            result = self._find_step_result(step)
+            if (
+                auto_trigger_import
+                and step == PipelineStep.GENIESIM_SUBMIT
+                and result is not None
+                and result.success
+                and result.outputs.get("job_status") == "completed"
+                and PipelineStep.GENIESIM_IMPORT not in steps[index + 1 :]
+            ):
+                should_continue = _execute_step(PipelineStep.GENIESIM_IMPORT)
+                if not should_continue:
+                    break
 
         # Print summary
         self._print_summary()
@@ -4666,6 +4695,14 @@ def main():
         help="Run Genie Sim steps in mock mode (no external services required)",
     )
     parser.add_argument(
+        "--auto-trigger-import",
+        action="store_true",
+        help=(
+            "Run genie-sim-import automatically after a completed submit when import "
+            "is not in the remaining steps."
+        ),
+    )
+    parser.add_argument(
         "--estimate-costs",
         action="store_true",
         help="Print estimated GPU-hours and costs before running",
@@ -4772,6 +4809,7 @@ def main():
         run_validation=args.validate,
         resume_from=resume_from,
         force_rerun_steps=force_rerun_steps,
+        auto_trigger_import=args.auto_trigger_import,
     )
 
     sys.exit(0 if success else 1)
