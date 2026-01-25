@@ -709,6 +709,8 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_ENV` | str | `development` | Environment toggle for Genie Sim integrations (`production` disables mock/fallback behavior). |
 | `GENERATE_EMBEDDINGS` | bool | false | Generate embeddings for Genie Sim asset indexing. Defaults to `true` when `GENIESIM_ENV`/`PIPELINE_ENV` resolves to production. Requires provider credentials when `REQUIRE_EMBEDDINGS=true`. |
 | `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (placeholders disallowed in production). Defaults to `true` when `GENIESIM_ENV`/`BP_ENV` resolves to production. |
+| `GENIESIM_EMBEDDING_DIM` | int | 2048 | Embedding dimensionality for Genie Sim asset indexing. |
+| `GENIESIM_ALLOWED_EMBEDDING_DIMS` | str | `768,1024,2048,3072` | Comma-separated allow-list of embedding dimensions accepted by Genie Sim asset indexing. |
 | `ALLOW_EMBEDDING_FALLBACK` | bool | false | Allow deterministic placeholder embeddings in production when `REQUIRE_EMBEDDINGS=false` (logs warnings instead of failing fast). |
 | `LOCAL_EMBEDDING_FALLBACK` | bool | false | Enable local embedding generation via `sentence-transformers` before falling back to placeholders. Treated as acceptable when `REQUIRE_EMBEDDINGS=true`. |
 | `LOCAL_EMBEDDING_MODEL` | str | `all-MiniLM-L6-v2` | Sentence-transformers model name to use for local embedding fallback. |
