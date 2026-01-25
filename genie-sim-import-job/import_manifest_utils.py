@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -186,6 +187,66 @@ def compute_manifest_checksum(manifest: Dict[str, Any]) -> str:
     manifest_copy["checksums"] = checksums
     payload = json.dumps(manifest_copy, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def canonicalize_checksums_payload(payload: Dict[str, Any]) -> bytes:
+    payload_copy = json.loads(json.dumps(payload))
+    payload_copy.pop("signature", None)
+    return json.dumps(payload_copy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def compute_checksums_signature(
+    payload: Dict[str, Any],
+    key: str,
+    key_id: Optional[str] = None,
+) -> Dict[str, str]:
+    canonical = canonicalize_checksums_payload(payload)
+    digest = hmac.new(key.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
+    signature = {"alg": "HMAC-SHA256", "value": digest}
+    if key_id:
+        signature["key_id"] = key_id
+    return signature
+
+
+def verify_checksums_signature(
+    payload: Dict[str, Any],
+    key: Optional[str],
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "success": False,
+        "errors": [],
+        "expected": None,
+        "actual": None,
+    }
+    signature = payload.get("signature")
+    if not isinstance(signature, dict):
+        result["errors"].append("checksums.json signature is missing")
+        return result
+
+    algorithm = signature.get("alg")
+    if algorithm != "HMAC-SHA256":
+        result["errors"].append(f"Unsupported signature algorithm: {algorithm}")
+        return result
+
+    expected = signature.get("value")
+    result["expected"] = expected
+    if not expected:
+        result["errors"].append("checksums.json signature value is missing")
+        return result
+
+    if not key:
+        result["errors"].append("CHECKSUMS_HMAC_KEY is required to verify signature")
+        return result
+
+    canonical = canonicalize_checksums_payload(payload)
+    actual = hmac.new(key.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
+    result["actual"] = actual
+    if not hmac.compare_digest(str(expected), str(actual)):
+        result["errors"].append("checksums.json signature mismatch")
+        return result
+
+    result["success"] = True
+    return result
 
 
 def _extract_expected_checksum(entry: Any) -> Tuple[Optional[str], Optional[int]]:
