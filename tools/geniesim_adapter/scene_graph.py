@@ -269,6 +269,32 @@ def _sanitize_fallback_category(value: Any) -> Tuple[str, bool]:
     return "object", True
 
 
+def _resolve_scene_id_from_manifest(manifest: Dict[str, Any]) -> str:
+    metadata = manifest.get("metadata")
+    if isinstance(metadata, dict):
+        scene_id = metadata.get("scene_id")
+        if scene_id:
+            return str(scene_id)
+    return str(manifest.get("scene_id", "unknown"))
+
+
+def _namespaced_asset_id(scene_id: Optional[str], obj_id: str) -> str:
+    if not scene_id or scene_id == "unknown":
+        return obj_id
+    scene_prefix = f"{scene_id}_obj_"
+    if obj_id.startswith(scene_prefix) or obj_id.startswith(f"{scene_id}:"):
+        return obj_id
+    return f"{scene_id}_obj_{obj_id}"
+
+
+def _strip_asset_namespace(asset_id: str) -> str:
+    if "_obj_" in asset_id:
+        return asset_id.split("_obj_", 1)[1]
+    if ":" in asset_id:
+        return asset_id.split(":", 1)[1]
+    return asset_id
+
+
 def _resolve_env_float(key: str, default: float, default_source: str) -> Tuple[float, str]:
     raw = os.getenv(key)
     if raw is None:
@@ -1140,9 +1166,10 @@ class RelationInferencer:
         return entries
 
     def _contact_depth(self, entries: List[Any], other_id: str) -> Optional[float]:
+        raw_other_id = _strip_asset_namespace(other_id)
         for entry in entries:
             if isinstance(entry, str):
-                if entry == other_id:
+                if entry == other_id or entry == raw_other_id:
                     return self.physics_contact_depth_threshold
                 continue
             if not isinstance(entry, dict):
@@ -1153,7 +1180,7 @@ class RelationInferencer:
                 or entry.get("id")
                 or entry.get("target_id")
             )
-            if other != other_id:
+            if other != other_id and other != raw_other_id:
                 continue
             depth = (
                 entry.get("depth")
@@ -1194,9 +1221,10 @@ class RelationInferencer:
         other_id: str,
         ratio_threshold: float,
     ) -> bool:
+        raw_other_id = _strip_asset_namespace(other_id)
         for entry in entries:
             if isinstance(entry, str):
-                if entry == other_id:
+                if entry == other_id or entry == raw_other_id:
                     return True
                 continue
             if not isinstance(entry, dict):
@@ -1208,7 +1236,7 @@ class RelationInferencer:
                 or entry.get("object_id")
                 or entry.get("id")
             )
-            if other != other_id:
+            if other != other_id and other != raw_other_id:
                 continue
             ratio = (
                 entry.get("ratio")
@@ -1294,7 +1322,7 @@ class SceneGraphConverter:
         start_time = time.monotonic()
         self.log("Starting non-streaming manifest conversion")
 
-        scene_id = manifest.get("scene_id", "unknown")
+        scene_id = _resolve_scene_id_from_manifest(manifest)
         scene_config = manifest.get("scene", {})
         objects = manifest.get("objects", [])
 
@@ -1327,7 +1355,7 @@ class SceneGraphConverter:
         self.log(f"Converted {len(nodes)} nodes", extra={"scene_id": scene_id})
 
         # Extract explicit edges from relationships
-        explicit_edges = self._extract_explicit_edges(objects)
+        explicit_edges = self._extract_explicit_edges(objects, scene_id=scene_id)
         self.log(
             f"Found {len(explicit_edges)} explicit relationships",
             extra={"scene_id": scene_id},
@@ -1552,8 +1580,10 @@ class SceneGraphConverter:
                 "contains": obj.get("contains"),
             }
 
+            asset_id = _namespaced_asset_id(scene_id, obj_id)
+
             return GenieSimNode(
-                asset_id=obj_id,
+                asset_id=asset_id,
                 semantic=semantic,
                 size=size,
                 pose=pose,
@@ -1619,6 +1649,7 @@ class SceneGraphConverter:
     def _extract_explicit_edges(
         self,
         objects: List[Dict[str, Any]],
+        scene_id: Optional[str] = None,
     ) -> List[GenieSimEdge]:
         """Extract explicit relationships from object definitions."""
         edges = []
@@ -1641,8 +1672,8 @@ class SceneGraphConverter:
                     continue
 
                 edges.append(GenieSimEdge(
-                    source=subject_id,
-                    target=object_id,
+                    source=_namespaced_asset_id(scene_id, str(subject_id)),
+                    target=_namespaced_asset_id(scene_id, str(object_id)),
                     relation=geniesim_relation,
                     confidence=1.0,  # Explicit = high confidence
                 ))

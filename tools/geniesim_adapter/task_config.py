@@ -42,6 +42,24 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EPISODE_JOB_ROOT = REPO_ROOT / "episode-generation-job"
 
+
+def _resolve_scene_id_from_manifest(manifest: Dict[str, Any]) -> str:
+    metadata = manifest.get("metadata")
+    if isinstance(metadata, dict):
+        scene_id = metadata.get("scene_id")
+        if scene_id:
+            return str(scene_id)
+    return str(manifest.get("scene_id", "unknown"))
+
+
+def _namespaced_asset_id(scene_id: Optional[str], obj_id: str) -> str:
+    if not scene_id or scene_id == "unknown":
+        return obj_id
+    scene_prefix = f"{scene_id}_obj_"
+    if obj_id.startswith(scene_prefix) or obj_id.startswith(f"{scene_id}:"):
+        return obj_id
+    return f"{scene_id}_obj_{obj_id}"
+
 # =============================================================================
 # Data Models
 # =============================================================================
@@ -83,10 +101,11 @@ class SuggestedTask:
     # Constraints from BlueprintPipeline affordances
     constraints: Dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, *, scene_id: Optional[str] = None) -> Dict[str, Any]:
+        target_object = _namespaced_asset_id(scene_id, self.target_object)
         result = {
             "task_type": self.task_type,
-            "target_object": self.target_object,
+            "target_object": target_object,
             "difficulty": self.difficulty,
             "priority": self.priority,
         }
@@ -114,7 +133,7 @@ class GenieSimTaskConfig:
             "schema_version": "3.0",
             "scene_id": self.scene_id,
             "environment_type": self.environment_type,
-            "suggested_tasks": [t.to_dict() for t in self.suggested_tasks],
+            "suggested_tasks": [t.to_dict(scene_id=self.scene_id) for t in self.suggested_tasks],
             "robot_config": self.robot_config.to_dict(),
             "metadata": self.metadata,
         }
@@ -237,7 +256,7 @@ class TaskConfigGenerator:
         """
         self.log("Generating Genie Sim task configuration")
 
-        scene_id = manifest.get("scene_id", "unknown")
+        scene_id = _resolve_scene_id_from_manifest(manifest)
         scene_config = manifest.get("scene", {})
         objects = manifest.get("objects", [])
 
