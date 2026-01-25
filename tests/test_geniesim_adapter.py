@@ -21,6 +21,8 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import tools.geniesim_adapter.scene_graph as scene_graph
+
 from tools.geniesim_adapter import (
     GenieSimExporter,
     GenieSimExportConfig,
@@ -385,6 +387,56 @@ class TestSceneGraphConverter:
 
         assert scene_graph.edges == expected_edges
         assert called["count"] == len(scene_graph.nodes)
+
+    def test_production_requires_ijson(self, tmp_path, monkeypatch):
+        """Ensure production mode errors when ijson is unavailable."""
+        manifest_path = tmp_path / "scene_manifest.json"
+        manifest_path.write_text("{}")
+
+        monkeypatch.setattr(scene_graph, "resolve_production_mode", lambda: True)
+        monkeypatch.setattr(scene_graph.importlib.util, "find_spec", lambda name: None)
+
+        with pytest.raises(RuntimeError, match="ijson"):
+            scene_graph.convert_manifest_to_scene_graph(
+                manifest_path,
+                verbose=False,
+            )
+
+    def test_auto_streaming_threshold_non_production(self, tmp_path, monkeypatch):
+        """Ensure non-production auto-streaming triggers at >1MB."""
+        manifest_path = tmp_path / "scene_manifest.json"
+        payload = {"scene_id": "test_scene", "coordinate_system": "y_up", "meters_per_unit": 1.0, "objects": []}
+        manifest_path.write_text(json.dumps(payload) + (" " * (1024 * 1024 + 10)))
+
+        called = {"used": False}
+
+        class DummyStreamingParser:
+            def __init__(self, path: str) -> None:
+                called["used"] = True
+
+            def get_metadata(self) -> Dict[str, Any]:
+                return {
+                    "scene_id": "test_scene",
+                    "coordinate_system": "y_up",
+                    "meters_per_unit": 1.0,
+                    "metadata": {},
+                }
+
+            def stream_objects(self, batch_size: int, progress_callback, progress_interval_s: float):
+                return []
+
+        monkeypatch.setattr(scene_graph, "resolve_production_mode", lambda: False)
+        monkeypatch.setattr(scene_graph, "HAVE_STREAMING_PARSER", True)
+        monkeypatch.setattr(scene_graph, "StreamingManifestParser", DummyStreamingParser)
+        monkeypatch.setattr(scene_graph.importlib.util, "find_spec", lambda name: object())
+
+        result = scene_graph.convert_manifest_to_scene_graph(
+            manifest_path,
+            verbose=False,
+        )
+
+        assert called["used"] is True
+        assert isinstance(result, GenieSimSceneGraph)
 
 
 # =============================================================================

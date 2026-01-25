@@ -1747,21 +1747,28 @@ def convert_manifest_to_scene_graph(
     runtime_config = _load_scene_graph_runtime_config()
 
     file_size_mb = manifest_path.stat().st_size / (1024 * 1024)
+    production_mode = resolve_production_mode()
+    streaming_threshold_mb = 1.0
+
+    if production_mode:
+        use_streaming = True
 
     # Auto-detect if streaming is needed based on file size
     if use_streaming is None:
-        use_streaming = file_size_mb > 10  # Use streaming for files > 10MB
+        use_streaming = file_size_mb > streaming_threshold_mb  # Use streaming for files > 1MB
 
-    if use_streaming and file_size_mb > 10:
-        ijson_available = importlib.util.find_spec("ijson") is not None
-        if not ijson_available:
-            message = (
-                "Streaming requested for large manifest but ijson is not installed. "
-                "Install ijson (pip install ijson) to avoid full-file JSON loads."
-            )
-            if resolve_production_mode():
-                raise RuntimeError(message)
-            logger.error(message, extra={"manifest_path": str(manifest_path)})
+    ijson_available = importlib.util.find_spec("ijson") is not None
+    if production_mode and not ijson_available:
+        raise RuntimeError(
+            "Production mode requires ijson for streaming manifest parsing. "
+            "Install ijson (pip install ijson) to avoid full-file JSON loads."
+        )
+    if use_streaming and not ijson_available:
+        message = (
+            "Streaming requested for manifest but ijson is not installed. "
+            "Install ijson (pip install ijson) to avoid full-file JSON loads."
+        )
+        logger.error(message, extra={"manifest_path": str(manifest_path)})
 
     # GAP-PERF-001 FIX: Use streaming parser for large manifests
     if use_streaming and HAVE_STREAMING_PARSER:
