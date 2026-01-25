@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from tools.config.env import parse_bool_env
+from tools.tracing.correlation import get_request_id
 
 
 DEFAULT_JSON_ENV_KEYS = ("LOG_JSON", "LOG_FORMAT")
@@ -97,6 +98,17 @@ class PlainTextFormatter(logging.Formatter):
         return super().format(record)
 
 
+class RequestIdFilter(logging.Filter):
+    """Inject request_id into log records when missing."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "request_id") or record.request_id is None:
+            request_id = get_request_id()
+            if request_id:
+                record.request_id = request_id
+        return True
+
+
 def init_logging(
     *,
     level: Optional[int] = None,
@@ -116,6 +128,7 @@ def init_logging(
 
     handler_stream = stream if stream is not None else sys.stdout
     handler = logging.StreamHandler(handler_stream)
+    handler.addFilter(RequestIdFilter())
     if json_enabled:
         handler.setFormatter(JsonLogFormatter())
     else:

@@ -6,7 +6,10 @@ gracefully degrades when disabled or dependencies are missing.
 """
 
 import os
-from contextlib import nullcontext
+import io
+import json
+import logging
+from contextlib import nullcontext, contextmanager
 
 import pytest
 
@@ -241,6 +244,46 @@ def test_tracing_with_complex_attributes(monkeypatch):
     set_trace_attribute("list", [1, 2, 3])  # Converted to string
     set_trace_attribute("dict", {"key": "value"})  # Converted to string
     set_trace_attribute("none", None)
+
+
+@pytest.mark.unit
+def test_request_id_propagates_to_logs_and_spans(monkeypatch):
+    """Ensure trace_job generates a request_id used in logs and span attributes."""
+    monkeypatch.delenv("REQUEST_ID", raising=False)
+
+    from tools.logging_config import init_logging
+    from tools.tracing import tracer as tracer_module
+    from tools.tracing import correlation
+
+    correlation._request_id.set(None)
+
+    captured: dict[str, object] = {}
+
+    class FakeTracer:
+        enabled = True
+
+        @contextmanager
+        def start_span(self, name, attributes=None, kind=None):
+            captured["name"] = name
+            captured["attributes"] = attributes or {}
+            yield None
+
+    fake_tracer = FakeTracer()
+    monkeypatch.setattr(tracer_module, "get_tracer", lambda: fake_tracer)
+
+    stream = io.StringIO()
+    init_logging(stream=stream, json_enabled=True)
+    logger = logging.getLogger("request-id-test")
+
+    with tracer_module.trace_job("request-id-job"):
+        logger.info("hello from trace_job")
+
+    lines = [line for line in stream.getvalue().splitlines() if line.strip()]
+    assert lines, "Expected log output"
+    payload = json.loads(lines[-1])
+    request_id = payload.get("request_id")
+    assert request_id
+    assert captured["attributes"]["request.id"] == request_id
 
 
 if __name__ == "__main__":

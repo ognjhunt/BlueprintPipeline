@@ -69,6 +69,7 @@ from tools.logging_config import init_logging
 from tools.quality.quality_config import resolve_quality_settings
 from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
+from tools.tracing.correlation import ensure_request_id
 from tools.tracing import init_tracing
 from tools.firebase_upload import preflight_firebase_connectivity
 from monitoring.alerting import send_alert
@@ -1347,6 +1348,7 @@ def main(input_params: Optional[Dict[str, Any]] = None) -> int:
     debug_mode = _resolve_debug_mode()
     if debug_mode:
         os.environ["LOG_LEVEL"] = "DEBUG"
+    os.environ["REQUEST_ID"] = ensure_request_id()
     init_logging(level=logging.DEBUG if debug_mode else None)
     log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": os.getenv("SCENE_ID")})
 

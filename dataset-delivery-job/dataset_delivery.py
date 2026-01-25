@@ -35,6 +35,7 @@ from tools.quality_gates.quality_gate import (
     QualityGateSeverity,
 )
 from tools.quality_reports.asset_provenance_generator import COMMERCIAL_OK_LICENSES, LicenseType
+from tools.tracing.correlation import ensure_request_id
 
 GCS_ROOT = Path("/mnt/gcs")
 JOB_NAME = "dataset-delivery-job"
@@ -353,6 +354,7 @@ def write_failure_marker(
 
 
 def main() -> int:
+    os.environ["REQUEST_ID"] = ensure_request_id()
     bucket_name = os.environ.get("BUCKET")
     scene_id = os.environ.get("SCENE_ID") or ""
     job_id = os.environ.get("JOB_ID") or ""
