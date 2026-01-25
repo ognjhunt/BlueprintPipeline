@@ -17,10 +17,7 @@ torchvision==0.20.0
 # HuggingFace for model downloads
 huggingface-hub==0.36.2
 
-# For SAM3D integration
-# Provided by base image in production
-
-# For Hunyuan integration
+# For UltraShape integration (includes Hunyuan for Stage 1)
 diffusers==0.30.0
 transformers==4.37.2
 safetensors==0.7.0

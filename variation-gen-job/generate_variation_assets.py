@@ -970,7 +970,7 @@ def load_manifest(manifest_path: Path) -> Tuple[Dict[str, Any], List[VariationAs
     return manifest, assets
 
 
-def create_hunyuan_assets_json(
+def create_variation_assets_json(
     results: List[GenerationResult],
     assets: List[VariationAssetSpec],
     output_dir: Path,
@@ -1360,9 +1360,9 @@ def process_variation_assets(
 
     three_d_lookup = {r.asset_name: r for r in three_d_results}
 
-    # Create hunyuan-compatible assets file
+    # Create downstream-compatible assets file
     if summary['successful'] > 0:
-        create_hunyuan_assets_json(
+        create_variation_assets_json(
             results=results,
             assets=assets,
             output_dir=output_dir,

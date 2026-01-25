@@ -70,7 +70,7 @@ Resulting manifest excerpt:
         "short_description": "stainless steel microwave"
       },
       "asset_generation": {
-        "pipeline": "sam3d",
+        "pipeline": "ultrashape",
         "inputs": {
           "multiview_dir": "scenes/kitchen_123/multiview/obj_12",
           "crop_path": "scenes/kitchen_123/multiview/obj_12/view_0.png"
