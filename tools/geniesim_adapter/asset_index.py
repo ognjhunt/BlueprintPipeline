@@ -265,6 +265,24 @@ def normalize_material_type(material_type: Optional[str]) -> str:
     return MATERIAL_ALIASES.get(normalized, normalized)
 
 
+def _resolve_scene_id_from_manifest(manifest: Dict[str, Any]) -> str:
+    metadata = manifest.get("metadata")
+    if isinstance(metadata, dict):
+        scene_id = metadata.get("scene_id")
+        if scene_id:
+            return str(scene_id)
+    return str(manifest.get("scene_id", "unknown"))
+
+
+def _namespaced_asset_id(scene_id: Optional[str], obj_id: str) -> str:
+    if not scene_id or scene_id == "unknown":
+        return obj_id
+    scene_prefix = f"{scene_id}_obj_"
+    if obj_id.startswith(scene_prefix) or obj_id.startswith(f"{scene_id}:"):
+        return obj_id
+    return f"{scene_id}_obj_{obj_id}"
+
+
 def _handle_missing_material_physics_config(path: Path) -> None:
     message = (
         "Material physics config not found. Expected file at "
@@ -578,11 +596,11 @@ class AssetIndexBuilder:
         self.log("Building Genie Sim asset index")
 
         objects = manifest.get("objects", [])
-        scene_id = manifest.get("scene_id", "unknown")
+        scene_id = _resolve_scene_id_from_manifest(manifest)
 
         assets = []
         for obj in objects:
-            asset = self._build_asset(obj, usd_base_path)
+            asset = self._build_asset(obj, usd_base_path, scene_id=scene_id)
             if asset:
                 assets.append(asset)
 
@@ -692,6 +710,7 @@ class AssetIndexBuilder:
         self,
         obj: Dict[str, Any],
         usd_base_path: Optional[str],
+        scene_id: Optional[str] = None,
     ) -> Optional[GenieSimAsset]:
         """Build a single asset entry from object data."""
         try:
@@ -791,6 +810,7 @@ class AssetIndexBuilder:
                 obj=obj,
                 asset_data=asset_data,
                 asset_source=asset_source,
+                scene_id=scene_id,
             )
 
             # Preserve BP metadata
@@ -801,8 +821,10 @@ class AssetIndexBuilder:
                 "articulation": obj.get("articulation", {}),
             }
 
+            asset_id = _namespaced_asset_id(scene_id, obj_id)
+
             return GenieSimAsset(
-                asset_id=obj_id,
+                asset_id=asset_id,
                 usd_path=usd_path,
                 semantic_description=semantic_description,
                 categories=list(categories),
@@ -944,6 +966,7 @@ class AssetIndexBuilder:
         obj: Dict[str, Any],
         asset_data: Dict[str, Any],
         asset_source: str,
+        scene_id: Optional[str] = None,
     ) -> tuple[bool, str]:
         license_raw = asset_data.get("license") or obj.get("license")
         provenance = asset_data.get("provenance") or obj.get("provenance")
@@ -987,10 +1010,11 @@ class AssetIndexBuilder:
             license_value = "proprietary" if commercial_ok else "unknown"
 
         if license_raw and license_type is None:
+            asset_id = _namespaced_asset_id(scene_id, str(obj.get("id", "")))
             log_payload = {
                 "event": "license_resolution",
                 "status": parse_info.get("match"),
-                "asset_id": obj.get("id"),
+                "asset_id": asset_id,
                 "license_raw": license_raw,
                 "normalized": parse_info.get("normalized"),
                 "candidates": parse_info.get("candidates", []),
