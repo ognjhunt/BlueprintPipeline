@@ -573,6 +573,28 @@ class TestTaskConfigGenerator:
 
         assert len(config.suggested_tasks) <= 1
 
+    def test_unknown_scene_id_strict_raises(self, monkeypatch):
+        """Ensure strict mode rejects unknown scene IDs."""
+        monkeypatch.setenv("BP_TASK_CONFIG_STRICT", "true")
+        generator = TaskConfigGenerator(verbose=False)
+        manifest = {"scene": {}, "objects": []}
+
+        with pytest.raises(RuntimeError, match="Scene ID is required"):
+            generator.generate(manifest)
+
+    def test_empty_tasks_strict_raises(self, monkeypatch):
+        """Ensure strict mode rejects empty task lists."""
+        monkeypatch.setenv("BP_TASK_CONFIG_STRICT", "true")
+        generator = TaskConfigGenerator(verbose=False)
+        manifest = {
+            "scene_id": "empty_tasks_scene",
+            "scene": {},
+            "objects": [{"id": "bg", "sim_role": "static"}],
+        }
+
+        with pytest.raises(RuntimeError, match="No suggested tasks"):
+            generator.generate(manifest)
+
 
 # =============================================================================
 # Full Exporter Tests

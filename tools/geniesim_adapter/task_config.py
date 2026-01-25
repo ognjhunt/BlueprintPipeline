@@ -24,7 +24,7 @@ import sys
 from dataclasses import dataclass, field
 from json import JSONDecodeError, loads as json_loads
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -41,6 +41,14 @@ from tools.geniesim_adapter.multi_robot_config import ROBOT_SPECS, RobotType
 logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EPISODE_JOB_ROOT = REPO_ROOT / "episode-generation-job"
+
+
+def _resolve_task_config_strictness(env: Optional[Mapping[str, str]] = None) -> bool:
+    strict_override = parse_bool_env(
+        (env or os.environ).get("BP_TASK_CONFIG_STRICT"),
+        default=False,
+    )
+    return resolve_production_mode(env) or bool(strict_override)
 
 
 def _resolve_scene_id_from_manifest(manifest: Dict[str, Any]) -> str:
@@ -257,6 +265,12 @@ class TaskConfigGenerator:
         self.log("Generating Genie Sim task configuration")
 
         scene_id = _resolve_scene_id_from_manifest(manifest)
+        strict_validation = _resolve_task_config_strictness()
+        if scene_id == "unknown" and strict_validation:
+            raise RuntimeError(
+                "Scene ID is required for task configuration in strict mode. "
+                "Set scene_id in the manifest metadata or top-level scene_id field."
+            )
         scene_config = manifest.get("scene", {})
         objects = manifest.get("objects", [])
 
@@ -295,6 +309,11 @@ class TaskConfigGenerator:
             manifest=manifest,
             robot_config=robot_config,
         )
+        if not tasks and strict_validation:
+            raise RuntimeError(
+                "No suggested tasks available after filtering. "
+                "Provide objects with task affordances or adjust filtering settings."
+            )
 
         # Build metadata
         metadata = {
