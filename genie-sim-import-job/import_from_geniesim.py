@@ -185,6 +185,10 @@ DEFAULT_VIDEO_CAMERA_ID = "camera"
 VIDEO_CHUNK_SIZE = 1000
 
 
+class DeliveryMarkerExistsError(RuntimeError):
+    """Raised when a delivery marker already exists and retries are disallowed."""
+
+
 def _resolve_debug_mode() -> bool:
     debug_flag = parse_bool_env(os.getenv("BLUEPRINT_DEBUG"))
     if debug_flag is None:
@@ -1285,6 +1289,236 @@ def _resolve_run_id(job_id: str) -> str:
         or os.getenv("GENIE_SIM_RUN_ID")
         or os.getenv("GENIESIM_RUN_ID")
         or job_id
+    )
+
+
+@dataclass(frozen=True)
+class DeliveryMarkerResult:
+    payload: Dict[str, Any]
+    gcs_uri: Optional[str]
+    local_path: Optional[Path]
+    marker_exists: bool
+
+
+def _delivery_marker_object_path(scene_id: str, run_id: str) -> str:
+    return f"scenes/{scene_id}/geniesim/delivery/{run_id}.json"
+
+
+def _resolve_delivery_marker_gcs_uri(
+    bucket: Optional[str],
+    scene_id: str,
+    run_id: str,
+) -> Optional[str]:
+    if not bucket:
+        return None
+    return f"gs://{bucket}/{_delivery_marker_object_path(scene_id, run_id)}"
+
+
+def _resolve_delivery_marker_local_path(
+    bucket: Optional[str],
+    scene_id: str,
+    run_id: str,
+    *,
+    local_root: Optional[Path] = None,
+) -> Optional[Path]:
+    if not bucket:
+        return None
+    object_path = _delivery_marker_object_path(scene_id, run_id)
+    if local_root is not None:
+        return local_root / bucket / object_path
+    return _resolve_local_path(bucket, object_path)
+
+
+def _build_delivery_marker_payload(
+    *,
+    scene_id: str,
+    job_id: str,
+    run_id: str,
+    idempotency_key: Optional[str],
+) -> Dict[str, Any]:
+    return {
+        "scene_id": scene_id,
+        "job_id": job_id,
+        "run_id": run_id,
+        "idempotency_key": idempotency_key,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _is_gcs_precondition_failure(exc: BaseException) -> bool:
+    if hasattr(exc, "code") and getattr(exc, "code") == 412:
+        return True
+    if hasattr(exc, "status_code") and getattr(exc, "status_code") == 412:
+        return True
+    return False
+
+
+def _load_delivery_marker_payload(
+    *,
+    bucket: Optional[str],
+    scene_id: str,
+    run_id: str,
+    storage_client: Optional[Any] = None,
+    local_path: Optional[Path] = None,
+    log: Optional[logging.LoggerAdapter] = None,
+) -> Optional[Dict[str, Any]]:
+    if bucket and storage_client is not None:
+        try:
+            blob = storage_client.bucket(bucket).blob(
+                _delivery_marker_object_path(scene_id, run_id)
+            )
+            if not blob.exists():
+                return None
+            payload_text = blob.download_as_text()
+            return json.loads(payload_text)
+        except Exception as exc:
+            if log:
+                log.warning("Failed to read delivery marker from GCS: %s", exc)
+            return None
+    if local_path and local_path.exists():
+        try:
+            with open(local_path, "r") as handle:
+                return json.load(handle)
+        except Exception as exc:
+            if log:
+                log.warning("Failed to read local delivery marker: %s", exc)
+            return None
+    return None
+
+
+def _update_import_manifest_delivery(
+    manifest_path: Optional[Path],
+    delivery_payload: Dict[str, Any],
+    *,
+    gcs_uri: Optional[str],
+    local_path: Optional[Path],
+    marker_exists: bool,
+) -> None:
+    if manifest_path is None or not manifest_path.exists():
+        return
+    with open(manifest_path, "r") as handle:
+        import_manifest = json.load(handle)
+    import_manifest["delivery"] = {
+        "marker": delivery_payload,
+        "gcs_uri": gcs_uri,
+        "local_path": str(local_path) if local_path else None,
+        "marker_exists": marker_exists,
+        "recorded_at": datetime.utcnow().isoformat() + "Z",
+    }
+    checksums = import_manifest.setdefault("checksums", {})
+    metadata_checksums = checksums.setdefault("metadata", {})
+    metadata_checksums.setdefault("import_manifest.json", {})
+    metadata_checksums["import_manifest.json"]["sha256"] = compute_manifest_checksum(
+        import_manifest
+    )
+    write_json_atomic(manifest_path, import_manifest, indent=2)
+
+
+def _write_delivery_marker(
+    *,
+    bucket: Optional[str],
+    scene_id: str,
+    job_id: str,
+    run_id: str,
+    idempotency_key: Optional[str],
+    allow_idempotent_retry: bool,
+    log: logging.LoggerAdapter,
+    import_manifest_paths: Optional[List[Path]] = None,
+    storage_client: Optional[Any] = None,
+    local_root: Optional[Path] = None,
+) -> DeliveryMarkerResult:
+    marker_payload = _build_delivery_marker_payload(
+        scene_id=scene_id,
+        job_id=job_id,
+        run_id=run_id,
+        idempotency_key=idempotency_key,
+    )
+    gcs_uri = _resolve_delivery_marker_gcs_uri(bucket, scene_id, run_id)
+    local_path = _resolve_delivery_marker_local_path(
+        bucket,
+        scene_id,
+        run_id,
+        local_root=local_root,
+    )
+
+    gcs_blob = None
+    if bucket:
+        if storage_client is None:
+            try:
+                from google.cloud import storage  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(
+                    f"google-cloud-storage unavailable for delivery marker: {exc}"
+                ) from exc
+            storage_client = storage.Client()
+        gcs_blob = storage_client.bucket(bucket).blob(
+            _delivery_marker_object_path(scene_id, run_id)
+        )
+
+    marker_exists = False
+    if gcs_blob is not None and gcs_blob.exists():
+        marker_exists = True
+    elif local_path is not None and local_path.exists():
+        marker_exists = True
+
+    if marker_exists:
+        existing_payload = _load_delivery_marker_payload(
+            bucket=bucket,
+            scene_id=scene_id,
+            run_id=run_id,
+            storage_client=storage_client,
+            local_path=local_path,
+            log=log,
+        )
+        if not allow_idempotent_retry:
+            raise DeliveryMarkerExistsError(
+                f"Delivery marker already exists for scene {scene_id} "
+                f"run {run_id}. Set ALLOW_IDEMPOTENT_RETRY=true to proceed."
+            )
+        if existing_payload:
+            marker_payload = existing_payload
+        log.warning(
+            "Delivery marker already exists for scene %s (run_id=%s); "
+            "continuing due to ALLOW_IDEMPOTENT_RETRY=true.",
+            scene_id,
+            run_id,
+        )
+    else:
+        if gcs_blob is not None:
+            try:
+                gcs_blob.upload_from_string(
+                    json.dumps(marker_payload, indent=2),
+                    content_type="application/json",
+                    if_generation_match=0,
+                )
+            except Exception as exc:
+                if _is_gcs_precondition_failure(exc):
+                    raise DeliveryMarkerExistsError(
+                        f"Delivery marker already exists for scene {scene_id} "
+                        f"run {run_id}."
+                    ) from exc
+                raise
+        if local_path is not None:
+            try:
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                write_json_atomic(local_path, marker_payload, indent=2)
+            except Exception as exc:
+                log.warning("Failed to write local delivery marker: %s", exc)
+
+    for manifest_path in import_manifest_paths or []:
+        _update_import_manifest_delivery(
+            manifest_path,
+            marker_payload,
+            gcs_uri=gcs_uri,
+            local_path=local_path,
+            marker_exists=marker_exists,
+        )
+
+    return DeliveryMarkerResult(
+        payload=marker_payload,
+        gcs_uri=gcs_uri,
+        local_path=local_path,
+        marker_exists=marker_exists,
     )
 
 
@@ -5819,6 +6053,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             log.warning("%s", e)
             if not local_episodes_prefix:
                 sys.exit(1)
+    idempotency = _resolve_job_idempotency(job_metadata)
 
     # Quality configuration
     production_mode = resolve_production_mode()
@@ -5900,6 +6135,10 @@ def main(input_params: Optional[Dict[str, Any]] = None):
     allow_partial_firebase_uploads = parse_bool_env(
         os.getenv("ALLOW_PARTIAL_FIREBASE_UPLOADS"),
         default=not production_mode,  # Default False in production, True otherwise
+    )
+    allow_idempotent_retry = parse_bool_env(
+        os.getenv("ALLOW_IDEMPOTENT_RETRY"),
+        default=False,
     )
     if production_mode and allow_partial_firebase_uploads:
         log.warning(
@@ -6274,6 +6513,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                     job_metadata=job_metadata,
                 )
             partial_failure = bool(failed_robots)
+            delivery_marker_result: Optional[DeliveryMarkerResult] = None
             (
                 firebase_upload_suppressed,
                 suppression_reason,
@@ -6298,6 +6538,21 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                 )
 
             if enable_firebase_upload and not firebase_upload_suppressed:
+                manifest_paths = [
+                    payload["result"].import_manifest_path
+                    for payload in robot_results
+                    if payload.get("result") and payload["result"].import_manifest_path
+                ]
+                delivery_marker_result = _write_delivery_marker(
+                    bucket=bucket,
+                    scene_id=scene_id,
+                    job_id=job_id,
+                    run_id=_resolve_run_id(job_id),
+                    idempotency_key=idempotency.get("key") if idempotency else None,
+                    allow_idempotent_retry=allow_idempotent_retry,
+                    log=log,
+                    import_manifest_paths=manifest_paths,
+                )
                 overall_success = _run_firebase_uploads_for_robot_payloads(
                     robot_results=robot_results,
                     scene_id=scene_id,
@@ -6376,6 +6631,14 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                 robot_entries,
                 quality_settings,
             )
+            if delivery_marker_result is not None:
+                _update_import_manifest_delivery(
+                    combined_manifest_path,
+                    delivery_marker_result.payload,
+                    gcs_uri=delivery_marker_result.gcs_uri,
+                    local_path=delivery_marker_result.local_path,
+                    marker_exists=delivery_marker_result.marker_exists,
+                )
             log.info("Combined import manifest: %s", combined_manifest_path)
 
             if overall_success:
@@ -6457,6 +6720,20 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             log.info("Average quality: %.2f", result.average_quality_score)
             if enable_firebase_upload:
                 log.info("Uploading episodes to Firebase Storage...")
+                _write_delivery_marker(
+                    bucket=bucket,
+                    scene_id=scene_id,
+                    job_id=job_id,
+                    run_id=_resolve_run_id(job_id),
+                    idempotency_key=idempotency.get("key") if idempotency else None,
+                    allow_idempotent_retry=allow_idempotent_retry,
+                    log=log,
+                    import_manifest_paths=[
+                        result.import_manifest_path
+                    ]
+                    if result.import_manifest_path
+                    else [],
+                )
                 dedup_summary = _prepare_deduplication_summary(
                     result=result,
                     scene_id=scene_id,
