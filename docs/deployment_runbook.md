@@ -353,3 +353,24 @@ If a canary scene fails, the submission job writes a rollback marker at
 - Spot check GCS outputs for a recent scene.
 
 If anything fails, reference the rollback procedures in [docs/rollback.md](rollback.md).
+
+## Local Genie Sim import poller fallback
+
+When running Genie Sim locally (or when the submit/import steps are decoupled),
+you can start a local poller that watches `geniesim/job.json` for
+`status=completed` and triggers the import once. The poller writes a
+`geniesim/.geniesim_import_triggered` marker so restarts do not repeatedly
+trigger imports.
+
+```bash
+python tools/run_local_pipeline.py --scene-dir ./scene --import-poller
+```
+
+Override the polling interval using the CLI flag or `GENIESIM_IMPORT_POLL_INTERVAL`:
+
+```bash
+python tools/run_local_pipeline.py \
+  --scene-dir ./scene \
+  --import-poller \
+  --import-poller-interval 15
+```

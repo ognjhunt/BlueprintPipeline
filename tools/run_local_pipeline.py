@@ -22,6 +22,8 @@ Usage:
     # To explicitly disable auto-import:
     python tools/run_local_pipeline.py --scene-dir ./scene \
         --steps genie-sim-export,genie-sim-submit --no-auto-trigger-import
+    # Run a local poller to trigger import once job.json reports completed
+    python tools/run_local_pipeline.py --scene-dir ./scene --import-poller
 
 Pipeline Steps:
     1. regen3d   - Adapt 3D-RE-GEN outputs to BlueprintPipeline format
@@ -4239,43 +4241,6 @@ class LocalPipelineRunner:
                 message=f"Import error (Genie Sim import job not found): {self._summarize_exception(e)}",
             )
 
-        def _poll_geniesim_job_status() -> tuple[Dict[str, Any], str]:
-            poll_interval = max(
-                1,
-                parse_int_env(os.getenv("GENIESIM_IMPORT_POLL_INTERVAL"), default=10),
-            )
-            poll_timeout = parse_int_env(
-                os.getenv("GENIESIM_IMPORT_POLL_TIMEOUT"),
-                default=3600,
-            )
-            poll_start = time.time()
-            last_status = None
-            last_payload: Dict[str, Any] = {}
-            while True:
-                payload = _load_json(job_path, "Genie Sim job payload")
-                status = str(payload.get("status", "submitted")).strip().lower()
-                last_payload = payload
-                if status != last_status and status:
-                    self.log(
-                        f"Genie Sim job {job_id} status: {status}",
-                        "INFO",
-                    )
-                    last_status = status
-                if status in {"completed", "failed"}:
-                    if status == "failed":
-                        failure_reason = payload.get("failure_reason") or "unknown failure"
-                        raise NonRetryableError(
-                            f"Genie Sim job {job_id} failed: {failure_reason}."
-                        )
-                    return payload, status
-                if poll_timeout and (time.time() - poll_start) >= poll_timeout:
-                    raise NonRetryableError(
-                        "Timed out waiting for Genie Sim job "
-                        f"{job_id} to complete after {poll_timeout}s "
-                        f"(last status: {status})."
-                    )
-                time.sleep(poll_interval)
-
         job_path = self.geniesim_dir / "job.json"
         try:
             if not job_path.is_file():
@@ -4303,7 +4268,7 @@ class LocalPipelineRunner:
                 message=str(exc),
             )
         try:
-            job_payload, job_status = _poll_geniesim_job_status()
+            job_payload, job_status = self._poll_geniesim_job_status(job_path, job_id)
         except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_IMPORT,
@@ -4469,6 +4434,120 @@ class LocalPipelineRunner:
                 "completion_marker": str(marker_path) if result.success else None,
             },
         )
+
+    def _poll_geniesim_job_status(
+        self,
+        job_path: Path,
+        job_id: str,
+        *,
+        poll_interval_override: Optional[int] = None,
+        poll_timeout_override: Optional[int] = None,
+    ) -> tuple[Dict[str, Any], str]:
+        poll_interval = poll_interval_override
+        if poll_interval is None:
+            poll_interval = parse_int_env(
+                os.getenv("GENIESIM_IMPORT_POLL_INTERVAL"),
+                default=10,
+            )
+        poll_interval = max(1, poll_interval)
+        poll_timeout = poll_timeout_override
+        if poll_timeout is None:
+            poll_timeout = parse_int_env(
+                os.getenv("GENIESIM_IMPORT_POLL_TIMEOUT"),
+                default=3600,
+            )
+        poll_start = time.time()
+        last_status = None
+        last_payload: Dict[str, Any] = {}
+        while True:
+            payload = _load_json(job_path, "Genie Sim job payload")
+            status = str(payload.get("status", "submitted")).strip().lower()
+            last_payload = payload
+            if status != last_status and status:
+                self.log(
+                    f"Genie Sim job {job_id} status: {status}",
+                    "INFO",
+                )
+                last_status = status
+            if status in {"completed", "failed"}:
+                if status == "failed":
+                    failure_reason = payload.get("failure_reason") or "unknown failure"
+                    raise NonRetryableError(
+                        f"Genie Sim job {job_id} failed: {failure_reason}."
+                    )
+                return payload, status
+            if poll_timeout and (time.time() - poll_start) >= poll_timeout:
+                raise NonRetryableError(
+                    "Timed out waiting for Genie Sim job "
+                    f"{job_id} to complete after {poll_timeout}s "
+                    f"(last status: {status})."
+                )
+            time.sleep(poll_interval)
+
+    def run_geniesim_import_poller(self, *, poll_interval: Optional[int] = None) -> bool:
+        """Poll Genie Sim job status and trigger local import once completed."""
+        self.geniesim_dir.mkdir(parents=True, exist_ok=True)
+        marker_path = self.geniesim_dir / ".geniesim_import_triggered"
+        completion_marker = self.geniesim_dir / ".geniesim_import_complete"
+        if completion_marker.is_file():
+            self.log(
+                f"Genie Sim import already completed (marker: {completion_marker}).",
+                "INFO",
+            )
+            return True
+        if marker_path.is_file():
+            self.log(
+                f"Genie Sim import already triggered (marker: {marker_path}).",
+                "INFO",
+            )
+            return True
+        job_path = self.geniesim_dir / "job.json"
+        resolved_interval = poll_interval
+        if resolved_interval is None:
+            resolved_interval = parse_int_env(
+                os.getenv("GENIESIM_IMPORT_POLL_INTERVAL"),
+                default=10,
+            )
+        resolved_interval = max(1, resolved_interval)
+        if not job_path.is_file():
+            self.log(
+                f"Waiting for Genie Sim job metadata at {job_path}...",
+                "INFO",
+            )
+        while not job_path.is_file():
+            time.sleep(resolved_interval)
+        job_payload = _load_json(job_path, "Genie Sim job payload")
+        job_id = job_payload.get("job_id")
+        if not job_id:
+            self.log(
+                f"Genie Sim job metadata missing job_id at {job_path}",
+                "ERROR",
+            )
+            return False
+        try:
+            _, job_status = self._poll_geniesim_job_status(
+                job_path,
+                job_id,
+                poll_interval_override=resolved_interval,
+            )
+        except NonRetryableError as exc:
+            self.log(str(exc), "ERROR")
+            return False
+        if job_status != "completed":
+            self.log(
+                f"Genie Sim job {job_id} status is {job_status}; import not triggered.",
+                "ERROR",
+            )
+            return False
+        if completion_marker.is_file():
+            self.log(
+                f"Genie Sim import already completed (marker: {completion_marker}).",
+                "INFO",
+            )
+            return True
+        self._write_marker(marker_path, status="triggered")
+        result = self._run_geniesim_import()
+        return bool(result.success)
 
     def _run_dwm(self) -> StepResult:
         """
@@ -4956,6 +5035,22 @@ def main():
         help="Disable automatic import triggering after submit.",
     )
     parser.add_argument(
+        "--import-poller",
+        action="store_true",
+        help=(
+            "Run a local poller that waits for geniesim/job.json to reach status=completed "
+            "and then triggers genie-sim-import once."
+        ),
+    )
+    parser.add_argument(
+        "--import-poller-interval",
+        type=int,
+        help=(
+            "Polling interval in seconds for --import-poller. Defaults to "
+            "GENIESIM_IMPORT_POLL_INTERVAL when unset."
+        ),
+    )
+    parser.add_argument(
         "--estimate-costs",
         action="store_true",
         help="Print estimated GPU-hours and costs before running",
@@ -5041,6 +5136,12 @@ def main():
         ),
         fail_fast=args.fail_fast,
     )
+
+    if args.import_poller:
+        success = runner.run_geniesim_import_poller(
+            poll_interval=args.import_poller_interval,
+        )
+        sys.exit(0 if success else 1)
 
     if args.estimate_costs:
         config_path = Path(args.estimate_config) if args.estimate_config else None
