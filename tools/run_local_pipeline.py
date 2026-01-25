@@ -38,7 +38,8 @@ Pipeline Steps:
     10. genie-sim-export - Export scene bundle for Genie Sim
     11. genie-sim-submit - Submit/run Genie Sim generation (API or local)
     12. genie-sim-import - Import Genie Sim episodes into local bundle
-    13. validate  - QA validation
+    13. dataset-delivery - (Optional) Deliver datasets to lab buckets
+    14. validate  - QA validation
 
     Auto-trigger import: By default, a successful genie-sim-submit step
     (status=completed) will automatically run genie-sim-import if it is
@@ -191,6 +192,7 @@ class PipelineStep(str, Enum):
     GENIESIM_EXPORT = "genie-sim-export"
     GENIESIM_SUBMIT = "genie-sim-submit"
     GENIESIM_IMPORT = "genie-sim-import"
+    DATASET_DELIVERY = "dataset-delivery"
     DWM = "dwm"  # Dexterous World Model preparation
     DWM_INFERENCE = "dwm-inference"  # Run DWM model on prepared bundles
     DREAM2FLOW = "dream2flow"  # Dream2Flow preparation (arXiv:2512.24766)
@@ -246,6 +248,7 @@ class LocalPipelineRunner:
         enable_dwm: bool = False,
         enable_dream2flow: bool = False,
         enable_inventory_enrichment: Optional[bool] = None,
+        enable_dataset_delivery: bool = False,
         disable_articulated_assets: bool = False,
         fail_fast: Optional[bool] = None,
         step_circuit_breaker: Optional[CircuitBreaker] = None,
@@ -260,6 +263,7 @@ class LocalPipelineRunner:
             enable_dwm: Include optional DWM steps in default pipeline
             enable_dream2flow: Include optional Dream2Flow steps in default pipeline
             enable_inventory_enrichment: Enable optional inventory enrichment step
+            enable_dataset_delivery: Enable optional dataset delivery step
             step_circuit_breaker: Optional shared step-level circuit breaker to reuse across runs
         """
         self.scene_dir = Path(scene_dir).resolve()
@@ -282,6 +286,7 @@ class LocalPipelineRunner:
             ).lower() in {"1", "true", "yes", "y"}
         else:
             self.enable_inventory_enrichment = enable_inventory_enrichment
+        self.enable_dataset_delivery = enable_dataset_delivery
         self.disable_articulated_assets = disable_articulated_assets
         if fail_fast is None:
             # Default to True in production mode for faster failure detection
@@ -364,6 +369,7 @@ class LocalPipelineRunner:
             PipelineStep.GENIESIM_EXPORT: [PipelineStep.SIMREADY],
             PipelineStep.GENIESIM_SUBMIT: [PipelineStep.GENIESIM_EXPORT],
             PipelineStep.GENIESIM_IMPORT: [PipelineStep.GENIESIM_SUBMIT],
+            PipelineStep.DATASET_DELIVERY: [PipelineStep.GENIESIM_IMPORT],
         }
 
         if self._variation_assets_expected(steps):
@@ -2023,6 +2029,8 @@ class LocalPipelineRunner:
         """Append optional steps gated by explicit flags."""
         if self.enable_inventory_enrichment:
             steps = self._inject_inventory_enrichment_step(steps)
+        if self.enable_dataset_delivery:
+            steps = self._inject_dataset_delivery_step(steps)
         if self.enable_dwm:
             steps.extend(self.DWM_STEPS)
         if self.enable_dream2flow:
@@ -2040,6 +2048,17 @@ class LocalPipelineRunner:
             steps.append(PipelineStep.INVENTORY_ENRICHMENT)
         return steps
 
+    @staticmethod
+    def _inject_dataset_delivery_step(steps: List[PipelineStep]) -> List[PipelineStep]:
+        if PipelineStep.DATASET_DELIVERY in steps:
+            return steps
+        if PipelineStep.GENIESIM_IMPORT in steps:
+            insert_at = steps.index(PipelineStep.GENIESIM_IMPORT) + 1
+            steps.insert(insert_at, PipelineStep.DATASET_DELIVERY)
+        else:
+            steps.append(PipelineStep.DATASET_DELIVERY)
+        return steps
+
     def _map_jobs_to_steps(self, job_sequence: List[str]) -> List[PipelineStep]:
         """Map pipeline selector job names to local runner steps."""
         mapping = {
@@ -2054,6 +2073,7 @@ class LocalPipelineRunner:
             "genie-sim-export-job": PipelineStep.GENIESIM_EXPORT,
             "genie-sim-submit-job": PipelineStep.GENIESIM_SUBMIT,
             "genie-sim-import-job": PipelineStep.GENIESIM_IMPORT,
+            "dataset-delivery-job": PipelineStep.DATASET_DELIVERY,
         }
         steps: List[PipelineStep] = []
         for job_name in job_sequence:
@@ -2200,6 +2220,11 @@ class LocalPipelineRunner:
                 result = self._run_with_timeout(
                     PipelineStep.GENIESIM_IMPORT,
                     self._run_geniesim_import,
+                )
+            elif step == PipelineStep.DATASET_DELIVERY:
+                result = self._run_with_timeout(
+                    PipelineStep.DATASET_DELIVERY,
+                    self._run_dataset_delivery,
                 )
             elif step == PipelineStep.DWM:
                 result = self._run_with_retry(PipelineStep.DWM, self._run_dwm)
@@ -4640,6 +4665,112 @@ class LocalPipelineRunner:
             },
         )
 
+    def _run_dataset_delivery(self) -> StepResult:
+        """Invoke the dataset delivery job using the current Genie Sim context."""
+        start_time = time.time()
+        delivery_script = REPO_ROOT / "dataset-delivery-job" / "dataset_delivery.py"
+        if not delivery_script.is_file():
+            return StepResult(
+                step=PipelineStep.DATASET_DELIVERY,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message="dataset-delivery-job entrypoint not found",
+            )
+
+        job_path = self.geniesim_dir / "job.json"
+        if not job_path.is_file():
+            return StepResult(
+                step=PipelineStep.DATASET_DELIVERY,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message="Genie Sim job metadata missing - run genie-sim-submit/import first",
+            )
+
+        try:
+            job_payload = _load_json(job_path, "Genie Sim job payload")
+        except NonRetryableError as exc:
+            return StepResult(
+                step=PipelineStep.DATASET_DELIVERY,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=str(exc),
+            )
+
+        job_id = str(job_payload.get("job_id") or "")
+        if not job_id:
+            return StepResult(
+                step=PipelineStep.DATASET_DELIVERY,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message="Genie Sim job metadata missing job_id",
+            )
+
+        artifacts = job_payload.get("artifacts", {})
+        local_episodes_prefix = (
+            artifacts.get("episodes_prefix")
+            or artifacts.get("episodes_path")
+            or str(self.episodes_dir / f"geniesim_{job_id}")
+        )
+        output_dir = Path(local_episodes_prefix)
+        import_manifest_path = output_dir / "import_manifest.json"
+        if not import_manifest_path.is_file():
+            return StepResult(
+                step=PipelineStep.DATASET_DELIVERY,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=f"Import manifest not found at {import_manifest_path}",
+                outputs={"import_manifest_path": str(import_manifest_path)},
+            )
+
+        manifest_env_path = str(import_manifest_path)
+        gcs_root = Path(os.getenv("GCS_MOUNT_ROOT", "/mnt/gcs")).resolve()
+        try:
+            relative_manifest = import_manifest_path.resolve().relative_to(gcs_root)
+        except ValueError:
+            relative_manifest = None
+        if relative_manifest is not None:
+            manifest_env_path = f"gs://{relative_manifest.as_posix()}"
+
+        env = os.environ.copy()
+        env.update({
+            "SCENE_ID": self.scene_id,
+            "JOB_ID": job_id,
+            "IMPORT_MANIFEST_PATH": manifest_env_path,
+            "BUCKET": env.get("BUCKET", "local"),
+            "RUN_ID": self.run_id,
+        })
+        env["PYTHONPATH"] = f"{REPO_ROOT}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
+
+        self.log("Running dataset-delivery-job entrypoint locally")
+        proc = subprocess.run(
+            [sys.executable, str(delivery_script)],
+            cwd=str(REPO_ROOT),
+            env=env,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return StepResult(
+                step=PipelineStep.DATASET_DELIVERY,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=f"dataset-delivery-job failed with exit code {proc.returncode}",
+                outputs={"import_manifest_path": manifest_env_path},
+            )
+
+        marker_path = self.geniesim_dir / ".dataset_delivery_complete"
+        self._write_marker(marker_path, status="completed")
+        return StepResult(
+            step=PipelineStep.DATASET_DELIVERY,
+            success=True,
+            duration_seconds=time.time() - start_time,
+            message="Dataset delivery completed",
+            outputs={
+                "job_id": job_id,
+                "import_manifest_path": manifest_env_path,
+                "completion_marker": str(marker_path),
+            },
+        )
+
     def _poll_geniesim_job_status(
         self,
         job_path: Path,
@@ -5135,6 +5266,8 @@ class LocalPipelineRunner:
             ]
         if step == PipelineStep.GENIESIM_IMPORT:
             return [self.geniesim_dir / ".geniesim_import_complete"]
+        if step == PipelineStep.DATASET_DELIVERY:
+            return [self.geniesim_dir / ".dataset_delivery_complete"]
         if step == PipelineStep.DWM:
             return [self.dwm_dir / ".dwm_complete"]
         if step == PipelineStep.DWM_INFERENCE:
@@ -5221,6 +5354,11 @@ def main():
         "--enable-experimental",
         action="store_true",
         help="Enable experimental steps (DWM + Dream2Flow) in the default pipeline",
+    )
+    parser.add_argument(
+        "--deliver",
+        action="store_true",
+        help="Include optional dataset delivery step in the pipeline",
     )
     parser.add_argument(
         "--disable-articulations",
@@ -5344,6 +5482,9 @@ def main():
                 print(f"Available: {[s.value for s in PipelineStep]}")
                 sys.exit(1)
 
+    if args.deliver and steps is not None:
+        steps = LocalPipelineRunner._inject_dataset_delivery_step(steps)
+
     force_rerun_steps: List[PipelineStep] = []
     if args.force_rerun:
         requested = []
@@ -5368,6 +5509,7 @@ def main():
         environment_type=args.environment,
         enable_dwm=args.enable_dwm,
         enable_dream2flow=args.enable_dream2flow,
+        enable_dataset_delivery=args.deliver,
         disable_articulated_assets=(
             args.disable_articulations
             or os.getenv("DISABLE_ARTICULATED_ASSETS", "").lower() in {"1", "true", "yes", "y"}
