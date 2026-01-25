@@ -130,6 +130,10 @@ from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmen
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.lerobot_validation import validate_lerobot_dataset
 from tools.metrics.job_metrics_exporter import export_job_metrics
+from tools.geniesim_idempotency import (
+    build_geniesim_idempotency_inputs,
+    build_quality_thresholds,
+)
 from tools.quality.quality_config import resolve_quality_settings
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry, build_notification_service
 from tools.startup_validation import (
@@ -3580,6 +3584,10 @@ class LocalPipelineRunner:
         )
         quality_settings = resolve_quality_settings()
         min_quality_score = quality_settings.min_quality_score
+        quality_thresholds = build_quality_thresholds(
+            min_quality_score=min_quality_score,
+            filter_low_quality=quality_settings.filter_low_quality,
+        )
         def _parse_timeout_env(env_var: str) -> Optional[float]:
             raw_value = os.getenv(env_var)
             if raw_value in (None, ""):
@@ -3599,15 +3607,13 @@ class LocalPipelineRunner:
         collection_timeout_seconds = _parse_timeout_env("GENIESIM_COLLECTION_TIMEOUT_S")
         submit_timeout_seconds = _parse_timeout_env("GENIESIM_SUBMIT_TIMEOUT_S")
 
-        idempotency_payload = {
-            "scene_id": self.scene_id,
-            "task_config": task_config,
-            "robot_types": robot_types,
-            "episodes_per_task": episodes_per_task,
-            "num_variations": num_variations,
-            "min_quality_score": min_quality_score,
-            "filter_low_quality": quality_settings.filter_low_quality,
-        }
+        idempotency_payload = build_geniesim_idempotency_inputs(
+            scene_id=self.scene_id,
+            task_config=task_config,
+            robot_types=robot_types,
+            episodes_per_task=episodes_per_task,
+            quality_thresholds=quality_thresholds,
+        )
         idempotency_key = hashlib.sha256(
             json.dumps(idempotency_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
