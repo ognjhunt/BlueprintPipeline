@@ -9,15 +9,13 @@ needed for domain randomization in Isaac Sim Replicator:
 2. Check asset library for existing assets (optional optimization)
 3. For missing assets:
    a. Generate reference images using Gemini 3.0 Pro Image (Nano Banana Pro)
-   b. Convert to 3D using SAM3D (fast), Hunyuan (quality), or UltraShape (ultra)
+   b. Convert to 3D using UltraShape
    c. Add physics properties inline (mass, friction, COM, collision)
 4. Output: SimReady USDZ assets ready for Replicator placement
 
-3D Backend Options:
-    - SAM3D: Fast, good for simple objects (30-60 seconds per asset)
-    - Hunyuan: High quality, slower (2-5 minutes per asset)
-    - UltraShape: Highest quality via Hunyuan + diffusion refinement (5-10 minutes per asset)
-      Reference: https://github.com/PKU-YuanGroup/UltraShape-1.0
+3D Backend:
+    UltraShape: High-quality 3D mesh generation via two-stage diffusion refinement
+    Reference: https://github.com/PKU-YuanGroup/UltraShape-1.0
 
 Pipeline Flow:
     replicator-job manifest.json
@@ -32,7 +30,6 @@ Configuration (Environment Variables):
     REPLICATOR_PREFIX: Path to replicator bundle (default: scenes/{SCENE_ID}/replicator)
     VARIATION_ASSETS_PREFIX: Output path (default: scenes/{SCENE_ID}/variation_assets)
 
-    3D_BACKEND: "sam3d" | "hunyuan" | "ultrashape" | "auto" (default: "auto")
     QUALITY_MODE: "fast" | "balanced" | "quality" | "ultra" (default: "balanced")
     MAX_ASSETS: Maximum number of assets to generate (default: all)
     PRIORITY_FILTER: "required" | "recommended" | "optional" | "" (default: "")
@@ -96,74 +93,37 @@ USD_FROM_GLTF_RETRY_BACKOFF_S = float(os.getenv("USD_FROM_GLTF_RETRY_BACKOFF_S",
 # Gemini model for image generation (Nano Banana Pro / Gemini 3.0 Pro Image Preview)
 GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
 
-# Quality presets
+# Quality presets - all use UltraShape with varying parameters
 QUALITY_PRESETS = {
     "fast": {
-        "3d_backend": "sam3d",
         "image_size": 512,
-        "sam3d_normalize": True,
-        "hunyuan_render_size": 512,
-        "hunyuan_texture_size": 1024,
+        "render_size": 512,
+        "texture_size": 1024,
         "ultrashape_steps": 30,
         "ultrashape_octree_resolution": 128,
     },
     "balanced": {
-        "3d_backend": "auto",  # SAM3D for simple, Hunyuan for complex
         "image_size": 1024,
-        "sam3d_normalize": True,
-        "hunyuan_render_size": 1024,
-        "hunyuan_texture_size": 2048,
+        "render_size": 1024,
+        "texture_size": 2048,
         "ultrashape_steps": 50,
         "ultrashape_octree_resolution": 256,
     },
     "quality": {
-        "3d_backend": "hunyuan",
         "image_size": 2048,
-        "sam3d_normalize": True,
-        "hunyuan_render_size": 2048,
-        "hunyuan_texture_size": 4096,
+        "render_size": 2048,
+        "texture_size": 4096,
         "ultrashape_steps": 50,
         "ultrashape_octree_resolution": 256,
     },
     "ultra": {
-        "3d_backend": "ultrashape",  # Hunyuan + UltraShape refinement
         "image_size": 2048,
-        "sam3d_normalize": True,
-        "hunyuan_render_size": 2048,
-        "hunyuan_texture_size": 4096,
+        "render_size": 2048,
+        "texture_size": 4096,
         "ultrashape_steps": 75,
         "ultrashape_octree_resolution": 384,
     },
 }
-
-# Category-based complexity hints for auto backend selection
-SIMPLE_CATEGORIES = {"dishes", "utensils", "cans", "bottles", "boxes", "containers"}
-COMPLEX_CATEGORIES = {"clothing", "food", "produce", "tools", "electronics", "lab_equipment"}
-GENERIC_CATEGORIES = {"", "generic", "misc", "miscellaneous", "unknown", "other"}
-
-COMPLEXITY_KEYWORDS = {
-    "intricate": 2,
-    "detailed": 2,
-    "complex": 2,
-    "layered": 2,
-    "mechanical": 2,
-    "electronics": 2,
-    "circuit": 2,
-    "buttons": 1,
-    "knobs": 1,
-    "switches": 1,
-    "hinges": 1,
-    "folds": 1,
-    "fabric": 1,
-    "textured": 1,
-    "patterned": 1,
-    "transparent": 1,
-    "reflective": 1,
-    "glass": 1,
-    "metallic": 1,
-    "multiple parts": 2,
-}
-COMPLEXITY_SCORE_THRESHOLD = 2
 
 # Physics defaults by category
 PHYSICS_DEFAULTS = {
@@ -238,10 +198,7 @@ PHYSICS_DEFAULTS = {
 # ============================================================================
 
 class Backend3D(str, Enum):
-    SAM3D = "sam3d"
-    HUNYUAN = "hunyuan"
-    ULTRASHAPE = "ultrashape"  # Hunyuan + UltraShape refinement
-    AUTO = "auto"
+    ULTRASHAPE = "ultrashape"
 
 
 @dataclass
@@ -1008,151 +965,10 @@ def generate_reference_image_gemini(
 
 
 # ============================================================================
-# 3D Conversion (SAM3D / Hunyuan)
+# 3D Conversion (UltraShape)
 # ============================================================================
 
-def score_complexity_from_keywords(text: str) -> Tuple[int, List[str]]:
-    """Score complexity based on keyword hits in the provided text."""
-    if not text:
-        return 0, []
-    text_lower = text.lower()
-    score = 0
-    hits = []
-    for keyword, weight in COMPLEXITY_KEYWORDS.items():
-        if keyword in text_lower:
-            score += weight
-            hits.append(keyword)
-    return score, hits
-
-
-def build_generic_complexity_text(asset: AssetSpec) -> str:
-    """Build a text bundle for complexity scoring when category is generic."""
-    parts = [
-        asset.description,
-        asset.semantic_class,
-        asset.material_hint,
-        asset.generation_prompt_hint,
-    ]
-    return " ".join(part for part in parts if part)
-
-
-def select_3d_backend(asset: AssetSpec, config: PipelineConfig) -> Tuple[str, Dict[str, Any]]:
-    """
-    Select 3D backend based on asset complexity and config.
-    """
-    category_lower = asset.category.strip().lower()
-    decision_metadata = {
-        "category": asset.category,
-        "keyword_hits": [],
-        "complexity_score": 0,
-    }
-
-    if config.backend_3d != Backend3D.AUTO:
-        decision_metadata["selection"] = config.backend_3d.value
-        return config.backend_3d.value, decision_metadata
-
-    # Auto selection based on category
-    if category_lower in SIMPLE_CATEGORIES:
-        decision_metadata["selection"] = "sam3d"
-        return "sam3d", decision_metadata
-    if category_lower in COMPLEX_CATEGORIES:
-        decision_metadata["selection"] = "hunyuan"
-        return "hunyuan", decision_metadata
-
-    # For generic/empty categories, use keyword-based scoring on descriptive fields
-    if category_lower in GENERIC_CATEGORIES:
-        complexity_text = build_generic_complexity_text(asset)
-        score, hits = score_complexity_from_keywords(complexity_text)
-        decision_metadata["complexity_score"] = score
-        decision_metadata["keyword_hits"] = hits
-        backend = "hunyuan" if score >= COMPLEXITY_SCORE_THRESHOLD else "sam3d"
-        decision_metadata["selection"] = backend
-        return backend, decision_metadata
-
-    # Default to SAM3D for speed
-    decision_metadata["selection"] = "sam3d"
-    return "sam3d", decision_metadata
-
-
-def run_sam3d_reconstruction(
-    image_path: Path,
-    output_dir: Path,
-    asset_name: str,
-    normalize: bool = True,
-    dry_run: bool = False
-) -> Tuple[bool, Optional[Path], Optional[str]]:
-    """
-    Run SAM3D reconstruction on a reference image.
-
-    This is a simplified inline version that uses the SAM3D inference directly.
-    In production, this would use the 3D-RE-GEN pipeline or Inference class.
-
-    Returns: (success, glb_path, error_message)
-    """
-    if dry_run:
-        print(f"[VAR-PIPELINE] [DRY-RUN] Would run SAM3D for: {asset_name}")
-        return True, output_dir / safe_name(asset_name) / "model.glb", None
-
-    try:
-        # Try to import SAM3D inference
-        try:
-            from inference import Inference
-            SAM3D_AVAILABLE = True
-        except ImportError:
-            SAM3D_AVAILABLE = False
-
-        if not SAM3D_AVAILABLE:
-            return False, None, "SAM3D inference not available in this environment"
-
-        # Find SAM3D config
-        config_candidates = [
-            Path("/app/sam3d-objects/checkpoints/hf/pipeline.yaml"),
-            Path("/mnt/gcs/sam3d/checkpoints/hf/pipeline.yaml"),
-            Path("/workspace/sam3d-objects/checkpoints/hf/pipeline.yaml"),
-        ]
-
-        config_path = None
-        for candidate in config_candidates:
-            if candidate.is_file():
-                config_path = candidate
-                break
-
-        if config_path is None:
-            return False, None, "SAM3D config not found"
-
-        print(f"[VAR-PIPELINE] Running SAM3D on: {image_path}")
-
-        # Load image
-        image = Image.open(image_path).convert("RGB")
-        rgb = np.array(image)
-
-        # Simple background mask (white background)
-        gray = rgb.mean(axis=-1)
-        mask = (np.abs(gray - 240) > 10).astype(np.uint8)
-
-        # Run inference
-        inference = Inference(str(config_path), compile=False)
-        output = inference(rgb, mask, seed=42)
-
-        # Save mesh
-        mesh = output.get("mesh")
-        if mesh is None:
-            return False, None, "SAM3D returned no mesh"
-
-        asset_out_dir = output_dir / safe_name(asset_name)
-        asset_out_dir.mkdir(parents=True, exist_ok=True)
-
-        glb_path = asset_out_dir / "model.glb"
-        mesh.export(str(glb_path))
-
-        print(f"[VAR-PIPELINE] SAM3D complete: {asset_name} -> {glb_path}")
-        return True, glb_path, None
-
-    except Exception as e:
-        return False, None, f"SAM3D error: {str(e)}"
-
-
-def run_hunyuan_reconstruction(
+def _run_hunyuan_reconstruction(
     image_path: Path,
     output_dir: Path,
     asset_name: str,
@@ -1162,6 +978,8 @@ def run_hunyuan_reconstruction(
 ) -> Tuple[bool, Optional[Path], Optional[str]]:
     """
     Run Hunyuan3D reconstruction on a reference image.
+
+    This is an internal function used by UltraShape as Stage 1 (coarse mesh generation).
 
     Returns: (success, glb_path, error_message)
     """
@@ -1262,7 +1080,7 @@ def run_ultrashape_reconstruction(
         # Stage 1: Generate coarse mesh with Hunyuan3D
         print(f"[VAR-PIPELINE] UltraShape Stage 1: Generating coarse mesh with Hunyuan3D")
 
-        success, coarse_mesh_path, error = run_hunyuan_reconstruction(
+        success, coarse_mesh_path, error = _run_hunyuan_reconstruction(
             image_path=image_path,
             output_dir=output_dir,
             asset_name=f"{asset_name}_coarse",
@@ -1597,7 +1415,6 @@ def process_single_asset(
         )
 
     if config.dry_run:
-        backend, backend_selection_metadata = select_3d_backend(asset, config)
         return AssetResult(
             name=asset.name,
             success=True,
@@ -1606,47 +1423,26 @@ def process_single_asset(
             asset_dir=str(asset_out_dir),
             reference_image=str(image_path) if image_path else None,
             timings=timings,
-            metadata={"backend_selection": backend_selection_metadata},
+            metadata={"backend": "ultrashape"},
         )
 
-    # Stage 2: Convert to 3D
+    # Stage 2: Convert to 3D using UltraShape
     start_3d = time.time()
-    backend, backend_selection_metadata = select_3d_backend(asset, config)
-
     preset = QUALITY_PRESETS.get(config.quality_mode, QUALITY_PRESETS["balanced"])
 
-    if backend == "ultrashape":
-        # UltraShape: Hunyuan + refinement for highest quality
-        success, glb_path, error = run_ultrashape_reconstruction(
-            image_path=image_path,
-            output_dir=output_dir,
-            asset_name=asset.name,
-            render_size=preset["hunyuan_render_size"],
-            texture_size=preset["hunyuan_texture_size"],
-            ultrashape_steps=preset.get("ultrashape_steps", 50),
-            ultrashape_octree_resolution=preset.get("ultrashape_octree_resolution", 256),
-            dry_run=config.dry_run,
-        )
-    elif backend == "hunyuan":
-        success, glb_path, error = run_hunyuan_reconstruction(
-            image_path=image_path,
-            output_dir=output_dir,
-            asset_name=asset.name,
-            render_size=preset["hunyuan_render_size"],
-            texture_size=preset["hunyuan_texture_size"],
-            dry_run=config.dry_run,
-        )
-    else:  # sam3d
-        success, glb_path, error = run_sam3d_reconstruction(
-            image_path=image_path,
-            output_dir=output_dir,
-            asset_name=asset.name,
-            normalize=preset["sam3d_normalize"],
-            dry_run=config.dry_run,
-        )
+    success, glb_path, error = run_ultrashape_reconstruction(
+        image_path=image_path,
+        output_dir=output_dir,
+        asset_name=asset.name,
+        render_size=preset["render_size"],
+        texture_size=preset["texture_size"],
+        ultrashape_steps=preset.get("ultrashape_steps", 50),
+        ultrashape_octree_resolution=preset.get("ultrashape_octree_resolution", 256),
+        dry_run=config.dry_run,
+    )
 
     timings["3d_conversion"] = time.time() - start_3d
-    timings["3d_backend"] = backend
+    timings["3d_backend"] = "ultrashape"
 
     if not success:
         return AssetResult(
@@ -1655,7 +1451,7 @@ def process_single_asset(
             stage_completed="3d",
             error=error,
             timings=timings,
-            metadata={"backend_selection": backend_selection_metadata},
+            metadata={"backend": "ultrashape"},
         )
 
     # Stage 3: Add physics properties
@@ -1670,7 +1466,7 @@ def process_single_asset(
         physics=physics,
         source_info={
             "pipeline": "variation-asset-pipeline",
-            "3d_backend": backend,
+            "3d_backend": "ultrashape",
             "quality_mode": config.quality_mode,
         },
     )
@@ -1695,7 +1491,7 @@ def process_single_asset(
         timings=timings,
         metadata={
             "physics": physics,
-            "backend_selection": backend_selection_metadata,
+            "backend": "ultrashape",
         },
         asset_dir=str(asset_out_dir),
         reference_image=str(image_path) if image_path else None,
@@ -1735,7 +1531,7 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     """Run the complete variation asset pipeline."""
 
     print(f"[VAR-PIPELINE] Starting pipeline for scene: {config.scene_id}")
-    print(f"[VAR-PIPELINE] 3D Backend: {config.backend_3d.value}")
+    print(f"[VAR-PIPELINE] 3D Backend: ultrashape")
     print(f"[VAR-PIPELINE] Quality Mode: {config.quality_mode}")
 
     # Load manifest
@@ -1908,7 +1704,7 @@ def main():
         bucket=bucket or None,
         replicator_prefix=os.getenv("REPLICATOR_PREFIX", f"scenes/{scene_id}/replicator"),
         variation_assets_prefix=os.getenv("VARIATION_ASSETS_PREFIX", f"scenes/{scene_id}/variation_assets"),
-        backend_3d=Backend3D(os.getenv("3D_BACKEND", "auto").lower()),
+        backend_3d=Backend3D.ULTRASHAPE,
         quality_mode=os.getenv("QUALITY_MODE", "balanced"),
         max_assets=int(os.getenv("MAX_ASSETS")) if os.getenv("MAX_ASSETS") else None,
         priority_filter=os.getenv("PRIORITY_FILTER") or None,
@@ -1933,7 +1729,7 @@ def main():
     print(f"[VAR-PIPELINE]   Bucket: {bucket}")
     print(f"[VAR-PIPELINE]   Replicator prefix: {config.replicator_prefix}")
     print(f"[VAR-PIPELINE]   Output prefix: {config.variation_assets_prefix}")
-    print(f"[VAR-PIPELINE]   3D Backend: {config.backend_3d.value}")
+    print(f"[VAR-PIPELINE]   3D Backend: ultrashape")
     print(f"[VAR-PIPELINE]   Quality Mode: {config.quality_mode}")
     if config.max_assets:
         print(f"[VAR-PIPELINE]   Max Assets: {config.max_assets}")

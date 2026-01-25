@@ -2,19 +2,15 @@
 #
 # This job orchestrates the complete variation asset generation pipeline:
 # 1. Generate reference images (Gemini 3.0 Pro Image - Nano Banana Pro)
-# 2. Convert to 3D (SAM3D, Hunyuan, or UltraShape)
+# 2. Convert to 3D (UltraShape)
 # 3. Add physics properties
 # 4. Output SimReady USDZ assets
 #
-# Supports multiple backends:
-# - SAM3D: Fast, good for simple objects
-# - Hunyuan: High quality, slower
-# - UltraShape: Highest quality (Hunyuan + diffusion refinement)
+# 3D Backend: UltraShape
 #   Reference: https://github.com/PKU-YuanGroup/UltraShape-1.0
 #
 # Environment Variables:
 #   SCENE_ID: Scene identifier (required)
-#   3D_BACKEND: "sam3d" | "hunyuan" | "ultrashape" | "auto" (default: "auto")
 #   QUALITY_MODE: "fast" | "balanced" | "quality" | "ultra" (default: "balanced")
 #   GEMINI_API_KEY: Google AI API key for image generation
 
@@ -105,7 +101,6 @@ ENV ULTRASHAPE_CONFIG=/app/ultrashape/configs/infer_dit_refine.yaml
 
 # Default quality mode (can be overridden)
 ENV QUALITY_MODE=balanced
-ENV 3D_BACKEND=auto
 ENV SKIP_EXISTING=1
 
 # Entry point

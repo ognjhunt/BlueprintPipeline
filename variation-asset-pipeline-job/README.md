@@ -16,7 +16,7 @@ replicator-job manifest.json
 │   2. Generate reference images        │
 │      (Gemini 3.0 Pro Image)           │
 │   3. Convert to 3D mesh               │
-│      (SAM3D or Hunyuan3D)             │
+│      (UltraShape)                     │
 │   4. Add physics properties           │
 │      (mass, friction, collision)      │
 │   5. Convert to USDZ                  │
@@ -51,8 +51,7 @@ Use this job when you need to generate variation assets for a scene that has alr
 | `BUCKET` | - | GCS bucket name |
 | `REPLICATOR_PREFIX` | `scenes/{SCENE_ID}/replicator` | Path to replicator bundle |
 | `VARIATION_ASSETS_PREFIX` | `scenes/{SCENE_ID}/variation_assets` | Output path |
-| `3D_BACKEND` | `auto` | `sam3d`, `hunyuan`, or `auto` |
-| `QUALITY_MODE` | `balanced` | `fast`, `balanced`, or `quality` |
+| `QUALITY_MODE` | `balanced` | `fast`, `balanced`, `quality`, or `ultra` |
 | `MAX_ASSETS` | - | Limit number of assets to generate |
 | `PRIORITY_FILTER` | - | `required`, `recommended`, or `optional` |
 | `ASSET_LIBRARY_PATH` | - | Path to shared asset library |
@@ -76,24 +75,14 @@ export SCENE_ID=scene_123
 
 ### Quality Presets
 
-| Mode | 3D Backend | Image Size | Use Case |
-|------|------------|------------|----------|
-| `fast` | SAM3D | 512px | Quick iteration, many simple objects |
-| `balanced` | Auto | 1024px | Default - good quality/speed balance |
-| `quality` | Hunyuan | 2048px | High-quality assets, hero objects |
+All quality modes use UltraShape with different parameter settings:
 
-### 3D Backend Selection
-
-When `3D_BACKEND=auto`, the backend is selected based on asset category:
-
-| SAM3D (Fast) | Hunyuan (Quality) |
-|--------------|-------------------|
-| dishes | clothing |
-| utensils | food |
-| cans | produce |
-| bottles | tools |
-| boxes | electronics |
-| containers | lab_equipment |
+| Mode | Image Size | UltraShape Steps | Octree Resolution | Use Case |
+|------|------------|------------------|-------------------|----------|
+| `fast` | 512px | 30 | 128 | Quick iteration |
+| `balanced` | 1024px | 50 | 256 | Default - good quality/speed balance |
+| `quality` | 2048px | 50 | 256 | High-quality assets |
+| `ultra` | 2048px | 75 | 384 | Maximum quality, hero objects |
 
 ## Input
 
@@ -171,7 +160,7 @@ Idempotency checks prevent overwriting identical files, and ingestion is automat
 
 ### Library lookup fallback
 
-When semantic embedding lookups are enabled, the pipeline first attempts a vector search. If embedding generation fails and `ASSET_VECTOR_LEXICAL_FALLBACK=1`, it falls back to a lightweight lexical match using the `AssetSpec` metadata (name/description/category/semantic class/variants) against library index metadata (`asset_id`, `tags`, `description`). The match is accepted when the overlap score meets `ASSET_VECTOR_LEXICAL_THRESHOLD`. 
+When semantic embedding lookups are enabled, the pipeline first attempts a vector search. If embedding generation fails and `ASSET_VECTOR_LEXICAL_FALLBACK=1`, it falls back to a lightweight lexical match using the `AssetSpec` metadata (name/description/category/semantic class/variants) against library index metadata (`asset_id`, `tags`, `description`). The match is accepted when the overlap score meets `ASSET_VECTOR_LEXICAL_THRESHOLD`.
 
 ### Registry updates
 
@@ -291,15 +280,14 @@ When an exact `{category}/{asset_name}.usdz` match is missing, the pipeline can 
 | Stage | Duration (per asset) | Notes |
 |-------|---------------------|-------|
 | Image Generation | 5-15s | Gemini 3.0 Pro Image (Nano Banana Pro) |
-| SAM3D Conversion | 30-60s | Good for simple objects |
-| Hunyuan Conversion | 2-5min | Higher quality |
+| UltraShape Conversion | 3-10min | Quality depends on preset |
 | Physics Estimation | <1s | Category-based defaults |
 | USDZ Conversion | 1-5s | Requires usd_from_gltf |
 
 **Total per asset:**
-- Fast mode: ~1-2 minutes
-- Balanced mode: ~2-5 minutes
-- Quality mode: ~5-10 minutes
+- Fast mode: ~3-5 minutes
+- Balanced mode: ~5-8 minutes
+- Quality/Ultra mode: ~8-12 minutes
 
 ## Troubleshooting
 
@@ -308,9 +296,9 @@ When an exact `{category}/{asset_name}.usdz` match is missing, the pipeline can 
 1. **"Gemini API key not set"**
    - Set `GEMINI_API_KEY` environment variable
 
-2. **"SAM3D inference not available"**
-   - SAM3D requires specific checkpoints and dependencies
-   - Use `3D_BACKEND=hunyuan` or ensure SAM3D is properly installed
+2. **"UltraShape not available"**
+   - UltraShape falls back to coarse mesh generation if refinement is unavailable
+   - Ensure UltraShape checkpoints and config are properly mounted
 
 3. **"USDZ conversion failed"**
    - `usd_from_gltf` may not be available
@@ -333,4 +321,3 @@ SCENE_ID=test_scene DRY_RUN=1 python run_variation_asset_pipeline.py
 - **replicator-job**: Creates the manifest consumed by this job
 - **variation-gen-job**: Reference image generation
 - **simready-job**: Standalone physics property assignment
-- **regen3d-job**: 3D-RE-GEN adapter for mesh generation

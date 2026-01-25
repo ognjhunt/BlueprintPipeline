@@ -118,7 +118,7 @@ def main():
     seg_prefix = os.getenv("SEG_PREFIX")             # scenes/<sceneId>/seg (optional, for Gemini pipeline)
     layout_file = os.getenv("LAYOUT_FILE_NAME", "scene_layout_scaled.json")
     interactive_ids_env = os.getenv("INTERACTIVE_OBJECT_IDS", "")
-    static_pipeline = os.getenv("STATIC_ASSET_PIPELINE", "sam3d")
+    static_pipeline = os.getenv("STATIC_ASSET_PIPELINE", "ultrashape")
     particulate_endpoint = os.getenv("PARTICULATE_ENDPOINT")
     skip_interactive = os.getenv("SKIP_INTERACTIVE_JOB", "0").lower() in ("1", "true", "yes", "on")
 
