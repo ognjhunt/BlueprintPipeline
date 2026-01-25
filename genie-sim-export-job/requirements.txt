@@ -5,6 +5,7 @@ numpy==1.26.4
 
 # JSON Schema validation
 jsonschema==4.23.0
+ijson==3.2.3
 
 # Optional: Embedding generation (if GENERATE_EMBEDDINGS=true)
 sentence-transformers==3.3.1    # For local embeddings (LOCAL_EMBEDDING_FALLBACK)
