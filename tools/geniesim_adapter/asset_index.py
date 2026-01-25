@@ -493,7 +493,37 @@ class AssetIndexBuilder:
             allow_embedding_fallback: Allow placeholder embeddings in production
             verbose: Print progress
         """
-        allowed_embedding_dims = {768, 1024, 2048, 3072}
+        default_embedding_dims = {768, 1024, 2048, 3072}
+        allowed_embedding_dims_env = os.getenv("GENIESIM_ALLOWED_EMBEDDING_DIMS", "").strip()
+        if allowed_embedding_dims_env:
+            raw_tokens = [
+                token.strip()
+                for token in re.split(r"[,\s]+", allowed_embedding_dims_env)
+                if token.strip()
+            ]
+            if not raw_tokens:
+                raise ValueError(
+                    "GENIESIM_ALLOWED_EMBEDDING_DIMS must be a comma-separated list of "
+                    "positive integers; got an empty value."
+                )
+            parsed_dims: List[int] = []
+            for token in raw_tokens:
+                try:
+                    dim = int(token)
+                except ValueError as exc:
+                    raise ValueError(
+                        "GENIESIM_ALLOWED_EMBEDDING_DIMS must be a comma-separated list of "
+                        f"positive integers; got {allowed_embedding_dims_env!r}."
+                    ) from exc
+                if dim <= 0:
+                    raise ValueError(
+                        "GENIESIM_ALLOWED_EMBEDDING_DIMS must contain only positive integers; "
+                        f"got {allowed_embedding_dims_env!r}."
+                    )
+                parsed_dims.append(dim)
+            allowed_embedding_dims = set(parsed_dims)
+        else:
+            allowed_embedding_dims = default_embedding_dims
         self.verbose = verbose
         self.generate_embeddings = generate_embeddings
         self.embedding_model = embedding_model
@@ -565,7 +595,8 @@ class AssetIndexBuilder:
         if embedding_dim not in allowed_embedding_dims:
             raise ValueError(
                 "Unsupported embedding_dim. Genie Sim requires one of "
-                f"{sorted(allowed_embedding_dims)}; got {embedding_dim}."
+                f"{sorted(allowed_embedding_dims)} (configured via GENIESIM_ALLOWED_EMBEDDING_DIMS); "
+                f"got {embedding_dim}."
             )
         self.embedding_dim = embedding_dim
 
