@@ -30,6 +30,7 @@ from tools.config import load_quality_config
 from tools.metrics import track_pipeline_run, update_pipeline_status
 from tools.metrics.pipeline_metrics import get_metrics
 from tools.quality_gates import QualityGateCheckpoint, QualityGateRegistry, build_notification_service
+from tools.error_handling.circuit_breaker import CircuitBreaker
 from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
 from tools.scene_batch_reporting import _summarize_batch_results
 from tools.locking.gcs_lock import DEFAULT_HEARTBEAT_SECONDS, DEFAULT_TTL_SECONDS, GCSLock
@@ -218,6 +219,7 @@ def _build_scene_processor(
     checkpoint_step: str,
     skip_completed: bool,
     attempt_counts: Dict[str, int],
+    step_circuit_breaker: Optional[CircuitBreaker],
 ) -> Tuple[Any, Dict[str, int]]:
     metrics = get_metrics()
     job_name = "scene-batch"
@@ -266,6 +268,7 @@ def _build_scene_processor(
                 enable_dream2flow=config.enable_dream2flow,
                 enable_inventory_enrichment=config.enable_inventory_enrichment,
                 disable_articulated_assets=config.disable_articulated_assets,
+                step_circuit_breaker=step_circuit_breaker,
             )
             try:
                 success = runner.run(
@@ -334,6 +337,53 @@ def _build_scene_processor(
         return metadata
 
     return process_scene, attempt_counts
+
+
+def _build_batch_circuit_breaker(reports_dir: Optional[Path]) -> CircuitBreaker:
+    failure_threshold = int(os.getenv("PIPELINE_CIRCUIT_BREAKER_FAILURES", "3"))
+    success_threshold = int(os.getenv("PIPELINE_CIRCUIT_BREAKER_SUCCESSES", "2"))
+    recovery_timeout = float(os.getenv("PIPELINE_CIRCUIT_BREAKER_RECOVERY_S", "60"))
+    persistence_path = None
+    if reports_dir:
+        persistence_path = reports_dir / ".batch_circuit_breaker.json"
+
+    def on_open(name: str, failure_count: int) -> None:
+        logger.error(
+            "[CIRCUIT-BREAKER][BATCH] Circuit breaker '%s' opened after %s failures.",
+            name,
+            failure_count,
+        )
+
+    def on_half_open(name: str) -> None:
+        logger.warning(
+            "[CIRCUIT-BREAKER][BATCH] Circuit breaker '%s' half-open; testing recovery.",
+            name,
+        )
+
+    def on_close(name: str) -> None:
+        logger.info(
+            "[CIRCUIT-BREAKER][BATCH] Circuit breaker '%s' closed; normal operation resumed.",
+            name,
+        )
+
+    breaker = CircuitBreaker(
+        name="batch_pipeline",
+        failure_threshold=failure_threshold,
+        success_threshold=success_threshold,
+        recovery_timeout=recovery_timeout,
+        persistence_path=persistence_path,
+        on_open=on_open,
+        on_half_open=on_half_open,
+        on_close=on_close,
+    )
+    if persistence_path:
+        logger.info(
+            "Using batch-level step circuit breaker with persistence at %s.",
+            persistence_path,
+        )
+    else:
+        logger.info("Using batch-level step circuit breaker without persistence.")
+    return breaker
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -426,6 +476,7 @@ def main() -> int:
         disable_articulated_assets=args.disable_articulated_assets,
     )
 
+    step_circuit_breaker = _build_batch_circuit_breaker(args.reports_dir)
     attempt_counts: Dict[str, int] = {}
     process_scene, attempt_counts = _build_scene_processor(
         config=config,
@@ -433,6 +484,7 @@ def main() -> int:
         checkpoint_step=args.checkpoint_step,
         skip_completed=args.skip_completed,
         attempt_counts=attempt_counts,
+        step_circuit_breaker=step_circuit_breaker,
     )
 
     runner = ParallelPipelineRunner(
