@@ -128,6 +128,15 @@ def _extract_positions(task: Dict[str, Any]) -> List[Tuple[str, List[float]]]:
     return positions
 
 
+def _namespaced_asset_id(scene_id: Optional[str], obj_id: str) -> str:
+    if not scene_id or scene_id == "unknown":
+        return obj_id
+    scene_prefix = f"{scene_id}_obj_"
+    if obj_id.startswith(scene_prefix) or obj_id.startswith(f"{scene_id}:"):
+        return obj_id
+    return f"{scene_id}_obj_{obj_id}"
+
+
 def _validate_export_consistency_payloads(
     *,
     scene_graph: Dict[str, Any],
@@ -165,7 +174,14 @@ def _validate_export_consistency_payloads(
     for entry in task_entries:
         referenced_ids.update(_extract_object_ids_from_entry(entry))
 
-    missing_task_assets = {obj_id for obj_id in referenced_ids if obj_id not in asset_ids}
+    scene_id = scene_graph.get("scene_id") if isinstance(scene_graph, dict) else None
+
+    missing_task_assets = {
+        obj_id
+        for obj_id in referenced_ids
+        if obj_id not in asset_ids
+        and _namespaced_asset_id(scene_id, obj_id) not in asset_ids
+    }
 
     workspace_bounds = _parse_workspace_bounds(
         task_config.get("robot_config", {}).get("workspace_bounds")
