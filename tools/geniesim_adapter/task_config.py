@@ -14,15 +14,21 @@ References:
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 import logging
+import math
 import os
+import sys
 from dataclasses import dataclass, field
 from json import JSONDecodeError, loads as json_loads
 from pathlib import Path
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+
+from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 from tools.geniesim_adapter.config import (
     get_geniesim_task_confidence_threshold,
@@ -33,6 +39,8 @@ from tools.geniesim_adapter.config import (
 from tools.geniesim_adapter.multi_robot_config import ROBOT_SPECS, RobotType
 
 logger = logging.getLogger(__name__)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+EPISODE_JOB_ROOT = REPO_ROOT / "episode-generation-job"
 
 # =============================================================================
 # Data Models
@@ -263,6 +271,11 @@ class TaskConfigGenerator:
             robot_config=robot_config,
             strict_reachability=strict_reachability,
         )
+        tasks, curobo_metadata = self._filter_tasks_by_curobo(
+            tasks=tasks,
+            manifest=manifest,
+            robot_config=robot_config,
+        )
 
         # Build metadata
         metadata = {
@@ -276,6 +289,7 @@ class TaskConfigGenerator:
             ),
             "task_types": list(set(t.task_type for t in tasks)),
             **reachability_metadata,
+            **curobo_metadata,
         }
 
         return GenieSimTaskConfig(
@@ -693,6 +707,159 @@ class TaskConfigGenerator:
             "tasks_missing_position": missing_positions,
             "tasks_total_after_reachability_filter": len(filtered_tasks),
         }
+
+    def _filter_tasks_by_curobo(
+        self,
+        tasks: List[SuggestedTask],
+        manifest: Dict[str, Any],
+        robot_config: RobotConfig,
+    ) -> Tuple[List[SuggestedTask], Dict[str, Any]]:
+        use_curobo = parse_bool_env(os.getenv("GENIESIM_USE_CUROBO"), default=False)
+        metadata = {
+            "curobo_reachability_enabled": bool(use_curobo),
+            "tasks_total_before_curobo_filter": len(tasks),
+            "tasks_filtered_by_curobo": 0,
+            "tasks_total_after_curobo_filter": len(tasks),
+        }
+
+        if not use_curobo or not tasks:
+            return tasks, metadata
+
+        if EPISODE_JOB_ROOT.exists() and str(EPISODE_JOB_ROOT) not in sys.path:
+            sys.path.insert(0, str(EPISODE_JOB_ROOT))
+
+        if importlib.util.find_spec("curobo_planner") is None:
+            self.log(
+                "GENIESIM_USE_CUROBO enabled, but curobo_planner module not found; "
+                "skipping cuRobo task filtering.",
+                level="WARNING",
+            )
+            return tasks, metadata
+
+        curobo_planner = importlib.import_module("curobo_planner")
+        if not curobo_planner.is_curobo_available():
+            self.log(
+                "GENIESIM_USE_CUROBO enabled, but cuRobo is not installed; skipping cuRobo checks.",
+                level="WARNING",
+            )
+            return tasks, metadata
+
+        planner = curobo_planner.create_curobo_planner(robot_config.robot_type)
+        if planner is None:
+            self.log(
+                "GENIESIM_USE_CUROBO enabled, but cuRobo planner initialization failed; "
+                "skipping cuRobo checks.",
+                level="WARNING",
+            )
+            return tasks, metadata
+
+        objects = manifest.get("objects", [])
+        object_positions = {
+            str(obj.get("id", "")): obj.get("transform", {}).get("position")
+            for obj in objects
+        }
+        filtered_tasks = []
+        filtered_by_curobo = 0
+
+        for task in tasks:
+            position = object_positions.get(task.target_object)
+            if not position or len(position) < 3:
+                filtered_tasks.append(task)
+                continue
+
+            obstacles = self._build_curobo_obstacles(
+                objects=objects,
+                exclude_object_id=task.target_object,
+                collision_object_cls=curobo_planner.CollisionObject,
+                geometry_type_cls=curobo_planner.CollisionGeometryType,
+            )
+            goal_pose = np.array(
+                [position[0], position[1], position[2], 1.0, 0.0, 0.0, 0.0],
+                dtype=float,
+            )
+            default_joints = getattr(planner.robot_config, "default_joint_positions", None)
+            if default_joints is None:
+                default_joints = np.zeros(getattr(planner.robot_config, "num_joints", 0))
+            start_joints = np.asarray(default_joints, dtype=float)
+            request = curobo_planner.CuRoboPlanRequest(
+                start_joint_positions=start_joints,
+                goal_pose=goal_pose,
+                obstacles=obstacles,
+                max_iterations=10,
+                parallel_finetune=False,
+                batch_size=1,
+            )
+
+            try:
+                result = planner.plan_to_pose(request)
+            except Exception as exc:
+                self.log(
+                    f"cuRobo validation failed for task {task.target_object}: {exc}",
+                    level="WARNING",
+                )
+                filtered_tasks.append(task)
+                continue
+
+            if result.success and result.is_collision_free:
+                filtered_tasks.append(task)
+            else:
+                filtered_by_curobo += 1
+
+        metadata.update(
+            {
+                "tasks_filtered_by_curobo": filtered_by_curobo,
+                "tasks_total_after_curobo_filter": len(filtered_tasks),
+            }
+        )
+        return filtered_tasks, metadata
+
+    def _build_curobo_obstacles(
+        self,
+        objects: List[Dict[str, Any]],
+        exclude_object_id: str,
+        collision_object_cls: Any,
+        geometry_type_cls: Any,
+    ) -> List[Any]:
+        obstacles = []
+        for obj in objects:
+            obj_id = str(obj.get("id", ""))
+            if obj_id == exclude_object_id:
+                continue
+            sim_role = obj.get("sim_role", "")
+            if sim_role not in {"static", "scene_shell", "articulated_furniture", "articulated_appliance"}:
+                continue
+
+            position = obj.get("transform", {}).get("position")
+            if not position or len(position) < 3:
+                continue
+
+            dimensions = obj.get("dimensions_est", {})
+            if not isinstance(dimensions, dict):
+                continue
+
+            width = float(dimensions.get("width", 0.0) or 0.0)
+            depth = float(dimensions.get("depth", 0.0) or 0.0)
+            height = float(dimensions.get("height", 0.0) or 0.0)
+            if min(width, depth, height) <= 0.0:
+                continue
+
+            rotation = obj.get("transform", {}).get("rotation")
+            if isinstance(rotation, (list, tuple)) and len(rotation) == 4:
+                orientation = np.array(rotation, dtype=float)
+            else:
+                orientation = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+
+            obstacles.append(
+                collision_object_cls(
+                    object_id=obj_id,
+                    geometry_type=geometry_type_cls.CUBOID,
+                    position=np.array(position[:3], dtype=float),
+                    orientation=orientation,
+                    dimensions=np.array([width, depth, height], dtype=float),
+                    is_static=True,
+                )
+            )
+        return obstacles
 
     def _create_robot_config(
         self,
