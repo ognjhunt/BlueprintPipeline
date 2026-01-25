@@ -28,7 +28,14 @@ Image → 3D-RE-GEN → BlueprintPipeline → ... → DWM Preparation → DWM Bu
 ## Dependencies & Availability
 
 - **Isaac Sim rendering is required for production bundles.** Static scene videos must be rendered against the real USD scene using the Isaac Sim backend. The mock renderer is intended only for CI/smoke tests where GPU rendering is unavailable.
-- **DWM model availability gates inference.** The repository prepares conditioning bundles today, but running DWM inference requires access to the released model weights/API. Until the model is available, inference should be treated as optional or disabled.
+- **DWM inference is experimental.** The repository prepares conditioning bundles today, but running DWM inference requires access to the released model weights/API and is treated as experimental. Placeholder outputs are only generated when `DWM_ALLOW_PLACEHOLDER=true`, and the inference job fails fast if neither an API endpoint nor a checkpoint path is provided.
+
+### Experimental DWM Inference (Placeholder Policy)
+
+The DWM inference job emits placeholder interaction videos only when explicitly opted in:
+
+- Set `DWM_ALLOW_PLACEHOLDER=true` to allow placeholder outputs if the real model is unavailable or the API fails.
+- Provide `--api-endpoint` or `--checkpoint-path`; the job fails immediately if neither is configured.
 
 ### Local Pipeline
 ```bash
