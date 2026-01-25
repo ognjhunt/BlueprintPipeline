@@ -85,6 +85,10 @@ The multi-robot adapter ships with built-in specs for humanoids (G2, GR1, Figure
 
 ## Example usage
 
+Genie Sim export artifacts namespace object asset IDs with the scene ID, using the
+format `<scene_id>_obj_<object_id>` (falling back to the raw object ID if no
+scene ID is available).
+
 ```python
 from pathlib import Path
 from tools.geniesim_adapter import (
