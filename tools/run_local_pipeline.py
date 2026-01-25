@@ -238,6 +238,7 @@ class LocalPipelineRunner:
         enable_inventory_enrichment: Optional[bool] = None,
         disable_articulated_assets: bool = False,
         fail_fast: Optional[bool] = None,
+        step_circuit_breaker: Optional[CircuitBreaker] = None,
     ):
         """Initialize the local pipeline runner.
 
@@ -249,6 +250,7 @@ class LocalPipelineRunner:
             enable_dwm: Include optional DWM steps in default pipeline
             enable_dream2flow: Include optional Dream2Flow steps in default pipeline
             enable_inventory_enrichment: Enable optional inventory enrichment step
+            step_circuit_breaker: Optional shared step-level circuit breaker to reuse across runs
         """
         self.scene_dir = Path(scene_dir).resolve()
         self.verbose = verbose
@@ -321,7 +323,14 @@ class LocalPipelineRunner:
 
         # Step-level circuit breaker to prevent cascading failures (P1)
         # Opens after consecutive failures to avoid wasting time on doomed pipelines
-        self._step_circuit_breaker = self._initialize_step_circuit_breaker()
+        if step_circuit_breaker is not None:
+            self._step_circuit_breaker = step_circuit_breaker
+            self.log(
+                f"Using provided step-level circuit breaker '{self._step_circuit_breaker.name}'.",
+                "INFO",
+            )
+        else:
+            self._step_circuit_breaker = self._initialize_step_circuit_breaker()
 
     def _resolve_step_dependencies(
         self,
