@@ -379,6 +379,7 @@ class SceneGraphStreamingConfig:
 class SceneGraphValidationConfig:
     """Validation configuration for scene graph conversion."""
     allow_unvalidated_input: bool = True
+    require_physics_validation: bool = True
 
 
 @dataclass
@@ -1279,6 +1280,10 @@ class ConfigLoader:
                         "allow_unvalidated_input",
                         True,
                     ),
+                    require_physics_validation=scene_graph.get("validation", {}).get(
+                        "require_physics_validation",
+                        True,
+                    ),
                 ),
             ),
             ab_testing=ABTestingConfig(
@@ -1494,6 +1499,11 @@ class ConfigLoader:
                         bool,
                     ):
                         errors["scene_graph.validation.allow_unvalidated_input"] = "Must be a boolean"
+                    if "require_physics_validation" in validation and not isinstance(
+                        validation["require_physics_validation"],
+                        bool,
+                    ):
+                        errors["scene_graph.validation.require_physics_validation"] = "Must be a boolean"
 
         if "health_checks" in config:
             health_checks = config["health_checks"]

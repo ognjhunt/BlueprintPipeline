@@ -499,6 +499,9 @@ Scene graph relation inference thresholds and streaming options.
 | `BP_SCENE_GRAPH_HORIZONTAL_PROXIMITY_THRESHOLD` | float | 0.15 | Horizontal proximity threshold (meters) for inferring "adjacent" relations. Valid range: 0.0–0.5 (Genie Sim 3.0 scene graph spec). |
 | `BP_SCENE_GRAPH_ALIGNMENT_ANGLE_THRESHOLD` | float | 5.0 | Alignment threshold (degrees) for inferring "aligned" relations. Valid range: 0–45 (Genie Sim 3.0 scene graph spec). |
 | `BP_SCENE_GRAPH_STREAMING_BATCH_SIZE` | int | 100 | Batch size for streaming scene manifest parsing |
+| `BP_SCENE_GRAPH_ENABLE_PHYSICS_VALIDATION` | bool | pipeline config | Enable physics-backed validation for "on"/"in" relations when Isaac Sim is available. |
+| `BP_SCENE_GRAPH_REQUIRE_PHYSICS_VALIDATION` | bool | true | Require physics validation in production; raises if Isaac Sim is unavailable. |
+| `BP_SCENE_GRAPH_ALLOW_HEURISTICS_IN_PROD` | bool | false | Explicitly allow heuristic-only validation in production when Isaac Sim is missing. |
 
 **Example**:
 ```bash
