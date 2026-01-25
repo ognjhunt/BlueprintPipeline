@@ -22,8 +22,13 @@ from google.cloud import storage
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+GENIE_SIM_IMPORT_PATH = REPO_ROOT / "genie-sim-import-job"
+if str(GENIE_SIM_IMPORT_PATH) not in sys.path:
+    sys.path.insert(0, str(GENIE_SIM_IMPORT_PATH))
 
+from tools.config.production_mode import resolve_production_mode
 from tools.metrics.pipeline_metrics import get_metrics
+from import_manifest_utils import verify_checksums_signature
 
 GCS_ROOT = Path("/mnt/gcs")
 JOB_NAME = "dataset-delivery-integrity-audit-job"
@@ -88,18 +93,53 @@ def _download_and_hash(blob: storage.Blob) -> Tuple[str, int]:
     return hasher.hexdigest(), size
 
 
+def _verify_checksums_signature(
+    payload: Dict[str, Any],
+    production_mode: bool,
+    hmac_key: Optional[str],
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "success": True,
+        "errors": [],
+        "expected": None,
+        "actual": None,
+        "required": production_mode,
+    }
+    signature = payload.get("signature")
+    if signature is None:
+        if production_mode:
+            result["success"] = False
+            result["errors"].append("checksums.json signature is required in production")
+        return result
+
+    verify_result = verify_checksums_signature(payload, hmac_key)
+    result["expected"] = verify_result.get("expected")
+    result["actual"] = verify_result.get("actual")
+    if not verify_result.get("success"):
+        result["success"] = False
+        result["errors"].extend(verify_result.get("errors", []))
+    return result
+
+
 def _audit_bundle(
     bucket: storage.Bucket,
     bundle_prefix: str,
     checksums_payload: Dict[str, Any],
     max_files: int,
     max_failure_details: int,
+    production_mode: bool,
+    hmac_key: Optional[str],
 ) -> Dict[str, Any]:
     entries = _extract_checksums_entries(checksums_payload)
     missing_files: List[str] = []
     checksum_mismatches: List[Dict[str, Any]] = []
     size_mismatches: List[Dict[str, Any]] = []
     invalid_entries: List[str] = []
+    signature_result = _verify_checksums_signature(
+        checksums_payload,
+        production_mode,
+        hmac_key,
+    )
     checked_files = 0
     skipped_files = 0
 
@@ -156,6 +196,7 @@ def _audit_bundle(
         and not checksum_mismatches
         and not size_mismatches
         and not invalid_entries
+        and signature_result["success"]
     )
 
     return {
@@ -166,6 +207,7 @@ def _audit_bundle(
         "checksum_mismatches": checksum_mismatches,
         "size_mismatches": size_mismatches,
         "invalid_entries": invalid_entries,
+        "signature": signature_result,
         "success": success,
     }
 
@@ -191,6 +233,8 @@ def main() -> int:
     max_bundles = _parse_int(os.getenv("MAX_BUNDLES"), 100)
     max_files = _parse_int(os.getenv("MAX_FILES_PER_BUNDLE"), 0)
     max_failure_details = _parse_int(os.getenv("MAX_FAILURE_DETAILS"), 200)
+    production_mode = resolve_production_mode()
+    hmac_key = os.getenv("CHECKSUMS_HMAC_KEY")
 
     report_bucket_name = os.getenv("AUDIT_REPORT_BUCKET", bucket_name)
     report_prefix = os.getenv("AUDIT_REPORT_PREFIX", "audit-reports/delivery-integrity")
@@ -236,6 +280,8 @@ def main() -> int:
                 payload,
                 max_files,
                 max_failure_details,
+                production_mode,
+                hmac_key,
             )
             bundle_result["checksums_object"] = blob.name
             bundle_result["bundle_id"] = bundle_id
