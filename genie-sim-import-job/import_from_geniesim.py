@@ -79,6 +79,7 @@ from import_manifest_utils import (
     build_directory_checksums,
     build_file_inventory,
     collect_provenance,
+    compute_checksums_signature,
     compute_manifest_checksum,
     get_git_sha,
     get_episode_file_paths,
@@ -2177,7 +2178,10 @@ For example, supply the dataset path in your training config or CLI to start tra
     return readme_path
 
 
-def _write_checksums_file(output_dir: Path, checksums: Dict[str, Any]) -> Path:
+def _write_checksums_file(
+    output_dir: Path,
+    checksums: Dict[str, Any],
+) -> tuple[Path, Optional[Dict[str, str]]]:
     checksums_path = output_dir / "checksums.json"
     payload = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -2185,9 +2189,15 @@ def _write_checksums_file(output_dir: Path, checksums: Dict[str, Any]) -> Path:
         "algorithm": "sha256",
         "files": checksums,
     }
+    signature = None
+    hmac_key = os.getenv("CHECKSUMS_HMAC_KEY")
+    if hmac_key:
+        key_id = os.getenv("CHECKSUMS_HMAC_KEY_ID")
+        signature = compute_checksums_signature(payload, hmac_key, key_id=key_id)
+        payload["signature"] = signature
     with open(checksums_path, "w") as handle:
         json.dump(payload, handle, indent=2)
-    return checksums_path
+    return checksums_path, signature
 
 
 def _load_contract_schema(schema_name: str) -> Dict[str, Any]:
@@ -3177,7 +3187,10 @@ def _write_combined_import_manifest(
     directory_checksums = build_directory_checksums(
         output_dir, exclude_paths=[manifest_path]
     )
-    checksums_path = _write_checksums_file(output_dir, directory_checksums)
+    checksums_path, checksums_signature = _write_checksums_file(
+        output_dir,
+        directory_checksums,
+    )
     checksums_rel_path = checksums_path.relative_to(output_dir).as_posix()
     checksums_entry = {
         "sha256": _sha256_file(checksums_path),
@@ -3198,6 +3211,8 @@ def _write_combined_import_manifest(
         "episode_files": {},
         "bundle_files": dict(directory_checksums),
     }
+    if checksums_signature:
+        checksums_payload["signature"] = checksums_signature
     checksums_payload["metadata"][checksums_rel_path] = checksums_entry
     checksums_payload["bundle_files"][checksums_rel_path] = checksums_entry
     file_inventory = build_file_inventory(output_dir, exclude_paths=[manifest_path])
@@ -5279,7 +5294,12 @@ def run_local_import_job(
         "episode_files": file_checksums["episodes"],
         "bundle_files": dict(directory_checksums),
     }
-    checksums_path = _write_checksums_file(config.output_dir, directory_checksums)
+    checksums_path, checksums_signature = _write_checksums_file(
+        config.output_dir,
+        directory_checksums,
+    )
+    if checksums_signature:
+        checksums_payload["signature"] = checksums_signature
     checksums_rel_path = checksums_path.relative_to(config.output_dir).as_posix()
     checksums_entry = {
         "sha256": _sha256_file(checksums_path),
