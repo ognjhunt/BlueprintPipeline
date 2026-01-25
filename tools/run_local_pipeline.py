@@ -5064,12 +5064,12 @@ def main():
     parser.add_argument(
         "--enable-dwm",
         action="store_true",
-        help="Include optional DWM preparation/inference steps in the default pipeline",
+        help="Include optional DWM preparation/inference steps (experimental) in the default pipeline",
     )
     parser.add_argument(
         "--enable-dream2flow",
         action="store_true",
-        help="Include optional Dream2Flow preparation/inference steps in the default pipeline",
+        help="Include optional Dream2Flow preparation/inference steps (experimental) in the default pipeline",
     )
     parser.add_argument(
         "--enable-experimental",

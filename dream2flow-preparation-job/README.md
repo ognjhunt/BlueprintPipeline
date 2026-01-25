@@ -145,13 +145,14 @@ From the Dream2Flow paper examples:
 
 ## Status
 
-**Production readiness** is achieved only when real Dream2Flow backends are configured:
+**Dream2Flow inference is experimental** and relies on real backends to be production ready:
 
 - **Video generation**: Set `VIDEO_API_ENDPOINT` or provide a local Dream2Flow checkpoint
   plus the Dream2Flow Python package.
 - **Robot tracking**: Use `ROBOT_TRACKING_API`, `isaac_lab_env`, or the built-in IK backend.
-- **Placeholders**: Set `DREAM2FLOW_REQUIRE_REAL_BACKENDS=1` to hard-fail if placeholders
-  would otherwise be used.
+- **Placeholders**: Set `DREAM2FLOW_ALLOW_PLACEHOLDER=true` to explicitly opt in to placeholder
+  outputs when the real model is unavailable or the API fails. The inference job fails fast
+  if neither an API endpoint nor a checkpoint path is configured.
 
 Default scaffolding still provides:
 
@@ -176,7 +177,7 @@ Default scaffolding still provides:
 | FPS | No | 24 | Frames per second |
 | ROBOT | No | franka_panda | Robot embodiment |
 | VIDEO_API_ENDPOINT | No | - | Remote video generation API |
-| DREAM2FLOW_REQUIRE_REAL_BACKENDS | No | false | Fail if placeholders would be used |
+| DREAM2FLOW_ALLOW_PLACEHOLDER | No | false | Allow placeholder outputs for experimental inference |
 
 Example storage target:
 

@@ -41,6 +41,13 @@ from models import Dream2FlowBundle, TaskInstruction, TaskType
 from tools.config.constants import DEFAULT_HTTP_TIMEOUT_S
 
 
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass
 class Dream2FlowInferenceConfig:
     """Configuration for running Dream2Flow inference on prepared bundles."""
@@ -48,6 +55,7 @@ class Dream2FlowInferenceConfig:
     bundles_dir: Path
     video_api_endpoint: Optional[str] = None
     video_checkpoint_path: Optional[Path] = None
+    allow_placeholder: Optional[bool] = None
     save_intermediate: bool = True
     overwrite: bool = False
     verbose: bool = True
@@ -56,6 +64,8 @@ class Dream2FlowInferenceConfig:
         self.bundles_dir = Path(self.bundles_dir)
         if isinstance(self.video_checkpoint_path, str):
             self.video_checkpoint_path = Path(self.video_checkpoint_path)
+        if self.allow_placeholder is None:
+            self.allow_placeholder = _parse_bool_env("DREAM2FLOW_ALLOW_PLACEHOLDER", default=False)
 
 
 @dataclass
@@ -90,9 +100,11 @@ class Dream2FlowModelClient:
         self,
         api_endpoint: Optional[str] = None,
         checkpoint_path: Optional[Path] = None,
+        allow_placeholder: bool = False,
     ) -> None:
         self.api_endpoint = api_endpoint
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
+        self.allow_placeholder = allow_placeholder
 
     def generate_video(
         self,
@@ -120,7 +132,21 @@ class Dream2FlowModelClient:
                     fps=fps,
                 )
             except Exception:
+                if not self.allow_placeholder:
+                    raise
                 traceback.print_exc()
+
+        if self.checkpoint_path and not self.allow_placeholder:
+            raise RuntimeError(
+                "Dream2Flow checkpoint inference is not implemented; set "
+                "DREAM2FLOW_ALLOW_PLACEHOLDER=true to enable placeholder outputs."
+            )
+
+        if not self.allow_placeholder:
+            raise RuntimeError(
+                "Dream2Flow inference requires a working API endpoint or checkpoint. "
+                "Set DREAM2FLOW_ALLOW_PLACEHOLDER=true to allow placeholder outputs."
+            )
 
         # Placeholder generation
         return self._generate_placeholder_video(
@@ -252,6 +278,7 @@ class Dream2FlowInferenceJob:
         self.model_client = Dream2FlowModelClient(
             api_endpoint=config.video_api_endpoint,
             checkpoint_path=config.video_checkpoint_path,
+            allow_placeholder=bool(config.allow_placeholder),
         )
 
     def log(self, msg: str, level: str = "INFO") -> None:
@@ -263,6 +290,18 @@ class Dream2FlowInferenceJob:
         manifest_path = bundles_dir / "dream2flow_bundles_manifest.json"
         results: list[BundleInferenceResult] = []
         errors: list[str] = []
+
+        if not self.config.video_api_endpoint and not self.config.video_checkpoint_path:
+            raise ValueError(
+                "Dream2Flow inference requires --api-endpoint or --checkpoint-path. "
+                "Configure a backend before running."
+            )
+
+        self.log(
+            "EXPERIMENTAL / PLACEHOLDER OUTPUT: Dream2Flow inference is experimental. "
+            "Placeholder outputs are only generated when DREAM2FLOW_ALLOW_PLACEHOLDER=true.",
+            level="WARNING",
+        )
 
         bundle_dirs = self._discover_bundles(manifest_path)
         if not bundle_dirs:
@@ -383,6 +422,7 @@ def run_dream2flow_inference(
     bundles_dir: Path,
     api_endpoint: Optional[str] = None,
     checkpoint_path: Optional[Path] = None,
+    allow_placeholder: Optional[bool] = None,
     overwrite: bool = False,
     verbose: bool = True,
 ) -> Dream2FlowInferenceOutput:
@@ -391,6 +431,7 @@ def run_dream2flow_inference(
         bundles_dir=bundles_dir,
         video_api_endpoint=api_endpoint,
         video_checkpoint_path=checkpoint_path,
+        allow_placeholder=allow_placeholder,
         overwrite=overwrite,
         verbose=verbose,
     )

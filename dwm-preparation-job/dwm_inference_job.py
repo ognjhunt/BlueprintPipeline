@@ -37,6 +37,13 @@ def _safe_float_env(name: str, default: float) -> float:
         return default
 
 
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass
 class DWMInferenceConfig:
     """Configuration for running DWM inference on prepared bundles."""
@@ -44,6 +51,7 @@ class DWMInferenceConfig:
     bundles_dir: Path
     api_endpoint: Optional[str] = None
     checkpoint_path: Optional[Path] = None
+    allow_placeholder: Optional[bool] = None
     save_frames: bool = True
     overwrite: bool = False
     fps_override: Optional[float] = None
@@ -54,6 +62,8 @@ class DWMInferenceConfig:
         self.bundles_dir = Path(self.bundles_dir)
         if isinstance(self.checkpoint_path, str):
             self.checkpoint_path = Path(self.checkpoint_path)
+        if self.allow_placeholder is None:
+            self.allow_placeholder = _parse_bool_env("DWM_ALLOW_PLACEHOLDER", default=False)
 
 
 @dataclass
@@ -88,9 +98,11 @@ class DWMModelClient:
         self,
         api_endpoint: Optional[str] = None,
         checkpoint_path: Optional[Path] = None,
+        allow_placeholder: bool = False,
     ) -> None:
         self.api_endpoint = api_endpoint
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
+        self.allow_placeholder = allow_placeholder
 
     def generate_interaction(
         self,
@@ -121,12 +133,24 @@ class DWMModelClient:
                         imageio.imwrite(frames_dir / f"{idx:05d}.png", frame)
                 return len(frames)
             except Exception:
+                if not self.allow_placeholder:
+                    raise
                 # Fall through to placeholder generation
                 traceback.print_exc()
 
         if self.checkpoint_path:
             # Placeholder: checkpoint inference can be wired here when available.
-            pass
+            if not self.allow_placeholder:
+                raise RuntimeError(
+                    "DWM checkpoint inference is not implemented; set DWM_ALLOW_PLACEHOLDER=true "
+                    "to enable placeholder outputs."
+                )
+
+        if not self.allow_placeholder:
+            raise RuntimeError(
+                "DWM inference requires a working API endpoint or checkpoint. "
+                "Set DWM_ALLOW_PLACEHOLDER=true to allow placeholder outputs."
+            )
 
         return self._generate_placeholder(
             bundle=bundle,
@@ -324,6 +348,7 @@ class DWMInferenceJob:
         self.model_client = DWMModelClient(
             api_endpoint=config.api_endpoint,
             checkpoint_path=config.checkpoint_path,
+            allow_placeholder=bool(config.allow_placeholder),
         )
 
     def log(self, msg: str, level: str = "INFO") -> None:
@@ -335,6 +360,18 @@ class DWMInferenceJob:
         manifest_path = bundles_dir / "dwm_bundles_manifest.json"
         results: list[BundleInferenceResult] = []
         errors: list[str] = []
+
+        if not self.config.api_endpoint and not self.config.checkpoint_path:
+            raise ValueError(
+                "DWM inference requires --api-endpoint or --checkpoint-path. "
+                "Configure a backend before running."
+            )
+
+        self.log(
+            "EXPERIMENTAL / PLACEHOLDER OUTPUT: DWM inference is experimental. "
+            "Placeholder outputs are only generated when DWM_ALLOW_PLACEHOLDER=true.",
+            level="WARNING",
+        )
 
         bundle_dirs = self._discover_bundles(manifest_path)
         if not bundle_dirs:
@@ -499,6 +536,7 @@ def run_dwm_inference(
     bundles_dir: Path,
     api_endpoint: Optional[str] = None,
     checkpoint_path: Optional[Path] = None,
+    allow_placeholder: Optional[bool] = None,
     save_frames: bool = True,
     overwrite: bool = False,
     verbose: bool = True,
@@ -508,6 +546,7 @@ def run_dwm_inference(
         bundles_dir=bundles_dir,
         api_endpoint=api_endpoint,
         checkpoint_path=checkpoint_path,
+        allow_placeholder=allow_placeholder,
         save_frames=save_frames,
         overwrite=overwrite,
         verbose=verbose,
