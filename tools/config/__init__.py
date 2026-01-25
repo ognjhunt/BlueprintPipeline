@@ -8,9 +8,9 @@ the configuration files or providing overrides via environment variables.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
-import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -33,6 +33,11 @@ from .constants import (
 from .production_mode import ensure_config_audit_for_production
 
 try:
+    import yaml
+except ImportError:  # pragma: no cover - optional dependency in constrained envs
+    yaml = None  # type: ignore[assignment]
+
+try:
     from pydantic import BaseModel, ConfigDict, ValidationError, validator
     HAVE_PYDANTIC = True
 except ImportError:
@@ -49,6 +54,7 @@ CONFIG_DIR = Path(__file__).parent
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_CONFIG_PATH = CONFIG_DIR / "pipeline_config.json"
 QUALITY_CONFIG_PATH = CONFIG_DIR.parent / "quality_gates" / "quality_config.json"
+ADAPTIVE_TIMEOUTS_PATH = REPO_ROOT / "policy_configs" / "adaptive_timeouts.yaml"
 
 
 def _normalize_robot_name(robot_name: str) -> str:
@@ -199,6 +205,17 @@ class GenieSimKinematicReachabilityThresholds:
     min_reachability_rate: float = 1.0
     max_unreachable_targets: int = 0
     check_place_targets: bool = True
+
+
+@dataclass
+class AdaptiveTimeoutConfig:
+    """Adaptive timeout defaults from policy configuration."""
+    default_timeout_seconds: float
+    bundle_tier: Dict[str, float] = field(default_factory=dict)
+    scene_complexity: Dict[str, float] = field(default_factory=dict)
+    selected_timeout_seconds: float = 0.0
+    selected_bundle_tier: Optional[str] = None
+    selected_scene_complexity: Optional[str] = None
 
 
 @dataclass
@@ -1738,11 +1755,105 @@ def load_pipeline_config(**kwargs) -> PipelineConfig:
     return ConfigLoader.load_pipeline_config(**kwargs)
 
 
-def load_pipeline_step_timeouts() -> Dict[str, float]:
+def load_adaptive_timeout_config(
+    *,
+    bundle_tier: Optional[str] = None,
+    scene_complexity: Optional[str] = None,
+    bundle_tier_env_var: str = "ADAPTIVE_TIMEOUT_BUNDLE_TIER",
+    scene_complexity_env_var: str = "ADAPTIVE_TIMEOUT_SCENE_COMPLEXITY",
+) -> AdaptiveTimeoutConfig:
+    """Load adaptive timeout defaults with optional tier/complexity selection."""
+    if yaml is None:
+        raise ImportError("PyYAML is required to load adaptive timeout configuration.")
+    if bundle_tier is None:
+        bundle_tier = os.getenv(bundle_tier_env_var)
+    if scene_complexity is None:
+        scene_complexity = os.getenv(scene_complexity_env_var)
+
+    if not ADAPTIVE_TIMEOUTS_PATH.is_file():
+        raise FileNotFoundError(f"Adaptive timeout config not found: {ADAPTIVE_TIMEOUTS_PATH}")
+
+    try:
+        payload = yaml.safe_load(ADAPTIVE_TIMEOUTS_PATH.read_text()) or {}
+    except yaml.YAMLError as exc:  # type: ignore[union-attr]
+        raise ValueError(
+            f"Failed to parse adaptive timeout config at {ADAPTIVE_TIMEOUTS_PATH}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Adaptive timeout config at {ADAPTIVE_TIMEOUTS_PATH} must be a YAML mapping."
+        )
+
+    def _parse_timeout(value: Any, context: str) -> float:
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"{context} must be a number of seconds.")
+        timeout_value = float(value)
+        if timeout_value <= 0:
+            raise ValueError(f"{context} must be > 0 seconds.")
+        return timeout_value
+
+    default_timeout_raw = payload.get("default_timeout_seconds", 1800)
+    default_timeout = _parse_timeout(default_timeout_raw, "default_timeout_seconds")
+
+    bundle_tier_map: Dict[str, float] = {}
+    for key, value in (payload.get("bundle_tier") or {}).items():
+        bundle_tier_map[str(key)] = _parse_timeout(
+            value,
+            f"bundle_tier.{key}",
+        )
+
+    scene_complexity_map: Dict[str, float] = {}
+    for key, value in (payload.get("scene_complexity") or {}).items():
+        scene_complexity_map[str(key)] = _parse_timeout(
+            value,
+            f"scene_complexity.{key}",
+        )
+
+    selected_timeout = default_timeout
+    selected_bundle_tier = None
+    selected_scene_complexity = None
+    selected_candidates: List[float] = []
+    if bundle_tier:
+        candidate = bundle_tier_map.get(bundle_tier)
+        if candidate is None:
+            logger.warning(
+                "Unknown adaptive bundle tier '%s' (expected one of %s).",
+                bundle_tier,
+                sorted(bundle_tier_map.keys()),
+            )
+        else:
+            selected_bundle_tier = bundle_tier
+            selected_candidates.append(candidate)
+    if scene_complexity:
+        candidate = scene_complexity_map.get(scene_complexity)
+        if candidate is None:
+            logger.warning(
+                "Unknown adaptive scene complexity '%s' (expected one of %s).",
+                scene_complexity,
+                sorted(scene_complexity_map.keys()),
+            )
+        else:
+            selected_scene_complexity = scene_complexity
+            selected_candidates.append(candidate)
+
+    if selected_candidates:
+        selected_timeout = max(selected_candidates)
+
+    return AdaptiveTimeoutConfig(
+        default_timeout_seconds=default_timeout,
+        bundle_tier=bundle_tier_map,
+        scene_complexity=scene_complexity_map,
+        selected_timeout_seconds=selected_timeout,
+        selected_bundle_tier=selected_bundle_tier,
+        selected_scene_complexity=selected_scene_complexity,
+    )
+
+
+def load_pipeline_step_timeouts() -> Dict[str, Optional[float]]:
     """Load pipeline step timeouts from environment configuration.
 
     Expects PIPELINE_STEP_TIMEOUTS_JSON to be a JSON object mapping pipeline
-    step names to timeout seconds.
+    step names to timeout seconds. Use null or 0 to explicitly disable a timeout.
     """
     raw = os.getenv("PIPELINE_STEP_TIMEOUTS_JSON")
     if not raw:
@@ -1757,21 +1868,27 @@ def load_pipeline_step_timeouts() -> Dict[str, float]:
         raise ValueError(
             "PIPELINE_STEP_TIMEOUTS_JSON must be a JSON object mapping step names to timeout seconds."
         )
-    timeouts: Dict[str, float] = {}
+    timeouts: Dict[str, Optional[float]] = {}
     for key, value in payload.items():
         if not isinstance(key, str) or not key.strip():
             raise ValueError(
                 "PIPELINE_STEP_TIMEOUTS_JSON keys must be non-empty strings."
             )
+        if value is None:
+            timeouts[key.strip()] = None
+            continue
         if not isinstance(value, (int, float)):
             raise ValueError(
-                f"PIPELINE_STEP_TIMEOUTS_JSON timeout for '{key}' must be a number."
+                f"PIPELINE_STEP_TIMEOUTS_JSON timeout for '{key}' must be a number or null."
             )
         timeout_value = float(value)
-        if timeout_value <= 0:
+        if timeout_value < 0:
             raise ValueError(
-                f"PIPELINE_STEP_TIMEOUTS_JSON timeout for '{key}' must be > 0 seconds."
+                f"PIPELINE_STEP_TIMEOUTS_JSON timeout for '{key}' must be >= 0 seconds."
             )
+        if timeout_value == 0:
+            timeouts[key.strip()] = None
+            continue
         timeouts[key.strip()] = timeout_value
     return timeouts
 

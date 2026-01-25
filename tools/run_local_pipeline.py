@@ -66,6 +66,8 @@ Environment overrides:
     - GCS_MOUNT_ROOT: Base path used for local GCS-style mount mapping.
     - PIPELINE_FAIL_FAST: Stop the pipeline on the first failure when true.
     - PIPELINE_STEP_TIMEOUTS_JSON: JSON mapping of pipeline step names to timeout seconds.
+    - ADAPTIVE_TIMEOUT_BUNDLE_TIER: Bundle tier for adaptive default timeouts.
+    - ADAPTIVE_TIMEOUT_SCENE_COMPLEXITY: Scene complexity for adaptive default timeouts.
     - REQUIRE_BALANCED_ROBOT_EPISODES: Fail validation when cross-robot episode counts mismatch.
 
 References:
@@ -108,6 +110,7 @@ from tools.cost_tracking.estimate import (
     load_estimate_config,
 )
 from tools.config import (
+    load_adaptive_timeout_config,
     load_pipeline_config,
     load_pipeline_step_timeouts,
     load_quality_config as load_quality_gate_config,
@@ -828,10 +831,12 @@ class LocalPipelineRunner:
         legacy_robot = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
         return [legacy_robot] if legacy_robot else ["franka"]
 
-    def _resolve_step_timeouts(self) -> Dict[PipelineStep, float]:
+    def _resolve_step_timeouts(self) -> Dict[PipelineStep, Optional[float]]:
+        adaptive_config = load_adaptive_timeout_config()
+        default_timeout_seconds = adaptive_config.selected_timeout_seconds
         raw_timeouts = load_pipeline_step_timeouts()
-        resolved: Dict[PipelineStep, float] = {}
-        unknown: Dict[str, float] = {}
+        resolved: Dict[PipelineStep, Optional[float]] = {}
+        unknown: Dict[str, Optional[float]] = {}
         for step_name, timeout_value in raw_timeouts.items():
             try:
                 step = PipelineStep(step_name)
@@ -841,22 +846,84 @@ class LocalPipelineRunner:
             resolved[step] = timeout_value
 
         if unknown:
-            formatted = ", ".join(f"{key}={value}s" for key, value in sorted(unknown.items()))
+            formatted = ", ".join(
+                f"{key}={value if value is not None else 'disabled'}"
+                for key, value in sorted(unknown.items())
+            )
             self.log(
                 f"Unrecognized pipeline step timeouts ignored: {formatted}",
                 "WARNING",
             )
 
         for step in PipelineStep:
-            timeout_value = resolved.get(step)
-            if timeout_value is None:
-                self.log(f"Resolved step timeout: step={step.value} timeout=none", "INFO")
-            else:
-                self.log(
-                    f"Resolved step timeout: step={step.value} timeout={timeout_value:.0f}s",
-                    "INFO",
-                )
+            if step not in resolved:
+                resolved[step] = default_timeout_seconds
+
+        adaptive_details = [
+            f"default_timeout_seconds={adaptive_config.default_timeout_seconds:.0f}s",
+        ]
+        if adaptive_config.selected_bundle_tier:
+            bundle_value = adaptive_config.bundle_tier[adaptive_config.selected_bundle_tier]
+            adaptive_details.append(
+                f"bundle_tier={adaptive_config.selected_bundle_tier} ({bundle_value:.0f}s)"
+            )
+        if adaptive_config.selected_scene_complexity:
+            complexity_value = adaptive_config.scene_complexity[
+                adaptive_config.selected_scene_complexity
+            ]
+            adaptive_details.append(
+                f"scene_complexity={adaptive_config.selected_scene_complexity} ({complexity_value:.0f}s)"
+            )
+        adaptive_details.append(f"selected_timeout_seconds={default_timeout_seconds:.0f}s")
+        overrides_summary = (
+            "none"
+            if not raw_timeouts
+            else ", ".join(
+                f"{key}={value if value is not None else 'disabled'}"
+                for key, value in sorted(raw_timeouts.items())
+            )
+        )
+        final_summary = ", ".join(
+            f"{step.value}={value if value is not None else 'disabled'}"
+            for step, value in resolved.items()
+        )
+        self.log(
+            "Resolved pipeline step timeouts using adaptive defaults "
+            f"({'; '.join(adaptive_details)}), "
+            f"overrides=({overrides_summary}); "
+            f"final=({final_summary}).",
+            "INFO",
+        )
         return resolved
+
+    def _run_with_timeout(self, step: PipelineStep, action: Any) -> Any:
+        timeout_seconds = self._step_timeouts.get(step)
+        if timeout_seconds is None:
+            return action()
+        try:
+            with timeout_thread(
+                timeout_seconds,
+                f"{step.value} timed out after {timeout_seconds:.0f}s",
+            ):
+                return action()
+        except TimeoutError as exc:
+            context = ErrorContext(
+                scene_id=self.scene_id,
+                step=step.value,
+                max_attempts=1,
+                additional={"timeout_seconds": timeout_seconds},
+            )
+            message = (
+                f"{step.value} timed out after {timeout_seconds:.0f}s "
+                f"for scene {self.scene_id}"
+            )
+            raise PipelineError(
+                message,
+                category=ErrorCategory.EXTERNAL_SERVICE,
+                retryable=False,
+                context=context,
+                cause=exc,
+            ) from exc
 
     def _run_with_retry(self, step: PipelineStep, action: Any) -> Any:
         config = self.retry_config
@@ -2089,39 +2156,57 @@ class LocalPipelineRunner:
 
         try:
             if step == PipelineStep.REGEN3D:
-                result = self._run_regen3d_adapter()
+                result = self._run_with_timeout(PipelineStep.REGEN3D, self._run_regen3d_adapter)
             elif step == PipelineStep.SCALE:
                 result = self._run_with_retry(PipelineStep.SCALE, self._run_scale)
             elif step == PipelineStep.INTERACTIVE:
                 result = self._run_with_retry(PipelineStep.INTERACTIVE, self._run_interactive)
             elif step == PipelineStep.SIMREADY:
-                result = self._run_simready()
+                result = self._run_with_timeout(PipelineStep.SIMREADY, self._run_simready)
             elif step == PipelineStep.USD:
-                result = self._run_usd_assembly()
+                result = self._run_with_timeout(PipelineStep.USD, self._run_usd_assembly)
             elif step == PipelineStep.INVENTORY_ENRICHMENT:
-                result = self._run_inventory_enrichment()
+                result = self._run_with_timeout(
+                    PipelineStep.INVENTORY_ENRICHMENT,
+                    self._run_inventory_enrichment,
+                )
             elif step == PipelineStep.REPLICATOR:
-                result = self._run_replicator()
+                result = self._run_with_timeout(PipelineStep.REPLICATOR, self._run_replicator)
             elif step == PipelineStep.VARIATION_GEN:
-                result = self._run_variation_gen()
+                result = self._run_with_timeout(PipelineStep.VARIATION_GEN, self._run_variation_gen)
             elif step == PipelineStep.ISAAC_LAB:
-                result = self._run_isaac_lab()
+                result = self._run_with_timeout(PipelineStep.ISAAC_LAB, self._run_isaac_lab)
             elif step == PipelineStep.GENIESIM_EXPORT:
-                result = self._run_geniesim_export()
+                result = self._run_with_timeout(
+                    PipelineStep.GENIESIM_EXPORT,
+                    self._run_geniesim_export,
+                )
             elif step == PipelineStep.GENIESIM_SUBMIT:
-                result = self._run_geniesim_submit()
+                result = self._run_with_timeout(
+                    PipelineStep.GENIESIM_SUBMIT,
+                    self._run_geniesim_submit,
+                )
             elif step == PipelineStep.GENIESIM_IMPORT:
-                result = self._run_geniesim_import()
+                result = self._run_with_timeout(
+                    PipelineStep.GENIESIM_IMPORT,
+                    self._run_geniesim_import,
+                )
             elif step == PipelineStep.DWM:
                 result = self._run_with_retry(PipelineStep.DWM, self._run_dwm)
             elif step == PipelineStep.DWM_INFERENCE:
-                result = self._run_dwm_inference()
+                result = self._run_with_timeout(
+                    PipelineStep.DWM_INFERENCE,
+                    self._run_dwm_inference,
+                )
             elif step == PipelineStep.DREAM2FLOW:
                 result = self._run_with_retry(PipelineStep.DREAM2FLOW, self._run_dream2flow)
             elif step == PipelineStep.DREAM2FLOW_INFERENCE:
-                result = self._run_dream2flow_inference()
+                result = self._run_with_timeout(
+                    PipelineStep.DREAM2FLOW_INFERENCE,
+                    self._run_dream2flow_inference,
+                )
             elif step == PipelineStep.VALIDATE:
-                result = self._run_validation()
+                result = self._run_with_timeout(PipelineStep.VALIDATE, self._run_validation)
             else:
                 result = StepResult(
                     step=step,
@@ -3604,8 +3689,13 @@ class LocalPipelineRunner:
                 )
             return timeout_value
 
+        step_timeout_seconds = self._step_timeouts.get(PipelineStep.GENIESIM_SUBMIT)
         collection_timeout_seconds = _parse_timeout_env("GENIESIM_COLLECTION_TIMEOUT_S")
         submit_timeout_seconds = _parse_timeout_env("GENIESIM_SUBMIT_TIMEOUT_S")
+        if submit_timeout_seconds is None and step_timeout_seconds is not None:
+            submit_timeout_seconds = step_timeout_seconds
+        if collection_timeout_seconds is None and step_timeout_seconds is not None:
+            collection_timeout_seconds = step_timeout_seconds
 
         idempotency_payload = build_geniesim_idempotency_inputs(
             scene_id=self.scene_id,
