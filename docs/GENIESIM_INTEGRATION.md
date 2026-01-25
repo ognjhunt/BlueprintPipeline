@@ -21,6 +21,7 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
   - Avoid `/tmp` or `/var/tmp` in production to prevent data loss.
 - [ ] **gRPC Python dependency** (`grpcio`) installed in the Python environment used by the adapter.
 - [ ] **Production deployments** set `PIPELINE_ENV=production` (and `GENIESIM_ENV=production` for GenieSim-only services) plus enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks. Legacy production flags are deprecated and should be removed before **2025-12-31**.
+- [ ] **Task config cuRobo filtering** (optional): set `GENIESIM_USE_CUROBO=true` to run cuRobo reachability validation after workspace/radius filtering. When enabled, tasks that fail the cuRobo joint-limit + collision feasibility check are removed and metrics such as `tasks_filtered_by_curobo` are reported in task config metadata.
 - [ ] **Optional runtime cap** configured via `GENIESIM_COLLECTION_TIMEOUT_S` to bound local data collection duration.
 - [ ] **Firebase uploads (import only)** have credentials available in production or service mode:
   - `FIREBASE_STORAGE_BUCKET`
