@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, TypeVar, cast
 
 from tools.config.env import parse_bool_env
+from tools.tracing.correlation import ensure_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -337,9 +338,11 @@ def trace_job(
     """
     tracer = get_tracer()
 
+    request_id = ensure_request_id()
     attrs = {
         "job.name": job_name,
         "pipeline.step": job_name.replace("-job", ""),
+        "request.id": request_id,
     }
     if scene_id:
         attrs["scene.id"] = scene_id
@@ -453,7 +456,9 @@ def inject_trace_context() -> Dict[str, str]:
             pass
     """
     tracer = get_tracer()
-    return tracer.inject_context()
+    carrier = tracer.inject_context()
+    carrier["x-request-id"] = ensure_request_id()
+    return carrier
 
 
 def extract_trace_context(carrier: Dict[str, str]):

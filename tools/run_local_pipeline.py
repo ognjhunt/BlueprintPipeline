@@ -144,6 +144,7 @@ from tools.startup_validation import (
     validate_gcs_credentials,
 )
 from tools.validation.geniesim_export import ExportConsistencyError, validate_export_consistency
+from tools.tracing.correlation import ensure_request_id
 
 # Add repository root to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -5174,6 +5175,7 @@ class LocalPipelineRunner:
 
 
 def main():
+    os.environ["REQUEST_ID"] = ensure_request_id()
     parser = argparse.ArgumentParser(
         description="Run BlueprintPipeline locally for testing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
