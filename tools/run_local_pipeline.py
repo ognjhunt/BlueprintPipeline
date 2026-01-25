@@ -992,15 +992,24 @@ class LocalPipelineRunner:
             message=f"Error: {message}",
         )
 
-    def _write_marker(self, marker_path: Path, status: str) -> None:
+    def _write_marker(
+        self,
+        marker_path: Path,
+        status: str,
+        *,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Write a simple JSON marker file."""
+        marker_payload: Dict[str, Any] = {
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "scene_id": self.scene_id,
+        }
+        if payload:
+            marker_payload.update(payload)
         _safe_write_text(
             marker_path,
-            json.dumps({
-                "status": status,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "scene_id": self.scene_id,
-            }, indent=2),
+            json.dumps(marker_payload, indent=2),
             context="marker file",
         )
 
@@ -3619,6 +3628,7 @@ class LocalPipelineRunner:
         ).hexdigest()
         job_path = self.geniesim_dir / "job.json"
         idempotency_path = self.geniesim_dir / "idempotency.json"
+        submission_marker = self.geniesim_dir / ".geniesim_submitted"
 
         def _write_idempotency_payload() -> None:
             idempotency_payload["idempotency_key"] = idempotency_key
@@ -3638,6 +3648,14 @@ class LocalPipelineRunner:
                 self.log(
                     "Found completed Genie Sim job with matching idempotency key; reusing outputs.",
                     "INFO",
+                )
+                self._write_marker(
+                    submission_marker,
+                    status="submitted",
+                    payload={
+                        "job_id": prior_job_payload.get("job_id"),
+                        "job_status": prior_status,
+                    },
                 )
                 return StepResult(
                     step=PipelineStep.GENIESIM_SUBMIT,
@@ -4291,6 +4309,15 @@ class LocalPipelineRunner:
             json.dumps(job_payload, indent=2),
             context="geniesim job payload",
         )
+        if job_status != "failed":
+            self._write_marker(
+                submission_marker,
+                status="submitted",
+                payload={
+                    "job_id": job_id,
+                    "job_status": job_status,
+                },
+            )
         try:
             export_job_metrics(job_json_path=job_path)
         except Exception as exc:
@@ -4576,6 +4603,7 @@ class LocalPipelineRunner:
         self.geniesim_dir.mkdir(parents=True, exist_ok=True)
         marker_path = self.geniesim_dir / ".geniesim_import_triggered"
         completion_marker = self.geniesim_dir / ".geniesim_import_complete"
+        submission_marker = self.geniesim_dir / ".geniesim_submitted"
         if completion_marker.is_file():
             self.log(
                 f"Genie Sim import already completed (marker: {completion_marker}).",
@@ -4588,6 +4616,26 @@ class LocalPipelineRunner:
                 "INFO",
             )
             return True
+        if submission_marker.is_file():
+            try:
+                submission_payload = _load_json(
+                    submission_marker,
+                    "Genie Sim submission marker",
+                )
+            except Exception as exc:
+                self.log(
+                    f"Found Genie Sim submission marker but failed to read it: {exc}",
+                    "WARNING",
+                )
+            else:
+                marker_job_id = submission_payload.get("job_id")
+                marker_status = submission_payload.get("job_status") or submission_payload.get("status")
+                self.log(
+                    "Found Genie Sim submission marker"
+                    + (f" for job {marker_job_id}" if marker_job_id else "")
+                    + (f" (status: {marker_status})." if marker_status else "."),
+                    "INFO",
+                )
         job_path = self.geniesim_dir / "job.json"
         resolved_interval = poll_interval
         if resolved_interval is None:
@@ -4597,10 +4645,13 @@ class LocalPipelineRunner:
             )
         resolved_interval = max(1, resolved_interval)
         if not job_path.is_file():
-            self.log(
-                f"Waiting for Genie Sim job metadata at {job_path}...",
-                "INFO",
-            )
+            wait_message = f"Waiting for Genie Sim job metadata at {job_path}..."
+            if submission_marker.is_file():
+                wait_message += (
+                    f" Submission marker exists at {submission_marker},"
+                    " but job.json is still required for polling."
+                )
+            self.log(wait_message, "INFO")
         while not job_path.is_file():
             time.sleep(resolved_interval)
         job_payload = _load_json(job_path, "Genie Sim job payload")
@@ -4987,7 +5038,10 @@ class LocalPipelineRunner:
                 self.geniesim_dir / "merged_scene_manifest.json",
             ]
         if step == PipelineStep.GENIESIM_SUBMIT:
-            return [self.geniesim_dir / "job.json"]
+            return [
+                self.geniesim_dir / "job.json",
+                self.geniesim_dir / ".geniesim_submitted",
+            ]
         if step == PipelineStep.GENIESIM_IMPORT:
             return [self.geniesim_dir / ".geniesim_import_complete"]
         if step == PipelineStep.DWM:
