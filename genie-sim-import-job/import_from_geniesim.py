@@ -122,6 +122,7 @@ from tools.schema_migrations import (
     migrate_dataset_info_payload,
     migrate_import_manifest_payload,
 )
+from tools.tracing.correlation import ensure_request_id
 from tools.firebase_upload.firebase_upload_orchestrator import (
     AtomicUploadTransaction,
     FirebaseUploadOrchestratorError,
@@ -5746,6 +5747,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
     debug_mode = _resolve_debug_mode()
     if debug_mode:
         os.environ["LOG_LEVEL"] = "DEBUG"
+    os.environ["REQUEST_ID"] = ensure_request_id()
     init_logging(level=logging.DEBUG if debug_mode else None)
     log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": os.getenv("SCENE_ID")})
 
