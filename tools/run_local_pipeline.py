@@ -332,7 +332,8 @@ class LocalPipelineRunner:
                 "INFO",
             )
         else:
-            self._step_circuit_breaker = self._initialize_step_circuit_breaker()
+            self._step_circuit_breaker = None
+        self._step_circuit_breaker_persistence_path: Optional[Path] = None
 
     def _resolve_step_dependencies(
         self,
@@ -1395,7 +1396,75 @@ class LocalPipelineRunner:
 
         return report
 
-    def _initialize_step_circuit_breaker(self) -> CircuitBreaker:
+    def _resolve_step_circuit_breaker_path(self) -> Path:
+        return self.scene_dir / ".circuit_breaker.json"
+
+    def _rotate_circuit_breaker_state(self, persistence_path: Path, reason: str) -> None:
+        if persistence_path.exists():
+            timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            rotated_path = persistence_path.with_name(
+                f"{persistence_path.name}.{timestamp}.bak"
+            )
+            persistence_path.replace(rotated_path)
+            self.log(
+                f"[CIRCUIT-BREAKER] Rotated breaker state to {rotated_path} ({reason}).",
+                "INFO",
+            )
+        tmp_path = persistence_path.with_suffix(f"{persistence_path.suffix}.tmp")
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    def _prepare_step_circuit_breaker_persistence(self, reset_breaker: bool) -> Path:
+        persistence_path = self._resolve_step_circuit_breaker_path()
+        persistence_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path = persistence_path.with_suffix(".meta.json")
+        previous_scene_id = None
+        if meta_path.exists():
+            try:
+                payload = json.loads(meta_path.read_text())
+            except json.JSONDecodeError:
+                payload = {}
+            if isinstance(payload, dict):
+                previous_scene_id = payload.get("scene_id")
+
+        if reset_breaker:
+            self._rotate_circuit_breaker_state(persistence_path, "reset flag")
+        elif previous_scene_id and previous_scene_id != self.scene_id:
+            self._rotate_circuit_breaker_state(
+                persistence_path,
+                f"scene changed from {previous_scene_id} to {self.scene_id}",
+            )
+
+        meta_payload = {
+            "scene_id": self.scene_id,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _safe_write_text(
+            meta_path,
+            json.dumps(meta_payload, indent=2),
+            context="circuit breaker metadata",
+        )
+
+        return persistence_path
+
+    def _ensure_step_circuit_breaker(self, *, reset_breaker: bool) -> None:
+        if self._step_circuit_breaker is not None:
+            if reset_breaker:
+                self.log("[CIRCUIT-BREAKER] Resetting provided circuit breaker.", "INFO")
+                self._step_circuit_breaker.reset()
+            return
+
+        persistence_path = self._prepare_step_circuit_breaker_persistence(reset_breaker)
+        self._step_circuit_breaker_persistence_path = persistence_path
+        self._step_circuit_breaker = self._initialize_step_circuit_breaker(
+            persistence_path=persistence_path
+        )
+
+    def _initialize_step_circuit_breaker(
+        self,
+        *,
+        persistence_path: Optional[Path] = None,
+    ) -> CircuitBreaker:
         """
         Initialize circuit breaker for step-level failure protection (P1).
 
@@ -1405,6 +1474,7 @@ class LocalPipelineRunner:
         failure_threshold = int(os.getenv("PIPELINE_CIRCUIT_BREAKER_FAILURES", "3"))
         success_threshold = int(os.getenv("PIPELINE_CIRCUIT_BREAKER_SUCCESSES", "2"))
         recovery_timeout = float(os.getenv("PIPELINE_CIRCUIT_BREAKER_RECOVERY_S", "60"))
+        should_log_load = bool(persistence_path and persistence_path.exists())
 
         def on_open(name: str, failure_count: int) -> None:
             self.log(
@@ -1425,7 +1495,7 @@ class LocalPipelineRunner:
                 "INFO",
             )
 
-        return CircuitBreaker(
+        breaker = CircuitBreaker(
             name=f"pipeline_{self.scene_id}",
             failure_threshold=failure_threshold,
             success_threshold=success_threshold,
@@ -1433,7 +1503,14 @@ class LocalPipelineRunner:
             on_open=on_open,
             on_half_open=on_half_open,
             on_close=on_close,
+            persistence_path=persistence_path,
         )
+        if should_log_load:
+            self.log(
+                f"[CIRCUIT-BREAKER] Loaded breaker state from {persistence_path}.",
+                "INFO",
+            )
+        return breaker
 
     def run(
         self,
@@ -1441,6 +1518,7 @@ class LocalPipelineRunner:
         run_validation: bool = False,
         resume_from: Optional[PipelineStep] = None,
         force_rerun_steps: Optional[List[PipelineStep]] = None,
+        reset_breaker: bool = False,
         auto_trigger_import: Optional[bool] = None,
     ) -> bool:
         """Run the pipeline.
@@ -1450,6 +1528,7 @@ class LocalPipelineRunner:
             run_validation: Run QA validation at the end
             resume_from: Resume from the given step (skip completed steps with checkpoints)
             force_rerun_steps: Steps to rerun even if checkpoints exist
+            reset_breaker: Reset the step circuit breaker persistence for this run
             auto_trigger_import: Run genie-sim-import after a completed submit when not scheduled.
                 Defaults to True if genie-sim-submit is in steps and import is not.
 
@@ -1479,6 +1558,8 @@ class LocalPipelineRunner:
 
         if run_validation and PipelineStep.VALIDATE not in steps:
             steps.append(PipelineStep.VALIDATE)
+
+        self._ensure_step_circuit_breaker(reset_breaker=reset_breaker)
 
         if resume_from is not None:
             checkpoint_store = get_checkpoint_store(self.scene_dir, self.scene_id)
@@ -5067,6 +5148,11 @@ def main():
         help="Stop the pipeline immediately on the first failure",
     )
     parser.add_argument(
+        "--reset-breaker",
+        action="store_true",
+        help="Reset the step circuit breaker state before running",
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Reduce output verbosity",
@@ -5171,6 +5257,7 @@ def main():
         run_validation=args.validate,
         resume_from=resume_from,
         force_rerun_steps=force_rerun_steps,
+        reset_breaker=args.reset_breaker,
         auto_trigger_import=auto_trigger_import,
     )
 
