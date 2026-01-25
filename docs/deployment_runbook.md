@@ -246,6 +246,52 @@ Optionally run a canary workflow with a known scene ID:
 gcloud workflows run blueprint-pipeline --data='{ "scene_id": "<scene_id>" }'
 ```
 
+## Smoke Test (10–15 minutes)
+
+Use this quick-start to validate the pipeline in production mode with a single scene. For a full
+end-to-end production validation (no mock fallbacks, quality thresholds, and full artifact checks),
+see [docs/PRODUCTION_E2E_VALIDATION.md](PRODUCTION_E2E_VALIDATION.md).
+
+1. Generate mock regen3d fixtures (local staging or seed GCS inputs):
+
+   ```bash
+   python fixtures/generate_mock_regen3d.py --output-dir /tmp/regen3d-fixtures
+   ```
+
+2. Run a single-scene pipeline in production mode with Genie Sim enabled:
+
+   ```bash
+   PIPELINE_ENV=production \
+   USE_GENIESIM=true \
+   python tools/run_local_pipeline.py \
+     --scene-dir /mnt/gcs/scenes/<scene_id> \
+     --use-geniesim
+   ```
+
+3. Expected artifacts (Genie Sim outputs + episodes + markers):
+
+   - `scenes/<scene_id>/geniesim/scene_graph.json`
+   - `scenes/<scene_id>/geniesim/asset_index.json`
+   - `scenes/<scene_id>/geniesim/task_config.json`
+   - `scenes/<scene_id>/geniesim/job.json`
+   - `scenes/<scene_id>/geniesim/merged_scene_manifest.json`
+   - `scenes/<scene_id>/geniesim/.geniesim_complete`
+   - `scenes/<scene_id>/episodes/.episodes_complete`
+   - `scenes/<scene_id>/episodes/geniesim_<job_id>/import_manifest.json`
+   - `scenes/<scene_id>/variation_assets/.variation_pipeline_complete`
+   - `scenes/<scene_id>/usd/.usd_complete`
+
+4. Firebase/GCS verification:
+
+   ```bash
+   python - <<'PY'
+from tools.firebase_upload import preflight_firebase_connectivity
+print(preflight_firebase_connectivity())
+PY
+
+   gsutil ls gs://<bucket>/scenes/<scene_id>/episodes/
+   ```
+
 ## Canary deployment process
 
 Use the canary pipeline to route a tagged subset of scenes through a new Genie Sim image tag before
