@@ -54,6 +54,8 @@ def test_on_in_edges_marked_heuristic_without_physics_metadata() -> None:
         physics_contact_depth_threshold=0.001,
         physics_containment_ratio_threshold=0.8,
         heuristic_confidence_scale=0.5,
+        allow_unvalidated_input=True,
+        require_physics_validation=False,
     )
     inferencer = RelationInferencer(verbose=False, config=config)
 
@@ -77,3 +79,14 @@ def test_on_in_edges_marked_heuristic_without_physics_metadata() -> None:
     assert on_edge.confidence == pytest.approx(0.8 * 0.5)
     assert in_edge.metadata.get("inference_method") == "heuristic"
     assert in_edge.confidence == pytest.approx(0.9 * 0.5)
+
+
+def test_strict_physics_validation_raises_without_isaac(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(scene_graph, "HAVE_PIPELINE_CONFIG", False)
+    monkeypatch.setattr(scene_graph, "resolve_production_mode", lambda: True)
+    monkeypatch.setattr(scene_graph, "_is_isaac_sim_available", lambda: False)
+    monkeypatch.delenv("BP_SCENE_GRAPH_ALLOW_HEURISTICS_IN_PROD", raising=False)
+    scene_graph._SCENE_GRAPH_CONFIG = None
+
+    with pytest.raises(RuntimeError, match="Isaac Sim"):
+        scene_graph._load_scene_graph_runtime_config()

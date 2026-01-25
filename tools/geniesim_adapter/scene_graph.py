@@ -191,6 +191,7 @@ class SceneGraphRuntimeConfig:
     physics_containment_ratio_threshold: float
     heuristic_confidence_scale: float
     allow_unvalidated_input: bool
+    require_physics_validation: bool
 
 
 _SCENE_GRAPH_CONFIG: Optional[SceneGraphRuntimeConfig] = None
@@ -349,7 +350,11 @@ def _is_isaac_sim_available() -> bool:
     return False
 
 
-def _resolve_physics_validation_default() -> bool:
+def _resolve_physics_validation_default(
+    *,
+    require_physics_validation: bool,
+    allow_heuristics_in_prod: bool,
+) -> bool:
     """P0 FIX: Resolve physics validation default based on environment.
 
     Physics validation ensures spatial relations (on, in) are physically accurate
@@ -357,7 +362,7 @@ def _resolve_physics_validation_default() -> bool:
 
     In production mode:
     - If Isaac Sim is available: ENABLE physics validation (more accurate)
-    - If Isaac Sim is not available: DISABLE but log a WARNING
+    - If Isaac Sim is not available: ERROR unless heuristics are explicitly allowed
 
     In development mode:
     - Default to False (faster iteration)
@@ -382,15 +387,21 @@ def _resolve_physics_validation_default() -> bool:
             "Spatial relations will be validated against physics simulation data."
         )
         return True
-    else:
+    if allow_heuristics_in_prod or not require_physics_validation:
         logger.warning(
-            "P0 WARNING: Physics validation DISABLED in production because Isaac Sim is not available. "
-            "Spatial relations will use heuristics only, which may be less accurate. "
-            "To enable physics validation, set ISAAC_SIM_PATH to the Isaac Sim installation directory, "
-            "or run in an Isaac Sim Python environment. "
-            "To suppress this warning, explicitly set BP_SCENE_GRAPH_ENABLE_PHYSICS_VALIDATION=false."
+            "P0 WARNING: Physics validation explicitly disabled in production while Isaac Sim is unavailable. "
+            "Spatial relations will use heuristics only. "
+            "Set ISAAC_SIM_PATH to enable physics validation."
         )
         return False
+
+    raise RuntimeError(
+        "Physics validation is required in production, but Isaac Sim is unavailable. "
+        "Set ISAAC_SIM_PATH to the Isaac Sim installation directory or "
+        "explicitly disable strict mode by setting "
+        "scene_graph.validation.require_physics_validation=false or "
+        "BP_SCENE_GRAPH_ALLOW_HEURISTICS_IN_PROD=true."
+    )
 
 
 def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
@@ -402,6 +413,7 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         pipeline_config = load_pipeline_config()
         relation_config = pipeline_config.scene_graph.relation_inference
         streaming_config = pipeline_config.scene_graph.streaming
+        validation_config = pipeline_config.scene_graph.validation
         vertical_default = relation_config.vertical_proximity_threshold
         horizontal_default = relation_config.horizontal_proximity_threshold
         alignment_default = relation_config.alignment_angle_threshold
@@ -410,7 +422,8 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         containment_ratio_default = relation_config.physics_containment_ratio_threshold
         heuristic_confidence_default = relation_config.heuristic_confidence_scale
         batch_default = streaming_config.batch_size
-        allow_unvalidated_default = pipeline_config.scene_graph.validation.allow_unvalidated_input
+        allow_unvalidated_default = validation_config.allow_unvalidated_input
+        require_physics_validation_default = validation_config.require_physics_validation
         vertical_source = (
             "pipeline_config.scene_graph.relation_inference.vertical_proximity_threshold"
         )
@@ -434,14 +447,22 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
             "pipeline_config.scene_graph.relation_inference.heuristic_confidence_scale"
         )
         allow_unvalidated_source = "pipeline_config.scene_graph.validation.allow_unvalidated_input"
+        require_physics_validation_source = (
+            "pipeline_config.scene_graph.validation.require_physics_validation"
+        )
     else:
+        require_physics_validation_default = resolve_production_mode()
         vertical_default = 0.05
         horizontal_default = 0.15
         alignment_default = 5.0
         # P0 FIX: Enable physics validation by default when Isaac Sim is available
         # Physics validation ensures spatial relations (on, in) are physically accurate
         # In production, heuristics-only validation can produce invalid relations
-        physics_validation_default = _resolve_physics_validation_default()
+        physics_validation_default = _resolve_physics_validation_default(
+            require_physics_validation=require_physics_validation_default,
+            allow_heuristics_in_prod=os.getenv("BP_SCENE_GRAPH_ALLOW_HEURISTICS_IN_PROD", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+        )
         contact_depth_default = 0.001
         containment_ratio_default = 0.8
         heuristic_confidence_default = 0.6
@@ -456,6 +477,7 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         containment_ratio_source = "scene_graph.defaults.physics_containment_ratio_threshold"
         heuristic_confidence_source = "scene_graph.defaults.heuristic_confidence_scale"
         allow_unvalidated_source = "scene_graph.defaults.allow_unvalidated_input"
+        require_physics_validation_source = "scene_graph.defaults.require_physics_validation"
 
     vertical_value, vertical_value_source = _resolve_env_float(
         "BP_SCENE_GRAPH_VERTICAL_PROXIMITY_THRESHOLD",
@@ -502,6 +524,35 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         allow_unvalidated_default,
         allow_unvalidated_source,
     )
+    require_physics_validation_value, require_physics_validation_source = _resolve_env_bool(
+        "BP_SCENE_GRAPH_REQUIRE_PHYSICS_VALIDATION",
+        require_physics_validation_default,
+        require_physics_validation_source,
+    )
+    allow_heuristics_in_prod_value, allow_heuristics_in_prod_source = _resolve_env_bool(
+        "BP_SCENE_GRAPH_ALLOW_HEURISTICS_IN_PROD",
+        False,
+        "scene_graph.defaults.allow_heuristics_in_prod",
+    )
+
+    production_mode = resolve_production_mode()
+    isaac_available = _is_isaac_sim_available()
+    explicit_disable_reason: Optional[str] = None
+    if production_mode and not isaac_available:
+        if allow_heuristics_in_prod_value:
+            explicit_disable_reason = f"{allow_heuristics_in_prod_source}=true"
+            physics_validation_value = False
+        elif not require_physics_validation_value:
+            explicit_disable_reason = f"{require_physics_validation_source}=false"
+            physics_validation_value = False
+        else:
+            raise RuntimeError(
+                "Physics validation is required in production, but Isaac Sim is unavailable. "
+                "Set ISAAC_SIM_PATH to the Isaac Sim installation directory or "
+                "explicitly disable strict mode by setting "
+                "scene_graph.validation.require_physics_validation=false or "
+                "BP_SCENE_GRAPH_ALLOW_HEURISTICS_IN_PROD=true."
+            )
 
     config = SceneGraphRuntimeConfig(
         vertical_proximity_threshold=_validate_scene_graph_threshold(
@@ -525,14 +576,32 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         physics_containment_ratio_threshold=containment_ratio_value,
         heuristic_confidence_scale=heuristic_confidence_value,
         allow_unvalidated_input=allow_unvalidated_value,
+        require_physics_validation=require_physics_validation_value,
     )
+
+    if not config.enable_physics_validation:
+        if explicit_disable_reason:
+            logger.warning(
+                "Physics validation explicitly disabled (%s). Heuristic relation inference will be used.",
+                explicit_disable_reason,
+            )
+        elif physics_validation_source.startswith(("env:", "pipeline_config")):
+            logger.info(
+                "Physics validation explicitly disabled via %s.",
+                physics_validation_source,
+            )
+        elif not isaac_available:
+            logger.warning(
+                "Physics validation implicitly disabled because Isaac Sim is not available. "
+                "Set ISAAC_SIM_PATH to enable physics validation.",
+            )
 
     logger.info(
         "Scene graph config: vertical_proximity_threshold=%.3f, horizontal_proximity_threshold=%.3f, "
         "alignment_angle_threshold=%.3f, streaming_batch_size=%d, "
         "enable_physics_validation=%s, physics_contact_depth_threshold=%.4f, "
         "physics_containment_ratio_threshold=%.3f, heuristic_confidence_scale=%.2f, "
-        "allow_unvalidated_input=%s",
+        "allow_unvalidated_input=%s, require_physics_validation=%s",
         config.vertical_proximity_threshold,
         config.horizontal_proximity_threshold,
         config.alignment_angle_threshold,
@@ -542,6 +611,7 @@ def _load_scene_graph_runtime_config() -> SceneGraphRuntimeConfig:
         config.physics_containment_ratio_threshold,
         config.heuristic_confidence_scale,
         config.allow_unvalidated_input,
+        config.require_physics_validation,
     )
 
     _SCENE_GRAPH_CONFIG = config

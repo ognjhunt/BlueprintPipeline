@@ -177,7 +177,8 @@
     },
     "validation": {
       "allow_unvalidated_input": true,
-      "description": "Allow fallback sanitization when validation utilities are unavailable (non-production only)."
+      "require_physics_validation": true,
+      "description": "Validation options including fallback sanitization (non-production) and strict physics validation enforcement."
     }
   },
   "ab_testing": {
