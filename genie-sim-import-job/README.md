@@ -22,6 +22,13 @@ The minimum quality score for imports is defined in `quality_config.json`. You c
 
 LeRobot conversion failures are enforced by default in production or service mode. When `REQUIRE_LEROBOT` is unset, the import job defaults to requiring LeRobot conversion if `production_mode` or service mode is active. Set `REQUIRE_LEROBOT=false` to opt out in development workflows, and check the startup logs/import manifest for the resolved default that was applied.
 
+## HMAC signature
+
+When `CHECKSUMS_HMAC_KEY` is set, the import job signs `checksums.json` with an
+HMAC-SHA256 signature and includes the optional `CHECKSUMS_HMAC_KEY_ID` in the
+signature payload. Rotation and verification steps are documented in the
+operations runbook: [`docs/operations/checksums-hmac-rotation.md`](../docs/operations/checksums-hmac-rotation.md).
+
 ## Episode bundle layout
 
 The import job expects a bundled episode layout that mirrors the directory checks in `import_from_geniesim.py` (see `_resolve_recordings_dir`, `lerobot_dir = output_dir / "lerobot"`, and `_resolve_lerobot_info_path`) so operators can map errors back to the code paths that enforce them.
