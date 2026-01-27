@@ -67,6 +67,17 @@ When a pipeline gate is overridden (manual approval to proceed despite validatio
 4. **Retrospective**
    - Decide whether to codify the exception (fix the gate) or tighten validation rules.
 
+## Monitoring gate controls
+
+The episode-generation workflow checks for required monitoring resources in production. If a non-production run needs to
+proceed while monitoring assets are still being set up, set `MONITORING_GATE_STRICT=false` to log missing resources and
+continue. The gate expects the following assets to exist by exact name:
+
+- Dashboards: `BlueprintPipeline - Overview`, `BlueprintPipeline - GPU Metrics`
+- Alert policies: `[Blueprint] Workflow Job Timeout Detected`, `[Blueprint] Workflow Job Retry Spike`
+- Log-based metrics: `blueprint_job_timeout_events`, `blueprint_job_retry_exhausted_total`,
+  `blueprint_job_timeout_usage_ratio`, `blueprint_geniesim_sla_violations`, `blueprint_job_failure_events`
+
 ## Backup and restore steps
 
 > Note: Update these steps with environment-specific bucket names and retention policies.
