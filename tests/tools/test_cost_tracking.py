@@ -89,7 +89,7 @@ def test_cost_tracker_rejects_missing_pricing_in_production(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("BP_ENV", "production")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.delenv("GENIESIM_JOB_COST", raising=False)
     monkeypatch.delenv("GENIESIM_EPISODE_COST", raising=False)
 
@@ -102,7 +102,7 @@ def test_cost_tracker_rejects_missing_pricing_config_in_production(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("BP_ENV", "production")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.setenv("GENIESIM_JOB_COST", "1.25")
     monkeypatch.setenv("GENIESIM_EPISODE_COST", "0.03")
     monkeypatch.delenv("COST_TRACKING_PRICING_JSON", raising=False)
@@ -117,8 +117,7 @@ def test_cost_tracker_uses_defaults_in_non_prod(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("BP_ENV", raising=False)
-    monkeypatch.delenv("GENIESIM_ENV", raising=False)
+    monkeypatch.delenv("PIPELINE_ENV", raising=False)
     monkeypatch.delenv("GENIESIM_JOB_COST", raising=False)
     monkeypatch.delenv("GENIESIM_EPISODE_COST", raising=False)
 

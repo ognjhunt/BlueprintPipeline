@@ -2172,7 +2172,7 @@ def prepare_simready_assets_job(
         logger.warning(
             "[SIMREADY] Deterministic physics requested but production mode is unset. "
             "If this run is meant to mirror production, set PIPELINE_ENV=production "
-            "(or legacy SIMREADY_PRODUCTION_MODE=1)."
+            "(legacy SIMREADY_PRODUCTION_MODE=1 is deprecated; removal after 2025-12-31)."
         )
 
     print(f"[SIMREADY] Bucket={bucket}")

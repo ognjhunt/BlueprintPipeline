@@ -111,7 +111,7 @@ docker build -t blueprint-isaac-sim:latest .
 
 # Run episode generation
 docker run --gpus all \
-  -e PRODUCTION_MODE=true \
+  -e PIPELINE_ENV=production \
   -e SCENE_ID=kitchen_001 \
   -e NUM_EPISODES=100 \
   -v $(pwd)/output:/output \
@@ -208,7 +208,7 @@ For production episode generation with full physics validation:
 
 ```bash
 # Production mode enforces Isaac Sim usage and prevents mock fallback
-PRODUCTION_MODE=true \
+PIPELINE_ENV=production \
 SCENE_ID=kitchen_scene_001 \
 NUM_EPISODES=100 \
 ROBOT_TYPE=franka \
@@ -220,7 +220,7 @@ MIN_QUALITY_SCORE=0.8 \
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `PRODUCTION_MODE` | Enforce Isaac Sim (no mock) | `false` | Yes (for prod) |
+| `PIPELINE_ENV` | Pipeline environment (set to `production` for Isaac Sim enforcement) | `development` | Yes (for prod) |
 | `SCENE_ID` | Scene identifier | - | Yes |
 | `NUM_EPISODES` | Episodes to generate | `10` | No |
 | `ROBOT_TYPE` | Robot type (franka, ur5, etc.) | `franka` | No |
@@ -250,8 +250,8 @@ spec:
         args:
           - "/workspace/BlueprintPipeline/episode-generation-job/generate_episodes.py"
         env:
-          - name: PRODUCTION_MODE
-            value: "true"
+          - name: PIPELINE_ENV
+            value: "production"
           - name: SCENE_ID
             value: "kitchen_001"
           - name: NUM_EPISODES

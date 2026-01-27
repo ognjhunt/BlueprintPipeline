@@ -111,7 +111,7 @@ scenes/{scene_id}/geniesim/
 
 ### Production Embedding Requirements
 
-When `GENIESIM_ENV`/`BP_ENV` resolves to `production`, embedding generation is required and placeholder embeddings
+When `PIPELINE_ENV` resolves to `production`, embedding generation is required and placeholder embeddings
 are disallowed. Ensure `REQUIRE_EMBEDDINGS=true` (or remove overrides) whenever `GENERATE_EMBEDDINGS=true`, and
 provide an embedding provider API key (for example, `OPENAI_API_KEY` or `QWEN_API_KEY`/`DASHSCOPE_API_KEY`) and
 matching embedding model environment variables so the job can complete successfully.

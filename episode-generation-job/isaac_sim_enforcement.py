@@ -13,7 +13,7 @@ Key Principles:
 4. No silent degradation - fail fast with clear error messages
 
 Environment Variables:
-    PRODUCTION_MODE: Set to "true" for production enforcement (default: false)
+    PIPELINE_ENV: Set to "production" for production enforcement (default: development)
     ALLOW_MOCK_CAPTURE: Set to "true" to allow mock sensor data (default: false)
     ISAAC_SIM_REQUIRED: Force Isaac Sim requirement (default: false)
     DATA_QUALITY_LEVEL: Expected quality level (production|development|test)
@@ -201,7 +201,7 @@ def enforce_isaac_sim_for_production(
                 "\n"
                 "Options:\n"
                 "1. Run in Isaac Sim environment (use Dockerfile.isaacsim)\n"
-                "2. Set PRODUCTION_MODE=false for development/testing\n"
+                "2. Set PIPELINE_ENV=development for development/testing\n"
                 "3. Use pre-generated episodes from Genie Sim 3.0\n"
                 "\n"
                 "Current environment:\n"

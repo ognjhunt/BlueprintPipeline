@@ -27,7 +27,7 @@ data:
   GENIESIM_CLEANUP_TMP: "0"
   # Production pipeline settings
   PIPELINE_ENV: "production"
-  PRODUCTION_MODE: "true"
+  PIPELINE_ENV: "production"
   LEROBOT_EXPORT_FORMAT: "lerobot_v3"
   REQUIRE_LEROBOT: "true"
   ENABLE_REALTIME_STREAMING: "1"

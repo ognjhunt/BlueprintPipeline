@@ -38,7 +38,7 @@ The published document includes:
 | `ASSET_CATALOG_COLLECTION` | Collection name for metadata | `asset_metadata` |
 | `ASSET_CATALOG_CREDENTIALS` | Path to service account JSON | None |
 | `ASSET_CATALOG_EMULATOR_HOST` | Host for emulator/local testing | None |
-| `SIMREADY_PRODUCTION_MODE` | Enforce production physics rules (requires Gemini or deterministic mode) | `false` |
+| `SIMREADY_PRODUCTION_MODE` | Legacy production indicator (deprecated; use `PIPELINE_ENV=production`) | `false` |
 | `SIMREADY_PHYSICS_MODE` | Physics estimation mode (`auto`/`gemini`/`deterministic`) | `auto` |
 | `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | Allow deterministic (LLM-free) physics estimation when Gemini is unavailable | `false` |
 | `SIMREADY_ALLOW_HEURISTIC_FALLBACK` | Allow heuristic-only physics estimation in CI/testing when Gemini and deterministic modes are unavailable | `false` |
@@ -54,7 +54,7 @@ with local metadata.
 Simready prefers Gemini-backed physics estimation. When Gemini is unavailable,
 you can enable **deterministic physics** (LLM-free, metadata/material-driven)
 by setting `SIMREADY_PHYSICS_MODE=deterministic` or `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS=1`.
-In **production mode** (`SIMREADY_PRODUCTION_MODE=1` or `PIPELINE_ENV=production`),
+In **production mode** (`PIPELINE_ENV=production`),
 Gemini is required unless deterministic mode is explicitly enabled; heuristic-only
 physics is rejected and the job exits with an error. In production, Gemini
 credentials must come from Secret Manager; env var fallbacks are rejected.
@@ -82,12 +82,10 @@ approximations in reports.
 ### Production modes (free vs. paid)
 
 **Free production (deterministic, no Gemini)**:
-- Required flags: `SIMREADY_PRODUCTION_MODE=1` (or `PIPELINE_ENV=production`) and
-  `SIMREADY_PHYSICS_MODE=deterministic`.
+- Required flags: `PIPELINE_ENV=production` and `SIMREADY_PHYSICS_MODE=deterministic`.
 - Enforces `SIMREADY_FALLBACK_MIN_COVERAGE` and `SIMREADY_NON_LLM_MIN_QUALITY`.
 
 **Paid production (Gemini-backed)**:
-- Required flags: `SIMREADY_PRODUCTION_MODE=1` (or `PIPELINE_ENV=production`) and
-  either `SIMREADY_PHYSICS_MODE=gemini` or `SIMREADY_PHYSICS_MODE=auto` with Gemini
-  credentials available.
+- Required flags: `PIPELINE_ENV=production` and either `SIMREADY_PHYSICS_MODE=gemini`
+  or `SIMREADY_PHYSICS_MODE=auto` with Gemini credentials available.
 - Configure `gemini-api-key` in Secret Manager (production rejects env var fallbacks).

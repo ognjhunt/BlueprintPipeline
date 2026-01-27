@@ -28,7 +28,7 @@ Supported environment variables (read by `LLMClient` helpers):
   - `ANTHROPIC_MODEL` (default `claude-sonnet-4-5-20250929`)
   - `OPENAI_MODEL` (default `gpt-5.1`)【F:tools/llm_client/client.py†L10-L43】
 
-Secret Manager integration is enforced in production via `_get_secret_or_env_with_log`, which requires secrets in Secret Manager when `PRODUCTION`, `K_SERVICE`, or `KUBERNETES_SERVICE_HOST` indicates a production environment.【F:tools/llm_client/client.py†L55-L124】
+Secret Manager integration is enforced in production via `_get_secret_or_env_with_log`, which requires secrets in Secret Manager when `PIPELINE_ENV` resolves to production (via `resolve_production_mode`) or when `K_SERVICE`/`KUBERNETES_SERVICE_HOST` indicates a production runtime.【F:tools/llm_client/client.py†L55-L124】
 
 ## Request/response payloads & data models
 
@@ -69,4 +69,3 @@ response = client.generate(
 print(response.text)
 print(response.parse_json())
 ```
-
