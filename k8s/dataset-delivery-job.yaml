@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: dataset-delivery
-          image: ghcr.io/${PROJECT_ID}/blueprint-dataset-delivery:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-dataset-delivery:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "dataset_delivery.py"]

@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: scene-generation
-          image: ghcr.io/${PROJECT_ID}/blueprint-scene-generation:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-scene-generation:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "generate_scene_images.py"]
