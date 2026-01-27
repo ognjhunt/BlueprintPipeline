@@ -14,8 +14,6 @@
 #   docker-compose -f docker-compose.geniesim-server.yaml up
 # =============================================================================
 
-version: "3.8"
-
 services:
   geniesim-server:
     image: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:4.1.0}

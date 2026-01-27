@@ -5,8 +5,9 @@ GENIESIM_ROOT=${GENIESIM_ROOT:-/opt/geniesim}
 ISAAC_SIM_PATH=${ISAAC_SIM_PATH:-/isaac-sim}
 GENIESIM_REPO=${GENIESIM_REPO:-https://github.com/AgibotTech/genie_sim.git}
 
-if [ ! -d "${GENIESIM_ROOT}" ] || [ -z "$(ls -A "${GENIESIM_ROOT}" 2>/dev/null)" ]; then
+if [ ! -d "${GENIESIM_ROOT}/.git" ]; then
   echo "[geniesim] Cloning Genie Sim into ${GENIESIM_ROOT}"
+  rm -rf "${GENIESIM_ROOT:?}"/* 2>/dev/null || true
   mkdir -p "${GENIESIM_ROOT}"
   git clone "${GENIESIM_REPO}" "${GENIESIM_ROOT}"
 else
