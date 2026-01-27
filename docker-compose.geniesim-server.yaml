@@ -18,9 +18,10 @@ version: "3.8"
 
 services:
   geniesim-server:
-    image: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:2024.1.0}
+    image: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:4.1.0}
     container_name: geniesim-server
     environment:
+      ACCEPT_EULA: "Y"
       ISAAC_SIM_PATH: ${ISAAC_SIM_PATH:-/isaac-sim}
       GENIESIM_ROOT: ${GENIESIM_ROOT:-/opt/geniesim}
       GENIESIM_REPO: ${GENIESIM_REPO:-https://github.com/AgibotTech/genie_sim.git}
