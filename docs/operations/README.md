@@ -12,6 +12,7 @@ starting point for incident response, on-call routines, and runtime troubleshoot
 - Scripts overview: [`scripts/README.md`](../../scripts/README.md)
 - Workflow timeouts: [`workflows/TIMEOUT_AND_RETRY_POLICY.md`](../../workflows/TIMEOUT_AND_RETRY_POLICY.md)
 - Disaster recovery (RTO/RPO): [`docs/operations/disaster-recovery.md`](./disaster-recovery.md)
+- Checksums HMAC rotation: [`docs/operations/checksums-hmac-rotation.md`](./checksums-hmac-rotation.md)
 
 ## Incident response
 
