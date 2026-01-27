@@ -49,23 +49,87 @@ main:
           # Default/fallback
           - condition: true
             steps:
-              - log_missing_data:
+              - log_malformed_event:
                   call: sys.log
                   args:
-                    text: "Missing required event data. Event must contain job_id and output_path"
+                    data:
+                      bp_metric: "malformed_event"
+                      workflow: "training-pipeline"
+                      required_fields:
+                        - job_id
+                        - output_path
+                      error:
+                        code: "invalid_event_payload"
+                        message: "Missing required event data. Event must contain job_id and output_path."
+                      remediation: "Ensure the Eventarc payload includes job_id and output_path in event or event.data."
+                      raw_event: ${event}
                     severity: ERROR
-              - raise_invalid_event:
-                  raise:
-                    message: "Invalid event payload: missing required fields"
+              - return_invalid_event:
+                  return:
+                    status: "error"
+                    error:
+                      code: "invalid_event_payload"
+                      message: "Missing required event data. Event must contain job_id and output_path."
+                      required_fields:
+                        - job_id
+                        - output_path
+                      remediation: "Ensure the Eventarc payload includes job_id and output_path in event or event.data."
+                      raw_event: ${event}
 
     - validate_inputs:
         switch:
           - condition: ${job_id == null or job_id == ""}
-            raise:
-              message: "job_id is required"
+            steps:
+              - log_missing_job_id:
+                  call: sys.log
+                  args:
+                    data:
+                      bp_metric: "malformed_event"
+                      workflow: "training-pipeline"
+                      required_fields:
+                        - job_id
+                      error:
+                        code: "missing_job_id"
+                        message: "job_id is required."
+                      remediation: "Provide job_id in the event payload (event.job_id or event.data.job_id)."
+                      raw_event: ${event}
+                    severity: ERROR
+              - return_missing_job_id:
+                  return:
+                    status: "error"
+                    error:
+                      code: "missing_job_id"
+                      message: "job_id is required."
+                      required_fields:
+                        - job_id
+                      remediation: "Provide job_id in the event payload (event.job_id or event.data.job_id)."
+                      raw_event: ${event}
           - condition: ${output_path == null or output_path == ""}
-            raise:
-              message: "output_path is required"
+            steps:
+              - log_missing_output_path:
+                  call: sys.log
+                  args:
+                    data:
+                      bp_metric: "malformed_event"
+                      workflow: "training-pipeline"
+                      required_fields:
+                        - output_path
+                      error:
+                        code: "missing_output_path"
+                        message: "output_path is required."
+                      remediation: "Provide output_path in the event payload (event.output_path or event.data.output_path)."
+                      raw_event: ${event}
+                    severity: ERROR
+              - return_missing_output_path:
+                  return:
+                    status: "error"
+                    error:
+                      code: "missing_output_path"
+                      message: "output_path is required."
+                      required_fields:
+                        - output_path
+                      remediation: "Provide output_path in the event payload (event.output_path or event.data.output_path)."
+                      raw_event: ${event}
         next: set_training_markers
 
     - set_training_markers:
