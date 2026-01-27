@@ -117,6 +117,7 @@ from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.logging_config import init_logging
+from tools.secrets.secret_manager import get_secret_or_env
 from tools.schema_migrations import (
     DATASET_INFO_SCHEMA_VERSION,
     SchemaMigrationError,
@@ -183,6 +184,11 @@ JOB_NAME = "genie-sim-import-job"
 logger = logging.getLogger(__name__)
 DEFAULT_VIDEO_CAMERA_ID = "camera"
 VIDEO_CHUNK_SIZE = 1000
+# Secret Manager IDs + env var fallbacks for checksums signing.
+CHECKSUMS_HMAC_KEY_SECRET_ID = "checksums-hmac-key"
+CHECKSUMS_HMAC_KEY_ENV_VAR = "CHECKSUMS_HMAC_KEY"
+CHECKSUMS_HMAC_KEY_ID_SECRET_ID = "checksums-hmac-key-id"
+CHECKSUMS_HMAC_KEY_ID_ENV_VAR = "CHECKSUMS_HMAC_KEY_ID"
 
 
 class DeliveryMarkerExistsError(RuntimeError):
@@ -2425,9 +2431,18 @@ def _write_checksums_file(
         "files": checksums,
     }
     signature = None
-    hmac_key = os.getenv("CHECKSUMS_HMAC_KEY")
+    production_mode = resolve_production_mode()
+    hmac_key = get_secret_or_env(
+        CHECKSUMS_HMAC_KEY_SECRET_ID,
+        env_var=CHECKSUMS_HMAC_KEY_ENV_VAR,
+        fallback_to_env=not production_mode,
+    )
     if hmac_key:
-        key_id = os.getenv("CHECKSUMS_HMAC_KEY_ID")
+        key_id = get_secret_or_env(
+            CHECKSUMS_HMAC_KEY_ID_SECRET_ID,
+            env_var=CHECKSUMS_HMAC_KEY_ID_ENV_VAR,
+            fallback_to_env=not production_mode,
+        )
         signature = compute_checksums_signature(payload, hmac_key, key_id=key_id)
         payload["signature"] = signature
     with open(checksums_path, "w") as handle:
