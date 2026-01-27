@@ -36,9 +36,8 @@ services:
       - isaac-sim-cache:/root/.cache/ov
       - isaac-sim-data:/root/.local/share/ov
     working_dir: /workspace/BlueprintPipeline
+    entrypoint: ["/bin/bash", "-lc"]
     command:
-      - /bin/bash
-      - -lc
       - >
         ./tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh &&
         tail -f ${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
