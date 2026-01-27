@@ -432,3 +432,37 @@ variable "labels" {
     project    = "blueprint-pipeline"
   }
 }
+
+# =============================================================================
+# Monitoring
+# =============================================================================
+
+variable "monitoring_dashboard_overview_name" {
+  type        = string
+  description = "Display name for the pipeline overview dashboard."
+  default     = "BlueprintPipeline - Overview"
+}
+
+variable "monitoring_dashboard_gpu_name" {
+  type        = string
+  description = "Display name for the GPU metrics dashboard."
+  default     = "BlueprintPipeline - GPU Metrics"
+}
+
+variable "monitoring_alert_workflow_timeout_name" {
+  type        = string
+  description = "Display name for the workflow job timeout alert policy."
+  default     = "[Blueprint] Workflow Job Timeout Detected"
+}
+
+variable "monitoring_alert_workflow_retry_spike_name" {
+  type        = string
+  description = "Display name for the workflow retry spike alert policy."
+  default     = "[Blueprint] Workflow Job Retry Spike"
+}
+
+variable "monitoring_notification_channel_ids" {
+  type        = list(string)
+  description = "Notification channel IDs for monitoring alert policies."
+  default     = []
+}

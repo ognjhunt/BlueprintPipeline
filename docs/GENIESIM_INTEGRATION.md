@@ -28,6 +28,11 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
   - `FIREBASE_SERVICE_ACCOUNT_JSON` or `FIREBASE_SERVICE_ACCOUNT_PATH`
   - Optional prefix: `FIREBASE_UPLOAD_PREFIX` (used by import after validation).
   - Optional total timeout: `FIREBASE_UPLOAD_TIMEOUT_TOTAL_SECONDS` (global budget for batch uploads).
+    - **Recommended default:** keep the canonical `3600` seconds unless you have unusually large batches or slow upload
+      throughput; tune upward for multi-hour backfills and downward for tight turnarounds. See
+      [`tools/config/ENVIRONMENT_VARIABLES.md`](../tools/config/ENVIRONMENT_VARIABLES.md) for the source-of-truth default.
+    - **SLO/batch size assumption:** there is no explicit SLO or fixed batch size baked into the uploader; the timeout is
+      a best-effort global cap applied to whatever batch size the import job submits.
   - `ENABLE_FIREBASE_UPLOAD=true` to force uploads outside production/service mode (import defaults to enabled in production/service mode).
 
 ### Migration note: Firebase upload prefix rename

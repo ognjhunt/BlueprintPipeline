@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.validation import validate_quaternion, validate_rotation_matrix
+from tools.validation import ValidationError, validate_quaternion, validate_rotation_matrix
 
 pytestmark = pytest.mark.usefixtures("add_repo_to_path")
 
@@ -35,3 +35,23 @@ def test_validate_rotation_matrix_svd_fix_warns(caplog) -> None:
     assert np.allclose(fixed.T @ fixed, np.eye(3), atol=1e-6)
     assert np.isclose(np.linalg.det(fixed), 1.0, atol=1e-6)
     assert "Adjusted rotation matrix" in caplog.text
+
+
+def test_validate_quaternion_rejects_invalid_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("PIPELINE_ENV", "production")
+
+    with pytest.raises(ValidationError, match="deviates from 1.0"):
+        validate_quaternion([2.0, 0.0, 0.0, 0.0], field_name="prod_quaternion")
+
+
+def test_validate_rotation_matrix_rejects_invalid_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("PIPELINE_ENV", "production")
+
+    matrix = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.1],
+        [0.0, 0.0, 0.9],
+    ])
+
+    with pytest.raises(ValidationError, match="Rotation matrix invalid"):
+        validate_rotation_matrix(matrix, field_name="prod_rotation_matrix")
