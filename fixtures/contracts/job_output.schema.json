@@ -3,11 +3,43 @@
   "title": "Genie Sim Job Output",
   "type": "object",
   "required": ["job_id", "scene_id", "status", "submitted_at", "idempotency"],
+  "definitions": {
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "episodes_prefix": {"type": "string"},
+        "lerobot_prefix": {"type": "string"},
+        "episodes_path": {"type": "string"},
+        "lerobot_path": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "job_metrics": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "status": {"type": "string"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": ["string", "null"], "format": "date-time"},
+        "duration_seconds": {"type": ["number", "null"], "minimum": 0},
+        "total_episodes": {"type": ["integer", "null"], "minimum": 0},
+        "episodes_collected": {"type": ["integer", "null"], "minimum": 0},
+        "episodes_passed": {"type": ["integer", "null"], "minimum": 0},
+        "quality_pass_rate": {"type": ["number", "null"], "minimum": 0},
+        "failure_reason": {"type": ["string", "null"]},
+        "failure_details": {"type": ["object", "null"], "additionalProperties": true}
+      },
+      "additionalProperties": true
+    }
+  },
   "properties": {
     "job_id": {"type": "string"},
     "scene_id": {"type": "string"},
     "status": {"type": "string"},
-    "submitted_at": {"type": "string"},
+    "submitted_at": {"type": "string", "format": "date-time"},
+    "run_id": {"type": "string", "format": "uuid"},
+    "message": {"type": ["string", "null"]},
+    "warnings": {"type": "array", "items": {"type": "string"}},
     "idempotency": {
       "type": "object",
       "required": ["key", "task_config_hash", "export_manifest_hash", "first_submitted_at"],
@@ -15,7 +47,199 @@
         "key": {"type": "string"},
         "task_config_hash": {"type": "string"},
         "export_manifest_hash": {"type": "string"},
-        "first_submitted_at": {"type": "string"}
+        "first_submitted_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": true
+    },
+    "idempotency_key": {"type": "string"},
+    "preflight_report_path": {"type": "string"},
+    "canary": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "is_canary": {"type": "boolean"},
+        "matched_tags": {"type": "array", "items": {"type": "string"}},
+        "match_reasons": {"type": "array", "items": {"type": "string"}},
+        "assignment_percent": {"type": "integer", "minimum": 0, "maximum": 100},
+        "scene_tags": {"type": "array", "items": {"type": "string"}},
+        "scene_id": {"type": "string"},
+        "release_channel": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "bundle": {
+      "type": "object",
+      "properties": {
+        "scene_graph": {"type": "string"},
+        "asset_index": {"type": "string"},
+        "task_config": {"type": "string"},
+        "asset_provenance": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "provenance_gate": {
+      "type": "object",
+      "properties": {
+        "status": {"type": "string"},
+        "commercial_use_ok": {"type": ["boolean", "null"]},
+        "commercial_blockers": {"type": "array", "items": {"type": "string"}},
+        "allow_noncommercial_override": {"type": "boolean"},
+        "asset_provenance_path": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "generation_params": {
+      "type": "object",
+      "properties": {
+        "robot_type": {"type": "string"},
+        "robot_types": {"type": "array", "items": {"type": "string"}},
+        "episodes_per_task": {"type": "integer", "minimum": 0},
+        "num_variations": {"type": "integer", "minimum": 0},
+        "min_quality_score": {"type": ["number", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "quality_config": {
+      "type": "object",
+      "properties": {
+        "min_quality_score": {"type": ["number", "null"]},
+        "filter_low_quality": {"type": "boolean"},
+        "range": {
+          "type": "object",
+          "properties": {
+            "min_allowed": {"type": ["number", "null"]},
+            "max_allowed": {"type": ["number", "null"]}
+          },
+          "additionalProperties": true
+        },
+        "defaults": {
+          "type": "object",
+          "properties": {
+            "min_quality_score": {"type": ["number", "null"]},
+            "filter_low_quality": {"type": "boolean"}
+          },
+          "additionalProperties": true
+        },
+        "source_path": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "export_schema": {
+      "type": "object",
+      "properties": {
+        "export_schema_version": {"type": ["string", "null"]},
+        "geniesim_schema_version": {"type": ["string", "null"]},
+        "blueprintpipeline_version": {"type": ["string", "null"]},
+        "export_timestamp": {"type": ["string", "null"], "format": "date-time"},
+        "schema_compatibility": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": true
+    },
+    "metrics_summary": {
+      "type": "object",
+      "properties": {
+        "backend": {"type": "string"},
+        "stats": {"type": "object"}
+      },
+      "additionalProperties": true
+    },
+    "local_execution": {
+      "type": "object",
+      "properties": {
+        "success": {"type": "boolean"},
+        "episodes_collected": {"type": "integer", "minimum": 0},
+        "episodes_passed": {"type": "integer", "minimum": 0},
+        "collision_free_rate": {"type": ["number", "null"]},
+        "task_success_rate": {"type": ["number", "null"]},
+        "collision_free_episodes": {"type": "integer", "minimum": 0},
+        "collision_info_episodes": {"type": "integer", "minimum": 0},
+        "task_success_episodes": {"type": "integer", "minimum": 0},
+        "task_success_info_episodes": {"type": "integer", "minimum": 0},
+        "preflight": {"type": "object", "additionalProperties": true},
+        "server_info": {"type": "object", "additionalProperties": true},
+        "generation_duration_seconds": {"type": ["number", "null"], "minimum": 0},
+        "by_robot": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "success": {"type": "boolean"},
+              "episodes_collected": {"type": "integer", "minimum": 0},
+              "episodes_passed": {"type": "integer", "minimum": 0},
+              "collision_free_rate": {"type": ["number", "null"]},
+              "collision_free_episodes": {"type": "integer", "minimum": 0},
+              "collision_info_episodes": {"type": "integer", "minimum": 0},
+              "task_success_rate": {"type": ["number", "null"]},
+              "task_success_episodes": {"type": "integer", "minimum": 0},
+              "task_success_info_episodes": {"type": "integer", "minimum": 0},
+              "output_dir": {"type": ["string", "null"]},
+              "server_info": {"type": ["object", "null"], "additionalProperties": true}
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "firebase_upload_status": {"type": "string"},
+    "firebase_upload_retry": {
+      "type": "object",
+      "properties": {
+        "retry_attempted": {"type": "boolean"},
+        "retry_failed_count": {"type": "integer", "minimum": 0},
+        "retry_manifest_path": {"type": ["string", "null"]},
+        "deferred_to_import": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "firebase_upload_policy": {
+      "type": "object",
+      "properties": {
+        "allow_partial_uploads": {"type": "boolean"},
+        "suppress_on_partial_failure": {"type": "boolean"},
+        "production_mode": {"type": "boolean"},
+        "fail_on_partial_error": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "job_metrics_by_robot": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/definitions/job_metrics"}
+    },
+    "job_metrics": {"$ref": "#/definitions/job_metrics"},
+    "job_metrics_summary": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": "string"},
+        "status": {"type": "string"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": ["string", "null"], "format": "date-time"},
+        "duration_seconds": {"type": ["number", "null"], "minimum": 0},
+        "total_episodes": {"type": ["integer", "null"], "minimum": 0},
+        "episodes_collected": {"type": ["integer", "null"], "minimum": 0},
+        "episodes_passed": {"type": ["integer", "null"], "minimum": 0},
+        "quality_pass_rate": {"type": ["number", "null"], "minimum": 0},
+        "artifact_validation": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": true
+    },
+    "job_metrics_error": {"type": "string"},
+    "failure_reason": {"type": ["string", "null"]},
+    "failure_details": {"type": ["object", "null"], "additionalProperties": true},
+    "artifacts": {"$ref": "#/definitions/artifacts"},
+    "artifacts_by_robot": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/definitions/artifacts"}
+    },
+    "artifact_validation": {
+      "type": "object",
+      "properties": {
+        "require_lerobot": {"type": "boolean"},
+        "allow_partial_failures": {"type": "boolean"},
+        "require_balanced_robot_episodes": {"type": "boolean"},
+        "status": {"type": "string"},
+        "by_robot": {"type": "object", "additionalProperties": true},
+        "cross_robot": {"type": "object", "additionalProperties": true}
       },
       "additionalProperties": true
     }
