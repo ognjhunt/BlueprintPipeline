@@ -38,7 +38,6 @@ The published document includes:
 | `ASSET_CATALOG_COLLECTION` | Collection name for metadata | `asset_metadata` |
 | `ASSET_CATALOG_CREDENTIALS` | Path to service account JSON | None |
 | `ASSET_CATALOG_EMULATOR_HOST` | Host for emulator/local testing | None |
-| `SIMREADY_PRODUCTION_MODE` | Legacy production indicator (deprecated; use `PIPELINE_ENV=production`) | `false` |
 | `SIMREADY_PHYSICS_MODE` | Physics estimation mode (`auto`/`gemini`/`deterministic`) | `auto` |
 | `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | Allow deterministic (LLM-free) physics estimation when Gemini is unavailable | `false` |
 | `SIMREADY_ALLOW_HEURISTIC_FALLBACK` | Allow heuristic-only physics estimation in CI/testing when Gemini and deterministic modes are unavailable | `false` |
