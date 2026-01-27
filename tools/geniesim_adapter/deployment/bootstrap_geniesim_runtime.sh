@@ -20,6 +20,13 @@ fi
 
 "${SCRIPT_DIR}/install_geniesim.sh"
 
+# Install pipeline Python dependencies into Isaac Sim's Python
+PIPELINE_REQS="${REPO_ROOT}/genie-sim-local-job/requirements.txt"
+if [ -f "${PIPELINE_REQS}" ]; then
+  echo "[geniesim] Installing pipeline Python dependencies"
+  "${ISAAC_SIM_PATH}/python.sh" -m pip install --quiet -r "${PIPELINE_REQS}" 2>&1 | tail -5
+fi
+
 export GENIESIM_ROOT
 export ISAAC_SIM_PATH
 export GENIESIM_HOST
