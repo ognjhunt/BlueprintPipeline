@@ -59,7 +59,7 @@ spec:
 
       containers:
         - name: genie-sim-export
-          image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-export:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-export:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "export_to_geniesim.py"]

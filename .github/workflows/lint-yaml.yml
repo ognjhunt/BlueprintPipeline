@@ -29,3 +29,6 @@ jobs:
         run: |
           shopt -s globstar
           kubeconform -strict -summary -output json k8s/**/*.yaml
+
+      - name: Reject :latest image tags in k8s manifests
+        run: scripts/lint-k8s-images.sh

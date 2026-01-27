@@ -12,6 +12,8 @@ Kubernetes manifests for deploying pipeline jobs and supporting infrastructure.
 
 ## Key environment variables
 - `KUBECONFIG` or other cluster credentials used by `kubectl`.
+- `IMAGE_TAG`: Tag to apply to all Blueprint container images referenced in this folder (for example,
+  a version, commit SHA, or release label).
 
 ## Tracing (OpenTelemetry)
 Production jobs ship OpenTelemetry spans via **OTLP** to a collector.
@@ -30,6 +32,7 @@ Production jobs ship OpenTelemetry spans via **OTLP** to a collector.
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 \
 OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ${OTEL_TOKEN}" \
+IMAGE_TAG=2024-09-15 \
 envsubst < k8s/genie-sim-import-job.yaml | kubectl apply -f -
 ```
 
@@ -40,6 +43,12 @@ envsubst < k8s/genie-sim-import-job.yaml | kubectl apply -f -
 All Kubernetes manifests in this folder should reference images in `ghcr.io`. When updating
 image names or tags, ensure every `image:` entry (including Kustomize overrides) points to
 the same GHCR registry so production deployments stay consistent.
+
+## Image tagging policy
+All Blueprint-owned images in `k8s/*.yaml` use an environment-substituted tag via
+`${IMAGE_TAG}`. Set `IMAGE_TAG` before applying manifests so the entire deployment uses a
+consistent, non-`latest` tag. Third-party base images (for example, NVIDIA CUDA images)
+remain pinned to explicit versions.
 
 ## Episode generation via Kustomize
 The episode generation job reads `SCENE_ID` and `BUCKET` from the `episode-gen-runtime`
@@ -55,7 +64,7 @@ ConfigMap, plus an image override for the Isaac Sim episode generator.
 
 Example override:
 ```
-kustomize edit set image ghcr.io/blueprint-project/blueprint-episode-gen=ghcr.io/my-project/blueprint-episode-gen:isaacsim
+kustomize edit set image ghcr.io/blueprint-project/blueprint-episode-gen=ghcr.io/my-project/blueprint-episode-gen:${IMAGE_TAG}
 ```
 
 ## Firebase cleanup CronJob

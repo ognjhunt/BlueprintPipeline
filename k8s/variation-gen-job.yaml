@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: variation-gen
-          image: ghcr.io/${PROJECT_ID}/blueprint-variation-gen:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-variation-gen:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["/app/run_variation_gen.sh"]

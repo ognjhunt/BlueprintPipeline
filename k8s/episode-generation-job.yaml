@@ -137,7 +137,7 @@ spec:
 
       containers:
         - name: episode-generator
-          image: ghcr.io/blueprint-project/blueprint-episode-gen:isaacsim
+          image: ghcr.io/blueprint-project/blueprint-episode-gen:${IMAGE_TAG}
           imagePullPolicy: Always
 
           # Run episode generation
@@ -275,7 +275,7 @@ spec:
 
           containers:
             - name: episode-generator
-              image: ghcr.io/blueprint-project/blueprint-episode-gen:isaacsim
+              image: ghcr.io/blueprint-project/blueprint-episode-gen:${IMAGE_TAG}
               command: ["/entrypoint.sh", "generate"]
               envFrom:
                 - configMapRef:

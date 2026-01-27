@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: simready
-          image: ghcr.io/${PROJECT_ID}/blueprint-simready:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-simready:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["/app/run_simready.sh"]
