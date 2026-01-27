@@ -43,6 +43,37 @@ terraform apply \
   -var="tf_state_prefix=YOUR_ENVIRONMENT/terraform/state"
 ```
 
+## Required inputs
+
+| Variable | Description |
+| --- | --- |
+| `project_id` | GCP project ID used for all resources. |
+| `tf_state_bucket` | GCS bucket for Terraform state. |
+| `tf_state_prefix` | GCS prefix for Terraform state (environment-specific). |
+
+## Monitoring resources
+
+Terraform now provisions the dashboards, alert policies, and log-based metrics checked by the workflow monitoring
+gate. Override names in non-prod environments using the variables below or a `*.tfvars` file.
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `monitoring_dashboard_overview_name` | Display name for the overview dashboard. | `BlueprintPipeline - Overview` |
+| `monitoring_dashboard_gpu_name` | Display name for the GPU metrics dashboard. | `BlueprintPipeline - GPU Metrics` |
+| `monitoring_alert_workflow_timeout_name` | Display name for the workflow timeout alert policy. | `[Blueprint] Workflow Job Timeout Detected` |
+| `monitoring_alert_workflow_retry_spike_name` | Display name for the workflow retry spike alert policy. | `[Blueprint] Workflow Job Retry Spike` |
+| `monitoring_notification_channel_ids` | Notification channel IDs for monitoring alert policies. | `[]` |
+
+Example override (`terraform.tfvars`):
+
+```hcl
+monitoring_dashboard_overview_name       = "BlueprintPipeline (Staging) - Overview"
+monitoring_dashboard_gpu_name            = "BlueprintPipeline (Staging) - GPU Metrics"
+monitoring_alert_workflow_timeout_name   = "[Blueprint][Staging] Workflow Job Timeout Detected"
+monitoring_alert_workflow_retry_spike_name = "[Blueprint][Staging] Workflow Job Retry Spike"
+monitoring_notification_channel_ids      = ["projects/YOUR_PROJECT_ID/notificationChannels/1234567890"]
+```
+
 ## Binary Authorization
 
 Production clusters must enable Binary Authorization. Configure it via tfvars:
