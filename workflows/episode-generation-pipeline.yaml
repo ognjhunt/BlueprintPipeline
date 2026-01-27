@@ -58,7 +58,8 @@ main:
           - enforceQualityGates: '${default(map.get(event, "enforce_quality_gates"), sys.get_env("BP_ENV") == "production")}'
           - runStagingE2E: '${default(map.get(event, "run_staging_e2e"), sys.get_env("BP_ENV") == "production")}'
           - stagingDataRoot: '${default(map.get(event, "staging_data_root"), "/mnt/gcs")}'
-          - monitoringGateEnabled: '${sys.get_env("BP_ENV") == "production"}'
+          - monitoringGateEnabled: '${default(map.get(event, "monitoring_gate_enabled"), sys.get_env("BP_ENV") == "production")}'
+          - monitoringGateStrict: '${default(map.get(event, "monitoring_gate_strict"), default(sys.get_env("MONITORING_GATE_STRICT"), "true")) == "true"}'
           - buildPollTimeoutSeconds: '${int(default(map.get(event, "build_poll_timeout_seconds"), default(sys.get_env("EPISODE_BUILD_POLL_TIMEOUT_SECONDS"), "3600")))}'
           - firebaseBucket: '${default(sys.get_env("FIREBASE_STORAGE_BUCKET"), "")}'
           - firebaseServiceAccountJson: '${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_JSON"), "")}'
@@ -256,9 +257,18 @@ main:
           - dashboardsPayload: '${json.encode(dashboardsResult)}'
           - alertsPayload: '${json.encode(alertPoliciesResult)}'
           - metricsPayload: '${json.encode(logMetricsResult)}'
-          - dashboardsOk: '${text.contains(dashboardsPayload, "BlueprintPipeline - Overview") && text.contains(dashboardsPayload, "BlueprintPipeline - GPU Metrics")}'
-          - alertsOk: '${text.contains(alertsPayload, "[Blueprint] Workflow Job Timeout Detected") && text.contains(alertsPayload, "[Blueprint] Workflow Job Retry Spike")}'
-          - metricsOk: '${text.contains(metricsPayload, "blueprint_job_timeout_events") && text.contains(metricsPayload, "blueprint_job_retry_exhausted_total") && text.contains(metricsPayload, "blueprint_job_timeout_usage_ratio") && text.contains(metricsPayload, "blueprint_geniesim_sla_violations") && text.contains(metricsPayload, "blueprint_job_failure_events")}'
+          - dashboardOverviewOk: '${text.contains(dashboardsPayload, "BlueprintPipeline - Overview")}'
+          - dashboardGpuOk: '${text.contains(dashboardsPayload, "BlueprintPipeline - GPU Metrics")}'
+          - alertTimeoutOk: '${text.contains(alertsPayload, "[Blueprint] Workflow Job Timeout Detected")}'
+          - alertRetryOk: '${text.contains(alertsPayload, "[Blueprint] Workflow Job Retry Spike")}'
+          - metricTimeoutEventsOk: '${text.contains(metricsPayload, "blueprint_job_timeout_events")}'
+          - metricRetryExhaustedOk: '${text.contains(metricsPayload, "blueprint_job_retry_exhausted_total")}'
+          - metricTimeoutUsageOk: '${text.contains(metricsPayload, "blueprint_job_timeout_usage_ratio")}'
+          - metricSlaViolationsOk: '${text.contains(metricsPayload, "blueprint_geniesim_sla_violations")}'
+          - metricFailureEventsOk: '${text.contains(metricsPayload, "blueprint_job_failure_events")}'
+          - dashboardsOk: '${dashboardOverviewOk && dashboardGpuOk}'
+          - alertsOk: '${alertTimeoutOk && alertRetryOk}'
+          - metricsOk: '${metricTimeoutEventsOk && metricRetryExhaustedOk && metricTimeoutUsageOk && metricSlaViolationsOk && metricFailureEventsOk}'
           - monitoringGateOk: '${dashboardsOk && alertsOk && metricsOk}'
         next: monitoring_gate_decision
 
@@ -271,9 +281,22 @@ main:
     - monitoring_gate_failed:
         call: sys.log
         args:
-          text: '${"Monitoring gate failed; dashboardsOk=" + json.encode(dashboardsOk) + ", alertsOk=" + json.encode(alertsOk) + ", metricsOk=" + json.encode(metricsOk)}'
-          severity: "ERROR"
-        next: raise_monitoring_gate_error
+          text: '${"Monitoring gate failed. Missing assets (false indicates missing): dashboard_overview_ok=" + json.encode(dashboardOverviewOk) + ", dashboard_gpu_ok=" + json.encode(dashboardGpuOk) + ", alert_timeout_ok=" + json.encode(alertTimeoutOk) + ", alert_retry_ok=" + json.encode(alertRetryOk) + ", metric_timeout_events_ok=" + json.encode(metricTimeoutEventsOk) + ", metric_retry_exhausted_ok=" + json.encode(metricRetryExhaustedOk) + ", metric_timeout_usage_ok=" + json.encode(metricTimeoutUsageOk) + ", metric_sla_violations_ok=" + json.encode(metricSlaViolationsOk) + ", metric_failure_events_ok=" + json.encode(metricFailureEventsOk)}'
+          severity: '${if(monitoringGateStrict, "ERROR", "WARNING")}'
+        next: monitoring_gate_strict_decision
+
+    - monitoring_gate_strict_decision:
+        switch:
+          - condition: '${monitoringGateStrict == true}'
+            next: raise_monitoring_gate_error
+        next: monitoring_gate_bypass
+
+    - monitoring_gate_bypass:
+        call: sys.log
+        args:
+          text: '${"Monitoring gate strict mode disabled; continuing despite missing monitoring assets."}'
+          severity: "WARNING"
+        next: check_already_processed
 
     - raise_monitoring_gate_error:
         raise: '${"Monitoring gate failed; deploy dashboards, alert policies, and log-based metrics before production runs."}'
