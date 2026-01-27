@@ -45,7 +45,7 @@ spec:
           serviceAccountName: blueprint-pipeline-sa
           containers:
             - name: geniesim-cleanup
-              image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-local:latest
+              image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-local:${IMAGE_TAG}
               imagePullPolicy: Always
               command: ["python", "/app/tools/geniesim_adapter/cleanup_retention.py"]
               envFrom:

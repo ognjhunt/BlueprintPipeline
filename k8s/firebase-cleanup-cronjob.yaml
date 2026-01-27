@@ -45,7 +45,7 @@ spec:
           serviceAccountName: blueprint-pipeline-sa
           containers:
             - name: firebase-cleanup
-              image: ghcr.io/${PROJECT_ID}/blueprint-firebase-cleanup:latest
+              image: ghcr.io/${PROJECT_ID}/blueprint-firebase-cleanup:${IMAGE_TAG}
               imagePullPolicy: Always
               envFrom:
                 - configMapRef:

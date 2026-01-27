@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: replicator
-          image: ghcr.io/${PROJECT_ID}/blueprint-replicator:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-replicator:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["/app/entrypoint.sh"]

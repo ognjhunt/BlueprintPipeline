@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: upsell-features
-          image: ghcr.io/${PROJECT_ID}/blueprint-upsell-features:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-upsell-features:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command:

@@ -57,7 +57,7 @@ spec:
 
       containers:
         - name: genie-sim-local
-          image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-local:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-local:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "/app/genie-sim-submit-job/submit_to_geniesim.py"]
