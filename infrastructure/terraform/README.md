@@ -33,14 +33,10 @@ terraform init -backend-config="backend.dev.hcl"
 
 ```bash
 terraform plan \
-  -var="project_id=YOUR_PROJECT_ID" \
-  -var="tf_state_bucket=YOUR_TF_STATE_BUCKET" \
-  -var="tf_state_prefix=YOUR_ENVIRONMENT/terraform/state"
+  -var="project_id=YOUR_PROJECT_ID"
 
 terraform apply \
-  -var="project_id=YOUR_PROJECT_ID" \
-  -var="tf_state_bucket=YOUR_TF_STATE_BUCKET" \
-  -var="tf_state_prefix=YOUR_ENVIRONMENT/terraform/state"
+  -var="project_id=YOUR_PROJECT_ID"
 ```
 
 ## Required inputs
@@ -48,8 +44,6 @@ terraform apply \
 | Variable | Description |
 | --- | --- |
 | `project_id` | GCP project ID used for all resources. |
-| `tf_state_bucket` | GCS bucket for Terraform state. |
-| `tf_state_prefix` | GCS prefix for Terraform state (environment-specific). |
 
 ## Monitoring resources
 
