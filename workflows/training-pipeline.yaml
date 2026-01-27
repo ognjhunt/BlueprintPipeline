@@ -26,6 +26,9 @@ main:
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - bucket: ${default(sys.get_env("PRIMARY_BUCKET"), sys.get_env("GCS_BUCKET", "blueprintpipeline-data"))}
           - trainingJobName: "training-job"
+          # Timeout defaults align with policy_configs/adaptive_timeouts.yaml unless overridden.
+          - adaptiveTimeoutConfigPath: "policy_configs/adaptive_timeouts.yaml"
+          - adaptiveTimeoutDefaultSeconds: 1800
           - trainingTimeoutSeconds: 21600
 
     - extract_event:
@@ -37,6 +40,8 @@ main:
               - scene_id: ${default(event.scene_id, "unknown")}
               - output_path: ${event.output_path}
               - episode_count: ${default(event.episode_count, 0)}
+              - timeout_override_seconds: ${default(event.timeout_override_seconds, null)}
+              - trainingTimeoutSeconds: ${default(event.timeout_override_seconds, trainingTimeoutSeconds)}
 
           # Wrapped Eventarc event
           - condition: ${"data" in event}
@@ -45,6 +50,8 @@ main:
               - scene_id: ${default(event.data.scene_id, "unknown")}
               - output_path: ${event.data.output_path}
               - episode_count: ${default(event.data.episode_count, 0)}
+              - timeout_override_seconds: ${default(event.data.timeout_override_seconds, null)}
+              - trainingTimeoutSeconds: ${default(event.data.timeout_override_seconds, trainingTimeoutSeconds)}
 
           # Default/fallback
           - condition: true
@@ -364,7 +371,7 @@ main:
                         value: "0.0001"
                       - name: CHECKPOINT_INTERVAL
                         value: "10"
-                timeout: "21600s"  # 6 hours max for training
+                timeout: '${string(trainingTimeoutSeconds) + "s"}'
           result: training_job_execution
         retry:
           predicate: ${http.default_retry_predicate}

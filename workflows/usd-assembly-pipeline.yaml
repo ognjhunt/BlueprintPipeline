@@ -18,6 +18,9 @@
 # 3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
 # "image → sim-ready 3D reconstruction" with explicit physical constraints.
 # Reference: https://3dregen.jdihlmann.com/
+#
+# Timeout defaults align with policy_configs/adaptive_timeouts.yaml; workflow-specific
+# values are defined in top-level variables to keep runtime settings consistent.
 
 main:
   params: [event]
@@ -60,6 +63,8 @@ main:
           - isaacLabFailedMarker: '${"scenes/" + sceneId + "/isaac_lab/.failed"}'
           - lockObject: '${"scenes/" + sceneId + "/locks/usd-assembly.lock"}'
           - usdJobName: "usd-assembly-job"
+          # Timeout defaults align with policy_configs/adaptive_timeouts.yaml unless overridden.
+          - adaptiveTimeoutConfigPath: "policy_configs/adaptive_timeouts.yaml"
           - convertTimeoutSeconds: 1800
           - simreadyTimeoutSeconds: 3600
           - usdAssemblyTimeoutSeconds: 3600
@@ -393,7 +398,7 @@ main:
                         value: ${assetsPrefix}
                       - name: SIMREADY_PHYSICS_MODE
                         value: "deterministic"
-              timeout: "3600s"  # 1 hour max for simready
+              timeout: '${string(simreadyTimeoutSeconds) + "s"}'
         result: simreadyExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -630,7 +635,7 @@ main:
                         value: ${assetsPrefix}
                       - name: USD_PREFIX
                         value: ${usdPrefix}
-              timeout: "3600s"  # 1 hour max for USD assembly
+              timeout: '${string(usdAssemblyTimeoutSeconds) + "s"}'
           result: usdExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -870,7 +875,7 @@ main:
                         value: ${usdPrefix}
                       - name: REPLICATOR_PREFIX
                         value: ${replicatorPrefix}
-              timeout: "1800s"  # 30 minutes max for replicator
+              timeout: '${string(replicatorTimeoutSeconds) + "s"}'
           result: replicatorExec
         retry:
           predicate: ${http.default_retry_predicate}
@@ -1099,7 +1104,7 @@ main:
                         value: ${replicatorPrefix}
                       - name: ISAAC_LAB_PREFIX
                         value: ${isaacLabPrefix}
-              timeout: "1800s"  # 30 minutes max for Isaac Lab task generation
+              timeout: '${string(isaacLabTimeoutSeconds) + "s"}'
           result: isaacLabExec
         retry:
           predicate: ${http.default_retry_predicate}
