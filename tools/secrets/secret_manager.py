@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Dict, Optional
 
+from tools.config.production_mode import resolve_production_mode
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,7 +93,7 @@ def get_secret_or_env(
     secret_id: str,
     env_var: str,
     project_id: Optional[str] = None,
-    fallback_to_env: bool = True,
+    fallback_to_env: Optional[bool] = None,
 ) -> Optional[str]:
     """
     Get secret from Secret Manager, with optional fallback to environment variable.
@@ -102,7 +104,8 @@ def get_secret_or_env(
         secret_id: Secret identifier in Secret Manager
         env_var: Environment variable name as fallback
         project_id: GCP project ID (defaults to current project)
-        fallback_to_env: If True, fall back to env var if secret not found
+        fallback_to_env: If True, fall back to env var if secret not found. Defaults
+            to non-production (resolved via resolve_production_mode()).
 
     Returns:
         Secret value, or None if not found
@@ -114,6 +117,9 @@ def get_secret_or_env(
             env_var="GEMINI_API_KEY",
         )
     """
+    if fallback_to_env is None:
+        fallback_to_env = not resolve_production_mode()
+
     # Try Secret Manager first
     try:
         return get_secret(secret_id, project_id=project_id)

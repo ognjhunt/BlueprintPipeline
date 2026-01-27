@@ -231,6 +231,7 @@ def get_inventory_enricher(mode: Optional[str] = None) -> InventoryEnricher:
         api_key = get_secret_or_env(
             SecretIds.INVENTORY_ENRICHMENT_API_KEY,
             env_var="INVENTORY_ENRICHMENT_API_KEY",
+            fallback_to_env=not production_mode,
         )
         if production_mode:
             missing = []

@@ -66,7 +66,11 @@ SECRET_ID_ANTHROPIC = SecretIds.ANTHROPIC_API_KEY if SecretIds else "anthropic-a
 def _load_secret_value(secret_id: str, env_var: str) -> Optional[str]:
     if HAVE_SECRET_MANAGER and get_secret_or_env is not None:
         try:
-            return get_secret_or_env(secret_id, env_var=env_var)
+            return get_secret_or_env(
+                secret_id,
+                env_var=env_var,
+                fallback_to_env=True,
+            )
         except Exception as exc:
             logger.warning(
                 "[TASK-SPECIFIER] [WARN] Failed to fetch secret '%s', falling back to env var '%s': %s",
