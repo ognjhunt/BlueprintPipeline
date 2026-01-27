@@ -6,12 +6,16 @@ resource "google_service_account" "secret_rotation_job" {
   account_id   = "secret-rotation-job"
   display_name = "Secret Rotation Job Service Account"
   project      = var.project_id
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_service_account" "secret_rotation_scheduler" {
   account_id   = "secret-rotation-scheduler"
   display_name = "Secret Rotation Scheduler Service Account"
   project      = var.project_id
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_project_iam_member" "secret_rotation_job_roles" {
@@ -24,6 +28,8 @@ resource "google_project_iam_member" "secret_rotation_job_roles" {
   project = var.project_id
   role    = each.value
   member  = "serviceAccount:${google_service_account.secret_rotation_job.email}"
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_cloud_run_v2_job" "secret_rotation" {
@@ -75,6 +81,8 @@ resource "google_cloud_run_v2_job_iam_member" "secret_rotation_invoker" {
   project  = var.project_id
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.secret_rotation_scheduler.email}"
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_cloud_scheduler_job" "secret_rotation" {

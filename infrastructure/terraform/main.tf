@@ -124,6 +124,8 @@ resource "google_compute_subnetwork" "blueprint_subnet" {
   }
 
   private_ip_google_access = true
+
+  depends_on = [google_project_service.apis]
 }
 
 # Cloud NAT for private nodes to access internet
@@ -132,6 +134,8 @@ resource "google_compute_router" "blueprint_router" {
   project = var.project_id
   region  = var.region
   network = google_compute_network.blueprint_vpc.id
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_compute_router_nat" "blueprint_nat" {
@@ -146,6 +150,8 @@ resource "google_compute_router_nat" "blueprint_nat" {
     enable = true
     filter = "ERRORS_ONLY"
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 # =============================================================================
@@ -157,6 +163,8 @@ resource "google_service_account" "gke_nodes" {
   account_id   = "${var.cluster_name}-nodes"
   display_name = "GKE Node Service Account for ${var.cluster_name}"
   project      = var.project_id
+
+  depends_on = [google_project_service.apis]
 }
 
 # Pipeline workload identity service account
@@ -164,6 +172,8 @@ resource "google_service_account" "pipeline_workload" {
   account_id   = "blueprint-pipeline-sa"
   display_name = "Blueprint Pipeline Workload Identity"
   project      = var.project_id
+
+  depends_on = [google_project_service.apis]
 }
 
 # Workflow service account
@@ -171,6 +181,8 @@ resource "google_service_account" "workflow" {
   account_id   = "blueprint-workflow-sa"
   display_name = "Blueprint Workflow Service Account"
   project      = var.project_id
+
+  depends_on = [google_project_service.apis]
 }
 
 # IAM bindings for GKE nodes
@@ -186,6 +198,8 @@ resource "google_project_iam_member" "gke_nodes_roles" {
   project = var.project_id
   role    = each.value
   member  = "serviceAccount:${google_service_account.gke_nodes.email}"
+
+  depends_on = [google_project_service.apis]
 }
 
 # IAM bindings for pipeline workload
@@ -201,6 +215,8 @@ resource "google_project_iam_member" "pipeline_workload_roles" {
   project = var.project_id
   role    = each.value
   member  = "serviceAccount:${google_service_account.pipeline_workload.email}"
+
+  depends_on = [google_project_service.apis]
 }
 
 # IAM bindings for workflow
@@ -217,6 +233,8 @@ resource "google_project_iam_member" "workflow_roles" {
   project = var.project_id
   role    = each.value
   member  = "serviceAccount:${google_service_account.workflow.email}"
+
+  depends_on = [google_project_service.apis]
 }
 
 # Workload Identity binding
@@ -224,6 +242,8 @@ resource "google_service_account_iam_member" "pipeline_workload_identity" {
   service_account_id = google_service_account.pipeline_workload.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[blueprint/blueprint-pipeline-sa]"
+
+  depends_on = [google_project_service.apis]
 }
 
 # =============================================================================
@@ -411,6 +431,8 @@ resource "google_pubsub_subscription" "dead_letter_sub" {
     environment = var.environment
     managed_by  = "terraform"
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 # =============================================================================
