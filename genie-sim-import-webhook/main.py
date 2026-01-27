@@ -18,6 +18,7 @@ from google.cloud import firestore
 from google.cloud.workflows import executions_v1
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
+from pydantic import BaseModel, Field, ValidationError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -495,19 +496,27 @@ def _is_authenticated(body: bytes) -> bool:
     return False
 
 
-def _validate_payload(payload: dict) -> tuple[bool, str]:
-    if not isinstance(payload, dict):
-        return False, "payload must be a JSON object"
-    job_id = payload.get("job_id")
-    if not isinstance(job_id, str):
-        return False, "job_id must be a string"
-    status = payload.get("status")
-    if status is not None and not isinstance(status, str):
-        return False, "status must be a string"
-    scene_id = payload.get("scene_id")
-    if scene_id is not None and not isinstance(scene_id, str):
-        return False, "scene_id must be a string"
-    return True, ""
+class JobCompletePayload(BaseModel):
+    job_id: str = Field(..., min_length=1)
+    status: str | None = None
+    scene_id: str | None = None
+
+
+def _format_payload_errors(errors: list[dict]) -> list[str]:
+    formatted = []
+    for err in errors:
+        loc = ".".join(str(part) for part in err.get("loc", []))
+        msg = err.get("msg", "Invalid value")
+        formatted.append(f"{loc}: {msg}" if loc else msg)
+    return formatted
+
+
+def _parse_job_complete_payload(payload: object) -> tuple[dict | None, list[str]]:
+    try:
+        parsed = JobCompletePayload.model_validate(payload)
+    except ValidationError as exc:
+        return None, _format_payload_errors(exc.errors())
+    return parsed.model_dump(), []
 
 
 def _dedup_collection_name() -> str:
@@ -644,10 +653,9 @@ def handle_job_complete():
     if not _is_authenticated(raw_body):
         return jsonify({"error": "unauthorized"}), 401
 
-    payload = request.get_json(silent=True)
-    is_valid, error = _validate_payload(payload)
-    if not is_valid:
-        return jsonify({"error": error}), 400
+    payload, errors = _parse_job_complete_payload(request.get_json(silent=True))
+    if errors:
+        return jsonify({"error": "invalid_payload", "details": errors}), 400
 
     payload = payload.copy()
     payload.setdefault("status", "completed")
