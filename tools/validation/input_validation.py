@@ -19,6 +19,8 @@ from typing import Any, Collection, Dict, List, Optional, Pattern, Union
 
 import numpy as np
 
+from tools.config.production_mode import resolve_production_mode
+
 logger = logging.getLogger(__name__)
 
 
@@ -463,7 +465,7 @@ def validate_rgb_color(color: Union[List[float], tuple]) -> List[float]:
 def validate_quaternion(
     quaternion: Union[List[float], tuple, np.ndarray, Dict[str, float]],
     field_name: Optional[str] = None,
-    auto_normalize: bool = True,
+    auto_normalize: Optional[bool] = None,
     warn_on_fix: bool = True,
     eps: float = 1e-6,
 ) -> List[float]:
@@ -473,7 +475,7 @@ def validate_quaternion(
     Args:
         quaternion: Quaternion as [w, x, y, z] or dict with w/x/y/z keys.
         field_name: Field name for error messages/logging.
-        auto_normalize: Normalize when norm deviates from 1.
+        auto_normalize: Normalize when norm deviates from 1 (defaults to False in production).
         warn_on_fix: Emit warning when normalization occurs.
         eps: Minimum norm threshold before treating as invalid.
 
@@ -520,6 +522,9 @@ def validate_quaternion(
             value=validated,
         )
 
+    if auto_normalize is None:
+        auto_normalize = not resolve_production_mode()
+
     if abs(norm - 1.0) > 1e-3:
         if not auto_normalize:
             raise ValidationError(
@@ -542,7 +547,7 @@ def validate_quaternion(
 def validate_rotation_matrix(
     matrix: Union[List[List[float]], np.ndarray],
     field_name: Optional[str] = None,
-    auto_fix: bool = True,
+    auto_fix: Optional[bool] = None,
     warn_on_fix: bool = True,
     atol: float = 1e-3,
 ) -> np.ndarray:
@@ -552,7 +557,7 @@ def validate_rotation_matrix(
     Args:
         matrix: 3x3 rotation matrix.
         field_name: Field name for error messages/logging.
-        auto_fix: Use SVD to project to nearest rotation matrix when invalid.
+        auto_fix: Use SVD to project to nearest rotation matrix when invalid (defaults to False in production).
         warn_on_fix: Emit warning when a fix is applied.
         atol: Tolerance for orthogonality and determinant checks.
 
@@ -581,6 +586,9 @@ def validate_rotation_matrix(
     identity = np.eye(3)
     orth_error = float(np.linalg.norm(rot.T @ rot - identity, ord="fro"))
     det = float(np.linalg.det(rot))
+
+    if auto_fix is None:
+        auto_fix = not resolve_production_mode()
 
     if orth_error > atol or abs(det - 1.0) > atol:
         if not auto_fix:
