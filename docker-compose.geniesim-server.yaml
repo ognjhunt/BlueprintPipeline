@@ -30,6 +30,7 @@ services:
       GENIESIM_START_SERVER: ${GENIESIM_START_SERVER:-1}
       GENIESIM_HEALTHCHECK: ${GENIESIM_HEALTHCHECK:-1}
       GENIESIM_SERVER_LOG: ${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
+      PYTHONPATH: /workspace/BlueprintPipeline/tools/geniesim_adapter:/workspace/BlueprintPipeline
     volumes:
       - ./:/workspace/BlueprintPipeline:rw
       - geniesim-root:${GENIESIM_ROOT:-/opt/geniesim}
