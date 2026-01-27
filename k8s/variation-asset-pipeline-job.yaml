@@ -1,0 +1,129 @@
+# =============================================================================
+# Kubernetes Job: Variation Asset Pipeline
+# =============================================================================
+# Generates simready variation assets from replicator manifests.
+#
+# Apply:
+#   envsubst < k8s/variation-asset-pipeline-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: variation-asset-pipeline
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: variation-asset-pipeline
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: variation-asset-pipeline
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: variation-asset-pipeline
+          image: ghcr.io/${PROJECT_ID}/blueprint-variation-asset-pipeline:latest
+          imagePullPolicy: Always
+
+          command: ["python", "run_variation_asset_pipeline.py"]
+          workingDir: /app
+
+          envFrom:
+            - configMapRef:
+                name: cost-tracking-pricing
+
+          env:
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: GEMINI_API_KEY
+              value: "${GEMINI_API_KEY}"
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: REPLICATOR_PREFIX
+              value: "scenes/$(SCENE_ID)/replicator"
+            - name: VARIATION_ASSETS_PREFIX
+              value: "scenes/$(SCENE_ID)/variation_assets"
+            - name: QUALITY_MODE
+              value: "${QUALITY_MODE}"
+            - name: MAX_ASSETS
+              value: "${MAX_ASSETS}"
+            - name: PRIORITY_FILTER
+              value: "${PRIORITY_FILTER}"
+            - name: ASSET_LIBRARY_PATH
+              value: "${ASSET_LIBRARY_PATH}"
+            - name: ASSET_REGISTRY_BACKEND_URI
+              value: "${ASSET_REGISTRY_BACKEND_URI}"
+            - name: ASSET_VECTOR_BACKEND_URI
+              value: "${ASSET_VECTOR_BACKEND_URI}"
+            - name: ASSET_VECTOR_SIMILARITY_THRESHOLD
+              value: "${ASSET_VECTOR_SIMILARITY_THRESHOLD}"
+            - name: ASSET_VECTOR_MAX_CANDIDATES
+              value: "${ASSET_VECTOR_MAX_CANDIDATES}"
+            - name: ASSET_VECTOR_LEXICAL_FALLBACK
+              value: "${ASSET_VECTOR_LEXICAL_FALLBACK}"
+            - name: ASSET_VECTOR_LEXICAL_THRESHOLD
+              value: "${ASSET_VECTOR_LEXICAL_THRESHOLD}"
+            - name: SKIP_EXISTING
+              value: "${SKIP_EXISTING}"
+            - name: REGISTER_ASSETS
+              value: "${REGISTER_ASSETS}"
+            - name: DRY_RUN
+              value: "${DRY_RUN}"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: "${OTEL_EXPORTER_OTLP_HEADERS}"
+            - name: OTEL_SERVICE_NAME
+              value: "variation-asset-pipeline-job"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=variation-asset-pipeline,deployment.environment=production"
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files

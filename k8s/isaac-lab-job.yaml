@@ -1,0 +1,111 @@
+# =============================================================================
+# Kubernetes Job: Isaac Lab Task Generation
+# =============================================================================
+# Generates Isaac Lab tasks for the pipeline.
+#
+# Apply:
+#   envsubst < k8s/isaac-lab-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: isaac-lab
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: isaac-lab
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: isaac-lab
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: isaac-lab
+          image: ghcr.io/${PROJECT_ID}/blueprint-isaac-lab:latest
+          imagePullPolicy: Always
+
+          command: ["python", "/app/isaac-lab-job/generate_isaac_lab_task.py"]
+          workingDir: /app
+
+          envFrom:
+            - configMapRef:
+                name: cost-tracking-pricing
+
+          env:
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: ASSETS_PREFIX
+              value: "scenes/$(SCENE_ID)/assets"
+            - name: USD_PREFIX
+              value: "scenes/$(SCENE_ID)/usd"
+            - name: REPLICATOR_PREFIX
+              value: "scenes/$(SCENE_ID)/replicator"
+            - name: ISAAC_LAB_PREFIX
+              value: "scenes/$(SCENE_ID)/isaac_lab"
+            - name: ENVIRONMENT_TYPE
+              value: "${ENVIRONMENT_TYPE}"
+            - name: NUM_ENVS
+              value: "${NUM_ENVS}"
+            - name: POLICIES
+              value: "${POLICIES}"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: "${OTEL_EXPORTER_OTLP_HEADERS}"
+            - name: OTEL_SERVICE_NAME
+              value: "isaac-lab-job"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=isaac-lab,deployment.environment=production"
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files

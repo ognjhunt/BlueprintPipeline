@@ -3,11 +3,29 @@ kind: Kustomization
 
 resources:
   - cost-tracking-pricing.yaml
+  - arena-export-job.yaml
+  - dataset-delivery-job.yaml
+  - firebase-cleanup-job.yaml
+  - interactive-job.yaml
+  - isaac-lab-job.yaml
+  - meshy-job.yaml
+  - objects-job.yaml
+  - regen3d-job.yaml
+  - replicator-job.yaml
+  - scale-job.yaml
+  - scene-batch-job.yaml
+  - scene-generation-job.yaml
   - episode-generation-job.yaml
   - genie-sim-export-job.yaml
   - genie-sim-submit-job.yaml
   - genie-sim-local-job.yaml
   - genie-sim-import-webhook.yaml
+  - simready-job.yaml
+  - smart-placement-engine-job.yaml
+  - upsell-features-job.yaml
+  - usd-assembly-job.yaml
+  - variation-asset-pipeline-job.yaml
+  - variation-gen-job.yaml
 
 configMapGenerator:
   - name: episode-gen-runtime

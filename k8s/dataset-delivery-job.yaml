@@ -1,0 +1,109 @@
+# =============================================================================
+# Kubernetes Job: Dataset Delivery
+# =============================================================================
+# Delivers Genie Sim import bundles to lab-specific buckets.
+#
+# Apply:
+#   envsubst < k8s/dataset-delivery-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dataset-delivery
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: dataset-delivery
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: dataset-delivery
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: dataset-delivery
+          image: ghcr.io/${PROJECT_ID}/blueprint-dataset-delivery:latest
+          imagePullPolicy: Always
+
+          command: ["python", "dataset_delivery.py"]
+          workingDir: /app/dataset-delivery-job
+
+          envFrom:
+            - configMapRef:
+                name: cost-tracking-pricing
+
+          env:
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: JOB_ID
+              value: "${JOB_ID}"
+            - name: IMPORT_MANIFEST_PATH
+              value: "${IMPORT_MANIFEST_PATH}"
+            - name: DELIVERY_PREFIX
+              value: "${DELIVERY_PREFIX}"
+            - name: LAB_DELIVERY_BUCKETS
+              value: "${LAB_DELIVERY_BUCKETS}"
+            - name: DEFAULT_DELIVERY_BUCKET
+              value: "${DEFAULT_DELIVERY_BUCKET}"
+            - name: LAB_WEBHOOK_URLS
+              value: "${LAB_WEBHOOK_URLS}"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: "${OTEL_EXPORTER_OTLP_HEADERS}"
+            - name: OTEL_SERVICE_NAME
+              value: "dataset-delivery-job"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=dataset-delivery,deployment.environment=production"
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files

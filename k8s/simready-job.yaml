@@ -1,0 +1,125 @@
+# =============================================================================
+# Kubernetes Job: SimReady
+# =============================================================================
+# Prepares simready assets with physics hints.
+#
+# Apply:
+#   envsubst < k8s/simready-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: simready
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: simready
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: simready
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: simready
+          image: ghcr.io/${PROJECT_ID}/blueprint-simready:latest
+          imagePullPolicy: Always
+
+          command: ["/app/run_simready.sh"]
+          workingDir: /app
+
+          envFrom:
+            - configMapRef:
+                name: cost-tracking-pricing
+
+          env:
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: ASSETS_PREFIX
+              value: "scenes/$(SCENE_ID)/assets"
+            - name: GEMINI_API_KEY
+              value: "${GEMINI_API_KEY}"
+            - name: OPENAI_API_KEY
+              value: "${OPENAI_API_KEY}"
+            - name: PIPELINE_ENV
+              value: "${PIPELINE_ENV}"
+            - name: SIMREADY_PRODUCTION_MODE
+              value: "${SIMREADY_PRODUCTION_MODE}"
+            - name: SIMREADY_PHYSICS_MODE
+              value: "${SIMREADY_PHYSICS_MODE}"
+            - name: SIMREADY_ALLOW_DETERMINISTIC_PHYSICS
+              value: "${SIMREADY_ALLOW_DETERMINISTIC_PHYSICS}"
+            - name: SIMREADY_ALLOW_HEURISTIC_FALLBACK
+              value: "${SIMREADY_ALLOW_HEURISTIC_FALLBACK}"
+            - name: SIMREADY_FALLBACK_MIN_COVERAGE
+              value: "${SIMREADY_FALLBACK_MIN_COVERAGE}"
+            - name: SIMREADY_NON_LLM_MIN_QUALITY
+              value: "${SIMREADY_NON_LLM_MIN_QUALITY}"
+            - name: ASSET_CATALOG_PROJECT
+              value: "${ASSET_CATALOG_PROJECT}"
+            - name: ASSET_CATALOG_COLLECTION
+              value: "${ASSET_CATALOG_COLLECTION}"
+            - name: ASSET_CATALOG_CREDENTIALS
+              value: "${ASSET_CATALOG_CREDENTIALS}"
+            - name: ASSET_CATALOG_EMULATOR_HOST
+              value: "${ASSET_CATALOG_EMULATOR_HOST}"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: "${OTEL_EXPORTER_OTLP_HEADERS}"
+            - name: OTEL_SERVICE_NAME
+              value: "simready-job"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=simready,deployment.environment=production"
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files

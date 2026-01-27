@@ -1,0 +1,145 @@
+# =============================================================================
+# Kubernetes Job: Scene Batch
+# =============================================================================
+# Runs batch scene processing via tools/run_scene_batch.py.
+#
+# Apply:
+#   envsubst < k8s/scene-batch-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scene-batch
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: scene-batch
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: scene-batch
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: scene-batch
+          image: ghcr.io/${PROJECT_ID}/blueprint-scene-batch:latest
+          imagePullPolicy: Always
+
+          command: ["python", "scene-batch-job/entrypoint.py"]
+          workingDir: /app
+
+          envFrom:
+            - configMapRef:
+                name: cost-tracking-pricing
+
+          env:
+            - name: SCENE_LIST_JSON
+              value: "${SCENE_LIST_JSON}"
+            - name: SCENE_ROOT
+              value: "/mnt/gcs/scenes"
+            - name: REPORTS_DIR
+              value: "/mnt/gcs/batch_reports"
+            - name: MAX_CONCURRENT
+              value: "${MAX_CONCURRENT}"
+            - name: RETRY_ATTEMPTS
+              value: "${RETRY_ATTEMPTS}"
+            - name: RETRY_DELAY
+              value: "${RETRY_DELAY}"
+            - name: RATE_LIMIT
+              value: "${RATE_LIMIT}"
+            - name: STEPS
+              value: "${STEPS}"
+            - name: RESUME_FROM
+              value: "${RESUME_FROM}"
+            - name: CHECKPOINT_STEP
+              value: "${CHECKPOINT_STEP}"
+            - name: DLQ_PATH
+              value: "${DLQ_PATH}"
+            - name: LOG_LEVEL
+              value: "${LOG_LEVEL}"
+            - name: VALIDATE
+              value: "${VALIDATE}"
+            - name: SKIP_INTERACTIVE
+              value: "${SKIP_INTERACTIVE}"
+            - name: ENABLE_DWM
+              value: "${ENABLE_DWM}"
+            - name: ENABLE_DREAM2FLOW
+              value: "${ENABLE_DREAM2FLOW}"
+            - name: ENABLE_EXPERIMENTAL
+              value: "${ENABLE_EXPERIMENTAL}"
+            - name: ENABLE_INVENTORY_ENRICHMENT
+              value: "${ENABLE_INVENTORY_ENRICHMENT}"
+            - name: DISABLE_ARTICULATED_ASSETS
+              value: "${DISABLE_ARTICULATED_ASSETS}"
+            - name: SKIP_COMPLETED
+              value: "${SKIP_COMPLETED}"
+            - name: GCS_LOCK_BUCKET
+              value: "${GCS_LOCK_BUCKET}"
+            - name: GCS_LOCK_PREFIX
+              value: "${GCS_LOCK_PREFIX}"
+            - name: GCS_LOCK_TTL_SECONDS
+              value: "${GCS_LOCK_TTL_SECONDS}"
+            - name: GCS_LOCK_HEARTBEAT_SECONDS
+              value: "${GCS_LOCK_HEARTBEAT_SECONDS}"
+            - name: GCS_LOCK_WAIT_SECONDS
+              value: "${GCS_LOCK_WAIT_SECONDS}"
+            - name: GCS_LOCK_NAME
+              value: "${GCS_LOCK_NAME}"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: "${OTEL_EXPORTER_OTLP_HEADERS}"
+            - name: OTEL_SERVICE_NAME
+              value: "scene-batch-job"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=scene-batch,deployment.environment=production"
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files
