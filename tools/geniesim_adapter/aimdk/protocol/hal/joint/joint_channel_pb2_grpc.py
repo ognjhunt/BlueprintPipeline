@@ -5,7 +5,7 @@ import warnings
 
 from aimdk.protocol.hal.joint import joint_channel_pb2 as aimdk_dot_protocol_dot_hal_dot_joint_dot_joint__channel__pb2
 
-GRPC_GENERATED_VERSION = '1.71.2'
+GRPC_GENERATED_VERSION = '1.66.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
