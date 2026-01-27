@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: variation-asset-pipeline
-          image: ghcr.io/${PROJECT_ID}/blueprint-variation-asset-pipeline:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-variation-asset-pipeline:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "run_variation_asset_pipeline.py"]

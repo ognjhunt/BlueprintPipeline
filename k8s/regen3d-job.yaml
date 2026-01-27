@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: regen3d
-          image: ghcr.io/${PROJECT_ID}/blueprint-regen3d:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-regen3d:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "regen3d_adapter_job.py"]

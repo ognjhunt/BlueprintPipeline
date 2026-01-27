@@ -54,8 +54,9 @@ must be annotated inline in the workflow YAML and documented here:
 ## Timeout Policies by Pipeline
 
 ### Adaptive Timeout Alignment
+- **Canonical source of truth:** `policy_configs/adaptive_timeouts.yaml` defines baseline timeout defaults. Workflow YAMLs should reference that config (directly or via top-level variables) and avoid inline literal timeouts except where pipeline-specific overrides are required.
 - Workflows that accept `bundle_tier` or `scene_complexity` inputs should use the defaults in `policy_configs/adaptive_timeouts.yaml` unless overridden by the pipeline-specific values below.
-- When a workflow does not receive adaptive inputs, we set explicit per-workflow defaults (often 3600s) to keep metrics consistent and document any overrides here.
+- When a workflow does not receive adaptive inputs, we set explicit per-workflow defaults (often 3600s) via top-level workflow variables to keep metrics consistent and document any overrides here.
 
 ### Episode Generation Pipeline
 - **GKE Job Timeout:** 6 hours (21600s) - Isaac Sim GPU processing

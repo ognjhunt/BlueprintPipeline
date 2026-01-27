@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: isaac-lab
-          image: ghcr.io/${PROJECT_ID}/blueprint-isaac-lab:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-isaac-lab:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "/app/isaac-lab-job/generate_isaac_lab_task.py"]

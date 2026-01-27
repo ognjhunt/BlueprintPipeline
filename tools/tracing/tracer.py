@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, TypeVar, cast
 
 from tools.config.env import parse_bool_env
+from tools.config.production_mode import resolve_production_mode
 from tools.tracing.correlation import ensure_request_id
 
 logger = logging.getLogger(__name__)
@@ -282,7 +283,7 @@ def init_tracing(
     if enabled is None:
         # Enable in production or when explicitly configured
         enabled = (
-            os.getenv("PIPELINE_ENV") == "production"
+            resolve_production_mode()
             or parse_bool_env(os.getenv("ENABLE_TRACING"), default=False)
             or bool(os.getenv("GCP_PROJECT_ID"))
             or bool(os.getenv("JAEGER_ENDPOINT"))

@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: objects
-          image: ghcr.io/${PROJECT_ID}/blueprint-objects:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-objects:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["/app/run_objects.sh"]

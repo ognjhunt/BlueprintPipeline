@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: arena-export
-          image: ghcr.io/${PROJECT_ID}/blueprint-arena-export:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-arena-export:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "arena_export_job.py", "--env-mode"]

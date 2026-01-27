@@ -236,6 +236,8 @@ resource "google_container_node_pool" "cpu_pool" {
       node_config[0].labels,
     ]
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 # =============================================================================
@@ -316,6 +318,8 @@ resource "google_container_node_pool" "gpu_pool" {
       node_config[0].labels,
     ]
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 # =============================================================================
@@ -390,6 +394,8 @@ resource "google_container_node_pool" "gpu_ci_pool" {
       node_config[0].labels,
     ]
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 # =============================================================================

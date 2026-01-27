@@ -20,6 +20,8 @@ resource "google_container_analysis_note" "binary_auth_attestor" {
       human_readable_name = var.binary_authorization_attestor_description
     }
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_binary_authorization_attestor" "primary" {
@@ -35,6 +37,8 @@ resource "google_binary_authorization_attestor" "primary" {
     id                       = var.binary_authorization_attestor_public_key_id
     ascii_armored_pgp_public_key = var.binary_authorization_attestor_public_key
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_binary_authorization_policy" "default" {
@@ -48,4 +52,6 @@ resource "google_binary_authorization_policy" "default" {
     enforcement_mode        = "ENFORCED_BLOCK_AND_AUDIT_LOG"
     require_attestations_by = local.binary_authorization_attestors
   }
+
+  depends_on = [google_project_service.apis]
 }
