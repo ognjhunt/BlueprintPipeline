@@ -1,0 +1,10 @@
+{
+  "scene_id": "lightwheel_kitchen",
+  "run_id": "7d8e1955-bf83-41bf-bdeb-fa7d98c8aee2",
+  "environment_type": "kitchen",
+  "policies": [
+    "manipulation",
+    "navigation"
+  ],
+  "generated_at": "2026-01-27T17:41:41.297789Z"
+}

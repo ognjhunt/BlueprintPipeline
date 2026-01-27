@@ -1,0 +1,31 @@
+{
+  "step": "isaac-lab",
+  "status": "completed",
+  "started_at": "2026-01-27T17:41:59.923588Z",
+  "completed_at": "2026-01-27T17:41:59.942173Z",
+  "outputs": {
+    "files": [
+      "env_cfg.py",
+      "task_dish_loading.py",
+      "reward_functions.py",
+      "train_cfg.yaml",
+      "randomizations.py",
+      "__init__.py"
+    ],
+    "completion_marker": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/isaac_lab/.isaac_lab_complete",
+    "quality_gate_checkpoint": "isaac_lab_generated",
+    "quality_gate_report": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/quality_gates/quality_gate_report.json",
+    "quality_gate_summary": {
+      "total_gates": 1,
+      "passed": 1,
+      "failed": 0,
+      "blocking_failures": 0,
+      "can_proceed": true
+    }
+  },
+  "output_paths": [
+    "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/isaac_lab/.isaac_lab_complete"
+  ],
+  "output_hashes": {},
+  "scene_id": "lightwheel_kitchen"
+}

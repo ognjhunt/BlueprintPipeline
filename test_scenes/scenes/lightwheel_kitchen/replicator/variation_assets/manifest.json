@@ -1,0 +1,20 @@
+{
+  "scene_id": "lightwheel_kitchen",
+  "assets": [
+    {
+      "name": "variation_toaster",
+      "category": "toaster",
+      "description": "Variation of toaster",
+      "priority": "recommended",
+      "source_hint": "generate"
+    },
+    {
+      "name": "variation_pot",
+      "category": "pot",
+      "description": "Variation of pot",
+      "priority": "recommended",
+      "source_hint": "generate"
+    }
+  ],
+  "generated_at": "2026-01-27T17:41:41.298632Z"
+}
