@@ -50,7 +50,6 @@ Environment Variables:
 
 import asyncio
 import copy
-import hashlib
 import importlib
 import importlib.util
 import json
@@ -79,7 +78,6 @@ from import_manifest_utils import (
     build_directory_checksums,
     build_file_inventory,
     collect_provenance,
-    compute_checksums_signature,
     compute_manifest_checksum,
     get_git_sha,
     get_episode_file_paths,
@@ -89,6 +87,47 @@ from import_manifest_utils import (
     verify_import_manifest_checksum,
 )
 from verify_import_manifest import verify_manifest
+from genie_sim_import.constants import MIN_EPISODES_REQUIRED
+from genie_sim_import.downloads import (
+    _download_recordings_from_gcs,
+    _load_local_job_metadata,
+    _parse_gcs_uri,
+    _relative_recordings_path,
+    _resolve_gcs_output_path,
+    _resolve_gcs_recordings_path,
+    _resolve_local_output_dir,
+    _resolve_local_path,
+    _resolve_recordings_dir,
+    _write_local_job_metadata,
+)
+from genie_sim_import.integrity import (
+    _format_checksums_verification_errors,
+    _resolve_firebase_verify_checksums,
+    _sha256_file,
+    _write_checksums_file,
+)
+from genie_sim_import.manifest import (
+    _build_episode_hash_index_path,
+    _compute_episode_content_hash,
+    _compute_episode_content_manifest,
+    _load_json_file,
+    _load_existing_import_manifest,
+    _load_import_manifest_with_migration,
+    _lookup_episode_hash_index,
+    _persist_episode_hash_index,
+    _resolve_manifest_import_status,
+    _update_import_manifest_dedup_summary,
+    _update_import_manifest_firebase_summary,
+    _update_import_manifest_status,
+)
+from genie_sim_import.reporting import (
+    _aggregate_metrics_summary,
+    _normalize_gcs_output_path,
+    _relative_to_bundle,
+    _resolve_asset_provenance_reference,
+    _resolve_job_idempotency,
+    _write_combined_import_manifest,
+)
 
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -179,16 +218,10 @@ except ImportError:
 # Data Models
 # =============================================================================
 
-MIN_EPISODES_REQUIRED = 1
 JOB_NAME = "genie-sim-import-job"
 logger = logging.getLogger(__name__)
 DEFAULT_VIDEO_CAMERA_ID = "camera"
 VIDEO_CHUNK_SIZE = 1000
-# Secret Manager IDs + env var fallbacks for checksums signing.
-CHECKSUMS_HMAC_KEY_SECRET_ID = "checksums-hmac-key"
-CHECKSUMS_HMAC_KEY_ENV_VAR = "CHECKSUMS_HMAC_KEY"
-CHECKSUMS_HMAC_KEY_ID_SECRET_ID = "checksums-hmac-key-id"
-CHECKSUMS_HMAC_KEY_ID_ENV_VAR = "CHECKSUMS_HMAC_KEY_ID"
 
 
 class DeliveryMarkerExistsError(RuntimeError):
@@ -375,165 +408,6 @@ def _is_service_mode() -> bool:
         or os.getenv("K_SERVICE") is not None
         or os.getenv("KUBERNETES_SERVICE_HOST") is not None
     )
-
-
-def _sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(8192), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def _compute_episode_content_manifest(
-    recordings_dir: Path,
-    episode_id: str,
-) -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    for path in sorted(recordings_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.stem != episode_id:
-            continue
-        try:
-            rel_path = path.relative_to(recordings_dir).as_posix()
-        except ValueError:
-            rel_path = path.as_posix()
-        entries.append(
-            {
-                "path": rel_path,
-                "sha256": _sha256_file(path),
-                "size_bytes": path.stat().st_size,
-            }
-        )
-    entries.sort(key=lambda entry: entry["path"])
-    return entries
-
-
-def _compute_episode_content_hash(entries: List[Dict[str, Any]]) -> str:
-    payload = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _build_episode_hash_index_path(
-    *,
-    scene_id: str,
-    robot_type: Optional[str],
-    prefix: str,
-    content_hash: str,
-) -> str:
-    base_prefix = build_firebase_upload_prefix(
-        scene_id,
-        robot_type=robot_type,
-        prefix=prefix,
-    )
-    return f"{base_prefix}/episode_hash_index/{content_hash}.json"
-
-
-def _lookup_episode_hash_index(
-    *,
-    episode_hashes: Dict[str, str],
-    scene_id: str,
-    robot_type: Optional[str],
-    prefix: str,
-    log: logging.LoggerAdapter,
-) -> Dict[str, str]:
-    if not episode_hashes:
-        return {}
-    upload_mode = get_firebase_upload_mode()
-    existing: Dict[str, str] = {}
-    try:
-        if upload_mode == "local":
-            local_root = resolve_firebase_local_upload_root()
-            for episode_id, content_hash in episode_hashes.items():
-                index_path = _build_episode_hash_index_path(
-                    scene_id=scene_id,
-                    robot_type=robot_type,
-                    prefix=prefix,
-                    content_hash=content_hash,
-                )
-                if (local_root / index_path).exists():
-                    existing[episode_id] = content_hash
-            return existing
-
-        bucket = get_firebase_storage_bucket()
-        for episode_id, content_hash in episode_hashes.items():
-            blob_path = _build_episode_hash_index_path(
-                scene_id=scene_id,
-                robot_type=robot_type,
-                prefix=prefix,
-                content_hash=content_hash,
-            )
-            blob = bucket.blob(blob_path)
-            if blob.exists():
-                existing[episode_id] = content_hash
-    except Exception as exc:
-        log.warning("Episode hash index lookup failed: %s", exc)
-        return {}
-    return existing
-
-
-def _persist_episode_hash_index(
-    *,
-    episode_hashes: Dict[str, str],
-    scene_id: str,
-    robot_type: Optional[str],
-    prefix: str,
-    job_id: str,
-    log: logging.LoggerAdapter,
-) -> None:
-    if not episode_hashes:
-        return
-    upload_mode = get_firebase_upload_mode()
-    payload_template = {
-        "scene_id": scene_id,
-        "robot_type": robot_type,
-        "job_id": job_id,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
-    if upload_mode == "local":
-        local_root = resolve_firebase_local_upload_root()
-        for episode_id, content_hash in episode_hashes.items():
-            index_path = _build_episode_hash_index_path(
-                scene_id=scene_id,
-                robot_type=robot_type,
-                prefix=prefix,
-                content_hash=content_hash,
-            )
-            full_path = local_root / index_path
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                **payload_template,
-                "episode_id": episode_id,
-                "content_hash": content_hash,
-            }
-            write_json_atomic(full_path, payload, indent=2)
-        return
-
-    try:
-        bucket = get_firebase_storage_bucket()
-    except Exception as exc:
-        log.warning("Episode hash index write skipped: %s", exc)
-        return
-    for episode_id, content_hash in episode_hashes.items():
-        blob_path = _build_episode_hash_index_path(
-            scene_id=scene_id,
-            robot_type=robot_type,
-            prefix=prefix,
-            content_hash=content_hash,
-        )
-        blob = bucket.blob(blob_path)
-        if blob.exists():
-            continue
-        payload = {
-            **payload_template,
-            "episode_id": episode_id,
-            "content_hash": content_hash,
-        }
-        blob.upload_from_string(
-            json.dumps(payload, sort_keys=True),
-            content_type="application/json",
-        )
 
 
 def _resolve_upload_file_list(
@@ -1258,37 +1132,6 @@ def _run_firebase_uploads_for_robot_payloads(
     return overall_success
 
 
-def _relative_to_bundle(bundle_root: Path, path: Path) -> str:
-    try:
-        rel_path = path.resolve().relative_to(bundle_root.resolve())
-    except ValueError:
-        return path.as_posix()
-    rel_str = rel_path.as_posix()
-    return rel_str if rel_str else "."
-
-
-def _resolve_asset_provenance_reference(
-    bundle_root: Path,
-    output_dir: Path,
-    job_metadata: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
-    local_path = output_dir / "legal" / "asset_provenance.json"
-    if local_path.exists():
-        return _relative_to_bundle(bundle_root, local_path)
-    if job_metadata:
-        artifacts = job_metadata.get("artifacts", {})
-        bundle = job_metadata.get("bundle", {})
-        reference = (
-            artifacts.get("asset_provenance")
-            or artifacts.get("asset_provenance_path")
-            or bundle.get("asset_provenance")
-            or bundle.get("asset_provenance_path")
-        )
-        if reference:
-            return reference
-    return None
-
-
 def _resolve_run_id(job_id: str) -> str:
     return (
         os.getenv("RUN_ID")
@@ -1573,10 +1416,6 @@ def _resolve_firebase_upload_max_workers(raw_value: Optional[str]) -> Optional[i
     if max_workers < 1:
         raise ValueError("FIREBASE_UPLOAD_MAX_WORKERS must be >= 1")
     return max_workers
-
-
-def _resolve_firebase_verify_checksums(raw_value: Optional[str]) -> bool:
-    return parse_bool_env(raw_value, default=True)
 
 
 def _should_fail_firebase_verification(
@@ -2419,37 +2258,6 @@ For example, supply the dataset path in your training config or CLI to start tra
     return readme_path
 
 
-def _write_checksums_file(
-    output_dir: Path,
-    checksums: Dict[str, Any],
-) -> tuple[Path, Optional[Dict[str, str]]]:
-    checksums_path = output_dir / "checksums.json"
-    payload = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "root": ".",
-        "algorithm": "sha256",
-        "files": checksums,
-    }
-    signature = None
-    production_mode = resolve_production_mode()
-    hmac_key = get_secret_or_env(
-        CHECKSUMS_HMAC_KEY_SECRET_ID,
-        env_var=CHECKSUMS_HMAC_KEY_ENV_VAR,
-        fallback_to_env=not production_mode,
-    )
-    if hmac_key:
-        key_id = get_secret_or_env(
-            CHECKSUMS_HMAC_KEY_ID_SECRET_ID,
-            env_var=CHECKSUMS_HMAC_KEY_ID_ENV_VAR,
-            fallback_to_env=not production_mode,
-        )
-        signature = compute_checksums_signature(payload, hmac_key, key_id=key_id)
-        payload["signature"] = signature
-    with open(checksums_path, "w") as handle:
-        json.dump(payload, handle, indent=2)
-    return checksums_path, signature
-
-
 def _load_contract_schema(schema_name: str) -> Dict[str, Any]:
     schema_path = REPO_ROOT / "fixtures" / "contracts" / schema_name
     return json.loads(schema_path.read_text())
@@ -2754,14 +2562,6 @@ def _validate_schema_payload(
     return []
 
 
-def _load_json_file(path: Path) -> Any:
-    try:
-        with open(path, "r") as handle:
-            return json.load(handle)
-    except (FileNotFoundError, PermissionError, json.JSONDecodeError, OSError) as exc:
-        raise ValueError(f"Failed to load JSON file {path}: {exc}") from exc
-
-
 def _load_dataset_info_with_migration(
     path: Path,
     log: logging.Logger,
@@ -2780,30 +2580,6 @@ def _load_dataset_info_with_migration(
     if migration.applied_steps:
         log.info(
             "Applied dataset_info migrations for %s: %s",
-            path,
-            ", ".join(migration.applied_steps),
-        )
-    return migration.payload
-
-
-def _load_import_manifest_with_migration(
-    path: Path,
-    log: logging.Logger,
-    *,
-    required: bool = True,
-) -> Optional[Dict[str, Any]]:
-    payload = _load_json_file(path)
-    try:
-        migration = migrate_import_manifest_payload(payload)
-    except SchemaMigrationError as exc:
-        message = f"Unsupported import_manifest schema version in {path}: {exc}"
-        if required:
-            raise ValueError(message) from exc
-        log.warning(message)
-        return None
-    if migration.applied_steps:
-        log.info(
-            "Applied import manifest migrations for %s: %s",
             path,
             ", ".join(migration.applied_steps),
         )
@@ -2896,364 +2672,12 @@ def _create_bundle_package(
     return package_path
 
 
-def _parse_gcs_uri(uri: str) -> Optional[Dict[str, str]]:
-    if not uri.startswith("gs://"):
-        return None
-    remainder = uri[len("gs://"):]
-    if "/" not in remainder:
-        return {"bucket": remainder, "object": ""}
-    bucket, obj = remainder.split("/", 1)
-    return {"bucket": bucket, "object": obj}
-
-
-def _resolve_local_path(bucket: str, uri_or_path: str) -> Path:
-    if uri_or_path.startswith("/mnt/gcs/"):
-        return Path(uri_or_path)
-    parsed = _parse_gcs_uri(uri_or_path)
-    if parsed:
-        return Path("/mnt/gcs") / parsed["bucket"] / parsed["object"]
-    return Path("/mnt/gcs") / bucket / uri_or_path
-
-
-def _resolve_local_output_dir(
-    bucket: str,
-    output_prefix: str,
-    job_id: str,
-    local_episodes_prefix: Optional[str],
-) -> Path:
-    if local_episodes_prefix:
-        return _resolve_local_path(bucket, local_episodes_prefix)
-    return Path("/mnt/gcs") / bucket / output_prefix / f"geniesim_{job_id}"
-
-
-def _resolve_gcs_output_path(
-    output_dir: Path,
-    *,
-    bucket: Optional[str],
-    output_prefix: Optional[str],
-    job_id: str,
-    explicit_gcs_output_path: Optional[str],
-) -> Optional[str]:
-    if explicit_gcs_output_path:
-        return explicit_gcs_output_path
-    output_dir_str = str(output_dir)
-    if output_dir_str.startswith("/mnt/gcs/"):
-        return "gs://" + output_dir_str[len("/mnt/gcs/"):]
-    if bucket and output_prefix:
-        return f"gs://{bucket}/{output_prefix}/geniesim_{job_id}"
-    return None
-
-
-def _resolve_gcs_recordings_path(
-    *,
-    bucket: str,
-    output_prefix: str,
-    job_id: str,
-    local_episodes_prefix: Optional[str],
-) -> str:
-    if local_episodes_prefix:
-        if local_episodes_prefix.startswith("gs://"):
-            base = local_episodes_prefix
-        elif local_episodes_prefix.startswith("/mnt/gcs/"):
-            base = "gs://" + local_episodes_prefix[len("/mnt/gcs/"):]
-        else:
-            base = f"gs://{bucket}/{local_episodes_prefix.lstrip('/')}"
-    else:
-        base = f"gs://{bucket}/{output_prefix}/geniesim_{job_id}"
-    return f"{base.rstrip('/')}/recordings"
-
-
-def _download_recordings_from_gcs(recordings_uri: str, destination: Path) -> Path:
-    try:
-        from google.cloud import storage  # type: ignore
-    except Exception as exc:
-        raise RuntimeError(
-            f"google-cloud-storage unavailable for recordings download: {exc}"
-        ) from exc
-
-    parsed = _parse_gcs_uri(recordings_uri)
-    if not parsed:
-        raise ValueError(f"Invalid GCS recordings path: {recordings_uri}")
-
-    bucket_name = parsed["bucket"]
-    prefix = parsed["object"].rstrip("/")
-    if prefix:
-        prefix += "/"
-    client = storage.Client()
-    blobs = list(client.list_blobs(bucket_name, prefix=prefix))
-    if not blobs:
-        raise FileNotFoundError(f"No recordings found at {recordings_uri}")
-
-    for blob in blobs:
-        blob_name = getattr(blob, "name", "")
-        if not blob_name or blob_name.endswith("/"):
-            continue
-        rel_path = blob_name[len(prefix):] if prefix and blob_name.startswith(prefix) else blob_name
-        local_path = destination / rel_path
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        blob.download_to_filename(str(local_path))
-    return destination
-
-
-def _relative_recordings_path(
-    recordings_dir: Path,
-    output_dir: Path,
-    path: Path,
-) -> str:
-    try:
-        return path.relative_to(output_dir).as_posix()
-    except ValueError:
-        try:
-            rel_path = path.relative_to(recordings_dir)
-        except ValueError:
-            return path.as_posix()
-        return (Path("recordings") / rel_path).as_posix()
-
-
-def _resolve_recordings_dir(
-    config: "ImportConfig",
-    *,
-    bucket: Optional[str],
-    output_prefix: str,
-    log: logging.LoggerAdapter,
-) -> Path:
-    recordings_dir = config.output_dir / "recordings"
-    output_dir_str = str(config.output_dir)
-    on_shared_volume = output_dir_str.startswith("/mnt/gcs/")
-
-    if on_shared_volume and recordings_dir.exists():
-        log.info("Using recordings from shared volume: %s", recordings_dir)
-        return recordings_dir
-
-    if not bucket:
-        raise ValueError("BUCKET is required to resolve recordings from GCS.")
-
-    recordings_uri = _resolve_gcs_recordings_path(
-        bucket=bucket,
-        output_prefix=output_prefix,
-        job_id=config.job_id,
-        local_episodes_prefix=config.local_episodes_prefix,
-    )
-    temp_dir = Path(tempfile.mkdtemp(prefix="geniesim_recordings_"))
-    log.info(
-        "Recordings not available on shared volume; downloading from %s to %s",
-        recordings_uri,
-        temp_dir,
-    )
-    downloaded_dir = _download_recordings_from_gcs(recordings_uri, temp_dir)
-    log.info("Using downloaded recordings directory: %s", downloaded_dir)
-    return downloaded_dir
-
-
-def _load_local_job_metadata(
-    bucket: str,
-    job_metadata_path: Optional[str],
-) -> Optional[Dict[str, Any]]:
-    if not job_metadata_path:
-        return None
-    metadata_path = _resolve_local_path(bucket, job_metadata_path)
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"Job metadata not found at {metadata_path}")
-    with open(metadata_path, "r") as handle:
-        return json.load(handle)
-
-
-def _write_local_job_metadata(
-    bucket: str,
-    job_metadata_path: Optional[str],
-    job_metadata: Dict[str, Any],
-) -> None:
-    if not job_metadata_path:
-        return
-    metadata_path = _resolve_local_path(bucket, job_metadata_path)
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(metadata_path, job_metadata, indent=2)
-
-
-def _load_existing_import_manifest(
-    output_dir: Path,
-    log: logging.Logger,
-) -> Optional[Dict[str, Any]]:
-    manifest_path = output_dir / "import_manifest.json"
-    if not manifest_path.exists():
-        return None
-    return _load_import_manifest_with_migration(
-        manifest_path,
-        log,
-        required=True,
-    )
-
-
-def _resolve_manifest_import_status(import_manifest: Dict[str, Any]) -> str:
-    status = import_manifest.get("import_status")
-    if isinstance(status, str):
-        return status.strip().lower()
-    success = import_manifest.get("success")
-    if isinstance(success, bool):
-        return "success" if success else "failed"
-    checksums_verification = import_manifest.get("verification", {}).get("checksums", {})
-    if isinstance(checksums_verification, dict):
-        checksums_success = checksums_verification.get("success")
-        if isinstance(checksums_success, bool):
-            return "success" if checksums_success else "failed"
-        output_bundle = checksums_verification.get("output_bundle")
-        if isinstance(output_bundle, dict):
-            checksums_success = output_bundle.get("success")
-            if isinstance(checksums_success, bool):
-                return "success" if checksums_success else "failed"
-    return "unknown"
-
-
 def _resolve_import_status(result: "ImportResult") -> str:
     if result.success:
         return "success"
     if result.episodes_passed_validation or result.episodes_filtered:
         return "partial"
     return "failed"
-
-
-def _format_checksums_verification_errors(
-    checksums_verification: Mapping[str, Any],
-) -> List[str]:
-    verification_errors: List[str] = []
-    for error in checksums_verification.get("errors") or []:
-        verification_errors.append(str(error))
-    if checksums_verification.get("missing_files"):
-        verification_errors.append(
-            "Missing files: " + ", ".join(checksums_verification["missing_files"])
-        )
-    if checksums_verification.get("checksum_mismatches"):
-        mismatch_paths = [
-            mismatch["path"]
-            for mismatch in checksums_verification["checksum_mismatches"]
-            if isinstance(mismatch, dict) and "path" in mismatch
-        ]
-        if mismatch_paths:
-            verification_errors.append(
-                "Checksum mismatches: " + ", ".join(mismatch_paths)
-            )
-    if checksums_verification.get("size_mismatches"):
-        mismatch_paths = [
-            mismatch["path"]
-            for mismatch in checksums_verification["size_mismatches"]
-            if isinstance(mismatch, dict) and "path" in mismatch
-        ]
-        if mismatch_paths:
-            verification_errors.append("Size mismatches: " + ", ".join(mismatch_paths))
-    return verification_errors
-
-
-def _update_import_manifest_status(
-    manifest_path: Optional[Path],
-    status: str,
-    success: Optional[bool] = None,
-) -> None:
-    if manifest_path is None or not manifest_path.exists():
-        return
-    with open(manifest_path, "r") as handle:
-        import_manifest = json.load(handle)
-    import_manifest["import_status"] = status
-    if success is not None:
-        import_manifest["success"] = success
-    import_manifest["status_updated_at"] = datetime.utcnow().isoformat() + "Z"
-    checksums = import_manifest.setdefault("checksums", {})
-    metadata_checksums = checksums.setdefault("metadata", {})
-    metadata_checksums.setdefault("import_manifest.json", {})
-    metadata_checksums["import_manifest.json"]["sha256"] = compute_manifest_checksum(
-        import_manifest
-    )
-    write_json_atomic(manifest_path, import_manifest, indent=2)
-
-
-def _update_import_manifest_firebase_summary(
-    manifest_path: Optional[Path],
-    firebase_summary: Dict[str, Any],
-) -> None:
-    if manifest_path is None:
-        return
-    if not manifest_path.exists():
-        print(
-            "[GENIE-SIM-IMPORT] ⚠️  Import manifest not found; "
-            "skipping Firebase summary update."
-        )
-        return
-    with open(manifest_path, "r") as handle:
-        import_manifest = json.load(handle)
-    import_manifest["firebase_upload"] = firebase_summary
-    firebase_verification = firebase_summary.get("firebase_verification")
-    if firebase_verification is not None:
-        import_manifest.setdefault("verification", {})[
-            "firebase_upload"
-        ] = firebase_verification
-    checksums = import_manifest.setdefault("checksums", {})
-    metadata_checksums = checksums.setdefault("metadata", {})
-    metadata_checksums.setdefault("import_manifest.json", {})
-    metadata_checksums["import_manifest.json"]["sha256"] = compute_manifest_checksum(
-        import_manifest
-    )
-    write_json_atomic(manifest_path, import_manifest, indent=2)
-
-
-def _update_import_manifest_dedup_summary(
-    manifest_path: Optional[Path],
-    dedup_summary: Dict[str, Any],
-) -> None:
-    if manifest_path is None:
-        return
-    if not manifest_path.exists():
-        print(
-            "[GENIE-SIM-IMPORT] ⚠️  Import manifest not found; "
-            "skipping dedup summary update."
-        )
-        return
-    with open(manifest_path, "r") as handle:
-        import_manifest = json.load(handle)
-    import_manifest["deduplication"] = dedup_summary
-    episodes_summary = import_manifest.setdefault("episodes", {})
-    episodes_summary["deduplicated"] = dedup_summary.get("deduplicated_count", 0)
-    episodes_summary["deduplicated_ids"] = dedup_summary.get(
-        "deduplicated_episode_ids", []
-    )
-    episodes_summary["deduplicated_filtered_from_outputs"] = dedup_summary.get(
-        "filtered_from_outputs",
-        False,
-    )
-    episodes_summary["deduplicated_filtered"] = dedup_summary.get(
-        "filtered_count",
-        0,
-    )
-    episodes_summary["deduplicated_filtered_ids"] = dedup_summary.get(
-        "filtered_episode_ids",
-        [],
-    )
-    post_dedup_passed = dedup_summary.get("post_dedup_passed_validation")
-    if isinstance(post_dedup_passed, int):
-        episodes_summary["passed_validation"] = post_dedup_passed
-    post_dedup_filtered = dedup_summary.get("post_dedup_filtered")
-    if isinstance(post_dedup_filtered, int):
-        episodes_summary["filtered"] = post_dedup_filtered
-    post_dedup_converted = dedup_summary.get("post_dedup_lerobot_converted_count")
-    if isinstance(post_dedup_converted, int):
-        lerobot_summary = import_manifest.setdefault("lerobot", {})
-        lerobot_summary["converted_count"] = post_dedup_converted
-    post_dedup_frames = dedup_summary.get("post_dedup_lerobot_total_frames")
-    if isinstance(post_dedup_frames, int):
-        lerobot_summary = import_manifest.setdefault("lerobot", {})
-        lerobot_summary["total_frames"] = post_dedup_frames
-    checksums = import_manifest.setdefault("checksums", {})
-    metadata_checksums = checksums.setdefault("metadata", {})
-    metadata_checksums.setdefault("import_manifest.json", {})
-    metadata_checksums["import_manifest.json"]["sha256"] = compute_manifest_checksum(
-        import_manifest
-    )
-    write_json_atomic(manifest_path, import_manifest, indent=2)
-
-
-def _resolve_job_idempotency(job_metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not job_metadata:
-        return None
-    idempotency = job_metadata.get("idempotency")
-    return idempotency if isinstance(idempotency, dict) else None
 
 
 def _resolve_artifacts_by_robot(
@@ -3294,308 +2718,6 @@ def _resolve_gcs_path(path: Optional[Path]) -> Optional[str]:
     if path_str.startswith("/mnt/gcs/"):
         return "gs://" + path_str[len("/mnt/gcs/"):]
     return path_str
-
-
-def _normalize_gcs_output_path(path_value: Optional[str]) -> Optional[str]:
-    if not path_value:
-        return None
-    if path_value.startswith("gs://"):
-        return path_value
-    if path_value.startswith("/mnt/gcs/"):
-        return "gs://" + path_value[len("/mnt/gcs/"):]
-    return path_value
-
-
-def _aggregate_metrics_summary(robot_metrics: Dict[str, Any]) -> Dict[str, Any]:
-    aggregated_stats: Dict[str, Any] = {}
-    backends = set()
-    for metrics in robot_metrics.values():
-        if not isinstance(metrics, dict):
-            continue
-        backend = metrics.get("backend")
-        if backend:
-            backends.add(backend)
-        stats = metrics.get("stats")
-        if isinstance(stats, dict):
-            for key, value in stats.items():
-                if isinstance(value, (int, float)):
-                    aggregated_stats[key] = aggregated_stats.get(key, 0) + value
-    if not backends:
-        backend = "unknown"
-    elif len(backends) == 1:
-        backend = next(iter(backends))
-    else:
-        backend = "mixed"
-    return {
-        "backend": backend,
-        "stats": aggregated_stats,
-        "robots": robot_metrics,
-    }
-
-
-def _write_combined_import_manifest(
-    output_dir: Path,
-    job_id: str,
-    gcs_output_path: Optional[str],
-    job_metadata: Optional[Dict[str, Any]],
-    robot_entries: List[Dict[str, Any]],
-    quality_settings: ResolvedQualitySettings,
-) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    normalized_gcs_output_path = _normalize_gcs_output_path(gcs_output_path)
-    total_downloaded = sum(entry["episodes"]["downloaded"] for entry in robot_entries)
-    total_passed = sum(entry["episodes"]["passed_validation"] for entry in robot_entries)
-    total_filtered = sum(entry["episodes"]["filtered"] for entry in robot_entries)
-    total_parse_failed = sum(entry["episodes"]["parse_failed"] for entry in robot_entries)
-    idempotency = _resolve_job_idempotency(job_metadata)
-
-    weighted_quality_sum = 0.0
-    quality_weight_total = 0
-    min_quality_scores = []
-    max_quality_scores = []
-    for entry in robot_entries:
-        quality = entry["quality"]
-        episodes_downloaded = entry["episodes"]["downloaded"]
-        weighted_quality_sum += quality["average_score"] * episodes_downloaded
-        quality_weight_total += episodes_downloaded
-        if episodes_downloaded > 0:
-            min_quality_scores.append(quality["min_score"])
-            max_quality_scores.append(quality["max_score"])
-
-    average_quality = (
-        weighted_quality_sum / quality_weight_total if quality_weight_total else 0.0
-    )
-    min_quality = min(min_quality_scores) if min_quality_scores else 0.0
-    max_quality = max(max_quality_scores) if max_quality_scores else 0.0
-    component_failure_counts: Dict[str, int] = {}
-    component_failed_total = 0
-    for entry in robot_entries:
-        quality = entry.get("quality", {})
-        component_failed_total += int(quality.get("component_failed_episodes", 0))
-        counts = quality.get("component_failure_counts")
-        if isinstance(counts, dict):
-            for key, value in counts.items():
-                if isinstance(value, (int, float)):
-                    component_failure_counts[key] = component_failure_counts.get(key, 0) + int(
-                        value
-                    )
-
-    normalized_robot_entries = []
-    robot_metrics: Dict[str, Any] = {}
-    robot_provenance: Dict[str, Any] = {}
-    lerobot_metadata_paths: Dict[str, List[str]] = {}
-    for entry in robot_entries:
-        entry_copy = copy.deepcopy(entry)
-        entry_copy["gcs_output_path"] = _normalize_gcs_output_path(
-            entry_copy.get("gcs_output_path")
-        )
-        entry_copy["import_manifest_path"] = _normalize_gcs_output_path(
-            entry_copy.get("import_manifest_path")
-        )
-        normalized_robot_entries.append(entry_copy)
-        robot_type = entry_copy.get("robot_type", "unknown")
-        output_dir_str = entry_copy.get("output_dir")
-        if output_dir_str:
-            robot_output_dir = Path(output_dir_str)
-            metadata_paths = get_lerobot_metadata_paths(robot_output_dir)
-            lerobot_metadata_paths[robot_type] = [
-                path.relative_to(robot_output_dir).as_posix()
-                for path in metadata_paths
-            ]
-        manifest_path_str = entry.get("import_manifest_local_path")
-        if manifest_path_str:
-            manifest_path = Path(manifest_path_str)
-            if manifest_path.exists():
-                try:
-                    manifest_payload = _load_import_manifest_with_migration(
-                        manifest_path,
-                        logger,
-                        required=False,
-                    )
-                except ValueError as exc:
-                    print(
-                        "[GENIE-SIM-IMPORT] ⚠️  Failed to load robot manifest "
-                        f"{manifest_path}: {exc}"
-                    )
-                    continue
-                if not manifest_payload:
-                    print(
-                        "[GENIE-SIM-IMPORT] ⚠️  Skipping robot manifest with unsupported "
-                        f"schema {manifest_path}."
-                    )
-                    continue
-                robot_metrics_payload = manifest_payload.get("metrics_summary")
-                if robot_metrics_payload:
-                    robot_metrics[robot_type] = robot_metrics_payload
-                robot_provenance_payload = manifest_payload.get("provenance")
-                if robot_provenance_payload:
-                    robot_provenance[robot_type] = robot_provenance_payload
-
-    metrics_summary = _aggregate_metrics_summary(robot_metrics)
-    bundle_root = output_dir.resolve()
-    manifest_path = output_dir / "import_manifest.json"
-    directory_checksums = build_directory_checksums(
-        output_dir, exclude_paths=[manifest_path]
-    )
-    checksums_path, checksums_signature = _write_checksums_file(
-        output_dir,
-        directory_checksums,
-    )
-    checksums_rel_path = checksums_path.relative_to(output_dir).as_posix()
-    checksums_entry = {
-        "sha256": _sha256_file(checksums_path),
-        "size_bytes": checksums_path.stat().st_size,
-    }
-    checksums_payload = {
-        "download_manifest": None,
-        "episodes": {},
-        "filtered_episodes": [],
-        "lerobot": {
-            "dataset_info": None,
-            "episodes_index": None,
-            "episodes": [],
-        },
-        "metadata": dict(directory_checksums),
-        "missing_episode_ids": [],
-        "missing_metadata_files": [],
-        "episode_files": {},
-        "bundle_files": dict(directory_checksums),
-    }
-    if checksums_signature:
-        checksums_payload["signature"] = checksums_signature
-    checksums_payload["metadata"][checksums_rel_path] = checksums_entry
-    checksums_payload["bundle_files"][checksums_rel_path] = checksums_entry
-    file_inventory = build_file_inventory(output_dir, exclude_paths=[manifest_path])
-    asset_provenance_path = _resolve_asset_provenance_reference(
-        bundle_root=bundle_root,
-        output_dir=output_dir,
-        job_metadata=job_metadata,
-    )
-    config_snapshot = {
-        "env": snapshot_env(ENV_SNAPSHOT_KEYS),
-        "config": {
-            "job_id": job_id,
-            "output_dir": str(output_dir),
-            "gcs_output_path": normalized_gcs_output_path,
-            "robots": [entry["robot_type"] for entry in normalized_robot_entries],
-        },
-        "job_metadata": job_metadata or {},
-    }
-    base_provenance = {
-        "source": "genie_sim",
-        "job_id": job_id,
-        "imported_by": "BlueprintPipeline",
-        "importer": "genie-sim-import-job",
-        "client_mode": "local",
-    }
-    provenance = collect_provenance(REPO_ROOT, config_snapshot)
-    provenance.update(base_provenance)
-    provenance["robots"] = robot_provenance
-
-    import_manifest = {
-        "schema_version": MANIFEST_SCHEMA_VERSION,
-        "schema_definition": MANIFEST_SCHEMA_DEFINITION,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "job_id": job_id,
-        "output_dir": str(output_dir),
-        "gcs_output_path": normalized_gcs_output_path,
-        "job_idempotency": {
-            "key": idempotency.get("key") if idempotency else None,
-            "first_submitted_at": idempotency.get("first_submitted_at") if idempotency else None,
-        },
-        "success": all(entry["success"] for entry in normalized_robot_entries),
-        "episodes": {
-            "downloaded": total_downloaded,
-            "passed_validation": total_passed,
-            "filtered": total_filtered,
-            "download_errors": 0,
-            "parse_failed": total_parse_failed,
-            "parse_failures": [],
-            "min_required": min(
-                (entry["episodes"].get("min_required", MIN_EPISODES_REQUIRED) for entry in robot_entries),
-                default=MIN_EPISODES_REQUIRED,
-            ),
-        },
-        "quality": {
-            "average_score": average_quality,
-            "min_score": min_quality,
-            "max_score": max_quality,
-            "threshold": min(
-                (entry["quality"]["threshold"] for entry in robot_entries),
-                default=0.0,
-            ),
-            "validation_enabled": any(
-                entry["quality"]["validation_enabled"] for entry in normalized_robot_entries
-            ),
-            "component_thresholds": quality_settings.config.dimension_thresholds,
-            "component_failed_episodes": component_failed_total,
-            "component_failure_counts": component_failure_counts,
-        },
-        "quality_config": {
-            "min_quality_score": quality_settings.min_quality_score,
-            "filter_low_quality": quality_settings.filter_low_quality,
-            "dimension_thresholds": quality_settings.config.dimension_thresholds,
-            "range": {
-                "min_allowed": quality_settings.config.min_allowed,
-                "max_allowed": quality_settings.config.max_allowed,
-            },
-            "defaults": {
-                "min_quality_score": quality_settings.config.default_min_quality_score,
-                "filter_low_quality": quality_settings.config.default_filter_low_quality,
-            },
-            "source_path": quality_settings.config.source_path,
-        },
-        "robots": normalized_robot_entries,
-        "job_metadata": job_metadata or {},
-        "readme_path": None,
-        "checksums_path": _relative_to_bundle(bundle_root, checksums_path),
-        "asset_provenance_path": asset_provenance_path,
-        "lerobot_metadata_paths": lerobot_metadata_paths,
-        "metrics_summary": metrics_summary,
-        "provenance": provenance,
-        "checksums": checksums_payload,
-        "file_inventory": file_inventory,
-        "verification": {
-            "checksums": {},
-        },
-        "upload_status": "not_configured",
-        "upload_failures": [],
-        "upload_started_at": None,
-        "upload_completed_at": None,
-        "upload_summary": {
-            "total_files": 0,
-            "uploaded": 0,
-            "skipped": 0,
-            "failed": 0,
-        },
-    }
-
-    import_manifest["checksums"]["metadata"]["import_manifest.json"] = {
-        "sha256": compute_manifest_checksum(import_manifest),
-    }
-
-    write_json_atomic(manifest_path, import_manifest, indent=2)
-
-    print("=" * 80)
-    print("COMBINED IMPORT MANIFEST CHECKSUM VERIFICATION")
-    print("=" * 80)
-    verify_exit_code = verify_manifest(manifest_path)
-    if verify_exit_code != 0:
-        print("[GENIE-SIM-IMPORT] ❌ Combined import manifest verification failed.")
-        raise RuntimeError("Combined import manifest verification failed.")
-    print("[GENIE-SIM-IMPORT] ✅ Combined import manifest verification succeeded")
-    print("=" * 80 + "\n")
-
-    manifest_checksum_result = verify_import_manifest_checksum(manifest_path)
-    if not manifest_checksum_result["success"]:
-        print(
-            "[GENIE-SIM-IMPORT] ❌ Combined import manifest checksum validation failed."
-        )
-        print("[GENIE-SIM-IMPORT] ❌ Import manifest checksum verification details:")
-        for error in manifest_checksum_result["errors"]:
-            print(f"[GENIE-SIM-IMPORT]   - {error}")
-        raise RuntimeError("Combined import manifest checksum verification failed.")
-    return manifest_path
 
 
 def _resolve_gcs_upload_target(gcs_output_path: str) -> Dict[str, str]:
@@ -6645,6 +5767,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                 job_metadata,
                 robot_entries,
                 quality_settings,
+                logger=logger,
             )
             if delivery_marker_result is not None:
                 _update_import_manifest_delivery(
