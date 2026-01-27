@@ -40,19 +40,28 @@ def _run_protoc(proto_root: Path, proto_paths: list[Path]) -> None:
 def main() -> None:
     _ensure_grpc_tools()
     proto_root = Path(__file__).resolve().parent
-    proto_path = proto_root / "geniesim_grpc.proto"
-    joint_proto = proto_root / "aimdk" / "protocol" / "hal" / "joint" / "joint_channel.proto"
-    for required in (proto_path, joint_proto):
+    aimdk_common = proto_root / "aimdk" / "protocol" / "common"
+    aimdk_hal_joint = proto_root / "aimdk" / "protocol" / "hal" / "joint"
+
+    # Collect all proto files that need compilation
+    proto_paths: list[Path] = [proto_root / "geniesim_grpc.proto"]
+    for proto_dir in (aimdk_common, aimdk_hal_joint):
+        proto_paths.extend(sorted(proto_dir.glob("*.proto")))
+
+    for required in proto_paths:
         if not required.exists():
             raise SystemExit(f"Proto file not found: {required}")
 
-    _run_protoc(proto_root, [proto_path, joint_proto])
+    _run_protoc(proto_root, proto_paths)
 
     expected_files = [
         proto_root / "geniesim_grpc_pb2.py",
         proto_root / "geniesim_grpc_pb2_grpc.py",
-        proto_root / "aimdk" / "protocol" / "hal" / "joint" / "joint_channel_pb2.py",
-        proto_root / "aimdk" / "protocol" / "hal" / "joint" / "joint_channel_pb2_grpc.py",
+        aimdk_common / "se3_pose_pb2.py",
+        aimdk_common / "joint_pb2.py",
+        aimdk_common / "vec3_pb2.py",
+        aimdk_hal_joint / "joint_channel_pb2.py",
+        aimdk_hal_joint / "joint_channel_pb2_grpc.py",
     ]
     missing = [path for path in expected_files if not path.exists()]
     if missing:
