@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: meshy
-          image: ghcr.io/${PROJECT_ID}/blueprint-meshy:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-meshy:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["/app/run_meshy.sh"]

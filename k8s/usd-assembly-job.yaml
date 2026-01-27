@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: usd-assembly
-          image: ghcr.io/${PROJECT_ID}/blueprint-usd-assembly:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-usd-assembly:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["/app/run_usd.sh"]
