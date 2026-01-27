@@ -1,0 +1,111 @@
+# =============================================================================
+# Kubernetes Job: Scene Generation
+# =============================================================================
+# Generates scene images using Gemini for the pipeline.
+#
+# Apply:
+#   envsubst < k8s/scene-generation-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scene-generation
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: scene-generation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: scene-generation
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: scene-generation
+          image: ghcr.io/${PROJECT_ID}/blueprint-scene-generation:latest
+          imagePullPolicy: Always
+
+          command: ["python", "generate_scene_images.py"]
+          workingDir: /app
+
+          envFrom:
+            - configMapRef:
+                name: cost-tracking-pricing
+
+          env:
+            - name: GEMINI_API_KEY
+              value: "${GEMINI_API_KEY}"
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENES_PER_RUN
+              value: "${SCENES_PER_RUN}"
+            - name: ARCHETYPES
+              value: "${ARCHETYPES}"
+            - name: DRY_RUN
+              value: "${DRY_RUN}"
+            - name: FIRESTORE_PROJECT
+              value: "${FIRESTORE_PROJECT}"
+            - name: GEMINI_PRO_MODEL
+              value: "${GEMINI_PRO_MODEL}"
+            - name: GEMINI_IMAGE_MODEL
+              value: "${GEMINI_IMAGE_MODEL}"
+            - name: GEMINI_IMAGE_MODEL_FALLBACK
+              value: "${GEMINI_IMAGE_MODEL_FALLBACK}"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: "${OTEL_EXPORTER_OTLP_HEADERS}"
+            - name: OTEL_SERVICE_NAME
+              value: "scene-generation-job"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=scene-generation,deployment.environment=production"
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files

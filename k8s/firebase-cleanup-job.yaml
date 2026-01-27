@@ -1,0 +1,97 @@
+# =============================================================================
+# Kubernetes Job: Firebase Storage Cleanup (On-demand)
+# =============================================================================
+# Runs a one-off cleanup of orphaned Firebase Storage blobs.
+#
+# Apply:
+#   envsubst < k8s/firebase-cleanup-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: firebase-cleanup-config
+  namespace: blueprint
+data:
+  FIREBASE_CLEANUP_PREFIX: "datasets"
+  FIREBASE_CLEANUP_MAX_AGE_HOURS: "168"
+  FIREBASE_CLEANUP_MANIFEST_PATH: ""
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: firebase-cleanup
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: firebase-cleanup
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 7200
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: firebase-cleanup
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: firebase-cleanup
+          image: ghcr.io/${PROJECT_ID}/blueprint-firebase-cleanup:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: firebase-cleanup-config
+            - configMapRef:
+                name: cost-tracking-pricing
+          env:
+            - name: FIREBASE_STORAGE_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: firebase-cleanup-overrides
+                  key: FIREBASE_STORAGE_BUCKET
+                  optional: true
+            - name: FIREBASE_SERVICE_ACCOUNT_JSON
+              valueFrom:
+                configMapKeyRef:
+                  name: firebase-cleanup-overrides
+                  key: FIREBASE_SERVICE_ACCOUNT_JSON
+                  optional: true
+            - name: FIREBASE_SERVICE_ACCOUNT_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: firebase-cleanup-overrides
+                  key: FIREBASE_SERVICE_ACCOUNT_PATH
+                  optional: true
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: "${OTEL_EXPORTER_OTLP_HEADERS}"
+            - name: OTEL_SERVICE_NAME
+              value: "firebase-cleanup-job"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=firebase-cleanup,deployment.environment=production"
+          volumeMounts:
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
+
+      volumes:
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files
