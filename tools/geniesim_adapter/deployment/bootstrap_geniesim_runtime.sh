@@ -24,6 +24,7 @@ export GENIESIM_ROOT
 export ISAAC_SIM_PATH
 export GENIESIM_HOST
 export GENIESIM_PORT
+export PYTHONPATH="${REPO_ROOT}/tools/geniesim_adapter:${REPO_ROOT}:${PYTHONPATH:-}"
 
 if [ "${GENIESIM_START_SERVER}" = "1" ]; then
   echo "[geniesim] Starting Genie Sim server (logs: ${GENIESIM_SERVER_LOG})"
@@ -37,5 +38,5 @@ fi
 
 if [ "${GENIESIM_HEALTHCHECK}" = "1" ]; then
   echo "[geniesim] Running health check"
-  PYTHONPATH="${REPO_ROOT}" python3 -m tools.geniesim_adapter.geniesim_healthcheck
+  "${ISAAC_SIM_PATH}/python.sh" -m tools.geniesim_adapter.geniesim_healthcheck
 fi
