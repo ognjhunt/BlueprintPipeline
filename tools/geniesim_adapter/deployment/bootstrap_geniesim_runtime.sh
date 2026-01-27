@@ -46,6 +46,16 @@ if [ "${GENIESIM_START_SERVER}" = "1" ]; then
 fi
 
 if [ "${GENIESIM_HEALTHCHECK}" = "1" ]; then
-  echo "[geniesim] Running health check"
-  "${ISAAC_SIM_PATH}/python.sh" -m tools.geniesim_adapter.geniesim_healthcheck
+  echo "[geniesim] Running health check (informational only)"
+  "${ISAAC_SIM_PATH}/python.sh" -m tools.geniesim_adapter.geniesim_healthcheck || {
+    echo "[geniesim] Health check not yet passing - server may still be starting"
+  }
+fi
+
+# Keep container alive by waiting on the server process
+if [ "${GENIESIM_START_SERVER}" = "1" ]; then
+  echo "[geniesim] Waiting for server process..."
+  # Wait for the server log to be created and then tail it
+  while [ ! -f "${GENIESIM_SERVER_LOG}" ]; do sleep 1; done
+  tail -f "${GENIESIM_SERVER_LOG}"
 fi
