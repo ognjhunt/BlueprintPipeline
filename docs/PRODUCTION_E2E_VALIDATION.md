@@ -14,10 +14,12 @@ Run a full production end-to-end validation for a scene, including workflow exec
 | `usd_marker` | GCS marker for episode generation trigger | `scenes/<scene_id>/usd/.usd_complete` |
 | `regen3d_marker` | GCS marker for DWM prep trigger | `scenes/<scene_id>/assets/.regen3d_complete` |
 
-## Required Production Flags (No Mock Fallbacks)
-These flags must be enforced for production validation runs:
+## Production Flags (No Mock Fallbacks)
+Set `PIPELINE_ENV=production` and enable the following quality toggles for production validation runs
+(these toggles do not set production mode on their own):
 
 ### Episode Generation (Isaac Sim)
+- `PIPELINE_ENV=production`
 - `DATA_QUALITY_LEVEL=production`
 - `REQUIRE_REAL_PHYSICS=true`
 - `ISAAC_SIM_REQUIRED=true`

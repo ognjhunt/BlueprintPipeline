@@ -17,7 +17,7 @@ The service:
 3. Exports segmented mesh + URDF with joint definitions
 
 Environment Variables:
-    ENV: Service environment (set to "production" to disable /debug)
+    PIPELINE_ENV: Pipeline environment (set to "production" to disable /debug)
     PARTICULATE_ROOT: Path to Particulate installation (default: /opt/particulate)
     ENABLE_DEBUG_ENDPOINT: Enable /debug in non-production (default: false)
     DEBUG_MODE: Legacy flag for /debug in non-production (default: 0)
@@ -137,7 +137,6 @@ PARTICULATE_ROOT = Path(os.environ.get("PARTICULATE_ROOT", "/opt/particulate"))
 PARTICULATE_INFER = PARTICULATE_ROOT / "infer.py"
 _TMP_ENV_VAR = "PARTICULATE_TMP_DIR"
 
-ENVIRONMENT = os.environ.get("ENV", "").lower()
 PRODUCTION_MODE = resolve_production_mode()
 ENABLE_DEBUG_ENDPOINT = os.environ.get("ENABLE_DEBUG_ENDPOINT", "false").lower() in ("1", "true", "yes")
 DEBUG_MODE = os.environ.get("DEBUG_MODE", os.environ.get("PARTICULATE_DEBUG", "0")) == "1"
@@ -145,7 +144,7 @@ DEBUG_ENDPOINT_ENABLED = ENABLE_DEBUG_ENDPOINT or DEBUG_MODE
 
 
 def _is_production_env() -> bool:
-    return ENVIRONMENT == "production" or PRODUCTION_MODE
+    return PRODUCTION_MODE
 
 
 def _ensure_secure_directory(path: Path) -> None:

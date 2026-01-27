@@ -346,14 +346,13 @@ otherwise, missing Gemini credentials cause the job to fail in production mode.
 ### Production modes (free vs. paid)
 
 **Free production (deterministic, no Gemini)**:
-- Required flags: `PIPELINE_ENV=production` (or legacy `SIMREADY_PRODUCTION_MODE=1`, deprecated until 2025-12-31) and
-  `SIMREADY_PHYSICS_MODE=deterministic`.
+- Required flags: `PIPELINE_ENV=production` and `SIMREADY_PHYSICS_MODE=deterministic`.
 - The run enforces metadata/material coverage (`SIMREADY_FALLBACK_MIN_COVERAGE`) and
   non-LLM quality checks (`SIMREADY_NON_LLM_MIN_QUALITY`) to maintain simulation fidelity.
 
 **Paid production (Gemini-backed)**:
-- Required flags: `PIPELINE_ENV=production` (or legacy `SIMREADY_PRODUCTION_MODE=1`, deprecated until 2025-12-31) and either
-  `SIMREADY_PHYSICS_MODE=gemini` or `SIMREADY_PHYSICS_MODE=auto` with Gemini credentials available.
+- Required flags: `PIPELINE_ENV=production` and either `SIMREADY_PHYSICS_MODE=gemini`
+  or `SIMREADY_PHYSICS_MODE=auto` with Gemini credentials available.
 - Configure the `gemini-api-key` Secret Manager entry (production rejects env var fallbacks).
 
 ## Documentation
@@ -417,7 +416,7 @@ The pipeline produces outputs ready for integration with existing workflows:
 3. **Domain Randomization**: Use `replicator/` scripts with Omniverse Replicator
 
 Labs must provide the Particulate service endpoint for interactive articulation
-(`PARTICULATE_ENDPOINT`). In production (`PIPELINE_ENV=production`; `BP_ENV` is deprecated until 2025-12-31)
+(`PARTICULATE_ENDPOINT`). In production (`PIPELINE_ENV=production`; legacy flags are deprecated until 2025-12-31)
 or when `DISALLOW_PLACEHOLDER_URDF=true`, interactive-job raises errors instead
 of emitting placeholder URDFs (e.g., if Particulate is unavailable or a mesh is
 missing). Expect staging runs to fail fast and emit `.interactive_failed` when

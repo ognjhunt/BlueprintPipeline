@@ -55,8 +55,8 @@ main:
           - gkeCluster: '${primaryGkeCluster}'
           - gkeZone: '${primaryGkeZone}'
           - namespace: "blueprint"
-          - enforceQualityGates: '${default(map.get(event, "enforce_quality_gates"), sys.get_env("BP_ENV") == "production")}'
-          - runStagingE2E: '${default(map.get(event, "run_staging_e2e"), sys.get_env("BP_ENV") == "production")}'
+          - enforceQualityGates: '${default(map.get(event, "enforce_quality_gates"), sys.get_env("PIPELINE_ENV") == "production")}'
+          - runStagingE2E: '${default(map.get(event, "run_staging_e2e"), sys.get_env("PIPELINE_ENV") == "production")}'
           - stagingDataRoot: '${default(map.get(event, "staging_data_root"), "/mnt/gcs")}'
           - monitoringGateEnabled: '${default(map.get(event, "monitoring_gate_enabled"), sys.get_env("BP_ENV") == "production")}'
           - monitoringGateStrict: '${default(map.get(event, "monitoring_gate_strict"), default(sys.get_env("MONITORING_GATE_STRICT"), "true")) == "true"}'
@@ -65,7 +65,7 @@ main:
           - firebaseServiceAccountJson: '${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_JSON"), "")}'
           - firebaseServiceAccountPath: '${default(sys.get_env("FIREBASE_SERVICE_ACCOUNT_PATH"), "/secrets/firebase/service-account.json")}'
           - firebaseUploadPrefix: '${default(sys.get_env("FIREBASE_UPLOAD_PREFIX"), "datasets")}'
-          - enableFirebaseUpload: '${default(sys.get_env("ENABLE_FIREBASE_UPLOAD"), if(sys.get_env("BP_ENV") == "production", "true", "false"))}'
+          - enableFirebaseUpload: '${default(sys.get_env("ENABLE_FIREBASE_UPLOAD"), if(sys.get_env("PIPELINE_ENV") == "production", "true", "false"))}'
           # Bundle tier for upsell features (standard, pro, enterprise, foundation)
           # Can be passed in event or read from scene config
           - bundleTier: '${default(map.get(event, "bundle_tier"), "standard")}'

@@ -389,7 +389,6 @@ Workflows auto-trigger on GCS completion markers:
 
 ```bash
 PIPELINE_ENV=production
-SIMREADY_PRODUCTION_MODE=true
 DISALLOW_PLACEHOLDER_URDF=true
 ```
 
@@ -578,7 +577,7 @@ export GENIESIM_ROOT=/opt/geniesim
 export ISAAC_SIM_PATH=/isaac-sim
 
 # Production settings
-export GENIESIM_ENV=production
+export PIPELINE_ENV=production
 export USE_GENIESIM=true
 ```
 
