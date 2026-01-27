@@ -381,6 +381,15 @@ CI enforces a unit-test coverage gate: the unit-test job publishes `coverage.xml
 from `pytest-cov` and fails if total line coverage drops below 85%. Update the
 threshold in `.github/workflows/test-unit.yml` if the baseline changes.
 
+Some tests exercise optional dependencies (for example `pyarrow` for Parquet
+validation). These are marked with `@pytest.mark.optional_dep` and are not
+required for the default CI/unit test suite. To run them locally, install the
+optional deps (e.g. `pip install -r tests/requirements.txt`) and run:
+
+```bash
+pytest -m optional_dep -v
+```
+
 ### Staging Isaac Sim E2E (Labs pre-production)
 
 Before production rollouts, labs should run the staging E2E harness against a
