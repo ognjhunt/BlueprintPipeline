@@ -1,0 +1,19 @@
+{
+  "scene_id": "lightwheel_kitchen",
+  "objects": [
+    {"id": "Refrigerator001", "class_name": "refrigerator", "center3d": [2.0, 0.9, -2.5]},
+    {"id": "Dishwasher054", "class_name": "dishwasher", "center3d": [-1.0, 0.4, -2.5]},
+    {"id": "Microwave017", "class_name": "microwave", "center3d": [0.5, 1.2, -2.5]},
+    {"id": "Sink054", "class_name": "sink", "center3d": [0.0, 0.9, -2.5]},
+    {"id": "Stovetop012", "class_name": "stovetop", "center3d": [1.0, 0.9, -2.5]},
+    {"id": "RangeHood015", "class_name": "range_hood", "center3d": [1.0, 2.0, -2.5]},
+    {"id": "Kitchen_Cabinet001", "class_name": "cabinet", "center3d": [-0.5, 1.5, -2.5]},
+    {"id": "Kitchen_Cabinet002", "class_name": "cabinet", "center3d": [0.5, 1.5, -2.5]},
+    {"id": "Table049", "class_name": "table", "center3d": [0.0, 0.4, 1.0]},
+    {"id": "WallStackOven004", "class_name": "oven", "center3d": [-2.0, 1.0, -2.5]},
+    {"id": "Toaster003", "class_name": "toaster", "center3d": [0.3, 0.95, -2.3]},
+    {"id": "CoffeeMachine006", "class_name": "coffee_machine", "center3d": [-0.3, 0.95, -2.3]},
+    {"id": "Pot057", "class_name": "pot", "center3d": [1.0, 0.95, -2.3]}
+  ],
+  "room_box": {"min": [-3, 0, -3], "max": [3, 3, 3]}
+}

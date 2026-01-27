@@ -1,0 +1,18 @@
+{
+  "scene_id": "lightwheel_kitchen",
+  "objects": [
+    {"id": "Refrigerator001", "category": "refrigerator", "sim_role": "articulated_appliance"},
+    {"id": "Dishwasher054", "category": "dishwasher", "sim_role": "articulated_appliance"},
+    {"id": "Microwave017", "category": "microwave", "sim_role": "articulated_appliance"},
+    {"id": "Sink054", "category": "sink", "sim_role": "static"},
+    {"id": "Stovetop012", "category": "stovetop", "sim_role": "interactive"},
+    {"id": "RangeHood015", "category": "range_hood", "sim_role": "static"},
+    {"id": "Kitchen_Cabinet001", "category": "cabinet", "sim_role": "articulated_furniture"},
+    {"id": "Kitchen_Cabinet002", "category": "cabinet", "sim_role": "articulated_furniture"},
+    {"id": "Table049", "category": "table", "sim_role": "static"},
+    {"id": "WallStackOven004", "category": "oven", "sim_role": "articulated_appliance"},
+    {"id": "Toaster003", "category": "toaster", "sim_role": "manipulable_object"},
+    {"id": "CoffeeMachine006", "category": "coffee_machine", "sim_role": "interactive"},
+    {"id": "Pot057", "category": "pot", "sim_role": "manipulable_object"}
+  ]
+}
