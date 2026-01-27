@@ -59,7 +59,7 @@ main:
           - enforceQualityGates: '${default(map.get(event, "enforce_quality_gates"), sys.get_env("PIPELINE_ENV") == "production")}'
           - runStagingE2E: '${default(map.get(event, "run_staging_e2e"), sys.get_env("PIPELINE_ENV") == "production")}'
           - stagingDataRoot: '${default(map.get(event, "staging_data_root"), "/mnt/gcs")}'
-          - monitoringGateEnabled: '${default(map.get(event, "monitoring_gate_enabled"), sys.get_env("BP_ENV") == "production")}'
+          - monitoringGateEnabled: '${default(map.get(event, "monitoring_gate_enabled"), sys.get_env("PIPELINE_ENV") == "production")}'
           # Production runs always enforce strict monitoring gates (no bypass).
           - monitoringGateStrict: '${if(isProduction, true, default(map.get(event, "monitoring_gate_strict"), default(sys.get_env("MONITORING_GATE_STRICT"), "true")) == "true")}'
           - buildPollTimeoutSeconds: '${int(default(map.get(event, "build_poll_timeout_seconds"), default(sys.get_env("EPISODE_BUILD_POLL_TIMEOUT_SECONDS"), "3600")))}'

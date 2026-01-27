@@ -375,7 +375,7 @@ enables production mode; there is no explicit "false override" once any flag is 
 **Canonical flag (preferred)**:
 1. `PIPELINE_ENV=production` or `PIPELINE_ENV=prod`
 
-**Legacy compatibility flags (deprecated; removal after 2025-12-31)**:
+**Legacy compatibility flags (deprecated; removal after 2025-12-31; do not use in new configs)**:
 - `GENIESIM_ENV=production|prod`
 - `BP_ENV=production|prod`
 - `PRODUCTION_MODE=1|true|yes`
@@ -400,9 +400,6 @@ to enable production defaults.
 ```bash
 # Canonical production indicator
 export PIPELINE_ENV=production
-
-# Legacy compatibility (still supported)
-export GENIESIM_ENV=production
 ```
 
 ---
