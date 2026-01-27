@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+
 GENIESIM_ROOT=${GENIESIM_ROOT:-/opt/geniesim}
 ISAAC_SIM_PATH=${ISAAC_SIM_PATH:-/isaac-sim}
 GENIESIM_REPO=${GENIESIM_REPO:-https://github.com/AgibotTech/genie_sim.git}
+
+# Determine the Genie Sim ref to checkout (env var > GENIESIM_REF file > none)
+GENIESIM_REF=${GENIESIM_REF:-}
+if [ -z "${GENIESIM_REF}" ]; then
+  REF_FILE="${REPO_ROOT}/genie-sim-gpu-job/GENIESIM_REF"
+  if [ -f "${REF_FILE}" ]; then
+    GENIESIM_REF="$(tr -d '[:space:]' < "${REF_FILE}")"
+    echo "[geniesim] Using GENIESIM_REF from ${REF_FILE}: ${GENIESIM_REF}"
+  fi
+fi
 
 # Always ensure build tools are installed (needed for compiling Python packages)
 if ! command -v git &>/dev/null || ! command -v g++ &>/dev/null || ! command -v cmake &>/dev/null; then
@@ -18,6 +31,15 @@ if [ ! -d "${GENIESIM_ROOT}/.git" ]; then
   git clone "${GENIESIM_REPO}" "${GENIESIM_ROOT}"
 else
   echo "[geniesim] Genie Sim already present at ${GENIESIM_ROOT}"
+fi
+
+# Checkout specific ref if set
+if [ -n "${GENIESIM_REF}" ]; then
+  echo "[geniesim] Checking out GENIESIM_REF=${GENIESIM_REF}"
+  cd "${GENIESIM_ROOT}"
+  git fetch origin "${GENIESIM_REF}" 2>/dev/null || git fetch --unshallow 2>/dev/null || true
+  git checkout "${GENIESIM_REF}"
+  cd "${OLDPWD}"
 fi
 
 if [ ! -x "${ISAAC_SIM_PATH}/python.sh" ]; then
