@@ -9,11 +9,11 @@ from typing import Mapping, Optional, Sequence, Tuple
 _TRUTHY_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSY_VALUES = {"0", "false", "no", "n", "off"}
 
+_LEGACY_PRODUCTION_FLAG_REMOVAL_DATE = "2025-12-31"
+
 _LEGACY_PRODUCTION_FLAGS = (
     "PRODUCTION_MODE",
     "SIMREADY_PRODUCTION_MODE",
-    "ISAAC_SIM_REQUIRED",
-    "REQUIRE_REAL_PHYSICS",
     "PRODUCTION",
     "LABS_STAGING",
 )
@@ -21,7 +21,6 @@ _LEGACY_PRODUCTION_FLAGS = (
 _LEGACY_PRODUCTION_ENV_VALUES = {
     "GENIESIM_ENV": {"production", "prod"},
     "BP_ENV": {"production", "prod"},
-    "DATA_QUALITY_LEVEL": {"production"},
 }
 
 logger = logging.getLogger(__name__)
@@ -57,12 +56,17 @@ def resolve_env_with_legacy(
             if value is not None:
                 if canonical_label:
                     (log or logger).warning(
-                        "%s is deprecated; use %s instead.",
+                        "%s is deprecated; use %s instead. Planned removal after %s.",
                         name,
                         canonical_label,
+                        _LEGACY_PRODUCTION_FLAG_REMOVAL_DATE,
                     )
                 else:
-                    (log or logger).warning("%s is deprecated.", name)
+                    (log or logger).warning(
+                        "%s is deprecated. Planned removal after %s.",
+                        name,
+                        _LEGACY_PRODUCTION_FLAG_REMOVAL_DATE,
+                    )
                 return value, name
 
     return default, None
@@ -134,8 +138,9 @@ def ensure_config_audit_for_production(
 
 def _warn_deprecated_production_flag(name: str, log: Optional[logging.Logger] = None) -> None:
     (log or logger).warning(
-        "%s is deprecated; use PIPELINE_ENV=production instead.",
+        "%s is deprecated; use PIPELINE_ENV=production instead. Planned removal after %s.",
         name,
+        _LEGACY_PRODUCTION_FLAG_REMOVAL_DATE,
     )
 
 
@@ -172,11 +177,8 @@ def resolve_production_mode(env: Optional[Mapping[str, str]] = None) -> bool:
     Legacy flags (deprecated, still honored for compatibility):
       - GENIESIM_ENV=production|prod
       - BP_ENV=production|prod
-      - DATA_QUALITY_LEVEL=production
       - PRODUCTION_MODE=1/true/yes
       - SIMREADY_PRODUCTION_MODE=1/true/yes
-      - ISAAC_SIM_REQUIRED=1/true/yes
-      - REQUIRE_REAL_PHYSICS=1/true/yes
       - PRODUCTION=1/true/yes
       - LABS_STAGING=1/true/yes
     """

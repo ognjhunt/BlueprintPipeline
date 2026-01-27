@@ -20,7 +20,7 @@ from tools.geniesim_adapter.geniesim_grpc_pb2 import (
 
 
 def test_curobo_missing_enables_fallback_non_production(monkeypatch):
-    monkeypatch.setenv("GENIESIM_ENV", "development")
+    monkeypatch.setenv("PIPELINE_ENV", "development")
     monkeypatch.delenv("GENIESIM_ALLOW_LINEAR_FALLBACK", raising=False)
     monkeypatch.setattr(lf, "CUROBO_INTEGRATION_AVAILABLE", False)
 
@@ -31,7 +31,7 @@ def test_curobo_missing_enables_fallback_non_production(monkeypatch):
 
 
 def test_curobo_missing_production_fails_fast(monkeypatch):
-    monkeypatch.setenv("GENIESIM_ENV", "production")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.delenv("GENIESIM_ALLOW_LINEAR_FALLBACK", raising=False)
     monkeypatch.setattr(lf, "CUROBO_INTEGRATION_AVAILABLE", False)
 
@@ -42,7 +42,7 @@ def test_curobo_missing_production_fails_fast(monkeypatch):
 
 
 def test_production_temp_dirs_raise_for_defaults(monkeypatch):
-    monkeypatch.setenv("GENIESIM_ENV", "production")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.delenv("GENIESIM_RECORDINGS_DIR", raising=False)
     monkeypatch.delenv("GENIESIM_RECORDING_DIR", raising=False)
     monkeypatch.delenv("GENIESIM_LOG_DIR", raising=False)
@@ -55,7 +55,7 @@ def test_production_temp_dirs_raise_for_defaults(monkeypatch):
 
 
 def test_production_temp_dirs_raise_for_explicit_paths(monkeypatch):
-    monkeypatch.setenv("GENIESIM_ENV", "production")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.setenv("GENIESIM_RECORDINGS_DIR", "/tmp/custom_recordings")
     monkeypatch.setenv("GENIESIM_LOG_DIR", "/tmp/custom_logs")
 
@@ -124,7 +124,7 @@ def test_start_server_honors_startup_timeout(monkeypatch, tmp_path, caplog):
 
 @pytest.mark.unit
 def test_check_geniesim_availability_allows_mock(monkeypatch, tmp_path):
-    monkeypatch.setenv("GENIESIM_ENV", "development")
+    monkeypatch.setenv("PIPELINE_ENV", "development")
     monkeypatch.setenv("ALLOW_GENIESIM_MOCK", "1")
     monkeypatch.setenv("GENIESIM_ROOT", str(tmp_path / "missing_geniesim"))
     isaac_path = tmp_path / "isaac"

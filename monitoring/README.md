@@ -321,8 +321,7 @@ and then applies overrides in the following order: custom pricing JSON → envir
 variable overrides.
 
 * `GENIESIM_JOB_COST` and `GENIESIM_EPISODE_COST` must be set to real values in
-  production (`BP_ENV` or `GENIESIM_ENV` set to `production`/`prod`), otherwise
-  the tracker raises an error.
+  production (`PIPELINE_ENV=production`), otherwise the tracker raises an error.
 * `GENIESIM_GPU_RATE_TABLE` can contain JSON for per-region or per-node hourly
   GPU rates (for example, `{"default": {"g5.xlarge": 1.006}}`).
 * `GENIESIM_GPU_RATE_TABLE_PATH` points at a JSON file with the same structure.

@@ -57,8 +57,8 @@ spec:
               value: "${OPENAI_API_KEY}"
             - name: PIPELINE_ENV
               value: "${PIPELINE_ENV}"
-            - name: SIMREADY_PRODUCTION_MODE
-              value: "${SIMREADY_PRODUCTION_MODE}"
+            - name: PIPELINE_ENV
+              value: "${PIPELINE_ENV}"
             - name: SIMREADY_PHYSICS_MODE
               value: "${SIMREADY_PHYSICS_MODE}"
             - name: SIMREADY_ALLOW_DETERMINISTIC_PHYSICS

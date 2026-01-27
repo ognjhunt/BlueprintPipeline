@@ -36,6 +36,7 @@ data:
   NUM_CAMERAS: "1"
   IMAGE_RESOLUTION: "640,480"
   # Production enforcement
+  PIPELINE_ENV: "production"
   DATA_QUALITY_LEVEL: "production"
   ISAAC_SIM_REQUIRED: "true"
   ALLOW_MOCK_DATA: "false"

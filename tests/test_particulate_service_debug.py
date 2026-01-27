@@ -51,8 +51,6 @@ def test_debug_endpoint_forbidden_when_unset(monkeypatch: pytest.MonkeyPatch) ->
 def test_debug_token_uses_secret_manager_in_non_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ENV", raising=False)
-    monkeypatch.delenv("PRODUCTION", raising=False)
     monkeypatch.delenv("PIPELINE_ENV", raising=False)
     monkeypatch.delenv("DEBUG_TOKEN", raising=False)
     monkeypatch.delenv("PARTICULATE_DEBUG_TOKEN", raising=False)
@@ -82,7 +80,7 @@ def test_debug_token_uses_secret_manager_in_non_production(
 def test_debug_token_env_rejected_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.setenv("DEBUG_TOKEN", "env-token")
     monkeypatch.delenv("PARTICULATE_DEBUG_TOKEN", raising=False)
 
