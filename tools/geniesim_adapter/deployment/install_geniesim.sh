@@ -6,9 +6,9 @@ ISAAC_SIM_PATH=${ISAAC_SIM_PATH:-/isaac-sim}
 GENIESIM_REPO=${GENIESIM_REPO:-https://github.com/AgibotTech/genie_sim.git}
 
 if [ ! -d "${GENIESIM_ROOT}/.git" ]; then
-  if ! command -v git &>/dev/null; then
-    echo "[geniesim] Installing git"
-    apt-get update -qq && apt-get install -y -qq git >/dev/null
+  if ! command -v git &>/dev/null || ! command -v g++ &>/dev/null; then
+    echo "[geniesim] Installing build dependencies (git, g++, cmake)"
+    apt-get update -qq && apt-get install -y -qq git build-essential cmake >/dev/null
   fi
   echo "[geniesim] Cloning Genie Sim into ${GENIESIM_ROOT}"
   rm -rf "${GENIESIM_ROOT:?}"/* 2>/dev/null || true
@@ -26,8 +26,10 @@ fi
 
 if [ -f "${GENIESIM_ROOT}/requirements.txt" ]; then
   echo "[geniesim] Installing Genie Sim Python dependencies via Isaac Sim Python"
-  "${ISAAC_SIM_PATH}/python.sh" -m pip install --upgrade pip
-  "${ISAAC_SIM_PATH}/python.sh" -m pip install -r "${GENIESIM_ROOT}/requirements.txt"
+  "${ISAAC_SIM_PATH}/python.sh" -m pip install --quiet --upgrade pip 2>&1 | tail -3
+  # Allow partial failures — some Genie Sim deps may need optional system libs
+  "${ISAAC_SIM_PATH}/python.sh" -m pip install -r "${GENIESIM_ROOT}/requirements.txt" || \
+    echo "[geniesim] WARNING: Some Genie Sim dependencies failed to install (non-fatal)" >&2
 else
   echo "[geniesim] WARNING: requirements.txt not found under ${GENIESIM_ROOT}" >&2
 fi
