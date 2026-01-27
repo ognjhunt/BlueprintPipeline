@@ -34,10 +34,9 @@ terraform {
     }
   }
 
-  # Remote state (recommended for production)
+  # Remote state (recommended for production). Configure with:
+  # terraform init -backend-config="bucket=YOUR_TF_STATE_BUCKET" -backend-config="prefix=YOUR_ENVIRONMENT/terraform/state"
   backend "gcs" {
-    bucket = var.tf_state_bucket
-    prefix = var.tf_state_prefix
   }
 }
 
