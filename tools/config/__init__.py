@@ -30,7 +30,7 @@ from .constants import (
     DEFAULT_VARIATION_3D_SUCCESS_RATE_MIN,
     DEFAULT_VARIATION_MIN_OBJECTS,
 )
-from .production_mode import ensure_config_audit_for_production
+from .production_mode import ensure_config_audit_for_production, resolve_production_mode
 
 try:
     import yaml
@@ -1600,7 +1600,7 @@ class ConfigLoader:
                                         f"thresholds.episodes.tier_thresholds.{tier_name}.min_episodes_required"
                                     ] = "Must be non-negative"
 
-                        if os.getenv("PIPELINE_ENV", "").lower() == "production":
+                        if resolve_production_mode():
                             production_floor = {
                                 "collision_free_rate_min": 0.90,
                                 "quality_pass_rate_min": 0.75,
