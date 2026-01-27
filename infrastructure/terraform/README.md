@@ -39,6 +39,11 @@ terraform apply \
   -var="project_id=YOUR_PROJECT_ID"
 ```
 
+> **Note**
+> Several resources explicitly depend on `google_project_service.apis` to avoid a first-time bootstrap race where
+> Terraform attempts to create IAM, GKE, Pub/Sub, or monitoring resources before the corresponding APIs finish
+> enabling. This keeps initial `terraform apply` runs reliable in new projects.
+
 ## Required inputs
 
 | Variable | Description |

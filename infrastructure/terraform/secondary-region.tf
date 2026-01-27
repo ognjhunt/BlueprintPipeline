@@ -21,6 +21,8 @@ resource "google_compute_subnetwork" "blueprint_subnet_secondary" {
   }
 
   private_ip_google_access = true
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_compute_router" "blueprint_router_secondary" {
@@ -29,6 +31,8 @@ resource "google_compute_router" "blueprint_router_secondary" {
   project = var.project_id
   region  = var.secondary_region
   network = google_compute_network.blueprint_vpc.id
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_compute_router_nat" "blueprint_nat_secondary" {
@@ -44,6 +48,8 @@ resource "google_compute_router_nat" "blueprint_nat_secondary" {
     enable = true
     filter = "ERRORS_ONLY"
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_container_cluster" "blueprint_secondary" {
@@ -157,6 +163,8 @@ resource "google_container_node_pool" "secondary_cpu_pool" {
       mode = "GKE_METADATA"
     }
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_container_node_pool" "secondary_gpu_pool" {
@@ -221,6 +229,8 @@ resource "google_container_node_pool" "secondary_gpu_pool" {
       mode = "GKE_METADATA"
     }
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 output "secondary_cluster_name" {
