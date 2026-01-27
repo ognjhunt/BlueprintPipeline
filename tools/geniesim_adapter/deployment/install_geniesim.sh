@@ -5,11 +5,13 @@ GENIESIM_ROOT=${GENIESIM_ROOT:-/opt/geniesim}
 ISAAC_SIM_PATH=${ISAAC_SIM_PATH:-/isaac-sim}
 GENIESIM_REPO=${GENIESIM_REPO:-https://github.com/AgibotTech/genie_sim.git}
 
+# Always ensure build tools are installed (needed for compiling Python packages)
+if ! command -v git &>/dev/null || ! command -v g++ &>/dev/null || ! command -v cmake &>/dev/null; then
+  echo "[geniesim] Installing build dependencies (git, g++, cmake)"
+  apt-get update -qq && apt-get install -y -qq git build-essential cmake >/dev/null
+fi
+
 if [ ! -d "${GENIESIM_ROOT}/.git" ]; then
-  if ! command -v git &>/dev/null || ! command -v g++ &>/dev/null; then
-    echo "[geniesim] Installing build dependencies (git, g++, cmake)"
-    apt-get update -qq && apt-get install -y -qq git build-essential cmake >/dev/null
-  fi
   echo "[geniesim] Cloning Genie Sim into ${GENIESIM_ROOT}"
   rm -rf "${GENIESIM_ROOT:?}"/* 2>/dev/null || true
   mkdir -p "${GENIESIM_ROOT}"
