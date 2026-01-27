@@ -3,6 +3,9 @@
 ## Purpose / scope
 Generates or processes Meshy assets within the pipeline.
 
+> **Note:** This job is intentionally a lightweight wrapper around Meshy tooling and
+> API calls so the container stays focused on orchestration rather than bespoke logic.
+
 ## Primary entrypoints
 - `run_meshy_from_assets.py` job entrypoint.
 - `run_meshy.sh` shell wrapper.

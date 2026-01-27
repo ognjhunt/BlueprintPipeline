@@ -1412,6 +1412,7 @@ class SceneGraphConverter:
             obj_id = str(obj.get("id", ""))
             if not obj_id:
                 return None
+            production_mode = resolve_production_mode()
 
             # Skip background/shell objects
             sim_role = obj.get("sim_role", "unknown")
@@ -1535,6 +1536,7 @@ class SceneGraphConverter:
                     orientation = validate_quaternion(
                         orientation,
                         field_name=f"{obj_id}.rotation_quaternion",
+                        auto_normalize=not production_mode,
                     )
                 except ValidationError as e:
                     logger.warning(

@@ -12,6 +12,7 @@ starting point for incident response, on-call routines, and runtime troubleshoot
 - Scripts overview: [`scripts/README.md`](../../scripts/README.md)
 - Workflow timeouts: [`workflows/TIMEOUT_AND_RETRY_POLICY.md`](../../workflows/TIMEOUT_AND_RETRY_POLICY.md)
 - Disaster recovery (RTO/RPO): [`docs/operations/disaster-recovery.md`](./disaster-recovery.md)
+- Checksums HMAC rotation: [`docs/operations/checksums-hmac-rotation.md`](./checksums-hmac-rotation.md)
 
 ## Incident response
 
@@ -66,6 +67,17 @@ When a pipeline gate is overridden (manual approval to proceed despite validatio
    - Update [`docs/OPS_RUNTIME_REPORT.md`](../OPS_RUNTIME_REPORT.md) if timeouts or retries changed.
 4. **Retrospective**
    - Decide whether to codify the exception (fix the gate) or tighten validation rules.
+
+## Monitoring gate controls
+
+The episode-generation workflow checks for required monitoring resources in production. If a non-production run needs to
+proceed while monitoring assets are still being set up, set `MONITORING_GATE_STRICT=false` to log missing resources and
+continue. The gate expects the following assets to exist by exact name:
+
+- Dashboards: `BlueprintPipeline - Overview`, `BlueprintPipeline - GPU Metrics`
+- Alert policies: `[Blueprint] Workflow Job Timeout Detected`, `[Blueprint] Workflow Job Retry Spike`
+- Log-based metrics: `blueprint_job_timeout_events`, `blueprint_job_retry_exhausted_total`,
+  `blueprint_job_timeout_usage_ratio`, `blueprint_geniesim_sla_violations`, `blueprint_job_failure_events`
 
 ## Backup and restore steps
 

@@ -23,6 +23,26 @@ Run the deployment script to create dashboards, alert policies, and log-based me
    - Go to: https://console.cloud.google.com/monitoring/dashboards
    - Select "BlueprintPipeline - Genie Sim 3.0 Dashboard"
 
+## Monitoring gate requirements
+
+The episode-generation workflow enforces a monitoring gate in production that checks for specific Cloud Monitoring
+resources by name. Non-production environments can bypass failures by setting `MONITORING_GATE_STRICT=false`.
+
+**Dashboards (exact names)**
+- `BlueprintPipeline - Overview`
+- `BlueprintPipeline - GPU Metrics`
+
+**Alert policies (exact names)**
+- `[Blueprint] Workflow Job Timeout Detected`
+- `[Blueprint] Workflow Job Retry Spike`
+
+**Log-based metrics (exact names)**
+- `blueprint_job_timeout_events`
+- `blueprint_job_retry_exhausted_total`
+- `blueprint_job_timeout_usage_ratio`
+- `blueprint_geniesim_sla_violations`
+- `blueprint_job_failure_events`
+
 ### Prometheus + Grafana
 
 1. **Start Prometheus**:
