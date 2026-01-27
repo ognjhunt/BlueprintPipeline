@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import traceback
@@ -36,6 +37,7 @@ from tools.quality_gates.quality_gate import (
 )
 from tools.quality_reports.asset_provenance_generator import COMMERCIAL_OK_LICENSES, LicenseType
 from tools.tracing.correlation import ensure_request_id
+from tools.validation.entrypoint_checks import validate_required_env_vars
 
 GCS_ROOT = Path("/mnt/gcs")
 JOB_NAME = "dataset-delivery-job"
@@ -353,22 +355,38 @@ def write_failure_marker(
     blob.upload_from_string(json.dumps(marker, indent=2), content_type="application/json")
 
 
+def _seed_scene_id_from_manifest_path(import_manifest_path: str) -> None:
+    if os.environ.get("SCENE_ID"):
+        return
+    match = re.search(r"/scenes/([^/]+)/", import_manifest_path)
+    if match:
+        os.environ["SCENE_ID"] = match.group(1)
+        return
+    os.environ["SCENE_ID"] = "unknown"
+    logger.warning("Unable to derive SCENE_ID from IMPORT_MANIFEST_PATH; using 'unknown'.")
+
+
 def main() -> int:
     os.environ["REQUEST_ID"] = ensure_request_id()
+    import_manifest_path = os.environ.get("IMPORT_MANIFEST_PATH")
+    if import_manifest_path:
+        _seed_scene_id_from_manifest_path(import_manifest_path)
+        required_env_vars = {
+            "BUCKET": "Bucket name for pipeline artifacts",
+            "IMPORT_MANIFEST_PATH": "GCS URI for the import manifest",
+        }
+    else:
+        required_env_vars = {
+            "BUCKET": "Bucket name for pipeline artifacts",
+            "SCENE_ID": "Scene identifier",
+        }
+    validate_required_env_vars(required_env_vars, label="[DATASET-DELIVERY]")
+
     bucket_name = os.environ.get("BUCKET")
     scene_id = os.environ.get("SCENE_ID") or ""
     job_id = os.environ.get("JOB_ID") or ""
-    import_manifest_path = os.environ.get("IMPORT_MANIFEST_PATH")
     delivery_prefix_template = os.environ.get("DELIVERY_PREFIX", "deliveries/{scene_id}/{job_id}")
-
-    if not bucket_name:
-        print("BUCKET is required", file=sys.stderr)
-        return 1
-
     if not import_manifest_path:
-        if not scene_id:
-            print("SCENE_ID is required when IMPORT_MANIFEST_PATH is not set", file=sys.stderr)
-            return 1
         import_manifest_path = f"gs://{bucket_name}/scenes/{scene_id}/geniesim/import_manifest.json"
 
     client = storage.Client()
