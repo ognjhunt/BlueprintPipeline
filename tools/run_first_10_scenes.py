@@ -36,11 +36,12 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Import pipeline components
+from tools.config import load_quality_config
 from tools.quality_gates import (
     QualityGateRegistry,
     QualityGateCheckpoint,
-    NotificationService,
     NotificationPayload,
+    build_notification_service,
     generate_qa_context,
 )
 from tools.sim2real import (
@@ -92,11 +93,10 @@ class First10ScenesRunner:
     def __init__(
         self,
         output_base: Path,
-        notify_email: str = "ohstnhunt@gmail.com",
-        notify_phone: str = "9196389913",
         customer_id: str = "internal_validation",
         dry_run: bool = False,
         verbose: bool = True,
+        notification_service=None,
     ):
         self.output_base = Path(output_base)
         self.output_base.mkdir(parents=True, exist_ok=True)
@@ -106,12 +106,7 @@ class First10ScenesRunner:
 
         # Initialize components
         self.quality_gates = QualityGateRegistry(verbose=verbose)
-
-        self.notifications = NotificationService(
-            email=notify_email,
-            phone=notify_phone,
-            verbose=verbose,
-        )
+        self.notifications = notification_service
 
         self.sim2real_tracker = ExperimentTracker(
             experiments_dir=self.output_base / "sim2real_experiments",
@@ -464,6 +459,10 @@ class {task.title().replace("_", "")}Task:
         gate_results: list,
     ) -> None:
         """Send notification for QA review."""
+        if not self.notifications:
+            self.log("Notifications disabled; skipping QA notification.")
+            return
+
         failed = [r for r in gate_results if not r.passed]
 
         payload = NotificationPayload(
@@ -674,13 +673,28 @@ def main():
         print(f"  - {s.scene_id} ({s.environment_type})")
     print()
 
+    quality_config = load_quality_config()
+    env_overrides = dict(os.environ)
+    if args.email:
+        env_overrides["BP_QUALITY_NOTIFICATIONS_EMAIL_RECIPIENTS"] = args.email
+    if args.phone:
+        env_overrides["BP_QUALITY_NOTIFICATIONS_SMS_RECIPIENTS"] = args.phone
+    try:
+        notification_service = build_notification_service(
+            quality_config,
+            env=env_overrides,
+            verbose=not args.quiet,
+        )
+    except ValueError as exc:
+        print(f"Notification configuration error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
     # Run pipeline
     runner = First10ScenesRunner(
         output_base=args.output_dir,
-        notify_email=args.email,
-        notify_phone=args.phone,
         dry_run=args.dry_run,
         verbose=not args.quiet,
+        notification_service=notification_service,
     )
 
     results = runner.run(scenes)
