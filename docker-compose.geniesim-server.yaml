@@ -16,13 +16,15 @@
 
 services:
   geniesim-server:
-    image: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:4.1.0}
+    image: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:4.5.0}
     container_name: geniesim-server
     environment:
       ACCEPT_EULA: "Y"
+      PRIVACY_CONSENT: "Y"
       ISAAC_SIM_PATH: ${ISAAC_SIM_PATH:-/isaac-sim}
       GENIESIM_ROOT: ${GENIESIM_ROOT:-/opt/geniesim}
       GENIESIM_REPO: ${GENIESIM_REPO:-https://github.com/AgibotTech/genie_sim.git}
+      GENIESIM_REF: ${GENIESIM_REF:-4208030d556b3d025b8b1de4e8acf09f66c494bc}
       GENIESIM_HOST: ${GENIESIM_HOST:-0.0.0.0}
       GENIESIM_PORT: ${GENIESIM_PORT:-50051}
       GENIESIM_HEADLESS: ${GENIESIM_HEADLESS:-1}
@@ -38,9 +40,7 @@ services:
     working_dir: /workspace/BlueprintPipeline
     entrypoint: ["/bin/bash", "-lc"]
     command:
-      - >
-        ./tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh &&
-        tail -f ${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
+      - ./tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh
     ports:
       - "${GENIESIM_PORT:-50051}:50051"
     shm_size: "16gb"
