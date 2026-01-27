@@ -1,0 +1,105 @@
+# =============================================================================
+# Kubernetes Job: Meshy
+# =============================================================================
+# Generates Meshy assets from pipeline inputs.
+#
+# Apply:
+#   envsubst < k8s/meshy-job.yaml | kubectl apply -f -
+# =============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: meshy
+  namespace: blueprint
+  labels:
+    app: blueprint-pipeline
+    component: meshy
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 14400
+
+  template:
+    metadata:
+      labels:
+        app: blueprint-pipeline
+        component: meshy
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: OnFailure
+
+      serviceAccountName: blueprint-pipeline-sa
+
+      containers:
+        - name: meshy
+          image: ghcr.io/${PROJECT_ID}/blueprint-meshy:latest
+          imagePullPolicy: Always
+
+          command: ["/app/run_meshy.sh"]
+          workingDir: /app
+
+          envFrom:
+            - configMapRef:
+                name: cost-tracking-pricing
+
+          env:
+            - name: BUCKET
+              value: "${BUCKET}"
+            - name: SCENE_ID
+              value: "${SCENE_ID}"
+            - name: ASSETS_PREFIX
+              value: "scenes/$(SCENE_ID)/assets"
+            - name: MESHY_API_KEY
+              value: "${MESHY_API_KEY}"
+            - name: MESHY_BASE_URL
+              value: "${MESHY_BASE_URL}"
+            - name: MESHY_API_BASE
+              value: "${MESHY_API_BASE}"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secrets/gcs/key.json
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              value: "${OTEL_EXPORTER_OTLP_HEADERS}"
+            - name: OTEL_SERVICE_NAME
+              value: "meshy-job"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=meshy,deployment.environment=production"
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /secrets/gcs
+              readOnly: true
+            - name: gcs-mount
+              mountPath: /mnt/gcs
+            - name: cost-tracking-pricing
+              mountPath: /etc/blueprint/pricing
+              readOnly: true
+
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: gcs-service-account
+        - name: gcs-mount
+          emptyDir: {}
+        - name: cost-tracking-pricing
+          configMap:
+            name: cost-tracking-pricing-files
