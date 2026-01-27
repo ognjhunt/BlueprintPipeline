@@ -1,0 +1,65 @@
+name: Pipeline Staging E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_scene_id:
+        description: "Scene ID under STAGING_DATA_ROOT/scenes"
+        required: false
+        type: string
+      staging_scene_dir:
+        description: "Absolute path to a staging scene directory (overrides STAGING_DATA_ROOT + STAGING_SCENE_ID)"
+        required: false
+        type: string
+  schedule:
+    - cron: "0 7 * * 1"
+
+concurrency:
+  group: pipeline-staging-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pipeline-staging-e2e:
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 360
+    env:
+      # Required secrets: STAGING_DATA_ROOT or STAGING_SCENE_DIR, plus STAGING_SCENE_ID if using data root.
+      STAGING_DATA_ROOT: ${{ secrets.STAGING_DATA_ROOT }}
+      STAGING_SCENE_ID: ${{ inputs.staging_scene_id || secrets.STAGING_SCENE_ID }}
+      STAGING_SCENE_DIR: ${{ inputs.staging_scene_dir || secrets.STAGING_SCENE_DIR }}
+      STAGING_ENVIRONMENT_TYPE: ${{ secrets.STAGING_ENVIRONMENT_TYPE || 'kitchen' }}
+      STAGING_EPISODES_PER_VARIATION: ${{ secrets.STAGING_EPISODES_PER_VARIATION || '1' }}
+      STAGING_MAX_VARIATIONS: ${{ secrets.STAGING_MAX_VARIATIONS || '1' }}
+      STAGING_MIN_QUALITY_SCORE: ${{ secrets.STAGING_MIN_QUALITY_SCORE || '0.85' }}
+      # Isaac Sim runtime must be available on the runner at /isaac-sim/python.sh.
+      RUN_STAGING_E2E: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare artifact directories
+        run: |
+          mkdir -p logs/ci/pipeline
+
+      - name: Run pipeline staging E2E tests
+        run: |
+          set -o pipefail
+          /isaac-sim/python.sh -m pytest tests/test_pipeline_e2e_staging.py -v \
+            --junitxml=logs/ci/pipeline/pytest-junit.xml \
+            | tee logs/ci/pipeline/pytest.log
+
+      - name: Upload pipeline staging artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-staging-e2e-artifacts
+          path: logs/ci/pipeline
+          if-no-files-found: warn
+
+      - name: Upload pipeline staging JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-staging-e2e-junit
+          path: logs/ci/pipeline/pytest-junit.xml
+          if-no-files-found: warn
