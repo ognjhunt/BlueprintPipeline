@@ -58,6 +58,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
+from tools.config.production_mode import resolve_production_mode
+
 try:
     from tools.validation import validate_rotation_matrix, ValidationError
     HAVE_VALIDATION_TOOLS = True
@@ -489,6 +491,7 @@ class Regen3DAdapter:
     def _decompose_transform(self, matrix: List[List[float]]) -> Dict[str, List[float]]:
         """Decompose a 4x4 transform matrix into translation, rotation, scale."""
         m = np.array(matrix, dtype=np.float64)
+        production_mode = resolve_production_mode()
 
         # Translation
         translation = m[:3, 3].tolist()
@@ -511,7 +514,11 @@ class Regen3DAdapter:
 
         if HAVE_VALIDATION_TOOLS:
             try:
-                rot = validate_rotation_matrix(rot, field_name=f"{self.__class__.__name__}.rotation_matrix")
+                rot = validate_rotation_matrix(
+                    rot,
+                    field_name=f"{self.__class__.__name__}.rotation_matrix",
+                    auto_fix=not production_mode,
+                )
             except ValidationError as exc:
                 logger.warning("Rotation matrix validation failed: %s. Using identity.", exc)
                 rot = np.eye(3)
