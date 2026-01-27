@@ -7,17 +7,6 @@ variable "project_id" {
   description = "GCP project ID"
 }
 
-variable "tf_state_bucket" {
-  type        = string
-  description = "GCS bucket name for Terraform remote state"
-}
-
-variable "tf_state_prefix" {
-  type        = string
-  description = "GCS prefix for Terraform remote state"
-  default     = "terraform/state"
-}
-
 variable "region" {
   type        = string
   description = "GCP region for resources"
