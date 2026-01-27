@@ -25,8 +25,6 @@ Environment Variables:
     REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
     PIPELINE_ENV: Pipeline environment (e.g., "production") for production guardrails
-    GENIESIM_ENV/BP_ENV: Legacy aliases for PIPELINE_ENV (deprecated)
-    PRODUCTION_MODE: Legacy boolean production flag (deprecated)
     DISALLOW_PLACEHOLDER_URDF: "true" to fail if placeholder URDFs are generated
     LABS_MODE: "true" to enforce labs guardrails (Particulate required, no heuristics)
 """

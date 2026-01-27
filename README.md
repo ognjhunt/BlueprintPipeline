@@ -203,7 +203,7 @@ GENIESIM_MOCK_MODE=false \
 /isaac-sim/python.sh -m pytest tests/test_geniesim_staging_e2e.py -v
 ```
 
-> **Note:** Production mode (`PIPELINE_ENV=production`; legacy flags deprecated until 2025-12-31) force-disable
+> **Note:** Production mode (`PIPELINE_ENV=production`) force-disables
 > `GENIESIM_MOCK_MODE`. For non-production mock runs, set `ALLOW_GENIESIM_MOCK=1` or pass an
 > explicit `mock_mode=True` in code.
 
@@ -416,7 +416,7 @@ The pipeline produces outputs ready for integration with existing workflows:
 3. **Domain Randomization**: Use `replicator/` scripts with Omniverse Replicator
 
 Labs must provide the Particulate service endpoint for interactive articulation
-(`PARTICULATE_ENDPOINT`). In production (`PIPELINE_ENV=production`; legacy flags are deprecated until 2025-12-31)
+(`PARTICULATE_ENDPOINT`). In production (`PIPELINE_ENV=production`)
 or when `DISALLOW_PLACEHOLDER_URDF=true`, interactive-job raises errors instead
 of emitting placeholder URDFs (e.g., if Particulate is unavailable or a mesh is
 missing). Expect staging runs to fail fast and emit `.interactive_failed` when
