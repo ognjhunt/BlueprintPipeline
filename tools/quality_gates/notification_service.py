@@ -3,8 +3,8 @@
 Supports email and SMS notifications for human-in-the-loop QA.
 
 Environment Variables:
-    QA_EMAIL: Default email for QA notifications (default: ohstnhunt@gmail.com)
-    QA_PHONE: Default phone for SMS notifications (default: 9196389913)
+    QA_EMAIL: Email recipient for QA notifications (required in production when email is enabled)
+    QA_PHONE: Phone recipient for SMS notifications (required in production when SMS is enabled)
 
     # Email (SendGrid)
     SENDGRID_API_KEY: SendGrid API key for email notifications
@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tools.config import QualityConfig
+from tools.config.production_mode import resolve_production_mode
 
 
 class NotificationChannel(str, Enum):
@@ -204,10 +205,6 @@ class NotificationPayload:
 class NotificationService:
     """Service for sending QA notifications via multiple channels."""
 
-    # Default recipients from user request
-    DEFAULT_EMAIL = "ohstnhunt@gmail.com"
-    DEFAULT_PHONE = "9196389913"
-
     def __init__(
         self,
         email: Optional[str] = None,
@@ -216,8 +213,8 @@ class NotificationService:
         channels: Optional[List[NotificationChannel]] = None,
         verbose: bool = True,
     ):
-        self.email = email or os.getenv("QA_EMAIL", self.DEFAULT_EMAIL)
-        self.phone = phone or os.getenv("QA_PHONE", self.DEFAULT_PHONE)
+        self.email = email or os.getenv("QA_EMAIL")
+        self.phone = phone or os.getenv("QA_PHONE")
         self.channels = channels or [NotificationChannel.EMAIL, NotificationChannel.SMS]
         self.verbose = verbose
 
@@ -573,6 +570,26 @@ def build_notification_service(
 
     email = email_recipients[0] if email_recipients else None
     phone = sms_recipients[0] if sms_recipients else None
+
+    if not email:
+        email = env_map.get("QA_EMAIL")
+    if not phone:
+        phone = env_map.get("QA_PHONE")
+
+    if resolve_production_mode(env_map):
+        missing: list[str] = []
+        if NotificationChannel.EMAIL in resolved_channels and not email:
+            missing.append("email recipient (QA_EMAIL or BP_QUALITY_NOTIFICATIONS_EMAIL_RECIPIENTS)")
+        if NotificationChannel.SMS in resolved_channels and not phone:
+            missing.append("SMS recipient (QA_PHONE or BP_QUALITY_NOTIFICATIONS_SMS_RECIPIENTS)")
+        if NotificationChannel.SLACK in resolved_channels and not slack_webhook_url:
+            missing.append("Slack webhook (QA_SLACK_WEBHOOK_URL or BP_QUALITY_NOTIFICATIONS_SLACK_WEBHOOK_URL)")
+        if missing:
+            missing_detail = "; ".join(missing)
+            raise ValueError(
+                "Production mode requires explicit notification recipients/webhooks for enabled channels. "
+                f"Missing: {missing_detail}."
+            )
 
     return NotificationService(
         email=email,
