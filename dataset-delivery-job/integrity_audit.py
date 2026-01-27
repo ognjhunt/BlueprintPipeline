@@ -28,11 +28,15 @@ if str(GENIE_SIM_IMPORT_PATH) not in sys.path:
 
 from tools.config.production_mode import resolve_production_mode
 from tools.metrics.pipeline_metrics import get_metrics
+from tools.secrets.secret_manager import SecretManagerError, get_secret_or_env
 from import_manifest_utils import verify_checksums_signature
 
 GCS_ROOT = Path("/mnt/gcs")
 JOB_NAME = "dataset-delivery-integrity-audit-job"
 LOGGER = logging.getLogger(JOB_NAME)
+# Secret Manager IDs + env var fallbacks for signature verification.
+CHECKSUMS_HMAC_KEY_SECRET_ID = "checksums-hmac-key"
+CHECKSUMS_HMAC_KEY_ENV_VAR = "CHECKSUMS_HMAC_KEY"
 
 
 def _parse_int(value: Optional[str], default: int) -> int:
@@ -234,7 +238,24 @@ def main() -> int:
     max_files = _parse_int(os.getenv("MAX_FILES_PER_BUNDLE"), 0)
     max_failure_details = _parse_int(os.getenv("MAX_FAILURE_DETAILS"), 200)
     production_mode = resolve_production_mode()
-    hmac_key = os.getenv("CHECKSUMS_HMAC_KEY")
+    try:
+        hmac_key = get_secret_or_env(
+            CHECKSUMS_HMAC_KEY_SECRET_ID,
+            env_var=CHECKSUMS_HMAC_KEY_ENV_VAR,
+            fallback_to_env=not production_mode,
+        )
+    except SecretManagerError as exc:
+        if production_mode:
+            raise RuntimeError(
+                "CHECKSUMS_HMAC_KEY is required in production. "
+                f"Configure Secret Manager secret '{CHECKSUMS_HMAC_KEY_SECRET_ID}'."
+            ) from exc
+        hmac_key = None
+    if production_mode and not hmac_key:
+        raise RuntimeError(
+            "CHECKSUMS_HMAC_KEY is required in production. "
+            f"Configure Secret Manager secret '{CHECKSUMS_HMAC_KEY_SECRET_ID}'."
+        )
 
     report_bucket_name = os.getenv("AUDIT_REPORT_BUCKET", bucket_name)
     report_prefix = os.getenv("AUDIT_REPORT_PREFIX", "audit-reports/delivery-integrity")
