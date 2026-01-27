@@ -20,7 +20,7 @@ Use this checklist when wiring Genie Sim into a local environment. It captures t
   - `GENIESIM_LOG_DIR` for server logs.
   - Avoid `/tmp` or `/var/tmp` in production to prevent data loss.
 - [ ] **gRPC Python dependency** (`grpcio`) installed in the Python environment used by the adapter.
-- [ ] **Production deployments** set `PIPELINE_ENV=production` (and `GENIESIM_ENV=production` for GenieSim-only services) plus enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks. Legacy production flags are deprecated and should be removed before **2025-12-31**.
+- [ ] **Production deployments** set `PIPELINE_ENV=production` and enable `ISAACSIM_REQUIRED=true` + `CUROBO_REQUIRED=true` to enforce runtime checks. Legacy production flags (including `GENIESIM_ENV`) are deprecated and should be removed before **2025-12-31**.
 - [ ] **Task config cuRobo filtering** (optional): set `GENIESIM_USE_CUROBO=true` to run cuRobo reachability validation after workspace/radius filtering. When enabled, tasks that fail the cuRobo joint-limit + collision feasibility check are removed and metrics such as `tasks_filtered_by_curobo` are reported in task config metadata.
 - [ ] **Optional runtime cap** configured via `GENIESIM_COLLECTION_TIMEOUT_S` to bound local data collection duration.
 - [ ] **Firebase uploads (import only)** have credentials available in production or service mode:
@@ -117,13 +117,11 @@ When using the lightweight local mock server (`tools/geniesim_adapter/geniesim_s
 
 ## Production toggle
 
-Use `PIPELINE_ENV=production` as the canonical production toggle. Genie Sim-specific services may additionally set
-`GENIESIM_ENV=production`. Legacy toggles (`BP_ENV`, `PRODUCTION_MODE`, etc.) are deprecated and scheduled for removal
-after **2025-12-31**.
+Use `PIPELINE_ENV=production` as the canonical production toggle. Legacy toggles (`GENIESIM_ENV`, `BP_ENV`,
+`PRODUCTION_MODE`, etc.) are deprecated and scheduled for removal after **2025-12-31**.
 
 ```bash
 export PIPELINE_ENV=production
-export GENIESIM_ENV=production
 export ISAACSIM_REQUIRED=true
 export CUROBO_REQUIRED=true
 ```

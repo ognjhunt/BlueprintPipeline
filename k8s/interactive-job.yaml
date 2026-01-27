@@ -57,10 +57,8 @@ spec:
               value: "${MULTIVIEW_PREFIX}"
             - name: PIPELINE_ENV
               value: "${PIPELINE_ENV}"
-            - name: BP_ENV
-              value: "${BP_ENV}"
-            - name: PRODUCTION_MODE
-              value: "${PRODUCTION_MODE}"
+            - name: PIPELINE_ENV
+              value: "${PIPELINE_ENV}"
             - name: DISALLOW_PLACEHOLDER_URDF
               value: "${DISALLOW_PLACEHOLDER_URDF}"
             - name: PARTICULATE_ENDPOINT

@@ -123,7 +123,7 @@ def test_resize_embedding_empty_is_zeros():
 
 @pytest.mark.unit
 def test_production_disallows_placeholder_embeddings(monkeypatch):
-    monkeypatch.setenv("GENIESIM_ENV", "production")
+    monkeypatch.setenv("PIPELINE_ENV", "production")
     builder = AssetIndexBuilder(
         generate_embeddings=True,
         verbose=False,

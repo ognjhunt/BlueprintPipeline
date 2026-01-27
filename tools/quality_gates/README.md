@@ -2,7 +2,7 @@
 
 ## Production requirements
 Quality gate approvals must have at least one notification channel configured when
-`PRODUCTION_MODE` (or `PIPELINE_ENV=production`) is enabled. The pipeline will
+`PIPELINE_ENV=production` is enabled. The pipeline will
 raise an error if `human_approval.notification_channels` is empty in production.
 
 The primary pipeline entrypoints (for example `tools/run_local_pipeline.py`,

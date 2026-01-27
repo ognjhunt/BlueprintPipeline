@@ -13,8 +13,8 @@ Runs interactive asset processing for the pipeline.
 - **Outputs:** processed interactive assets and associated metadata.
 
 ## Key environment variables
-- `BP_ENV` or `PIPELINE_ENV` (canonical): set to `production` to enforce placeholder disallow and production guardrails.
-- `PRODUCTION_MODE`: explicit boolean override for production mode (takes priority over `BP_ENV`/`PIPELINE_ENV`).
+- `PIPELINE_ENV`: set to `production` to enforce placeholder disallow and production guardrails.
+- `BP_ENV` and `PRODUCTION_MODE` are deprecated legacy production flags (removal after 2025-12-31).
 - `DISALLOW_PLACEHOLDER_URDF`: set to `true` to fail when placeholder URDFs would be generated (enabled automatically in production).
 - Variables defining input/output locations and pipeline configuration.
 

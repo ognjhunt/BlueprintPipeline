@@ -69,4 +69,4 @@ Kubernetes manifests for deploying pipeline jobs or infrastructure.
 ## Runtime-impacting configuration cross-references
 
 - **Scene manifest compliance**: Scene assembly and downstream jobs rely on `scene_manifest.json` matching the schema; missing `version` fails QA validation (see `docs/SCENE_MANIFEST.md`).【F:docs/SCENE_MANIFEST.md†L1-L24】
-- **Production validation**: Production E2E runs require strict environment flags (e.g., `DATA_QUALITY_LEVEL=production`, `REQUIRE_REAL_PHYSICS=true`) and minimum quality scores to pass validation gates; these settings should be aligned with job configs and env overrides.【F:docs/PRODUCTION_E2E_VALIDATION.md†L21-L90】
+- **Production validation**: Production E2E runs require `PIPELINE_ENV=production`, strict quality toggles (for example `DATA_QUALITY_LEVEL=production`, `REQUIRE_REAL_PHYSICS=true`), and minimum quality scores to pass validation gates; align these settings with job configs and env overrides.【F:docs/PRODUCTION_E2E_VALIDATION.md†L21-L91】

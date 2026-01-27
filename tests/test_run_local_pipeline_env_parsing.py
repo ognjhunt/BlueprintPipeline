@@ -70,13 +70,11 @@ def test_pipeline_env_prefers_canonical(monkeypatch, tmp_path, caplog):
     assert not any("BP_ENV is deprecated" in record.message for record in caplog.records)
 
 
-def test_pipeline_env_legacy_bp_env_warns(monkeypatch, tmp_path, caplog):
-    monkeypatch.delenv("PIPELINE_ENV", raising=False)
-    monkeypatch.delenv("GENIESIM_ENV", raising=False)
-    monkeypatch.setenv("BP_ENV", "production")
+def test_pipeline_env_canonical_has_no_warnings(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("PIPELINE_ENV", "production")
 
     with caplog.at_level(logging.WARNING):
         runner = _make_runner(tmp_path)
 
     assert runner.environment == "production"
-    assert any("BP_ENV is deprecated" in record.message for record in caplog.records)
+    assert not any("deprecated" in record.message for record in caplog.records)

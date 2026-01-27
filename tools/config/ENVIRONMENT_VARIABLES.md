@@ -159,6 +159,7 @@ export ALERT_LOW_QUALITY_SEVERITY=warning
 export ALERT_FIREBASE_UPLOAD_SEVERITY=error
 export ALERT_PROVENANCE_GATE_SEVERITY=error
 export ALERT_JOB_EXCEPTION_SEVERITY=critical
+export PIPELINE_ENV=production
 ```
 
 ## Quality Gate Notifications
@@ -181,7 +182,7 @@ one channel via `BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS` or
 
 **Example**:
 ```bash
-export PRODUCTION_MODE=true
+export PIPELINE_ENV=production
 export BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS="email,slack"
 export BP_QUALITY_NOTIFICATIONS_EMAIL_RECIPIENTS="qa-team@example.com"
 export BP_QUALITY_NOTIFICATIONS_SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
@@ -379,11 +380,16 @@ enables production mode; there is no explicit "false override" once any flag is 
 - `BP_ENV=production|prod`
 - `PRODUCTION_MODE=1|true|yes`
 - `SIMREADY_PRODUCTION_MODE=1|true|yes`
-- `DATA_QUALITY_LEVEL=production`
-- `ISAAC_SIM_REQUIRED=1|true|yes`
-- `REQUIRE_REAL_PHYSICS=1|true|yes`
 - `PRODUCTION=1|true|yes`
 - `LABS_STAGING=1|true|yes`
+
+**Functional toggles (still supported, not production detectors)**:
+- `DATA_QUALITY_LEVEL=production` (quality tier selection)
+- `ISAAC_SIM_REQUIRED=1|true|yes` (force Isaac Sim availability checks)
+- `REQUIRE_REAL_PHYSICS=1|true|yes` (force physics-backed validation)
+
+These toggles do **not** set production mode on their own; set `PIPELINE_ENV=production`
+to enable production defaults.
 
 **Migration guidance**:
 - Replace any legacy production toggles with `PIPELINE_ENV=production`.
@@ -396,7 +402,7 @@ enables production mode; there is no explicit "false override" once any flag is 
 export PIPELINE_ENV=production
 
 # Legacy compatibility (still supported)
-export DATA_QUALITY_LEVEL=production
+export GENIESIM_ENV=production
 ```
 
 ---
@@ -706,9 +712,9 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
-| `GENIESIM_ENV` | str | `development` | Environment toggle for Genie Sim integrations (`production` disables mock/fallback behavior). |
-| `GENERATE_EMBEDDINGS` | bool | false | Generate embeddings for Genie Sim asset indexing. Defaults to `true` when `GENIESIM_ENV`/`PIPELINE_ENV` resolves to production. Requires provider credentials when `REQUIRE_EMBEDDINGS=true`. |
-| `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (placeholders disallowed in production). Defaults to `true` when `GENIESIM_ENV`/`BP_ENV` resolves to production. |
+| `GENIESIM_ENV` | str | `development` | Legacy alias for `PIPELINE_ENV` in Genie Sim integrations (`production` disables mock/fallback behavior). Deprecated; removal after 2025-12-31. |
+| `GENERATE_EMBEDDINGS` | bool | false | Generate embeddings for Genie Sim asset indexing. Defaults to `true` when `PIPELINE_ENV` resolves to production. Requires provider credentials when `REQUIRE_EMBEDDINGS=true`. |
+| `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (placeholders disallowed in production). Defaults to `true` when `PIPELINE_ENV` resolves to production. |
 | `GENIESIM_EMBEDDING_DIM` | int | 2048 | Embedding dimensionality for Genie Sim asset indexing. |
 | `GENIESIM_ALLOWED_EMBEDDING_DIMS` | str | `768,1024,2048,3072` | Comma-separated allow-list of embedding dimensions accepted by Genie Sim asset indexing. |
 | `ALLOW_EMBEDDING_FALLBACK` | bool | false | Allow deterministic placeholder embeddings in production when `REQUIRE_EMBEDDINGS=false` (logs warnings instead of failing fast). |
@@ -768,7 +774,6 @@ export PARTICULATE_HEALTHCHECK_HOST=localhost
 
 **Production Example**:
 ```bash
-export GENIESIM_ENV=production
 export PIPELINE_ENV=production
 export ISAACSIM_REQUIRED=true
 export CUROBO_REQUIRED=true
@@ -875,7 +880,7 @@ In production, store the Particulate debug token in Secret Manager under
 | `SKIP_QUALITY_GATES` | bool | "0" | Skip quality validation (⚠️ dev only) |
 | `DRY_RUN` | bool | "0" | Dry run (no output generated) |
 | `PYTEST_VERBOSE` | bool | "0" | Verbose test output |
-| `INVENTORY_ENRICHMENT_MODE` | str | "mock" (production defaults to `external` when `BP_ENV`/`GENIESIM_ENV` is production) | Inventory enrichment mode (`mock` or `external`) |
+| `INVENTORY_ENRICHMENT_MODE` | str | "mock" (production defaults to `external` when `PIPELINE_ENV` is production) | Inventory enrichment mode (`mock` or `external`) |
 
 ---
 

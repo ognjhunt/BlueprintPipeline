@@ -296,8 +296,8 @@ run_episode_generation() {
     export NUM_CAMERAS="${NUM_CAMERAS:-1}"
     export IMAGE_RESOLUTION="${IMAGE_RESOLUTION:-640,480}"
     export CAPTURE_SENSOR_DATA="${CAPTURE_SENSOR_DATA:-true}"
+    export PIPELINE_ENV="${PIPELINE_ENV:-production}"
     export DATA_QUALITY_LEVEL="${DATA_QUALITY_LEVEL:-production}"
-    export PRODUCTION_MODE="${PRODUCTION_MODE:-true}"
     export ISAAC_SIM_REQUIRED="${ISAAC_SIM_REQUIRED:-true}"
 
     # IMPORTANT: Set USE_MOCK_CAPTURE=false to use real Isaac Sim capture
