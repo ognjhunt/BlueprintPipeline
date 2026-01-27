@@ -15,7 +15,51 @@ import importlib.util
 import types
 
 
+def _install_grpc_stub() -> types.ModuleType:
+    grpc_stub = types.ModuleType("grpc")
+    grpc_stub.__version__ = "1.66.1"
+
+    def _noop(*args, **kwargs):
+        return None
+
+    grpc_stub.insecure_channel = _noop
+    grpc_stub.secure_channel = _noop
+    grpc_stub.intercept_channel = _noop
+    grpc_stub.ssl_channel_credentials = _noop
+    grpc_stub.metadata_call_credentials = _noop
+    grpc_stub.composite_channel_credentials = _noop
+    grpc_stub.experimental = types.SimpleNamespace(unary_unary=_noop)
+    grpc_stub.StatusCode = types.SimpleNamespace(UNIMPLEMENTED="UNIMPLEMENTED")
+
+    utilities_stub = types.ModuleType("grpc._utilities")
+
+    def first_version_is_lower(current: str, required: str) -> bool:
+        return False
+
+    utilities_stub.first_version_is_lower = first_version_is_lower
+    grpc_stub._utilities = utilities_stub
+
+    sys.modules.setdefault("grpc", grpc_stub)
+    sys.modules.setdefault("grpc._utilities", utilities_stub)
+    return grpc_stub
+
+
+def _ensure_grpc_module() -> types.ModuleType:
+    try:
+        import grpc  # type: ignore
+
+        return grpc
+    except Exception:
+        return _install_grpc_stub()
+
+
 def _load_geniesim_grpc_module() -> types.ModuleType:
+    _ensure_grpc_module()
+
+    adapter_root = REPO_ROOT / "tools" / "geniesim_adapter"
+    if str(adapter_root) not in sys.path:
+        sys.path.insert(0, str(adapter_root))
+
     tools_module = types.ModuleType("tools")
     tools_module.__path__ = [str(REPO_ROOT / "tools")]
     sys.modules.setdefault("tools", tools_module)
@@ -54,9 +98,6 @@ def _clear_geniesim_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_create_channel_insecure(monkeypatch: pytest.MonkeyPatch) -> None:
-    if not grpc_module.GRPC_AVAILABLE:
-        pytest.skip("grpc is not available in this environment")
-
     _clear_geniesim_env(monkeypatch)
     monkeypatch.setenv("GENIESIM_HOST", "example.com")
     monkeypatch.setenv("GENIESIM_PORT", "1234")
@@ -89,9 +130,6 @@ def test_create_channel_insecure(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_create_channel_tls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    if not grpc_module.GRPC_AVAILABLE:
-        pytest.skip("grpc is not available in this environment")
-
     _clear_geniesim_env(monkeypatch)
     cert_path = tmp_path / "client.pem"
     key_path = tmp_path / "client.key"
@@ -137,9 +175,6 @@ def test_create_channel_tls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
 
 def test_create_channel_auth_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    if not grpc_module.GRPC_AVAILABLE:
-        pytest.skip("grpc is not available in this environment")
-
     _clear_geniesim_env(monkeypatch)
     monkeypatch.setenv("GENIESIM_AUTH_TOKEN", "token-value")
 
