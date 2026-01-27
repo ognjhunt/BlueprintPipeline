@@ -368,9 +368,8 @@ export LLM_CACHE_TTL_SECONDS=60
 
 ## Production Mode Resolution
 
-Production mode is resolved through a shared helper (`tools/config/production_mode.py`). It treats the following
-environment variables as production indicators, in the order below. The first match that evaluates to production
-enables production mode; there is no explicit "false override" once any flag is set to a production value.
+Production mode is resolved through a shared helper (`tools/config/production_mode.py`). The only supported
+production indicator is `PIPELINE_ENV=production` (or `PIPELINE_ENV=prod`).
 
 **Canonical flag (preferred)**:
 1. `PIPELINE_ENV=production` or `PIPELINE_ENV=prod`
@@ -390,11 +389,6 @@ enables production mode; there is no explicit "false override" once any flag is 
 
 These toggles do **not** set production mode on their own; set `PIPELINE_ENV=production`
 to enable production defaults.
-
-**Migration guidance**:
-- Replace any legacy production toggles with `PIPELINE_ENV=production`.
-- For GenieSim integrations, migrate `GENIESIM_ENV=production` to `PIPELINE_ENV=production`.
-- Plan to remove legacy flags from job manifests and scripts before **2025-12-31**.
 
 **Example**:
 ```bash
@@ -526,7 +520,7 @@ Enable configuration audit trail logging.
 | `BP_ENABLE_CONFIG_AUDIT` | bool | "0" | Enable config source tracking |
 
 When enabled, `ConfigLoader.dump_audit_trail()` shows where each config value came from.
-Production runs (`PIPELINE_ENV=production` or equivalent) automatically enable the audit
+Production runs (`PIPELINE_ENV=production`) automatically enable the audit
 trail unless you explicitly disable it by setting `BP_ENABLE_CONFIG_AUDIT=0`.
 
 **Example**:
@@ -545,7 +539,6 @@ Environment variables that control simready physics estimation behavior.
 |----------|------|---------|-------------|
 | `SIMREADY_PHYSICS_MODE` | str | "auto" | Physics estimation mode: "auto", "gemini", or "deterministic". Production workflows set this to "deterministic" to avoid Gemini dependencies. |
 | `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | bool | "0" | When `SIMREADY_PHYSICS_MODE=auto`, allow deterministic physics when Gemini is unavailable. |
-| `SIMREADY_PRODUCTION_MODE` | bool | "0" | Deprecated (removal after 2025-12-31). Use `PIPELINE_ENV=production` to enable production behavior. |
 | `SIMREADY_ALLOW_HEURISTIC_FALLBACK` | bool | "0" | Allow heuristic-only fallback when Gemini is unavailable in non-production runs. |
 | `SIMREADY_FALLBACK_MIN_COVERAGE` | float | 0.6 | Minimum coverage ratio required for deterministic fallback physics. |
 | `SIMREADY_NON_LLM_MIN_QUALITY` | float | 0.85 | Minimum quality threshold for non-LLM physics estimation. |
@@ -709,7 +702,6 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `GENIE_SIM_GRPC_PORT` | int | 50051 | Genie Sim gRPC port (local) |
-| `GENIESIM_ENV` | str | `development` | Legacy alias for `PIPELINE_ENV` in Genie Sim integrations (`production` disables mock/fallback behavior). Deprecated; removal after 2025-12-31. |
 | `GENERATE_EMBEDDINGS` | bool | false | Generate embeddings for Genie Sim asset indexing. Defaults to `true` when `PIPELINE_ENV` resolves to production. Requires provider credentials when `REQUIRE_EMBEDDINGS=true`. |
 | `REQUIRE_EMBEDDINGS` | bool | false | Require real embeddings for Genie Sim asset indexing (placeholders disallowed in production). Defaults to `true` when `PIPELINE_ENV` resolves to production. |
 | `GENIESIM_EMBEDDING_DIM` | int | 2048 | Embedding dimensionality for Genie Sim asset indexing. |
