@@ -371,8 +371,16 @@ export LLM_CACHE_TTL_SECONDS=60
 Production mode is resolved through a shared helper (`tools/config/production_mode.py`). The only supported
 production indicator is `PIPELINE_ENV=production` (or `PIPELINE_ENV=prod`).
 
-Legacy production flags are no longer honored and will raise an error after 2025-12-31. Remove legacy
-flags from job manifests and scripts and set `PIPELINE_ENV=production` instead.
+**Canonical flag (preferred)**:
+1. `PIPELINE_ENV=production` or `PIPELINE_ENV=prod`
+
+**Legacy compatibility flags (deprecated; removal after 2025-12-31; do not use in new configs)**:
+- `GENIESIM_ENV=production|prod`
+- `BP_ENV=production|prod`
+- `PRODUCTION_MODE=1|true|yes`
+- `SIMREADY_PRODUCTION_MODE=1|true|yes`
+- `PRODUCTION=1|true|yes`
+- `LABS_STAGING=1|true|yes`
 
 **Functional toggles (still supported, not production detectors)**:
 - `DATA_QUALITY_LEVEL=production` (quality tier selection)

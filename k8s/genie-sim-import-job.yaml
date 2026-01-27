@@ -72,7 +72,7 @@ spec:
 
       containers:
         - name: genie-sim-import
-          image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-import:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-genie-sim-import:${IMAGE_TAG}
           imagePullPolicy: Always
           command: ["/app/genie-sim-import-job/scripts/import_with_delay.sh"]
 

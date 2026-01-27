@@ -25,6 +25,8 @@ resource "google_service_account_iam_member" "scheduler_token_creator" {
   service_account_id = google_service_account.workflow.name
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_cloud_scheduler_job" "retention_cleanup_daily" {

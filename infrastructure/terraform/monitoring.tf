@@ -33,6 +33,8 @@ resource "google_monitoring_dashboard" "workflow_gate" {
 
   project        = var.project_id
   dashboard_json = jsonencode(each.value)
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_logging_metric" "workflow_gate" {
@@ -50,6 +52,8 @@ resource "google_logging_metric" "workflow_gate" {
 
   label_extractors = try(each.value.labelExtractors, null)
   value_extractor  = try(each.value.valueExtractor, null)
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_monitoring_alert_policy" "workflow_job_timeout" {
@@ -85,6 +89,8 @@ resource "google_monitoring_alert_policy" "workflow_job_timeout" {
   }
 
   notification_channels = var.monitoring_notification_channel_ids
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_monitoring_alert_policy" "workflow_job_retry_spike" {
@@ -120,4 +126,6 @@ resource "google_monitoring_alert_policy" "workflow_job_retry_spike" {
   }
 
   notification_channels = var.monitoring_notification_channel_ids
+
+  depends_on = [google_project_service.apis]
 }

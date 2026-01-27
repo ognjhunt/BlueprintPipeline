@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: interactive
-          image: ghcr.io/${PROJECT_ID}/blueprint-interactive:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-interactive:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "run_interactive_assets.py"]

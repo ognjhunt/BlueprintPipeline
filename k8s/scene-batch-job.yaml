@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: scene-batch
-          image: ghcr.io/${PROJECT_ID}/blueprint-scene-batch:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-scene-batch:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["python", "scene-batch-job/entrypoint.py"]

@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: scale
-          image: ghcr.io/${PROJECT_ID}/blueprint-scale:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-scale:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["/app/run_scale.sh"]

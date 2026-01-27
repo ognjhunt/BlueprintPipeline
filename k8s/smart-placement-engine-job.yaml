@@ -34,7 +34,7 @@ spec:
 
       containers:
         - name: smart-placement-engine
-          image: ghcr.io/${PROJECT_ID}/blueprint-smart-placement-engine:latest
+          image: ghcr.io/${PROJECT_ID}/blueprint-smart-placement-engine:${IMAGE_TAG}
           imagePullPolicy: Always
 
           command: ["/app/entrypoint.sh"]

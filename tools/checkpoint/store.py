@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,12 +64,13 @@ def checkpoint_path(scene_dir: Path, step: str) -> Path:
 CheckpointLocation = Union[Path, str]
 
 
-class BaseCheckpointStore:
+class BaseCheckpointStore(ABC):
     """Shared checkpoint store interface."""
 
     def __init__(self, *, scene_id: Optional[str] = None) -> None:
         self.scene_id = scene_id
 
+    @abstractmethod
     def write_checkpoint(
         self,
         step: str,
@@ -83,6 +85,7 @@ class BaseCheckpointStore:
     ) -> CheckpointLocation:
         raise NotImplementedError
 
+    @abstractmethod
     def load_checkpoint(self, step: str) -> Optional[CheckpointRecord]:
         raise NotImplementedError
 
