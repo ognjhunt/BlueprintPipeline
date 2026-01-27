@@ -5,7 +5,7 @@ import warnings
 
 import geniesim_grpc_pb2 as geniesim__grpc__pb2
 
-GRPC_GENERATED_VERSION = '1.71.2'
+GRPC_GENERATED_VERSION = '1.66.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
