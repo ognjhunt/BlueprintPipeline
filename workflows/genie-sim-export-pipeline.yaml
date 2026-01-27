@@ -139,6 +139,7 @@ main:
           - circuitBreakerStatus: "closed"
           - circuitBreakerOpenedAt: null
           - circuitBreakerLastProbeAt: null
+          - circuitBreakerGeneration: 0
         next: read_circuit_breaker_state
 
     - read_circuit_breaker_state:
@@ -147,8 +148,7 @@ main:
           args:
             bucket: ${bucket}
             object: ${circuitBreakerObject}
-            alt: "media"
-          result: circuitBreakerRaw
+          result: circuitBreakerMetadata
         except:
           as: circuitBreakerError
           steps:
@@ -160,6 +160,7 @@ main:
             - set_empty_circuit_breaker_state:
                 assign:
                   - circuitBreakerRaw: "{}"
+                  - circuitBreakerGeneration: 0
                 next: parse_circuit_breaker_state
             - log_circuit_breaker_read_error:
                 call: sys.log
@@ -170,7 +171,34 @@ main:
             - set_circuit_breaker_state_after_error:
                 assign:
                   - circuitBreakerRaw: "{}"
+                  - circuitBreakerGeneration: 0
                 next: log_circuit_breaker_state
+        next: set_circuit_breaker_generation
+
+    - set_circuit_breaker_generation:
+        assign:
+          - circuitBreakerGeneration: ${int(circuitBreakerMetadata.generation)}
+        next: read_circuit_breaker_state_body
+
+    - read_circuit_breaker_state_body:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${circuitBreakerObject}
+            alt: "media"
+          result: circuitBreakerRaw
+        except:
+          as: circuitBreakerBodyError
+          steps:
+            - log_circuit_breaker_body_error:
+                call: sys.log
+                args:
+                  text: '${"Unable to read circuit breaker body for scene " + sceneId + ": " + circuitBreakerBodyError.message}'
+                  severity: "WARNING"
+            - set_empty_circuit_breaker_body_after_error:
+                assign:
+                  - circuitBreakerRaw: "{}"
         next: parse_circuit_breaker_state
 
     - parse_circuit_breaker_state:
@@ -223,6 +251,7 @@ main:
           bucket: ${bucket}
           name: ${circuitBreakerObject}
           uploadType: "media"
+          ifGenerationMatch: ${circuitBreakerGeneration}
           body: ${json.encode({
             "scene_id": sceneId,
             "failure_count": circuitBreakerFailureCount,
@@ -234,6 +263,12 @@ main:
             "last_failure_at": circuitBreakerLastFailureAt,
             "last_success_at": circuitBreakerLastSuccessAt
           })}
+        result: circuitBreakerWriteResult
+        next: update_circuit_breaker_generation_after_half_open
+
+    - update_circuit_breaker_generation_after_half_open:
+        assign:
+          - circuitBreakerGeneration: ${int(circuitBreakerWriteResult.generation)}
         next: probe_circuit_breaker_primary
 
     - probe_circuit_breaker_primary:
@@ -271,6 +306,7 @@ main:
           bucket: ${bucket}
           name: ${circuitBreakerObject}
           uploadType: "media"
+          ifGenerationMatch: ${circuitBreakerGeneration}
           body: ${json.encode({
             "scene_id": sceneId,
             "failure_count": circuitBreakerFailureCount,
@@ -300,6 +336,7 @@ main:
           bucket: ${bucket}
           name: ${circuitBreakerObject}
           uploadType: "media"
+          ifGenerationMatch: ${circuitBreakerGeneration}
           body: ${json.encode({
             "scene_id": sceneId,
             "failure_count": circuitBreakerFailureCount,
@@ -665,6 +702,7 @@ main:
                   bucket: ${bucket}
                   name: ${circuitBreakerObject}
                   uploadType: "media"
+                  ifGenerationMatch: ${circuitBreakerGeneration}
                   body: ${json.encode({
                     "scene_id": sceneId,
                     "failure_count": circuitBreakerFailureCount,
@@ -1196,6 +1234,7 @@ main:
                   bucket: ${bucket}
                   name: ${circuitBreakerObject}
                   uploadType: "media"
+                  ifGenerationMatch: ${circuitBreakerGeneration}
                   body: ${json.encode({
                     "scene_id": sceneId,
                     "failure_count": circuitBreakerFailureCount,
@@ -1293,6 +1332,7 @@ main:
           bucket: ${bucket}
           name: ${circuitBreakerObject}
           uploadType: "media"
+          ifGenerationMatch: ${circuitBreakerGeneration}
           body: ${json.encode({
             "scene_id": sceneId,
             "failure_count": circuitBreakerFailureCount,
@@ -1575,6 +1615,7 @@ main:
           bucket: ${bucket}
           name: ${circuitBreakerObject}
           uploadType: "media"
+          ifGenerationMatch: ${circuitBreakerGeneration}
           body: ${json.encode({
             "scene_id": sceneId,
             "failure_count": circuitBreakerFailureCount,
@@ -1617,6 +1658,7 @@ main:
           bucket: ${bucket}
           name: ${circuitBreakerObject}
           uploadType: "media"
+          ifGenerationMatch: ${circuitBreakerGeneration}
           body: ${json.encode({
             "scene_id": sceneId,
             "failure_count": circuitBreakerFailureCount,
