@@ -7,6 +7,10 @@ using the expected paths from `tools/geniesim_adapter/deployment/README.md`:
 - `ISAAC_SIM_PATH=/isaac-sim`
 - `GENIESIM_ROOT=/opt/geniesim`
 
+> **Note:** This job is intentionally a lightweight wrapper around existing Genie Sim
+> tooling, keeping the container focused on packaging Isaac Sim and invoking the
+> upstream entrypoints without extra orchestration logic.
+
 ## Build
 
 Build arguments:

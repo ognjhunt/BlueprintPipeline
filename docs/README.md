@@ -10,3 +10,4 @@
 - [Lab integration data contract](lab_integration.md)
 - [Production E2E validation runbook](PRODUCTION_E2E_VALIDATION.md)
 - [GPU sizing guide](GPU_SIZING.md)
+- Thin-wrapper jobs: lightweight containers that delegate to shared tooling (e.g., `genie-sim-gpu-job`, `meshy-job`, `scene-batch-job`).
