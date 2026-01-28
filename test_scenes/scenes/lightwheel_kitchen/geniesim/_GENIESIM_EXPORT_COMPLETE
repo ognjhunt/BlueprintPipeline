@@ -1,0 +1,78 @@
+{
+  "scene_id": "lightwheel_kitchen",
+  "robot_type": "franka",
+  "success": true,
+  "commercial_data": true,
+  "premium_analytics_enabled": false,
+  "export_schema_version": "1.0.0",
+  "geniesim_schema_version": "3.0.0",
+  "blueprintpipeline_version": "1.0.0",
+  "export_timestamp": "2026-01-28T14:15:48.227864Z",
+  "schema_compatibility": {
+    "min_geniesim_version": "3.0.0",
+    "max_geniesim_version": "3.x.x",
+    "breaking_changes_since": "2.x.x"
+  },
+  "stats": {
+    "nodes": 14,
+    "edges": 92,
+    "assets": 14,
+    "tasks": 0,
+    "original_objects": 13,
+    "variation_assets": 1
+  },
+  "metrics_summary": {
+    "backend": "in_memory",
+    "stats": {
+      "pipeline_runs_total": 0,
+      "pipeline_duration_seconds": {},
+      "objects_processed": 0,
+      "objects_failed": 0,
+      "gemini_calls": 0,
+      "gemini_tokens_input": 0,
+      "gemini_tokens_output": 0,
+      "gemini_latency_seconds": {},
+      "geniesim_jobs": 0,
+      "geniesim_episodes_generated": 0,
+      "geniesim_job_duration_seconds": {},
+      "geniesim_import_episodes_skipped_total": 0,
+      "geniesim_api_latency_seconds": {},
+      "episode_quality_score": {},
+      "collision_free_rate": null,
+      "task_success_rate": null,
+      "physics_validation_score": {},
+      "sensor_capture_source_total": 0,
+      "scenes_in_progress": null,
+      "storage_bytes_written": 0,
+      "pipeline_cost_total_usd": 0,
+      "cost_per_scene": null,
+      "errors_total": 0,
+      "retries_total": 0,
+      "retry_attempts_total": 0,
+      "retry_failures_total": 0,
+      "retry_delay_seconds": {}
+    }
+  },
+  "embedding_requirements": {
+    "generate_embeddings": false,
+    "require_embeddings": false,
+    "production_mode": false,
+    "allow_embedding_fallback": false,
+    "allow_placeholder_embeddings_in_prod": false
+  },
+  "embedding_provider_available": false,
+  "embedding_mode": "placeholder",
+  "premium_features_exported": {
+    "premium_analytics": false,
+    "sim2real_fidelity": false,
+    "embodiment_transfer": false,
+    "trajectory_optimality": false,
+    "policy_leaderboard": false,
+    "tactile_sensors": false,
+    "language_annotations": false,
+    "generalization_analyzer": false,
+    "sim2real_validation": false,
+    "audio_narration": false
+  },
+  "premium_features_failed": []
+}

@@ -20,7 +20,7 @@
     ]
   },
   "export_info": {
-    "timestamp": "2026-01-28T14:09:39.633858Z",
+    "timestamp": "2026-01-28T14:15:48.004252Z",
     "exporter_version": "1.0.0",
     "source_pipeline": "blueprintpipeline"
   },
@@ -48,7 +48,7 @@
     "statistics": {
       "nodes": 14,
       "edges": 92,
-      "assets": 13,
+      "assets": 14,
       "tasks": 0
     },
     "errors": [],
@@ -68,7 +68,7 @@
   "file_inventory": [
     {
       "path": "asset_index.json",
-      "size_bytes": 14366
+      "size_bytes": 15385
     },
     {
       "path": "enhanced_features.json",
@@ -110,15 +110,15 @@
   "checksums": {
     "files": {
       "asset_index.json": {
-        "sha256": "e76cd72c798236fa072e2211a2af5ceca673cd64e1d97316d269c83ee2857726",
-        "size_bytes": 14366
+        "sha256": "8a288d70a603e9bc74f42b4f6a6e182b8584062719d8805c60b4baabf153f18d",
+        "size_bytes": 15385
       },
       "enhanced_features.json": {
-        "sha256": "853b0356d97271e35169a50c4a08044e0eb0259320b9658e8701907730f0fe6c",
+        "sha256": "11ef2ff693c7f1235f2def2dc9e364ac3b76fc282d8085f02a95705f34ed2486",
         "size_bytes": 2025
       },
       "legal/asset_provenance.json": {
-        "sha256": "862622d4ae7f04bd133a8692d9d57817e853e5c7ada1bcb6fe98a71e6f969559",
+        "sha256": "3fdd5e4d6fcc340653920f34c353423c58da8db9b5e861b3ca972d5ea08589b2",
         "size_bytes": 20348
       },
       "merged_scene_manifest.json": {
@@ -126,7 +126,7 @@
         "size_bytes": 11769
       },
       "multi_robot_config.json": {
-        "sha256": "3776c46e0295655da3d3b97141b0cf728cfa9c5ef0c871ef18c6de565e04cc64",
+        "sha256": "eec45e108097b739bb3a49ff0ebbd606d53981a5f733bbef011c4ee7c4cef2b8",
         "size_bytes": 2411
       },
       "preflight_report.json": {
@@ -134,11 +134,11 @@
         "size_bytes": 703
       },
       "scene_config.yaml": {
-        "sha256": "cc261c080cf9af7c514c13cf3eeb3f3757a4fdfd7ac4dcc159de78face8f1b65",
+        "sha256": "97bea0c7c713ac9c69b1b63a608aeae6eebe8c0a7b269bed3f96aefa6e88f7d4",
         "size_bytes": 1177
       },
       "scene_graph.json": {
-        "sha256": "4e7b88982b527f614745748e8e3136a8a3129edb4bdf7a884e50c5ef07d1e80f",
+        "sha256": "7da87d8196e08d7a0acaf42f0cdc3951aa34be0ab1575a35fa2c300aae6ca7c0",
         "size_bytes": 34416
       },
       "task_config.json": {
@@ -150,7 +150,7 @@
         "size_bytes": 270921439
       },
       "export_manifest.json": {
-        "sha256": "2a007be7ae3d039d7e56f17011f83075fe7c38aa56ea4d0dde5377495ccb87a3"
+        "sha256": "6406dac366c0f744883c05a97a6521c00608ce5b561bf70e09287d09e8ef2ea3"
       }
     }
   }

@@ -1,0 +1,19 @@
+{
+  "step": "genie-sim-export",
+  "status": "completed",
+  "started_at": "2026-01-28T14:15:46.760154Z",
+  "completed_at": "2026-01-28T14:15:48.228647Z",
+  "outputs": {
+    "geniesim_dir": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim",
+    "scene_graph": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/scene_graph.json",
+    "task_config": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/task_config.json"
+  },
+  "output_paths": [
+    "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/scene_graph.json",
+    "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/task_config.json",
+    "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/asset_index.json",
+    "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/merged_scene_manifest.json"
+  ],
+  "output_hashes": {},
+  "scene_id": "lightwheel_kitchen"
+}

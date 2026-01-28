@@ -513,8 +513,8 @@
         ]
       },
       "task_tag": [
-        "place",
-        "pick"
+        "pick",
+        "place"
       ],
       "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Toaster003/Toaster003.usd",
       "properties": {
@@ -613,9 +613,9 @@
         ]
       },
       "task_tag": [
+        "pick",
         "place",
-        "fill",
-        "pick"
+        "fill"
       ],
       "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Pot057/Pot057.usd",
       "properties": {
@@ -665,8 +665,8 @@
         ]
       },
       "task_tag": [
-        "place",
-        "pick"
+        "pick",
+        "place"
       ],
       "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/mock_mug_01/mock_mug_01.usd",
       "properties": {

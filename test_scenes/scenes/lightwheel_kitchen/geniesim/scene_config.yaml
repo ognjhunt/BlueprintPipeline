@@ -1,7 +1,7 @@
 # Genie Sim 3.0 Scene Configuration
 # Auto-generated from BlueprintPipeline
 # Scene: lightwheel_kitchen
-# Generated: 2026-01-28T14:09:39.286510Z
+# Generated: 2026-01-28T14:15:47.434814Z
 
 scene:
   id: "lightwheel_kitchen"
@@ -23,7 +23,7 @@ robot:
 
 assets:
   index_path: "asset_index.json"
-  total_count: 13
+  total_count: 14
   commercial_only: True
 
 scene_graph:
