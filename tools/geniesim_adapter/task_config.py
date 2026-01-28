@@ -679,9 +679,15 @@ class TaskConfigGenerator:
         strict_reachability: bool,
     ) -> Tuple[List[SuggestedTask], Dict[str, int]]:
         """Filter tasks by robot reachability and workspace bounds."""
+        def _pos_to_list(pos):
+            """Convert position dict {"x":..,"y":..,"z":..} to [x,y,z] list."""
+            if isinstance(pos, dict):
+                return [pos.get("x", 0.0), pos.get("y", 0.0), pos.get("z", 0.0)]
+            return pos
+
         objects = manifest.get("objects", [])
         object_positions = {
-            str(obj.get("id", "")): obj.get("transform", {}).get("position")
+            str(obj.get("id", "")): _pos_to_list(obj.get("transform", {}).get("position"))
             for obj in objects
         }
 
@@ -791,9 +797,14 @@ class TaskConfigGenerator:
             )
             return tasks, metadata
 
+        def _pos_to_list_2(pos):
+            if isinstance(pos, dict):
+                return [pos.get("x", 0.0), pos.get("y", 0.0), pos.get("z", 0.0)]
+            return pos
+
         objects = manifest.get("objects", [])
         object_positions = {
-            str(obj.get("id", "")): obj.get("transform", {}).get("position")
+            str(obj.get("id", "")): _pos_to_list_2(obj.get("transform", {}).get("position"))
             for obj in objects
         }
         filtered_tasks = []
