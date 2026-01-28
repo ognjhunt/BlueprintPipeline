@@ -1,0 +1,1360 @@
+{
+  "schema_version": "3.0",
+  "scene_id": "lightwheel_kitchen",
+  "coordinate_system": "y_up",
+  "meters_per_unit": 0.01,
+  "nodes": [
+    {
+      "asset_id": "lightwheel_kitchen_obj_Refrigerator001",
+      "semantic": "refrigerator: Refrigerator",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          2.0,
+          0.0,
+          -2.5
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Refrigerator001/Refrigerator001.usd",
+      "properties": {
+        "mass": 80.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "refrigerator",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        },
+        "placement_region": null,
+        "physics": {
+          "mass": 80.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Dishwasher054",
+      "semantic": "dishwasher: Dishwasher",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          -1.0,
+          0.0,
+          -2.5
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Dishwasher054/Dishwasher054.usd",
+      "properties": {
+        "mass": 50.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "dishwasher",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        },
+        "placement_region": null,
+        "physics": {
+          "mass": 50.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Microwave017",
+      "semantic": "microwave: Microwave",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          0.5,
+          1.2,
+          -2.5
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Microwave017/Microwave017.usd",
+      "properties": {
+        "mass": 15.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "microwave",
+        "affordances": [
+          "Openable",
+          "Pressable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        },
+        "placement_region": null,
+        "physics": {
+          "mass": 15.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Sink054",
+      "semantic": "sink: Sink",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          0.0,
+          0.9,
+          -2.5
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Sink054/Sink054.usd",
+      "properties": {
+        "mass": 20.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "sink",
+        "affordances": [
+          "Turnable"
+        ],
+        "articulation": {},
+        "placement_region": null,
+        "physics": {
+          "mass": 20.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Stovetop012",
+      "semantic": "stovetop: Stovetop",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          1.0,
+          0.9,
+          -2.5
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [
+        "interact"
+      ],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Stovetop012/Stovetop012.usd",
+      "properties": {
+        "mass": 30.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "interactive",
+        "category": "stovetop",
+        "affordances": [
+          "Turnable"
+        ],
+        "articulation": {},
+        "placement_region": null,
+        "physics": {
+          "mass": 30.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_RangeHood015",
+      "semantic": "range_hood: Range Hood",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          1.0,
+          2.0,
+          -2.5
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_RangeHood015/RangeHood015.usd",
+      "properties": {
+        "mass": 25.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "range_hood",
+        "affordances": [],
+        "articulation": {},
+        "placement_region": null,
+        "physics": {
+          "mass": 25.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "semantic": "cabinet: Kitchen Cabinet",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          -0.5,
+          1.5,
+          -2.5
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Kitchen_Cabinet001/Kitchen_Cabinet001.usd",
+      "properties": {
+        "mass": 30.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "cabinet",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        },
+        "placement_region": null,
+        "physics": {
+          "mass": 30.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "semantic": "cabinet: Kitchen Cabinet 2",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          0.5,
+          1.5,
+          -2.5
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Kitchen_Cabinet002/Kitchen_Cabinet002.usd",
+      "properties": {
+        "mass": 30.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "cabinet",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        },
+        "placement_region": null,
+        "physics": {
+          "mass": 30.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Table049",
+      "semantic": "table: Kitchen Table",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Table049/Table049.usd",
+      "properties": {
+        "mass": 40.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "table",
+        "affordances": [],
+        "articulation": {},
+        "placement_region": null,
+        "physics": {
+          "mass": 40.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_WallStackOven004",
+      "semantic": "oven: Wall Oven",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          -2.0,
+          1.0,
+          -2.5
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_WallStackOven004/WallStackOven004.usd",
+      "properties": {
+        "mass": 60.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "oven",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        },
+        "placement_region": null,
+        "physics": {
+          "mass": 60.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Toaster003",
+      "semantic": "toaster: Toaster",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          0.3,
+          0.95,
+          -2.3
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [
+        "place",
+        "pick"
+      ],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Toaster003/Toaster003.usd",
+      "properties": {
+        "mass": 2.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "manipulable_object",
+        "category": "toaster",
+        "affordances": [
+          "Graspable",
+          "Pressable"
+        ],
+        "articulation": {},
+        "placement_region": null,
+        "physics": {
+          "mass": 2.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "semantic": "coffee_machine: Coffee Machine",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          -0.3,
+          0.95,
+          -2.3
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [
+        "interact"
+      ],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_CoffeeMachine006/CoffeeMachine006.usd",
+      "properties": {
+        "mass": 5.0,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "interactive",
+        "category": "coffee_machine",
+        "affordances": [
+          "Pressable"
+        ],
+        "articulation": {},
+        "placement_region": null,
+        "physics": {
+          "mass": 5.0
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Pot057",
+      "semantic": "pot: Pot",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          1.0,
+          0.95,
+          -2.3
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [
+        "fill",
+        "place",
+        "pick"
+      ],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Pot057/Pot057.usd",
+      "properties": {
+        "mass": 1.5,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "manipulable_object",
+        "category": "pot",
+        "affordances": [
+          "Graspable",
+          "Containable"
+        ],
+        "articulation": {},
+        "placement_region": null,
+        "physics": {
+          "mass": 1.5
+        },
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_mock_mug_01",
+      "semantic": "mug: mock_mug_01",
+      "size": [
+        0.1,
+        0.1,
+        0.1
+      ],
+      "pose": {
+        "position": [
+          0.5,
+          0.9,
+          -1.0
+        ],
+        "orientation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "task_tag": [
+        "place",
+        "pick"
+      ],
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/mock_mug_01/mock_mug_01.usd",
+      "properties": {
+        "mass": 0.5,
+        "friction": 0.5,
+        "restitution": 0.1
+      },
+      "bp_metadata": {
+        "sim_role": "manipulable_object",
+        "category": "mug",
+        "affordances": [],
+        "articulation": {},
+        "placement_region": null,
+        "physics": {},
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_Dishwasher054",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_Microwave017",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_Sink054",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_Stovetop012",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_RangeHood015",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_Table049",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_WallStackOven004",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Refrigerator001",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_Microwave017",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_Sink054",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_Stovetop012",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_RangeHood015",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_Table049",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_WallStackOven004",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Dishwasher054",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_Sink054",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_Stovetop012",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_RangeHood015",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_Table049",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_WallStackOven004",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Microwave017",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_Stovetop012",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_RangeHood015",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_Table049",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_WallStackOven004",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Sink054",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Stovetop012",
+      "target": "lightwheel_kitchen_obj_RangeHood015",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Stovetop012",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Stovetop012",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Stovetop012",
+      "target": "lightwheel_kitchen_obj_Table049",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Stovetop012",
+      "target": "lightwheel_kitchen_obj_WallStackOven004",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Stovetop012",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Stovetop012",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Stovetop012",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Stovetop012",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_RangeHood015",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_RangeHood015",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_RangeHood015",
+      "target": "lightwheel_kitchen_obj_Table049",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_RangeHood015",
+      "target": "lightwheel_kitchen_obj_WallStackOven004",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_RangeHood015",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_RangeHood015",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_RangeHood015",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_RangeHood015",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "target": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "target": "lightwheel_kitchen_obj_Table049",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "target": "lightwheel_kitchen_obj_WallStackOven004",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "target": "lightwheel_kitchen_obj_Table049",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "target": "lightwheel_kitchen_obj_WallStackOven004",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Table049",
+      "target": "lightwheel_kitchen_obj_WallStackOven004",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Table049",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Table049",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Table049",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Table049",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_WallStackOven004",
+      "target": "lightwheel_kitchen_obj_Toaster003",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_WallStackOven004",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_WallStackOven004",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_WallStackOven004",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Toaster003",
+      "target": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Toaster003",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Toaster003",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "adjacent",
+      "confidence": 0.7,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Toaster003",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "target": "lightwheel_kitchen_obj_Pot057",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    },
+    {
+      "source": "lightwheel_kitchen_obj_Pot057",
+      "target": "lightwheel_kitchen_obj_mock_mug_01",
+      "relation": "aligned",
+      "confidence": 0.6,
+      "metadata": {}
+    }
+  ],
+  "metadata": {
+    "source": "blueprintpipeline",
+    "environment_type": "kitchen",
+    "room_bounds": {
+      "width": 6.0,
+      "depth": 6.0,
+      "height": 3.0,
+      "x": [
+        -3.0,
+        3.0
+      ],
+      "y": [
+        0.0,
+        3.0
+      ],
+      "z": [
+        -3.0,
+        3.0
+      ]
+    }
+  }
+}

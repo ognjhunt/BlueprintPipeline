@@ -1,7 +1,7 @@
 {
   "scene_id": "lightwheel_kitchen",
   "version": "1.0.0",
-  "generated_at": "2026-01-28T13:59:42.167890Z",
+  "generated_at": "2026-01-28T14:05:18.432870Z",
   "license": {
     "type": "unknown",
     "commercial_ok": false,
@@ -52,7 +52,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.168279Z",
+          "timestamp": "2026-01-28T14:05:18.433478Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -67,7 +67,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.168279Z",
+          "timestamp": "2026-01-28T14:05:18.433478Z",
           "parameters": {
             "mass": 80.0,
             "friction": null
@@ -78,7 +78,7 @@
       ],
       "verification": {
         "content_hash": "90c33da5593bb916797bb0f19f7a865635a92b17e22b50641a81e019c177c554",
-        "timestamp": "2026-01-28T13:59:42.255418Z"
+        "timestamp": "2026-01-28T14:05:18.543259Z"
       },
       "metadata": {
         "category": "refrigerator",
@@ -105,7 +105,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.255472Z",
+          "timestamp": "2026-01-28T14:05:18.543373Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -120,7 +120,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.255472Z",
+          "timestamp": "2026-01-28T14:05:18.543373Z",
           "parameters": {
             "mass": 50.0,
             "friction": null
@@ -131,7 +131,7 @@
       ],
       "verification": {
         "content_hash": "ea4d914d14c1397300b7ccb6e931c7e742cb45ae00c1b58132db69cf251a31ed",
-        "timestamp": "2026-01-28T13:59:42.276403Z"
+        "timestamp": "2026-01-28T14:05:18.572241Z"
       },
       "metadata": {
         "category": "dishwasher",
@@ -158,7 +158,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.276439Z",
+          "timestamp": "2026-01-28T14:05:18.572314Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -173,7 +173,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.276439Z",
+          "timestamp": "2026-01-28T14:05:18.572314Z",
           "parameters": {
             "mass": 15.0,
             "friction": null
@@ -184,7 +184,7 @@
       ],
       "verification": {
         "content_hash": "a6645c97c6d8d30f91d4e8bd627059e1bbeeb1f170ccd22da8ad37d6ca10b3b0",
-        "timestamp": "2026-01-28T13:59:42.313337Z"
+        "timestamp": "2026-01-28T14:05:18.704205Z"
       },
       "metadata": {
         "category": "microwave",
@@ -211,7 +211,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.313378Z",
+          "timestamp": "2026-01-28T14:05:18.704269Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -226,7 +226,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.313378Z",
+          "timestamp": "2026-01-28T14:05:18.704269Z",
           "parameters": {
             "mass": 20.0,
             "friction": null
@@ -237,7 +237,7 @@
       ],
       "verification": {
         "content_hash": "b7aa2abd53ebe9e2687c3c58151b3f5a09359be86d2a4cbc9b60d2785e134eec",
-        "timestamp": "2026-01-28T13:59:42.341736Z"
+        "timestamp": "2026-01-28T14:05:18.772810Z"
       },
       "metadata": {
         "category": "sink",
@@ -264,7 +264,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.341776Z",
+          "timestamp": "2026-01-28T14:05:18.772886Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -279,7 +279,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.341776Z",
+          "timestamp": "2026-01-28T14:05:18.772886Z",
           "parameters": {
             "mass": 30.0,
             "friction": null
@@ -290,7 +290,7 @@
       ],
       "verification": {
         "content_hash": "4a711c6654fe5f54bc1c0740e9c85213a56fc6e97c0bee85f75d11f6371f212c",
-        "timestamp": "2026-01-28T13:59:42.344560Z"
+        "timestamp": "2026-01-28T14:05:18.777876Z"
       },
       "metadata": {
         "category": "stovetop",
@@ -317,7 +317,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.344583Z",
+          "timestamp": "2026-01-28T14:05:18.777926Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -332,7 +332,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.344583Z",
+          "timestamp": "2026-01-28T14:05:18.777926Z",
           "parameters": {
             "mass": 25.0,
             "friction": null
@@ -343,7 +343,7 @@
       ],
       "verification": {
         "content_hash": "acf43be175ab4d1c4e660807edecddc6da23bc8d4cd290590fe562919995b9d4",
-        "timestamp": "2026-01-28T13:59:42.355073Z"
+        "timestamp": "2026-01-28T14:05:18.799849Z"
       },
       "metadata": {
         "category": "range_hood",
@@ -370,7 +370,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.355094Z",
+          "timestamp": "2026-01-28T14:05:18.799933Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -385,7 +385,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.355094Z",
+          "timestamp": "2026-01-28T14:05:18.799933Z",
           "parameters": {
             "mass": 30.0,
             "friction": null
@@ -396,7 +396,7 @@
       ],
       "verification": {
         "content_hash": "d56d7b62682d19e591058c350ab5bed93dd3634994c20f3e6b5368d4655b58f6",
-        "timestamp": "2026-01-28T13:59:42.396294Z"
+        "timestamp": "2026-01-28T14:05:18.856064Z"
       },
       "metadata": {
         "category": "cabinet",
@@ -423,7 +423,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.396341Z",
+          "timestamp": "2026-01-28T14:05:18.856132Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -438,7 +438,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.396341Z",
+          "timestamp": "2026-01-28T14:05:18.856132Z",
           "parameters": {
             "mass": 30.0,
             "friction": null
@@ -449,7 +449,7 @@
       ],
       "verification": {
         "content_hash": "7f4b736e6392cff56afa357b3ecfffc230c98bc496c49e7b80b5e61312f00ace",
-        "timestamp": "2026-01-28T13:59:42.432540Z"
+        "timestamp": "2026-01-28T14:05:18.906011Z"
       },
       "metadata": {
         "category": "cabinet",
@@ -476,7 +476,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.432570Z",
+          "timestamp": "2026-01-28T14:05:18.906056Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -491,7 +491,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.432570Z",
+          "timestamp": "2026-01-28T14:05:18.906056Z",
           "parameters": {
             "mass": 40.0,
             "friction": null
@@ -502,7 +502,7 @@
       ],
       "verification": {
         "content_hash": "33e9fca333ebafc72b991f7052168867d35f22d488df7d0c0d2fd3a9ae754341",
-        "timestamp": "2026-01-28T13:59:42.439292Z"
+        "timestamp": "2026-01-28T14:05:18.917638Z"
       },
       "metadata": {
         "category": "table",
@@ -529,7 +529,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.439321Z",
+          "timestamp": "2026-01-28T14:05:18.917680Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -544,7 +544,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.439321Z",
+          "timestamp": "2026-01-28T14:05:18.917680Z",
           "parameters": {
             "mass": 60.0,
             "friction": null
@@ -555,7 +555,7 @@
       ],
       "verification": {
         "content_hash": "0c32a1811e506daabe048d55622fe7b5dcae604f4a6712fd08fcd74b5d153386",
-        "timestamp": "2026-01-28T13:59:42.454563Z"
+        "timestamp": "2026-01-28T14:05:18.936322Z"
       },
       "metadata": {
         "category": "oven",
@@ -582,7 +582,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.454585Z",
+          "timestamp": "2026-01-28T14:05:18.936363Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -597,7 +597,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.454585Z",
+          "timestamp": "2026-01-28T14:05:18.936363Z",
           "parameters": {
             "mass": 2.0,
             "friction": null
@@ -608,7 +608,7 @@
       ],
       "verification": {
         "content_hash": "b08d66168def455c974d8d1b806e4c39f5221588b7c91da53c8c0ef9f65435d2",
-        "timestamp": "2026-01-28T13:59:42.456544Z"
+        "timestamp": "2026-01-28T14:05:18.938459Z"
       },
       "metadata": {
         "category": "toaster",
@@ -635,7 +635,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.456557Z",
+          "timestamp": "2026-01-28T14:05:18.938480Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -650,7 +650,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.456557Z",
+          "timestamp": "2026-01-28T14:05:18.938480Z",
           "parameters": {
             "mass": 5.0,
             "friction": null
@@ -661,7 +661,7 @@
       ],
       "verification": {
         "content_hash": "ba2873af48ed780b701cc287824b10773897f26e26ddb3f11b7738fcdbc113d4",
-        "timestamp": "2026-01-28T13:59:42.582496Z"
+        "timestamp": "2026-01-28T14:05:19.077040Z"
       },
       "metadata": {
         "category": "coffee_machine",
@@ -688,7 +688,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.582527Z",
+          "timestamp": "2026-01-28T14:05:19.077087Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -703,7 +703,7 @@
           "step": "physics_authoring",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.582527Z",
+          "timestamp": "2026-01-28T14:05:19.077087Z",
           "parameters": {
             "mass": 1.5,
             "friction": null
@@ -714,7 +714,7 @@
       ],
       "verification": {
         "content_hash": "4d36ce9bde33830f2df13632dffcdd56eded1188edfcf3c7229f1f9e846a753f",
-        "timestamp": "2026-01-28T13:59:42.585666Z"
+        "timestamp": "2026-01-28T14:05:19.082468Z"
       },
       "metadata": {
         "category": "pot",
@@ -741,7 +741,7 @@
           "step": "scaling",
           "tool": "BlueprintPipeline",
           "version": "1.0.0",
-          "timestamp": "2026-01-28T13:59:42.585688Z",
+          "timestamp": "2026-01-28T14:05:19.082513Z",
           "parameters": {
             "scale": {
               "x": 1.0,
@@ -755,7 +755,7 @@
       ],
       "verification": {
         "content_hash": null,
-        "timestamp": "2026-01-28T13:59:42.585741Z"
+        "timestamp": "2026-01-28T14:05:19.082615Z"
       },
       "metadata": {
         "category": "mug",

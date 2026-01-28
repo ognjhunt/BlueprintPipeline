@@ -1,0 +1,427 @@
+{
+  "schema_version": "3.0",
+  "assets": [
+    {
+      "asset_id": "lightwheel_kitchen_obj_Refrigerator001",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Refrigerator001/Refrigerator001.usd",
+      "semantic_description": "A refrigerator named Refrigerator can be openable",
+      "categories": [
+        "kitchen",
+        "appliance",
+        "articulated"
+      ],
+      "mass": 80.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Refrigerator001/Refrigerator001.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "refrigerator",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        }
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Dishwasher054",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Dishwasher054/Dishwasher054.usd",
+      "semantic_description": "A dishwasher named Dishwasher can be openable",
+      "categories": [
+        "kitchen",
+        "appliance",
+        "articulated"
+      ],
+      "mass": 50.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Dishwasher054/Dishwasher054.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "dishwasher",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        }
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Microwave017",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Microwave017/Microwave017.usd",
+      "semantic_description": "A microwave named Microwave can be openable, pressable",
+      "categories": [
+        "kitchen",
+        "appliance",
+        "articulated"
+      ],
+      "mass": 15.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Microwave017/Microwave017.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "microwave",
+        "affordances": [
+          "Openable",
+          "Pressable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        }
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Sink054",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Sink054/Sink054.usd",
+      "semantic_description": "A sink named Sink can be turnable",
+      "categories": [
+        "kitchen",
+        "fixture",
+        "static"
+      ],
+      "mass": 20.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Sink054/Sink054.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "sink",
+        "affordances": [
+          "Turnable"
+        ],
+        "articulation": {}
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Stovetop012",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Stovetop012/Stovetop012.usd",
+      "semantic_description": "A stovetop named Stovetop can be turnable",
+      "categories": [
+        "general",
+        "item",
+        "graspable"
+      ],
+      "mass": 30.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Stovetop012/Stovetop012.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "interactive",
+        "category": "stovetop",
+        "affordances": [
+          "Turnable"
+        ],
+        "articulation": {}
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_RangeHood015",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_RangeHood015/RangeHood015.usd",
+      "semantic_description": "A range_hood named Range Hood",
+      "categories": [
+        "general",
+        "item",
+        "graspable"
+      ],
+      "mass": 25.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_RangeHood015/RangeHood015.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "range_hood",
+        "affordances": [],
+        "articulation": {}
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Kitchen_Cabinet001",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Kitchen_Cabinet001/Kitchen_Cabinet001.usd",
+      "semantic_description": "A cabinet named Kitchen Cabinet can be openable",
+      "categories": [
+        "kitchen",
+        "storage",
+        "articulated"
+      ],
+      "mass": 30.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Kitchen_Cabinet001/Kitchen_Cabinet001.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "cabinet",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        }
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Kitchen_Cabinet002",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Kitchen_Cabinet002/Kitchen_Cabinet002.usd",
+      "semantic_description": "A cabinet named Kitchen Cabinet 2 can be openable",
+      "categories": [
+        "kitchen",
+        "storage",
+        "articulated"
+      ],
+      "mass": 30.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Kitchen_Cabinet002/Kitchen_Cabinet002.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "cabinet",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        }
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Table049",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Table049/Table049.usd",
+      "semantic_description": "A table named Kitchen Table",
+      "categories": [
+        "furniture",
+        "surface",
+        "static"
+      ],
+      "mass": 40.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Table049/Table049.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "table",
+        "affordances": [],
+        "articulation": {}
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_WallStackOven004",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_WallStackOven004/WallStackOven004.usd",
+      "semantic_description": "A oven named Wall Oven can be openable",
+      "categories": [
+        "kitchen",
+        "appliance",
+        "articulated"
+      ],
+      "mass": 60.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_WallStackOven004/WallStackOven004.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "static",
+        "category": "oven",
+        "affordances": [
+          "Openable"
+        ],
+        "articulation": {
+          "required": false,
+          "disabled": true
+        }
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Toaster003",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Toaster003/Toaster003.usd",
+      "semantic_description": "A toaster named Toaster can be graspable, pressable suitable for robot manipulation",
+      "categories": [
+        "general",
+        "item",
+        "graspable"
+      ],
+      "mass": 2.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Toaster003/Toaster003.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "manipulable_object",
+        "category": "toaster",
+        "affordances": [
+          "Graspable",
+          "Pressable"
+        ],
+        "articulation": {}
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_CoffeeMachine006/CoffeeMachine006.usd",
+      "semantic_description": "A coffee_machine named Coffee Machine can be pressable",
+      "categories": [
+        "general",
+        "item",
+        "graspable"
+      ],
+      "mass": 5.0,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_CoffeeMachine006/CoffeeMachine006.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "interactive",
+        "category": "coffee_machine",
+        "affordances": [
+          "Pressable"
+        ],
+        "articulation": {}
+      }
+    },
+    {
+      "asset_id": "lightwheel_kitchen_obj_Pot057",
+      "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Pot057/Pot057.usd",
+      "semantic_description": "A pot named Pot can be graspable, containable suitable for robot manipulation",
+      "categories": [
+        "kitchen",
+        "cookware",
+        "graspable"
+      ],
+      "mass": 1.5,
+      "material": {
+        "friction": 0.5,
+        "restitution": 0.1,
+        "density": 1000.0
+      },
+      "collision_hull_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Pot057/Pot057.usd",
+      "texture_variants": {},
+      "embedding_status": "not_requested",
+      "commercial_ok": true,
+      "license": "proprietary",
+      "source": "blueprintpipeline",
+      "bp_metadata": {
+        "sim_role": "manipulable_object",
+        "category": "pot",
+        "affordances": [
+          "Graspable",
+          "Containable"
+        ],
+        "articulation": {}
+      }
+    }
+  ],
+  "metadata": {
+    "source_scene": "lightwheel_kitchen",
+    "total_assets": 13,
+    "commercial_assets": 13,
+    "embedding_model": null,
+    "embedding_dim": 2048,
+    "embedding_errors": [],
+    "embedding_failure_rate": 0.0,
+    "embedding_failures": 0,
+    "placeholder_embeddings_allowed": true,
+    "placeholder_embeddings_used": 0,
+    "local_fallback_embeddings_used": 0,
+    "embedding_mode": "disabled",
+    "embedding_fallback_allowed": false
+  }
+}
