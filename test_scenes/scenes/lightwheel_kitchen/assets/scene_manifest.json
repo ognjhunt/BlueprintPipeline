@@ -6,14 +6,6 @@
     "meters_per_unit": 0.01,
     "environment_type": "kitchen",
     "room": {
-      "bounds": {
-        "width": 6.0,
-        "depth": 6.0,
-        "height": 3.0,
-        "x": [-3.0, 3.0],
-        "y": [0.0, 3.0],
-        "z": [-3.0, 3.0]
-      }
     }
   },
   "objects": [

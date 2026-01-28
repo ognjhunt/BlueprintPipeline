@@ -942,11 +942,11 @@ class TaskConfigGenerator:
                 # Default workspace
                 workspace_bounds = [[-0.5, -0.5, 0.0], [1.0, 1.0, 1.5]]
 
-        # Robot base position (center of workspace, on floor)
+        # Robot base position (center of workspace)
         base_position = [
             (workspace_bounds[0][0] + workspace_bounds[1][0]) / 2,
             (workspace_bounds[0][1] + workspace_bounds[1][1]) / 2,
-            0.0,
+            (workspace_bounds[0][2] + workspace_bounds[1][2]) / 2,
         ]
 
         return RobotConfig(
