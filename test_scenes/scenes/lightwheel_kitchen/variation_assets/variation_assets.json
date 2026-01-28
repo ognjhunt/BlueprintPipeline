@@ -1,0 +1,23 @@
+{
+  "scene_id": "lightwheel_kitchen",
+  "objects": [
+    {
+      "id": "mock_mug_01",
+      "name": "mock_mug_01",
+      "category": "mug",
+      "short_description": "A simple mug for testing",
+      "sim_role": "manipulable_object",
+      "must_be_separate_asset": true,
+      "preferred_view": null,
+      "multiview_dir": null,
+      "crop_path": null,
+      "physics_hints": {},
+      "semantic_class": "mug",
+      "asset": {
+        "license": "CC0",
+        "commercial_ok": true
+      }
+    }
+  ],
+  "source": "mock_for_testing"
+}
