@@ -35,6 +35,11 @@ export GENIESIM_HOST
 export GENIESIM_PORT
 export PYTHONPATH="${REPO_ROOT}/tools/geniesim_adapter:${REPO_ROOT}:${PYTHONPATH:-}"
 
+# Enable Isaac Sim's internal ROS 2 libraries for rclpy
+# Genie Sim's command_controller.py imports rclpy unconditionally
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export LD_LIBRARY_PATH="${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/humble/lib:${LD_LIBRARY_PATH:-}"
+
 if [ "${GENIESIM_START_SERVER}" = "1" ]; then
   echo "[geniesim] Starting Genie Sim server (logs: ${GENIESIM_SERVER_LOG})"
   # Note: data_collector_server.py doesn't accept --host/--port args
