@@ -894,7 +894,7 @@ class AssetIndexBuilder:
         if not value:
             return None, {"raw": value, "normalized": None, "match": None, "candidates": []}
         raw = str(value).strip()
-        normalized = GenieSimAssetIndexBuilder._normalize_license_string(raw)
+        normalized = AssetIndexBuilder._normalize_license_string(raw)
         license_map = {
             "cc0": LicenseType.CC0,
             "cc0-1.0": LicenseType.CC0_1_0,
