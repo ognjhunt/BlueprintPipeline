@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "missing": [],
+  "remediation": [],
+  "status": {
+    "available": true,
+    "geniesim_installed": true,
+    "isaac_sim_available": true,
+    "server_running": true,
+    "grpc_available": true,
+    "grpc_stubs_available": true,
+    "curobo_available": false,
+    "use_curobo": true,
+    "mock_server_allowed": false,
+    "details": {
+      "environment": "development",
+      "allow_geniesim_mock": false,
+      "isaacsim_required": false,
+      "curobo_required": false,
+      "curobo_available": false,
+      "use_curobo": true,
+      "geniesim_root": "/tmp/geniesim-stub",
+      "isaac_sim_path": "/tmp/isaac-sim-stub"
+    }
+  },
+  "server_ready": false,
+  "stage": "local-pipeline"
+}
