@@ -3388,6 +3388,47 @@ class GenieSimLocalFramework:
                     result.errors.append(error_message)
                     return result
 
+            # Initialize the robot on the server before any reset() calls.
+            # The server's CommandController requires init_robot() to set up
+            # end_effector_prim_path and other robot state; without it, reset()
+            # crashes with AttributeError.
+            robot_cfg = task_config.get("robot_config", {})
+            robot_type = robot_cfg.get("type", self.config.robot_type or "franka")
+            # Map robot type to the server's robot config JSON filename.
+            # The Genie Sim server stores configs in robot_cfg/ directory;
+            # the robot_cfg_file field is looked up as:
+            #   {GENIESIM_ROOT}/source/data_collection/config/robot_cfg/{robot_cfg_file}
+            # Override via GENIESIM_ROBOT_CFG_FILE env var if needed.
+            _ROBOT_CFG_MAP = {
+                "franka": "G1_omnipicker_fixed.json",
+                "g1": "G1_omnipicker_fixed.json",
+                "g1_dual": "G1_omnipicker_fixed_dual.json",
+                "g2": "G2_omnipicker_fixed_dual.json",
+            }
+            robot_cfg_file = os.environ.get(
+                "GENIESIM_ROBOT_CFG_FILE",
+                _ROBOT_CFG_MAP.get(robot_type, f"{robot_type}.json"),
+            )
+            base_pos = robot_cfg.get("base_position", [0, 0, 0])
+            base_pose = {
+                "position": {"x": base_pos[0], "y": base_pos[1], "z": base_pos[2]},
+                "orientation_rpy": {"roll": 0, "pitch": 0, "yaw": 0},
+            }
+            self.log(f"Initializing robot: cfg_file={robot_cfg_file}, base_position={base_pos}")
+            init_result = self._client.init_robot(
+                robot_type=robot_cfg_file,
+                base_pose=base_pose,
+            )
+            if not init_result.success:
+                self.log(
+                    f"init_robot returned: success={init_result.success}, "
+                    f"error={init_result.error}, available={init_result.available}",
+                    "WARNING",
+                )
+                # Non-fatal: server may already have robot loaded via --scene arg
+            else:
+                self.log(f"Robot initialized: {init_result.payload}")
+
             episodes_target = episodes_per_task or self.config.episodes_per_task
             tasks = task_config.get("suggested_tasks", [task_config])
 
