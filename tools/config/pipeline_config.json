@@ -8,8 +8,7 @@
       "standard": 500,
       "pro": 1500,
       "enterprise": 2500,
-      "foundation": 5000,
-      "description": "Number of episodes to generate per scene by tier"
+      "foundation": 5000
     },
     "episodes_per_task": 10,
     "num_variations": 5,
