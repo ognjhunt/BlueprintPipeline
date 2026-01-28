@@ -7,7 +7,7 @@
   "export_schema_version": "1.0.0",
   "geniesim_schema_version": "3.0.0",
   "blueprintpipeline_version": "1.0.0",
-  "export_timestamp": "2026-01-28T17:31:07.606757Z",
+  "export_timestamp": "2026-01-28T17:36:06.042439Z",
   "schema_compatibility": {
     "min_geniesim_version": "3.0.0",
     "max_geniesim_version": "3.x.x",
@@ -17,7 +17,7 @@
     "nodes": 14,
     "edges": 92,
     "assets": 14,
-    "tasks": 4,
+    "tasks": 0,
     "original_objects": 13,
     "variation_assets": 1
   },

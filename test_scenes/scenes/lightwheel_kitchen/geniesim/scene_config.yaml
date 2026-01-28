@@ -1,7 +1,7 @@
 # Genie Sim 3.0 Scene Configuration
 # Auto-generated from BlueprintPipeline
 # Scene: lightwheel_kitchen
-# Generated: 2026-01-28T17:31:06.988442Z
+# Generated: 2026-01-28T17:36:05.296022Z
 
 scene:
   id: "lightwheel_kitchen"
@@ -16,10 +16,10 @@ room:
 
 robot:
   type: "franka"
-  base_position: [0.5, 0.5, -2.3]
+  base_position: [0.25, 0.25, 0.75]
   workspace:
-    min: [-0.5, -0.5, -2.8]
-    max: [1.5, 1.5, -1.8]
+    min: [-0.5, -0.5, 0.0]
+    max: [1.0, 1.0, 1.5]
 
 assets:
   index_path: "asset_index.json"
@@ -33,7 +33,7 @@ scene_graph:
 
 tasks:
   config_path: "task_config.json"
-  suggested_count: 4
+  suggested_count: 0
   max_tasks: 50
 
 # Genie Sim integration settings

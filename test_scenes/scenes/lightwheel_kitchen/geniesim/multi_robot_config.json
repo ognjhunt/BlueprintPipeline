@@ -27,13 +27,41 @@
     ]
   ],
   "all_robots": [
-    "ur10",
-    "gr1",
-    "franka",
+    "g2",
     "h1",
-    "g2"
+    "ur10",
+    "franka",
+    "gr1"
   ],
   "robot_specs": {
+    "g2": {
+      "robot_type": "g2",
+      "category": "humanoid",
+      "num_joints": 32,
+      "action_dim": 33,
+      "gripper_type": "dexterous",
+      "max_gripper_aperture": 0.12,
+      "reach_radius": 0.9,
+      "base_height": 0.0,
+      "geniesim_native": true,
+      "urdf_path": null,
+      "usd_path": null,
+      "requires_urdf_import": false
+    },
+    "h1": {
+      "robot_type": "h1",
+      "category": "humanoid",
+      "num_joints": 27,
+      "action_dim": 28,
+      "gripper_type": "dexterous",
+      "max_gripper_aperture": 0.12,
+      "reach_radius": 0.9,
+      "base_height": 0.0,
+      "geniesim_native": false,
+      "urdf_path": "robots/h1/h1.urdf",
+      "usd_path": "robots/h1/h1.usd",
+      "requires_urdf_import": true
+    },
     "ur10": {
       "robot_type": "ur10",
       "category": "arm",
@@ -46,20 +74,6 @@
       "geniesim_native": false,
       "urdf_path": "robots/ur10/ur10.urdf",
       "usd_path": null,
-      "requires_urdf_import": true
-    },
-    "gr1": {
-      "robot_type": "gr1",
-      "category": "humanoid",
-      "num_joints": 30,
-      "action_dim": 31,
-      "gripper_type": "dexterous",
-      "max_gripper_aperture": 0.1,
-      "reach_radius": 0.85,
-      "base_height": 0.0,
-      "geniesim_native": false,
-      "urdf_path": "robots/gr1/gr1.urdf",
-      "usd_path": "robots/gr1/gr1.usd",
       "requires_urdf_import": true
     },
     "franka": {
@@ -76,33 +90,19 @@
       "usd_path": null,
       "requires_urdf_import": true
     },
-    "h1": {
-      "robot_type": "h1",
+    "gr1": {
+      "robot_type": "gr1",
       "category": "humanoid",
-      "num_joints": 27,
-      "action_dim": 28,
+      "num_joints": 30,
+      "action_dim": 31,
       "gripper_type": "dexterous",
-      "max_gripper_aperture": 0.12,
-      "reach_radius": 0.9,
+      "max_gripper_aperture": 0.1,
+      "reach_radius": 0.85,
       "base_height": 0.0,
       "geniesim_native": false,
-      "urdf_path": "robots/h1/h1.urdf",
-      "usd_path": "robots/h1/h1.usd",
+      "urdf_path": "robots/gr1/gr1.urdf",
+      "usd_path": "robots/gr1/gr1.usd",
       "requires_urdf_import": true
-    },
-    "g2": {
-      "robot_type": "g2",
-      "category": "humanoid",
-      "num_joints": 32,
-      "action_dim": 33,
-      "gripper_type": "dexterous",
-      "max_gripper_aperture": 0.12,
-      "reach_radius": 0.9,
-      "base_height": 0.0,
-      "geniesim_native": true,
-      "urdf_path": null,
-      "usd_path": null,
-      "requires_urdf_import": false
     }
   }
 }

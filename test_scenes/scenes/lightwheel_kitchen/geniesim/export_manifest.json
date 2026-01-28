@@ -20,7 +20,7 @@
     ]
   },
   "export_info": {
-    "timestamp": "2026-01-28T17:31:07.389188Z",
+    "timestamp": "2026-01-28T17:36:05.819789Z",
     "exporter_version": "1.0.0",
     "source_pipeline": "blueprintpipeline"
   },
@@ -49,7 +49,7 @@
       "nodes": 14,
       "edges": 92,
       "assets": 14,
-      "tasks": 4
+      "tasks": 0
     },
     "errors": [],
     "warnings": []
@@ -112,7 +112,7 @@
     },
     {
       "path": "task_config.json",
-      "size_bytes": 2015
+      "size_bytes": 876
     },
     {
       "path": "usd/scene.usda",
@@ -122,7 +122,7 @@
   "checksums": {
     "files": {
       "_GENIESIM_EXPORT_COMPLETE": {
-        "sha256": "6cfc66f49abbf1677d405842eeddf7542ab9382a76cf92335ef041ac456b43ad",
+        "sha256": "8cc8c5fbf09c50a9fd59ba9f0a0ba88086af0c97e3bcd97d4992bee26c808010",
         "size_bytes": 2298
       },
       "asset_index.json": {
@@ -130,7 +130,7 @@
         "size_bytes": 15385
       },
       "enhanced_features.json": {
-        "sha256": "5a28f9b989e7bbf3ada887325dfc3c9daad0a220e1b41941a2c62c19df3ce771",
+        "sha256": "f3c4a79a989b7df4f9eba850e492b1c862d67457fd7455bdd3b3d33eb3224c38",
         "size_bytes": 2025
       },
       "idempotency.json": {
@@ -142,7 +142,7 @@
         "size_bytes": 14934
       },
       "legal/asset_provenance.json": {
-        "sha256": "734f7440f0cf23fef221b1a10f34e7bf0c9fe4873b5a3b160165f2725b516dd7",
+        "sha256": "ccbafeeeca5ed0eb22302e9a6a9adbf29b3ba867e8cd107eca1315ad8a7a7248",
         "size_bytes": 20348
       },
       "merged_scene_manifest.json": {
@@ -150,7 +150,7 @@
         "size_bytes": 11505
       },
       "multi_robot_config.json": {
-        "sha256": "5befd2bfe441c2b117abe9b0a7b34013e46f33f069a197d0df426c5e65e5b780",
+        "sha256": "1f155877c3c966155c5cbb85039e133e1cb06e668054ecb249237dc3879c049c",
         "size_bytes": 2411
       },
       "preflight_report.json": {
@@ -158,23 +158,23 @@
         "size_bytes": 752
       },
       "scene_config.yaml": {
-        "sha256": "ce44750514d84319a01dd5c29570b95179ec2c6df33112528bfec0ec684482be",
+        "sha256": "14e17c7fd6aaee96aab77b1bc75cc3ed1efcc65394fa428af2900671e3e97a6b",
         "size_bytes": 1181
       },
       "scene_graph.json": {
-        "sha256": "0513ccf393e24b4ecb186917296c76c0d4fb8f4da0afc34a45cb8bd26b1d1d4f",
+        "sha256": "31e034d27d90920650085ea6a1d9b548054623cecd70f49679e37c29a8e5a835",
         "size_bytes": 34210
       },
       "task_config.json": {
-        "sha256": "fa01f7253d65a589b4ba4d53a414cb161c290a9e18d02648fc088220964549d3",
-        "size_bytes": 2015
+        "sha256": "2444882072a0221906a32c40f083527e6c9b9f5015980fe1252b78904e9a8b51",
+        "size_bytes": 876
       },
       "usd/scene.usda": {
         "sha256": "e20fee54c2a2e6bfcea51400f143affe1fc7659d7b060e8c1d4b0ae04b638c62",
         "size_bytes": 270921439
       },
       "export_manifest.json": {
-        "sha256": "0bb6f8d85ece6bd6961734207160e3b208a703b70c14fa8a1f2a3d026ddefcab"
+        "sha256": "fdf11b132ee0cadca806eaffc039f79a9ce19f6389f2888198f90adfa68cbe8a"
       }
     }
   }
