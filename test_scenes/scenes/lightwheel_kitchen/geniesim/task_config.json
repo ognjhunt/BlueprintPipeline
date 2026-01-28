@@ -2,24 +2,56 @@
   "schema_version": "3.0",
   "scene_id": "lightwheel_kitchen",
   "environment_type": "kitchen",
-  "suggested_tasks": [],
+  "suggested_tasks": [
+    {
+      "task_type": "pick_place",
+      "target_object": "lightwheel_kitchen_obj_Toaster003",
+      "difficulty": "medium",
+      "priority": 4,
+      "goal_region": "Table049",
+      "description_hint": "Pick up the toaster (Toaster) and place it on a nearby surface in a kitchen environment"
+    },
+    {
+      "task_type": "pick_place",
+      "target_object": "lightwheel_kitchen_obj_Pot057",
+      "difficulty": "medium",
+      "priority": 4,
+      "goal_region": "Table049",
+      "description_hint": "Pick up the pot (Pot) and place it on a nearby surface in a kitchen environment"
+    },
+    {
+      "task_type": "organize",
+      "target_object": "lightwheel_kitchen_obj_Pot057",
+      "difficulty": "medium",
+      "priority": 2,
+      "description_hint": "Organize items into the pot (Pot) in a kitchen environment"
+    },
+    {
+      "task_type": "interact",
+      "target_object": "lightwheel_kitchen_obj_Stovetop012",
+      "difficulty": "medium",
+      "priority": 1,
+      "goal_region": "Table049",
+      "description_hint": "interact the stovetop"
+    }
+  ],
   "robot_config": {
     "type": "franka",
     "base_position": [
-      3.0,
-      0.0,
-      0.0
+      0.5,
+      0.5,
+      -2.3
     ],
     "workspace_bounds": [
       [
-        0.0,
-        -3.0,
-        0.0
+        -0.5,
+        -0.5,
+        -2.8
       ],
       [
-        6.0,
-        3.0,
-        3.0
+        1.5,
+        1.5,
+        -1.8
       ]
     ]
   },
@@ -27,15 +59,19 @@
     "total_objects": 14,
     "manipulable_objects": 3,
     "articulated_objects": 0,
-    "task_types": [],
+    "task_types": [
+      "organize",
+      "interact",
+      "pick_place"
+    ],
     "tasks_total_before_reachability_filter": 6,
-    "tasks_filtered_unreachable": 6,
+    "tasks_filtered_unreachable": 2,
     "tasks_filtered_missing_position": 0,
     "tasks_missing_position": 0,
-    "tasks_total_after_reachability_filter": 0,
+    "tasks_total_after_reachability_filter": 4,
     "curobo_reachability_enabled": false,
-    "tasks_total_before_curobo_filter": 0,
+    "tasks_total_before_curobo_filter": 4,
     "tasks_filtered_by_curobo": 0,
-    "tasks_total_after_curobo_filter": 0
+    "tasks_total_after_curobo_filter": 4
   }
 }

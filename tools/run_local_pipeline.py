@@ -1834,10 +1834,13 @@ class LocalPipelineRunner:
         return all_success
 
     def _steps_require_geniesim_preflight(self, steps: List[PipelineStep]) -> bool:
-        """Return True if any Genie Sim step is requested."""
+        """Return True if a Genie Sim step that needs the runtime is requested.
+
+        genie-sim-export only generates JSON configs from the scene manifest and
+        does not need Isaac Sim, Genie Sim, or a running server.
+        """
         return any(
             step in {
-                PipelineStep.GENIESIM_EXPORT,
                 PipelineStep.GENIESIM_SUBMIT,
                 PipelineStep.GENIESIM_IMPORT,
             }

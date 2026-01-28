@@ -4,21 +4,21 @@
   "multi_robot": {
     "enabled": true,
     "robots": [
-      "franka",
-      "h1",
       "ur10",
       "gr1",
+      "franka",
+      "h1",
       "g2"
     ],
     "categories": {
       "humanoid": [
-        "h1",
         "gr1",
+        "h1",
         "g2"
       ],
       "arm": [
-        "franka",
-        "ur10"
+        "ur10",
+        "franka"
       ],
       "mobile": [],
       "dual_arm": []

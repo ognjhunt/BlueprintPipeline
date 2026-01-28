@@ -20,7 +20,7 @@
     ]
   },
   "export_info": {
-    "timestamp": "2026-01-28T14:15:48.004252Z",
+    "timestamp": "2026-01-28T17:31:07.389188Z",
     "exporter_version": "1.0.0",
     "source_pipeline": "blueprintpipeline"
   },
@@ -49,7 +49,7 @@
       "nodes": 14,
       "edges": 92,
       "assets": 14,
-      "tasks": 0
+      "tasks": 4
     },
     "errors": [],
     "warnings": []
@@ -67,6 +67,10 @@
   "premium_artifacts": {},
   "file_inventory": [
     {
+      "path": "_GENIESIM_EXPORT_COMPLETE",
+      "size_bytes": 2298
+    },
+    {
       "path": "asset_index.json",
       "size_bytes": 15385
     },
@@ -75,12 +79,20 @@
       "size_bytes": 2025
     },
     {
+      "path": "idempotency.json",
+      "size_bytes": 1255
+    },
+    {
+      "path": "job.json",
+      "size_bytes": 14934
+    },
+    {
       "path": "legal/asset_provenance.json",
       "size_bytes": 20348
     },
     {
       "path": "merged_scene_manifest.json",
-      "size_bytes": 11769
+      "size_bytes": 11505
     },
     {
       "path": "multi_robot_config.json",
@@ -88,19 +100,19 @@
     },
     {
       "path": "preflight_report.json",
-      "size_bytes": 703
+      "size_bytes": 752
     },
     {
       "path": "scene_config.yaml",
-      "size_bytes": 1177
+      "size_bytes": 1181
     },
     {
       "path": "scene_graph.json",
-      "size_bytes": 34416
+      "size_bytes": 34210
     },
     {
       "path": "task_config.json",
-      "size_bytes": 872
+      "size_bytes": 2015
     },
     {
       "path": "usd/scene.usda",
@@ -109,48 +121,60 @@
   ],
   "checksums": {
     "files": {
+      "_GENIESIM_EXPORT_COMPLETE": {
+        "sha256": "6cfc66f49abbf1677d405842eeddf7542ab9382a76cf92335ef041ac456b43ad",
+        "size_bytes": 2298
+      },
       "asset_index.json": {
         "sha256": "8a288d70a603e9bc74f42b4f6a6e182b8584062719d8805c60b4baabf153f18d",
         "size_bytes": 15385
       },
       "enhanced_features.json": {
-        "sha256": "11ef2ff693c7f1235f2def2dc9e364ac3b76fc282d8085f02a95705f34ed2486",
+        "sha256": "5a28f9b989e7bbf3ada887325dfc3c9daad0a220e1b41941a2c62c19df3ce771",
         "size_bytes": 2025
       },
+      "idempotency.json": {
+        "sha256": "7046944be902c2f7eb20b844c691f975a4f5323baccc8ed258a71e178f987ecb",
+        "size_bytes": 1255
+      },
+      "job.json": {
+        "sha256": "e71f6a8b470c6b84ccffb174a293192d6295dc2f2ce11f62ee28a10268419652",
+        "size_bytes": 14934
+      },
       "legal/asset_provenance.json": {
-        "sha256": "3fdd5e4d6fcc340653920f34c353423c58da8db9b5e861b3ca972d5ea08589b2",
+        "sha256": "734f7440f0cf23fef221b1a10f34e7bf0c9fe4873b5a3b160165f2725b516dd7",
         "size_bytes": 20348
       },
       "merged_scene_manifest.json": {
-        "sha256": "f4209b06e07b94d9e9cf9b82f5abd577e52264564fb12120478cc9efef19a0bd",
-        "size_bytes": 11769
+        "sha256": "ead7d39bec7e167b27480f16ea8776c56c7c31d557c0c60d03a504f36fd532c7",
+        "size_bytes": 11505
       },
       "multi_robot_config.json": {
-        "sha256": "eec45e108097b739bb3a49ff0ebbd606d53981a5f733bbef011c4ee7c4cef2b8",
+        "sha256": "5befd2bfe441c2b117abe9b0a7b34013e46f33f069a197d0df426c5e65e5b780",
         "size_bytes": 2411
       },
       "preflight_report.json": {
-        "sha256": "04686633a7eee511dbac06c5a00d597004c71cf0e69b2130b2192e8c56bbeacf",
-        "size_bytes": 703
+        "sha256": "50ef7ae23b52460134c75106959909231f78fc50835772a955ebc071bd829c6e",
+        "size_bytes": 752
       },
       "scene_config.yaml": {
-        "sha256": "97bea0c7c713ac9c69b1b63a608aeae6eebe8c0a7b269bed3f96aefa6e88f7d4",
-        "size_bytes": 1177
+        "sha256": "ce44750514d84319a01dd5c29570b95179ec2c6df33112528bfec0ec684482be",
+        "size_bytes": 1181
       },
       "scene_graph.json": {
-        "sha256": "7da87d8196e08d7a0acaf42f0cdc3951aa34be0ab1575a35fa2c300aae6ca7c0",
-        "size_bytes": 34416
+        "sha256": "0513ccf393e24b4ecb186917296c76c0d4fb8f4da0afc34a45cb8bd26b1d1d4f",
+        "size_bytes": 34210
       },
       "task_config.json": {
-        "sha256": "1cc81e1caa2934cddde05a6697204b86dc01eccd83407b6e00f7ab02f3aa00ac",
-        "size_bytes": 872
+        "sha256": "fa01f7253d65a589b4ba4d53a414cb161c290a9e18d02648fc088220964549d3",
+        "size_bytes": 2015
       },
       "usd/scene.usda": {
         "sha256": "e20fee54c2a2e6bfcea51400f143affe1fc7659d7b060e8c1d4b0ae04b638c62",
         "size_bytes": 270921439
       },
       "export_manifest.json": {
-        "sha256": "6406dac366c0f744883c05a97a6521c00608ce5b561bf70e09287d09e8ef2ea3"
+        "sha256": "0bb6f8d85ece6bd6961734207160e3b208a703b70c14fa8a1f2a3d026ddefcab"
       }
     }
   }

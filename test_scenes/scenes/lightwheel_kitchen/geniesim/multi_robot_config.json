@@ -27,41 +27,13 @@
     ]
   ],
   "all_robots": [
-    "franka",
-    "h1",
     "ur10",
     "gr1",
+    "franka",
+    "h1",
     "g2"
   ],
   "robot_specs": {
-    "franka": {
-      "robot_type": "franka",
-      "category": "arm",
-      "num_joints": 7,
-      "action_dim": 8,
-      "gripper_type": "parallel_jaw",
-      "max_gripper_aperture": 0.08,
-      "reach_radius": 0.855,
-      "base_height": 0.0,
-      "geniesim_native": false,
-      "urdf_path": "robots/franka/panda.urdf",
-      "usd_path": null,
-      "requires_urdf_import": true
-    },
-    "h1": {
-      "robot_type": "h1",
-      "category": "humanoid",
-      "num_joints": 27,
-      "action_dim": 28,
-      "gripper_type": "dexterous",
-      "max_gripper_aperture": 0.12,
-      "reach_radius": 0.9,
-      "base_height": 0.0,
-      "geniesim_native": false,
-      "urdf_path": "robots/h1/h1.urdf",
-      "usd_path": "robots/h1/h1.usd",
-      "requires_urdf_import": true
-    },
     "ur10": {
       "robot_type": "ur10",
       "category": "arm",
@@ -88,6 +60,34 @@
       "geniesim_native": false,
       "urdf_path": "robots/gr1/gr1.urdf",
       "usd_path": "robots/gr1/gr1.usd",
+      "requires_urdf_import": true
+    },
+    "franka": {
+      "robot_type": "franka",
+      "category": "arm",
+      "num_joints": 7,
+      "action_dim": 8,
+      "gripper_type": "parallel_jaw",
+      "max_gripper_aperture": 0.08,
+      "reach_radius": 0.855,
+      "base_height": 0.0,
+      "geniesim_native": false,
+      "urdf_path": "robots/franka/panda.urdf",
+      "usd_path": null,
+      "requires_urdf_import": true
+    },
+    "h1": {
+      "robot_type": "h1",
+      "category": "humanoid",
+      "num_joints": 27,
+      "action_dim": 28,
+      "gripper_type": "dexterous",
+      "max_gripper_aperture": 0.12,
+      "reach_radius": 0.9,
+      "base_height": 0.0,
+      "geniesim_native": false,
+      "urdf_path": "robots/h1/h1.urdf",
+      "usd_path": "robots/h1/h1.usd",
       "requires_urdf_import": true
     },
     "g2": {
