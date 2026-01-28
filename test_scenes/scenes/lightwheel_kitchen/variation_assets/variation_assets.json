@@ -13,7 +13,14 @@
       "crop_path": null,
       "physics_hints": {},
       "semantic_class": "mug",
+      "transform": {
+        "position": { "x": 0.5, "y": 0.9, "z": -1.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 },
+        "rotation_quaternion": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 }
+      },
       "asset": {
+        "path": "assets/mock_mug_01/mock_mug_01.usd",
+        "format": "usd",
         "license": "CC0",
         "commercial_ok": true
       }
