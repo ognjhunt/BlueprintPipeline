@@ -32,11 +32,12 @@ fi
 
 # Ensure cuRobo is available for Genie Sim motion planning.
 echo "[geniesim] Ensuring cuRobo is installed"
-if ! "${ISAAC_SIM_PATH}/python.sh" - <<'PY' >/dev/null 2>&1; then
+if "${ISAAC_SIM_PATH}/python.sh" - <<'PY' >/dev/null 2>&1; then
 import importlib.util
 raise SystemExit(0 if importlib.util.find_spec("curobo") else 1)
 PY
-then
+  echo "[geniesim] cuRobo already installed"
+else
   CUROBO_PKG="nvidia-curobo"
   if [ -n "${GENIESIM_CUROBO_VERSION}" ]; then
     CUROBO_PKG="nvidia-curobo==${GENIESIM_CUROBO_VERSION}"
