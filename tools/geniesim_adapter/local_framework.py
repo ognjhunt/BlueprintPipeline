@@ -639,13 +639,13 @@ class GenieSimConfig(BaseModel):
 class GeneratedEpisodeMetadata:
     """Metadata for a generated episode."""
 
-    episode_id: str
-    task_name: str
-    quality_score: float
-    frame_count: int
-    duration_seconds: float
-    validation_passed: bool
-    file_size_bytes: int
+    episode_id: str = ""
+    task_name: str = ""
+    quality_score: float = 0.0
+    frame_count: int = 0
+    duration_seconds: float = 0.0
+    validation_passed: bool = False
+    file_size_bytes: int = 0
     quality_components: Dict[str, float] = field(default_factory=dict)
     episode_content_hash: Optional[str] = None
 
