@@ -38,7 +38,7 @@ export PYTHONPATH="${REPO_ROOT}/tools/geniesim_adapter:${REPO_ROOT}:${PYTHONPATH
 if [ "${GENIESIM_START_SERVER}" = "1" ]; then
   echo "[geniesim] Starting Genie Sim server (logs: ${GENIESIM_SERVER_LOG})"
   # Note: data_collector_server.py doesn't accept --host/--port args
-  # It listens on its default port (check Genie Sim docs for the port number)
+  # It listens on its default port (50051)
   nohup "${ISAAC_SIM_PATH}/python.sh" \
     "${GENIESIM_ROOT}/source/data_collection/scripts/data_collector_server.py" \
     $( [ "${GENIESIM_HEADLESS}" = "1" ] && echo "--headless" ) \
