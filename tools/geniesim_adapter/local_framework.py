@@ -1043,34 +1043,18 @@ class GenieSimGRPCClient:
         """
         Perform a lightweight gRPC health check against the server.
 
+        Uses a TCP socket check rather than an RPC call because the server's
+        CommandController may not be fully initialised (no robot loaded yet)
+        and calling get_observation / reset on a bare server causes it to
+        crash with an AttributeError.
+
         Returns:
-            True if the server responds successfully.
+            True if the server socket is reachable.
         """
-        # Use the larger bound to avoid unintentionally shortening the default timeout.
-        effective_timeout = max(self.timeout, timeout) if timeout else self.timeout
-
-        if not self._have_grpc or self._stub is None:
-            return self._check_server_socket()
-
-        def _request() -> GetObservationRsp:
-            request = GetObservationReq(
-                isCam=False,
-                isJoint=False,
-                isPose=False,
-                isGripper=False,
-            )
-            return self._stub.get_observation(request, timeout=effective_timeout)
-
-        response = self._call_grpc(
-            "get_observation(ping)",
-            _request,
-            None,
-            success_checker=lambda resp: resp is not None,
-        )
-        if response is None:
-            return False
-        logger.info("✅ Genie Sim gRPC ping succeeded")
-        return True
+        if self._check_server_socket():
+            logger.info("✅ Genie Sim gRPC ping succeeded (socket reachable)")
+            return True
+        return False
 
     def get_observation_minimal(
         self,
@@ -3257,79 +3241,36 @@ class GenieSimLocalFramework:
 
     def check_simulation_ready(self, timeout: Optional[float] = None) -> GrpcCallResult:
         """
-        Perform a real readiness workflow against the running simulation.
+        Perform a readiness check against the running simulation.
 
-        This connects over gRPC, issues a reset, and requests joint observations
-        to ensure the sim loop is actively producing data.
+        Uses a socket-level connectivity check rather than issuing reset/
+        get_observation RPCs, because the server's CommandController may
+        not be initialised with a robot yet (no scene loaded).  Calling
+        reset() or get_observation() on a bare server causes it to crash
+        with an AttributeError on end_effector_prim_path.
         """
-        if not self._client._have_grpc:
+        if not self._client._check_server_socket():
             return GrpcCallResult(
                 success=False,
                 available=False,
-                error="gRPC stubs unavailable; cannot perform readiness probe",
-            )
-        if not self._client.connect():
-            return GrpcCallResult(
-                success=False,
-                available=False,
-                error="gRPC channel not ready",
+                error="Server socket not reachable",
             )
 
-        reset_result = self._client.reset_environment()
-        if not reset_result.available:
-            return GrpcCallResult(
-                success=False,
-                available=False,
-                error=reset_result.error or "Reset unavailable",
-            )
-        if not reset_result.success:
-            return GrpcCallResult(
-                success=False,
-                available=True,
-                error=reset_result.error or "Reset failed",
-            )
+        # If gRPC stubs are available, verify channel connectivity
+        if self._client._have_grpc:
+            if not self._client.connect():
+                return GrpcCallResult(
+                    success=False,
+                    available=False,
+                    error="gRPC channel not ready",
+                )
 
-        obs_result = self._client.get_observation_minimal(
-            include_joint=True,
-            timeout=timeout,
-        )
-        if not obs_result.available:
-            return GrpcCallResult(
-                success=False,
-                available=False,
-                error=obs_result.error or "Observation unavailable",
-            )
-        if not obs_result.success:
-            return GrpcCallResult(
-                success=False,
-                available=True,
-                error=obs_result.error or "Observation failed",
-            )
-
-        payload = obs_result.payload or {}
-        joint_state = payload.get("robot_state", {}).get("joint_state", {})
-        joint_names = joint_state.get("names") or []
-        joint_positions = joint_state.get("positions") or []
-        if not joint_names and not joint_positions:
-            return GrpcCallResult(
-                success=False,
-                available=True,
-                error="Observation missing joint data",
-                payload=payload,
-            )
-        recording_state = payload.get("recording_state")
-        if recording_state is not None and not str(recording_state).strip():
-            return GrpcCallResult(
-                success=False,
-                available=True,
-                error="Observation recording_state empty",
-                payload=payload,
-            )
-
+        # Socket reachable and (if applicable) gRPC channel connected.
+        # Skip reset/get_observation RPCs - the server may not have a robot
+        # loaded yet, and those calls crash the CommandController.
         return GrpcCallResult(
             success=True,
             available=True,
-            payload=payload,
         )
 
     # =========================================================================
