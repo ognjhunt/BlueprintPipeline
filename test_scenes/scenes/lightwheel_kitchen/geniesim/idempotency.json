@@ -1,0 +1,53 @@
+{
+  "episodes_per_task": 10,
+  "idempotency_key": "81ecaeaaae59d48d9af31cb1680ec635786be24cf08035414eb790310e97247b",
+  "quality_thresholds": {
+    "filter_low_quality": true,
+    "min_quality_score": 0.85
+  },
+  "robot_types": [
+    "franka"
+  ],
+  "scene_id": "lightwheel_kitchen",
+  "task_config": {
+    "environment_type": "kitchen",
+    "metadata": {
+      "articulated_objects": 0,
+      "curobo_reachability_enabled": false,
+      "manipulable_objects": 3,
+      "task_types": [],
+      "tasks_filtered_by_curobo": 0,
+      "tasks_filtered_missing_position": 0,
+      "tasks_filtered_unreachable": 6,
+      "tasks_missing_position": 0,
+      "tasks_total_after_curobo_filter": 0,
+      "tasks_total_after_reachability_filter": 0,
+      "tasks_total_before_curobo_filter": 0,
+      "tasks_total_before_reachability_filter": 6,
+      "total_objects": 14
+    },
+    "robot_config": {
+      "base_position": [
+        3.0,
+        0.0,
+        0.0
+      ],
+      "type": "franka",
+      "workspace_bounds": [
+        [
+          0.0,
+          -3.0,
+          0.0
+        ],
+        [
+          6.0,
+          3.0,
+          3.0
+        ]
+      ]
+    },
+    "scene_id": "lightwheel_kitchen",
+    "schema_version": "3.0",
+    "suggested_tasks": []
+  }
+}

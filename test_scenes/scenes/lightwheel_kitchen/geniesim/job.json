@@ -1,0 +1,342 @@
+{
+  "job_id": "local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+  "scene_id": "lightwheel_kitchen",
+  "run_id": "a91e480a-3c9c-40f0-976d-086b6e16c3e5",
+  "status": "failed",
+  "submitted_at": "2026-01-28T17:14:28.349753Z",
+  "message": "Local Genie Sim execution failed.",
+  "idempotency_key": "81ecaeaaae59d48d9af31cb1680ec635786be24cf08035414eb790310e97247b",
+  "preflight_report_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/preflight_report.json",
+  "bundle": {
+    "scene_graph": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/scene_graph.json",
+    "asset_index": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/asset_index.json",
+    "task_config": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/task_config.json"
+  },
+  "generation_params": {
+    "robot_type": "franka",
+    "robot_types": [
+      "franka"
+    ],
+    "episodes_per_task": 10,
+    "num_variations": 5,
+    "min_quality_score": 0.85
+  },
+  "quality_config": {
+    "min_quality_score": 0.85,
+    "filter_low_quality": true,
+    "range": {
+      "min_allowed": 0.5,
+      "max_allowed": 0.95
+    },
+    "defaults": {
+      "min_quality_score": 0.85,
+      "filter_low_quality": true
+    },
+    "source_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/genie-sim-import-job/quality_config.json"
+  },
+  "job_metrics_by_robot": {
+    "franka": {
+      "job_id": "local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+      "status": "failed",
+      "created_at": "2026-01-28T17:14:28.349753Z",
+      "completed_at": null,
+      "total_episodes": 10,
+      "episodes_collected": 0,
+      "episodes_passed": 0,
+      "quality_pass_rate": null,
+      "failure_reason": "Local Genie Sim execution failed",
+      "failure_details": {
+        "error": "RetryableError: Local Genie Sim execution failed",
+        "artifact_validation": {
+          "errors": [
+            {
+              "type": "missing_paths",
+              "paths": [
+                "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+              ]
+            }
+          ],
+          "episodes_found": 0,
+          "episodes_expected": 0,
+          "missing_paths": [
+            "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+          ],
+          "require_lerobot": false,
+          "lerobot_errors": []
+        }
+      }
+    }
+  },
+  "job_metrics_summary": {
+    "job_id": "local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+    "status": "failed",
+    "created_at": "2026-01-28T17:14:28.349753Z",
+    "completed_at": null,
+    "duration_seconds": 775.4422838687897,
+    "total_episodes": 10,
+    "episodes_collected": 0,
+    "episodes_passed": 0,
+    "quality_pass_rate": null,
+    "artifact_validation": {
+      "status": "failed",
+      "cross_robot": {
+        "status": "failed",
+        "canonical_schema": {
+          "required_subpaths": [
+            "recordings"
+          ],
+          "lerobot_required": false,
+          "dataset_info_required": false,
+          "expected_episodes": 0
+        },
+        "by_robot": {
+          "franka": {
+            "schema": {
+              "episodes_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+              "recordings_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings",
+              "lerobot_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot",
+              "dataset_info_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot/dataset_info.json"
+            },
+            "episodes_found": 0,
+            "episodes_expected": 0,
+            "discrepancies": [
+              {
+                "type": "missing_required_path",
+                "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+              },
+              {
+                "type": "missing_episodes",
+                "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings/**/*.json"
+              }
+            ]
+          }
+        },
+        "errors": []
+      }
+    }
+  },
+  "job_metrics": {
+    "job_id": "local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+    "status": "failed",
+    "created_at": "2026-01-28T17:14:28.349753Z",
+    "completed_at": null,
+    "total_episodes": 10,
+    "episodes_collected": 0,
+    "episodes_passed": 0,
+    "quality_pass_rate": null,
+    "failure_reason": "Local Genie Sim execution failed",
+    "failure_details": {
+      "error": "RetryableError: Local Genie Sim execution failed",
+      "artifact_validation": {
+        "errors": [
+          {
+            "type": "missing_paths",
+            "paths": [
+              "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+            ]
+          }
+        ],
+        "episodes_found": 0,
+        "episodes_expected": 0,
+        "missing_paths": [
+          "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+        ],
+        "require_lerobot": false,
+        "lerobot_errors": []
+      }
+    }
+  },
+  "failure_reason": "Local Genie Sim execution failed",
+  "failure_details": {
+    "by_robot": {
+      "franka": {
+        "error": "RetryableError: Local Genie Sim execution failed",
+        "artifact_validation": {
+          "errors": [
+            {
+              "type": "missing_paths",
+              "paths": [
+                "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+              ]
+            }
+          ],
+          "episodes_found": 0,
+          "episodes_expected": 0,
+          "missing_paths": [
+            "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+          ],
+          "require_lerobot": false,
+          "lerobot_errors": []
+        }
+      }
+    },
+    "cleanup": {
+      "enabled": true,
+      "local": {
+        "cleaned": {
+          "franka": {
+            "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9"
+          }
+        },
+        "left_behind": {}
+      }
+    },
+    "artifact_validation": {
+      "by_robot": {
+        "franka": {
+          "errors": [],
+          "output_dir": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+          "lerobot_dir": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot"
+        }
+      },
+      "cross_robot": {
+        "status": "failed",
+        "canonical_schema": {
+          "required_subpaths": [
+            "recordings"
+          ],
+          "lerobot_required": false,
+          "dataset_info_required": false,
+          "expected_episodes": 0
+        },
+        "by_robot": {
+          "franka": {
+            "schema": {
+              "episodes_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+              "recordings_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings",
+              "lerobot_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot",
+              "dataset_info_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot/dataset_info.json"
+            },
+            "episodes_found": 0,
+            "episodes_expected": 0,
+            "discrepancies": [
+              {
+                "type": "missing_required_path",
+                "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+              },
+              {
+                "type": "missing_episodes",
+                "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings/**/*.json"
+              }
+            ]
+          }
+        },
+        "errors": []
+      }
+    }
+  },
+  "artifact_validation": {
+    "require_lerobot": false,
+    "allow_partial_failures": false,
+    "require_balanced_robot_episodes": false,
+    "by_robot": {
+      "franka": {
+        "status": "failed",
+        "output_dir": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+        "recordings_dir": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings",
+        "lerobot_dir": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot",
+        "dataset_info_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot/dataset_info.json",
+        "episodes_found": 0,
+        "episodes_expected": 0,
+        "errors": [
+          {
+            "type": "missing_paths",
+            "paths": [
+              "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+            ]
+          }
+        ]
+      }
+    },
+    "cross_robot": {
+      "status": "failed",
+      "canonical_schema": {
+        "required_subpaths": [
+          "recordings"
+        ],
+        "lerobot_required": false,
+        "dataset_info_required": false,
+        "expected_episodes": 0
+      },
+      "by_robot": {
+        "franka": {
+          "schema": {
+            "episodes_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+            "recordings_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings",
+            "lerobot_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot",
+            "dataset_info_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot/dataset_info.json"
+          },
+          "episodes_found": 0,
+          "episodes_expected": 0,
+          "discrepancies": [
+            {
+              "type": "missing_required_path",
+              "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings"
+            },
+            {
+              "type": "missing_episodes",
+              "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/recordings/**/*.json"
+            }
+          ]
+        }
+      },
+      "errors": []
+    },
+    "status": "failed"
+  },
+  "firebase_upload_policy": {
+    "allow_partial_uploads": false,
+    "suppress_on_partial_failure": false,
+    "production_mode": false,
+    "fail_on_partial_error": false
+  },
+  "artifacts": {
+    "episodes_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+    "episodes_prefix": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9",
+    "lerobot_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot",
+    "lerobot_prefix": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9/lerobot"
+  },
+  "local_execution": {
+    "success": false,
+    "episodes_collected": 0,
+    "episodes_passed": 0,
+    "preflight": {
+      "ok": true,
+      "missing": [],
+      "remediation": [],
+      "status": {
+        "available": true,
+        "geniesim_installed": true,
+        "isaac_sim_available": true,
+        "server_running": true,
+        "grpc_available": true,
+        "grpc_stubs_available": true,
+        "curobo_available": false,
+        "use_curobo": true,
+        "mock_server_allowed": true,
+        "details": {
+          "environment": "development",
+          "allow_geniesim_mock": true,
+          "isaacsim_required": false,
+          "curobo_required": false,
+          "curobo_available": false,
+          "use_curobo": true,
+          "geniesim_root": "/tmp/geniesim-stub",
+          "isaac_sim_path": "/tmp/isaac-sim-stub"
+        }
+      },
+      "server_ready": false,
+      "stage": "genie-sim-local-runner"
+    },
+    "generation_duration_seconds": 775.4431149959564,
+    "by_robot": {
+      "franka": {
+        "success": false,
+        "episodes_collected": 0,
+        "episodes_passed": 0,
+        "output_dir": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-2f6aba65-3708-4b0f-82bd-88d465a13ce9"
+      }
+    }
+  },
+  "firebase_upload_status": "skipped"
+}
