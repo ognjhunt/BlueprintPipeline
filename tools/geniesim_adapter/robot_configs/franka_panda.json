@@ -1,0 +1,61 @@
+{
+    "robot": {
+        "robot_name": "franka_panda",
+        "base_prim_path": "/Franka",
+        "arm": "right",
+        "urdf_name": null,
+        "robot_description": null,
+        "robot_usd": "robot/franka/franka.usd",
+        "initial_position": [],
+        "dof_nums": 7,
+        "joint_delta_time": 0.01,
+        "lock_joints": [],
+        "init_joint_position": [
+            0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 0.7854, 0.04, 0.04
+        ]
+    },
+    "camera": {
+        "/Franka/panda_hand/hand_camera": [1280, 720]
+    },
+    "gripper": {
+        "gripper_type": "parallel",
+        "gripper_name": {
+            "left": "panda_gripper",
+            "right": "panda_gripper"
+        },
+        "max_force": 40,
+        "finger_names": {
+            "left": ["panda_finger_joint1", "panda_finger_joint2"],
+            "right": ["panda_finger_joint1", "panda_finger_joint2"]
+        },
+        "end_effector_name": {
+            "left": "panda_hand",
+            "right": "panda_hand"
+        },
+        "end_effector_prim_path": {
+            "left": "/Franka/panda_hand",
+            "right": "/Franka/panda_hand"
+        },
+        "gripper_controll_joint": {
+            "left": "/Franka/panda_finger_joint1",
+            "right": "/Franka/panda_finger_joint1"
+        },
+        "opened_positions": {
+            "left": [0.04, 0.04],
+            "right": [0.04, 0.04]
+        },
+        "closed_velocities": {
+            "left": [-0.2, -0.2],
+            "right": [-0.2, -0.2]
+        }
+    },
+    "closed_positions": {
+        "left": [0.0, 0.0],
+        "right": [0.0, 0.0]
+    },
+    "curobo": {
+        "curobo_config_file": "franka.yml",
+        "curobo_urdf_path": "franka",
+        "curobo_urdf_name": "franka/franka_panda.urdf"
+    }
+}
