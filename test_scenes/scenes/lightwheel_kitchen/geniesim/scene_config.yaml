@@ -1,0 +1,63 @@
+# Genie Sim 3.0 Scene Configuration
+# Auto-generated from BlueprintPipeline
+# Scene: lightwheel_kitchen
+# Generated: 2026-01-28T14:09:39.286510Z
+
+scene:
+  id: "lightwheel_kitchen"
+  environment_type: "kitchen"
+  coordinate_system: "y_up"
+  meters_per_unit: 0.01
+
+room:
+  width: 6.0
+  depth: 6.0
+  height: 3.0
+
+robot:
+  type: "franka"
+  base_position: [3.0, 0.0, 0.0]
+  workspace:
+    min: [0.0, -3.0, 0.0]
+    max: [6.0, 3.0, 3.0]
+
+assets:
+  index_path: "asset_index.json"
+  total_count: 13
+  commercial_only: True
+
+scene_graph:
+  path: "scene_graph.json"
+  node_count: 14
+  edge_count: 92
+
+tasks:
+  config_path: "task_config.json"
+  suggested_count: 0
+  max_tasks: 50
+
+# Genie Sim integration settings
+geniesim:
+  # Data collection settings
+  collection:
+    mode: "automated"  # automated or teleop
+    episodes_per_task: 100
+    use_curobo: true
+
+  # Evaluation settings
+  evaluation:
+    enabled: true
+    vlm_scoring: true
+    scenarios: 1000
+
+  # Export settings
+  export:
+    format: "lerobot_v2"
+    include_visual_obs: true
+    include_depth: true
+
+# Source information
+source:
+  pipeline: "blueprintpipeline"
+  version: "2.0.0"
+  manifest_path: "scene_manifest.json"

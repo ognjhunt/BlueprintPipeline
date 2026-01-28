@@ -1,0 +1,157 @@
+{
+  "schema_version": "3.0",
+  "schema_definition": {
+    "version": "3.0",
+    "description": "Genie Sim export manifest schema for BlueprintPipeline exports.",
+    "fields": {
+      "schema_version": "Schema version string.",
+      "export_info": "Export metadata and provenance.",
+      "asset_provenance_path": "Relative path to asset provenance JSON for legal review.",
+      "config": "Export configuration snapshot.",
+      "result": "Export output paths, statistics, warnings, and errors.",
+      "geniesim_compatibility": "Target Genie Sim compatibility metadata.",
+      "premium_artifacts": "Post-export premium feature artifacts and bundle locations.",
+      "file_inventory": "List of output files (path + size).",
+      "checksums": "SHA256 checksums for all output files."
+    },
+    "notes": [
+      "file_inventory excludes export_manifest.json to avoid self-reference.",
+      "checksums.files['export_manifest.json'] is computed from a canonical JSON representation of the manifest with that checksum entry removed."
+    ]
+  },
+  "export_info": {
+    "timestamp": "2026-01-28T14:09:39.633858Z",
+    "exporter_version": "1.0.0",
+    "source_pipeline": "blueprintpipeline"
+  },
+  "asset_provenance_path": "legal/asset_provenance.json",
+  "config": {
+    "robot_type": "franka",
+    "generate_embeddings": false,
+    "embedding_model": null,
+    "require_embeddings": false,
+    "filter_commercial_only": true,
+    "max_tasks": 50,
+    "lerobot_export_format": "lerobot_v2",
+    "dry_run": false
+  },
+  "result": {
+    "success": false,
+    "scene_id": "lightwheel_kitchen",
+    "output_dir": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim",
+    "outputs": {
+      "scene_graph": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/scene_graph.json",
+      "asset_index": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/asset_index.json",
+      "task_config": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/task_config.json",
+      "scene_config": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/scene_config.yaml"
+    },
+    "statistics": {
+      "nodes": 14,
+      "edges": 92,
+      "assets": 13,
+      "tasks": 0
+    },
+    "errors": [],
+    "warnings": []
+  },
+  "geniesim_compatibility": {
+    "version": "3.0",
+    "isaac_sim_version": "5.1.0",
+    "formats": {
+      "scene_graph": "json",
+      "asset_index": "json",
+      "task_config": "json",
+      "scene_config": "yaml"
+    }
+  },
+  "premium_artifacts": {},
+  "file_inventory": [
+    {
+      "path": "asset_index.json",
+      "size_bytes": 14366
+    },
+    {
+      "path": "enhanced_features.json",
+      "size_bytes": 2025
+    },
+    {
+      "path": "legal/asset_provenance.json",
+      "size_bytes": 20348
+    },
+    {
+      "path": "merged_scene_manifest.json",
+      "size_bytes": 11769
+    },
+    {
+      "path": "multi_robot_config.json",
+      "size_bytes": 2411
+    },
+    {
+      "path": "preflight_report.json",
+      "size_bytes": 703
+    },
+    {
+      "path": "scene_config.yaml",
+      "size_bytes": 1177
+    },
+    {
+      "path": "scene_graph.json",
+      "size_bytes": 34416
+    },
+    {
+      "path": "task_config.json",
+      "size_bytes": 872
+    },
+    {
+      "path": "usd/scene.usda",
+      "size_bytes": 270921439
+    }
+  ],
+  "checksums": {
+    "files": {
+      "asset_index.json": {
+        "sha256": "e76cd72c798236fa072e2211a2af5ceca673cd64e1d97316d269c83ee2857726",
+        "size_bytes": 14366
+      },
+      "enhanced_features.json": {
+        "sha256": "853b0356d97271e35169a50c4a08044e0eb0259320b9658e8701907730f0fe6c",
+        "size_bytes": 2025
+      },
+      "legal/asset_provenance.json": {
+        "sha256": "862622d4ae7f04bd133a8692d9d57817e853e5c7ada1bcb6fe98a71e6f969559",
+        "size_bytes": 20348
+      },
+      "merged_scene_manifest.json": {
+        "sha256": "f4209b06e07b94d9e9cf9b82f5abd577e52264564fb12120478cc9efef19a0bd",
+        "size_bytes": 11769
+      },
+      "multi_robot_config.json": {
+        "sha256": "3776c46e0295655da3d3b97141b0cf728cfa9c5ef0c871ef18c6de565e04cc64",
+        "size_bytes": 2411
+      },
+      "preflight_report.json": {
+        "sha256": "04686633a7eee511dbac06c5a00d597004c71cf0e69b2130b2192e8c56bbeacf",
+        "size_bytes": 703
+      },
+      "scene_config.yaml": {
+        "sha256": "cc261c080cf9af7c514c13cf3eeb3f3757a4fdfd7ac4dcc159de78face8f1b65",
+        "size_bytes": 1177
+      },
+      "scene_graph.json": {
+        "sha256": "4e7b88982b527f614745748e8e3136a8a3129edb4bdf7a884e50c5ef07d1e80f",
+        "size_bytes": 34416
+      },
+      "task_config.json": {
+        "sha256": "1cc81e1caa2934cddde05a6697204b86dc01eccd83407b6e00f7ab02f3aa00ac",
+        "size_bytes": 872
+      },
+      "usd/scene.usda": {
+        "sha256": "e20fee54c2a2e6bfcea51400f143affe1fc7659d7b060e8c1d4b0ae04b638c62",
+        "size_bytes": 270921439
+      },
+      "export_manifest.json": {
+        "sha256": "2a007be7ae3d039d7e56f17011f83075fe7c38aa56ea4d0dde5377495ccb87a3"
+      }
+    }
+  }
+}

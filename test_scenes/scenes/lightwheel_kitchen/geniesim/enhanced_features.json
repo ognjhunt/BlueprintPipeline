@@ -1,0 +1,108 @@
+{
+  "version": "1.0.0",
+  "description": "BlueprintPipeline enhanced features for Genie Sim 3.0 output",
+  "multi_robot": {
+    "enabled": true,
+    "robots": [
+      "h1",
+      "ur10",
+      "franka",
+      "g2",
+      "gr1"
+    ],
+    "categories": {
+      "humanoid": [
+        "h1",
+        "g2",
+        "gr1"
+      ],
+      "arm": [
+        "ur10",
+        "franka"
+      ],
+      "mobile": [],
+      "dual_arm": []
+    }
+  },
+  "bimanual": {
+    "enabled": true,
+    "robots": [
+      "g2",
+      "h1",
+      "yumi"
+    ],
+    "task_types": [
+      "coordinated_lift",
+      "hold_and_manipulate",
+      "lid_opening",
+      "handoff"
+    ]
+  },
+  "multi_robot_coordination": {
+    "enabled": true,
+    "pairs": [
+      {
+        "robot_a": "franka",
+        "robot_b": "ur10"
+      },
+      {
+        "robot_a": "franka",
+        "robot_b": "fetch"
+      }
+    ],
+    "scenarios": [
+      "handoff",
+      "collaborative_assembly",
+      "fleet_coordination"
+    ]
+  },
+  "rich_annotations": {
+    "enabled": true,
+    "types": [
+      "bounding_boxes_2d",
+      "bounding_boxes_3d",
+      "instance_segmentation",
+      "semantic_segmentation",
+      "object_poses_6dof",
+      "depth_ground_truth",
+      "surface_normals",
+      "material_properties"
+    ],
+    "formats": [
+      "json",
+      "coco",
+      "pascal_voc"
+    ]
+  },
+  "vla_finetuning": {
+    "enabled": true,
+    "models": [
+      "openvla",
+      "pi0",
+      "smolvla",
+      "groot_n1"
+    ],
+    "includes": [
+      "training_config",
+      "lora_config",
+      "data_adapter",
+      "train_script"
+    ]
+  },
+  "enhancement_summary": {
+    "genie_sim_provides": [
+      "episodes_lerobot_format",
+      "visual_observations",
+      "robot_states_actions",
+      "llm_task_generation",
+      "vlm_evaluation"
+    ],
+    "blueprintpipeline_adds": [
+      "multi_robot_embodiment_data",
+      "bimanual_manipulation_data",
+      "multi_robot_coordination_data",
+      "rich_ground_truth_annotations",
+      "vla_finetuning_packages"
+    ]
+  }
+}

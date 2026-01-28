@@ -613,8 +613,8 @@
         ]
       },
       "task_tag": [
-        "fill",
         "place",
+        "fill",
         "pick"
       ],
       "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/usd/assets/obj_Pot057/Pot057.usd",
