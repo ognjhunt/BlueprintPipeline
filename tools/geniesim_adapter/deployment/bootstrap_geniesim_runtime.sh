@@ -12,7 +12,6 @@ GENIESIM_HEADLESS=${GENIESIM_HEADLESS:-1}
 GENIESIM_START_SERVER=${GENIESIM_START_SERVER:-1}
 GENIESIM_HEALTHCHECK=${GENIESIM_HEALTHCHECK:-1}
 GENIESIM_SERVER_LOG=${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
-GENIESIM_CUROBO_VERSION=${GENIESIM_CUROBO_VERSION:-}
 
 if [ ! -x "${ISAAC_SIM_PATH}/python.sh" ]; then
   echo "[geniesim] ERROR: Isaac Sim not found at ${ISAAC_SIM_PATH}." >&2
@@ -31,6 +30,7 @@ if [ -f "${PIPELINE_REQS}" ]; then
 fi
 
 # Ensure cuRobo is available for Genie Sim motion planning.
+# The nvidia-curobo PyPI package is a placeholder; cuRobo must be built from source.
 echo "[geniesim] Ensuring cuRobo is installed"
 if "${ISAAC_SIM_PATH}/python.sh" - <<'PY' >/dev/null 2>&1; then
 import importlib.util
@@ -38,13 +38,16 @@ raise SystemExit(0 if importlib.util.find_spec("curobo") else 1)
 PY
   echo "[geniesim] cuRobo already installed"
 else
-  CUROBO_PKG="nvidia-curobo"
-  if [ -n "${GENIESIM_CUROBO_VERSION}" ]; then
-    CUROBO_PKG="nvidia-curobo==${GENIESIM_CUROBO_VERSION}"
+  echo "[geniesim] Installing cuRobo from source (this may take ~20 minutes)..."
+  CUROBO_DIR="${GENIESIM_ROOT}/curobo"
+  if [ ! -d "${CUROBO_DIR}/.git" ]; then
+    git clone https://github.com/NVlabs/curobo.git "${CUROBO_DIR}"
   fi
-  "${ISAAC_SIM_PATH}/python.sh" -m pip install --quiet "${CUROBO_PKG}" 2>&1 | tail -10 || {
-    echo "[geniesim] WARNING: cuRobo install failed (non-fatal; required for full motion planning)"
+  cd "${CUROBO_DIR}"
+  "${ISAAC_SIM_PATH}/python.sh" -m pip install -e . --no-build-isolation 2>&1 | tail -20 || {
+    echo "[geniesim] WARNING: cuRobo source install failed (required for full motion planning)"
   }
+  cd "${OLDPWD}"
 fi
 
 export GENIESIM_ROOT
