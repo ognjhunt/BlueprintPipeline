@@ -1,0 +1,766 @@
+{
+  "scene_id": "lightwheel_kitchen",
+  "version": "1.0.0",
+  "generated_at": "2026-01-28T13:59:42.167890Z",
+  "license": {
+    "type": "unknown",
+    "commercial_ok": false,
+    "blockers": [
+      "Asset 'Refrigerator001' has unknown license - requires verification",
+      "Asset 'Dishwasher054' has unknown license - requires verification",
+      "Asset 'Microwave017' has unknown license - requires verification",
+      "Asset 'Sink054' has unknown license - requires verification",
+      "Asset 'Stovetop012' has unknown license - requires verification",
+      "Asset 'RangeHood015' has unknown license - requires verification",
+      "Asset 'Kitchen_Cabinet001' has unknown license - requires verification",
+      "Asset 'Kitchen_Cabinet002' has unknown license - requires verification",
+      "Asset 'Table049' has unknown license - requires verification",
+      "Asset 'WallStackOven004' has unknown license - requires verification",
+      "Asset 'Toaster003' has unknown license - requires verification",
+      "Asset 'CoffeeMachine006' has unknown license - requires verification",
+      "Asset 'Pot057' has unknown license - requires verification"
+    ]
+  },
+  "summary": {
+    "total_assets": 14,
+    "commercial_ok": 1,
+    "non_commercial": 0,
+    "unknown_license": 13
+  },
+  "pipeline": {
+    "name": "BlueprintPipeline",
+    "version": "1.0.0"
+  },
+  "assets": [
+    {
+      "asset_id": "Refrigerator001",
+      "asset_path": "assets/obj_Refrigerator001/Refrigerator001.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.168279Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.168279Z",
+          "parameters": {
+            "mass": 80.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "90c33da5593bb916797bb0f19f7a865635a92b17e22b50641a81e019c177c554",
+        "timestamp": "2026-01-28T13:59:42.255418Z"
+      },
+      "metadata": {
+        "category": "refrigerator",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "Dishwasher054",
+      "asset_path": "assets/obj_Dishwasher054/Dishwasher054.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.255472Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.255472Z",
+          "parameters": {
+            "mass": 50.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "ea4d914d14c1397300b7ccb6e931c7e742cb45ae00c1b58132db69cf251a31ed",
+        "timestamp": "2026-01-28T13:59:42.276403Z"
+      },
+      "metadata": {
+        "category": "dishwasher",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "Microwave017",
+      "asset_path": "assets/obj_Microwave017/Microwave017.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.276439Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.276439Z",
+          "parameters": {
+            "mass": 15.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "a6645c97c6d8d30f91d4e8bd627059e1bbeeb1f170ccd22da8ad37d6ca10b3b0",
+        "timestamp": "2026-01-28T13:59:42.313337Z"
+      },
+      "metadata": {
+        "category": "microwave",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "Sink054",
+      "asset_path": "assets/obj_Sink054/Sink054.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.313378Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.313378Z",
+          "parameters": {
+            "mass": 20.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "b7aa2abd53ebe9e2687c3c58151b3f5a09359be86d2a4cbc9b60d2785e134eec",
+        "timestamp": "2026-01-28T13:59:42.341736Z"
+      },
+      "metadata": {
+        "category": "sink",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "Stovetop012",
+      "asset_path": "assets/obj_Stovetop012/Stovetop012.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.341776Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.341776Z",
+          "parameters": {
+            "mass": 30.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "4a711c6654fe5f54bc1c0740e9c85213a56fc6e97c0bee85f75d11f6371f212c",
+        "timestamp": "2026-01-28T13:59:42.344560Z"
+      },
+      "metadata": {
+        "category": "stovetop",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "RangeHood015",
+      "asset_path": "assets/obj_RangeHood015/RangeHood015.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.344583Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.344583Z",
+          "parameters": {
+            "mass": 25.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "acf43be175ab4d1c4e660807edecddc6da23bc8d4cd290590fe562919995b9d4",
+        "timestamp": "2026-01-28T13:59:42.355073Z"
+      },
+      "metadata": {
+        "category": "range_hood",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "Kitchen_Cabinet001",
+      "asset_path": "assets/obj_Kitchen_Cabinet001/Kitchen_Cabinet001.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.355094Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.355094Z",
+          "parameters": {
+            "mass": 30.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "d56d7b62682d19e591058c350ab5bed93dd3634994c20f3e6b5368d4655b58f6",
+        "timestamp": "2026-01-28T13:59:42.396294Z"
+      },
+      "metadata": {
+        "category": "cabinet",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "Kitchen_Cabinet002",
+      "asset_path": "assets/obj_Kitchen_Cabinet002/Kitchen_Cabinet002.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.396341Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.396341Z",
+          "parameters": {
+            "mass": 30.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "7f4b736e6392cff56afa357b3ecfffc230c98bc496c49e7b80b5e61312f00ace",
+        "timestamp": "2026-01-28T13:59:42.432540Z"
+      },
+      "metadata": {
+        "category": "cabinet",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "Table049",
+      "asset_path": "assets/obj_Table049/Table049.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.432570Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.432570Z",
+          "parameters": {
+            "mass": 40.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "33e9fca333ebafc72b991f7052168867d35f22d488df7d0c0d2fd3a9ae754341",
+        "timestamp": "2026-01-28T13:59:42.439292Z"
+      },
+      "metadata": {
+        "category": "table",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "WallStackOven004",
+      "asset_path": "assets/obj_WallStackOven004/WallStackOven004.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.439321Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.439321Z",
+          "parameters": {
+            "mass": 60.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "0c32a1811e506daabe048d55622fe7b5dcae604f4a6712fd08fcd74b5d153386",
+        "timestamp": "2026-01-28T13:59:42.454563Z"
+      },
+      "metadata": {
+        "category": "oven",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "Toaster003",
+      "asset_path": "assets/obj_Toaster003/Toaster003.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.454585Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.454585Z",
+          "parameters": {
+            "mass": 2.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "b08d66168def455c974d8d1b806e4c39f5221588b7c91da53c8c0ef9f65435d2",
+        "timestamp": "2026-01-28T13:59:42.456544Z"
+      },
+      "metadata": {
+        "category": "toaster",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "CoffeeMachine006",
+      "asset_path": "assets/obj_CoffeeMachine006/CoffeeMachine006.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.456557Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.456557Z",
+          "parameters": {
+            "mass": 5.0,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "ba2873af48ed780b701cc287824b10773897f26e26ddb3f11b7738fcdbc113d4",
+        "timestamp": "2026-01-28T13:59:42.582496Z"
+      },
+      "metadata": {
+        "category": "coffee_machine",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "Pot057",
+      "asset_path": "assets/obj_Pot057/Pot057.usd",
+      "license": {
+        "type": "unknown",
+        "url": null,
+        "commercial_ok": false
+      },
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.582527Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        },
+        {
+          "step": "physics_authoring",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.582527Z",
+          "parameters": {
+            "mass": 1.5,
+            "friction": null
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": "4d36ce9bde33830f2df13632dffcdd56eded1188edfcf3c7229f1f9e846a753f",
+        "timestamp": "2026-01-28T13:59:42.585666Z"
+      },
+      "metadata": {
+        "category": "pot",
+        "description": ""
+      }
+    },
+    {
+      "asset_id": "mock_mug_01",
+      "asset_path": "assets/mock_mug_01/mock_mug_01.usd",
+      "license": {
+        "type": "cc0",
+        "url": null,
+        "commercial_ok": true
+      },
+      "source": {
+        "type": "blueprintpipeline_generated",
+        "id": null,
+        "url": null,
+        "creator": null,
+        "creation_date": null
+      },
+      "transformations": [
+        {
+          "step": "scaling",
+          "tool": "BlueprintPipeline",
+          "version": "1.0.0",
+          "timestamp": "2026-01-28T13:59:42.585688Z",
+          "parameters": {
+            "scale": {
+              "x": 1.0,
+              "y": 1.0,
+              "z": 1.0
+            }
+          },
+          "input_hash": null,
+          "output_hash": null
+        }
+      ],
+      "verification": {
+        "content_hash": null,
+        "timestamp": "2026-01-28T13:59:42.585741Z"
+      },
+      "metadata": {
+        "category": "mug",
+        "description": ""
+      }
+    }
+  ]
+}
