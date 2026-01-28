@@ -1,15 +1,11 @@
 {
-  "ok": false,
-  "missing": [
-    "Isaac Sim runtime (ISAAC_SIM_PATH)"
-  ],
-  "remediation": [
-    "Set ISAAC_SIM_PATH to your Isaac Sim install (found python.sh). Current: /isaac-sim"
-  ],
+  "ok": true,
+  "missing": [],
+  "remediation": [],
   "status": {
-    "available": false,
-    "geniesim_installed": false,
-    "isaac_sim_available": false,
+    "available": true,
+    "geniesim_installed": true,
+    "isaac_sim_available": true,
     "server_running": true,
     "grpc_available": true,
     "grpc_stubs_available": true,
@@ -22,9 +18,11 @@
       "isaacsim_required": false,
       "curobo_required": false,
       "curobo_available": false,
-      "use_curobo": true
+      "use_curobo": true,
+      "geniesim_root": "/tmp/geniesim-stub",
+      "isaac_sim_path": "/tmp/isaac-sim-stub"
     }
   },
   "server_ready": false,
-  "stage": "local-pipeline"
+  "stage": "genie-sim-local-runner"
 }

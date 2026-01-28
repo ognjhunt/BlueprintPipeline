@@ -1,0 +1,1 @@
+{"state": "closed", "last_failure_time": 1769623562.105124, "opened_at": null, "success_count": 0, "failures": [{"timestamp": 1769623562.105124, "exception_type": "Exception", "message": "Local Genie Sim execution failed."}]}

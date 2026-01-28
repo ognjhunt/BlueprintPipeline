@@ -4,17 +4,17 @@
   "multi_robot": {
     "enabled": true,
     "robots": [
-      "g2",
-      "h1",
+      "gr1",
       "ur10",
+      "h1",
       "franka",
-      "gr1"
+      "g2"
     ],
     "categories": {
       "humanoid": [
-        "g2",
+        "gr1",
         "h1",
-        "gr1"
+        "g2"
       ],
       "arm": [
         "ur10",
