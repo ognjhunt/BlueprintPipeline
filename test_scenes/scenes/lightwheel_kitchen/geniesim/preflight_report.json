@@ -11,10 +11,10 @@
     "grpc_stubs_available": true,
     "curobo_available": false,
     "use_curobo": true,
-    "mock_server_allowed": false,
+    "mock_server_allowed": true,
     "details": {
       "environment": "development",
-      "allow_geniesim_mock": false,
+      "allow_geniesim_mock": true,
       "isaacsim_required": false,
       "curobo_required": false,
       "curobo_available": false,
