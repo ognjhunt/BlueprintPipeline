@@ -12,6 +12,7 @@ GENIESIM_HEADLESS=${GENIESIM_HEADLESS:-1}
 GENIESIM_START_SERVER=${GENIESIM_START_SERVER:-1}
 GENIESIM_HEALTHCHECK=${GENIESIM_HEALTHCHECK:-1}
 GENIESIM_SERVER_LOG=${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
+GENIESIM_CUROBO_VERSION=${GENIESIM_CUROBO_VERSION:-}
 
 if [ ! -x "${ISAAC_SIM_PATH}/python.sh" ]; then
   echo "[geniesim] ERROR: Isaac Sim not found at ${ISAAC_SIM_PATH}." >&2
@@ -26,6 +27,22 @@ if [ -f "${PIPELINE_REQS}" ]; then
   echo "[geniesim] Installing pipeline Python dependencies"
   "${ISAAC_SIM_PATH}/python.sh" -m pip install --quiet -r "${PIPELINE_REQS}" 2>&1 | tail -10 || {
     echo "[geniesim] WARNING: Some pipeline dependencies failed (non-fatal)"
+  }
+fi
+
+# Ensure cuRobo is available for Genie Sim motion planning.
+echo "[geniesim] Ensuring cuRobo is installed"
+if ! "${ISAAC_SIM_PATH}/python.sh" - <<'PY' >/dev/null 2>&1; then
+import importlib.util
+raise SystemExit(0 if importlib.util.find_spec("curobo") else 1)
+PY
+then
+  CUROBO_PKG="nvidia-curobo"
+  if [ -n "${GENIESIM_CUROBO_VERSION}" ]; then
+    CUROBO_PKG="nvidia-curobo==${GENIESIM_CUROBO_VERSION}"
+  fi
+  "${ISAAC_SIM_PATH}/python.sh" -m pip install --quiet "${CUROBO_PKG}" 2>&1 | tail -10 || {
+    echo "[geniesim] WARNING: cuRobo install failed (non-fatal; required for full motion planning)"
   }
 fi
 
