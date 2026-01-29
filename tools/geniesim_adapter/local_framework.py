@@ -839,6 +839,7 @@ class GenieSimGRPCClient:
         self._default_camera_ids = ["wrist", "overhead", "side"]
         self._joint_names: List[str] = []
         self._grpc_unavailable_logged: set[str] = set()
+        self._camera_missing_logged: set[str] = set()
         self._circuit_breaker = CircuitBreaker(
             f"geniesim-grpc-{self.host}:{self.port}",
             failure_threshold=get_geniesim_circuit_breaker_failure_threshold(),
@@ -2534,12 +2535,14 @@ class GenieSimGRPCClient:
             None,
         )
         if image_info is None:
-            available_ids = sorted({image.get("camera_id") for image in images if image.get("camera_id")})
-            logger.warning(
-                "Camera '%s' not found in observation. Available camera_ids=%s.",
-                camera_id,
-                available_ids,
-            )
+            if camera_id not in self._camera_missing_logged:
+                self._camera_missing_logged.add(camera_id)
+                available_ids = sorted({image.get("camera_id") for image in images if image.get("camera_id")})
+                logger.warning(
+                    "Camera '%s' not found in observation. Available camera_ids=%s.",
+                    camera_id,
+                    available_ids,
+                )
             return None
 
         width = int(image_info.get("width") or 0)

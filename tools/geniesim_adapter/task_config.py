@@ -281,7 +281,23 @@ class TaskConfigGenerator:
         )
 
         # Generate suggested tasks
-        tasks = self._generate_tasks(objects, environment_type)
+        use_llm = os.environ.get("GENIESIM_USE_LLM_TASK_PLANNING", "0") == "1"
+        if use_llm:
+            try:
+                tasks = self._generate_tasks_with_llm(manifest, environment_type, max_tasks)
+                self.log(
+                    f"LLM generated {len(tasks)} task suggestions",
+                    extra={"scene_id": scene_id},
+                )
+            except Exception as exc:
+                self.log(
+                    f"LLM task generation failed, falling back to deterministic: {exc}",
+                    level="WARNING",
+                    extra={"scene_id": scene_id},
+                )
+                tasks = self._generate_tasks(objects, environment_type)
+        else:
+            tasks = self._generate_tasks(objects, environment_type)
         self.log(
             f"Generated {len(tasks)} task suggestions",
             extra={"scene_id": scene_id},
@@ -608,6 +624,137 @@ class TaskConfigGenerator:
                     priority += 1
 
         return min(priority, 5)  # Cap at 5
+
+    # =========================================================================
+    # LLM-based Task Generation (Gemini 3.0 Pro Preview)
+    # =========================================================================
+
+    def _generate_tasks_with_llm(
+        self,
+        manifest: Dict[str, Any],
+        environment_type: str,
+        max_tasks: int = 50,
+    ) -> List[SuggestedTask]:
+        """Generate tasks using Gemini 3.0 Pro Preview instead of deterministic rules."""
+        from tools.llm_client import create_llm_client, LLMProvider
+
+        client = create_llm_client(provider=LLMProvider.GOOGLE)
+        prompt = self._build_task_planning_prompt(manifest, environment_type, max_tasks)
+
+        self.log("Requesting task generation from Gemini 3.0 Pro Preview")
+        response = client.generate(
+            prompt=prompt,
+            json_output=True,
+            temperature=0.7,
+        )
+
+        if response.error_message:
+            raise RuntimeError(f"LLM task generation failed: {response.error_message}")
+
+        data = response.data
+        if data is None:
+            # Try parsing text as JSON
+            data = json.loads(response.text)
+
+        raw_tasks = data.get("suggested_tasks", [])
+        self.log(f"LLM generated {len(raw_tasks)} task suggestions")
+
+        tasks = []
+        valid_task_types = set(DIFFICULTY_FACTORS.keys())
+        for t in raw_tasks:
+            task_type = t.get("task_type", "")
+            if task_type not in valid_task_types:
+                self.log(f"Skipping unknown task_type from LLM: {task_type}", level="WARNING")
+                continue
+            tasks.append(SuggestedTask(
+                task_type=task_type,
+                target_object=str(t.get("target_object", "")),
+                goal_region=t.get("goal_region"),
+                difficulty=t.get("difficulty", "medium"),
+                priority=min(int(t.get("priority", 1)), 5),
+                description_hint=t.get("description_hint"),
+                constraints=t.get("constraints", {}),
+            ))
+
+        return tasks
+
+    def _build_task_planning_prompt(
+        self,
+        manifest: Dict[str, Any],
+        environment_type: str,
+        max_tasks: int,
+    ) -> str:
+        """Build a prompt for LLM-based task generation from scene data."""
+        objects = manifest.get("objects", [])
+
+        # Build object descriptions
+        object_descriptions = []
+        for obj in objects:
+            sim_role = obj.get("sim_role", "unknown")
+            if sim_role in ("background", "scene_shell"):
+                continue
+            semantics = obj.get("semantics", {})
+            affordances = semantics.get("affordances", [])
+            aff_names = []
+            for a in affordances:
+                if isinstance(a, str):
+                    aff_names.append(a)
+                elif isinstance(a, dict):
+                    aff_names.append(a.get("name", str(a)))
+            pos = obj.get("transform", {}).get("position", {})
+            mass = obj.get("physics", {}).get("mass")
+            desc = {
+                "id": obj.get("id"),
+                "name": obj.get("name"),
+                "category": obj.get("category"),
+                "sim_role": sim_role,
+                "affordances": aff_names,
+            }
+            if pos:
+                desc["position"] = pos
+            if mass is not None:
+                desc["mass_kg"] = mass
+            object_descriptions.append(desc)
+
+        objects_json = json.dumps(object_descriptions, indent=2)
+
+        valid_types = sorted(DIFFICULTY_FACTORS.keys())
+
+        return f"""You are a robot task planner for a simulated {environment_type} environment.
+
+Given the following objects in the scene, generate diverse and physically plausible manipulation tasks for a robot arm.
+
+## Scene Objects
+{objects_json}
+
+## Valid Task Types
+{json.dumps(valid_types)}
+
+## Instructions
+- Generate up to {max_tasks} tasks
+- Each task must reference a real object ID from the scene
+- Prefer objects with relevant affordances (e.g., Graspable for pick_place)
+- Vary task types for diversity
+- Set difficulty based on object size, mass, and task complexity
+- Set priority 1-5 (5 = most important)
+- Write a natural language description_hint explaining the task
+- goal_region should be another object ID (a surface or container) when applicable
+
+## Output Format
+Return JSON with this exact structure:
+{{
+  "suggested_tasks": [
+    {{
+      "task_type": "pick_place",
+      "target_object": "ObjectId",
+      "goal_region": "SurfaceId",
+      "difficulty": "easy|medium|hard",
+      "priority": 1,
+      "description_hint": "Natural language task description",
+      "constraints": {{}}
+    }}
+  ]
+}}"""
 
     def _generate_description_hint(
         self,
