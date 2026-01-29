@@ -15,7 +15,7 @@ Episode generation **must** run inside an Isaac Sim runtime with Replicator enab
 We standardize on the NVIDIA NGC container image below for production runs:
 
 - **Container image**: `nvcr.io/nvidia/isaac-sim:2024.1.0` (Isaac Sim 2024.1.0+)
-- **Required extensions**: `omni.isaac.core`, `omni.physx`, `omni.replicator.core`
+- **Required extensions**: `isaacsim.core.api`, `omni.physx`, `omni.replicator.core`
 - **GPU**: NVIDIA RTX/Tesla-class GPU (T4/L4/A10/A100) with **16GB+ VRAM**
 - **Driver/tooling**: NVIDIA driver + NVIDIA Container Toolkit installed
 

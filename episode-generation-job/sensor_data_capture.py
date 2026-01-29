@@ -1172,8 +1172,8 @@ class IsaacSimSensorCapture:
             # Try to get poses from Isaac Sim
             if self._omni is not None:
                 from pxr import UsdGeom, UsdPhysics
-                import omni.isaac.core.utils.stage as stage_utils
-                from omni.isaac.core.utils.stage import get_current_stage
+                import isaacsim.core.api.utils.stage as stage_utils
+                from isaacsim.core.api.utils.stage import get_current_stage
 
                 stage = get_current_stage()
                 if stage is None:
@@ -1213,7 +1213,7 @@ class IsaacSimSensorCapture:
 
                                 if prim.HasAPI(UsdPhysics.RigidBodyAPI):
                                     try:
-                                        from omni.isaac.core.prims import RigidPrim
+                                        from isaacsim.core.api.prims import RigidPrim
                                         rigid = RigidPrim(prim_path)
                                         vel = rigid.get_linear_velocity()
                                         ang_vel = rigid.get_angular_velocity()
@@ -1444,8 +1444,8 @@ class IsaacSimSensorCapture:
         # Capture robot state
         if self._omni is not None:
             try:
-                from omni.isaac.core.articulations import Articulation
-                from omni.isaac.core.utils.stage import get_current_stage
+                from isaacsim.core.api.articulations import Articulation
+                from isaacsim.core.api.utils.stage import get_current_stage
 
                 stage = get_current_stage()
                 if stage is not None:

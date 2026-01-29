@@ -136,7 +136,7 @@ RUN chmod +x /entrypoint.sh
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD ${ISAAC_SIM_PATH}/python.sh -c "import omni.isaac.core; print('healthy')" || exit 1
+    CMD ${ISAAC_SIM_PATH}/python.sh -c "import isaacsim.core.api; print('healthy')" || exit 1
 
 # =============================================================================
 # Entrypoint

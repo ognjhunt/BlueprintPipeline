@@ -12,7 +12,7 @@ DEPLOYMENT ARCHITECTURE:
 ========================
 PRODUCTION (Cloud Run / Docker):
   - Uses Dockerfile.isaacsim which extends NVIDIA Isaac Sim container
-  - Isaac Sim IS available via omni.isaac.core imports
+  - Isaac Sim IS available via isaacsim.core.api imports
   - GPU acceleration enabled (L4/A100 GPUs)
   - docker-compose.isaacsim.yaml sets USE_MOCK_CAPTURE="false"
 
@@ -126,7 +126,7 @@ def _check_isaac_sim_environment() -> Dict[str, Any]:
 
         # If omni is available, we're likely in Isaac Sim
         try:
-            import omni.isaac.core
+            import isaacsim.core.api
             status["isaac_sim"] = True
             _ISAAC_SIM_AVAILABLE = True
         except ImportError:
@@ -424,7 +424,7 @@ class PhysicsSimulator:
         stage = None
         try:
             import omni.usd
-            from omni.isaac.core import World
+            from isaacsim.core.api import World
 
             # Create or get world
             world = World.instance()
@@ -500,7 +500,7 @@ class PhysicsSimulator:
 
         if self._use_real_physics:
             try:
-                from omni.isaac.core import World
+                from isaacsim.core.api import World
                 world = World.instance()
                 if world:
                     world.reset()
@@ -517,7 +517,7 @@ class PhysicsSimulator:
         """Stop the physics simulation."""
         if self._use_real_physics:
             try:
-                from omni.isaac.core import World
+                from isaacsim.core.api import World
                 world = World.instance()
                 if world:
                     world.stop()
@@ -532,7 +532,7 @@ class PhysicsSimulator:
         """Pause the physics simulation."""
         if self._use_real_physics:
             try:
-                from omni.isaac.core import World
+                from isaacsim.core.api import World
                 world = World.instance()
                 if world:
                     world.pause()
@@ -574,7 +574,7 @@ class PhysicsSimulator:
         GAP-EH-005 FIX: Add timeout to prevent hung Isaac Sim operations.
         """
         try:
-            from omni.isaac.core import World
+            from isaacsim.core.api import World
 
             world = World.instance()
             if world is None:
@@ -677,7 +677,7 @@ class PhysicsSimulator:
 
         try:
             from pxr import UsdGeom
-            import omni.isaac.core.utils.stage as stage_utils
+            import isaacsim.core.api.utils.stage as stage_utils
 
             for obj_id, prim_path in self._tracked_objects.items():
                 try:
@@ -724,8 +724,8 @@ class PhysicsSimulator:
             return state
 
         try:
-            from omni.isaac.core.articulations import Articulation
-            from omni.isaac.core.utils.stage import get_current_stage
+            from isaacsim.core.api.articulations import Articulation
+            from isaacsim.core.api.utils.stage import get_current_stage
             from pxr import UsdGeom
 
             stage = get_current_stage()
@@ -852,8 +852,8 @@ class PhysicsSimulator:
             return False
 
         try:
-            from omni.isaac.core.articulations import Articulation
-            from omni.isaac.core.utils.types import ArticulationAction
+            from isaacsim.core.api.articulations import Articulation
+            from isaacsim.core.api.utils.types import ArticulationAction
 
             # Get robot articulation
             robot = Articulation(self._robot_prim_path)
@@ -923,7 +923,7 @@ class PhysicsSimulator:
             num_dof: Total number of DOFs
         """
         try:
-            from omni.isaac.core.utils.types import ArticulationAction
+            from isaacsim.core.api.utils.types import ArticulationAction
 
             # Common gripper joint indices (after arm joints)
             # Franka: joints 7, 8 are gripper fingers
