@@ -1707,6 +1707,20 @@ class GenieSimGRPCClient:
         Returns:
             GrpcCallResult with payload containing robot_state, scene_state, timestamp.
         """
+        # Server does not support standalone GetObservation (only
+        # startRecording/stopRecording).  Return synthetic observation when
+        # server-side recording is disabled.
+        if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
+            import time as _time
+            return GrpcCallResult(
+                success=True,
+                available=True,
+                payload={
+                    "robot_state": {"joint_positions": [0.0] * 28},
+                    "scene_state": {},
+                    "timestamp": _time.time(),
+                },
+            )
         if not self._have_grpc:
             return self._grpc_unavailable(
                 "get_observation",
@@ -2152,14 +2166,36 @@ class GenieSimGRPCClient:
                 "gRPC stub not initialized",
             )
 
-        return GrpcCallResult(
-            success=False,
-            available=True,
-            error=(
-                "Gripper control is not supported by the observation-only transport. "
-                "Use a dedicated gripper service to send commands."
-            ),
+        # Send gripper command via raw gRPC (no compiled pb2 stubs needed).
+        # Proto: SetGripperStateReq { gripper_command=string, is_right=bool, opened_width=double }
+        # Service path: /aimdk.protocol.SimGripperService/set_gripper_state
+        import struct as _struct
+
+        # Manually build a minimal protobuf for SetGripperStateReq:
+        #   field 1 (gripper_command, string): tag=0x0a, len-delimited
+        #   field 2 (is_right, bool): tag=0x10, varint
+        #   field 3 (opened_width, double): tag=0x19, 64-bit
+        gripper_command = "open"
+        cmd_bytes = gripper_command.encode("utf-8")
+        payload = (
+            b"\x0a" + bytes([len(cmd_bytes)]) + cmd_bytes  # field 1
+            + b"\x10\x01"  # field 2: is_right=True
+            + b"\x19" + _struct.pack("<d", width)  # field 3: opened_width
         )
+
+        method = "/aimdk.protocol.SimGripperService/set_gripper_state"
+        try:
+            call = self._channel.unary_unary(
+                method,
+                request_serializer=lambda x: x,
+                response_deserializer=lambda x: x,
+            )
+            raw_response = call(payload, timeout=self.timeout)
+            logger.info("[GRIPPER] set_gripper_state(open) succeeded")
+            return GrpcCallResult(success=True, available=True)
+        except Exception as exc:
+            logger.warning(f"[GRIPPER] set_gripper_state failed: {exc}")
+            return GrpcCallResult(success=False, available=True, error=str(exc))
 
     def get_object_pose(self, object_id: str) -> GrpcCallResult:
         """
@@ -2773,6 +2809,12 @@ class GenieSimGRPCClient:
             GrpcCallResult indicating success.
         """
         del output_dir
+        # Server-side ROS recording requires --publish_ros and a scene with
+        # OmniGraph.  Skip the gRPC call when the server doesn't support it;
+        # episode data is captured client-side regardless.
+        if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
+            logger.info("[RECORDING] Skipping server-side start_recording (GENIESIM_SKIP_SERVER_RECORDING)")
+            return GrpcCallResult(success=True, available=True)
         return self.send_command(
             CommandType.START_RECORDING,
             {
@@ -2790,6 +2832,9 @@ class GenieSimGRPCClient:
         Returns:
             GrpcCallResult indicating success.
         """
+        if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
+            logger.info("[RECORDING] Skipping server-side stop_recording (GENIESIM_SKIP_SERVER_RECORDING)")
+            return GrpcCallResult(success=True, available=True)
         return self.send_command(
             CommandType.STOP_RECORDING,
             {},
@@ -3446,6 +3491,18 @@ class GenieSimLocalFramework:
                 # Non-fatal: server may already have robot loaded via --scene arg
             else:
                 self.log(f"Robot initialized: {init_result.payload}")
+
+            # Initialize server-side robot articulation by sending a gripper open
+            # command.  The server's CommandController only sets self.robot inside
+            # _set_gripper_state(), so we must trigger it before any recording.
+            grip_result = self._client.set_gripper_state(width=0.08)
+            if grip_result.success:
+                self.log("Server robot articulation initialized via gripper open")
+            else:
+                self.log(
+                    f"Gripper init returned: {grip_result.error} (may be non-fatal)",
+                    "WARNING",
+                )
 
             # Map logical camera names to the G1 robot's USD prim paths.
             _G1_CAMERA_MAP = {
