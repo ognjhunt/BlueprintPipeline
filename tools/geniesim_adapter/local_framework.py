@@ -837,6 +837,9 @@ class GenieSimGRPCClient:
         self._joint_stub = None
         self._connected = False
         self._default_camera_ids = ["wrist", "overhead", "side"]
+        # Map logical camera names to robot-specific USD prim paths.
+        # Populated after init_robot from the robot config's camera dict.
+        self._camera_prim_map: Dict[str, str] = {}
         self._joint_names: List[str] = []
         self._grpc_unavailable_logged: set[str] = set()
         self._camera_missing_logged: set[str] = set()
@@ -1184,6 +1187,9 @@ class GenieSimGRPCClient:
         payload = data or {}
         camera_ids = payload.get("camera_ids") or payload.get("camera_prim_list") or self._default_camera_ids
         camera_ids = [str(camera_id) for camera_id in camera_ids]
+        # Resolve logical names (e.g. "wrist") to USD prim paths via map
+        if self._camera_prim_map:
+            camera_ids = [self._camera_prim_map.get(cid, cid) for cid in camera_ids]
         include_images = bool(payload.get("include_images", True))
         include_depth = bool(payload.get("include_depth", True))
         include_semantic = bool(payload.get("include_semantic", False))
@@ -3425,7 +3431,7 @@ class GenieSimLocalFramework:
                 "orientation": {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
             }
             self.log(f"Initializing robot: cfg_file={robot_cfg_file}, base_position={base_pos}")
-            scene_usd = os.environ.get("GENIESIM_SCENE_USD_PATH", "empty_scene.usda")
+            scene_usd = os.environ.get("GENIESIM_SCENE_USD_PATH", "scenes/empty_scene.usda")
             init_result = self._client.init_robot(
                 robot_type=robot_cfg_file,
                 base_pose=base_pose,
@@ -3440,6 +3446,20 @@ class GenieSimLocalFramework:
                 # Non-fatal: server may already have robot loaded via --scene arg
             else:
                 self.log(f"Robot initialized: {init_result.payload}")
+
+            # Map logical camera names to the G1 robot's USD prim paths.
+            _G1_CAMERA_MAP = {
+                "wrist": "/G1/gripper_r_base_link/Right_Camera",
+                "overhead": "/G1/head_link2/Head_Camera",
+                "side": "/G1/gripper_l_base_link/Left_Camera",
+            }
+            camera_map_env = os.environ.get("GENIESIM_CAMERA_PRIM_MAP", "")
+            if camera_map_env:
+                import json as _json
+                self._client._camera_prim_map = _json.loads(camera_map_env)
+            else:
+                self._client._camera_prim_map = _G1_CAMERA_MAP
+            self.log(f"Camera prim map: {self._client._camera_prim_map}")
 
             episodes_target = episodes_per_task or self.config.episodes_per_task
             tasks = task_config.get("suggested_tasks", [task_config])
