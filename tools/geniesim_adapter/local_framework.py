@@ -4023,6 +4023,11 @@ class GenieSimLocalFramework:
                 try:
                     start_event.wait()
                     start_time = collector_state["start_time"] or time.time()
+                    # Small settling delay to let the robot begin executing
+                    # before we start capturing observations
+                    settle_delay = float(os.getenv("OBS_SETTLE_DELAY_S", "0.05"))
+                    if settle_delay > 0:
+                        time.sleep(settle_delay)
                     for planned_timestamp in timestamps:
                         if abort_event.is_set():
                             break
@@ -4336,12 +4341,36 @@ class GenieSimLocalFramework:
                     return value.item()
                 return value
 
+            # Build robot metadata for dataset consumers
+            robot_type = getattr(self.config, "robot_type", "unknown")
+            joint_names = list(self._client._joint_names) if hasattr(self._client, "_joint_names") and self._client._joint_names else []
+            num_joints = len(frames[0]["action"]) if frames else 0
+            arm_dof = min(7, num_joints)
+            rc = ROBOT_CONFIGS.get(robot_type)
+            robot_metadata = {
+                "robot_type": robot_type,
+                "num_joints": num_joints,
+                "arm_dof": arm_dof,
+                "gripper_dof": max(0, num_joints - arm_dof),
+                "joint_names": joint_names if joint_names else [f"joint_{i}" for i in range(num_joints)],
+                "joint_limits_lower": rc.joint_limits_lower.tolist() if rc is not None and hasattr(rc, "joint_limits_lower") else None,
+                "joint_limits_upper": rc.joint_limits_upper.tolist() if rc is not None and hasattr(rc, "joint_limits_upper") else None,
+                "action_space": "joint_delta",
+                "action_abs_space": "joint_position",
+                "control_frequency_hz": 30.0,
+            }
+
+            # Reproducibility seed (deterministic trajectory, but record for traceability)
+            episode_seed = hash((episode_id, robot_type, num_joints)) & 0xFFFFFFFF
+
             with open(episode_path, "w") as f:
                 json.dump({
                     "episode_id": episode_id,
                     "task_name": task.get("task_name") or llm_metadata.get("task_name"),
                     "task_description": llm_metadata.get("task_description"),
                     "data_mode": data_mode,
+                    "robot_metadata": robot_metadata,
+                    "episode_seed": episode_seed,
                     "frames": frames,
                     "frame_count": len(frames),
                     "quality_score": quality_score,
@@ -4472,6 +4501,22 @@ class GenieSimLocalFramework:
         task: Dict[str, Any],
         episode_id: str,
     ) -> List[Dict[str, Any]]:
+        # Attempt to set up FK for end-effector pose computation
+        fk_solver = None
+        robot_config = ROBOT_CONFIGS.get(
+            getattr(self.config, "robot_type", ""), None
+        )
+        if robot_config is not None and IK_PLANNING_AVAILABLE:
+            try:
+                _solver = IKSolver(robot_config, verbose=False)
+                if hasattr(_solver, "_forward_kinematics"):
+                    fk_solver = _solver
+            except Exception:
+                pass
+
+        # Determine gripper joint indices (joints beyond the arm DOFs)
+        arm_dof = min(7, len(trajectory[0]["joint_positions"])) if trajectory else 7
+
         frames: List[Dict[str, Any]] = []
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             self._attach_camera_frames(obs, episode_id=episode_id, task=task)
@@ -4487,13 +4532,33 @@ class GenieSimLocalFramework:
                 obs_joints = np.array(jp, dtype=float)
             action_delta = (waypoint_joints - obs_joints).tolist()
 
-            frames.append({
+            frame_data: Dict[str, Any] = {
                 "step": step_idx,
                 "observation": obs,
                 "action": action_delta,
                 "action_abs": waypoint["joint_positions"],  # keep absolute for reference
                 "timestamp": waypoint["timestamp"],
-            })
+            }
+
+            # End-effector Cartesian pose via FK (best-effort)
+            if fk_solver is not None:
+                try:
+                    ee_pos, ee_quat = fk_solver._forward_kinematics(waypoint_joints[:arm_dof])
+                    frame_data["ee_pos"] = ee_pos.tolist()
+                    frame_data["ee_quat"] = ee_quat.tolist()
+                except Exception:
+                    pass
+
+            # Explicit gripper command: infer from gripper joint positions
+            # Mean gripper joint value near lower limit = closed, near upper = open
+            if len(waypoint_joints) > arm_dof:
+                gripper_joints = waypoint_joints[arm_dof:]
+                # Normalize: 0.0 = fully closed, 1.0 = fully open
+                gripper_mean = float(np.mean(np.abs(gripper_joints)))
+                frame_data["gripper_command"] = "open" if gripper_mean > 0.3 else "closed"
+                frame_data["gripper_openness"] = round(min(1.0, gripper_mean / 0.5), 3)
+
+            frames.append(frame_data)
         return frames
 
     def _validate_frames(
