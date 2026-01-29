@@ -4,13 +4,15 @@
   "multi_robot": {
     "enabled": false,
     "robots": [
+      "h1",
       "franka",
       "g2",
-      "ur10",
-      "gr1"
+      "gr1",
+      "ur10"
     ],
     "categories": {
       "humanoid": [
+        "h1",
         "g2",
         "gr1"
       ],
@@ -26,6 +28,7 @@
     "enabled": false,
     "robots": [
       "g2",
+      "h1",
       "yumi"
     ],
     "task_types": [
