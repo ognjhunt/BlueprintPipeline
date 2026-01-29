@@ -12,7 +12,7 @@ from typing import Optional
 
 import grpc
 
-from geniesim_grpc_pb2 import (
+from tools.geniesim_adapter.geniesim_grpc_pb2 import (
     AddCameraReq,
     AddCameraRsp,
     AttachReq,
@@ -50,7 +50,7 @@ from geniesim_grpc_pb2 import (
     TaskStatusReq,
     TaskStatusRsp,
 )
-from geniesim_grpc_pb2_grpc import (
+from tools.geniesim_adapter.geniesim_grpc_pb2_grpc import (
     SimObservationServiceServicer,
     add_SimObservationServiceServicer_to_server,
 )
