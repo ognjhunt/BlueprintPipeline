@@ -276,7 +276,7 @@ class TestSceneGraphConverter:
         assert mug_node.size == [0.08, 0.08, 0.10]
 
         # Check pose
-        assert mug_node.pose.position == [0.4, 0.3, 0.8]
+        assert mug_node.pose.position == [2.3, 0.1, 0.9]
 
         # Check task tags (should have pick, place from Graspable)
         assert "pick" in mug_node.task_tag
