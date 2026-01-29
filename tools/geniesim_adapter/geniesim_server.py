@@ -181,17 +181,19 @@ def _parse_port() -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a local GenieSim gRPC mock server.")
     parser.add_argument("--port", type=int, default=_parse_port())
+    parser.add_argument("--host", type=str, default="0.0.0.0")
     args = parser.parse_args()
 
     init_logging()
     server = grpc.server(ThreadPoolExecutor(max_workers=8))
     add_SimObservationServiceServicer_to_server(GenieSimLocalServicer(), server)
 
+    bind_addr = f"{args.host}:{args.port}"
     credentials = _load_tls_credentials()
     if credentials:
-        server.add_secure_port(f"0.0.0.0:{args.port}", credentials)
+        server.add_secure_port(bind_addr, credentials)
     else:
-        server.add_insecure_port(f"0.0.0.0:{args.port}")
+        server.add_insecure_port(bind_addr)
 
     LOGGER.info("Starting GenieSim mock server on port %s", args.port)
     server.start()
