@@ -281,6 +281,11 @@ except ImportError:
 DEFAULT_OBSERVATION_SCHEMA = {
     "required_keys": ["robot_state", "camera_frames"],
 }
+# When camera data is unavailable (e.g. GENIESIM_SKIP_SERVER_RECORDING),
+# use a relaxed schema that only requires proprioception data.
+PROPRIOCEPTION_ONLY_OBSERVATION_SCHEMA = {
+    "required_keys": ["robot_state"],
+}
 DEFAULT_ACTION_BOUNDS = {
     "lower": [-3.1416] * 7,
     "upper": [3.1416] * 7,
@@ -1708,17 +1713,28 @@ class GenieSimGRPCClient:
             GrpcCallResult with payload containing robot_state, scene_state, timestamp.
         """
         # Server does not support standalone GetObservation (only
-        # startRecording/stopRecording).  Return synthetic observation when
-        # server-side recording is disabled.
+        # startRecording/stopRecording).  When server-side recording is
+        # disabled, build a hybrid observation using real joint data from
+        # get_joint_position() (which works) and synthetic placeholders
+        # for fields the server can't provide.
         if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
             import time as _time
+            # Attempt to read real joint positions from the server
+            joint_positions = [0.0] * 28
+            try:
+                jp_result = self.get_joint_position()
+                if jp_result.success and jp_result.payload is not None:
+                    joint_positions = list(jp_result.payload)
+            except Exception:
+                pass
             return GrpcCallResult(
                 success=True,
                 available=True,
                 payload={
-                    "robot_state": {"joint_positions": [0.0] * 28},
+                    "robot_state": {"joint_positions": joint_positions},
                     "scene_state": {},
                     "timestamp": _time.time(),
+                    "planned_timestamp": 0.0,
                 },
             )
         if not self._have_grpc:
@@ -4256,6 +4272,22 @@ class GenieSimLocalFramework:
             task_success = self._extract_task_success(frames, task)
             collision_free = planning_report.get("collision_free")
 
+            # LLM-based episode enrichment: task metadata and success evaluation
+            llm_metadata = self._enrich_episode_with_llm(
+                frames=frames,
+                task=task,
+                episode_id=episode_id,
+                collision_free=collision_free,
+            )
+            # Use LLM task_success if server-side evaluation is unavailable
+            if task_success is None and llm_metadata.get("task_success") is not None:
+                task_success = llm_metadata["task_success"]
+
+            # Determine data mode
+            data_mode = "proprioception_only" if os.environ.get(
+                "GENIESIM_SKIP_SERVER_RECORDING", ""
+            ) else "full"
+
             # Save episode
             episode_path = output_dir / f"{episode_id}.json"
             def _json_default(value: Any) -> Any:
@@ -4268,14 +4300,19 @@ class GenieSimLocalFramework:
             with open(episode_path, "w") as f:
                 json.dump({
                     "episode_id": episode_id,
-                    "task_name": task.get("task_name"),
+                    "task_name": task.get("task_name") or llm_metadata.get("task_name"),
+                    "task_description": llm_metadata.get("task_description"),
+                    "data_mode": data_mode,
                     "frames": frames,
                     "frame_count": len(frames),
                     "quality_score": quality_score,
                     "validation_passed": validation_passed,
                     "task_success": task_success,
+                    "task_success_reasoning": llm_metadata.get("task_success_reasoning"),
                     "collision_free": collision_free,
                     "collision_source": planning_report.get("collision_source"),
+                    "scene_description": llm_metadata.get("scene_description"),
+                    "success_criteria": llm_metadata.get("success_criteria"),
                     "stall_info": result["stall_info"],
                     "frame_validation": frame_validation,
                 }, f, default=_json_default)
@@ -5281,27 +5318,89 @@ class GenieSimLocalFramework:
             upper = robot_config.joint_limits_upper
 
         initial_joints = np.clip(initial_joints, lower, upper)
-        if robot_config is not None:
-            goal_joints = robot_config.default_joint_positions.copy()
-            if goal_joints.shape != initial_joints.shape:
-                goal_joints = initial_joints.copy()
-        else:
-            goal_joints = initial_joints.copy()
 
-        goal_joints = np.clip(goal_joints, lower, upper)
+        # ---- Multi-phase joint-space trajectory ----
+        # Generate a manipulation-like trajectory with 5 phases:
+        #   1. Approach  (20%)  – move arm toward target region
+        #   2. Grasp     (10%)  – close gripper / fine positioning
+        #   3. Lift      (20%)  – raise arm
+        #   4. Transport (30%)  – move arm laterally toward place
+        #   5. Place     (20%)  – lower arm and open gripper
+        # Each phase target is computed as a bounded perturbation of the
+        # initial joints, scaled by a fraction of the joint range.  This
+        # ensures diversity while respecting limits.
+        joint_range = upper - lower
+        # Identify arm joints (first ~6-7) vs gripper/finger joints (remaining)
+        num_joints = len(initial_joints)
+        arm_end = min(7, num_joints)  # first 7 joints are typically arm
+        # Gripper open/closed state masks: 1.0 = open, 0.0 = closed
+        gripper_open = np.ones(num_joints)
+        gripper_closed = np.ones(num_joints)
+        for j in range(arm_end, num_joints):
+            gripper_closed[j] = 0.3  # partially close fingers
 
+        # Build phase waypoints as offsets from initial joints
+        phase_configs = [
+            # (phase_name, arm_offset_fraction, gripper_multiplier, duration_fraction)
+            ("approach",  np.array([0.0, 0.05, -0.08, 0.04, -0.02, 0.03, 0.0]), gripper_open,  0.20),
+            ("grasp",     np.array([0.0, 0.08, -0.12, 0.06, -0.03, 0.04, 0.01]), gripper_closed, 0.10),
+            ("lift",      np.array([0.0, -0.05, -0.15, 0.08, -0.05, 0.06, 0.0]), gripper_closed, 0.20),
+            ("transport", np.array([0.1, -0.03, -0.10, 0.05, 0.05, -0.02, 0.03]), gripper_closed, 0.30),
+            ("place",     np.array([0.1, 0.02, -0.05, 0.03, 0.04, -0.01, 0.02]), gripper_open,  0.20),
+        ]
+
+        # Generate phase target joint positions
+        phase_targets = []
+        for phase_name, arm_offsets, grip_mult, _ in phase_configs:
+            target = initial_joints.copy()
+            # Apply arm offsets scaled by joint range
+            for j in range(min(len(arm_offsets), arm_end)):
+                target[j] += arm_offsets[j] * joint_range[j]
+            # Apply gripper multiplier
+            for j in range(arm_end, num_joints):
+                mid = (lower[j] + upper[j]) / 2.0
+                target[j] = mid + (initial_joints[j] - mid) * grip_mult[j]
+            target = np.clip(target, lower, upper)
+            phase_targets.append(target)
+
+        # Interpolate between phases to build full trajectory
         trajectory: List[Dict[str, Any]] = []
-        for i in range(num_waypoints):
-            t = i / max(1, num_waypoints - 1)
-            joint_pos = (1 - t) * initial_joints + t * goal_joints
-            if robot_config is not None:
-                joint_pos = self._clamp_joints_to_limits(joint_pos, robot_config)
-            trajectory.append(
-                {
-                    "joint_positions": joint_pos.tolist(),
-                    "timestamp": i / fps,
-                }
-            )
+        current_joints = initial_joints.copy()
+        current_time = 0.0
+        total_duration = num_waypoints / fps
+
+        for phase_idx, (phase_name, _, _, duration_frac) in enumerate(phase_configs):
+            target_joints = phase_targets[phase_idx]
+            phase_duration = duration_frac * total_duration
+            phase_steps = max(2, int(round(duration_frac * num_waypoints)))
+            start_step = 0 if phase_idx == 0 else 1
+
+            for step in range(start_step, phase_steps):
+                t = step / max(1, phase_steps - 1)
+                # Smooth interpolation using cubic ease-in-out
+                if t < 0.5:
+                    s = 4.0 * t * t * t
+                else:
+                    s = 1.0 - ((-2.0 * t + 2.0) ** 3) / 2.0
+                joint_pos = (1.0 - s) * current_joints + s * target_joints
+                joint_pos = np.clip(joint_pos, lower, upper)
+                if robot_config is not None:
+                    joint_pos = self._clamp_joints_to_limits(joint_pos, robot_config)
+                trajectory.append(
+                    {
+                        "joint_positions": joint_pos.tolist(),
+                        "timestamp": current_time + t * phase_duration,
+                    }
+                )
+
+            current_time += phase_duration
+            current_joints = target_joints
+
+        self.log(
+            f"  ℹ️  Multi-phase joint-space fallback: {len(trajectory)} waypoints "
+            f"across 5 phases.",
+            "INFO",
+        )
 
         positions = None
         if robot_config is not None and IK_PLANNING_AVAILABLE:
@@ -5648,6 +5747,108 @@ class GenieSimLocalFramework:
 
         return curobo_obstacles
 
+    def _enrich_episode_with_llm(
+        self,
+        frames: List[Dict[str, Any]],
+        task: Dict[str, Any],
+        episode_id: str,
+        collision_free: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """
+        Use Gemini 3.0 Pro Preview to enrich episode metadata.
+
+        Generates task descriptions, scene annotations, success criteria,
+        and evaluates whether the trajectory likely accomplishes the task.
+
+        Returns a dict with enriched metadata fields.
+        """
+        result: Dict[str, Any] = {}
+
+        if not os.environ.get("GENIESIM_USE_LLM_TASK_PLANNING", ""):
+            return result
+
+        try:
+            from tools.llm_client import create_llm_client, LLMProvider
+        except ImportError:
+            self.log("  ℹ️  LLM client unavailable; skipping episode enrichment.", "INFO")
+            return result
+
+        # Extract trajectory summary for the LLM (first, middle, last frames)
+        num_frames = len(frames)
+        sample_indices = [0, num_frames // 4, num_frames // 2, 3 * num_frames // 4, num_frames - 1]
+        sample_indices = sorted(set(i for i in sample_indices if 0 <= i < num_frames))
+
+        trajectory_summary = []
+        for idx in sample_indices:
+            frame = frames[idx]
+            obs = frame.get("observation") or {}
+            rs = obs.get("robot_state") or {}
+            jp = rs.get("joint_positions", [])
+            action = frame.get("action", [])
+            trajectory_summary.append({
+                "step": idx,
+                "joint_positions": [round(v, 4) for v in jp[:7]] if jp else [],
+                "action_sample": [round(v, 4) for v in action[:7]] if action else [],
+                "timestamp": frame.get("timestamp", 0),
+            })
+
+        task_type = task.get("task_type", "manipulation")
+        target_object = task.get("target_object", "unknown object")
+        description_hint = task.get("description_hint", "")
+        robot_type = getattr(self.config, "robot_type", "humanoid")
+
+        prompt = (
+            f"You are evaluating a robot manipulation episode for data quality.\n\n"
+            f"Robot: {robot_type}\n"
+            f"Task type: {task_type}\n"
+            f"Target object: {target_object}\n"
+            f"Description hint: {description_hint}\n"
+            f"Episode ID: {episode_id}\n"
+            f"Total frames: {num_frames}\n"
+            f"Collision-free: {collision_free}\n\n"
+            f"Trajectory samples (joint positions at key frames):\n"
+            f"{json.dumps(trajectory_summary, indent=2)}\n\n"
+            f"Based on this information, provide a JSON response with:\n"
+            f'{{"task_name": "short descriptive name for the task",\n'
+            f' "task_description": "1-2 sentence natural language description of what the robot is doing",\n'
+            f' "scene_description": "brief description of the scene context",\n'
+            f' "success_criteria": ["list of criteria for task success"],\n'
+            f' "task_success": true/false (whether the trajectory plausibly accomplishes the task),\n'
+            f' "task_success_reasoning": "1 sentence explanation of success/failure assessment"}}\n'
+        )
+
+        try:
+            client = create_llm_client(provider=LLMProvider.GEMINI)
+            response = client.generate(
+                prompt=prompt,
+                json_output=True,
+                temperature=0.3,
+            )
+            if response.error_message:
+                self.log(f"  ⚠️  LLM enrichment failed: {response.error_message}", "WARNING")
+                return result
+
+            data = response.data
+            if data is None:
+                data = json.loads(response.text)
+
+            result["task_name"] = data.get("task_name")
+            result["task_description"] = data.get("task_description")
+            result["scene_description"] = data.get("scene_description")
+            result["success_criteria"] = data.get("success_criteria")
+            result["task_success"] = data.get("task_success")
+            result["task_success_reasoning"] = data.get("task_success_reasoning")
+
+            self.log(
+                f"  ✅ LLM enrichment: task_name={result.get('task_name')}, "
+                f"task_success={result.get('task_success')}",
+                "INFO",
+            )
+        except Exception as exc:
+            self.log(f"  ⚠️  LLM enrichment error: {exc}", "WARNING")
+
+        return result
+
     def _calculate_quality_score(
         self,
         frames: List[Dict[str, Any]],
@@ -5661,7 +5862,11 @@ class GenieSimLocalFramework:
         task_obs_schema = task.get("observation_schema") or {}
         required_keys = task_obs_schema.get("required_keys") or task.get("required_observation_keys")
         if not required_keys:
-            required_keys = DEFAULT_OBSERVATION_SCHEMA["required_keys"]
+            # Use relaxed schema when camera data is unavailable
+            if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
+                required_keys = PROPRIOCEPTION_ONLY_OBSERVATION_SCHEMA["required_keys"]
+            else:
+                required_keys = DEFAULT_OBSERVATION_SCHEMA["required_keys"]
 
         task_action_bounds = task.get("action_bounds") or task.get("joint_limits") or {}
         lower_bounds = (
@@ -5781,9 +5986,44 @@ class GenieSimLocalFramework:
 
         frame_count_score = 1.0 if total_frames >= 10 else 0.5
 
+        # Action diversity: measure how much the actions change across frames.
+        # A trajectory where all actions are identical is low quality.
+        action_diversity_score = 0.0
+        if total_frames >= 2:
+            all_actions = []
+            for frame in frames:
+                action = frame.get("action")
+                if isinstance(action, (list, tuple, np.ndarray)):
+                    all_actions.append(np.array(action, dtype=float))
+            if len(all_actions) >= 2:
+                action_matrix = np.array(all_actions)
+                # Compute mean pairwise L2 distance between consecutive actions
+                diffs = np.diff(action_matrix, axis=0)
+                mean_diff = np.mean(np.linalg.norm(diffs, axis=1))
+                # Scale: 0.01 rad mean change = low, 0.1+ = high
+                action_diversity_score = min(1.0, mean_diff / 0.05)
+
+        # Observation diversity: measure how much joint positions change
+        obs_diversity_score = 0.0
+        if total_frames >= 2:
+            all_obs_joints = []
+            for frame in frames:
+                obs = frame.get("observation") or {}
+                rs = obs.get("robot_state") or {}
+                jp = rs.get("joint_positions")
+                if isinstance(jp, (list, tuple, np.ndarray)):
+                    all_obs_joints.append(np.array(jp, dtype=float))
+            if len(all_obs_joints) >= 2:
+                obs_matrix = np.array(all_obs_joints)
+                obs_diffs = np.diff(obs_matrix, axis=0)
+                mean_obs_diff = np.mean(np.linalg.norm(obs_diffs, axis=1))
+                obs_diversity_score = min(1.0, mean_obs_diff / 0.05)
+
         weighted_score = (
-            0.45 * data_completeness_score
-            + 0.35 * action_validity_score
+            0.30 * data_completeness_score
+            + 0.25 * action_validity_score
+            + 0.15 * action_diversity_score
+            + 0.10 * obs_diversity_score
             + 0.15 * success_score
             + 0.05 * frame_count_score
         )
