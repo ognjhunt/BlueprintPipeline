@@ -280,18 +280,23 @@ class TaskConfigGenerator:
             extra={"scene_id": scene_id},
         )
 
-        # Generate suggested tasks
+        # Generate tasks and robot config
         use_llm = os.environ.get("GENIESIM_USE_LLM_TASK_PLANNING", "0") == "1"
+        llm_robot_config = None
         if use_llm:
             try:
-                tasks = self._generate_tasks_with_llm(manifest, environment_type, max_tasks)
+                tasks, llm_robot_config = self._plan_scene_with_llm(
+                    manifest, environment_type, robot_type, max_tasks,
+                )
                 self.log(
-                    f"LLM generated {len(tasks)} task suggestions",
+                    f"LLM planned scene: {len(tasks)} tasks, "
+                    f"bounds={llm_robot_config.workspace_bounds}, "
+                    f"base={llm_robot_config.base_position}",
                     extra={"scene_id": scene_id},
                 )
             except Exception as exc:
                 self.log(
-                    f"LLM task generation failed, falling back to deterministic: {exc}",
+                    f"LLM scene planning failed, falling back to deterministic: {exc}",
                     level="WARNING",
                     extra={"scene_id": scene_id},
                 )
@@ -306,13 +311,18 @@ class TaskConfigGenerator:
         # Prioritize and limit tasks
         tasks = self._prioritize_tasks(tasks, max_tasks)
 
-        # Create robot config
-        robot_config = self._create_robot_config(
-            robot_type=robot_type,
-            urdf_path=urdf_path,
-            scene_config=scene_config,
-            objects=objects,
-        )
+        # Create robot config (use LLM-derived if available)
+        if llm_robot_config is not None:
+            robot_config = llm_robot_config
+            if urdf_path:
+                robot_config.urdf_path = urdf_path
+        else:
+            robot_config = self._create_robot_config(
+                robot_type=robot_type,
+                urdf_path=urdf_path,
+                scene_config=scene_config,
+                objects=objects,
+            )
 
         tasks, reachability_metadata = self._filter_tasks_by_reachability(
             tasks=tasks,
@@ -626,22 +636,30 @@ class TaskConfigGenerator:
         return min(priority, 5)  # Cap at 5
 
     # =========================================================================
-    # LLM-based Task Generation (Gemini 3.0 Pro Preview)
+    # LLM-based Scene Planning (Gemini 3.0 Pro Preview)
     # =========================================================================
 
-    def _generate_tasks_with_llm(
+    def _plan_scene_with_llm(
         self,
         manifest: Dict[str, Any],
         environment_type: str,
+        robot_type: str,
         max_tasks: int = 50,
-    ) -> List[SuggestedTask]:
-        """Generate tasks using Gemini 3.0 Pro Preview instead of deterministic rules."""
+    ) -> Tuple[List[SuggestedTask], RobotConfig]:
+        """
+        Unified LLM scene planning: derives workspace bounds, robot placement,
+        and manipulation tasks in a single call to Gemini 3.0 Pro Preview.
+
+        Returns:
+            Tuple of (tasks, robot_config) where the robot_config has
+            LLM-derived workspace bounds and base position.
+        """
         from tools.llm_client import create_llm_client, LLMProvider
 
-        client = create_llm_client(provider=LLMProvider.GOOGLE)
-        prompt = self._build_task_planning_prompt(manifest, environment_type, max_tasks)
+        client = create_llm_client(provider=LLMProvider.GEMINI)
+        prompt = self._build_scene_planning_prompt(manifest, environment_type, robot_type, max_tasks)
 
-        self.log("Requesting task generation from Gemini 3.0 Pro Preview")
+        self.log("Requesting unified scene planning from Gemini 3.0 Pro Preview")
         response = client.generate(
             prompt=prompt,
             json_output=True,
@@ -649,13 +667,33 @@ class TaskConfigGenerator:
         )
 
         if response.error_message:
-            raise RuntimeError(f"LLM task generation failed: {response.error_message}")
+            raise RuntimeError(f"LLM scene planning failed: {response.error_message}")
 
         data = response.data
         if data is None:
-            # Try parsing text as JSON
             data = json.loads(response.text)
 
+        # Parse robot config
+        llm_robot = data.get("robot_config", {})
+        workspace_bounds = llm_robot.get("workspace_bounds", [[-0.5, -0.5, 0.0], [1.0, 1.0, 1.5]])
+        base_position = llm_robot.get("base_position")
+        if not base_position:
+            base_position = [
+                (workspace_bounds[0][0] + workspace_bounds[1][0]) / 2,
+                (workspace_bounds[0][1] + workspace_bounds[1][1]) / 2,
+                (workspace_bounds[0][2] + workspace_bounds[1][2]) / 2,
+            ]
+        robot_config = RobotConfig(
+            robot_type=robot_type,
+            base_position=base_position,
+            workspace_bounds=workspace_bounds,
+        )
+        self.log(
+            f"LLM derived workspace_bounds={workspace_bounds}, "
+            f"base_position={base_position}"
+        )
+
+        # Parse tasks
         raw_tasks = data.get("suggested_tasks", [])
         self.log(f"LLM generated {len(raw_tasks)} task suggestions")
 
@@ -676,15 +714,16 @@ class TaskConfigGenerator:
                 constraints=t.get("constraints", {}),
             ))
 
-        return tasks
+        return tasks, robot_config
 
-    def _build_task_planning_prompt(
+    def _build_scene_planning_prompt(
         self,
         manifest: Dict[str, Any],
         environment_type: str,
+        robot_type: str,
         max_tasks: int,
     ) -> str:
-        """Build a prompt for LLM-based task generation from scene data."""
+        """Build a unified prompt for scene planning: bounds, robot placement, and tasks."""
         objects = manifest.get("objects", [])
 
         # Build object descriptions
@@ -717,22 +756,39 @@ class TaskConfigGenerator:
             object_descriptions.append(desc)
 
         objects_json = json.dumps(object_descriptions, indent=2)
-
         valid_types = sorted(DIFFICULTY_FACTORS.keys())
 
-        return f"""You are a robot task planner for a simulated {environment_type} environment.
+        return f"""You are a robot scene planner for a simulated {environment_type} environment.
 
-Given the following objects in the scene, generate diverse and physically plausible manipulation tasks for a robot arm.
+Given the objects below, you must:
+1. Determine the workspace bounding box that contains all manipulable/interactive objects
+2. Choose an optimal robot base position within the workspace where the robot can reach the most objects
+3. Generate diverse manipulation tasks, ensuring all tasks target objects within the workspace bounds
 
 ## Scene Objects
 {objects_json}
+
+## Robot Type
+{robot_type} (typical reach radius ~0.85m)
 
 ## Valid Task Types
 {json.dumps(valid_types)}
 
 ## Instructions
+
+### Workspace Bounds
+- Analyze all object positions and compute a bounding box [min_xyz, max_xyz] that encompasses all manipulable and interactive objects with ~0.3m padding
+- The bounds must contain every object referenced in suggested_tasks
+
+### Robot Base Position
+- Place the robot where it can reach the most manipulable objects
+- Position should be within the workspace bounds
+- Consider the robot's reach radius (~0.85m) — objects beyond this distance from the base cannot be manipulated
+
+### Tasks
 - Generate up to {max_tasks} tasks
-- Each task must reference a real object ID from the scene
+- Each task MUST reference a real object ID from the scene
+- ONLY create tasks for objects within the robot's reach from the base position
 - Prefer objects with relevant affordances (e.g., Graspable for pick_place)
 - Vary task types for diversity
 - Set difficulty based on object size, mass, and task complexity
@@ -743,6 +799,10 @@ Given the following objects in the scene, generate diverse and physically plausi
 ## Output Format
 Return JSON with this exact structure:
 {{
+  "robot_config": {{
+    "workspace_bounds": [[min_x, min_y, min_z], [max_x, max_y, max_z]],
+    "base_position": [x, y, z]
+  }},
   "suggested_tasks": [
     {{
       "task_type": "pick_place",
