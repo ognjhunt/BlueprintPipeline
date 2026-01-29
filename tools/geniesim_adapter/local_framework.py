@@ -1854,7 +1854,7 @@ class GenieSimGRPCClient:
                 ry=float(value[1]),
                 rz=float(value[2]),
             )
-        return rpy_pb2.Rpy()
+        return rpy_pb2.Rpy(rw=1.0, rx=0.0, ry=0.0, rz=0.0)
 
     @classmethod
     def _pose_from_data(cls, pose: Optional[Any]) -> Optional["se3_pose_pb2.SE3RpyPose"]:
@@ -3421,7 +3421,7 @@ class GenieSimLocalFramework:
             base_pos = robot_cfg.get("base_position", [0, 0, 0])
             base_pose = {
                 "position": {"x": base_pos[0], "y": base_pos[1], "z": base_pos[2]},
-                "orientation_rpy": {"roll": 0, "pitch": 0, "yaw": 0},
+                "orientation": {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
             }
             self.log(f"Initializing robot: cfg_file={robot_cfg_file}, base_position={base_pos}")
             init_result = self._client.init_robot(
