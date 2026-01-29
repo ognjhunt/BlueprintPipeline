@@ -190,7 +190,7 @@ class MockJointControlServicer(JointControlServiceServicer):
         return rsp
 
     def set_joint_position(self, request, context):
-        return SetJointRsp(errmsg="")
+        return SetJointRsp(errmsg="ok")
 
     def get_ik_status(self, request, context):
         return GetIKStatusRsp(isSuccess=True)
