@@ -2994,6 +2994,12 @@ class GenieSimLocalFramework:
         env[GENIESIM_RECORDINGS_DIR_ENV] = str(self.config.recording_dir)
         env[GENIESIM_LOG_DIR_ENV] = str(self.config.log_dir)
 
+        # Ensure geniesim_adapter dir is on PYTHONPATH so aimdk proto stubs resolve
+        adapter_dir = str(Path(__file__).parent)
+        existing = env.get("PYTHONPATH", "")
+        if adapter_dir not in existing.split(os.pathsep):
+            env["PYTHONPATH"] = f"{adapter_dir}{os.pathsep}{existing}" if existing else adapter_dir
+
         if use_local_server:
             if production_mode:
                 self.log(
