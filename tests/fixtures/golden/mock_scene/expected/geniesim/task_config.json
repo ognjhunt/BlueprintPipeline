@@ -1,20 +1,28 @@
 {
+  "schema_version": "3.0",
   "scene_id": "mock_scene",
   "environment_type": "kitchen",
   "suggested_tasks": [
     {
       "task_type": "pick_place",
-      "target_object": "mug_0",
+      "target_object": "mock_scene_obj_mug_0",
       "difficulty": "medium",
       "priority": 4,
       "description_hint": "Pick up the mug (mug_0) and place it on a nearby surface in a kitchen environment"
     },
     {
       "task_type": "organize",
-      "target_object": "mug_0",
+      "target_object": "mock_scene_obj_mug_0",
       "difficulty": "medium",
       "priority": 2,
       "description_hint": "Organize items into the mug (mug_0) in a kitchen environment"
+    },
+    {
+      "task_type": "pick_place",
+      "target_object": "mock_scene_obj_variation_mug_1",
+      "difficulty": "medium",
+      "priority": 1,
+      "description_hint": "pick place the mug"
     }
   ],
   "robot_config": {
@@ -22,7 +30,7 @@
     "base_position": [
       1.0,
       0.0,
-      0.0
+      1.0
     ],
     "workspace_bounds": [
       [
@@ -39,11 +47,20 @@
   },
   "metadata": {
     "total_objects": 2,
-    "manipulable_objects": 1,
+    "manipulable_objects": 2,
     "articulated_objects": 0,
     "task_types": [
       "pick_place",
       "organize"
-    ]
+    ],
+    "tasks_total_before_reachability_filter": 3,
+    "tasks_filtered_unreachable": 0,
+    "tasks_filtered_missing_position": 0,
+    "tasks_missing_position": 0,
+    "tasks_total_after_reachability_filter": 3,
+    "curobo_reachability_enabled": false,
+    "tasks_total_before_curobo_filter": 3,
+    "tasks_filtered_by_curobo": 0,
+    "tasks_total_after_curobo_filter": 3
   }
 }

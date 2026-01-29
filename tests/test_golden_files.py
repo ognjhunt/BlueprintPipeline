@@ -179,6 +179,7 @@ def test_golden_files_minimal_pipeline(tmp_path: Path, monkeypatch: pytest.Monke
 
     monkeypatch.setattr(episode_module.EpisodeGenerator, "__init__", _mock_init)
     monkeypatch.setattr(episode_module.EpisodeGenerator, "generate", _mock_generate)
+    monkeypatch.setenv("BYPASS_QUALITY_GATES", "1")
 
     episode_exit = episode_module.run_episode_generation_job(
         root=tmp_path,

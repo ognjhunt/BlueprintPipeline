@@ -29,6 +29,17 @@ def _parse_workspace_bounds(
     if bounds is None:
         return None
     if isinstance(bounds, dict):
+        # Support RoomBounds format: {"width": w, "depth": d, "height": h}
+        if "width" in bounds and "depth" in bounds and "height" in bounds:
+            try:
+                w = float(bounds["width"])
+                d = float(bounds["depth"])
+                h = float(bounds["height"])
+            except (TypeError, ValueError) as exc:
+                raise ExportConsistencyError(
+                    f"Invalid workspace_bounds dict in {context} at {path}."
+                ) from exc
+            return [-w / 2, -d / 2, 0.0], [w / 2, d / 2, h]
         try:
             min_pt = [float(bounds["x"][0]), float(bounds["y"][0]), float(bounds["z"][0])]
             max_pt = [float(bounds["x"][1]), float(bounds["y"][1]), float(bounds["z"][1])]

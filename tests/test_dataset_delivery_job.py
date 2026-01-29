@@ -184,6 +184,7 @@ def test_dataset_delivery_happy_path(monkeypatch, tmp_path):
     _setup_storage(monkeypatch, module, client)
     _setup_tempdir(monkeypatch, module, tmp_path)
     calls = _setup_requests(monkeypatch, module)
+    monkeypatch.setattr(module, "GCS_ROOT", tmp_path / "gcs")
 
     result = module.main()
 

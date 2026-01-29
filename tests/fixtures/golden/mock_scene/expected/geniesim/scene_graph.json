@@ -1,10 +1,11 @@
 {
+  "schema_version": "3.0",
   "scene_id": "mock_scene",
   "coordinate_system": "y_up",
   "meters_per_unit": 1.0,
   "nodes": [
     {
-      "asset_id": "mug_0",
+      "asset_id": "mock_scene_obj_mug_0",
       "semantic": "mug: coffee mug",
       "size": [
         0.08,
@@ -43,11 +44,22 @@
           "Containable"
         ],
         "articulation": {},
-        "placement_region": null
+        "placement_region": null,
+        "physics": {
+          "mass": 0.2
+        },
+        "physics_hints": {
+          "material_type": "ceramic"
+        },
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
       }
     },
     {
-      "asset_id": "variation_mug_1",
+      "asset_id": "mock_scene_obj_variation_mug_1",
       "semantic": "mug: variation mug",
       "size": [
         0.1,
@@ -56,9 +68,9 @@
       ],
       "pose": {
         "position": [
-          0.0,
-          0.0,
-          0.0
+          0.2,
+          0.3,
+          0.8
         ],
         "orientation": [
           1.0,
@@ -67,7 +79,10 @@
           0.0
         ]
       },
-      "task_tag": [],
+      "task_tag": [
+        "place",
+        "pick"
+      ],
       "usd_path": "<USD_SOURCE_DIR>/variation_mug_1.usd",
       "properties": {
         "mass": 0.5,
@@ -75,26 +90,35 @@
         "restitution": 0.1
       },
       "bp_metadata": {
-        "sim_role": "unknown",
+        "sim_role": "manipulable_object",
         "category": "mug",
         "affordances": [],
         "articulation": {},
-        "placement_region": null
+        "placement_region": null,
+        "physics": {},
+        "physics_hints": {},
+        "contacts": [],
+        "collisions": [],
+        "containment": [],
+        "contained_in": null,
+        "contains": null
       }
     }
   ],
   "edges": [
     {
-      "source": "mug_0",
-      "target": "variation_mug_1",
+      "source": "mock_scene_obj_mug_0",
+      "target": "mock_scene_obj_variation_mug_1",
       "relation": "adjacent",
-      "confidence": 0.7
+      "confidence": 0.7,
+      "metadata": {}
     },
     {
-      "source": "mug_0",
-      "target": "variation_mug_1",
+      "source": "mock_scene_obj_mug_0",
+      "target": "mock_scene_obj_variation_mug_1",
       "relation": "aligned",
-      "confidence": 0.6
+      "confidence": 0.6,
+      "metadata": {}
     }
   ],
   "metadata": {

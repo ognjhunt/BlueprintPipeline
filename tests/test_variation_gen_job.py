@@ -38,9 +38,9 @@ def test_variation_gen_job_dry_run(tmp_path, monkeypatch):
         dry_run=True,
     )
 
-    assert success is True
+    assert success.success is True
 
-    asset_dir = tmp_path / "variation_assets" / "spatula_01"
+    asset_dir = tmp_path / "variation_assets" / "mock_plate"
     reference_image = asset_dir / "reference.png"
     assert reference_image.is_file()
 
@@ -54,7 +54,7 @@ def test_variation_gen_job_dry_run(tmp_path, monkeypatch):
 
     updated_manifest = json.loads(manifest_with_results.read_text())
     asset_entry = next(
-        asset for asset in updated_manifest["assets"] if asset["name"] == "spatula_01"
+        asset for asset in updated_manifest["assets"] if asset["name"] == "mock_plate"
     )
 
     assert asset_entry["generation_status"] == "success"

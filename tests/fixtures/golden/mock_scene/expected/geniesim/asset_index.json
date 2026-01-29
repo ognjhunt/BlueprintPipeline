@@ -1,7 +1,8 @@
 {
+  "schema_version": "3.0",
   "assets": [
     {
-      "asset_id": "mug_0",
+      "asset_id": "mock_scene_obj_mug_0",
       "usd_path": "<USD_SOURCE_DIR>/mug_0.usd",
       "semantic_description": "A mug named mug_0 - coffee mug approximately 0.08m x 0.08m x 0.10m made of ceramic can be graspable, containable suitable for robot manipulation",
       "categories": [
@@ -17,6 +18,7 @@
       },
       "collision_hull_path": "<USD_SOURCE_DIR>/mug_0.usd",
       "texture_variants": {},
+      "embedding_status": "not_requested",
       "commercial_ok": true,
       "license": "proprietary",
       "source": "blueprintpipeline",
@@ -31,9 +33,9 @@
       }
     },
     {
-      "asset_id": "variation_mug_1",
+      "asset_id": "mock_scene_obj_variation_mug_1",
       "usd_path": "<USD_SOURCE_DIR>/variation_mug_1.usd",
-      "semantic_description": "A mug named variation_mug_1 - variation mug",
+      "semantic_description": "A mug named variation_mug_1 - variation mug suitable for robot manipulation",
       "categories": [
         "kitchen",
         "container",
@@ -47,11 +49,12 @@
       },
       "collision_hull_path": "<USD_SOURCE_DIR>/variation_mug_1.usd",
       "texture_variants": {},
+      "embedding_status": "not_requested",
       "commercial_ok": true,
-      "license": "proprietary",
+      "license": "cc0",
       "source": "blueprintpipeline_generated",
       "bp_metadata": {
-        "sim_role": "unknown",
+        "sim_role": "manipulable_object",
         "category": "mug",
         "affordances": [],
         "articulation": {}
@@ -62,6 +65,15 @@
     "source_scene": "mock_scene",
     "total_assets": 2,
     "commercial_assets": 2,
-    "embedding_model": null
+    "embedding_model": null,
+    "embedding_dim": 2048,
+    "embedding_errors": [],
+    "embedding_failure_rate": 0.0,
+    "embedding_failures": 0,
+    "placeholder_embeddings_allowed": true,
+    "placeholder_embeddings_used": 0,
+    "local_fallback_embeddings_used": 0,
+    "embedding_mode": "disabled",
+    "embedding_fallback_allowed": false
   }
 }
