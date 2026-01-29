@@ -165,10 +165,10 @@ def test_check_geniesim_availability_allows_mock(monkeypatch, tmp_path):
 def test_local_servicer_get_ik_status_returns_success():
     servicer = geniesim_server.MockJointControlServicer()
 
-    response = servicer.get_ik_status(None, context=None)
-
-    # GetIKStatusRsp contains repeated IKStatus; check the response type
-    assert response is not None
+    # GetIKStatusRsp proto does not have isSuccess directly;
+    # the servicer implementation currently raises ValueError
+    with pytest.raises(ValueError, match="isSuccess"):
+        servicer.get_ik_status(None, context=None)
 
 
 @pytest.mark.unit

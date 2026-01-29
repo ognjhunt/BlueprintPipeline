@@ -86,9 +86,10 @@ def test_inject_extract_context_when_disabled(monkeypatch):
 
     from tools.tracing import inject_trace_context, extract_trace_context
 
-    # Should return empty dict
+    # May return request-id even when tracing is disabled
     context = inject_trace_context()
-    assert context == {}
+    # No OpenTelemetry trace headers when disabled
+    assert "traceparent" not in context
 
     # Should handle gracefully
     extracted = extract_trace_context({"traceparent": "test"})

@@ -136,6 +136,8 @@ def _prepare_common_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCENE_ID", "scene-1")
     monkeypatch.setenv("EPISODES_PER_TASK", "1")
     monkeypatch.setenv("NUM_VARIATIONS", "1")
+    monkeypatch.setenv("GENERATE_EMBEDDINGS", "false")
+    monkeypatch.setenv("REQUIRE_EMBEDDINGS", "false")
 
 
 def _install_firebase_stub(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,6 +187,7 @@ def _run_submit_job(
     )
     monkeypatch.setattr(submit_module, "upload_blob_from_filename", lambda *_a, **_k: FakeUploadResult())
     monkeypatch.setattr(submit_module, "verify_blob_upload", lambda *_a, **_k: (True, None))
+    monkeypatch.setattr(submit_module, "_run_geniesim_data_quality_gate", lambda **_k: True)
 
     class FakeMetrics:
         def __init__(self) -> None:

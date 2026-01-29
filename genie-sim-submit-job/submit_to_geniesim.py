@@ -1286,7 +1286,7 @@ def _build_local_execution_by_robot(
 ) -> Dict[str, Any]:
     return {
         current_robot: {
-            "success": bool(result and result.success),
+            "success": bool((result := local_run_results.get(current_robot)) and result.success),
             "episodes_collected": _safe_int(
                 getattr(result, "episodes_collected", None),
                 field_name=f"{current_robot}.episodes_collected",

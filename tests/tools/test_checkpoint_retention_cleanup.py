@@ -45,10 +45,11 @@ def test_cleanup_scene_prunes_old_files(tmp_path: Path) -> None:
         intermediate_days=5,
         outputs_days=5,
         logs_days=5,
+        markers_days=5,
         fallback_days=5,
     )
 
-    deleted, considered = retention_cleanup.cleanup_scene(
+    deleted, considered, deleted_markers, considered_markers = retention_cleanup.cleanup_scene(
         scene_root,
         policy,
         now=now,
@@ -76,10 +77,11 @@ def test_cleanup_scene_dry_run_keeps_files(tmp_path: Path) -> None:
         intermediate_days=5,
         outputs_days=5,
         logs_days=5,
+        markers_days=5,
         fallback_days=5,
     )
 
-    deleted, considered = retention_cleanup.cleanup_scene(
+    deleted, considered, deleted_markers, considered_markers = retention_cleanup.cleanup_scene(
         scene_root,
         policy,
         now=now,

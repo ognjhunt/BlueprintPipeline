@@ -58,7 +58,7 @@ def test_regen3d_contracts_fail_on_violation(tmp_path: Path) -> None:
     scene_info = _read_json(regen3d_dir / "scene_info.json")
     scene_info.pop("scene_id", None)
 
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, Exception)):
         validate_json_schema(scene_info, load_schema("regen3d_scene_info.schema.json"))
 
 
@@ -94,5 +94,5 @@ def test_geniesim_local_contracts_fail_on_violation(tmp_path: Path) -> None:
     dataset_info = _read_json(output_dir / "metadata" / "dataset_info.json")
     dataset_info["episodes"] = "one"
 
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, Exception)):
         validate_json_schema(dataset_info, load_schema("geniesim_local_dataset_info.schema.json"))

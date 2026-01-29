@@ -41,7 +41,7 @@ def test_geniesim_healthcheck_human_non_ok(monkeypatch, caplog):
     )
     monkeypatch.setattr("sys.argv", ["geniesim_healthcheck"])
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("INFO", logger="tools.geniesim_adapter.geniesim_healthcheck"):
         assert geniesim_healthcheck.main() == 1
 
     assert "Genie Sim Health Check" in caplog.text

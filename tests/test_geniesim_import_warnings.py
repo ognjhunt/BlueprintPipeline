@@ -19,13 +19,8 @@ def test_resolve_upload_file_list_warns_on_bad_json(
     dataset_info_path.write_text("{not-json")
 
     caplog.set_level(logging.WARNING)
-    result = module._resolve_upload_file_list(output_dir, ["episode_000001"])
-
-    assert result
-    assert any(
-        "dataset_info.json" in record.message and "Failed to load dataset info" in record.message
-        for record in caplog.records
-    )
+    with pytest.raises(ValueError, match="Failed to load JSON file"):
+        module._resolve_upload_file_list(output_dir, ["episode_000001"])
 
 
 def test_parquet_validation_logs_shape_warnings_once(

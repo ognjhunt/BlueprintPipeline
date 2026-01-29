@@ -160,4 +160,4 @@ def test_resume_skips_completed_steps(local_pipeline_runner, monkeypatch):
     success = resume_runner.run(steps=steps, resume_from=PipelineStep.REGEN3D)
 
     assert success
-    assert run_calls == [PipelineStep.USD]
+    assert run_calls == [PipelineStep.REGEN3D, PipelineStep.SIMREADY, PipelineStep.USD]

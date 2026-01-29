@@ -57,7 +57,7 @@ def test_timeout_expires_in_production(monkeypatch, tmp_path):
     manager = _build_manager(tmp_path, monkeypatch, config)
     request = manager.create_request(_make_failure_result())
     request.expires_at = (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z"
-    manager.save_request(request)
+    manager.store.save_request(request)
 
     current = manager.check_status(request.request_id)
 

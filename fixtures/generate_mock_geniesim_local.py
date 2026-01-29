@@ -243,6 +243,11 @@ def generate_mock_geniesim_local(
     dataset_info = {
         "dataset_type": "lerobot",
         "format_version": "1.0",
+        "schema_version": "1.0.0",
+        "scene_id": "mock_scene",
+        "run_id": run_id,
+        "pipeline_commit": "mock_commit",
+        "export_schema_version": "3.0",
         "episodes": episodes_index,
         "total_frames": total_frames,
         "average_quality_score": sum(quality_scores) / max(len(quality_scores), 1),
