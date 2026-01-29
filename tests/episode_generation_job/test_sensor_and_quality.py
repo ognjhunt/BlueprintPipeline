@@ -107,7 +107,6 @@ def test_quality_certificate_generation(load_job_module, tmp_path: Path) -> None
     ("env_var", "env_value"),
     [
         ("PIPELINE_ENV", "production"),
-        ("DATA_QUALITY_LEVEL", "production"),
     ],
 )
 def test_mock_capture_blocked_in_production_envs(

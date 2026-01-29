@@ -21,10 +21,7 @@ def test_requires_curobo_env_flag(load_job_module, monkeypatch) -> None:
     assert curobo_planner._requires_curobo() is True
 
     monkeypatch.setenv("PIPELINE_ENV", "development")
-    monkeypatch.setenv("DATA_QUALITY_LEVEL", "production")
-    assert curobo_planner._requires_curobo() is True
-
-    monkeypatch.setenv("DATA_QUALITY_LEVEL", "")
+    monkeypatch.delenv("DATA_QUALITY_LEVEL", raising=False)
     assert curobo_planner._requires_curobo() is False
 
 

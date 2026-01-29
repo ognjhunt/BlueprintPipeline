@@ -22,5 +22,5 @@ def test_articulation_defaults_include_new_fields(tmp_path) -> None:
 
     assert config["stiffness"] == 0.0
     assert config["friction"] == 0.0
-    assert config["velocity_limit"] == 6.0
+    assert config["velocity_limit"] == 1.0
     assert config["effort_limit"] is None

@@ -109,7 +109,7 @@ def test_solve_trajectory_with_replan_returns_replanned_plan(monkeypatch, tmp_pa
         assert kwargs["task_description"] == "Pick object"
         return replanned_motion_plan
 
-    monkeypatch.setattr(trajectory_solver.TrajectorySolver, "solve", fake_solve)
+    monkeypatch.setattr(generator.trajectory_solver, "solve", lambda plan: fake_solve(generator.trajectory_solver, plan))
     monkeypatch.setattr(generator.motion_planner, "plan_motion", fake_plan_motion)
 
     returned_plan, returned_trajectory = generator._solve_trajectory_with_replan(

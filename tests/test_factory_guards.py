@@ -25,6 +25,7 @@ from tools.llm_client.client import LLMClient, LLMProvider, LLMResponse
 
 import geniesim_grpc_pb2_grpc
 import geniesim_server
+from tools.geniesim_adapter import geniesim_grpc_pb2_grpc as _grpc_module
 
 
 class DummyClient(LLMClient):
@@ -68,5 +69,5 @@ def test_generate_image_returns_structured_failure_for_unsupported_provider() ->
 def test_geniesim_server_local_servicer_is_concrete() -> None:
     assert issubclass(
         geniesim_server.GenieSimLocalServicer,
-        geniesim_grpc_pb2_grpc.SimObservationServiceServicer,
+        _grpc_module.SimObservationServiceServicer,
     )

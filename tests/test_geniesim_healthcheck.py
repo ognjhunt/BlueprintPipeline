@@ -23,7 +23,7 @@ def test_geniesim_healthcheck_json_ok(monkeypatch, capsys):
     assert json.loads(output) == report_payload
 
 
-def test_geniesim_healthcheck_human_non_ok(monkeypatch, caplog):
+def test_geniesim_healthcheck_human_non_ok(monkeypatch, capsys):
     status_payload = {"isaac_sim_available": False}
     report_payload = {
         "ok": False,
@@ -41,8 +41,8 @@ def test_geniesim_healthcheck_human_non_ok(monkeypatch, caplog):
     )
     monkeypatch.setattr("sys.argv", ["geniesim_healthcheck"])
 
-    with caplog.at_level("INFO", logger="tools.geniesim_adapter.geniesim_healthcheck"):
-        assert geniesim_healthcheck.main() == 1
+    assert geniesim_healthcheck.main() == 1
 
-    assert "Genie Sim Health Check" in caplog.text
-    assert "Missing requirements: grpc" in caplog.text
+    output = capsys.readouterr().out
+    assert "Genie Sim Health Check" in output
+    assert "Missing requirements: grpc" in output
