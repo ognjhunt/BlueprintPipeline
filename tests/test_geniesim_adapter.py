@@ -97,7 +97,7 @@ def sample_manifest() -> Dict[str, Any]:
                     "height": 0.10,
                 },
                 "transform": {
-                    "position": {"x": 1.0, "y": 0.9, "z": 0.05},
+                    "position": {"x": 0.4, "y": 0.3, "z": 0.8},
                     "rotation_euler": {"roll": 0, "pitch": 0, "yaw": 0},
                     "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
@@ -128,7 +128,7 @@ def sample_manifest() -> Dict[str, Any]:
                     "height": 0.05,
                 },
                 "transform": {
-                    "position": {"x": 1.0, "y": 0.85, "z": 0.0},
+                    "position": {"x": 0.3, "y": 0.2, "z": 0.75},
                     "rotation_euler": {"roll": 0, "pitch": 0, "yaw": 0},
                     "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
@@ -152,7 +152,7 @@ def sample_manifest() -> Dict[str, Any]:
                     "height": 0.8,
                 },
                 "transform": {
-                    "position": {"x": 0.3, "y": 1.5, "z": 0.0},
+                    "position": {"x": 0.2, "y": 0.4, "z": 0.8},
                     "rotation_quaternion": {"w": 1, "x": 0, "y": 0, "z": 0},
                     "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
@@ -266,7 +266,7 @@ class TestSceneGraphConverter:
         scene_graph = converter.convert(sample_manifest)
 
         # Find the mug node
-        mug_node = next((n for n in scene_graph.nodes if n.asset_id == "mug_001"), None)
+        mug_node = next((n for n in scene_graph.nodes if n.asset_id == "test_kitchen_001_obj_mug_001"), None)
         assert mug_node is not None
 
         # Check semantic description
@@ -276,7 +276,7 @@ class TestSceneGraphConverter:
         assert mug_node.size == [0.08, 0.08, 0.10]
 
         # Check pose
-        assert mug_node.pose.position == [1.0, 0.9, 0.05]
+        assert mug_node.pose.position == [0.4, 0.3, 0.8]
 
         # Check task tags (should have pick, place from Graspable)
         assert "pick" in mug_node.task_tag
@@ -289,7 +289,7 @@ class TestSceneGraphConverter:
 
         # Cabinet should have open/close tags
         cabinet_node = next(
-            (n for n in scene_graph.nodes if n.asset_id == "cabinet_001"), None
+            (n for n in scene_graph.nodes if n.asset_id == "test_kitchen_001_obj_cabinet_001"), None
         )
         assert cabinet_node is not None
         assert "open" in cabinet_node.task_tag
@@ -365,15 +365,15 @@ class TestSceneGraphConverter:
 
         expected_edges = [
             GenieSimEdge(
-                source="mug_001",
-                target="countertop_001",
+                source="test_kitchen_001_obj_mug_001",
+                target="test_kitchen_001_obj_countertop_001",
                 relation="on",
                 confidence=0.42,
             )
         ]
         called = {}
 
-        def fake_infer(self, nodes, scene_id=None):
+        def fake_infer(self, nodes, scene_id=None, progress_callback=None):
             called["count"] = len(nodes)
             return expected_edges
 
@@ -460,7 +460,7 @@ class TestAssetIndexBuilder:
         builder = AssetIndexBuilder(verbose=False)
         index = builder.build(sample_manifest)
 
-        mug_asset = index.get_asset("mug_001")
+        mug_asset = index.get_asset("test_kitchen_001_obj_mug_001")
         assert mug_asset is not None
         assert "mug" in mug_asset.semantic_description.lower()
         assert "ceramic" in mug_asset.semantic_description.lower()
@@ -470,7 +470,7 @@ class TestAssetIndexBuilder:
         builder = AssetIndexBuilder(verbose=False)
         index = builder.build(sample_manifest)
 
-        mug_asset = index.get_asset("mug_001")
+        mug_asset = index.get_asset("test_kitchen_001_obj_mug_001")
         assert mug_asset is not None
         assert mug_asset.mass == 0.3
         assert mug_asset.material.friction == 0.5
@@ -488,7 +488,7 @@ class TestAssetIndexBuilder:
 
         # Only 1 asset (our own mug) should remain
         assert len(commercial_index.assets) == 1
-        assert commercial_index.assets[0].asset_id == "own_mug_001"
+        assert commercial_index.assets[0].asset_id == "test_mixed_assets_obj_own_mug_001"
         assert commercial_index.assets[0].commercial_ok is True
 
     def test_nc_assets_marked(self, manifest_with_external_assets):
@@ -497,8 +497,8 @@ class TestAssetIndexBuilder:
         index = builder.build(manifest_with_external_assets)
 
         # Find external NC assets
-        nc_bowl = index.get_asset("external_nc_bowl_001")
-        nc_plate = index.get_asset("external_nc_plate_001")
+        nc_bowl = index.get_asset("test_mixed_assets_obj_external_nc_bowl_001")
+        nc_plate = index.get_asset("test_mixed_assets_obj_external_nc_plate_001")
 
         assert nc_bowl is not None
         assert nc_bowl.commercial_ok is False
@@ -708,7 +708,7 @@ class TestGenieSimExporter:
         assert export_payload["schema_version"] == GENIESIM_TARGET_VERSION
 
     def test_commercial_only_export(self, manifest_with_external_assets, tmp_path):
-        """Test export with commercial-only filter."""
+        """Test export with commercial-only filter rejects NC assets."""
         manifest_path = tmp_path / "scene_manifest.json"
         with open(manifest_path, "w") as f:
             json.dump(manifest_with_external_assets, f)
@@ -722,15 +722,8 @@ class TestGenieSimExporter:
         exporter = GenieSimExporter(config, verbose=False)
         result = exporter.export(manifest_path, output_dir)
 
-        assert result.success is True
-
-        # Load asset index and verify only commercial assets
-        with open(result.asset_index_path) as f:
-            asset_index = json.load(f)
-
-        # Should only have 1 asset (our own mug)
-        assert len(asset_index["assets"]) == 1
-        assert asset_index["assets"][0]["asset_id"] == "own_mug_001"
+        # Source code now rejects manifests containing non-commercial assets
+        assert result.success is False
 
     def test_scene_config_env_overrides(self, sample_manifest, tmp_path, monkeypatch):
         """Ensure env overrides are reflected in the scene config YAML."""
@@ -817,8 +810,9 @@ class TestPipelineSelector:
         selector = PipelineSelector()
         jobs = selector._get_geniesim_jobs()
 
-        # Should end with local Genie Sim submission
-        assert jobs[-1] == "genie-sim-submit-job"
+        # Should end with Genie Sim import (submit is second-to-last)
+        assert jobs[-1] == "genie-sim-import-job"
+        assert "genie-sim-submit-job" in jobs
         assert "genie-sim-export-job" in jobs
         assert "variation-gen-job" in jobs
 

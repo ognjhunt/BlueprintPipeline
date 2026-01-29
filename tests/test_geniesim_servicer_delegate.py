@@ -25,34 +25,34 @@ class DummyContext:
         self.details = details
 
 
-class Delegate:
-    def __init__(self) -> None:
-        self.called = False
-
-    def GetObservation(
-        self,
-        request: geniesim_pb2.GetObservationRequest,
-        context: DummyContext,
-    ) -> geniesim_pb2.GetObservationResponse:
-        self.called = True
-        return geniesim_pb2.GetObservationResponse(success=True, timestamp=123.0)
-
-    def GetCameraData(self, *_args, **_kwargs) -> None:
-        return None
-
-    def GetSemanticData(self, *_args, **_kwargs) -> None:
-        return None
-
-    def LinearMove(self, *_args, **_kwargs) -> None:
-        return None
+def test_servicer_base_class_exists() -> None:
+    """Verify that SimObservationServiceServicer is importable and instantiable."""
+    servicer = geniesim_pb2_grpc.SimObservationServiceServicer()
+    assert servicer is not None
 
 
-def test_servicer_uses_delegate_for_get_observation() -> None:
-    delegate = Delegate()
-    servicer = geniesim_pb2_grpc.GenieSimServiceServicer(delegate=delegate)
-    context = DummyContext()
-
-    response = servicer.GetObservation(geniesim_pb2.GetObservationRequest(), context)
-
-    assert delegate.called is True
-    assert response.success is True
+def test_servicer_has_expected_methods() -> None:
+    """Verify the base servicer exposes the expected RPC method stubs."""
+    servicer = geniesim_pb2_grpc.SimObservationServiceServicer()
+    expected_methods = [
+        "get_observation",
+        "reset",
+        "attach_obj",
+        "detach_obj",
+        "task_status",
+        "exit",
+        "init_robot",
+        "add_camera",
+        "set_object_pose",
+        "set_trajectory_list",
+        "set_frame_state",
+        "set_task_metric",
+        "set_material",
+        "set_light",
+        "remove_objs_from_obstacle",
+        "store_current_state",
+        "playback",
+        "get_checker_status",
+    ]
+    for method_name in expected_methods:
+        assert hasattr(servicer, method_name), f"Missing method: {method_name}"

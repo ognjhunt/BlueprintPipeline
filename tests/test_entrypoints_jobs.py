@@ -284,6 +284,10 @@ def test_geniesim_submit_entrypoint_validates_bundle(monkeypatch: pytest.MonkeyP
     assert job_payload["export_schema"]["geniesim_schema_version"] == "3.0.0"
 
 
+@pytest.mark.skipif(
+    not importlib.util.find_spec("flask"),
+    reason="flask not installed",
+)
 def test_geniesim_import_webhook_persists_firestore(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_firestore_client = FakeFirestoreClient()
     fake_firestore_module = FakeFirestoreModule(fake_firestore_client)

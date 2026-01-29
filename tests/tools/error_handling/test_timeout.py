@@ -1,6 +1,9 @@
+import importlib
+import threading
+
 import pytest
 
-import tools.error_handling.timeout as timeout_module
+timeout_module = importlib.import_module("tools.error_handling.timeout")
 
 
 class ImmediateTimer:
@@ -31,7 +34,7 @@ class NoOpTimer:
 
 class TestTimeoutThread:
     def test_timeout_thread_triggers(self, monkeypatch):
-        monkeypatch.setattr(timeout_module.threading, "Timer", ImmediateTimer)
+        monkeypatch.setattr(threading, "Timer", ImmediateTimer)
 
         with pytest.raises(timeout_module.TimeoutError) as exc_info:
             with timeout_module.timeout_thread(0.01, "Too slow"):
@@ -40,7 +43,7 @@ class TestTimeoutThread:
         assert "Too slow" in str(exc_info.value)
 
     def test_with_timeout_propagates_exception(self, monkeypatch):
-        monkeypatch.setattr(timeout_module.threading, "Timer", NoOpTimer)
+        monkeypatch.setattr(threading, "Timer", NoOpTimer)
 
         @timeout_module.with_timeout(5.0, use_thread=True)
         def raises_value_error():

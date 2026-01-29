@@ -48,6 +48,8 @@ Environment Variables:
     COSMOS_POLICY_FIREBASE_PREFIX: Firebase upload prefix for Cosmos Policy (default: datasets/cosmos_policy)
 """
 
+from __future__ import annotations
+
 import asyncio
 import copy
 import importlib

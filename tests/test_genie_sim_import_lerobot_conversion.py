@@ -117,7 +117,7 @@ def test_missing_lerobot_dir_triggers_conversion(
         {
             "job_id": "job123",
             "output_dir": output_dir,
-            "min_quality_score": 0.0,
+            "min_quality_score": 0.5,
             "quality_component_thresholds": {},
             "enable_validation": False,
         }
@@ -161,7 +161,7 @@ def test_conversion_failure_reports_error_when_required(
         {
             "job_id": "job123",
             "output_dir": output_dir,
-            "min_quality_score": 0.0,
+            "min_quality_score": 0.5,
             "quality_component_thresholds": {},
             "enable_validation": False,
             "require_lerobot": True,

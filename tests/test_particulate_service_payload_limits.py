@@ -5,6 +5,9 @@ import threading
 from pathlib import Path
 
 import pytest
+pytest.importorskip("flask")
+
+import pytest
 
 
 class _NoOpThread:

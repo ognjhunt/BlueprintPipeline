@@ -64,6 +64,7 @@ def test_firebase_upload_allows_partial_failures(monkeypatch, load_job_module, t
         firebase_upload_prefix="datasets",
         firebase_upload_max_workers=2,
         allow_partial_firebase_uploads=True,
+        fail_on_partial_error=False,
         log=log,
         overall_success=True,
     )
@@ -110,6 +111,7 @@ def test_firebase_upload_blocks_partial_failures(monkeypatch, load_job_module, t
             firebase_upload_prefix="datasets",
             firebase_upload_max_workers=2,
             allow_partial_firebase_uploads=False,
+            fail_on_partial_error=True,
             log=log,
             overall_success=True,
         )

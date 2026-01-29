@@ -30,13 +30,22 @@ def _write_layout(layout_dir: Path, layout_fixture: Path, metadata_fixture: Path
     (layout_dir / "metric_metadata.json").write_text(json.dumps(metadata, indent=2))
 
 
-def _run_scale(layout_prefix: str, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _run_scale(layout_prefix: str, monkeypatch: pytest.MonkeyPatch, gcs_root: Path) -> Path:
     monkeypatch.setenv("BUCKET", "unit-test-bucket")
     monkeypatch.setenv("SCENE_ID", "unit-test-scene")
     monkeypatch.setenv("LAYOUT_PREFIX", layout_prefix)
     module = _load_scale_module()
+
+    _real_path = Path
+
+    def _patched_path(*args, **kwargs):
+        if args and args[0] == "/mnt/gcs":
+            return gcs_root
+        return _real_path(*args, **kwargs)
+
+    monkeypatch.setattr(module, "Path", _patched_path)
     module.main()
-    return Path("/mnt/gcs") / layout_prefix / "scene_layout_scaled.json"
+    return gcs_root / layout_prefix / "scene_layout_scaled.json"
 
 
 @pytest.mark.parametrize(
@@ -62,12 +71,12 @@ def test_scale_job_applies_reference_and_scene_metrics(
     expected_scale: float,
 ) -> None:
     prefix = f"scale-job-tests/{layout_fixture.stem}"
-    layout_dir = Path("/mnt/gcs") / prefix
+    layout_dir = tmp_path / prefix
     _write_layout(layout_dir, layout_fixture, metadata_fixture)
 
     schema = load_schema("metric_metadata.schema.json")
     validate_json_schema(json.loads(metadata_fixture.read_text()), schema)
 
-    scaled_path = _run_scale(prefix, monkeypatch)
+    scaled_path = _run_scale(prefix, monkeypatch, tmp_path)
     scaled_layout = json.loads(scaled_path.read_text())
     assert scaled_layout["scale"]["factor"] == pytest.approx(expected_scale)

@@ -210,7 +210,7 @@ KITCHEN_RULES: List[AssetPlacementRule] = [
         asset_category=AssetCategory.DISHES,
         region_types=[RegionType.SINK, RegionType.DISH_PIT],
         priority=15,
-        semantic_tags=["dirty_dishes", "to_wash"],
+        semantic_requirements=["dirty_dishes", "to_wash"],
         density_per_m2=12.0,
         notes="Dirty dishes in sink/dish pit"
     ),
@@ -244,7 +244,7 @@ KITCHEN_RULES: List[AssetPlacementRule] = [
         asset_category=AssetCategory.UTENSILS,
         region_types=[RegionType.COUNTER, RegionType.PREP_SURFACE],
         priority=10,
-        semantic_tags=["utensil_holder", "prep_area"],
+        semantic_requirements=["utensil_holder", "prep_area"],
         density_per_m2=15.0,
         notes="Utensils in holders on counter"
     ),
@@ -294,7 +294,7 @@ KITCHEN_RULES: List[AssetPlacementRule] = [
         asset_category=AssetCategory.FOOD_ITEMS,
         region_types=[RegionType.COUNTER, RegionType.PREP_SURFACE],
         priority=15,
-        semantic_tags=["prep_area", "cooking"],
+        semantic_requirements=["prep_area", "cooking"],
         notes="Food being prepared"
     ),
     AssetPlacementRule(
@@ -386,7 +386,7 @@ GROCERY_RULES: List[AssetPlacementRule] = [
         asset_category=AssetCategory.PRODUCE,
         region_types=[RegionType.SHELF],
         priority=15,
-        semantic_tags=["produce_section"],
+        semantic_requirements=["produce_section"],
         density_per_m2=30.0,
         notes="Fresh produce display"
     ),
@@ -539,7 +539,7 @@ LAUNDRY_RULES: List[AssetPlacementRule] = [
         region_types=[RegionType.WASHER],
         priority=20,
         requires_articulation_state=ArticulationState.OPEN,
-        semantic_tags=["dirty", "to_wash"],
+        semantic_requirements=["dirty", "to_wash"],
         notes="Clothes in open washer"
     ),
     AssetPlacementRule(
@@ -547,21 +547,21 @@ LAUNDRY_RULES: List[AssetPlacementRule] = [
         region_types=[RegionType.DRYER],
         priority=20,
         requires_articulation_state=ArticulationState.OPEN,
-        semantic_tags=["wet", "to_dry"],
+        semantic_requirements=["wet", "to_dry"],
         notes="Clothes in open dryer"
     ),
     AssetPlacementRule(
         asset_category=AssetCategory.CLOTHING,
         region_types=[RegionType.FOLDING_TABLE],
         priority=15,
-        semantic_tags=["clean", "to_fold"],
+        semantic_requirements=["clean", "to_fold"],
         notes="Clean clothes on folding table"
     ),
     AssetPlacementRule(
         asset_category=AssetCategory.CLOTHING,
         region_types=[RegionType.HAMPER_AREA],
         priority=15,
-        semantic_tags=["dirty"],
+        semantic_requirements=["dirty"],
         notes="Dirty clothes in hamper"
     ),
     AssetPlacementRule(
@@ -569,7 +569,7 @@ LAUNDRY_RULES: List[AssetPlacementRule] = [
         region_types=[RegionType.CLOSET],
         priority=10,
         requires_articulation_state=ArticulationState.OPEN,
-        semantic_tags=["clean", "stored"],
+        semantic_requirements=["clean", "stored"],
         notes="Clean clothes in closet"
     ),
     AssetPlacementRule(

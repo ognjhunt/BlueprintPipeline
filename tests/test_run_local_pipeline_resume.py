@@ -68,6 +68,7 @@ def test_resume_skips_completed_steps(local_pipeline_runner, monkeypatch):
         )
 
     monkeypatch.setattr(local_pipeline_runner, "_run_step", fake_run_step)
+    monkeypatch.setattr(local_pipeline_runner, "_apply_quality_gates", lambda step, result: result)
 
     success = local_pipeline_runner.run(steps=steps)
 
@@ -112,6 +113,7 @@ def test_resume_skips_completed_steps(local_pipeline_runner, monkeypatch):
         "_run_step",
         fake_run_step_resume_missing_marker,
     )
+    monkeypatch.setattr(resume_runner_missing_marker, "_apply_quality_gates", lambda step, result: result)
 
     success = resume_runner_missing_marker.run(
         steps=steps,
@@ -119,7 +121,7 @@ def test_resume_skips_completed_steps(local_pipeline_runner, monkeypatch):
     )
 
     assert not success
-    assert run_calls_missing_marker == [PipelineStep.REGEN3D, PipelineStep.USD]
+    assert run_calls_missing_marker == [PipelineStep.REGEN3D, PipelineStep.SIMREADY, PipelineStep.USD]
     assert marker_path.exists()
 
     resume_runner = LocalPipelineRunner(
@@ -153,6 +155,7 @@ def test_resume_skips_completed_steps(local_pipeline_runner, monkeypatch):
         )
 
     monkeypatch.setattr(resume_runner, "_run_step", fake_run_step_resume)
+    monkeypatch.setattr(resume_runner, "_apply_quality_gates", lambda step, result: result)
 
     success = resume_runner.run(steps=steps, resume_from=PipelineStep.REGEN3D)
 

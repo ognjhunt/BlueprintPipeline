@@ -65,6 +65,8 @@ def test_generate_image_returns_structured_failure_for_unsupported_provider() ->
     assert response.images == []
 
 
-def test_geniesim_server_guard_rejects_base_servicer() -> None:
-    with pytest.raises(TypeError):
-        geniesim_server._ensure_concrete_servicer(geniesim_grpc_pb2_grpc.GenieSimServiceServicer())
+def test_geniesim_server_local_servicer_is_concrete() -> None:
+    assert issubclass(
+        geniesim_server.GenieSimLocalServicer,
+        geniesim_grpc_pb2_grpc.SimObservationServiceServicer,
+    )

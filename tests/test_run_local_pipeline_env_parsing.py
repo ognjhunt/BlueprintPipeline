@@ -19,24 +19,25 @@ def _make_runner(tmp_path) -> LocalPipelineRunner:
 
 def test_parse_env_int_invalid_production_raises(monkeypatch, tmp_path):
     monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.setenv("BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS", "#test-approvals")
     monkeypatch.setenv("PIPELINE_RETRY_MAX", "nope")
-    runner = _make_runner(tmp_path)
 
     with pytest.raises(NonRetryableError, match="PIPELINE_RETRY_MAX"):
-        runner._parse_env_int("PIPELINE_RETRY_MAX", default=3)
+        _make_runner(tmp_path)
 
 
 def test_parse_env_float_invalid_production_raises(monkeypatch, tmp_path):
     monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.setenv("BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS", "#test-approvals")
     monkeypatch.setenv("PIPELINE_RETRY_BASE_DELAY", "n/a")
-    runner = _make_runner(tmp_path)
 
     with pytest.raises(NonRetryableError, match="PIPELINE_RETRY_BASE_DELAY"):
-        runner._parse_env_float("PIPELINE_RETRY_BASE_DELAY", default=1.0)
+        _make_runner(tmp_path)
 
 
 def test_parse_resolution_env_invalid_production_raises(monkeypatch, tmp_path):
     monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.setenv("BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS", "#test-approvals")
     monkeypatch.setenv("DEFAULT_CAMERA_RESOLUTION", "1024xNaN")
     runner = _make_runner(tmp_path)
 
@@ -61,6 +62,7 @@ def test_parse_resolution_env_invalid_non_production_warns(monkeypatch, tmp_path
 
 def test_pipeline_env_canonical_has_no_warnings(monkeypatch, tmp_path, caplog):
     monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.setenv("BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS", "#test-approvals")
 
     with caplog.at_level(logging.WARNING):
         runner = _make_runner(tmp_path)

@@ -25,7 +25,9 @@ def _assert_audio_defaults(config: Any) -> None:
     assert config.enabled is True
     assert config.voice_presets
     assert config.default_voice_preset == "narrator"
-    assert config.tts_providers == ["google", "local", "mock"]
+    # google provider requires GOOGLE_APPLICATION_CREDENTIALS env; only local+mock are always available
+    assert "local" in config.tts_providers
+    assert "mock" in config.tts_providers
     assert config.audio_output.sample_rate == 22050
     assert config.narration_templates
     assert config.narrate_all_episodes is True

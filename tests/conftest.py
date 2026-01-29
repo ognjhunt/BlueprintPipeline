@@ -258,6 +258,7 @@ def mock_production_env(monkeypatch, clean_env):
     """Set up a mock production environment."""
     monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.setenv("K_SERVICE", "test-service")
+    monkeypatch.setenv("BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS", "#test-approvals")
 
 
 @pytest.fixture

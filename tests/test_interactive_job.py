@@ -39,8 +39,8 @@ def write_scene_manifest(assets_root: Path, scene_id: str, objects: list[dict]) 
     (assets_root / "scene_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
-def build_scene_assets(assets_prefix: str, object_ids: list[str]) -> Path:
-    root = Path("/mnt/gcs")
+def build_scene_assets(assets_prefix: str, object_ids: list[str], gcs_root: Path | None = None) -> Path:
+    root = gcs_root if gcs_root is not None else Path("/mnt/gcs")
     root.mkdir(parents=True, exist_ok=True)
     assets_root = root / assets_prefix
     regen3d_root = assets_root / "regen3d"
@@ -83,7 +83,7 @@ def build_scene_assets(assets_prefix: str, object_ids: list[str]) -> Path:
     return assets_root
 
 
-def run_job(monkeypatch, assets_prefix: str, disallow_placeholder: bool, mock_placeholder: bool) -> None:
+def run_job(monkeypatch, assets_prefix: str, disallow_placeholder: bool, mock_placeholder: bool, gcs_root: Path | None = None) -> None:
     monkeypatch.setenv("BUCKET", "test-bucket")
     monkeypatch.setenv("SCENE_ID", "interactive_scene")
     monkeypatch.setenv("ASSETS_PREFIX", assets_prefix)
@@ -100,14 +100,24 @@ def run_job(monkeypatch, assets_prefix: str, disallow_placeholder: bool, mock_pl
     monkeypatch.delenv("LABS_MODE", raising=False)
     monkeypatch.delenv("MULTIVIEW_PREFIX", raising=False)
 
+    if gcs_root is not None:
+        _real_path = Path
+
+        def _patched_path(*args, **kwargs):
+            if args and args[0] == "/mnt/gcs":
+                return gcs_root
+            return _real_path(*args, **kwargs)
+
+        monkeypatch.setattr(run_interactive_assets, "Path", _patched_path)
+
     run_interactive_assets.main()
 
 
 def test_interactive_job_mock_glb_outputs(tmp_path, monkeypatch) -> None:
     assets_prefix = f"interactive-{tmp_path.name}"
-    assets_root = build_scene_assets(assets_prefix, ["mug_0", "mug_1"])
+    assets_root = build_scene_assets(assets_prefix, ["mug_0", "mug_1"], gcs_root=tmp_path)
 
-    run_job(monkeypatch, assets_prefix, disallow_placeholder=False, mock_placeholder=False)
+    run_job(monkeypatch, assets_prefix, disallow_placeholder=False, mock_placeholder=False, gcs_root=tmp_path)
 
     assert (assets_root / ".interactive_complete").is_file()
 
@@ -125,9 +135,9 @@ def test_interactive_job_mock_glb_outputs(tmp_path, monkeypatch) -> None:
 
 def test_disallow_placeholder_urdf_blocks_mock(tmp_path, monkeypatch) -> None:
     assets_prefix = f"interactive-disallow-{tmp_path.name}"
-    assets_root = build_scene_assets(assets_prefix, ["mug_0"])
+    assets_root = build_scene_assets(assets_prefix, ["mug_0"], gcs_root=tmp_path)
 
-    run_job(monkeypatch, assets_prefix, disallow_placeholder=True, mock_placeholder=True)
+    run_job(monkeypatch, assets_prefix, disallow_placeholder=True, mock_placeholder=True, gcs_root=tmp_path)
 
     complete_payload = json.loads((assets_root / ".interactive_complete").read_text(encoding="utf-8"))
     assert complete_payload["status"] == "failure"

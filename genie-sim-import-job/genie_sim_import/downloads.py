@@ -136,6 +136,10 @@ def _resolve_recordings_dir(
         log.info("Using recordings from shared volume: %s", recordings_dir)
         return recordings_dir
 
+    if recordings_dir.exists():
+        log.info("Using local recordings directory: %s", recordings_dir)
+        return recordings_dir
+
     if not bucket:
         raise ValueError("BUCKET is required to resolve recordings from GCS.")
 

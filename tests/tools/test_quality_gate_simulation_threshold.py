@@ -16,6 +16,7 @@ def _run_pre_episode_gate(steps_completed: int) -> object:
 
 def test_pre_episode_gate_defaults_to_50_steps(add_repo_to_path, monkeypatch):
     monkeypatch.delenv("BP_QUALITY_SIMULATION_MIN_STABLE_STEPS", raising=False)
+    monkeypatch.delenv("PIPELINE_ENV", raising=False)
 
     result = _run_pre_episode_gate(steps_completed=49)
 
@@ -24,6 +25,7 @@ def test_pre_episode_gate_defaults_to_50_steps(add_repo_to_path, monkeypatch):
 
 
 def test_pre_episode_gate_env_override_changes_threshold(add_repo_to_path, monkeypatch):
+    monkeypatch.delenv("PIPELINE_ENV", raising=False)
     monkeypatch.setenv("BP_QUALITY_SIMULATION_MIN_STABLE_STEPS", "5")
 
     result = _run_pre_episode_gate(steps_completed=6)

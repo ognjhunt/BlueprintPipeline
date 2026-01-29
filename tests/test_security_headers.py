@@ -1,6 +1,9 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+pytest.importorskip("flask")
+
 
 def _load_module(module_name: str, relative_path: str):
     module_path = Path(__file__).resolve().parents[1] / relative_path

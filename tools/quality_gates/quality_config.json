@@ -15,25 +15,25 @@
     "episodes": {
       "collision_free_rate_min": "DEFAULT_COLLISION_FREE_RATE_MIN",
       "quality_score_min": "DEFAULT_QUALITY_SCORE_MIN",
-      "quality_pass_rate_min": 0.70,
-      "min_episodes_required": 3,
+      "quality_pass_rate_min": 0.75,
+      "min_episodes_required": 5,
       "tier_thresholds": {
         "core": {
           "collision_free_rate_min": "DEFAULT_COLLISION_FREE_RATE_MIN",
           "quality_score_min": "DEFAULT_QUALITY_SCORE_MIN",
-          "quality_pass_rate_min": 0.70,
+          "quality_pass_rate_min": 0.75,
           "min_episodes_required": 3
         },
         "plus": {
           "collision_free_rate_min": "DEFAULT_COLLISION_FREE_RATE_MIN",
           "quality_score_min": "DEFAULT_QUALITY_SCORE_MIN",
-          "quality_pass_rate_min": 0.70,
-          "min_episodes_required": 4
+          "quality_pass_rate_min": 0.75,
+          "min_episodes_required": 5
         },
         "full": {
           "collision_free_rate_min": "DEFAULT_COLLISION_FREE_RATE_MIN",
           "quality_score_min": "DEFAULT_QUALITY_SCORE_MIN",
-          "quality_pass_rate_min": 0.70,
+          "quality_pass_rate_min": 0.75,
           "min_episodes_required": 5
         }
       },

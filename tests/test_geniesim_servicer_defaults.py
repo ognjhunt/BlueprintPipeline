@@ -28,92 +28,38 @@ class DummyContext:
         self.details = details
 
 
-class StreamingContext(DummyContext):
-    def __init__(self, remaining: int) -> None:
-        super().__init__()
-        self.remaining = remaining
-
-    def is_active(self) -> bool:
-        if self.remaining <= 0:
-            return False
-        self.remaining -= 1
-        return True
-
-
 def test_default_servicer_handles_core_methods(tmp_path: Path) -> None:
-    servicer = geniesim_pb2_grpc.GenieSimServiceServicer()
+    servicer = geniesim_pb2_grpc.SimObservationServiceServicer()
     context = DummyContext()
 
-    observation = servicer.GetObservation(geniesim_pb2.GetObservationRequest(), context)
-    assert observation.success is True
+    # get_observation sets UNIMPLEMENTED and raises NotImplementedError
+    with pytest.raises(NotImplementedError):
+        servicer.get_observation(geniesim_pb2.GetObservationReq(), context)
 
-    joint_response = servicer.SetJointPosition(
-        geniesim_pb2.SetJointPositionRequest(positions=[0.0, 0.1, 0.2]),
-        context,
-    )
-    assert joint_response.success is True
+    with pytest.raises(NotImplementedError):
+        servicer.reset(geniesim_pb2.ResetReq(), context)
 
-    joint_state = servicer.GetJointPosition(geniesim_pb2.GetJointPositionRequest(), context)
-    assert joint_state.success is True
+    with pytest.raises(NotImplementedError):
+        servicer.set_object_pose(geniesim_pb2.SetObjectPoseReq(), context)
 
-    ee_pose = servicer.GetEEPose(geniesim_pb2.GetEEPoseRequest(), context)
-    assert ee_pose.success is True
+    with pytest.raises(NotImplementedError):
+        servicer.set_trajectory_list(geniesim_pb2.SetTrajectoryListReq(), context)
 
-    gripper = servicer.SetGripperState(
-        geniesim_pb2.SetGripperStateRequest(width=0.05, force=5.0),
-        context,
-    )
-    assert gripper.success is True
+    with pytest.raises(NotImplementedError):
+        servicer.init_robot(geniesim_pb2.InitRobotReq(), context)
 
-    object_pose = geniesim_pb2.Pose(
-        position=geniesim_pb2.Vector3(x=1.0, y=2.0, z=3.0),
-        orientation=geniesim_pb2.Quaternion(w=1.0, x=0.0, y=0.0, z=0.0),
-    )
-    set_object = servicer.SetObjectPose(
-        geniesim_pb2.SetObjectPoseRequest(object_id="cube", pose=object_pose),
-        context,
-    )
-    assert set_object.success is True
+    with pytest.raises(NotImplementedError):
+        servicer.add_camera(geniesim_pb2.AddCameraReq(), context)
 
-    get_object = servicer.GetObjectPose(
-        geniesim_pb2.GetObjectPoseRequest(object_id="cube"),
-        context,
-    )
-    assert get_object.success is True
+    with pytest.raises(NotImplementedError):
+        servicer.store_current_state(geniesim_pb2.StoreCurrentStateReq(), context)
 
-    trajectory = servicer.SetTrajectory(
-        geniesim_pb2.SetTrajectoryRequest(
-            points=[geniesim_pb2.TrajectoryPoint(positions=[0.3, 0.4, 0.5], time_from_start=1.0)]
-        ),
-        context,
-    )
-    assert trajectory.success is True
+    with pytest.raises(NotImplementedError):
+        servicer.playback(geniesim_pb2.PlaybackReq(), context)
 
-    recording = servicer.StartRecording(
-        geniesim_pb2.StartRecordingRequest(output_directory=str(tmp_path)),
-        context,
-    )
-    assert recording.success is True
+    with pytest.raises(NotImplementedError):
+        servicer.get_checker_status(geniesim_pb2.GetCheckerStatusReq(), context)
 
-    stopped = servicer.StopRecording(geniesim_pb2.StopRecordingRequest(), context)
-    assert stopped.success is True
-
-    reset = servicer.Reset(geniesim_pb2.ResetRequest(), context)
-    assert reset.success is True
-
-    command = servicer.SendCommand(
-        geniesim_pb2.CommandRequest(command_type=geniesim_pb2.CommandType.GET_OBSERVATION),
-        context,
-    )
-    assert command.success is True
-
-
-def test_stream_observations_yields_multiple(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GENIESIM_STREAM_INTERVAL_S", "0")
-    servicer = geniesim_pb2_grpc.GenieSimServiceServicer()
-    context = StreamingContext(remaining=3)
-
-    responses = list(servicer.StreamObservations(geniesim_pb2.GetObservationRequest(), context))
-
-    assert len(responses) == 3
-    assert all(response.success for response in responses)
+    # All calls should have set UNIMPLEMENTED
+    assert context.code is not None
+    assert context.details == "Method not implemented!"

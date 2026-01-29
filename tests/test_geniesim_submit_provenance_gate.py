@@ -172,11 +172,11 @@ def _run_submit_job(
     monkeypatch.setattr(submit_module, "run_geniesim_preflight_or_exit", lambda *_a, **_k: {})
     monkeypatch.setattr(submit_module, "_run_geniesim_ik_gate", lambda **_k: True)
     monkeypatch.setattr(submit_module, "send_alert", lambda **_k: None)
-    monkeypatch.setattr(submit_module, "_preflight_firebase_upload", lambda: None)
+    monkeypatch.setattr(submit_module, "_run_firebase_preflight", lambda *_a, **_k: None)
     monkeypatch.setattr(
         submit_module,
         "_run_local_data_collection_with_handshake",
-        lambda **_k: submit_module.DataCollectionResult(
+        lambda *_a, **_k: submit_module.DataCollectionResult(
             success=True,
             task_name="test-task",
             episodes_collected=1,
@@ -214,7 +214,17 @@ def _build_blob_payloads(
         "scenes/scene-1/geniesim/scene_graph.json": minimal_scene_graph,
         "scenes/scene-1/geniesim/asset_index.json": minimal_asset_index,
         "scenes/scene-1/geniesim/task_config.json": minimal_task_config,
-        "scenes/scene-1/geniesim/export_manifest.json": {"exported": "ok"},
+        "scenes/scene-1/geniesim/export_manifest.json": {
+            "schema_version": "3.0",
+            "schema_definition": {"version": "3.0", "description": "test", "fields": {}},
+            "export_info": {"timestamp": "2024-01-01T00:00:00Z", "exporter_version": "1.0", "source_pipeline": "test"},
+            "asset_provenance_path": None,
+            "config": {"robot_type": "franka", "generate_embeddings": False, "embedding_model": None, "require_embeddings": False, "filter_commercial_only": False, "max_tasks": 50, "lerobot_export_format": "lerobot_v2"},
+            "result": {"success": True, "scene_id": "scene-1", "output_dir": "/tmp", "outputs": {"scene_graph": "scene_graph.json", "asset_index": "asset_index.json", "task_config": "task_config.json", "scene_config": "scene_config.yaml"}, "statistics": {"nodes": 1, "edges": 0, "assets": 1, "tasks": 1}, "errors": [], "warnings": []},
+            "geniesim_compatibility": {"version": "3.0", "isaac_sim_version": "2023.1", "formats": {"scene_graph": "3.0", "asset_index": "3.0", "task_config": "3.0", "scene_config": "3.0"}},
+            "file_inventory": [{"path": "scene_graph.json", "size_bytes": 100}],
+            "checksums": {"files": {"scene_graph.json": {"sha256": "abc123"}}}
+        },
         "scenes/scene-1/geniesim/_GENIESIM_EXPORT_COMPLETE": export_marker,
     }
     if asset_provenance is not None:
@@ -354,6 +364,7 @@ def test_provenance_missing_fails_in_production_even_with_override(
         env_overrides={
             "ALLOW_MISSING_ASSET_PROVENANCE": "true",
             "PIPELINE_ENV": "production",
+            "BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS": "#test-approvals",
         },
     )
 

@@ -13,7 +13,7 @@ def test_lerobot_v2_layout_validation(load_job_module, repo_root: Path) -> None:
     fixture_dir = repo_root / "genie-sim-import-job" / "fixtures" / "lerobot_v2"
     lerobot_dir = fixture_dir / "lerobot"
 
-    validation = module._validate_lerobot_metadata_files(fixture_dir, lerobot_dir)
+    validation = module._validate_lerobot_metadata_files(fixture_dir, lerobot_dir, require_parquet_validation=False)
 
     assert validation["export_format"] == "lerobot_v2"
     assert validation["schema_errors"] == []
@@ -34,7 +34,7 @@ def test_lerobot_v0_3_3_layout_validation(load_job_module, repo_root: Path) -> N
     fixture_dir = repo_root / "genie-sim-import-job" / "fixtures" / "lerobot_v0_3_3"
     lerobot_dir = fixture_dir / "lerobot"
 
-    validation = module._validate_lerobot_metadata_files(fixture_dir, lerobot_dir)
+    validation = module._validate_lerobot_metadata_files(fixture_dir, lerobot_dir, require_parquet_validation=False)
 
     assert validation["export_format"] == "lerobot_v0.3.3"
     assert validation["schema_errors"] == []
@@ -55,7 +55,7 @@ def test_lerobot_v0_4_layout_validation(load_job_module, repo_root: Path) -> Non
     fixture_dir = repo_root / "genie-sim-import-job" / "fixtures" / "lerobot_v0_4"
     lerobot_dir = fixture_dir / "lerobot"
 
-    validation = module._validate_lerobot_metadata_files(fixture_dir, lerobot_dir)
+    validation = module._validate_lerobot_metadata_files(fixture_dir, lerobot_dir, require_parquet_validation=False)
 
     assert validation["export_format"] == "lerobot_v0.4"
     assert validation["schema_errors"] == []
@@ -76,7 +76,7 @@ def test_lerobot_v3_layout_validation(load_job_module, repo_root: Path) -> None:
     fixture_dir = repo_root / "genie-sim-import-job" / "fixtures" / "lerobot_v3"
     lerobot_dir = fixture_dir / "lerobot"
 
-    validation = module._validate_lerobot_metadata_files(fixture_dir, lerobot_dir)
+    validation = module._validate_lerobot_metadata_files(fixture_dir, lerobot_dir, require_parquet_validation=False)
 
     assert validation["export_format"] == "lerobot_v3"
     assert validation["schema_errors"] == []

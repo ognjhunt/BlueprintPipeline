@@ -54,7 +54,7 @@ def test_geniesim_full_flow_e2e(tmp_path, monkeypatch):
         robot_type,
         episodes_per_task,
         max_duration_seconds=None,
-        verbose,
+        verbose=False,
     ):
         recordings_dir = Path(output_dir) / "recordings"
         recordings_dir.mkdir(parents=True, exist_ok=True)

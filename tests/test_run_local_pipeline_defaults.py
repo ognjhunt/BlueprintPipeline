@@ -30,6 +30,9 @@ def test_default_steps_without_selector_excludes_dream2flow(monkeypatch, tmp_pat
         PipelineStep.SIMREADY,
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
+        PipelineStep.GENIESIM_EXPORT,
+        PipelineStep.GENIESIM_SUBMIT,
+        PipelineStep.GENIESIM_IMPORT,
     ]
     assert PipelineStep.DREAM2FLOW not in steps
     assert PipelineStep.DREAM2FLOW_INFERENCE not in steps
@@ -67,6 +70,7 @@ def test_dream2flow_steps_require_explicit_flag(monkeypatch, tmp_path):
 
 def test_production_enables_checkpoint_hashes(monkeypatch, tmp_path):
     monkeypatch.setenv("PIPELINE_ENV", "production")
+    monkeypatch.setenv("BP_QUALITY_HUMAN_APPROVAL_NOTIFICATION_CHANNELS", "#test-approvals")
     monkeypatch.delenv("BP_CHECKPOINT_HASHES", raising=False)
 
     from tools.run_local_pipeline import LocalPipelineRunner

@@ -279,22 +279,13 @@ main:
           bucket: ${bucket}
           name: ${qualityGateFailedMarker}
           uploadType: "media"
-          body: ${json.encode({
-            "scene_id": scene_id,
-            "status": "failed",
-            "timestamp": time.format(sys.now()),
-            "error": {
-              "code": "quality_gate_failed",
-              "message": "Downstream quality gate preflight blocked training",
-              "report_path": qualityGateReportPath
-            }
-          })}
+          body: '${json.encode({"scene_id": scene_id, "status": "failed", "timestamp": time.format(sys.now()), "error": {"code": "quality_gate_failed", "message": "Downstream quality gate preflight blocked training", "report_path": qualityGateReportPath}})}'
         result: qualityGateFailedMarkerResult
         next: raise_quality_gate_failed
 
     - raise_quality_gate_failed:
         raise:
-          message: ${"Quality gate failed; report: " + qualityGateReportPath}
+          message: '${"Quality gate failed; report: " + qualityGateReportPath}'
 
     - log_start:
         call: sys.log
@@ -440,26 +431,7 @@ main:
                   bucket: ${bucket}
                   name: ${trainingFailedMarker}
                   uploadType: "media"
-                  body: ${json.encode({
-                    "job_id": job_id,
-                    "scene_id": scene_id,
-                    "job_name": trainingJobName,
-                    "status": "failed",
-                    "timestamp": time.format(sys.now()),
-                    "error": {
-                      "code": "training_start_failed",
-                      "message": e.message,
-                      "type": "workflow_failure",
-                      "stack_trace": null
-                    },
-                    "context": {
-                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
-                      "attempt_number": 1,
-                      "config_context": {
-                        "output_path": output_path
-                      }
-                    }
-                  })}
+                  body: '${json.encode({"job_id": job_id, "scene_id": scene_id, "job_name": trainingJobName, "status": "failed", "timestamp": time.format(sys.now()), "error": {"code": "training_start_failed", "message": e.message, "type": "workflow_failure", "stack_trace": null}, "context": {"workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"), "attempt_number": 1, "config_context": {"output_path": output_path}}})}'
             - raise_training_job_error:
                 raise: ${e}
 
@@ -536,27 +508,7 @@ main:
           bucket: ${bucket}
           name: ${trainingFailedMarker}
           uploadType: "media"
-          body: ${json.encode({
-            "job_id": job_id,
-            "scene_id": scene_id,
-            "job_name": trainingJobName,
-            "status": "failed",
-            "timestamp": time.format(sys.now()),
-            "error": {
-              "code": "training_failed",
-              "message": "Training job failed",
-              "type": "workflow_failure",
-              "stack_trace": null
-            },
-            "context": {
-              "execution_id": trainingExecutionName,
-              "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
-              "attempt_number": 1,
-              "config_context": {
-                "output_path": output_path
-              }
-            }
-          })}
+          body: '${json.encode({"job_id": job_id, "scene_id": scene_id, "job_name": trainingJobName, "status": "failed", "timestamp": time.format(sys.now()), "error": {"code": "training_failed", "message": "Training job failed", "type": "workflow_failure", "stack_trace": null}, "context": {"execution_id": trainingExecutionName, "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"), "attempt_number": 1, "config_context": {"output_path": output_path}}})}'
         next: raise_training_error
 
     - raise_training_error:

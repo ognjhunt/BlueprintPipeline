@@ -126,7 +126,6 @@ class ParallelEvalResult:
     env_spec_id: str
     policy_id: str
     embodiment: str
-    isaac_lab_arena_version: Optional[str] = None
     mock_evaluation: bool
 
     # Timing
@@ -148,6 +147,9 @@ class ParallelEvalResult:
 
     # Per-task breakdown
     task_metrics: dict[str, TaskMetricsSummary]
+
+    # Fields with defaults must come last
+    isaac_lab_arena_version: Optional[str] = None
 
     # Raw episode data (optional, for detailed analysis)
     episode_metrics: list[EpisodeMetrics] = field(default_factory=list)

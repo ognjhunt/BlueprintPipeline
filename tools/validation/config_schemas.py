@@ -384,6 +384,8 @@ class EnvironmentConfig(BaseModel):
                     "GENERATE_EMBEDDINGS=true and REQUIRE_EMBEDDINGS=true. "
                     "Set OPENAI_API_KEY or QWEN_API_KEY/DASHSCOPE_API_KEY."
                 )
+        return self
+
     @field_validator('alert_backend')
     @classmethod
     def normalize_alert_backend(cls, v: str) -> str:

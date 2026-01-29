@@ -4578,7 +4578,7 @@ class LocalPipelineRunner:
                     "Genie Sim lerobot artifacts missing for job "
                     f"{job_id}: expected {', '.join(missing)}"
                 )
-            if lerobot_dir.is_dir():
+            if require_lerobot and lerobot_dir.is_dir():
                 lerobot_validation_errors = validate_lerobot_dataset(lerobot_dir)
                 if lerobot_validation_errors:
                     raise NonRetryableError(

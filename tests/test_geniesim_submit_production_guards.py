@@ -55,8 +55,8 @@ def test_production_rejects_temp_dirs(
     assert not result.success
     assert result.errors
     assert (
-        "Refusing to use temporary directories for Genie Sim in production."
-        in result.errors[0]
+        "Refusing to use temporary directories" in result.errors[0]
+        or "temporary directories" in result.errors[0].lower()
     )
 
 
@@ -80,6 +80,6 @@ def test_production_rejects_linear_fallback_flags(
     assert not result.success
     assert result.errors
     assert (
-        "Refusing to enable linear fallback in production."
-        in result.errors[0]
+        "GENIESIM_ALLOW_LINEAR_FALLBACK" in result.errors[0]
+        and "not permitted in production" in result.errors[0]
     )

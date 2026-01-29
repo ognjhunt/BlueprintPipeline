@@ -796,10 +796,14 @@ def _is_temp_path(path: Path) -> bool:
         resolved = path.expanduser().absolute()
     for root in (Path("/tmp"), Path("/var/tmp")):
         try:
-            resolved.relative_to(root)
+            resolved_root = root.resolve()
+        except FileNotFoundError:
+            resolved_root = root.absolute()
+        try:
+            resolved.relative_to(resolved_root)
         except ValueError:
             continue
-        return resolved != root
+        return resolved != resolved_root
     return False
 
 
@@ -3558,6 +3562,8 @@ class GenieSimLocalFramework:
                 if _timeout_exceeded():
                     break
                 task_name = task.get("task_name", f"task_{task_idx}")
+                if "task_name" not in task or not task.get("task_name"):
+                    task["task_name"] = task_name
                 self.log(f"\nTask {task_idx + 1}/{len(tasks)}: {task_name}")
 
                 # Configure environment for task

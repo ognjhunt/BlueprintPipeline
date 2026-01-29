@@ -159,7 +159,7 @@ def test_firebase_retry_second_pass(
     monkeypatch.setattr(submit_module, "run_geniesim_preflight_or_exit", lambda *_a, **_k: {})
     monkeypatch.setattr(submit_module, "_run_geniesim_ik_gate", lambda **_k: True)
     monkeypatch.setattr(submit_module, "send_alert", lambda **_k: None)
-    monkeypatch.setattr(submit_module, "_preflight_firebase_upload", lambda: None)
+    monkeypatch.setattr(submit_module, "_run_firebase_preflight", lambda: None)
     monkeypatch.setattr(
         submit_module,
         "_run_local_data_collection_with_handshake",

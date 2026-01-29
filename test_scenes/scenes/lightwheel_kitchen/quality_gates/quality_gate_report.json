@@ -1,27 +1,12 @@
 {
   "scene_id": "lightwheel_kitchen",
-  "timestamp": "2026-01-27T17:41:59.950318Z",
+  "timestamp": "2026-01-29T19:40:24.995119Z",
   "summary": {
-    "total_gates": 1,
-    "passed": 1,
+    "total_gates": 0,
+    "passed": 0,
     "failed": 0,
     "blocking_failures": 0,
     "can_proceed": true
   },
-  "results": [
-    {
-      "gate_id": "qg-4-isaac-lab",
-      "checkpoint": "isaac_lab_generated",
-      "passed": true,
-      "severity": "warning",
-      "message": "Isaac Lab validation: 1 tasks, 0 issues",
-      "details": {
-        "task_count": 1,
-        "issues": []
-      },
-      "recommendations": [],
-      "requires_human_approval": false,
-      "timestamp": "2026-01-27T17:41:59.950299Z"
-    }
-  ]
+  "results": []
 }

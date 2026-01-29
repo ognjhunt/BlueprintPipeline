@@ -7,6 +7,7 @@ from .realtime_feedback import (
     RealtimeFeedbackLoop,
     TrainingSystemClient,
     DataStreamConfig,
+    DataStreamProtocol,
     FeedbackMetrics,
 )
 
@@ -14,5 +15,6 @@ __all__ = [
     "RealtimeFeedbackLoop",
     "TrainingSystemClient",
     "DataStreamConfig",
+    "DataStreamProtocol",
     "FeedbackMetrics",
 ]

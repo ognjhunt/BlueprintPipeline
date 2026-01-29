@@ -39,7 +39,7 @@ This is NOT an upsell - this is now the DEFAULT behavior of the pipeline.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -149,7 +149,7 @@ class TelemetryManifest:
     collision_force_threshold: float = 0.1  # Newtons
 
     # Grasp events
-    grasp_phases: List[str]
+    grasp_phases: List[str] = field(default_factory=list)
     grasp_force_range: tuple = (0.0, 100.0)  # Newtons
 
     # End-effector tracking

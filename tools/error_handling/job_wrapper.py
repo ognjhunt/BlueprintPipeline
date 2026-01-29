@@ -130,11 +130,12 @@ def run_job_with_dead_letter_queue(
     """
     # Context manager for tracing (no-op if tracing not available)
     if TRACING_AVAILABLE:
+        trace_attrs = {k: v for k, v in (input_params or {}).items() if k not in ("scene_id", "job_name", "step")}
         trace_context = trace_job(
             job_name=job_type,
             scene_id=scene_id,
             step=step,
-            **(input_params or {}),
+            **trace_attrs,
         )
     else:
         from contextlib import nullcontext

@@ -198,7 +198,7 @@ class CircuitBreaker:
 
         if self._state == CircuitState.OPEN:
             # Check if recovery timeout has passed
-            if self._opened_at and (now - self._opened_at) >= self.config.recovery_timeout:
+            if self._opened_at is not None and (now - self._opened_at) >= self.config.recovery_timeout:
                 self._transition_to_half_open()
 
         # Clean up old failures outside the window

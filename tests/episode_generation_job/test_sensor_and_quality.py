@@ -13,6 +13,7 @@ def test_sensor_data_validation_and_episode_errors(load_job_module) -> None:
         tier=sensor_module.DataPackTier.PLUS,
         num_cameras=1,
         resolution=(64, 48),
+        camera_specs=[{"prim_path": "/World/Camera_Wrist", "camera_type": "rgb", "camera_id": "wrist"}],
     )
     assert config.include_semantic_labels is True
     assert config.include_instance_ids is True
@@ -124,4 +125,5 @@ def test_mock_capture_blocked_in_production_envs(
             capture_mode=sensor_module.SensorDataCaptureMode.MOCK_DEV,
             allow_mock_capture=True,
             use_mock=True,
+            camera_specs=[{"prim_path": "/World/Camera", "camera_type": "rgb", "camera_id": "main"}],
         )

@@ -86,6 +86,7 @@ def test_auto_trigger_import_after_submit(temp_test_dir, monkeypatch):
     monkeypatch.setattr(runner, "_run_step", fake_run_step)
     monkeypatch.setattr(runner, "_run_geniesim_preflight", lambda require_server: True)
     monkeypatch.setattr(runner, "_apply_quality_gates", lambda step, result: result)
+    monkeypatch.setattr(runner, "_check_step_prerequisites", lambda step, deps, req: None)
 
     success = runner.run(
         steps=[PipelineStep.GENIESIM_EXPORT, PipelineStep.GENIESIM_SUBMIT],

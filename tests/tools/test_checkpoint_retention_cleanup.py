@@ -11,8 +11,9 @@ pytestmark = pytest.mark.usefixtures("add_repo_to_path")
 def _touch(path: Path, *, mtime: datetime) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("data")
+    import os
     timestamp = mtime.timestamp()
-    path.utime((timestamp, timestamp))
+    os.utime(path, (timestamp, timestamp))
 
 
 @pytest.mark.unit
