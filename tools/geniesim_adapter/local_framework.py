@@ -6450,6 +6450,13 @@ class GenieSimLocalFramework:
             meta_table = pa.Table.from_pydict(meta_payload, schema=meta_schema)
             pq.write_table(meta_table, meta_episodes_file)
 
+        # Write episodes.jsonl (required by v2 validation)
+        if resolved_format != LeRobotExportFormat.LEROBOT_V3:
+            episodes_jsonl_path = lerobot_root / "episodes.jsonl"
+            with open(episodes_jsonl_path, "w") as ejf:
+                for ep_id, fc in frame_counts.items():
+                    ejf.write(json.dumps({"episode_id": ep_id, "length": fc}) + "\n")
+
         dataset_info = {
             "format": "lerobot",
             "export_format": resolved_format.value,

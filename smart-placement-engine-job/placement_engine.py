@@ -756,7 +756,7 @@ class SmartPlacementEngine:
         return PlacementPlan(
             scene_id=scene_id,
             placements=placements,
-            regions_used=dict(self._region_usage.keys()),
+            regions_used=dict(self._region_usage),
             total_assets_placed=sum(
                 1 for p in placements if p.status == PlacementStatus.SUCCESS
             ),

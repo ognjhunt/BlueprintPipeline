@@ -97,7 +97,7 @@ def sample_manifest() -> Dict[str, Any]:
                     "height": 0.10,
                 },
                 "transform": {
-                    "position": {"x": 0.4, "y": 0.3, "z": 0.8},
+                    "position": {"x": 2.3, "y": 0.1, "z": 0.9},
                     "rotation_euler": {"roll": 0, "pitch": 0, "yaw": 0},
                     "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
@@ -128,7 +128,7 @@ def sample_manifest() -> Dict[str, Any]:
                     "height": 0.05,
                 },
                 "transform": {
-                    "position": {"x": 0.3, "y": 0.2, "z": 0.75},
+                    "position": {"x": 2.2, "y": 0.0, "z": 0.85},
                     "rotation_euler": {"roll": 0, "pitch": 0, "yaw": 0},
                     "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
@@ -152,7 +152,7 @@ def sample_manifest() -> Dict[str, Any]:
                     "height": 0.8,
                 },
                 "transform": {
-                    "position": {"x": 0.2, "y": 0.4, "z": 0.8},
+                    "position": {"x": 2.6, "y": 0.2, "z": 0.9},
                     "rotation_quaternion": {"w": 1, "x": 0, "y": 0, "z": 0},
                     "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },

@@ -930,49 +930,49 @@ def load_variation_metadata() -> Dict[str, Any]:
                 with path.open("r", encoding="utf-8") as handle:
                     data = json.load(handle)
                 assets = data.get("assets") or data.get("variation_assets") or []
-                return {
+                return {{
                     "assets": assets,
                     "raw": data,
-                }
+                }}
             except json.JSONDecodeError:
-                print(f"[REPLICATOR] Warning: Failed to parse variation metadata at {path}")
-                return {"assets": [], "raw": {}}
-    return {"assets": [], "raw": {}}
+                print(f"[REPLICATOR] Warning: Failed to parse variation metadata at {{path}}")
+                return {{"assets": [], "raw": {{}}}}
+    return {{"assets": [], "raw": {{}}}}
 
 
 def _material_ranges_from_hint(material_hint: str) -> Dict[str, Any]:
     hint = (material_hint or "").lower()
-    ranges = {
+    ranges = {{
         "base_color_min": (0.4, 0.4, 0.4),
         "base_color_max": (1.0, 1.0, 1.0),
         "roughness": (0.2, 0.8),
         "metallic": (0.0, 0.2),
-    }
+    }}
     if any(token in hint for token in ["metal", "aluminum", "steel", "stainless"]):
-        ranges.update({
+        ranges.update({{
             "roughness": (0.05, 0.4),
             "metallic": (0.6, 1.0),
-        })
+        }})
     elif any(token in hint for token in ["glass", "ceramic", "porcelain", "stoneware"]):
-        ranges.update({
+        ranges.update({{
             "roughness": (0.05, 0.3),
             "metallic": (0.0, 0.1),
-        })
+        }})
     elif any(token in hint for token in ["fabric", "cloth", "cotton", "textile"]):
-        ranges.update({
+        ranges.update({{
             "roughness": (0.6, 1.0),
             "metallic": (0.0, 0.05),
-        })
+        }})
     elif any(token in hint for token in ["plastic", "polymer", "rubber"]):
-        ranges.update({
+        ranges.update({{
             "roughness": (0.3, 0.7),
             "metallic": (0.0, 0.1),
-        })
+        }})
     elif "wood" in hint:
-        ranges.update({
+        ranges.update({{
             "roughness": (0.4, 0.85),
             "metallic": (0.0, 0.05),
-        })
+        }})
     return ranges
 
 
@@ -996,10 +996,10 @@ def _collect_texture_variants(asset_metadata: Dict[str, Any]) -> List[str]:
 
 
 def _build_material_metadata_index(metadata: Dict[str, Any]) -> Dict[str, Any]:
-    by_name = {}
-    by_semantic = {}
-    textures_by_name = {}
-    textures_by_semantic = {}
+    by_name = {{}}
+    by_semantic = {{}}
+    textures_by_name = {{}}
+    textures_by_semantic = {{}}
     for asset in metadata.get("assets", []):
         name = asset.get("name")
         semantic = asset.get("semantic_class")
@@ -1013,16 +1013,16 @@ def _build_material_metadata_index(metadata: Dict[str, Any]) -> Dict[str, Any]:
             textures = _collect_texture_variants(asset)
             if textures:
                 textures_by_semantic.setdefault(semantic, []).extend(textures)
-    return {
+    return {{
         "by_name": by_name,
         "by_semantic": by_semantic,
         "textures_by_name": textures_by_name,
         "textures_by_semantic": textures_by_semantic,
-    }
+    }}
 
 
 def _collect_assets_by_category(metadata: Dict[str, Any]) -> Dict[str, List[str]]:
-    assets_by_category: Dict[str, List[str]] = {}
+    assets_by_category: Dict[str, List[str]] = {{}}
     for asset in metadata.get("assets", []):
         category = asset.get("category")
         asset_path = asset.get("asset_path") or asset.get("path") or asset.get("usd_path")
@@ -1032,7 +1032,7 @@ def _collect_assets_by_category(metadata: Dict[str, Any]) -> Dict[str, List[str]
 
 
 def _extract_physics_hints(params: Dict[str, Any]) -> Dict[str, Any]:
-    hints: Dict[str, Any] = {}
+    hints: Dict[str, Any] = {{}}
     if isinstance(params.get("physics_hints"), dict):
         hints.update(params["physics_hints"])
     for key in (
@@ -1110,7 +1110,7 @@ def create_object_scatter_randomizer(
     physics_hints: Optional[Dict[str, Any]] = None,
 ):
     """Create a randomizer that scatters objects on surfaces."""
-    physics_hints = physics_hints or {}
+    physics_hints = physics_hints or {{}}
 
     def randomize_objects():
         # Determine number of objects to spawn
@@ -1156,7 +1156,7 @@ def create_material_variation_randomizer(
 ):
     """Create a randomizer for material properties on spawned variant objects."""
     metadata_index = _build_material_metadata_index(variation_metadata)
-    physics_hints = physics_hints or {}
+    physics_hints = physics_hints or {{}}
 
     def _select_target_prims():
         if SPAWNED_OBJECTS:
@@ -1181,7 +1181,7 @@ def create_material_variation_randomizer(
 
     def _resolve_textures(semantic_class: str) -> List[str]:
         textures = metadata_index["textures_by_semantic"].get(semantic_class, [])
-        return list({t for t in textures if isinstance(t, str)})
+        return list(set(t for t in textures if isinstance(t, str)))
 
     def randomize_materials():
         target_groups = _select_target_prims()

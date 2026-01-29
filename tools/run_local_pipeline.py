@@ -4007,7 +4007,7 @@ class LocalPipelineRunner:
                 "source_path": quality_settings.config.source_path,
             },
         }
-        task_count = len(task_config.get("tasks", [])) or 1
+        task_count = len(task_config.get("suggested_tasks", task_config.get("tasks", []))) or 1
         total_episodes_per_robot = max(1, episodes_per_task * task_count)
         job_metrics_by_robot: Dict[str, Any] = {}
         robot_failure_details = failure_details.get("by_robot", {})

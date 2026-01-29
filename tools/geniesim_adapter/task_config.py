@@ -886,6 +886,22 @@ Return JSON with this exact structure:
         strict_reachability: bool,
     ) -> Tuple[List[SuggestedTask], Dict[str, int]]:
         """Filter tasks by robot reachability and workspace bounds."""
+        import os as _os
+
+        # Allow bypassing reachability filter entirely
+        if _os.environ.get("GENIESIM_SKIP_REACHABILITY_FILTER", "0") == "1":
+            self.log(
+                "Reachability filter skipped (GENIESIM_SKIP_REACHABILITY_FILTER=1)",
+                level="WARNING",
+            )
+            return tasks, {
+                "tasks_total_before_reachability_filter": len(tasks),
+                "tasks_filtered_unreachable": 0,
+                "tasks_filtered_missing_position": 0,
+                "tasks_missing_position": 0,
+                "tasks_total_after_reachability_filter": len(tasks),
+            }
+
         def _pos_to_list(pos):
             """Convert position dict {"x":..,"y":..,"z":..} to [x,y,z] list."""
             if isinstance(pos, dict):
@@ -950,6 +966,19 @@ Return JSON with this exact structure:
                     continue
 
             filtered_tasks.append(task)
+
+        # Safety net: if ALL tasks were filtered out, keep them with a warning
+        # so the pipeline can still generate data (trajectory planner will use
+        # fallback targets).
+        if not filtered_tasks and tasks:
+            self.log(
+                f"Reachability filter rejected ALL {len(tasks)} tasks — keeping them "
+                f"anyway (workspace bounds may not match scene coordinate system). "
+                f"Set GENIESIM_SKIP_REACHABILITY_FILTER=1 to suppress this warning.",
+                level="WARNING",
+            )
+            filtered_tasks = list(tasks)
+            filtered_unreachable = 0
 
         return filtered_tasks, {
             "tasks_total_before_reachability_filter": len(tasks),

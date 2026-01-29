@@ -25,7 +25,12 @@ def _load_json(path: Path, label: str, errors: List[str]) -> Optional[Any]:
         errors.append(f"Missing {label}: {path}")
         return None
     try:
-        return json.loads(path.read_text())
+        text = path.read_text()
+        # Handle JSONL files (one JSON object per line)
+        if path.suffix == ".jsonl":
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            return [json.loads(line) for line in lines]
+        return json.loads(text)
     except json.JSONDecodeError as exc:
         errors.append(f"Invalid JSON in {label} ({path}): {exc}")
         return None
