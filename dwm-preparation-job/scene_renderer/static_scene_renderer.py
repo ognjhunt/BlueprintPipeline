@@ -425,7 +425,7 @@ class IsaacSimRenderer(BaseRenderer):
 
         if (
             importlib.util.find_spec("omni") is None
-            or importlib.util.find_spec("omni.isaac.kit") is None
+            or importlib.util.find_spec("isaacsim.simulation_app") is None
             or importlib.util.find_spec("pxr") is None
         ):
             raise RuntimeError(
@@ -492,9 +492,9 @@ class IsaacSimRenderer(BaseRenderer):
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        from omni.isaac.kit import SimulationApp
+        from isaacsim.simulation_app import SimulationApp
         import omni
-        from omni.isaac.core.utils.stage import open_stage
+        from isaacsim.core.api.utils.stage import open_stage
         import omni.kit.viewport.utility as vp_utils
         from omni.kit.capture.viewport import CaptureExtension
 
@@ -602,9 +602,9 @@ class IsaacSimRenderer(BaseRenderer):
 
         import importlib.util
 
-        from omni.isaac.kit import SimulationApp
+        from isaacsim.simulation_app import SimulationApp
         import omni
-        from omni.isaac.core.utils.stage import open_stage
+        from isaacsim.core.api.utils.stage import open_stage
         import omni.kit.viewport.utility as vp_utils
         from omni.kit.capture.viewport import CaptureExtension
 
@@ -750,7 +750,7 @@ class SceneRenderer:
 
             if (
                 importlib.util.find_spec("omni") is None
-                or importlib.util.find_spec("omni.isaac.kit") is None
+                or importlib.util.find_spec("isaacsim.simulation_app") is None
             ):
                 raise RuntimeError(
                     "Isaac Sim backend requested but required modules are missing. "

@@ -347,9 +347,9 @@ class Dream2FlowPreparationJob:
         if importlib.util.find_spec("omni") is None:
             raise RuntimeError("Isaac Sim modules are not available in this environment.")
 
-        from omni.isaac.kit import SimulationApp
+        from isaacsim.simulation_app import SimulationApp
         import omni
-        from omni.isaac.core.utils.stage import open_stage
+        from isaacsim.core.api.utils.stage import open_stage
         import omni.kit.viewport.utility as vp_utils
         from omni.kit.capture.viewport import CaptureExtension
         from omni.syntheticdata import SyntheticDataHelper

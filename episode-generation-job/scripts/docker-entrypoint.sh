@@ -182,10 +182,10 @@ except ImportError as e:
     sys.exit(1)
 
 try:
-    import omni.isaac.core
-    logger.info('- omni.isaac.core: OK')
+    import isaacsim.core.api
+    logger.info('- isaacsim.core.api: OK')
 except ImportError as e:
-    logger.error(f'- omni.isaac.core: FAILED ({e})')
+    logger.error(f'- isaacsim.core.api: FAILED ({e})')
     sys.exit(1)
 
 try:
@@ -246,10 +246,10 @@ except ImportError as exc:
     fail(f"❌ Preflight failed: omni not available ({exc}). Ensure Isaac Sim is installed.")
 
 try:
-    import omni.isaac.core  # noqa: F401
+    import isaacsim.core.api  # noqa: F401
 except ImportError as exc:
     fail(
-        "❌ Preflight failed: omni.isaac.core not available. "
+        "❌ Preflight failed: isaacsim.core.api not available. "
         "Run inside the Isaac Sim Python environment."
     )
 

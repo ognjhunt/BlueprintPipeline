@@ -353,7 +353,7 @@ def _is_isaac_sim_available() -> bool:
 
     Returns True if either:
     1. ISAAC_SIM_PATH environment variable is set to a valid path
-    2. omni.isaac.core can be imported (Isaac Sim Python environment)
+    2. isaacsim.core.api can be imported (Isaac Sim Python environment)
     """
     # Check environment variable first (fastest check)
     isaac_sim_path = os.getenv("ISAAC_SIM_PATH")
@@ -366,9 +366,9 @@ def _is_isaac_sim_available() -> bool:
     # Check for Isaac Sim Python module
     try:
         import importlib.util
-        spec = importlib.util.find_spec("omni.isaac.core")
+        spec = importlib.util.find_spec("isaacsim.core.api")
         if spec is not None:
-            logger.debug("Isaac Sim detected via omni.isaac.core module")
+            logger.debug("Isaac Sim detected via isaacsim.core.api module")
             return True
     except (ImportError, ModuleNotFoundError):
         pass

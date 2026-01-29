@@ -76,7 +76,7 @@ def initialize_isaac_sim(headless: bool = True) -> bool:
 
     try:
         # Direct Isaac Sim initialization
-        from omni.isaac.kit import SimulationApp
+        from isaacsim.simulation_app import SimulationApp
 
         config = {
             "headless": headless,
@@ -259,7 +259,7 @@ class IsaacSimPipeline:
     def _load_scene(self) -> Dict[str, Any]:
         """Load the USD scene."""
         import omni
-        from omni.isaac.core import World
+        from isaacsim.core.api import World
         from pxr import Usd, UsdGeom
 
         # Determine scene path
@@ -303,8 +303,8 @@ class IsaacSimPipeline:
 
     def _setup_robot(self) -> Dict[str, Any]:
         """Set up the robot in the scene."""
-        from omni.isaac.core.robots import Robot
-        from omni.isaac.core.utils.stage import add_reference_to_stage
+        from isaacsim.core.api.robots import Robot
+        from isaacsim.core.api.utils.stage import add_reference_to_stage
         from pxr import UsdGeom, Gf
 
         robot_prim_path = "/World/Robot"

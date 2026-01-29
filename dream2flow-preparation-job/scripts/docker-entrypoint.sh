@@ -151,14 +151,14 @@ except ImportError as e:
     sys.exit(1)
 
 try:
-    import omni.isaac.core
-    print('- omni.isaac.core: OK')
+    import isaacsim.core.api
+    print('- isaacsim.core.api: OK')
 except ImportError as e:
-    print(f'- omni.isaac.core: FAILED ({e})')
+    print(f'- isaacsim.core.api: FAILED ({e})')
     sys.exit(1)
 
 try:
-    from omni.isaac.kit import SimulationApp
+    from isaacsim.simulation_app import SimulationApp
     print('- SimulationApp: OK')
 except ImportError as e:
     print(f'- SimulationApp: FAILED ({e})')
@@ -237,7 +237,7 @@ print('=' * 40)
 # Check Isaac Sim rendering
 try:
     import omni
-    from omni.isaac.kit import SimulationApp
+    from isaacsim.simulation_app import SimulationApp
     print('Isaac Sim rendering: AVAILABLE')
 except ImportError:
     print('Isaac Sim rendering: NOT AVAILABLE')

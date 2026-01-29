@@ -1,12 +1,16 @@
 {
-  "ok": true,
-  "missing": [],
-  "remediation": [],
+  "ok": false,
+  "missing": [
+    "Genie Sim gRPC server"
+  ],
+  "remediation": [
+    "Start the server: /tmp/isaac-sim-stub/python.sh /tmp/geniesim-stub/source/data_collection/scripts/data_collector_server.py --headless --port 50051"
+  ],
   "status": {
     "available": true,
     "geniesim_installed": true,
     "isaac_sim_available": true,
-    "server_running": true,
+    "server_running": false,
     "grpc_available": true,
     "grpc_stubs_available": true,
     "curobo_available": false,
@@ -24,5 +28,5 @@
     }
   },
   "server_ready": false,
-  "stage": "genie-sim-local-runner"
+  "stage": "local-pipeline"
 }
