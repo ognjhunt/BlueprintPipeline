@@ -1204,7 +1204,7 @@ class GenieSimGRPCClient:
             render_depth=include_depth,
             render_semantic=include_semantic,
             camera_prim_list=camera_ids,
-            additional_parameters=str(payload.get("additional_parameters", "")),
+            additional_parameters=str(payload.get("additional_parameters", "{}")),
         )
         gripper_req = GripperRequest(
             left=bool(payload.get("left_gripper", False)),
