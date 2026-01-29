@@ -54,6 +54,17 @@ from tools.geniesim_adapter.geniesim_grpc_pb2_grpc import (
     SimObservationServiceServicer,
     add_SimObservationServiceServicer_to_server,
 )
+from aimdk.protocol.hal.joint.joint_channel_pb2 import (
+    GetJointRsp,
+    SetJointRsp,
+    GetIKStatusRsp,
+    GetEEPoseRsp,
+)
+from aimdk.protocol.hal.joint.joint_channel_pb2_grpc import (
+    JointControlServiceServicer,
+    add_JointControlServiceServicer_to_server,
+)
+from aimdk.protocol.common.joint_pb2 import JointState
 from tools.logging_config import init_logging
 from tools.geniesim_adapter.config import (
     DEFAULT_GENIESIM_PORT,
@@ -168,6 +179,26 @@ class GenieSimLocalServicer(SimObservationServiceServicer):
         return GetCheckerStatusRsp(msg=f"{checker}: ok")
 
 
+class MockJointControlServicer(JointControlServiceServicer):
+    """Mock joint control service returning zero joint positions."""
+
+    def get_joint_position(self, request, context):
+        rsp = GetJointRsp()
+        # Return 7 zero-position joints (typical robot arm)
+        for i in range(7):
+            rsp.states.append(JointState(name=f"joint_{i}", position=0.0))
+        return rsp
+
+    def set_joint_position(self, request, context):
+        return SetJointRsp(errmsg="")
+
+    def get_ik_status(self, request, context):
+        return GetIKStatusRsp(isSuccess=True)
+
+    def get_ee_pose(self, request, context):
+        return GetEEPoseRsp()
+
+
 def _parse_port() -> int:
     return parse_int_env(
         os.getenv(GENIESIM_PORT_ENV),
@@ -187,6 +218,7 @@ def main() -> None:
     init_logging()
     server = grpc.server(ThreadPoolExecutor(max_workers=8))
     add_SimObservationServiceServicer_to_server(GenieSimLocalServicer(), server)
+    add_JointControlServiceServicer_to_server(MockJointControlServicer(), server)
 
     bind_addr = f"{args.host}:{args.port}"
     credentials = _load_tls_credentials()
