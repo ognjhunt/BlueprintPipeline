@@ -74,7 +74,7 @@ def minimal_payloads() -> dict[str, object]:
             "scene_id": "scene-1",
             "environment_type": "kitchen",
             "suggested_tasks": [],
-            "robot_config": {"type": "franka"},
+            "robot_config": {"type": "franka", "base_position": [0.0, 0.0, 0.0], "workspace_bounds": {"min": [-1, -1, 0], "max": [1, 1, 1]}},
         },
         "scenes/scene-1/geniesim/export_manifest.json": {"exported": "ok"},
         "scenes/scene-1/geniesim/_GENIESIM_EXPORT_COMPLETE": {

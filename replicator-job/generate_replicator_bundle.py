@@ -935,7 +935,7 @@ def load_variation_metadata() -> Dict[str, Any]:
                     "raw": data,
                 }
             except json.JSONDecodeError:
-                print(f"[REPLICATOR] Warning: Failed to parse variation metadata at {{path}}")
+                print(f"[REPLICATOR] Warning: Failed to parse variation metadata at {path}")
                 return {"assets": [], "raw": {}}
     return {"assets": [], "raw": {}}
 

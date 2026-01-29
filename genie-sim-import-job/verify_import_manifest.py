@@ -33,11 +33,17 @@ def _verify_file_inventory(output_dir: Path, inventory: List[Dict[str, Any]]) ->
 
 def _verify_checksum_map(
     output_dir: Path,
-    checksum_map: Dict[str, Dict[str, Any]],
+    checksum_map: Any,
     manifest: Dict[str, Any],
 ) -> List[str]:
     errors: List[str] = []
-    for rel_path, checksum_entry in checksum_map.items():
+    if isinstance(checksum_map, list):
+        items = ((entry.get("file_name", ""), entry) for entry in checksum_map)
+    elif isinstance(checksum_map, dict):
+        items = checksum_map.items()
+    else:
+        return errors
+    for rel_path, checksum_entry in items:
         expected_sha = checksum_entry.get("sha256")
         if not expected_sha:
             continue

@@ -46,6 +46,15 @@ def test_regenerate_stubs_success(monkeypatch, tmp_path, capsys):
     proto_path = _write_proto(tmp_path)
     (tmp_path / "geniesim_grpc_pb2.py").write_text("# stub")
     (tmp_path / "geniesim_grpc_pb2_grpc.py").write_text("# stub")
+    aimdk_common = tmp_path / "aimdk" / "protocol" / "common"
+    aimdk_common.mkdir(parents=True, exist_ok=True)
+    (aimdk_common / "se3_pose_pb2.py").write_text("# stub")
+    (aimdk_common / "joint_pb2.py").write_text("# stub")
+    (aimdk_common / "vec3_pb2.py").write_text("# stub")
+    aimdk_hal_joint = tmp_path / "aimdk" / "protocol" / "hal" / "joint"
+    aimdk_hal_joint.mkdir(parents=True, exist_ok=True)
+    (aimdk_hal_joint / "joint_channel_pb2.py").write_text("# stub")
+    (aimdk_hal_joint / "joint_channel_pb2_grpc.py").write_text("# stub")
 
     monkeypatch.setattr(regenerate_stubs, "_ensure_grpc_tools", lambda: None)
     monkeypatch.setattr(regenerate_stubs, "Path", lambda *_args, **_kwargs: proto_path)

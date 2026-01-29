@@ -1731,13 +1731,21 @@ class GenieSimGRPCClient:
                     joint_positions = list(jp_result.payload)
             except Exception:
                 pass
+            # Use monotonic nanoseconds to guarantee unique, increasing timestamps
+            # even when multiple observations are polled within the same millisecond.
+            mono_ns = _time.monotonic_ns()
+            # Combine wall-clock base with monotonic offset for uniqueness
+            if not hasattr(self, "_obs_timestamp_base"):
+                self._obs_timestamp_base = _time.time()
+                self._obs_monotonic_base = mono_ns
+            unique_timestamp = self._obs_timestamp_base + (mono_ns - self._obs_monotonic_base) / 1e9
             return GrpcCallResult(
                 success=True,
                 available=True,
                 payload={
                     "robot_state": {"joint_positions": joint_positions},
                     "scene_state": {},
-                    "timestamp": _time.time(),
+                    "timestamp": unique_timestamp,
                     "planned_timestamp": 0.0,
                 },
             )
@@ -3939,6 +3947,22 @@ class GenieSimLocalFramework:
             timed_trajectory, clamped_waypoints = self._validate_trajectory_joint_limits(
                 timed_trajectory
             )
+            # Validate that the trajectory has meaningful motion (not static)
+            if len(timed_trajectory) >= 2:
+                all_wp_joints = np.array(
+                    [wp["joint_positions"] for wp in timed_trajectory], dtype=float
+                )
+                joint_range_in_traj = np.max(all_wp_joints, axis=0) - np.min(all_wp_joints, axis=0)
+                max_joint_motion = float(np.max(joint_range_in_traj))
+                min_motion_threshold = float(os.getenv("MIN_TRAJECTORY_MOTION_RAD", "0.01"))
+                if max_joint_motion < min_motion_threshold:
+                    result["error"] = (
+                        f"Static trajectory rejected: max joint motion {max_joint_motion:.6f} rad "
+                        f"< threshold {min_motion_threshold} rad. No meaningful robot motion."
+                    )
+                    self.log(f"  ❌ {result['error']}", "ERROR")
+                    return result
+
             if clamped_waypoints:
                 self.log(
                     f"  ⚠️  Clamped {clamped_waypoints} waypoint(s) to joint limits before execution.",
@@ -4225,6 +4249,15 @@ class GenieSimLocalFramework:
                 result["error"] = "Failed to align observations with trajectory."
                 return result
 
+            # Minimum frame count guard
+            min_episode_frames = int(os.getenv("MIN_EPISODE_FRAMES", "20"))
+            if len(aligned_observations) < min_episode_frames:
+                result["error"] = (
+                    f"Too few observations ({len(aligned_observations)}) for episode; "
+                    f"minimum is {min_episode_frames}."
+                )
+                return result
+
             frames = self._build_frames_from_trajectory(
                 timed_trajectory,
                 aligned_observations,
@@ -4442,10 +4475,23 @@ class GenieSimLocalFramework:
         frames: List[Dict[str, Any]] = []
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             self._attach_camera_frames(obs, episode_id=episode_id, task=task)
+
+            # Compute action as delta from current observation to waypoint target.
+            # This is the standard representation for imitation learning: the action
+            # is the commanded change, not the absolute target position.
+            waypoint_joints = np.array(waypoint["joint_positions"], dtype=float)
+            obs_joints = np.zeros_like(waypoint_joints)
+            robot_state = (obs or {}).get("robot_state") or {}
+            jp = robot_state.get("joint_positions")
+            if jp is not None and len(jp) == len(waypoint_joints):
+                obs_joints = np.array(jp, dtype=float)
+            action_delta = (waypoint_joints - obs_joints).tolist()
+
             frames.append({
                 "step": step_idx,
                 "observation": obs,
-                "action": waypoint["joint_positions"],
+                "action": action_delta,
+                "action_abs": waypoint["joint_positions"],  # keep absolute for reference
                 "timestamp": waypoint["timestamp"],
             })
         return frames
@@ -4519,13 +4565,15 @@ class GenieSimLocalFramework:
 
             obs = frame.get("observation") or {}
             camera_frames = obs.get("camera_frames") or {}
-            if required_cameras and not camera_frames:
-                frame_errors.append(
-                    f"Frame {idx} missing camera_frames for required cameras {required_cameras}."
-                )
-            for camera_id in required_cameras:
-                if camera_id not in camera_frames:
-                    frame_errors.append(f"Frame {idx} missing camera frame for camera '{camera_id}'.")
+            # Skip camera validation in proprioception-only mode (no server recording)
+            if not os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
+                if required_cameras and not camera_frames:
+                    frame_errors.append(
+                        f"Frame {idx} missing camera_frames for required cameras {required_cameras}."
+                    )
+                for camera_id in required_cameras:
+                    if camera_id not in camera_frames:
+                        frame_errors.append(f"Frame {idx} missing camera frame for camera '{camera_id}'.")
 
             for camera_id, camera_data in camera_frames.items():
                 if not isinstance(camera_data, dict):

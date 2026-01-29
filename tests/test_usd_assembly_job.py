@@ -22,6 +22,10 @@ def load_assemble_scene_module() -> object:
     return module
 
 
+@pytest.mark.skipif(
+    not importlib.util.find_spec("pxr"),
+    reason="pxr not installed",
+)
 def test_usd_assembly_job_stubs(tmp_path, monkeypatch):
     assemble_scene = load_assemble_scene_module()
 

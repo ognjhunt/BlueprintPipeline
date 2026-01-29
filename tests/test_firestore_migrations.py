@@ -72,9 +72,7 @@ def test_noop_when_versions_match() -> None:
     updated = migrations.migrate_collection(client, "scenes", 1, 1)
 
     assert updated == 0
-    assert client.batches
-    assert client.batches[0].set_calls == []
-    assert client.batches[0].commit_count == 0
+    assert client.batches == []
 
 
 def test_transform_applied_and_version_updated() -> None:
