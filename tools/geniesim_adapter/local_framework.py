@@ -2610,8 +2610,8 @@ class GenieSimGRPCClient:
     ) -> Optional[np.ndarray]:
         if not rgb_bytes:
             return None
-        if GenieSimLocalFramework._is_png_data(rgb_bytes) or "png" in encoding:
-            return GenieSimLocalFramework._decode_png(rgb_bytes)
+        if GenieSimGRPCClient._is_png_data(rgb_bytes) or "png" in encoding:
+            return GenieSimGRPCClient._decode_png(rgb_bytes)
 
         normalized = encoding.lower()
         channels = 3
@@ -2643,8 +2643,8 @@ class GenieSimGRPCClient:
     ) -> Optional[np.ndarray]:
         if not depth_bytes:
             return None
-        if GenieSimLocalFramework._is_png_data(depth_bytes) or "png" in encoding:
-            return GenieSimLocalFramework._decode_png(depth_bytes)
+        if GenieSimGRPCClient._is_png_data(depth_bytes) or "png" in encoding:
+            return GenieSimGRPCClient._decode_png(depth_bytes)
 
         normalized = encoding.lower()
         if "32f" in normalized or "float32" in normalized:
