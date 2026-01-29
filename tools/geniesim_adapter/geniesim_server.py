@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
+import struct
+
 import grpc
 
 from tools.geniesim_adapter.geniesim_grpc_pb2 import (
@@ -17,6 +19,9 @@ from tools.geniesim_adapter.geniesim_grpc_pb2 import (
     AddCameraRsp,
     AttachReq,
     AttachRsp,
+    CamImage,
+    CamInfo,
+    CameraRsp,
     DetachReq,
     DetachRsp,
     ExitReq,
@@ -25,14 +30,18 @@ from tools.geniesim_adapter.geniesim_grpc_pb2 import (
     GetCheckerStatusRsp,
     GetObservationReq,
     GetObservationRsp,
+    GripperRsp,
     InitRobotReq,
     InitRobotRsp,
+    JointRsp,
+    ObjectRsp,
     PlaybackReq,
     PlaybackRsp,
     RemoveObstacleReq,
     RemoveObstacleRsp,
     ResetReq,
     ResetRsp,
+    SemanticData,
     SetFrameStateReq,
     SetFrameStateRsp,
     SetLightReq,
@@ -54,6 +63,9 @@ from tools.geniesim_adapter.geniesim_grpc_pb2_grpc import (
     SimObservationServiceServicer,
     add_SimObservationServiceServicer_to_server,
 )
+from aimdk.protocol.common.se3_pose_pb2 import SE3RpyPose
+from aimdk.protocol.common.vec3_pb2 import Vec3
+from aimdk.protocol.common import rpy_pb2
 from aimdk.protocol.hal.joint.joint_channel_pb2 import (
     GetJointRsp,
     SetJointRsp,
@@ -76,6 +88,22 @@ from tools.geniesim_adapter.config import (
 from tools.config.env import parse_int_env
 
 LOGGER = logging.getLogger("geniesim.server")
+
+
+def _make_synthetic_png(width: int = 64, height: int = 64) -> bytes:
+    """Create a minimal valid PNG image (solid black) without external deps."""
+    import zlib
+
+    def _chunk(chunk_type: bytes, data: bytes) -> bytes:
+        c = chunk_type + data
+        crc = struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+        return struct.pack(">I", len(data)) + c + crc
+
+    header = b"\x89PNG\r\n\x1a\n"
+    ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit RGB
+    raw_rows = b"".join(b"\x00" + b"\x00" * (width * 3) for _ in range(height))
+    compressed = zlib.compress(raw_rows)
+    return header + _chunk(b"IHDR", ihdr_data) + _chunk(b"IDAT", compressed) + _chunk(b"IEND", b"")
 
 
 def _load_tls_credentials() -> Optional[grpc.ServerCredentials]:
@@ -104,10 +132,43 @@ class GenieSimLocalServicer(SimObservationServiceServicer):
             self._recording_state = "recording"
         if req.stopRecording:
             self._recording_state = "stopped"
-        if req.startRecording or req.stopRecording:
-            rsp.recordingState = self._recording_state
-            return rsp
         rsp.recordingState = self._recording_state
+        if req.startRecording or req.stopRecording:
+            return rsp
+
+        # --- Synthetic camera data (4x4 black RGB PNG) ---
+        if req.isCam:
+            synthetic_rgb = _make_synthetic_png(64, 64)
+            synthetic_depth = _make_synthetic_png(64, 64)
+            cam_rsp = CameraRsp(
+                camera_info=CamInfo(width=64, height=64, ppx=32.0, ppy=32.0, fx=60.0, fy=60.0),
+                rgb_camera=CamImage(format="png", data=synthetic_rgb),
+                depth_camera=CamImage(format="png", data=synthetic_depth),
+                semantic_mask=SemanticData(name="semantic", data=synthetic_depth),
+            )
+            rsp.camera.append(cam_rsp)
+
+        # --- Synthetic joint state (7-DOF arm) ---
+        if req.isJoint:
+            for i in range(7):
+                rsp.joint.left_arm.append(JointState(name=f"joint_{i}", position=0.0))
+
+        # --- Synthetic gripper pose ---
+        if req.isGripper:
+            zero_pose = SE3RpyPose(
+                position=Vec3(x=0.0, y=0.0, z=0.5),
+                rpy=rpy_pb2.Rpy(rw=1.0, rx=0.0, ry=0.0, rz=0.0),
+            )
+            rsp.gripper.CopyFrom(GripperRsp(left_gripper=zero_pose, right_gripper=zero_pose))
+
+        # --- Synthetic object poses ---
+        if req.isPose:
+            obj_pose = SE3RpyPose(
+                position=Vec3(x=0.3, y=0.0, z=0.8),
+                rpy=rpy_pb2.Rpy(rw=1.0, rx=0.0, ry=0.0, rz=0.0),
+            )
+            rsp.pose.append(ObjectRsp(object_pose=obj_pose))
+
         return rsp
 
     def reset(self, req: ResetReq, context) -> ResetRsp:
