@@ -6128,13 +6128,14 @@ def run_local_data_collection(
                 "GENIESIM_COLLECTION_TIMEOUT_S must be a number of seconds; ignoring invalid value."
             )
 
-    # Create framework
-    config = GenieSimConfig(
-        robot_type=robot_type,
-        episodes_per_task=episodes_per_task,
-        recording_dir=output_dir / "recordings",
-        max_duration_seconds=effective_timeout,
-    )
+    # Create framework – use from_env() so env-var-driven settings
+    # (e.g. GENIESIM_ALLOW_IK_FAILURE_FALLBACK) are honoured.
+    config = GenieSimConfig.from_env().model_copy(update={
+        "robot_type": robot_type,
+        "episodes_per_task": episodes_per_task,
+        "recording_dir": output_dir / "recordings",
+        "max_duration_seconds": effective_timeout,
+    })
 
     framework = GenieSimLocalFramework(config, verbose=verbose)
 
