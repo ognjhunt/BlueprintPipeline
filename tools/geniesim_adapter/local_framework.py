@@ -2311,6 +2311,7 @@ class GenieSimGRPCClient:
         urdf_path: str = "",
         base_pose: Optional[Dict[str, Any]] = None,
         initial_joint_positions: Optional[Sequence[float]] = None,
+        scene_usd_path: str = "",
     ) -> GrpcCallResult:
         """
         Initialize the robot in the simulation.
@@ -2350,7 +2351,7 @@ class GenieSimGRPCClient:
             request = InitRobotReq(
                 robot_cfg_file=robot_type,
                 robot_usd_path=urdf_path,
-                scene_usd_path="",
+                scene_usd_path=scene_usd_path or "",
                 robot_pose=pose_message,
                 joint_cmd=joint_cmds,
             )
@@ -3424,9 +3425,11 @@ class GenieSimLocalFramework:
                 "orientation": {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
             }
             self.log(f"Initializing robot: cfg_file={robot_cfg_file}, base_position={base_pos}")
+            scene_usd = os.environ.get("GENIESIM_SCENE_USD_PATH", "empty_scene.usda")
             init_result = self._client.init_robot(
                 robot_type=robot_cfg_file,
                 base_pose=base_pose,
+                scene_usd_path=scene_usd,
             )
             if not init_result.success:
                 self.log(
