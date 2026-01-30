@@ -55,9 +55,10 @@ RUN apt-get update -qq \
     && dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
     && apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
-       cuda-nvcc-12-6 cuda-cudart-dev-12-6 libcusparse-dev-12-6 libcublas-dev-12-6 \
+       cuda-nvcc-11-8 cuda-cudart-dev-11-8 libcusparse-dev-11-8 libcublas-dev-11-8 \
     && rm -rf /var/lib/apt/lists/*
-ENV CUDA_HOME=/usr/local/cuda
+ENV CUDA_HOME=/usr/local/cuda-11.8
+ENV PATH=${CUDA_HOME}/bin:${PATH}
 
 # ----- cuRobo from source -----
 RUN git clone --depth 1 https://github.com/NVlabs/curobo.git /opt/curobo \
