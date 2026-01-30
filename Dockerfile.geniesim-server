@@ -46,9 +46,15 @@ RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --upgrade pip \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir \
        -r ${GENIESIM_ROOT}/requirements.txt
 
-# ----- cuRobo from source -----
-# CUDA_HOME must be set for torch cpp_extension to find nvcc
+# ----- CUDA toolkit (nvcc) for cuRobo compilation -----
+# Isaac Sim base image only ships the CUDA runtime; cuRobo needs nvcc.
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends \
+       cuda-nvcc-12-6 cuda-cudart-dev-12-6 libcusparse-dev-12-6 libcublas-dev-12-6 \
+    && rm -rf /var/lib/apt/lists/*
 ENV CUDA_HOME=/usr/local/cuda
+
+# ----- cuRobo from source -----
 RUN git clone --depth 1 https://github.com/NVlabs/curobo.git /opt/curobo \
     && cd /opt/curobo \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install -e . --no-build-isolation \
