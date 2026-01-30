@@ -281,9 +281,9 @@ except ImportError as _ik_err:
 _FRANKA_METADATA = {
     "joint_names": ["panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4",
                     "panda_joint5", "panda_joint6", "panda_joint7"],
-    "joint_limits_lower": [-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973],
-    "joint_limits_upper": [2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973],
-    "default_joint_positions": [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
+    "joint_limits_lower": [-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973, 0.0, 0.0],
+    "joint_limits_upper": [2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973, 0.04, 0.04],
+    "default_joint_positions": [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04],
     "gripper_joint_names": ["panda_finger_joint1", "panda_finger_joint2"],
     "gripper_limits": (0.0, 0.04),
 }
@@ -369,6 +369,65 @@ def _franka_fk(joint_angles: "np.ndarray") -> Tuple[List[float], List[float]]:
 
     ee_quat = [float(w), float(x), float(y), float(z)]
     return ee_pos, ee_quat
+
+
+def _franka_numerical_ik(
+    target_pos: "np.ndarray",
+    initial_guess: Optional["np.ndarray"] = None,
+    max_iter: int = 200,
+    tol: float = 1e-3,
+) -> Optional["np.ndarray"]:
+    """
+    Numerical inverse kinematics for Franka Panda using Jacobian pseudo-inverse.
+
+    Args:
+        target_pos: Desired end-effector position [x, y, z].
+        initial_guess: Starting joint configuration (7 DOF). Uses default if None.
+        max_iter: Maximum iterations.
+        tol: Position error tolerance (meters).
+
+    Returns:
+        7-element joint angle array, or None if IK fails to converge.
+    """
+    _lower = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973])
+    _upper = np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973])
+
+    if initial_guess is None:
+        q = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+    else:
+        q = np.array(initial_guess[:7], dtype=float).copy()
+
+    target = np.asarray(target_pos, dtype=float)
+    step_size = 0.5
+    damping = 1e-4
+
+    for _ in range(max_iter):
+        ee_pos, _ = _franka_fk(q)
+        ee = np.array(ee_pos)
+        err = target - ee
+        if np.linalg.norm(err) < tol:
+            return q
+
+        # Numerical Jacobian (position only, 3x7)
+        J = np.zeros((3, 7))
+        delta = 1e-5
+        for j in range(7):
+            q_plus = q.copy()
+            q_plus[j] += delta
+            ee_plus, _ = _franka_fk(q_plus)
+            J[:, j] = (np.array(ee_plus) - ee) / delta
+
+        # Damped pseudo-inverse step
+        JT = J.T
+        dq = JT @ np.linalg.solve(J @ JT + damping * np.eye(3), err)
+        q = q + step_size * dq
+        q = np.clip(q, _lower, _upper)
+
+    # Check final convergence
+    ee_pos, _ = _franka_fk(q)
+    if np.linalg.norm(np.array(ee_pos) - target) < tol * 10:
+        return q
+    return None
 
 
 # =============================================================================
@@ -4468,6 +4527,25 @@ class GenieSimLocalFramework:
                     _tt, ["Task initiated", "Motion completed", "End state reached"]
                 )
 
+            # Geometric task success: verify object actually moved (Improvement D)
+            if task_success is None and frames:
+                _target_oid = task.get("target_object") or task.get("target_object_id")
+                if _target_oid:
+                    _init_p = frames[0].get("_initial_object_poses", {}).get(_target_oid)
+                    _final_p = frames[-1].get("_final_object_poses", {}).get(_target_oid)
+                    if _init_p is not None and _final_p is not None:
+                        _disp = float(np.linalg.norm(np.array(_final_p) - np.array(_init_p)))
+                        if _disp > 0.10:
+                            task_success = True
+                            llm_metadata["task_success_reasoning"] = (
+                                f"Geometric: target object displaced {_disp:.3f}m (>{0.10}m threshold)."
+                            )
+                        else:
+                            task_success = False
+                            llm_metadata["task_success_reasoning"] = (
+                                f"Geometric: target object displacement {_disp:.3f}m below 0.10m threshold."
+                            )
+
             # Heuristic task_success from gripper transitions
             if task_success is None and frames:
                 _has_grasp = False
@@ -4558,6 +4636,11 @@ class GenieSimLocalFramework:
             # Reproducibility seed (deterministic trajectory, but record for traceability)
             episode_seed = hash((episode_id, robot_type, num_joints)) & 0xFFFFFFFF
 
+            # Clean up internal metadata fields from frames before serialization
+            for _f in frames:
+                _f.pop("_initial_object_poses", None)
+                _f.pop("_final_object_poses", None)
+
             with open(episode_path, "w") as f:
                 json.dump({
                     "episode_id": episode_id,
@@ -4580,6 +4663,14 @@ class GenieSimLocalFramework:
                     "success_criteria": llm_metadata.get("success_criteria"),
                     "stall_info": result["stall_info"],
                     "frame_validation": frame_validation,
+                    "phase_descriptions": {
+                        "approach": f"Moving toward {task.get('target_object', 'target object')}",
+                        "grasp": f"Closing gripper to grasp {task.get('target_object', 'object')}",
+                        "lift": f"Lifting {task.get('target_object', 'object')} off the surface",
+                        "transport": f"Transporting {task.get('target_object', 'object')} to placement location",
+                        "place": f"Placing {task.get('target_object', 'object')} at target",
+                        "retract": "Retracting gripper after placement",
+                    },
                 }, f, default=_json_default)
 
             result["success"] = True
@@ -4592,7 +4683,9 @@ class GenieSimLocalFramework:
             result["frame_validation"] = frame_validation
 
         except Exception as e:
+            import traceback
             result["error"] = str(e)
+            self.log(f"Episode failed: {e}", "ERROR")
             if recording_started and not recording_stopped:
                 stop_result = self._client.stop_recording()
                 if not stop_result.available:
@@ -4722,6 +4815,38 @@ class GenieSimLocalFramework:
             trajectory[0]["joint_positions"], dtype=float
         ) if trajectory else np.zeros(7)
 
+        # --- Object tracking state for dynamic scene updates (Improvement A) ---
+        _attached_object_id: Optional[str] = None
+        _grasp_ee_offset: Optional[np.ndarray] = None
+        _object_poses: Dict[str, np.ndarray] = {}  # current poses of all objects
+        _initial_object_poses: Dict[str, np.ndarray] = {}  # for success verification
+
+        # --- Sensor noise config (Improvement E) ---
+        _inject_noise = os.environ.get("INJECT_SENSOR_NOISE", "1") == "1"
+        _jp_noise_std = 0.001  # 1 millirad
+        _jv_noise_std = 0.01   # 10 millirad/s
+        _ee_noise_std = 0.001  # 1mm
+
+        # --- Phase tracking for labels (Improvement G) ---
+        _grasp_detected = False
+        _release_detected = False
+        _lift_phase_started = False
+
+        # --- Grasp physics constants (Improvement J) ---
+        _GRIPPER_MAX_APERTURE = 0.08  # meters (Franka gripper max opening)
+        _GRIPPER_MAX_FORCE = 40.0     # Newtons
+        # Graspable width: objects can be grasped at their narrowest dimension
+        _OBJECT_SIZES = {
+            "pot": 0.06, "cup": 0.06, "plate": 0.02, "bottle": 0.05,
+            "toaster": 0.07, "mug": 0.06, "bowl": 0.02, "can": 0.05,
+            "box": 0.07, "pan": 0.03, "kettle": 0.06, "jar": 0.06,
+        }
+        _OBJECT_MASSES = {
+            "pot": 0.5, "cup": 0.2, "plate": 0.3, "bottle": 0.4,
+            "toaster": 1.0, "mug": 0.25, "bowl": 0.35, "can": 0.3,
+            "box": 0.4, "pan": 0.6, "kettle": 0.8, "jar": 0.35,
+        }
+
         frames: List[Dict[str, Any]] = []
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
@@ -4786,7 +4911,7 @@ class GenieSimLocalFramework:
                         _synth_objs.append({
                             "object_id": _target,
                             "object_type": _readable.lower(),
-                            "pose": {"x": _base[0] + 0.3, "y": _base[1], "z": _base[2]},
+                            "pose": {"x": _base[0] - 0.05, "y": _base[1] + 0.25, "z": _base[2] - 0.05},
                         })
                     _goal = task.get("goal_region")
                     if _goal:
@@ -4824,6 +4949,7 @@ class GenieSimLocalFramework:
 
             # Explicit gripper command: infer from gripper joint positions
             # Normalize by gripper range (e.g. Franka: [0.0, 0.04])
+            gripper_openness = 1.0
             if len(waypoint_joints) > arm_dof:
                 gripper_joints = waypoint_joints[arm_dof:]
                 _g_fb = _ROBOT_METADATA_FALLBACK.get(
@@ -4835,6 +4961,137 @@ class GenieSimLocalFramework:
                 gripper_openness = min(1.0, gripper_mean / _g_range) if _g_range > 0 else 0.0
                 frame_data["gripper_command"] = "open" if gripper_openness > 0.5 else "closed"
                 frame_data["gripper_openness"] = round(gripper_openness, 3)
+
+            # --- Improvement G: Per-frame phase labels ---
+            _current_phase = "approach"
+            if frame_data.get("gripper_command") == "closed" and not _grasp_detected:
+                _grasp_detected = True
+                _current_phase = "grasp"
+            elif _grasp_detected and not _release_detected:
+                if frame_data.get("gripper_command") == "open":
+                    _release_detected = True
+                    _current_phase = "place"
+                elif frame_data.get("ee_pos") and step_idx > 0 and frames:
+                    _prev_ee_z = frames[-1].get("ee_pos", [0, 0, 0])[2] if frames[-1].get("ee_pos") else 0
+                    _curr_ee_z = frame_data.get("ee_pos", [0, 0, 0])[2]
+                    if not _lift_phase_started and _curr_ee_z > _prev_ee_z + 0.005:
+                        _lift_phase_started = True
+                        _current_phase = "lift"
+                    elif _lift_phase_started:
+                        _current_phase = "transport"
+                    else:
+                        _current_phase = "grasp"
+            elif _release_detected:
+                _current_phase = "retract"
+            frame_data["phase"] = _current_phase
+
+            # --- Improvement A: Dynamic scene state + J: Grasp physics ---
+            ee_pos_arr = np.array(frame_data["ee_pos"]) if frame_data.get("ee_pos") else None
+
+            # Initialize object poses on first frame
+            if step_idx == 0 and obs.get("scene_state"):
+                for _obj in obs["scene_state"].get("objects", []):
+                    _oid = _obj.get("object_id", "")
+                    _p = _obj.get("pose", {})
+                    if "x" in _p:
+                        _pos = np.array([_p["x"], _p["y"], _p["z"]], dtype=float)
+                    elif "position" in _p:
+                        _pos = np.array(_p["position"], dtype=float)
+                    else:
+                        _pos = np.zeros(3)
+                    _object_poses[_oid] = _pos.copy()
+                    _initial_object_poses[_oid] = _pos.copy()
+
+            # Detect grasp: gripper closes near an object
+            if (frame_data.get("gripper_command") == "closed"
+                    and _attached_object_id is None
+                    and ee_pos_arr is not None):
+                for _oid, _opos in _object_poses.items():
+                    _dist = float(np.linalg.norm(ee_pos_arr - _opos))
+                    if _dist < 0.15:
+                        # Check grasp feasibility (Improvement J)
+                        _obj_type = ""
+                        for _obj in obs.get("scene_state", {}).get("objects", []):
+                            if _obj.get("object_id") == _oid:
+                                _obj_type = (_obj.get("object_type") or "").lower()
+                                break
+                        _obj_width = _OBJECT_SIZES.get(_obj_type, 0.06)
+                        if _obj_width <= _GRIPPER_MAX_APERTURE:
+                            _attached_object_id = _oid
+                            _grasp_ee_offset = _opos - ee_pos_arr
+                            frame_data["grasp_feasible"] = True
+                            frame_data["grasped_object_id"] = _oid
+                        else:
+                            frame_data["grasp_feasible"] = False
+                        break
+
+            # Update attached object pose to follow EE
+            if _attached_object_id is not None and ee_pos_arr is not None:
+                _new_pos = ee_pos_arr + _grasp_ee_offset
+                _object_poses[_attached_object_id] = _new_pos.copy()
+                # Update scene_state in observation
+                if obs.get("scene_state"):
+                    for _obj in obs["scene_state"].get("objects", []):
+                        if _obj.get("object_id") == _attached_object_id:
+                            _obj["pose"] = {
+                                "x": round(float(_new_pos[0]), 6),
+                                "y": round(float(_new_pos[1]), 6),
+                                "z": round(float(_new_pos[2]), 6),
+                            }
+                            break
+
+                # Contact force estimation (Improvement J)
+                _obj_type = ""
+                for _obj in obs.get("scene_state", {}).get("objects", []):
+                    if _obj.get("object_id") == _attached_object_id:
+                        _obj_type = (_obj.get("object_type") or "").lower()
+                        break
+                _mass = _OBJECT_MASSES.get(_obj_type, 0.3)
+                _weight = _mass * 9.81
+                _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
+                frame_data["contact_forces"] = {
+                    "weight_force_N": round(_weight, 2),
+                    "grip_force_N": round(_grip_force, 2),
+                    "force_sufficient": _grip_force >= _weight,
+                    "grasped_object_id": _attached_object_id,
+                }
+
+            # Detect release: gripper opens while holding object
+            if frame_data.get("gripper_command") == "open" and _attached_object_id is not None:
+                _attached_object_id = None
+                _grasp_ee_offset = None
+
+            # Update ALL tracked object poses in scene_state (not just attached)
+            if obs.get("scene_state") and _object_poses:
+                for _obj in obs["scene_state"].get("objects", []):
+                    _oid = _obj.get("object_id", "")
+                    if _oid in _object_poses:
+                        _p = _object_poses[_oid]
+                        _obj["pose"] = {
+                            "x": round(float(_p[0]), 6),
+                            "y": round(float(_p[1]), 6),
+                            "z": round(float(_p[2]), 6),
+                        }
+
+            # --- Improvement C: Mirror EE fields into observation.robot_state ---
+            for _key in ("ee_pos", "ee_quat", "ee_vel", "gripper_command", "gripper_openness"):
+                if _key in frame_data:
+                    robot_state[_key] = frame_data[_key]
+
+            # --- Improvement E: Sensor noise injection ---
+            if _inject_noise:
+                import random as _rng_mod
+                _noise_rng = _rng_mod.Random(hash((episode_id, step_idx)) & 0xFFFFFFFF)
+                _jp = robot_state.get("joint_positions", [])
+                if _jp:
+                    robot_state["joint_positions"] = [
+                        v + _noise_rng.gauss(0, _jp_noise_std) for v in _jp
+                    ]
+                if frame_data.get("ee_pos"):
+                    frame_data["ee_pos"] = [
+                        v + _noise_rng.gauss(0, _ee_noise_std) for v in frame_data["ee_pos"]
+                    ]
+                    robot_state["ee_pos"] = frame_data["ee_pos"]
 
             frames.append(frame_data)
 
@@ -4855,12 +5112,30 @@ class GenieSimLocalFramework:
                         dtype=float,
                     )
                     if jp_curr.shape == jp_prev.shape and jp_curr.size > 0:
-                        obs_rs["joint_velocities"] = ((jp_curr - jp_prev) / dt).tolist()
+                        _jv = ((jp_curr - jp_prev) / dt)
+                        # Add velocity noise (Improvement E)
+                        if _inject_noise:
+                            import random as _rng_mod
+                            _vn_rng = _rng_mod.Random(hash((episode_id, i, "vel")) & 0xFFFFFFFF)
+                            _jv = _jv + np.array([_vn_rng.gauss(0, _jv_noise_std) for _ in range(_jv.size)])
+                        obs_rs["joint_velocities"] = _jv.tolist()
                     # EE velocity
                     if frame.get("ee_pos") and prev.get("ee_pos"):
                         ee_curr = np.array(frame["ee_pos"], dtype=float)
                         ee_prev = np.array(prev["ee_pos"], dtype=float)
                         frame["ee_vel"] = ((ee_curr - ee_prev) / dt).tolist()
+                    # Mirror velocity fields to robot_state (Improvement C)
+                    if "ee_vel" in frame:
+                        obs_rs["ee_vel"] = frame["ee_vel"]
+
+        # Store initial/final object poses on first/last frame for success verification
+        if frames:
+            frames[0]["_initial_object_poses"] = {
+                k: v.tolist() for k, v in _initial_object_poses.items()
+            }
+            frames[-1]["_final_object_poses"] = {
+                k: v.tolist() for k, v in _object_poses.items()
+            }
 
         return frames
 
@@ -5319,14 +5594,24 @@ class GenieSimLocalFramework:
             for obj in objects:
                 obj_id = obj.get("object_id") or obj.get("id") or obj.get("name")
                 if obj_id == target_id:
-                    position = obj.get("pose", {}).get("position")
+                    pose = obj.get("pose", {})
+                    # Support both {"position": [x,y,z]} and {"x":..,"y":..,"z":..} formats
+                    position = pose.get("position")
                     if position is not None:
                         return np.array(position, dtype=float)
+                    if "x" in pose and "y" in pose and "z" in pose:
+                        return np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
         target_objects = task.get("target_objects", [])
         if target_objects:
             position = target_objects[0].get("position")
             if position is not None:
                 return np.array(position, dtype=float)
+        # Fallback: synthesize position from robot config (same logic as frame builder)
+        _target = task.get("target_object")
+        if _target:
+            _rc_cfg = task.get("robot_config") or {}
+            _base = _rc_cfg.get("base_position", [0.5, 0.0, 0.8])
+            return np.array([_base[0] - 0.05, _base[1] + 0.25, _base[2] - 0.05], dtype=float)
         return None
 
     def _resolve_task_waypoints(
@@ -5765,41 +6050,132 @@ class GenieSimLocalFramework:
         for j in range(arm_end, num_joints):
             gripper_closed[j] = 0.3  # partially close fingers
 
-        # Build phase waypoints as offsets from initial joints
+        # Build phase waypoints using task geometry + numerical IK
         # Randomize offsets and durations per episode for trajectory diversity
         import random as _random
-        _rng = _random.Random(hash(task.get("task_name", "") + str(id(initial_obs))) & 0xFFFFFFFF)
-        def _jitter(base_offsets: np.ndarray) -> np.ndarray:
-            noise = np.array([_rng.uniform(-0.03, 0.03) for _ in range(len(base_offsets))])
-            return base_offsets + noise
+        _rng = _random.Random(hash(task.get("task_name", "") + str(id(initial_obs)) + str(time.time())) & 0xFFFFFFFF)
 
         base_durations = np.array([0.20, 0.10, 0.20, 0.30, 0.20])
-        dur_noise = np.array([_rng.uniform(-0.05, 0.05) for _ in range(len(base_durations))])
+        dur_noise = np.array([_rng.uniform(-0.15, 0.15) for _ in range(len(base_durations))])
         durations = np.clip(base_durations + dur_noise, 0.05, 0.5)
         durations /= durations.sum()  # renormalize to 1.0
 
-        phase_configs = [
-            # (phase_name, arm_offset_fraction, gripper_multiplier, duration_fraction)
-            ("approach",  _jitter(np.array([0.0, 0.05, -0.08, 0.04, -0.02, 0.03, 0.0])), gripper_open,  durations[0]),
-            ("grasp",     _jitter(np.array([0.0, 0.08, -0.12, 0.06, -0.03, 0.04, 0.01])), gripper_closed, durations[1]),
-            ("lift",      _jitter(np.array([0.0, -0.05, -0.15, 0.08, -0.05, 0.06, 0.0])), gripper_closed, durations[2]),
-            ("transport", _jitter(np.array([0.1, -0.03, -0.10, 0.05, 0.05, -0.02, 0.03])), gripper_closed, durations[3]),
-            ("place",     _jitter(np.array([0.1, 0.02, -0.05, 0.03, 0.04, -0.01, 0.02])), gripper_open,  durations[4]),
-        ]
+        # Randomization parameters for trajectory diversity
+        _approach_angle = _rng.uniform(-0.5, 0.5)  # radians around target
+        _approach_height = 0.15 + _rng.uniform(-0.03, 0.05)
+        _lift_height = _rng.uniform(0.15, 0.25)
+        _transport_lateral = _rng.uniform(-0.10, 0.10)
+        _transport_arc_h = _rng.uniform(0.10, 0.25)
 
-        # Generate phase target joint positions
-        phase_targets = []
-        for phase_name, arm_offsets, grip_mult, _ in phase_configs:
-            target = initial_joints.copy()
-            # Apply arm offsets scaled by joint range
-            for j in range(min(len(arm_offsets), arm_end)):
-                target[j] += arm_offsets[j] * joint_range[j]
-            # Apply gripper multiplier
-            for j in range(arm_end, num_joints):
-                mid = (lower[j] + upper[j]) / 2.0
-                target[j] = mid + (initial_joints[j] - mid) * grip_mult[j]
-            target = np.clip(target, lower, upper)
-            phase_targets.append(target)
+        # Compute Cartesian waypoints from task geometry
+        _ik_waypoints_available = False
+        if target_position is not None:
+            _tp = np.array(target_position, dtype=float)
+            approach_pos = _tp + np.array([
+                _approach_height * np.cos(_approach_angle),
+                _approach_height * np.sin(_approach_angle),
+                _approach_height,
+            ])
+            grasp_pos = _tp.copy()
+            lift_pos = _tp + np.array([0.0, 0.0, _lift_height])
+
+            if place_position is not None:
+                _pp = np.array(place_position, dtype=float)
+                _dir = _pp - _tp
+                _dir_norm = np.linalg.norm(_dir)
+                if _dir_norm > 0.01:
+                    _dir_unit = _dir / _dir_norm
+                    _perp = np.array([-_dir_unit[1], _dir_unit[0], 0.0])
+                else:
+                    _dir_unit = np.array([1.0, 0.0, 0.0])
+                    _perp = np.array([0.0, 1.0, 0.0])
+                transport_pos = (_tp + _pp) / 2.0 + _perp * _transport_lateral + np.array([0, 0, _transport_arc_h])
+                place_pos_cart = _pp.copy()
+            else:
+                transport_pos = _tp + np.array([0.25, _transport_lateral, _transport_arc_h])
+                place_pos_cart = _tp + np.array([0.25, 0.0, 0.0])
+
+            # Solve IK for each Cartesian waypoint
+            _cart_targets = [
+                ("approach", approach_pos),
+                ("grasp", grasp_pos),
+                ("lift", lift_pos),
+                ("transport", transport_pos),
+                ("place", place_pos_cart),
+            ]
+            ik_phase_joints = []
+            _prev_q = initial_joints[:arm_end]
+            _all_solved = True
+            for _pname, _cart in _cart_targets:
+                _ik_result = _franka_numerical_ik(_cart, initial_guess=_prev_q)
+                if _ik_result is not None:
+                    ik_phase_joints.append(_ik_result)
+                    _prev_q = _ik_result
+                    self.log(
+                        f"  ✓ IK solved for phase '{_pname}': "
+                        f"target={[round(c, 3) for c in _cart.tolist()]}",
+                        "INFO",
+                    )
+                else:
+                    self.log(
+                        f"  ⚠️  IK failed for phase '{_pname}' "
+                        f"target={[round(c, 3) for c in _cart.tolist()]}; "
+                        f"falling back to joint-space offsets.",
+                        "WARNING",
+                    )
+                    _all_solved = False
+                    break
+
+            if _all_solved and len(ik_phase_joints) == 5:
+                _ik_waypoints_available = True
+                self.log(
+                    f"  ✅ All 5 IK waypoints solved — trajectory is task-geometry-aware.",
+                    "INFO",
+                )
+
+        # Build phase configs: IK-derived if available, else joint-space offsets
+        def _jitter(base_offsets: np.ndarray) -> np.ndarray:
+            noise = np.array([_rng.uniform(-0.10, 0.10) for _ in range(len(base_offsets))])
+            return base_offsets + noise
+
+        if _ik_waypoints_available:
+            # Use IK-derived joint targets
+            phase_configs = [
+                ("approach",  None, gripper_open,    durations[0]),
+                ("grasp",     None, gripper_closed,  durations[1]),
+                ("lift",      None, gripper_closed,  durations[2]),
+                ("transport", None, gripper_closed,  durations[3]),
+                ("place",     None, gripper_open,    durations[4]),
+            ]
+            phase_targets = []
+            for _pi, (_pn, _, _gm, _) in enumerate(phase_configs):
+                target = initial_joints.copy()
+                target[:arm_end] = ik_phase_joints[_pi]
+                # Apply gripper state
+                for j in range(arm_end, num_joints):
+                    mid = (lower[j] + upper[j]) / 2.0
+                    target[j] = mid + (initial_joints[j] - mid) * _gm[j]
+                target = np.clip(target, lower, upper)
+                phase_targets.append(target)
+        else:
+            # Fallback: joint-space offsets (original behavior with larger jitter)
+            phase_configs = [
+                ("approach",  _jitter(np.array([0.0, 0.05, -0.08, 0.04, -0.02, 0.03, 0.0])), gripper_open,  durations[0]),
+                ("grasp",     _jitter(np.array([0.0, 0.08, -0.12, 0.06, -0.03, 0.04, 0.01])), gripper_closed, durations[1]),
+                ("lift",      _jitter(np.array([0.0, -0.05, -0.15, 0.08, -0.05, 0.06, 0.0])), gripper_closed, durations[2]),
+                ("transport", _jitter(np.array([0.1, -0.03, -0.10, 0.05, 0.05, -0.02, 0.03])), gripper_closed, durations[3]),
+                ("place",     _jitter(np.array([0.1, 0.02, -0.05, 0.03, 0.04, -0.01, 0.02])), gripper_open,  durations[4]),
+            ]
+            phase_targets = []
+            for phase_name, arm_offsets, grip_mult, _ in phase_configs:
+                target = initial_joints.copy()
+                for j in range(min(len(arm_offsets), arm_end)):
+                    target[j] += arm_offsets[j] * joint_range[j]
+                for j in range(arm_end, num_joints):
+                    mid = (lower[j] + upper[j]) / 2.0
+                    target[j] = mid + (initial_joints[j] - mid) * grip_mult[j]
+                target = np.clip(target, lower, upper)
+                phase_targets.append(target)
 
         # Gripper joint values per phase (Franka finger joints: 0.04 = open, 0.0 = closed)
         _grip_lims = _ROBOT_METADATA_FALLBACK.get(self.config.robot_type, {}).get("gripper_limits", (0.0, 0.04))
@@ -5835,7 +6211,14 @@ class GenieSimLocalFramework:
                     joint_pos = self._clamp_joints_to_limits(joint_pos, robot_config)
                 # Interpolate gripper joints and append
                 grip_val = (1.0 - s) * current_grip + s * target_grip
-                full_joints = list(joint_pos.tolist()) + [grip_val, grip_val]
+                _jp_list = joint_pos.tolist()
+                # Set gripper joints in the existing array (indices 7,8) rather than appending
+                if len(_jp_list) >= 9:
+                    _jp_list[7] = grip_val
+                    _jp_list[8] = grip_val
+                    full_joints = _jp_list
+                else:
+                    full_joints = _jp_list + [grip_val, grip_val]
                 trajectory.append(
                     {
                         "joint_positions": full_joints,
@@ -6449,7 +6832,29 @@ class GenieSimLocalFramework:
         data_completeness_score = 1.0 - (missing_fields_count / total_frames)
         action_validity_score = 1.0 - (action_invalid_count / total_frames)
 
-        if success_flag_detected:
+        # --- Improvement D: Geometric task success verification ---
+        geometric_success = None
+        geometric_reasoning = ""
+        target_object_id = task.get("target_object") or task.get("target_object_id")
+        if target_object_id and frames:
+            _init_poses = frames[0].get("_initial_object_poses", {})
+            _final_poses = frames[-1].get("_final_object_poses", {})
+            if target_object_id in _init_poses and target_object_id in _final_poses:
+                _ip = np.array(_init_poses[target_object_id])
+                _fp = np.array(_final_poses[target_object_id])
+                _displacement = float(np.linalg.norm(_fp - _ip))
+                if _displacement > 0.10:
+                    geometric_success = True
+                    geometric_reasoning = f"Object displaced {_displacement:.3f}m"
+                else:
+                    geometric_success = False
+                    geometric_reasoning = f"Object displacement {_displacement:.3f}m < 0.10m threshold"
+
+        if geometric_success is not None:
+            success_score = 1.0 if geometric_success else 0.0
+            if not geometric_success:
+                logger.warning("Quality check: geometric verification failed: %s", geometric_reasoning)
+        elif success_flag_detected:
             success_score = 1.0 if success_flag_value else 0.0
             if not success_flag_value:
                 logger.warning("Quality check: task success flag is false.")
@@ -6517,6 +6922,62 @@ class GenieSimLocalFramework:
                 collision_free_score = 0.0
                 break
 
+        # --- Improvement I: Physics plausibility penalties ---
+        scene_state_penalty = 0.0
+        ee_approach_penalty = 0.0
+
+        # Penalty: static scene state (no object moved)
+        if frames:
+            _init_poses = frames[0].get("_initial_object_poses", {})
+            _final_poses = frames[-1].get("_final_object_poses", {})
+            if _init_poses and _final_poses:
+                _any_moved = False
+                for _oid, _ip in _init_poses.items():
+                    _fp = _final_poses.get(_oid)
+                    if _fp is not None:
+                        if np.linalg.norm(np.array(_fp) - np.array(_ip)) > 0.01:
+                            _any_moved = True
+                            break
+                if not _any_moved:
+                    scene_state_penalty = 0.20
+                    logger.warning("Quality penalty: scene_state is static (no object moved >1cm)")
+
+        # Penalty: EE never approaches target object
+        if target_object_id and frames:
+            _min_dist = float("inf")
+            _initial_dist = float("inf")
+            for _fi, _frame in enumerate(frames):
+                _eep = _frame.get("ee_pos")
+                _ss = _frame.get("observation", {}).get("scene_state", {})
+                if _eep:
+                    _eep_arr = np.array(_eep)
+                    for _obj in _ss.get("objects", []):
+                        if _obj.get("object_id") == target_object_id:
+                            _op = _obj.get("pose", {})
+                            if "x" in _op:
+                                _opos = np.array([_op["x"], _op["y"], _op["z"]])
+                            elif "position" in _op:
+                                _opos = np.array(_op["position"])
+                            else:
+                                break
+                            _d = float(np.linalg.norm(_eep_arr - _opos))
+                            if _fi == 0:
+                                _initial_dist = _d
+                            _min_dist = min(_min_dist, _d)
+                            break
+            if _min_dist > 0.20:
+                ee_approach_penalty = 0.15
+                logger.warning(
+                    "Quality penalty: EE never approaches target (min_dist=%.3f m)",
+                    _min_dist,
+                )
+            elif _min_dist >= _initial_dist and _initial_dist < float("inf"):
+                ee_approach_penalty = 0.10
+                logger.warning(
+                    "Quality penalty: EE distance to target never decreased (min=%.3f, initial=%.3f)",
+                    _min_dist, _initial_dist,
+                )
+
         # Base score uses original weights for backward compatibility;
         # smoothness and collision are additive bonuses (up to +0.05 each).
         weighted_score = (
@@ -6531,6 +6992,9 @@ class GenieSimLocalFramework:
         smoothness_bonus = 0.05 * smoothness_score
         collision_bonus = 0.05 * (collision_free_score - 0.5)  # neutral at 0.5
         weighted_score += smoothness_bonus + collision_bonus
+        # Physics plausibility penalties (Improvement I)
+        weighted_score -= scene_state_penalty
+        weighted_score -= ee_approach_penalty
 
         return min(1.0, max(0.0, weighted_score))
 
