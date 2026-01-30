@@ -34,15 +34,17 @@ RUN GENIESIM_REF=${GENIESIM_REF:-$(cat /tmp/GENIESIM_REF)} \
     && git checkout ${GENIESIM_REF}
 
 # ----- Python dependencies -----
+# NOTE: Lock/constraint files are omitted because Isaac Sim's bundled Python
+# ships its own pinned versions of core packages (e.g. requests, numpy) that
+# conflict with the lock file pins.  The requirements.txt files use flexible
+# enough pins to work with whatever Isaac Sim provides.
 COPY genie-sim-local-job/requirements.txt /tmp/pipeline-requirements.txt
-COPY genie-sim-local-job/requirements.lock /tmp/pipeline-requirements.lock
-COPY genie-sim-gpu-job/requirements.geniesim.lock /tmp/requirements.geniesim.lock
 
 RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --upgrade pip \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir \
-       -r /tmp/pipeline-requirements.txt -c /tmp/pipeline-requirements.lock \
+       -r /tmp/pipeline-requirements.txt \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir \
-       -r ${GENIESIM_ROOT}/requirements.txt -c /tmp/requirements.geniesim.lock
+       -r ${GENIESIM_ROOT}/requirements.txt
 
 # ----- cuRobo from source -----
 RUN git clone --depth 1 https://github.com/NVlabs/curobo.git /opt/curobo \
