@@ -32,7 +32,7 @@ services:
       GENIESIM_HEALTHCHECK: ${GENIESIM_HEALTHCHECK:-1}
       GENIESIM_SERVER_LOG: ${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
       SIM_ASSETS: /sim-assets
-      GEMINI_API_KEY: AIzaSyACbOLJSv3-W5_Hm4IXpI_RYVd2Bw0K_Qg
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       PYTHONPATH: /workspace/BlueprintPipeline/tools/geniesim_adapter:/workspace/BlueprintPipeline
     volumes:
       - ./:/workspace/BlueprintPipeline:rw
