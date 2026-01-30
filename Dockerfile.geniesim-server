@@ -48,7 +48,12 @@ RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --upgrade pip \
 
 # ----- CUDA toolkit (nvcc) for cuRobo compilation -----
 # Isaac Sim base image only ships the CUDA runtime; cuRobo needs nvcc.
+# Add NVIDIA CUDA repo, then install the toolkit packages.
 RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends wget gnupg \
+    && wget -qO /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
+    && apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
        cuda-nvcc-12-6 cuda-cudart-dev-12-6 libcusparse-dev-12-6 libcublas-dev-12-6 \
     && rm -rf /var/lib/apt/lists/*
