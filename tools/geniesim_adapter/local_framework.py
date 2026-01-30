@@ -1904,27 +1904,13 @@ class GenieSimGRPCClient:
                 except Exception as exc:
                     logger.debug(f"[OBS] get_object_pose({prim_path}) failed: {exc}")
 
-        # --- 4. Real camera images via CameraService ---
+        # --- 4. Camera images ---
+        # NOTE: The server's CameraService.get_camera_data dispatches to
+        # Command.GET_CAMERA_DATA (=1) which is NOT handled in on_command_step,
+        # causing a ValueError that kills the gRPC thread and the entire server.
+        # Camera capture only works internally via _capture_camera() during
+        # startRecording/reset. Skip camera capture until server is patched.
         camera_images = []
-        camera_prim_paths = list(self._camera_prim_map.values()) if self._camera_prim_map else []
-        camera_ids = list(self._camera_prim_map.keys()) if self._camera_prim_map else self._default_camera_ids
-        if camera_prim_paths and self._channel is not None:
-            for idx, cam_prim in enumerate(camera_prim_paths):
-                try:
-                    cam_data = self._get_camera_data_raw(cam_prim)
-                    if cam_data is not None:
-                        cam_id = camera_ids[idx] if idx < len(camera_ids) else str(idx)
-                        camera_images.append({
-                            "camera_id": cam_id,
-                            "rgb_data": _b64.b64encode(cam_data.get("rgb", b"")).decode("ascii") if cam_data.get("rgb") else "",
-                            "depth_data": _b64.b64encode(cam_data.get("depth", b"")).decode("ascii") if cam_data.get("depth") else "",
-                            "semantic_data": "",
-                            "width": cam_data.get("width", 0),
-                            "height": cam_data.get("height", 0),
-                            "encoding": "rgb",
-                        })
-                except Exception as exc:
-                    logger.debug(f"[OBS] get_camera_data({cam_prim}) failed: {exc}")
 
         # --- Timestamp ---
         mono_ns = _time.monotonic_ns()
