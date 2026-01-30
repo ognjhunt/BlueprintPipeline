@@ -4508,10 +4508,19 @@ class GenieSimLocalFramework:
 
             if not llm_metadata.get("scene_description"):
                 _env = task.get("environment_type") or "unknown"
-                _meta = task.get("metadata") or {}
-                _n_obj = _meta.get("manipulable_objects", "several")
+                # Count actual tracked objects from frames (Fix 5: match description to data)
+                _n_obj_actual = 0
+                if frames:
+                    _priv = frames[0].get("observation", {}).get("privileged", {})
+                    _ss = frames[0].get("observation", {}).get("scene_state", {}) or _priv.get("scene_state", {})
+                    _n_obj_actual = len(_ss.get("objects", []))
+                if _n_obj_actual > 0:
+                    _n_obj = str(_n_obj_actual)
+                else:
+                    _meta = task.get("metadata") or {}
+                    _n_obj = _meta.get("manipulable_objects", "several")
                 llm_metadata["scene_description"] = (
-                    f"{_env.title()} environment with {_n_obj} manipulable objects."
+                    f"{_env.title()} environment with {_n_obj} tracked objects."
                 )
 
             if not llm_metadata.get("success_criteria"):
@@ -4527,24 +4536,121 @@ class GenieSimLocalFramework:
                     _tt, ["Task initiated", "Motion completed", "End state reached"]
                 )
 
-            # Geometric task success: verify object actually moved (Improvement D)
+            # Geometric task success: goal-region verification (Fix 7)
             if task_success is None and frames:
                 _target_oid = task.get("target_object") or task.get("target_object_id")
                 if _target_oid:
                     _init_p = frames[0].get("_initial_object_poses", {}).get(_target_oid)
                     _final_p = frames[-1].get("_final_object_poses", {}).get(_target_oid)
                     if _init_p is not None and _final_p is not None:
-                        _disp = float(np.linalg.norm(np.array(_final_p) - np.array(_init_p)))
-                        if _disp > 0.10:
-                            task_success = True
-                            llm_metadata["task_success_reasoning"] = (
-                                f"Geometric: target object displaced {_disp:.3f}m (>{0.10}m threshold)."
-                            )
+                        _init_arr = np.array(_init_p)
+                        _final_arr = np.array(_final_p)
+                        _disp = float(np.linalg.norm(_final_arr - _init_arr))
+
+                        # Derive goal region from task config or use displacement heuristic
+                        _goal_cfg = task.get("goal_region") or {}
+                        _goal_center = np.array(_goal_cfg["center"]) if "center" in _goal_cfg else None
+                        _goal_extents = np.array(_goal_cfg["extents"]) if "extents" in _goal_cfg else None
+
+                        # Check milestones
+                        _grasp_detected = False
+                        _grasp_frame = None
+                        _lift_detected = False
+                        _place_frame = None
+                        _stable_count = 0
+                        _release_after_place = False
+                        _max_obj_z = float(_init_arr[2]) if len(_init_arr) >= 3 else 0.0
+                        _init_z = _max_obj_z
+
+                        for _fi, _fr in enumerate(frames):
+                            _gc = _fr.get("gripper_command")
+                            # Track grasp
+                            if not _grasp_detected and _gc == "closed":
+                                _grasp_detected = True
+                                _grasp_frame = _fi
+                            # Track object height from scene_state
+                            _obs_f = _fr.get("observation", {})
+                            _ss_f = _obs_f.get("scene_state", {}) or _obs_f.get("privileged", {}).get("scene_state", {})
+                            _obj_z_cur = None
+                            for _obj in _ss_f.get("objects", []):
+                                if _obj.get("object_id") == _target_oid:
+                                    _op = _obj.get("pose", {})
+                                    _obj_z_cur = _op.get("z") or (_op.get("position", [0, 0, 0])[2] if "position" in _op else None)
+                                    break
+                            if _obj_z_cur is not None:
+                                _max_obj_z = max(_max_obj_z, float(_obj_z_cur))
+                                # Lift: object >=5cm above initial
+                                if float(_obj_z_cur) - _init_z >= 0.05:
+                                    _lift_detected = True
+                            # Track release after grasp
+                            if _grasp_detected and _gc == "open":
+                                _release_after_place = True
+                                if _place_frame is None:
+                                    _place_frame = _fi
+
+                        # Check goal-region placement if goal is defined
+                        _in_goal = False
+                        _placement_error = None
+                        if _goal_center is not None and _goal_extents is not None:
+                            _placement_error = float(np.linalg.norm(_final_arr - _goal_center))
+                            _in_goal = bool(np.all(np.abs(_final_arr - _goal_center) <= _goal_extents))
                         else:
-                            task_success = False
-                            llm_metadata["task_success_reasoning"] = (
-                                f"Geometric: target object displacement {_disp:.3f}m below 0.10m threshold."
-                            )
+                            # Fallback: displacement > 0.10m counts as reaching goal
+                            _in_goal = _disp > 0.10
+                            _placement_error = _disp
+
+                        # Stability check: last 3 frames object velocity < 1mm/s
+                        _stable = True
+                        if len(frames) >= 4:
+                            _last_poses = []
+                            for _fr in frames[-4:]:
+                                _obs_f = _fr.get("observation", {})
+                                _ss_f = _obs_f.get("scene_state", {}) or _obs_f.get("privileged", {}).get("scene_state", {})
+                                for _obj in _ss_f.get("objects", []):
+                                    if _obj.get("object_id") == _target_oid:
+                                        _op = _obj.get("pose", {})
+                                        if "x" in _op:
+                                            _last_poses.append(np.array([_op["x"], _op["y"], _op["z"]]))
+                                        elif "position" in _op:
+                                            _last_poses.append(np.array(_op["position"]))
+                                        break
+                            if len(_last_poses) >= 3:
+                                _dt = 1.0 / 30.0
+                                for _li in range(1, len(_last_poses)):
+                                    _vel = float(np.linalg.norm(_last_poses[_li] - _last_poses[_li - 1])) / _dt
+                                    if _vel > 0.001:  # 1mm/s
+                                        _stable = False
+                                        break
+
+                        # Composite success
+                        _milestones = {
+                            "grasp_detected": _grasp_detected,
+                            "object_lifted_5cm": _lift_detected,
+                            "placed_in_goal": _in_goal,
+                            "stable_at_end": _stable,
+                            "gripper_released": _release_after_place,
+                        }
+                        _success_count = sum(_milestones.values())
+                        task_success = _success_count >= 4  # require at least 4 of 5
+
+                        # Store detailed metrics
+                        _ctrl_freq = 30.0
+                        llm_metadata["goal_region_verification"] = _milestones
+                        llm_metadata["goal_region_verification"]["displacement_m"] = round(_disp, 4)
+                        if _placement_error is not None:
+                            llm_metadata["goal_region_verification"]["final_placement_error_m"] = round(_placement_error, 4)
+                        if _grasp_frame is not None:
+                            llm_metadata["goal_region_verification"]["time_to_grasp_s"] = round(_grasp_frame / _ctrl_freq, 3)
+                        if _place_frame is not None:
+                            llm_metadata["goal_region_verification"]["time_to_place_s"] = round(_place_frame / _ctrl_freq, 3)
+                        llm_metadata["goal_region_verification"]["max_object_z"] = round(_max_obj_z, 4)
+                        llm_metadata["goal_region_verification"]["stability_score"] = 1.0 if _stable else 0.0
+
+                        _reasons = [f"{k}={'✓' if v else '✗'}" for k, v in _milestones.items()]
+                        llm_metadata["task_success_reasoning"] = (
+                            f"Goal-region: {_success_count}/5 milestones met "
+                            f"(disp={_disp:.3f}m). {', '.join(_reasons)}"
+                        )
 
             # Heuristic task_success from gripper transitions
             if task_success is None and frames:
@@ -4566,9 +4672,14 @@ class GenieSimLocalFramework:
                     )
 
             # Determine data mode
-            data_mode = "proprioception_only" if os.environ.get(
-                "GENIESIM_SKIP_SERVER_RECORDING", ""
-            ) else "full"
+            _skip_recording = os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", "")
+            _has_privileged = any(
+                f.get("observation", {}).get("privileged") for f in frames
+            ) if frames else False
+            if _skip_recording:
+                data_mode = "proprioception_with_privileged_state" if _has_privileged else "proprioception_only"
+            else:
+                data_mode = "full"
 
             # Save episode
             episode_path = output_dir / f"{episode_id}.json"
@@ -4611,6 +4722,10 @@ class GenieSimLocalFramework:
                 "action_space": "joint_delta",
                 "action_abs_space": "joint_position",
                 "control_frequency_hz": 30.0,
+                "clock_model": "uniform_30hz",
+                "transition_convention": "obs_t_action_t_produces_obs_t+1",
+                "action_semantics": "joint_delta_from_current_to_next",
+                "action_abs_semantics": "target_joint_position_for_next_step",
             }
 
             # Fallback collision check: verify waypoints within joint limits
@@ -4651,6 +4766,30 @@ class GenieSimLocalFramework:
                     "data_mode": data_mode,
                     "robot_metadata": robot_metadata,
                     "episode_seed": episode_seed,
+                    "provenance": {
+                        "ee_pos": "analytic_fk",
+                        "ee_quat": "analytic_fk",
+                        "ee_rot6d": "derived_from_ee_quat",
+                        "joint_velocities": "finite_difference",
+                        "joint_accelerations": "finite_difference_smoothed",
+                        "ee_vel": "finite_difference",
+                        "ee_acc": "finite_difference",
+                        "contact_forces": "heuristic_grasp_model_v1",
+                        "task_description": "task_config_hint",
+                        "scene_state": "synthetic_from_task_config",
+                        "task_success": "geometric_goal_region_v2",
+                        "quality_score": "weighted_composite_v2",
+                    },
+                    "channel_confidence": {
+                        "joint_positions": 1.0,
+                        "ee_pos": 0.95,
+                        "ee_quat": 0.95,
+                        "joint_velocities": 0.8,
+                        "joint_accelerations": 0.6,
+                        "contact_forces": 0.2,
+                        "scene_state": 0.5,
+                    },
+                    "goal_region_verification": llm_metadata.get("goal_region_verification"),
                     "frames": frames,
                     "frame_count": len(frames),
                     "quality_score": quality_score,
@@ -4820,6 +4959,12 @@ class GenieSimLocalFramework:
         _grasp_ee_offset: Optional[np.ndarray] = None
         _object_poses: Dict[str, np.ndarray] = {}  # current poses of all objects
         _initial_object_poses: Dict[str, np.ndarray] = {}  # for success verification
+        _release_decay_obj: Optional[str] = None
+        _release_decay_remaining: int = 0
+        # Fix 10: Phase progress tracking
+        _prev_phase_for_progress: str = "approach"
+        _phase_start_frame: int = 0
+        _target_oid_for_subgoal = task.get("target_object") or task.get("target_object_id")
 
         # --- Sensor noise config (Improvement E) ---
         _inject_noise = os.environ.get("INJECT_SENSOR_NOISE", "1") == "1"
@@ -4845,6 +4990,30 @@ class GenieSimLocalFramework:
             "pot": 0.5, "cup": 0.2, "plate": 0.3, "bottle": 0.4,
             "toaster": 1.0, "mug": 0.25, "bowl": 0.35, "can": 0.3,
             "box": 0.4, "pan": 0.6, "kettle": 0.8, "jar": 0.35,
+        }
+        # Object heights for correct table placement (Fix 5)
+        _OBJECT_HEIGHTS = {
+            "pot": 0.12, "cup": 0.10, "plate": 0.03, "bottle": 0.22,
+            "toaster": 0.15, "mug": 0.10, "bowl": 0.08, "can": 0.12,
+            "box": 0.10, "pan": 0.06, "kettle": 0.18, "jar": 0.12,
+        }
+        # Object bounding boxes [width, depth, height] in meters
+        _OBJECT_BBOXES = {
+            "pot": [0.20, 0.20, 0.12], "cup": [0.08, 0.08, 0.10],
+            "plate": [0.22, 0.22, 0.03], "bottle": [0.07, 0.07, 0.22],
+            "toaster": [0.25, 0.15, 0.15], "mug": [0.10, 0.08, 0.10],
+            "bowl": [0.18, 0.18, 0.08], "can": [0.06, 0.06, 0.12],
+            "box": [0.15, 0.10, 0.10], "pan": [0.26, 0.26, 0.06],
+            "kettle": [0.18, 0.15, 0.18], "jar": [0.08, 0.08, 0.12],
+        }
+        _DEFAULT_TABLE_HEIGHT = 0.75
+        # Object semantic categories (Fix 12)
+        _OBJECT_CATEGORIES = {
+            "pot": "container", "cup": "container", "mug": "container",
+            "bowl": "container", "jar": "container", "kettle": "container",
+            "plate": "tableware", "pan": "cookware", "can": "container",
+            "bottle": "container", "toaster": "appliance", "box": "container",
+            "table": "furniture", "surface": "furniture", "shelf": "furniture",
         }
 
         frames: List[Dict[str, Any]] = []
@@ -4883,9 +5052,13 @@ class GenieSimLocalFramework:
 
             action_delta = (waypoint_joints - obs_joints).tolist()
 
-            # Normalize timestamps to trajectory-relative (not wallclock)
-            obs["timestamp"] = waypoint["timestamp"]
-            obs["planned_timestamp"] = waypoint["timestamp"]
+            # Normalize timestamps to uniform 1/control_frequency_hz intervals
+            _control_freq = 30.0  # Hz
+            _uniform_ts = step_idx / _control_freq
+            obs["timestamp"] = _uniform_ts
+            obs["planned_timestamp"] = _uniform_ts
+            # Preserve original trajectory timestamp for debugging
+            obs["_original_timestamp"] = waypoint["timestamp"]
 
             # Inject synthetic scene_state when empty (mock/skip-server mode)
             if not obs.get("scene_state"):
@@ -4894,7 +5067,21 @@ class GenieSimLocalFramework:
                     obs["scene_state"] = {"objects": [
                         {
                             "object_id": o.get("name") or o.get("object_id") or f"object_{i}",
+                            "object_type": (o.get("object_type") or o.get("type") or "unknown").lower(),
                             "pose": o.get("pose") or o.get("position") or {"x": 0, "y": 0, "z": 0},
+                            "orientation": o.get("orientation", [1.0, 0.0, 0.0, 0.0]),
+                            "bbox": _OBJECT_BBOXES.get(
+                                (o.get("object_type") or o.get("type") or "").lower(),
+                                [0.10, 0.10, 0.10],
+                            ),
+                            "mass_kg": _OBJECT_MASSES.get(
+                                (o.get("object_type") or o.get("type") or "").lower(), 0.3
+                            ),
+                            "category": _OBJECT_CATEGORIES.get(
+                                (o.get("object_type") or o.get("type") or "").lower(), "unknown"
+                            ),
+                            "graspable": (o.get("object_type") or o.get("type") or "").lower() not in ("table", "surface", "shelf"),
+                            "support_surface": "table",
                         }
                         for i, o in enumerate(scene_objects)
                     ]}
@@ -4908,17 +5095,30 @@ class GenieSimLocalFramework:
                         _readable = _name_parts[-1].rstrip("0123456789") if _name_parts else _target
                         _rc_cfg = task.get("robot_config") or {}
                         _base = _rc_cfg.get("base_position", [0.5, 0.0, 0.8])
+                        _obj_type = _readable.lower()
+                        _half_h = _OBJECT_HEIGHTS.get(_obj_type, 0.10) / 2.0
+                        _obj_z = _DEFAULT_TABLE_HEIGHT + _half_h
                         _synth_objs.append({
                             "object_id": _target,
-                            "object_type": _readable.lower(),
-                            "pose": {"x": _base[0] - 0.05, "y": _base[1] + 0.25, "z": _base[2] - 0.05},
+                            "object_type": _obj_type,
+                            "pose": {
+                                "x": _base[0] - 0.05, "y": _base[1] + 0.25,
+                                "z": round(_obj_z, 4),
+                            },
+                            "orientation": [1.0, 0.0, 0.0, 0.0],  # identity quaternion [w,x,y,z]
+                            "bbox": _OBJECT_BBOXES.get(_obj_type, [0.10, 0.10, 0.10]),
+                            "mass_kg": _OBJECT_MASSES.get(_obj_type, 0.3),
+                            "category": _OBJECT_CATEGORIES.get(_obj_type, "unknown"),
+                            "graspable": _obj_type not in ("table", "surface", "shelf"),
+                            "support_surface": "table",
                         })
                     _goal = task.get("goal_region")
                     if _goal:
                         _synth_objs.append({
                             "object_id": _goal,
                             "object_type": "surface",
-                            "pose": {"x": 0.5, "y": 0.5, "z": 0.75},
+                            "pose": {"x": 0.5, "y": 0.5, "z": _DEFAULT_TABLE_HEIGHT},
+                            "orientation": [1.0, 0.0, 0.0, 0.0],
                         })
                     if _synth_objs:
                         obs["scene_state"] = {"objects": _synth_objs}
@@ -4928,7 +5128,8 @@ class GenieSimLocalFramework:
                 "observation": obs,
                 "action": action_delta,
                 "action_abs": waypoint["joint_positions"],
-                "timestamp": waypoint["timestamp"],
+                "timestamp": _uniform_ts,
+                "dt": 1.0 / _control_freq,
             }
 
             # Advance forward-propagated state to this waypoint's target
@@ -4946,6 +5147,27 @@ class GenieSimLocalFramework:
                     frame_data["ee_quat"] = ee_quat
             except Exception:
                 pass
+
+            # Fix 6: Quaternion normalization, hemisphere continuity, and 6D rotation
+            if frame_data.get("ee_quat"):
+                _q = np.array(frame_data["ee_quat"], dtype=float)
+                # Normalize to unit quaternion
+                _qn = float(np.linalg.norm(_q))
+                if _qn > 1e-8:
+                    _q = _q / _qn
+                # Hemisphere continuity: flip sign if dot with previous < 0
+                if frames and frames[-1].get("ee_quat"):
+                    _q_prev = np.array(frames[-1]["ee_quat"], dtype=float)
+                    if np.dot(_q, _q_prev) < 0:
+                        _q = -_q
+                frame_data["ee_quat"] = _q.tolist()
+                # 6D continuous rotation representation (first two columns of rotation matrix)
+                w, x, y, z = _q
+                _rot6d = [
+                    1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y),
+                    2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x),
+                ]
+                frame_data["ee_rot6d"] = [round(v, 8) for v in _rot6d]
 
             # Explicit gripper command: infer from gripper joint positions
             # Normalize by gripper range (e.g. Franka: [0.0, 0.04])
@@ -4984,6 +5206,22 @@ class GenieSimLocalFramework:
             elif _release_detected:
                 _current_phase = "retract"
             frame_data["phase"] = _current_phase
+
+            # Fix 10: Track phase boundaries and compute progress
+            if _current_phase != _prev_phase_for_progress:
+                _phase_start_frame = step_idx
+                _prev_phase_for_progress = _current_phase
+            _phase_len = step_idx - _phase_start_frame + 1
+            # Estimate phase duration as fraction of total trajectory
+            _est_phase_frames = max(1, len(trajectory) // 5)  # ~5 phases
+            frame_data["phase_progress"] = min(1.0, round(_phase_len / _est_phase_frames, 4))
+
+            # Distance to subgoal: use target object pose for approach/transport, table for place
+            if frame_data.get("ee_pos") and _target_oid_for_subgoal:
+                _ee_arr_sg = np.array(frame_data["ee_pos"])
+                _tgt_pos_sg = _object_poses.get(_target_oid_for_subgoal)
+                if _tgt_pos_sg is not None:
+                    frame_data["distance_to_subgoal"] = round(float(np.linalg.norm(_ee_arr_sg - _tgt_pos_sg)), 5)
 
             # --- Improvement A: Dynamic scene state + J: Grasp physics ---
             ee_pos_arr = np.array(frame_data["ee_pos"]) if frame_data.get("ee_pos") else None
@@ -5056,10 +5294,31 @@ class GenieSimLocalFramework:
                     "grasped_object_id": _attached_object_id,
                 }
 
+            # Add provenance to contact forces
+            if "contact_forces" in frame_data:
+                frame_data["contact_forces"]["provenance"] = "heuristic_grasp_model_v1"
+                frame_data["contact_forces"]["confidence"] = 0.2
+
             # Detect release: gripper opens while holding object
             if frame_data.get("gripper_command") == "open" and _attached_object_id is not None:
+                _release_decay_obj = _attached_object_id
+                _release_decay_remaining = 3  # decay over 3 frames
                 _attached_object_id = None
                 _grasp_ee_offset = None
+
+            # Decay contact forces over 3 frames after release (Fix 9)
+            if _release_decay_remaining > 0 and _attached_object_id is None and "contact_forces" not in frame_data:
+                _decay_frac = _release_decay_remaining / 3.0
+                _release_decay_remaining -= 1
+                frame_data["contact_forces"] = {
+                    "weight_force_N": 0.0,
+                    "grip_force_N": round(_decay_frac * 2.0, 2),  # decaying residual
+                    "force_sufficient": False,
+                    "grasped_object_id": None,
+                    "releasing": True,
+                    "provenance": "heuristic_grasp_model_v1",
+                    "confidence": 0.1,
+                }
 
             # Update ALL tracked object poses in scene_state (not just attached)
             if obs.get("scene_state") and _object_poses:
@@ -5078,6 +5337,16 @@ class GenieSimLocalFramework:
                 if _key in frame_data:
                     robot_state[_key] = frame_data[_key]
 
+            # Fix 11: Commanded vs measured state
+            if frame_data.get("action_abs"):
+                robot_state["commanded_joint_positions"] = frame_data["action_abs"]
+                _jp = robot_state.get("joint_positions", [])
+                _cmd = frame_data["action_abs"]
+                if _jp and len(_jp) == len(_cmd):
+                    robot_state["tracking_error"] = [
+                        round(c - m, 8) for c, m in zip(_cmd, _jp)
+                    ]
+
             # --- Improvement E: Sensor noise injection ---
             if _inject_noise:
                 import random as _rng_mod
@@ -5093,15 +5362,31 @@ class GenieSimLocalFramework:
                     ]
                     robot_state["ee_pos"] = frame_data["ee_pos"]
 
+            # --- Fix 3: Split observation into sensors (proprio) vs privileged (GT state) ---
+            _obs_full = frame_data.get("observation", {})
+            _privileged = {}
+            if "scene_state" in _obs_full:
+                _privileged["scene_state"] = _obs_full.pop("scene_state")
+            if "contact_forces" in frame_data:
+                _privileged["contact_forces"] = frame_data.pop("contact_forces")
+            if _privileged:
+                _obs_full["privileged"] = _privileged
+
             frames.append(frame_data)
 
-        # Second pass: compute joint velocities and EE velocities via finite differences
+        # Franka Panda velocity limits (rad/s) for 7 arm joints + 2 gripper
+        _FRANKA_VEL_LIMITS = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61, 0.2, 0.2])
+        _FRANKA_ACC_LIMITS = np.array([15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0, 10.0, 10.0])
+
+        # Second pass: compute joint velocities, accelerations, and EE velocities
         for i, frame in enumerate(frames):
             obs_rs = frame.get("observation", {}).get("robot_state", {})
             if i == 0:
                 obs_rs["joint_velocities"] = [0.0] * len(obs_rs.get("joint_positions", []))
+                obs_rs["joint_accelerations"] = [0.0] * len(obs_rs.get("joint_positions", []))
                 if frame.get("ee_pos"):
                     frame["ee_vel"] = [0.0, 0.0, 0.0]
+                    frame["ee_acc"] = [0.0, 0.0, 0.0]
             else:
                 prev = frames[i - 1]
                 dt = frame["timestamp"] - prev["timestamp"]
@@ -5118,12 +5403,37 @@ class GenieSimLocalFramework:
                             import random as _rng_mod
                             _vn_rng = _rng_mod.Random(hash((episode_id, i, "vel")) & 0xFFFFFFFF)
                             _jv = _jv + np.array([_vn_rng.gauss(0, _jv_noise_std) for _ in range(_jv.size)])
-                        obs_rs["joint_velocities"] = _jv.tolist()
+                        # Clamp to Franka velocity limits (Fix 4)
+                        _vel_lim = _FRANKA_VEL_LIMITS[:_jv.size]
+                        _jv_clamped = np.clip(_jv, -_vel_lim, _vel_lim)
+                        if not np.allclose(_jv, _jv_clamped, atol=0.01):
+                            logger.debug("Frame %d: joint velocity clamped (max exceeded)", i)
+                        obs_rs["joint_velocities"] = _jv_clamped.tolist()
+
+                        # Joint accelerations (finite difference of velocities)
+                        _prev_jv = np.array(
+                            prev.get("observation", {}).get("robot_state", {}).get("joint_velocities", []),
+                            dtype=float,
+                        )
+                        if _prev_jv.shape == _jv_clamped.shape and _prev_jv.size > 0:
+                            _ja = (_jv_clamped - _prev_jv) / dt
+                            _acc_lim = _FRANKA_ACC_LIMITS[:_ja.size]
+                            _ja = np.clip(_ja, -_acc_lim, _acc_lim)
+                            obs_rs["joint_accelerations"] = _ja.tolist()
+                        else:
+                            obs_rs["joint_accelerations"] = [0.0] * _jv_clamped.size
                     # EE velocity
                     if frame.get("ee_pos") and prev.get("ee_pos"):
                         ee_curr = np.array(frame["ee_pos"], dtype=float)
                         ee_prev = np.array(prev["ee_pos"], dtype=float)
                         frame["ee_vel"] = ((ee_curr - ee_prev) / dt).tolist()
+                        # EE acceleration
+                        if prev.get("ee_vel"):
+                            _prev_ee_vel = np.array(prev["ee_vel"], dtype=float)
+                            _ee_vel_curr = np.array(frame["ee_vel"], dtype=float)
+                            frame["ee_acc"] = ((_ee_vel_curr - _prev_ee_vel) / dt).tolist()
+                        else:
+                            frame["ee_acc"] = [0.0, 0.0, 0.0]
                     # Mirror velocity fields to robot_state (Improvement C)
                     if "ee_vel" in frame:
                         obs_rs["ee_vel"] = frame["ee_vel"]
@@ -6832,7 +7142,7 @@ class GenieSimLocalFramework:
         data_completeness_score = 1.0 - (missing_fields_count / total_frames)
         action_validity_score = 1.0 - (action_invalid_count / total_frames)
 
-        # --- Improvement D: Geometric task success verification ---
+        # --- Fix 7: Goal-region geometric task success verification ---
         geometric_success = None
         geometric_reasoning = ""
         target_object_id = task.get("target_object") or task.get("target_object_id")
@@ -6843,12 +7153,38 @@ class GenieSimLocalFramework:
                 _ip = np.array(_init_poses[target_object_id])
                 _fp = np.array(_final_poses[target_object_id])
                 _displacement = float(np.linalg.norm(_fp - _ip))
+                # Multi-milestone check (mirrors episode-level Fix 7)
+                _gr_milestones = 0
+                # 1. displacement
                 if _displacement > 0.10:
-                    geometric_success = True
-                    geometric_reasoning = f"Object displaced {_displacement:.3f}m"
-                else:
-                    geometric_success = False
-                    geometric_reasoning = f"Object displacement {_displacement:.3f}m < 0.10m threshold"
+                    _gr_milestones += 1
+                # 2. grasp detected
+                if grasp_frame_index is not None:
+                    _gr_milestones += 1
+                # 3. release detected
+                if release_frame_index is not None:
+                    _gr_milestones += 1
+                # 4. lift (check max z above initial)
+                _init_z_qs = float(_ip[2]) if len(_ip) >= 3 else 0.0
+                _max_z_qs = _init_z_qs
+                for _fr_qs in frames:
+                    _obs_qs = _fr_qs.get("observation", {})
+                    _ss_qs = _obs_qs.get("scene_state", {}) or _obs_qs.get("privileged", {}).get("scene_state", {})
+                    for _obj_qs in _ss_qs.get("objects", []):
+                        if _obj_qs.get("object_id") == target_object_id:
+                            _op_qs = _obj_qs.get("pose", {})
+                            _z_qs = _op_qs.get("z") or (_op_qs.get("position", [0, 0, 0])[2] if "position" in _op_qs else None)
+                            if _z_qs is not None:
+                                _max_z_qs = max(_max_z_qs, float(_z_qs))
+                            break
+                if _max_z_qs - _init_z_qs >= 0.05:
+                    _gr_milestones += 1
+
+                geometric_success = _gr_milestones >= 3
+                geometric_reasoning = (
+                    f"Goal-region QS: {_gr_milestones}/4 milestones "
+                    f"(disp={_displacement:.3f}m, lift={_max_z_qs - _init_z_qs:.3f}m)"
+                )
 
         if geometric_success is not None:
             success_score = 1.0 if geometric_success else 0.0
@@ -6948,7 +7284,8 @@ class GenieSimLocalFramework:
             _initial_dist = float("inf")
             for _fi, _frame in enumerate(frames):
                 _eep = _frame.get("ee_pos")
-                _ss = _frame.get("observation", {}).get("scene_state", {})
+                _obs = _frame.get("observation", {})
+                _ss = _obs.get("scene_state", {}) or _obs.get("privileged", {}).get("scene_state", {})
                 if _eep:
                     _eep_arr = np.array(_eep)
                     for _obj in _ss.get("objects", []):
@@ -6995,6 +7332,49 @@ class GenieSimLocalFramework:
         # Physics plausibility penalties (Improvement I)
         weighted_score -= scene_state_penalty
         weighted_score -= ee_approach_penalty
+
+        # --- Fix 13: Stricter quality gates ---
+        _gate_penalty = 0.0
+        # Gate: quaternion norms must be ~1.0
+        _quat_bad = 0
+        for _fr in frames:
+            _q = _fr.get("ee_quat")
+            if _q:
+                _qnorm = float(np.linalg.norm(_q))
+                if abs(_qnorm - 1.0) > 1e-4:
+                    _quat_bad += 1
+        if _quat_bad > 0:
+            _gate_penalty += 0.05
+            logger.warning("Quality gate: %d frames with non-unit quaternions", _quat_bad)
+
+        # Gate: joint velocities within Franka limits
+        _vel_exceeded = 0
+        _vel_lim = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])
+        for _fr in frames:
+            _jv = (_fr.get("observation", {}).get("robot_state", {})
+                   .get("joint_velocities", []))
+            if _jv and len(_jv) >= 7:
+                if np.any(np.abs(_jv[:7]) > _vel_lim * 1.05):
+                    _vel_exceeded += 1
+        if _vel_exceeded > 0:
+            _gate_penalty += 0.05
+            logger.warning("Quality gate: %d frames exceed Franka velocity limits", _vel_exceeded)
+
+        # Gate: grasp implies grip, open implies no grip
+        _grasp_consistency_fails = 0
+        for _fr in frames:
+            _gc = _fr.get("gripper_command")
+            _priv = _fr.get("observation", {}).get("privileged", {})
+            _cf = _priv.get("contact_forces", _fr.get("contact_forces", {}))
+            if _gc == "closed" and isinstance(_cf, dict) and _cf.get("grip_force_N", 0) <= 0:
+                _grasp_consistency_fails += 1
+            if _gc == "open" and isinstance(_cf, dict) and _cf.get("grasped_object_id") is not None and not _cf.get("releasing"):
+                _grasp_consistency_fails += 1
+        if _grasp_consistency_fails > 0:
+            _gate_penalty += 0.03
+            logger.warning("Quality gate: %d frames with grasp/contact inconsistency", _grasp_consistency_fails)
+
+        weighted_score -= _gate_penalty
 
         return min(1.0, max(0.0, weighted_score))
 
