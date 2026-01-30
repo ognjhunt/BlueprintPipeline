@@ -47,6 +47,8 @@ RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --upgrade pip \
        -r ${GENIESIM_ROOT}/requirements.txt
 
 # ----- cuRobo from source -----
+# CUDA_HOME must be set for torch cpp_extension to find nvcc
+ENV CUDA_HOME=/usr/local/cuda
 RUN git clone --depth 1 https://github.com/NVlabs/curobo.git /opt/curobo \
     && cd /opt/curobo \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install -e . --no-build-isolation \
