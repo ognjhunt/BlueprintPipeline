@@ -7125,6 +7125,13 @@ class GenieSimLocalFramework:
                 action_array = np.array(action, dtype=float)
                 lower = np.array(lower_bounds, dtype=float)
                 upper = np.array(upper_bounds, dtype=float)
+                # When action has more dims than bounds (e.g. full articulation
+                # vs arm+gripper bounds), validate the overlapping prefix only.
+                if action_array.shape[0] > lower.shape[0]:
+                    action_array = action_array[: lower.shape[0]]
+                elif action_array.shape[0] < lower.shape[0]:
+                    lower = lower[: action_array.shape[0]]
+                    upper = upper[: action_array.shape[0]]
                 if action_array.shape != lower.shape or action_array.shape != upper.shape:
                     action_invalid_count += 1
                     action_bounds_mismatch = True
@@ -7307,7 +7314,10 @@ class GenieSimLocalFramework:
         ee_approach_penalty = 0.0
 
         # Penalty: static scene state (no object moved)
-        if frames:
+        # Skip this penalty when running without server recording — physics
+        # feedback is unavailable so object poses are always identical.
+        _skip_recording = os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", "")
+        if frames and not _skip_recording:
             _init_poses = frames[0].get("_initial_object_poses", {})
             _final_poses = frames[-1].get("_final_object_poses", {})
             if _init_poses and _final_poses:

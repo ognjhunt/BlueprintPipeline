@@ -11,9 +11,9 @@ bundle_tier:
   enterprise: 2700
 
 scene_complexity:
-  low: 1800
-  medium: 2700
-  high: 3600
+  low: 3600
+  medium: 5400
+  high: 7200
 
 # Default fallback when no tier/complexity is provided.
-default_timeout_seconds: 1800
+default_timeout_seconds: 3600

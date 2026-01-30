@@ -3814,7 +3814,7 @@ class LocalPipelineRunner:
         submit_step_start = time.time()
         preflight_report = run_geniesim_preflight(
             "genie-sim-local-runner",
-            require_server=False,
+            require_server=True,
         )
         preflight_report_path = self.geniesim_dir / "preflight_report.json"
         _safe_write_text(
