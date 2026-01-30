@@ -179,6 +179,7 @@ def test_job_wrapper_with_tracing_enabled_but_no_exporter(monkeypatch, tmp_path)
 def test_job_wrapper_traces_errors(monkeypatch):
     """Job wrapper should trace errors when enabled."""
     monkeypatch.setenv("ENABLE_TRACING", "false")  # Disable to avoid dependencies
+    monkeypatch.delenv("BUCKET", raising=False)  # Ensure DLQ uses local backend
 
     from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
 

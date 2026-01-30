@@ -4365,7 +4365,6 @@ class LocalPipelineRunner:
             "fail_on_partial_error": fail_on_partial_error,
         }
         if not artifacts_valid:
-            import sys as _sys; print(f"DEBUG_ARTIFACTS: artifacts_valid=False artifact_validation={json.dumps(artifact_validation, indent=2, default=str)}", file=_sys.stderr)
             job_status = "failed"
             job_payload["status"] = job_status
             job_payload["job_metrics_summary"]["status"] = job_status

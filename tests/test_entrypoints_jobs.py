@@ -238,6 +238,7 @@ def test_dream2flow_entrypoint_parses_env_and_uploads(monkeypatch: pytest.Monkey
     monkeypatch.setenv("SCENE_ID", "scene_1")
     monkeypatch.setenv("NUM_TASKS", "3")
     monkeypatch.setenv("ROBOT", "ur5e")
+    monkeypatch.delenv("ASSETS_PREFIX", raising=False)  # Ensure default path is used
 
     with pytest.raises(SystemExit) as excinfo:
         entrypoint.main()

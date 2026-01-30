@@ -2470,7 +2470,7 @@ def prepare_simready_assets_job(
         )
 
         # Collect successful results
-        for success_item in result.successful_results:
+        for success_item in result.successful:
             if success_item:
                 oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used = success_item
                 simready_paths[oid] = sim_rel
@@ -2486,14 +2486,14 @@ def prepare_simready_assets_job(
                         quality_stats["passed"] += 1
 
         # Report failures
-        if result.failed_count > 0:
+        if len(result.failed) > 0:
             logger.warning(
                 "[SIMREADY] %s/%s objects failed; continuing with successful results.",
-                result.failed_count,
-                result.total_count,
+                len(result.failed),
+                result.total,
             )
 
-        print(f"[SIMREADY] Parallel processing complete: {result.success_count}/{result.total_count} succeeded")
+        print(f"[SIMREADY] Parallel processing complete: {len(result.successful)}/{result.total} succeeded")
 
     else:
         # Sequential fallback for small batches or when parallel processing unavailable
