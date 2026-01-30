@@ -179,8 +179,11 @@ def test_golden_files_minimal_pipeline(tmp_path: Path, monkeypatch: pytest.Monke
         output.manifest_path = self.config.output_dir / "manifests" / "generation_manifest.json"
         return output
 
-    monkeypatch.setattr(episode_module.EpisodeGenerator, "__init__", _mock_init)
-    monkeypatch.setattr(episode_module.EpisodeGenerator, "generate", _mock_generate)
+    # Use the currently-active generate_episodes module (another test may have
+    # replaced sys.modules["generate_episodes"] after our module-level _load_module).
+    _active_ep_module = sys.modules.get("generate_episodes", episode_module)
+    monkeypatch.setattr(_active_ep_module.EpisodeGenerator, "__init__", _mock_init)
+    monkeypatch.setattr(_active_ep_module.EpisodeGenerator, "generate", _mock_generate)
     monkeypatch.setenv("BYPASS_QUALITY_GATES", "1")
 
     # Bypass quality gates (they require real episode stats)

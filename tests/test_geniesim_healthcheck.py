@@ -1,6 +1,23 @@
 import json
+import logging
+
+import pytest
 
 from tools.geniesim_adapter import geniesim_healthcheck
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging():
+    """Restore root logger state after healthcheck tests (which call init_logging)."""
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    saved_disable = logging.root.manager.disable
+    yield
+    root.handlers = saved_handlers
+    root.setLevel(saved_level)
+    logging.disable(logging.NOTSET)
+    logging.root.manager.disable = saved_disable
 
 
 def test_geniesim_healthcheck_json_ok(monkeypatch, capsys):

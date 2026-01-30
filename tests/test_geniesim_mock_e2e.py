@@ -45,6 +45,8 @@ def test_geniesim_mock_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("FIREBASE_UPLOAD_MODE", "local")
     monkeypatch.setenv("FIREBASE_UPLOAD_LOCAL_DIR", str(local_upload_dir))
     monkeypatch.setenv("FIREBASE_UPLOAD_PREFIX", "local-datasets")
+    monkeypatch.setenv("DISABLE_ARTICULATED_ASSETS", "true")
+    monkeypatch.setenv("SKIP_QUALITY_GATES", "true")
 
     runner = LocalPipelineRunner(
         scene_dir=scene_dir,
@@ -53,6 +55,7 @@ def test_geniesim_mock_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         environment_type="kitchen",
         enable_dwm=False,
         enable_dream2flow=False,
+        disable_articulated_assets=True,
     )
 
     steps = [

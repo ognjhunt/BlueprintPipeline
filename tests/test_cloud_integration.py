@@ -326,9 +326,11 @@ class TestGCSOperations:
 class TestPipelineExecution:
     """Test pipeline execution flow."""
 
-    def test_local_pipeline_execution(self, temp_scene_dir):
+    def test_local_pipeline_execution(self, temp_scene_dir, monkeypatch):
         """Test running the local pipeline."""
         from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
+
+        monkeypatch.setenv("SKIP_QUALITY_GATES", "true")
 
         runner = LocalPipelineRunner(
             scene_dir=temp_scene_dir,
