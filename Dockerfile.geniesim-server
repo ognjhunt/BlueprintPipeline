@@ -44,7 +44,9 @@ RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --upgrade pip \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir \
        -r /tmp/pipeline-requirements.txt \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir \
-       -r ${GENIESIM_ROOT}/requirements.txt
+       -r ${GENIESIM_ROOT}/requirements.txt \
+    && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir \
+       "scipy==1.10.1"
 
 # ----- CUDA toolkit (nvcc) for cuRobo compilation -----
 # Isaac Sim base image only ships the CUDA runtime; cuRobo needs nvcc.
