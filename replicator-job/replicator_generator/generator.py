@@ -368,7 +368,7 @@ def setup_cameras(cameras_config):
     """Setup render cameras."""
     cameras = []
     for cam_cfg in cameras_config["cameras"]:
-        with rep.new_layer(layer_name=f"Camera_{'{'}cam_cfg['name']{'}'}"):
+        with rep.new_layer(layer_name=f"Camera_{cam_cfg['name']}"):
             camera = rep.create.camera(
                 position=cam_cfg["position"],
                 look_at=cam_cfg["look_at"],
@@ -469,7 +469,7 @@ def main():
     num_frames = dataset_cfg["generation"]["num_frames"]
     rep.orchestrator.run_until_complete(num_frames=num_frames)
 
-    print(f"Generation complete: {'{'}num_frames{'}'} frames generated")
+    print(f"Generation complete: {num_frames} frames generated")
 
 
 if __name__ == "__main__":

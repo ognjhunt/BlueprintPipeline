@@ -466,9 +466,9 @@ class LocalPipelineRunner:
             "message": msg,
         }
         if self.json_logging:
-            self._logger.log(log_level, json.dumps(payload))
+            print(json.dumps(payload))
         else:
-            self._logger.log(log_level, f"[run_id={self.run_id}] {msg}")
+            print(f"[run_id={self.run_id}] {msg}")
 
     def _configure_logger(self) -> logging.Logger:
         logger = logging.getLogger(f"local-pipeline.{self.scene_id}.{self.run_id}")

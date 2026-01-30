@@ -18,22 +18,20 @@ logger = logging.getLogger(__name__)
 
 def _render_human_report(report: Dict[str, Any]) -> None:
     status = report.get("status", {})
-    logger.info("Genie Sim Health Check")
-    logger.info("=======================")
-    logger.info("Isaac Sim available: %s", status.get("isaac_sim_available", False))
-    logger.info("gRPC available: %s", status.get("grpc_available", False))
-    logger.info("gRPC stubs available: %s", status.get("grpc_stubs_available", False))
-    logger.info("Server running: %s", status.get("server_running", False))
-    logger.info("Server ready: %s", report.get("server_ready", False))
-    logger.info(
-        "Overall: %s",
-        "PASS" if report.get("ok") else "FAIL",
-        extra={"healthcheck_ok": report.get("ok")},
+    print("Genie Sim Health Check")
+    print("=======================")
+    print("Isaac Sim available: %s" % status.get("isaac_sim_available", False))
+    print("gRPC available: %s" % status.get("grpc_available", False))
+    print("gRPC stubs available: %s" % status.get("grpc_stubs_available", False))
+    print("Server running: %s" % status.get("server_running", False))
+    print("Server ready: %s" % report.get("server_ready", False))
+    print(
+        "Overall: %s" % ("PASS" if report.get("ok") else "FAIL"),
     )
     if report.get("missing"):
-        logger.warning("Missing requirements: %s", ", ".join(report["missing"]))
+        print("Missing requirements: %s" % ", ".join(report["missing"]))
     if report.get("remediation"):
-        logger.info("Remediation steps: %s", " ".join(report["remediation"]))
+        print("Remediation steps: %s" % " ".join(report["remediation"]))
 
 
 def main() -> int:

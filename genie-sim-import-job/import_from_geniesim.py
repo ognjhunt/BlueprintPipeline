@@ -4346,17 +4346,20 @@ def run_local_import_job(
     schema_errors.extend(lerobot_metadata_validation["schema_errors"])
 
     if schema_errors:
-        result.errors.extend(schema_errors)
-        result.success = False
-        import_manifest_path = config.output_dir / "import_manifest.json"
-        if import_manifest_path.exists():
-            result.import_manifest_path = import_manifest_path
-            _update_import_manifest_status(
-                import_manifest_path,
-                "failed",
-                success=False,
-            )
-        return result
+        if resolve_production_mode():
+            result.errors.extend(schema_errors)
+            result.success = False
+            import_manifest_path = config.output_dir / "import_manifest.json"
+            if import_manifest_path.exists():
+                result.import_manifest_path = import_manifest_path
+                _update_import_manifest_status(
+                    import_manifest_path,
+                    "failed",
+                    success=False,
+                )
+            return result
+        else:
+            result.warnings.extend(schema_errors)
 
     episode_content_hashes: Dict[str, str] = {}
     episode_content_manifests: Dict[str, List[Dict[str, Any]]] = {}

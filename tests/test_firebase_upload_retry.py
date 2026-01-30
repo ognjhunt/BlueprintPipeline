@@ -74,15 +74,35 @@ def minimal_payloads() -> dict[str, object]:
             "scene_id": "scene-1",
             "environment_type": "kitchen",
             "suggested_tasks": [],
-            "robot_config": {"type": "franka", "base_position": [0.0, 0.0, 0.0], "workspace_bounds": {"min": [-1, -1, 0], "max": [1, 1, 1]}},
+            "robot_config": {"type": "franka", "base_position": [0.0, 0.0, 0.0], "workspace_bounds": [[-1, -1, 0], [1, 1, 1]]},
         },
-        "scenes/scene-1/geniesim/export_manifest.json": {"exported": "ok"},
+        "scenes/scene-1/geniesim/export_manifest.json": {
+            "schema_version": "3.0",
+            "schema_definition": {"version": "3.0", "description": "test", "fields": {}},
+            "export_info": {"timestamp": "2025-01-01T00:00:00Z", "exporter_version": "1.0", "source_pipeline": "test"},
+            "asset_provenance_path": None,
+            "config": {
+                "robot_type": "franka", "generate_embeddings": False,
+                "embedding_model": None, "require_embeddings": False,
+                "filter_commercial_only": False, "max_tasks": 5,
+                "lerobot_export_format": "lerobot_v3",
+            },
+            "result": {
+                "success": True, "scene_id": "scene-1", "output_dir": "geniesim",
+                "outputs": {"scene_graph": "scene_graph.json", "asset_index": "asset_index.json", "task_config": "task_config.json", "scene_config": "scene_config.yaml"},
+                "statistics": {"nodes": 0, "edges": 0, "assets": 0, "tasks": 0},
+                "errors": [], "warnings": [],
+            },
+            "geniesim_compatibility": {"version": "3.0.0", "isaac_sim_version": "4.0", "formats": {"scene_graph": "json", "asset_index": "json", "task_config": "json", "scene_config": "yaml"}},
+            "file_inventory": [],
+            "checksums": {"files": {}},
+        },
         "scenes/scene-1/geniesim/_GENIESIM_EXPORT_COMPLETE": {
             "export_schema_version": "1.0.0",
             "geniesim_schema_version": "3.0.0",
             "blueprintpipeline_version": "test",
             "export_timestamp": "2024-01-01T00:00:00Z",
-            "schema_compatibility": {},
+            "schema_compatibility": {"min_geniesim_version": "3.0.0", "max_geniesim_version": "3.99.99"},
         },
     }
 
@@ -148,18 +168,21 @@ def test_firebase_retry_second_pass(
     submit_module: types.ModuleType,
     minimal_payloads: dict[str, object],
 ) -> None:
+    import tempfile as _tmpmod
+    monkeypatch.setenv("QUALITY_APPROVAL_PATH", _tmpmod.mkdtemp(prefix="bp_approval_"))
     monkeypatch.setenv("BUCKET", "test-bucket")
     monkeypatch.setenv("SCENE_ID", "scene-1")
     monkeypatch.setenv("EPISODES_PER_TASK", "1")
     monkeypatch.setenv("NUM_VARIATIONS", "1")
     monkeypatch.setenv("FIREBASE_UPLOAD_SECOND_PASS_MAX", "1")
+    monkeypatch.setenv("ALLOW_MISSING_ASSET_PROVENANCE", "1")
 
     fake_client = FakeStorageClient({"test-bucket": minimal_payloads})
-    monkeypatch.setattr(submit_module.storage, "Client", lambda: fake_client)
+    monkeypatch.setattr(submit_module.storage, "Client", lambda *args, **kwargs: fake_client)
     monkeypatch.setattr(submit_module, "run_geniesim_preflight_or_exit", lambda *_a, **_k: {})
     monkeypatch.setattr(submit_module, "_run_geniesim_ik_gate", lambda **_k: True)
     monkeypatch.setattr(submit_module, "send_alert", lambda **_k: None)
-    monkeypatch.setattr(submit_module, "_run_firebase_preflight", lambda: None)
+    monkeypatch.setattr(submit_module, "_run_firebase_preflight", lambda **_k: None)
     monkeypatch.setattr(
         submit_module,
         "_run_local_data_collection_with_handshake",

@@ -20,6 +20,9 @@ class FakeBlob:
         self.name = name
         self._data_map = data_map
         self._uploads = uploads
+        self.md5_hash: str | None = None
+        self.crc32c: str | None = None
+        self.content_type: str | None = None
 
     def exists(self) -> bool:
         return self.name in self._data_map
@@ -34,11 +37,27 @@ class FakeBlob:
             raise FileNotFoundError(self.name)
         Path(filename).write_text(self._data_map[self.name])
 
+    def reload(self) -> None:
+        if self.name in self._data_map:
+            import base64
+            data = self._data_map[self.name]
+            raw = data.encode("utf-8") if isinstance(data, str) else data
+            self.md5_hash = base64.b64encode(hashlib.md5(raw).digest()).decode("utf-8")
+
+    @property
+    def size(self) -> int:
+        if self.name in self._data_map:
+            return len(self._data_map[self.name].encode("utf-8") if isinstance(self._data_map[self.name], str) else self._data_map[self.name])
+        return 0
+
     def upload_from_string(self, data: str, content_type: str | None = None) -> None:
         self._uploads[self.name] = data
+        self._data_map[self.name] = data
 
     def upload_from_filename(self, filename: str, content_type: str | None = None) -> None:
-        self._uploads[self.name] = Path(filename).read_text()
+        content = Path(filename).read_text()
+        self._uploads[self.name] = content
+        self._data_map[self.name] = content
 
 
 class FakeBucket:
@@ -180,6 +199,7 @@ def test_dream2flow_entrypoint_parses_env_and_uploads(monkeypatch: pytest.Monkey
     }
     uploads: dict[str, str] = {}
     fake_storage_module.Client = lambda: FakeStorageClient(data_map, uploads)
+    fake_storage_module.Bucket = FakeBucket
     _install_fake_google_cloud(monkeypatch, storage_module=fake_storage_module)
 
     entrypoint = _load_module(
@@ -244,9 +264,31 @@ def test_geniesim_submit_entrypoint_validates_bundle(monkeypatch: pytest.MonkeyP
         f"{geniesim_prefix}/_GENIESIM_EXPORT_COMPLETE": (
             FIXTURES_DIR / "geniesim_export_marker.json"
         ).read_text(),
+        f"{geniesim_prefix}/export_manifest.json": json.dumps({
+            "schema_version": "3.0",
+            "schema_definition": {"version": "3.0", "description": "test", "fields": {}},
+            "export_info": {"timestamp": "2025-01-01T00:00:00Z", "exporter_version": "1.0", "source_pipeline": "test"},
+            "asset_provenance_path": None,
+            "config": {
+                "robot_type": "franka", "generate_embeddings": False,
+                "embedding_model": None, "require_embeddings": False,
+                "filter_commercial_only": False, "max_tasks": 5,
+                "lerobot_export_format": "lerobot_v3",
+            },
+            "result": {
+                "success": True, "scene_id": "scene_1", "output_dir": "geniesim",
+                "outputs": {"scene_graph": "scene_graph.json", "asset_index": "asset_index.json", "task_config": "task_config.json", "scene_config": "scene_config.yaml"},
+                "statistics": {"nodes": 1, "edges": 0, "assets": 1, "tasks": 1},
+                "errors": [], "warnings": [],
+            },
+            "geniesim_compatibility": {"version": "3.0.0", "isaac_sim_version": "4.0", "formats": {"scene_graph": "json", "asset_index": "json", "task_config": "json", "scene_config": "yaml"}},
+            "file_inventory": [],
+            "checksums": {"files": {}},
+        }),
     }
     uploads: dict[str, str] = {}
     fake_storage_module.Client = lambda: FakeStorageClient(data_map, uploads)
+    fake_storage_module.Bucket = FakeBucket
     _install_fake_google_cloud(monkeypatch, storage_module=fake_storage_module)
 
     module = _load_module(
@@ -254,6 +296,9 @@ def test_geniesim_submit_entrypoint_validates_bundle(monkeypatch: pytest.MonkeyP
         REPO_ROOT / "genie-sim-submit-job" / "submit_to_geniesim.py",
     )
 
+    import tempfile as _tmpmod
+    _approval_dir = _tmpmod.mkdtemp(prefix="bp_approval_")
+    monkeypatch.setenv("QUALITY_APPROVAL_PATH", _approval_dir)
     monkeypatch.setenv("BUCKET", "test-bucket")
     monkeypatch.setenv("SCENE_ID", "scene_1")
     monkeypatch.setenv("GENIESIM_PREFIX", geniesim_prefix)

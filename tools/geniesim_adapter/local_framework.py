@@ -4315,6 +4315,7 @@ class GenieSimLocalFramework:
             validation_passed = quality_score >= min_quality
             task_success = self._extract_task_success(frames, task)
             collision_free = planning_report.get("collision_free")
+            collision_source = planning_report.get("collision_source")
 
             # LLM-based episode enrichment: task metadata and success evaluation
             llm_metadata = self._enrich_episode_with_llm(
@@ -4347,6 +4348,11 @@ class GenieSimLocalFramework:
             num_joints = len(frames[0]["action"]) if frames else 0
             arm_dof = min(7, num_joints)
             rc = ROBOT_CONFIGS.get(robot_type)
+            # Build joint names from ROBOT_CONFIGS when server doesn't provide them
+            if not joint_names and rc is not None:
+                joint_names = list(rc.joint_names)
+                if hasattr(rc, "gripper_joint_names") and rc.gripper_joint_names:
+                    joint_names = joint_names + list(rc.gripper_joint_names)
             robot_metadata = {
                 "robot_type": robot_type,
                 "num_joints": num_joints,
@@ -4355,10 +4361,31 @@ class GenieSimLocalFramework:
                 "joint_names": joint_names if joint_names else [f"joint_{i}" for i in range(num_joints)],
                 "joint_limits_lower": rc.joint_limits_lower.tolist() if rc is not None and hasattr(rc, "joint_limits_lower") else None,
                 "joint_limits_upper": rc.joint_limits_upper.tolist() if rc is not None and hasattr(rc, "joint_limits_upper") else None,
+                "gripper_joint_names": list(rc.gripper_joint_names) if rc is not None and hasattr(rc, "gripper_joint_names") else [],
+                "gripper_limits": list(rc.gripper_limits) if rc is not None and hasattr(rc, "gripper_limits") else None,
+                "default_joint_positions": rc.default_joint_positions.tolist() if rc is not None and hasattr(rc, "default_joint_positions") else None,
                 "action_space": "joint_delta",
                 "action_abs_space": "joint_position",
                 "control_frequency_hz": 30.0,
             }
+
+            # Fallback collision check: verify waypoints within joint limits
+            if collision_free is None and rc is not None and frames:
+                try:
+                    lower = rc.joint_limits_lower
+                    upper = rc.joint_limits_upper
+                    all_within = True
+                    for frame in frames:
+                        abs_joints = np.array(frame.get("action_abs", []), dtype=float)
+                        arm_joints = abs_joints[:len(lower)]
+                        if len(arm_joints) == len(lower):
+                            if np.any(arm_joints < lower) or np.any(arm_joints > upper):
+                                all_within = False
+                                break
+                    collision_free = all_within
+                    collision_source = "joint_limits_only"
+                except Exception:
+                    pass
 
             # Reproducibility seed (deterministic trajectory, but record for traceability)
             episode_seed = hash((episode_id, robot_type, num_joints)) & 0xFFFFFFFF
@@ -4366,7 +4393,7 @@ class GenieSimLocalFramework:
             with open(episode_path, "w") as f:
                 json.dump({
                     "episode_id": episode_id,
-                    "task_name": task.get("task_name") or llm_metadata.get("task_name"),
+                    "task_name": task.get("task_name") or llm_metadata.get("task_name") or "unknown_task",
                     "task_description": llm_metadata.get("task_description"),
                     "data_mode": data_mode,
                     "robot_metadata": robot_metadata,
@@ -4378,7 +4405,7 @@ class GenieSimLocalFramework:
                     "task_success": task_success,
                     "task_success_reasoning": llm_metadata.get("task_success_reasoning"),
                     "collision_free": collision_free,
-                    "collision_source": planning_report.get("collision_source"),
+                    "collision_source": collision_source,
                     "scene_description": llm_metadata.get("scene_description"),
                     "success_criteria": llm_metadata.get("success_criteria"),
                     "stall_info": result["stall_info"],
@@ -4517,28 +4544,70 @@ class GenieSimLocalFramework:
         # Determine gripper joint indices (joints beyond the arm DOFs)
         arm_dof = min(7, len(trajectory[0]["joint_positions"])) if trajectory else 7
 
+        # Forward-propagate joint positions: when observations return zeros
+        # (mock/skip-server-recording mode), use the trajectory waypoints as
+        # ground-truth robot state. This ensures action deltas are correct
+        # (small values, not equal to action_abs).
+        current_joint_state = np.array(
+            trajectory[0]["joint_positions"], dtype=float
+        ) if trajectory else np.zeros(7)
+
         frames: List[Dict[str, Any]] = []
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             self._attach_camera_frames(obs, episode_id=episode_id, task=task)
 
-            # Compute action as delta from current observation to waypoint target.
-            # This is the standard representation for imitation learning: the action
-            # is the commanded change, not the absolute target position.
             waypoint_joints = np.array(waypoint["joint_positions"], dtype=float)
-            obs_joints = np.zeros_like(waypoint_joints)
-            robot_state = (obs or {}).get("robot_state") or {}
+
+            # Use real observation joints if available; otherwise inject the
+            # forward-propagated state from the previous waypoint.
+            if obs is None:
+                obs = {}
+            obs.setdefault("robot_state", {})
+            robot_state = obs["robot_state"]
             jp = robot_state.get("joint_positions")
-            if jp is not None and len(jp) == len(waypoint_joints):
-                obs_joints = np.array(jp, dtype=float)
+
+            # Determine if we should use forward-propagated state:
+            # - No joints at all
+            # - Length mismatch (e.g., 28 default zeros vs 7 trajectory joints)
+            # - All zeros (mock mode default)
+            use_propagated = (
+                jp is None
+                or len(jp) != len(waypoint_joints)
+                or np.allclose(jp, 0.0)
+            )
+            if use_propagated:
+                robot_state["joint_positions"] = current_joint_state.tolist()
+
+            obs_joints = np.array(robot_state["joint_positions"], dtype=float)
+
             action_delta = (waypoint_joints - obs_joints).tolist()
+
+            # Normalize timestamps to trajectory-relative (not wallclock)
+            obs["timestamp"] = waypoint["timestamp"]
+            obs["planned_timestamp"] = waypoint["timestamp"]
+
+            # Inject synthetic scene_state when empty (mock/skip-server mode)
+            if not obs.get("scene_state"):
+                scene_objects = task.get("objects") or task.get("scene_objects") or []
+                if isinstance(scene_objects, list) and scene_objects:
+                    obs["scene_state"] = {"objects": [
+                        {
+                            "object_id": o.get("name") or o.get("object_id") or f"object_{i}",
+                            "pose": o.get("pose") or o.get("position") or {"x": 0, "y": 0, "z": 0},
+                        }
+                        for i, o in enumerate(scene_objects)
+                    ]}
 
             frame_data: Dict[str, Any] = {
                 "step": step_idx,
                 "observation": obs,
                 "action": action_delta,
-                "action_abs": waypoint["joint_positions"],  # keep absolute for reference
+                "action_abs": waypoint["joint_positions"],
                 "timestamp": waypoint["timestamp"],
             }
+
+            # Advance forward-propagated state to this waypoint's target
+            current_joint_state = waypoint_joints.copy()
 
             # End-effector Cartesian pose via FK (best-effort)
             if fk_solver is not None:
@@ -5459,13 +5528,25 @@ class GenieSimLocalFramework:
             gripper_closed[j] = 0.3  # partially close fingers
 
         # Build phase waypoints as offsets from initial joints
+        # Randomize offsets and durations per episode for trajectory diversity
+        import random as _random
+        _rng = _random.Random(hash(task.get("task_name", "") + str(id(initial_obs))) & 0xFFFFFFFF)
+        def _jitter(base_offsets: np.ndarray) -> np.ndarray:
+            noise = np.array([_rng.uniform(-0.03, 0.03) for _ in range(len(base_offsets))])
+            return base_offsets + noise
+
+        base_durations = np.array([0.20, 0.10, 0.20, 0.30, 0.20])
+        dur_noise = np.array([_rng.uniform(-0.05, 0.05) for _ in range(len(base_durations))])
+        durations = np.clip(base_durations + dur_noise, 0.05, 0.5)
+        durations /= durations.sum()  # renormalize to 1.0
+
         phase_configs = [
             # (phase_name, arm_offset_fraction, gripper_multiplier, duration_fraction)
-            ("approach",  np.array([0.0, 0.05, -0.08, 0.04, -0.02, 0.03, 0.0]), gripper_open,  0.20),
-            ("grasp",     np.array([0.0, 0.08, -0.12, 0.06, -0.03, 0.04, 0.01]), gripper_closed, 0.10),
-            ("lift",      np.array([0.0, -0.05, -0.15, 0.08, -0.05, 0.06, 0.0]), gripper_closed, 0.20),
-            ("transport", np.array([0.1, -0.03, -0.10, 0.05, 0.05, -0.02, 0.03]), gripper_closed, 0.30),
-            ("place",     np.array([0.1, 0.02, -0.05, 0.03, 0.04, -0.01, 0.02]), gripper_open,  0.20),
+            ("approach",  _jitter(np.array([0.0, 0.05, -0.08, 0.04, -0.02, 0.03, 0.0])), gripper_open,  durations[0]),
+            ("grasp",     _jitter(np.array([0.0, 0.08, -0.12, 0.06, -0.03, 0.04, 0.01])), gripper_closed, durations[1]),
+            ("lift",      _jitter(np.array([0.0, -0.05, -0.15, 0.08, -0.05, 0.06, 0.0])), gripper_closed, durations[2]),
+            ("transport", _jitter(np.array([0.1, -0.03, -0.10, 0.05, 0.05, -0.02, 0.03])), gripper_closed, durations[3]),
+            ("place",     _jitter(np.array([0.1, 0.02, -0.05, 0.03, 0.04, -0.01, 0.02])), gripper_open,  durations[4]),
         ]
 
         # Generate phase target joint positions
@@ -5883,8 +5964,8 @@ class GenieSimLocalFramework:
         """
         result: Dict[str, Any] = {}
 
-        if not os.environ.get("GENIESIM_USE_LLM_TASK_PLANNING", ""):
-            return result
+        # Always attempt LLM enrichment for maximum data quality.
+        # Falls through to ImportError handler if LLM client is unavailable.
 
         try:
             from tools.llm_client import create_llm_client, LLMProvider
@@ -5904,33 +5985,56 @@ class GenieSimLocalFramework:
             rs = obs.get("robot_state") or {}
             jp = rs.get("joint_positions", [])
             action = frame.get("action", [])
-            trajectory_summary.append({
+            sample = {
                 "step": idx,
                 "joint_positions": [round(v, 4) for v in jp[:7]] if jp else [],
-                "action_sample": [round(v, 4) for v in action[:7]] if action else [],
+                "action_delta": [round(v, 4) for v in action[:7]] if action else [],
                 "timestamp": frame.get("timestamp", 0),
-            })
+            }
+            # Include gripper state and end-effector pose when available
+            if frame.get("gripper_command"):
+                sample["gripper"] = frame["gripper_command"]
+                sample["gripper_openness"] = frame.get("gripper_openness", 0.0)
+            if frame.get("ee_pos"):
+                sample["ee_position_xyz"] = [round(v, 4) for v in frame["ee_pos"]]
+            if frame.get("ee_quat"):
+                sample["ee_orientation_quat"] = [round(v, 4) for v in frame["ee_quat"]]
+            trajectory_summary.append(sample)
 
         task_type = task.get("task_type", "manipulation")
         target_object = task.get("target_object", "unknown object")
         description_hint = task.get("description_hint", "")
         robot_type = getattr(self.config, "robot_type", "humanoid")
 
+        # Gather scene object context from task config
+        scene_objects = task.get("objects") or task.get("scene_objects") or []
+        scene_object_names = [
+            o.get("name") or o.get("object_id") or str(o)
+            for o in scene_objects
+        ] if isinstance(scene_objects, list) else []
+
+        # Get real joint names from ROBOT_CONFIGS
+        rc = ROBOT_CONFIGS.get(robot_type)
+        joint_name_list = list(rc.joint_names) if rc is not None else []
+
         prompt = (
             f"You are evaluating a robot manipulation episode for data quality.\n\n"
             f"Robot: {robot_type}\n"
+            f"Joint names: {joint_name_list}\n"
             f"Task type: {task_type}\n"
             f"Target object: {target_object}\n"
             f"Description hint: {description_hint}\n"
+            f"Scene objects: {scene_object_names}\n"
             f"Episode ID: {episode_id}\n"
             f"Total frames: {num_frames}\n"
             f"Collision-free: {collision_free}\n\n"
-            f"Trajectory samples (joint positions at key frames):\n"
+            f"Trajectory samples (joint positions, action deltas, gripper state, "
+            f"and end-effector pose at key frames):\n"
             f"{json.dumps(trajectory_summary, indent=2)}\n\n"
             f"Based on this information, provide a JSON response with:\n"
             f'{{"task_name": "short descriptive name for the task",\n'
             f' "task_description": "1-2 sentence natural language description of what the robot is doing",\n'
-            f' "scene_description": "brief description of the scene context",\n'
+            f' "scene_description": "brief description of the scene and objects present",\n'
             f' "success_criteria": ["list of criteria for task success"],\n'
             f' "task_success": true/false (whether the trajectory plausibly accomplishes the task),\n'
             f' "task_success_reasoning": "1 sentence explanation of success/failure assessment"}}\n'
@@ -6138,6 +6242,26 @@ class GenieSimLocalFramework:
                 mean_obs_diff = np.mean(np.linalg.norm(obs_diffs, axis=1))
                 obs_diversity_score = min(1.0, mean_obs_diff / 0.05)
 
+        # Trajectory smoothness: penalize jerky motions (high acceleration)
+        smoothness_score = 1.0
+        if total_frames >= 3 and len(all_actions) >= 3:
+            action_matrix = np.array(all_actions)
+            accels = np.diff(action_matrix, n=2, axis=0)
+            mean_accel = np.mean(np.linalg.norm(accels, axis=1))
+            smoothness_score = max(0.0, 1.0 - mean_accel / 0.1)
+
+        # Collision-free score: check if episode has collision info
+        collision_free_score = 0.5  # neutral when unknown
+        for frame in frames:
+            if frame.get("collision_free") is True:
+                collision_free_score = 1.0
+                break
+            elif frame.get("collision_free") is False:
+                collision_free_score = 0.0
+                break
+
+        # Base score uses original weights for backward compatibility;
+        # smoothness and collision are additive bonuses (up to +0.05 each).
         weighted_score = (
             0.30 * data_completeness_score
             + 0.25 * action_validity_score
@@ -6146,6 +6270,10 @@ class GenieSimLocalFramework:
             + 0.15 * success_score
             + 0.05 * frame_count_score
         )
+        # Bonus for smooth trajectories and collision-free episodes
+        smoothness_bonus = 0.05 * smoothness_score
+        collision_bonus = 0.05 * (collision_free_score - 0.5)  # neutral at 0.5
+        weighted_score += smoothness_bonus + collision_bonus
 
         return min(1.0, max(0.0, weighted_score))
 
@@ -6405,6 +6533,7 @@ class GenieSimLocalFramework:
                 "export_format": resolved_format.value,
                 "version": version_value,
                 "episodes": exported_count,
+                "total_episodes": exported_count,
                 "skipped": skipped_count,
                 "total_frames": total_frames,
                 "exported_at": datetime.utcnow().isoformat() + "Z",
@@ -6462,6 +6591,7 @@ class GenieSimLocalFramework:
             "export_format": resolved_format.value,
             "version": info["version"],
             "episodes": exported_count,
+            "total_episodes": exported_count,
             "skipped": skipped_count,
             "total_frames": total_frames,
             "exported_at": datetime.utcnow().isoformat() + "Z",

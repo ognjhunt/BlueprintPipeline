@@ -22,6 +22,7 @@ from .hand_trajectory_handler import (
 from .hand_mesh_renderer import (
     HandModel,
     HandMeshRenderer,
+    HandRenderConfig,
     render_hand_trajectory_to_video,
 )
 from .retargeting import HandRetargeter, RobotConfig
@@ -34,6 +35,7 @@ __all__ = [
     "generate_reach_trajectory",
     "HandMeshRenderer",
     "HandModel",
+    "HandRenderConfig",
     "render_hand_trajectory_to_video",
     "HandRetargeter",
     "RobotConfig",

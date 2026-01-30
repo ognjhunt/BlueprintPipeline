@@ -275,6 +275,22 @@ def test_request_id_propagates_to_logs_and_spans(monkeypatch):
     stream = io.StringIO()
     init_logging(stream=stream, json_enabled=True)
     logger = logging.getLogger("request-id-test")
+    # Pytest's logging plugin may replace root handlers; add directly to logger
+    logger.propagate = False
+    logger.handlers.clear()
+    root = logging.getLogger()
+    for h in root.handlers:
+        if hasattr(h, 'stream') and h.stream is stream:
+            logger.addHandler(h)
+            break
+    else:
+        # Fallback: create handler matching init_logging config
+        from tools.logging_config import JsonLogFormatter, RequestIdFilter
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonLogFormatter())
+        handler.addFilter(RequestIdFilter())
+        logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
 
     with tracer_module.trace_job("request-id-job"):
         logger.info("hello from trace_job")

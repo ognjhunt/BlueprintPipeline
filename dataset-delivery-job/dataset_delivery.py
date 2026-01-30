@@ -36,6 +36,7 @@ from tools.quality_gates.quality_gate import (
     QualityGateSeverity,
 )
 from tools.quality_reports.asset_provenance_generator import COMMERCIAL_OK_LICENSES, LicenseType
+from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.tracing.correlation import ensure_request_id
 from tools.validation.entrypoint_checks import validate_required_env_vars
 
@@ -381,6 +382,28 @@ def main() -> int:
             "SCENE_ID": "Scene identifier",
         }
     validate_required_env_vars(required_env_vars, label="[DATASET-DELIVERY]")
+
+    mock_decision = resolve_geniesim_mock_mode()
+    if mock_decision.enabled:
+        scene_id = os.environ.get("SCENE_ID") or "mock_scene"
+        print("[DATASET-DELIVERY] Mock mode enabled; skipping real GCS/webhook operations.")
+        report_path = _gate_report_path(GCS_ROOT, scene_id)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        _emit_delivery_quality_gate(
+            scene_id,
+            {
+                "scene_id": scene_id,
+                "success": True,
+                "delivery_targets": [],
+                "artifact_counts": {"total_artifacts": 0, "per_lab": {}},
+                "dataset_card_paths": {"local": None, "gcs": {}},
+                "warnings": [],
+                "errors": [],
+            },
+            report_path,
+        )
+        print("Dataset delivery completed (mock)")
+        return 0
 
     bucket_name = os.environ.get("BUCKET")
     scene_id = os.environ.get("SCENE_ID") or ""
