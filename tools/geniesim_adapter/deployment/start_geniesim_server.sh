@@ -35,7 +35,6 @@ echo "[geniesim] Starting Genie Sim server (logs: ${GENIESIM_SERVER_LOG})"
 nohup "${ISAAC_SIM_PATH}/python.sh" \
   "${GENIESIM_ROOT}/source/data_collection/scripts/data_collector_server.py" \
   $( [ "${GENIESIM_HEADLESS}" = "1" ] && echo "--headless" ) \
-  --publish_ros \
   > "${GENIESIM_SERVER_LOG}" 2>&1 &
 
 if [ "${GENIESIM_HEALTHCHECK}" = "1" ]; then
