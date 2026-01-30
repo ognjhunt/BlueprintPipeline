@@ -83,7 +83,18 @@ def test_missing_lerobot_dir_triggers_conversion(
     )
     recordings_dir = recordings_root / "recordings"
 
+    # Create stub parquet files so episode validation finds them
+    for p in recordings_dir.glob("*.json"):
+        parquet_path = p.with_suffix(".parquet")
+        parquet_path.write_bytes(b"\x00" * 2048)
+
     monkeypatch.setattr(module, "_resolve_recordings_dir", lambda *args, **kwargs: recordings_dir)
+    # Bypass parquet content validation — stub files are not real parquet
+    monkeypatch.setattr(
+        module,
+        "_stream_parquet_validation",
+        lambda *_a, **_k: {"errors": [], "warnings": []},
+    )
     called: Dict[str, Any] = {}
 
     def _fake_convert_to_lerobot(
@@ -112,6 +123,8 @@ def test_missing_lerobot_dir_triggers_conversion(
         )
 
     monkeypatch.setattr(module, "convert_to_lerobot", _fake_convert_to_lerobot)
+    monkeypatch.setattr(module, "verify_manifest", lambda *_a, **_k: 0)
+    monkeypatch.setattr(module, "verify_checksums_manifest", lambda *_a, **_k: {"success": True, "files": {}})
 
     config = module._create_import_config(
         {
@@ -150,7 +163,17 @@ def test_conversion_failure_reports_error_when_required(
     )
     recordings_dir = recordings_root / "recordings"
 
+    # Create stub parquet files so episode validation finds them
+    for p in recordings_dir.glob("*.json"):
+        p.with_suffix(".parquet").write_bytes(b"\x00" * 2048)
+
     monkeypatch.setattr(module, "_resolve_recordings_dir", lambda *args, **kwargs: recordings_dir)
+    # Bypass parquet content validation — stub files are not real parquet
+    monkeypatch.setattr(
+        module,
+        "_stream_parquet_validation",
+        lambda *_a, **_k: {"errors": [], "warnings": []},
+    )
 
     def _failing_convert_to_lerobot(*args, **kwargs):
         raise RuntimeError("boom")

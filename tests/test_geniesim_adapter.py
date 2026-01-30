@@ -568,6 +568,18 @@ def test_production_requires_real_embeddings_with_generation(monkeypatch):
             return None
 
     monkeypatch.setattr(export_module, "FailureMarkerWriter", DummyFailureMarkerWriter)
+
+    # Stub out GCS startup validation and dead letter queue so test runs without credentials
+    import types as _types
+    stub_mod = _types.ModuleType("startup_validation")
+    stub_mod.validate_and_fail_fast = lambda **_k: None
+    monkeypatch.setitem(__import__("sys").modules, "startup_validation", stub_mod)
+
+    def _passthrough_dead_letter(fn, **_kw):
+        return fn()
+
+    monkeypatch.setattr(export_module, "run_job_with_dead_letter_queue", _passthrough_dead_letter)
+
     monkeypatch.setenv("PIPELINE_ENV", "production")
     monkeypatch.setenv("BUCKET", "test-bucket")
     monkeypatch.setenv("SCENE_ID", "scene-123")

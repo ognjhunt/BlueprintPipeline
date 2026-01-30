@@ -258,19 +258,117 @@ except ImportError:
     logger.warning("cuRobo planner not available - collision-aware planning disabled")
 
 # Import IK utilities from episode-generation-job
+_episode_gen_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "episode-generation-job")
+if os.path.isdir(_episode_gen_dir) and _episode_gen_dir not in sys.path:
+    sys.path.insert(0, _episode_gen_dir)
 try:
     from trajectory_solver import IKSolver, ROBOT_CONFIGS
     from motion_planner import Waypoint, MotionPhase
     from collision_aware_planner import CollisionAwarePlanner
     IK_PLANNING_AVAILABLE = True
-except ImportError:
+except ImportError as _ik_err:
     IK_PLANNING_AVAILABLE = False
     IKSolver = None
-    ROBOT_CONFIGS = {}
     Waypoint = None
     MotionPhase = None
     CollisionAwarePlanner = None
-    logger.warning("IK utilities not available - IK fallback disabled")
+    logger.warning("IK utilities not available - IK fallback disabled: %s", _ik_err)
+
+    ROBOT_CONFIGS = {}
+
+# Lightweight robot metadata for episode output (joint names, limits)
+# when full trajectory_solver is unavailable.
+_FRANKA_METADATA = {
+    "joint_names": ["panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4",
+                    "panda_joint5", "panda_joint6", "panda_joint7"],
+    "joint_limits_lower": [-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973],
+    "joint_limits_upper": [2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973],
+    "default_joint_positions": [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
+    "gripper_joint_names": ["panda_finger_joint1", "panda_finger_joint2"],
+    "gripper_limits": (0.0, 0.04),
+}
+_ROBOT_METADATA_FALLBACK = {
+    "franka": _FRANKA_METADATA, "franka_panda": _FRANKA_METADATA, "panda": _FRANKA_METADATA,
+}
+
+
+def _franka_fk(joint_angles: "np.ndarray") -> Tuple[List[float], List[float]]:
+    """
+    Analytical forward kinematics for Franka Panda using modified DH parameters.
+
+    Args:
+        joint_angles: 7-element array of joint positions (radians).
+
+    Returns:
+        (ee_pos, ee_quat): End-effector position [x,y,z] and quaternion [w,x,y,z].
+    """
+    # Modified DH parameters for Franka Emika Panda
+    # (a, d, alpha) per joint — from the Franka documentation
+    dh = [
+        (0.0,    0.333,  0.0),
+        (0.0,    0.0,   -np.pi / 2),
+        (0.0,    0.316,  np.pi / 2),
+        (0.0825, 0.0,    np.pi / 2),
+        (-0.0825, 0.384, -np.pi / 2),
+        (0.0,    0.0,    np.pi / 2),
+        (0.088,  0.0,    np.pi / 2),
+    ]
+    # Flange offset (from joint 7 to flange)
+    d_flange = 0.107
+
+    T = np.eye(4)
+    q = np.asarray(joint_angles[:7], dtype=float)
+
+    for i, (a, d, alpha) in enumerate(dh):
+        cq = np.cos(q[i])
+        sq = np.sin(q[i])
+        ca = np.cos(alpha)
+        sa = np.sin(alpha)
+        Ti = np.array([
+            [cq, -sq, 0.0, a],
+            [sq * ca, cq * ca, -sa, -d * sa],
+            [sq * sa, cq * sa,  ca,  d * ca],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        T = T @ Ti
+
+    # Apply flange offset along z
+    T_flange = np.eye(4)
+    T_flange[2, 3] = d_flange
+    T = T @ T_flange
+
+    ee_pos = T[:3, 3].tolist()
+
+    # Extract quaternion from rotation matrix
+    R = T[:3, :3]
+    trace = R[0, 0] + R[1, 1] + R[2, 2]
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (R[2, 1] - R[1, 2]) * s
+        y = (R[0, 2] - R[2, 0]) * s
+        z = (R[1, 0] - R[0, 1]) * s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+        w = (R[2, 1] - R[1, 2]) / s
+        x = 0.25 * s
+        y = (R[0, 1] + R[1, 0]) / s
+        z = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+        w = (R[0, 2] - R[2, 0]) / s
+        x = (R[0, 1] + R[1, 0]) / s
+        y = 0.25 * s
+        z = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+        w = (R[1, 0] - R[0, 1]) / s
+        x = (R[0, 2] + R[2, 0]) / s
+        y = (R[1, 2] + R[2, 1]) / s
+        z = 0.25 * s
+
+    ee_quat = [float(w), float(x), float(y), float(z)]
+    return ee_pos, ee_quat
 
 
 # =============================================================================
@@ -287,8 +385,8 @@ PROPRIOCEPTION_ONLY_OBSERVATION_SCHEMA = {
     "required_keys": ["robot_state"],
 }
 DEFAULT_ACTION_BOUNDS = {
-    "lower": [-3.1416] * 7,
-    "upper": [3.1416] * 7,
+    "lower": [-3.1416] * 7 + [0.0] * 2,
+    "upper": [3.1416] * 7 + [0.04] * 2,
 }
 DEFAULT_SUCCESS_SCHEMA = {
     "success_keys": ["success", "task_success", "is_success"],
@@ -400,7 +498,7 @@ class GenieSimConfig(BaseModel):
     server_startup_timeout_s: StrictFloat = 120.0
     server_startup_poll_s: StrictFloat = 2.0
     max_duration_seconds: Optional[StrictFloat] = None
-    validate_frames: StrictBool = False
+    validate_frames: StrictBool = True
     fail_on_frame_validation: StrictBool = False
 
     # Output settings
@@ -3548,6 +3646,17 @@ class GenieSimLocalFramework:
 
             episodes_target = episodes_per_task or self.config.episodes_per_task
             tasks = task_config.get("suggested_tasks", [task_config])
+            # Inject top-level config context into each task for enrichment fallbacks
+            _top_env = task_config.get("environment_type")
+            _top_meta = task_config.get("metadata")
+            _top_robot_cfg = task_config.get("robot_config")
+            for _t in tasks:
+                if _top_env and "environment_type" not in _t:
+                    _t["environment_type"] = _top_env
+                if _top_meta and "metadata" not in _t:
+                    _t["metadata"] = _top_meta
+                if _top_robot_cfg and "robot_config" not in _t:
+                    _t["robot_config"] = _top_robot_cfg
 
             self.log(f"Tasks: {len(tasks)}")
             self.log(f"Episodes per task: {episodes_target}")
@@ -4328,6 +4437,56 @@ class GenieSimLocalFramework:
             if task_success is None and llm_metadata.get("task_success") is not None:
                 task_success = llm_metadata["task_success"]
 
+            # Deterministic fallbacks when LLM enrichment is unavailable
+            if not llm_metadata.get("task_description"):
+                _hint = task.get("description_hint")
+                if _hint:
+                    llm_metadata["task_description"] = _hint
+                else:
+                    _tt = task.get("task_type", "manipulation")
+                    _to = task.get("target_object", "object")
+                    llm_metadata["task_description"] = f"{_tt.replace('_', ' ').title()} task involving {_to}."
+
+            if not llm_metadata.get("scene_description"):
+                _env = task.get("environment_type") or "unknown"
+                _meta = task.get("metadata") or {}
+                _n_obj = _meta.get("manipulable_objects", "several")
+                llm_metadata["scene_description"] = (
+                    f"{_env.title()} environment with {_n_obj} manipulable objects."
+                )
+
+            if not llm_metadata.get("success_criteria"):
+                _tt = task.get("task_type", "manipulation")
+                _criteria_map = {
+                    "pick_place": ["Object grasped", "Object lifted above surface", "Object placed at target location"],
+                    "organize": ["Object grasped", "Object moved to container", "Object released in container"],
+                    "interact": ["Robot reached target object", "Interaction completed"],
+                    "stack": ["Object grasped", "Object lifted", "Object placed on top of target"],
+                    "pour": ["Container grasped", "Container tilted", "Contents poured"],
+                }
+                llm_metadata["success_criteria"] = _criteria_map.get(
+                    _tt, ["Task initiated", "Motion completed", "End state reached"]
+                )
+
+            # Heuristic task_success from gripper transitions
+            if task_success is None and frames:
+                _has_grasp = False
+                _has_release = False
+                for _f in frames:
+                    _gc = _f.get("gripper_command")
+                    if _gc == "closed":
+                        _has_grasp = True
+                    elif _gc == "open" and _has_grasp:
+                        _has_release = True
+                        break
+                if _has_grasp:
+                    task_success = _has_release
+                    llm_metadata["task_success_reasoning"] = (
+                        "Heuristic: grasp detected"
+                        + (" followed by release (pick-place pattern)." if _has_release
+                           else " but no subsequent release detected.")
+                    )
+
             # Determine data mode
             data_mode = "proprioception_only" if os.environ.get(
                 "GENIESIM_SKIP_SERVER_RECORDING", ""
@@ -4348,32 +4507,41 @@ class GenieSimLocalFramework:
             num_joints = len(frames[0]["action"]) if frames else 0
             arm_dof = min(7, num_joints)
             rc = ROBOT_CONFIGS.get(robot_type)
+            # Lightweight metadata fallback when trajectory_solver import fails
+            _meta_fb = _ROBOT_METADATA_FALLBACK.get(robot_type, {}) if rc is None else {}
             # Build joint names from ROBOT_CONFIGS when server doesn't provide them
             if not joint_names and rc is not None:
                 joint_names = list(rc.joint_names)
                 if hasattr(rc, "gripper_joint_names") and rc.gripper_joint_names:
                     joint_names = joint_names + list(rc.gripper_joint_names)
+            _is_generic = joint_names and all(n.startswith("joint_") and n[6:].isdigit() for n in joint_names)
+            if (not joint_names or _is_generic) and _meta_fb:
+                joint_names = list(_meta_fb["joint_names"])
+                if _meta_fb.get("gripper_joint_names"):
+                    joint_names = joint_names + list(_meta_fb["gripper_joint_names"])
             robot_metadata = {
                 "robot_type": robot_type,
                 "num_joints": num_joints,
                 "arm_dof": arm_dof,
                 "gripper_dof": max(0, num_joints - arm_dof),
                 "joint_names": joint_names if joint_names else [f"joint_{i}" for i in range(num_joints)],
-                "joint_limits_lower": rc.joint_limits_lower.tolist() if rc is not None and hasattr(rc, "joint_limits_lower") else None,
-                "joint_limits_upper": rc.joint_limits_upper.tolist() if rc is not None and hasattr(rc, "joint_limits_upper") else None,
-                "gripper_joint_names": list(rc.gripper_joint_names) if rc is not None and hasattr(rc, "gripper_joint_names") else [],
-                "gripper_limits": list(rc.gripper_limits) if rc is not None and hasattr(rc, "gripper_limits") else None,
-                "default_joint_positions": rc.default_joint_positions.tolist() if rc is not None and hasattr(rc, "default_joint_positions") else None,
+                "joint_limits_lower": rc.joint_limits_lower.tolist() if rc is not None and hasattr(rc, "joint_limits_lower") else _meta_fb.get("joint_limits_lower"),
+                "joint_limits_upper": rc.joint_limits_upper.tolist() if rc is not None and hasattr(rc, "joint_limits_upper") else _meta_fb.get("joint_limits_upper"),
+                "gripper_joint_names": list(rc.gripper_joint_names) if rc is not None and hasattr(rc, "gripper_joint_names") else _meta_fb.get("gripper_joint_names", []),
+                "gripper_limits": list(rc.gripper_limits) if rc is not None and hasattr(rc, "gripper_limits") else list(_meta_fb["gripper_limits"]) if _meta_fb.get("gripper_limits") else None,
+                "default_joint_positions": rc.default_joint_positions.tolist() if rc is not None and hasattr(rc, "default_joint_positions") else _meta_fb.get("default_joint_positions"),
                 "action_space": "joint_delta",
                 "action_abs_space": "joint_position",
                 "control_frequency_hz": 30.0,
             }
 
             # Fallback collision check: verify waypoints within joint limits
-            if collision_free is None and rc is not None and frames:
+            _limits_lower = rc.joint_limits_lower if rc is not None else (np.array(_meta_fb["joint_limits_lower"]) if _meta_fb.get("joint_limits_lower") else None)
+            _limits_upper = rc.joint_limits_upper if rc is not None else (np.array(_meta_fb["joint_limits_upper"]) if _meta_fb.get("joint_limits_upper") else None)
+            if collision_free is None and _limits_lower is not None and frames:
                 try:
-                    lower = rc.joint_limits_lower
-                    upper = rc.joint_limits_upper
+                    lower = _limits_lower
+                    upper = _limits_upper
                     all_within = True
                     for frame in frames:
                         abs_joints = np.array(frame.get("action_abs", []), dtype=float)
@@ -4394,6 +4562,8 @@ class GenieSimLocalFramework:
                 json.dump({
                     "episode_id": episode_id,
                     "task_name": task.get("task_name") or llm_metadata.get("task_name") or "unknown_task",
+                    "task_type": task.get("task_type"),
+                    "target_object": task.get("target_object"),
                     "task_description": llm_metadata.get("task_description"),
                     "data_mode": data_mode,
                     "robot_metadata": robot_metadata,
@@ -4554,14 +4724,20 @@ class GenieSimLocalFramework:
 
         frames: List[Dict[str, Any]] = []
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
+            # Shallow-copy obs to avoid mutating shared references (aligned
+            # observations may reuse the same dict for multiple frames).
+            if obs is None:
+                obs = {}
+            else:
+                obs = dict(obs)
+                if "robot_state" in obs:
+                    obs["robot_state"] = dict(obs["robot_state"])
             self._attach_camera_frames(obs, episode_id=episode_id, task=task)
 
             waypoint_joints = np.array(waypoint["joint_positions"], dtype=float)
 
             # Use real observation joints if available; otherwise inject the
             # forward-propagated state from the previous waypoint.
-            if obs is None:
-                obs = {}
             obs.setdefault("robot_state", {})
             robot_state = obs["robot_state"]
             jp = robot_state.get("joint_positions")
@@ -4597,6 +4773,30 @@ class GenieSimLocalFramework:
                         }
                         for i, o in enumerate(scene_objects)
                     ]}
+                else:
+                    # Synthesize from task-level fields (target_object, goal_region)
+                    _synth_objs = []
+                    _target = task.get("target_object")
+                    if _target:
+                        # Extract readable name from object ID (e.g. "lightwheel_kitchen_obj_Pot057" → "Pot")
+                        _name_parts = _target.rsplit("_", 1)
+                        _readable = _name_parts[-1].rstrip("0123456789") if _name_parts else _target
+                        _rc_cfg = task.get("robot_config") or {}
+                        _base = _rc_cfg.get("base_position", [0.5, 0.0, 0.8])
+                        _synth_objs.append({
+                            "object_id": _target,
+                            "object_type": _readable.lower(),
+                            "pose": {"x": _base[0] + 0.3, "y": _base[1], "z": _base[2]},
+                        })
+                    _goal = task.get("goal_region")
+                    if _goal:
+                        _synth_objs.append({
+                            "object_id": _goal,
+                            "object_type": "surface",
+                            "pose": {"x": 0.5, "y": 0.5, "z": 0.75},
+                        })
+                    if _synth_objs:
+                        obs["scene_state"] = {"objects": _synth_objs}
 
             frame_data: Dict[str, Any] = {
                 "step": step_idx,
@@ -4610,24 +4810,58 @@ class GenieSimLocalFramework:
             current_joint_state = waypoint_joints.copy()
 
             # End-effector Cartesian pose via FK (best-effort)
-            if fk_solver is not None:
-                try:
+            try:
+                if fk_solver is not None:
                     ee_pos, ee_quat = fk_solver._forward_kinematics(waypoint_joints[:arm_dof])
-                    frame_data["ee_pos"] = ee_pos.tolist()
-                    frame_data["ee_quat"] = ee_quat.tolist()
-                except Exception:
-                    pass
+                    frame_data["ee_pos"] = ee_pos.tolist() if hasattr(ee_pos, 'tolist') else ee_pos
+                    frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, 'tolist') else ee_quat
+                else:
+                    ee_pos, ee_quat = _franka_fk(waypoint_joints[:arm_dof])
+                    frame_data["ee_pos"] = ee_pos
+                    frame_data["ee_quat"] = ee_quat
+            except Exception:
+                pass
 
             # Explicit gripper command: infer from gripper joint positions
-            # Mean gripper joint value near lower limit = closed, near upper = open
+            # Normalize by gripper range (e.g. Franka: [0.0, 0.04])
             if len(waypoint_joints) > arm_dof:
                 gripper_joints = waypoint_joints[arm_dof:]
-                # Normalize: 0.0 = fully closed, 1.0 = fully open
+                _g_fb = _ROBOT_METADATA_FALLBACK.get(
+                    getattr(self.config, "robot_type", "franka"), {}
+                )
+                _g_lims = _g_fb.get("gripper_limits", (0.0, 1.0))
+                _g_range = float(_g_lims[1] - _g_lims[0]) if _g_lims[1] > _g_lims[0] else 1.0
                 gripper_mean = float(np.mean(np.abs(gripper_joints)))
-                frame_data["gripper_command"] = "open" if gripper_mean > 0.3 else "closed"
-                frame_data["gripper_openness"] = round(min(1.0, gripper_mean / 0.5), 3)
+                gripper_openness = min(1.0, gripper_mean / _g_range) if _g_range > 0 else 0.0
+                frame_data["gripper_command"] = "open" if gripper_openness > 0.5 else "closed"
+                frame_data["gripper_openness"] = round(gripper_openness, 3)
 
             frames.append(frame_data)
+
+        # Second pass: compute joint velocities and EE velocities via finite differences
+        for i, frame in enumerate(frames):
+            obs_rs = frame.get("observation", {}).get("robot_state", {})
+            if i == 0:
+                obs_rs["joint_velocities"] = [0.0] * len(obs_rs.get("joint_positions", []))
+                if frame.get("ee_pos"):
+                    frame["ee_vel"] = [0.0, 0.0, 0.0]
+            else:
+                prev = frames[i - 1]
+                dt = frame["timestamp"] - prev["timestamp"]
+                if dt > 0:
+                    jp_curr = np.array(obs_rs.get("joint_positions", []), dtype=float)
+                    jp_prev = np.array(
+                        prev.get("observation", {}).get("robot_state", {}).get("joint_positions", []),
+                        dtype=float,
+                    )
+                    if jp_curr.shape == jp_prev.shape and jp_curr.size > 0:
+                        obs_rs["joint_velocities"] = ((jp_curr - jp_prev) / dt).tolist()
+                    # EE velocity
+                    if frame.get("ee_pos") and prev.get("ee_pos"):
+                        ee_curr = np.array(frame["ee_pos"], dtype=float)
+                        ee_prev = np.array(prev["ee_pos"], dtype=float)
+                        frame["ee_vel"] = ((ee_curr - ee_prev) / dt).tolist()
+
         return frames
 
     def _validate_frames(
@@ -5427,11 +5661,15 @@ class GenieSimLocalFramework:
             initial_joints = None
         else:
             initial_joints = initial_joints_result.payload
+        # Treat all-zero joints from mock client as missing
+        if initial_joints is not None and all(j == 0.0 for j in initial_joints):
+            initial_joints = None
         if initial_joints is None:
             if robot_config is not None:
                 initial_joints = robot_config.default_joint_positions.tolist()
             else:
-                initial_joints = [0.0] * 7
+                _fb = _ROBOT_METADATA_FALLBACK.get(self.config.robot_type, {})
+                initial_joints = _fb.get("default_joint_positions", [0.0] * 7)
 
         initial_joints = np.array(initial_joints, dtype=float)
 
@@ -5563,14 +5801,23 @@ class GenieSimLocalFramework:
             target = np.clip(target, lower, upper)
             phase_targets.append(target)
 
+        # Gripper joint values per phase (Franka finger joints: 0.04 = open, 0.0 = closed)
+        _grip_lims = _ROBOT_METADATA_FALLBACK.get(self.config.robot_type, {}).get("gripper_limits", (0.0, 0.04))
+        _grip_open_val = float(_grip_lims[1]) if _grip_lims else 0.04
+        _grip_closed_val = float(_grip_lims[0]) if _grip_lims else 0.0
+        # Map phase to gripper target: approach=open, grasp=closed, lift/transport=closed, place=open
+        _phase_gripper = [_grip_open_val, _grip_closed_val, _grip_closed_val, _grip_closed_val, _grip_open_val]
+
         # Interpolate between phases to build full trajectory
         trajectory: List[Dict[str, Any]] = []
         current_joints = initial_joints.copy()
+        current_grip = _grip_open_val  # start with gripper open
         current_time = 0.0
         total_duration = num_waypoints / fps
 
         for phase_idx, (phase_name, _, _, duration_frac) in enumerate(phase_configs):
             target_joints = phase_targets[phase_idx]
+            target_grip = _phase_gripper[phase_idx]
             phase_duration = duration_frac * total_duration
             phase_steps = max(2, int(round(duration_frac * num_waypoints)))
             start_step = 0 if phase_idx == 0 else 1
@@ -5586,15 +5833,19 @@ class GenieSimLocalFramework:
                 joint_pos = np.clip(joint_pos, lower, upper)
                 if robot_config is not None:
                     joint_pos = self._clamp_joints_to_limits(joint_pos, robot_config)
+                # Interpolate gripper joints and append
+                grip_val = (1.0 - s) * current_grip + s * target_grip
+                full_joints = list(joint_pos.tolist()) + [grip_val, grip_val]
                 trajectory.append(
                     {
-                        "joint_positions": joint_pos.tolist(),
+                        "joint_positions": full_joints,
                         "timestamp": current_time + t * phase_duration,
                     }
                 )
 
             current_time += phase_duration
             current_joints = target_joints
+            current_grip = target_grip
 
         self.log(
             f"  ℹ️  Multi-phase joint-space fallback: {len(trajectory)} waypoints "
@@ -6156,11 +6407,17 @@ class GenieSimLocalFramework:
                         if bool(obs.get(key, frame.get(key))):
                             grasp_frame_index = idx
                             break
+                    # Fallback: detect grasp from gripper_command
+                    if grasp_frame_index is None and frame.get("gripper_command") == "closed":
+                        grasp_frame_index = idx
                 if grasp_frame_index is not None and release_frame_index is None:
                     for key in release_keys:
                         if bool(obs.get(key, frame.get(key))):
                             release_frame_index = idx
                             break
+                    # Fallback: detect release from gripper_command after grasp
+                    if release_frame_index is None and frame.get("gripper_command") == "open":
+                        release_frame_index = idx
 
         if missing_obs_count > 0:
             logger.warning(

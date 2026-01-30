@@ -22,8 +22,10 @@ def _install_fake_google_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
 
     storage_module = ModuleType("google.cloud.storage")
     storage_module.Client = lambda *args, **kwargs: None
+    import importlib
     firestore_module = ModuleType("google.cloud.firestore")
     firestore_module.Client = lambda *args, **kwargs: None
+    firestore_module.__spec__ = importlib.machinery.ModuleSpec("google.cloud.firestore", None)
 
     cloud_module.storage = storage_module
     cloud_module.firestore = firestore_module
@@ -125,6 +127,17 @@ def test_pipeline_data_flow_entrypoints(
 
     simready_job = load_job_module("simready", "prepare_simready_assets.py")
     monkeypatch.setattr(simready_job, "GCS_ROOT", tmp_path)
+
+    # Install stub modules so blueprint_sim.assembly / usd-assembly-job can import
+    if "pxr" not in sys.modules:
+        pxr_stub = ModuleType("pxr")
+        for attr in ("Sdf", "Usd", "UsdGeom", "UsdPhysics", "UsdShade", "UsdUtils", "Gf", "Vt"):
+            setattr(pxr_stub, attr, SimpleNamespace())
+        monkeypatch.setitem(sys.modules, "pxr", pxr_stub)
+    if "pygltflib" not in sys.modules:
+        pygltflib_stub = ModuleType("pygltflib")
+        pygltflib_stub.GLTF2 = type("GLTF2", (), {})
+        monkeypatch.setitem(sys.modules, "pygltflib", pygltflib_stub)
 
     import blueprint_sim.simready as simready_runner
 

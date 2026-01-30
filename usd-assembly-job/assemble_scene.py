@@ -89,44 +89,44 @@ def main() -> None:
         )
         sys.exit(exit_code)
 
-    if _should_bypass_quality_gates():
-        logger.warning("[USD-ASSEMBLY] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates")
-        sys.exit(exit_code)
-
     usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
-    usd_path = GCS_ROOT / usd_prefix / "scene.usda"
 
-    quality_gates = QualityGateRegistry(verbose=True)
-    quality_gates.run_checkpoint(
-        QualityGateCheckpoint.USD_ASSEMBLED,
-        context={"usd_path": str(usd_path), "scene_id": scene_id},
-    )
-    report_path = _gate_report_path(scene_id)
-    quality_gates.save_report(scene_id, report_path)
+    if not _should_bypass_quality_gates():
+        usd_path = GCS_ROOT / usd_prefix / "scene.usda"
 
-    if not quality_gates.can_proceed():
-        logger.error("[USD-ASSEMBLY] ❌ Quality gates blocked downstream pipeline")
-        FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
-            exception=RuntimeError("Quality gates blocked: USD validation failed"),
-            failed_step="quality_gates",
-            input_params={
-                "scene_id": scene_id,
-                "usd_prefix": usd_prefix,
-                "usd_path": str(usd_path),
-            },
-            partial_results={"quality_gate_report": str(report_path)},
-            recommendations=[
-                "Fix USD validation errors before proceeding.",
-                f"Review quality gate report: {report_path}",
-            ],
+        quality_gates = QualityGateRegistry(verbose=True)
+        quality_gates.run_checkpoint(
+            QualityGateCheckpoint.USD_ASSEMBLED,
+            context={"usd_path": str(usd_path), "scene_id": scene_id},
         )
-        sys.exit(1)
-    metrics = get_metrics()
-    with metrics.track_job("usd-assembly-job", scene_id):
-        exit_code = assemble_from_env()
+        report_path = _gate_report_path(scene_id)
+        quality_gates.save_report(scene_id, report_path)
 
-    usd_prefix = os.getenv("USD_PREFIX") or assets_prefix
-    completion_manifest_path = Path("/mnt/gcs") / usd_prefix / "usd_assembly_manifest.json"
+        if not quality_gates.can_proceed():
+            logger.error("[USD-ASSEMBLY] ❌ Quality gates blocked downstream pipeline")
+            FailureMarkerWriter(bucket, scene_id, JOB_NAME).write_failure(
+                exception=RuntimeError("Quality gates blocked: USD validation failed"),
+                failed_step="quality_gates",
+                input_params={
+                    "scene_id": scene_id,
+                    "usd_prefix": usd_prefix,
+                    "usd_path": str(usd_path),
+                },
+                partial_results={"quality_gate_report": str(report_path)},
+                recommendations=[
+                    "Fix USD validation errors before proceeding.",
+                    f"Review quality gate report: {report_path}",
+                ],
+            )
+            sys.exit(1)
+        metrics = get_metrics()
+        with metrics.track_job("usd-assembly-job", scene_id):
+            exit_code = assemble_from_env()
+    else:
+        logger.warning("[USD-ASSEMBLY] ⚠️  BYPASS_QUALITY_GATES enabled - skipping quality gates")
+
+    metrics = get_metrics()
+    completion_manifest_path = GCS_ROOT / usd_prefix / "usd_assembly_manifest.json"
     metrics_summary = {
         "backend": metrics.backend.value,
         "stats": metrics.get_stats(),

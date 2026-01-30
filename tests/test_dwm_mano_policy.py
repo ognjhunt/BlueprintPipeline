@@ -1,7 +1,21 @@
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture()
+def _isolate_dwm_modules():
+    """Ensure modules loaded by dwm-preparation-job don't pollute other tests."""
+    pre_keys = set(sys.modules)
+    saved_path = sys.path[:]
+    yield
+    # Restore: remove any modules added during this test so other jobs load cleanly
+    added = [k for k in sys.modules if k not in pre_keys]
+    for k in added:
+        del sys.modules[k]
+    sys.path[:] = saved_path
 
 
 def _load_prepare_module():
@@ -14,6 +28,7 @@ def _load_prepare_module():
     return module
 
 
+@pytest.mark.usefixtures("_isolate_dwm_modules")
 def test_production_requires_mano_assets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     prepare_module = _load_prepare_module()
     from hand_motion.hand_mesh_renderer import MANOUnavailableError

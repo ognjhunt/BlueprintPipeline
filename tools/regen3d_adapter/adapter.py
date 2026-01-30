@@ -386,7 +386,10 @@ class Regen3DAdapter:
                 "coordinate_frame": regen3d_output.coordinate_frame,
                 "meters_per_unit": regen3d_output.meters_per_unit * scale_factor,
                 "environment_type": environment_type,
-                "room": self._compute_room_bounds(regen3d_output, scale_factor),
+                "room": {
+                    k: v for k, v in self._compute_room_bounds(regen3d_output, scale_factor).items()
+                    if k in ("bounds", "origin")
+                },
                 "physics_defaults": {
                     "gravity": {"x": 0.0, "y": -9.81, "z": 0.0},
                     "solver": "TGS",
@@ -436,8 +439,8 @@ class Regen3DAdapter:
             "id": obj.id,
             "sim_role": sim_role,
             "name": obj.id,
-            "category": obj.category,
-            "description": obj.description,
+            "category": obj.category or ("background" if is_background else "object"),
+            "description": obj.description or f"Object {obj.id}",
             "transform": {
                 "position": {
                     "x": transform["translation"][0],
@@ -575,21 +578,14 @@ class Regen3DAdapter:
             all_bounds.append(regen3d_output.background.bounds)
 
         if not all_bounds:
-            default_bounds = {
-                "bounds": {"min": [-5, 0, -5], "max": [5, 3, 5]},
-                "origin": [0, 0, 0],
-            }
-            if scale_factor != 1.0:
-                default_bounds["bounds"]["min"] = [v * scale_factor for v in default_bounds["bounds"]["min"]]
-                default_bounds["bounds"]["max"] = [v * scale_factor for v in default_bounds["bounds"]["max"]]
-            return default_bounds
-
-        # Compute union of all bounds
-        mins = np.array([b.get("min", [-5, 0, -5]) for b in all_bounds])
-        maxs = np.array([b.get("max", [5, 3, 5]) for b in all_bounds])
-
-        room_min = mins.min(axis=0).tolist()
-        room_max = maxs.max(axis=0).tolist()
+            room_min = [-5.0, 0.0, -5.0]
+            room_max = [5.0, 3.0, 5.0]
+        else:
+            # Compute union of all bounds
+            mins = np.array([b.get("min", [-5, 0, -5]) for b in all_bounds])
+            maxs = np.array([b.get("max", [5, 3, 5]) for b in all_bounds])
+            room_min = mins.min(axis=0).tolist()
+            room_max = maxs.max(axis=0).tolist()
 
         # Apply scale_factor
         if scale_factor != 1.0:
@@ -597,7 +593,13 @@ class Regen3DAdapter:
             room_max = [v * scale_factor for v in room_max]
 
         return {
-            "bounds": {"min": room_min, "max": room_max},
+            "bounds": {
+                "width": room_max[0] - room_min[0],
+                "depth": room_max[2] - room_min[2],
+                "height": room_max[1] - room_min[1],
+            },
+            "min": room_min,
+            "max": room_max,
             "origin": [
                 (room_min[0] + room_max[0]) / 2,
                 room_min[1],  # Origin at floor level
@@ -638,8 +640,8 @@ class Regen3DAdapter:
         # Compute room box
         room_info = self._compute_room_bounds(regen3d_output)
         room_box = {
-            "min": room_info["bounds"]["min"],
-            "max": room_info["bounds"]["max"],
+            "min": room_info["min"],
+            "max": room_info["max"],
         }
 
         # Apply scale factor to room box

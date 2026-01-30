@@ -2297,6 +2297,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
             input_params["generate_embeddings"] = generate_embeddings
             input_params["require_embeddings"] = require_embeddings
 
+        gcs_mount_path = os.getenv("GCSFUSE_MOUNT_PATH", "/mnt/gcs")
         validated = False
         try:
             assets_root = Path(gcs_mount_path) / assets_prefix

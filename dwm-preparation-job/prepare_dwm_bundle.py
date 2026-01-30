@@ -197,6 +197,16 @@ class DWMPreparationJob:
             else None
         )
 
+        # Initialize MANO before renderers so policy errors surface first
+        mano_required = self._resolve_mano_requirement()
+        hand_render_config = HandRenderConfig(
+            width=config.resolution[0],
+            height=config.resolution[1],
+            hand_model=HandModel.MANO,
+            require_mano=mano_required,
+        )
+        self.hand_renderer = HandMeshRenderer(config=hand_render_config)
+
         # Initialize renderers
         render_config = RenderConfig(
             width=config.resolution[0],
@@ -206,15 +216,6 @@ class DWMPreparationJob:
             backend=config.render_backend,
             config=render_config,
         )
-
-        mano_required = self._resolve_mano_requirement()
-        hand_render_config = HandRenderConfig(
-            width=config.resolution[0],
-            height=config.resolution[1],
-            hand_model=HandModel.MANO,
-            require_mano=mano_required,
-        )
-        self.hand_renderer = HandMeshRenderer(config=hand_render_config)
 
         # Initialize packager
         self.packager = DWMBundlePackager(config.output_dir)

@@ -71,7 +71,12 @@ from tools.validation.entrypoint_checks import validate_required_env_vars
 from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
 from tools.tracing.correlation import ensure_request_id
 from tools.tracing import init_tracing
-from tools.firebase_upload import preflight_firebase_connectivity
+from tools.firebase_upload import (
+    FirebaseUploadError,
+    preflight_firebase_connectivity,
+    upload_episodes_to_firebase,
+    upload_firebase_files,
+)
 from monitoring.alerting import send_alert
 
 try:
@@ -1906,6 +1911,55 @@ def main(input_params: Optional[Dict[str, Any]] = None) -> int:
         logger.info(
             "[GENIESIM-SUBMIT-JOB] Firebase upload will occur during import after validation."
         )
+        firebase_second_pass_max = int(os.getenv("FIREBASE_UPLOAD_SECOND_PASS_MAX", "0"))
+        for current_robot in robot_types:
+            episodes_dir = output_dirs.get(current_robot)
+            if not episodes_dir:
+                continue
+            episodes_prefix = episodes_output_prefix
+            if multi_robot:
+                episodes_prefix = f"{episodes_output_prefix}/{current_robot}"
+            try:
+                upload_episodes_to_firebase(
+                    episodes_dir=episodes_dir,
+                    scene_id=scene_id,
+                    prefix=episodes_prefix,
+                )
+                firebase_upload_status = "completed"
+            except FirebaseUploadError as fb_err:
+                firebase_upload_status = "partial"
+                failed_files = fb_err.summary.get("failures", [])
+                if failed_files and firebase_second_pass_max > 0:
+                    firebase_retry_attempted = True
+                    retry_paths = [Path(f["local_path"]) for f in failed_files]
+                    retry_result = upload_firebase_files(
+                        paths=retry_paths,
+                        prefix=episodes_prefix,
+                        scene_id=scene_id,
+                    )
+                    firebase_retry_failed_count = retry_result.get("failed", 0)
+                    manifest = {
+                        "retry_attempted": True,
+                        "original_failures": len(failed_files),
+                        "retry_failed_count": firebase_retry_failed_count,
+                        "files": [str(p) for p in retry_paths],
+                    }
+                    manifest_path = episodes_dir / "upload_retry_manifest.json"
+                    _write_local_json(manifest_path, manifest)
+                    firebase_retry_manifest_path = str(manifest_path)
+                    gcs_manifest_uri = (
+                        f"gs://{bucket}/{episodes_prefix}/"
+                        f"geniesim_{job_id}/upload_retry_manifest.json"
+                    )
+                    upload_blob_from_filename(
+                        storage_client.bucket(bucket).blob(
+                            f"{episodes_prefix}/geniesim_{job_id}/upload_retry_manifest.json"
+                        ),
+                        manifest_path,
+                        gcs_manifest_uri,
+                    )
+                    if firebase_retry_failed_count == 0:
+                        firebase_upload_status = "completed"
 
     metrics = get_metrics()
     metrics_summary = {

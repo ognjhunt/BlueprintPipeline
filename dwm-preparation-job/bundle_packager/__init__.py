@@ -8,11 +8,13 @@ text prompts) into a structured bundle ready for DWM inference.
 from .dwm_bundle import (
     DWMBundlePackager,
     create_bundle_manifest,
+    generate_text_prompt,
     package_dwm_bundle,
 )
 
 __all__ = [
     "DWMBundlePackager",
     "create_bundle_manifest",
+    "generate_text_prompt",
     "package_dwm_bundle",
 ]

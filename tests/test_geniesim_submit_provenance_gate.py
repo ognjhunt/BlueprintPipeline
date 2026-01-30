@@ -140,9 +140,7 @@ def _prepare_common_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REQUIRE_EMBEDDINGS", "false")
 
 
-def _install_firebase_stub(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_firebase = types.ModuleType("tools.firebase_upload")
-
+def _install_firebase_stub(monkeypatch: pytest.MonkeyPatch, submit_module: types.ModuleType) -> None:
     class FirebaseUploadError(RuntimeError):
         pass
 
@@ -152,10 +150,9 @@ def _install_firebase_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     def upload_firebase_files(*_args: object, **_kwargs: object) -> dict[str, int]:
         return {"uploaded": 0, "skipped": 0, "reuploaded": 0, "failed": 0, "total_files": 0}
 
-    fake_firebase.FirebaseUploadError = FirebaseUploadError
-    fake_firebase.upload_episodes_to_firebase = upload_episodes_to_firebase
-    fake_firebase.upload_firebase_files = upload_firebase_files
-    monkeypatch.setitem(sys.modules, "tools.firebase_upload", fake_firebase)
+    monkeypatch.setattr(submit_module, "FirebaseUploadError", FirebaseUploadError)
+    monkeypatch.setattr(submit_module, "upload_episodes_to_firebase", upload_episodes_to_firebase)
+    monkeypatch.setattr(submit_module, "upload_firebase_files", upload_firebase_files)
 
 
 def _run_submit_job(
@@ -197,7 +194,7 @@ def _run_submit_job(
             return {}
 
     monkeypatch.setattr(submit_module, "get_metrics", lambda: FakeMetrics())
-    _install_firebase_stub(monkeypatch)
+    _install_firebase_stub(monkeypatch, submit_module)
 
     submit_module.main()
     job_path = "scenes/scene-1/geniesim/job.json"

@@ -171,6 +171,8 @@ def test_golden_files_minimal_pipeline(tmp_path: Path, monkeypatch: pytest.Monke
         )
         output.total_episodes = 1
         output.valid_episodes = 1
+        output.average_quality_score = 0.95
+        output.pass_rate = 1.0
         output.tasks_generated = {"pick_mug": 1}
         output.output_dir = self.config.output_dir
         output.lerobot_dataset_path = self.config.output_dir / "lerobot"
@@ -180,6 +182,21 @@ def test_golden_files_minimal_pipeline(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(episode_module.EpisodeGenerator, "__init__", _mock_init)
     monkeypatch.setattr(episode_module.EpisodeGenerator, "generate", _mock_generate)
     monkeypatch.setenv("BYPASS_QUALITY_GATES", "1")
+
+    # Bypass quality gates (they require real episode stats)
+    from episode_generation import runner as _runner_mod
+
+    class _StubQualityGates:
+        def __init__(self, **_kw):
+            pass
+        def run_checkpoint(self, *_a, **_kw):
+            pass
+        def save_report(self, *_a, **_kw):
+            pass
+        def can_proceed(self):
+            return True
+
+    monkeypatch.setattr(_runner_mod, "QualityGateRegistry", _StubQualityGates)
 
     episode_exit = episode_module.run_episode_generation_job(
         root=tmp_path,

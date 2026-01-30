@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,10 @@ def _load_module(module_name: str, file_path: Path):
     return module
 
 
+# Save state before loading dwm modules (they pollute sys.path and sys.modules)
+_pre_keys = set(sys.modules)
+_saved_path = sys.path[:]
+
 renderer = _load_module(
     "dwm_hand_mesh_renderer",
     DWM_ROOT / "hand_motion" / "hand_mesh_renderer.py",
@@ -25,6 +30,13 @@ models = _load_module(
     "dwm_models",
     DWM_ROOT / "models.py",
 )
+
+# Clean up sys.modules pollution (dwm scripts add their dir to sys.path and cache
+# a generic "models" module that conflicts with other jobs' models.py)
+for _k in list(sys.modules):
+    if _k not in _pre_keys and _k not in ("dwm_hand_mesh_renderer", "dwm_models"):
+        del sys.modules[_k]
+sys.path[:] = _saved_path
 
 
 @pytest.mark.unit

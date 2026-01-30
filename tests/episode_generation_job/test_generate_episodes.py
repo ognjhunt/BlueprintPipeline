@@ -101,7 +101,7 @@ def test_solve_trajectory_with_replan_returns_replanned_plan(monkeypatch, tmp_pa
     def fake_solve(_self, _plan):
         solver_calls["count"] += 1
         if solver_calls["count"] == 1:
-            raise trajectory_solver.TrajectoryIKError("IK failure")
+            raise generate_episodes.TrajectoryIKError("IK failure")
         return _build_joint_trajectory(trajectory_solver, trajectory_id="traj_replanned")
 
     def fake_plan_motion(**kwargs):

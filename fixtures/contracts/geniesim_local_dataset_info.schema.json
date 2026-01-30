@@ -104,6 +104,29 @@
         "lerobot_info": {"type": "string"},
         "debug_json_output": {"type": "boolean"}
       }
+    },
+    {
+      "type": "object",
+      "required": [
+        "format",
+        "export_format",
+        "version",
+        "episodes",
+        "total_frames",
+        "exported_at",
+        "lerobot_info"
+      ],
+      "properties": {
+        "format": {"type": "string"},
+        "export_format": {"type": "string", "enum": ["lerobot_v3"]},
+        "version": {"type": "string"},
+        "episodes": {"type": "integer"},
+        "skipped": {"type": "integer"},
+        "total_frames": {"type": "integer"},
+        "exported_at": {"type": "string"},
+        "lerobot_info": {"type": "string"},
+        "debug_json_output": {"type": "boolean"}
+      }
     }
   ],
   "additionalProperties": true

@@ -224,6 +224,12 @@ EXPORTER_CASES = [
 
 @pytest.mark.parametrize("case", EXPORTER_CASES, ids=lambda case: case["name"])
 def test_geniesim_premium_exporters(case: Dict[str, Any], tmp_path: Path) -> None:
+    # Remove cached module and ensure genie-sim-export-job is first in sys.path
+    # to avoid pollution from arena-export-job (which has identically named modules)
+    sys.modules.pop(case["module"], None)
+    if str(EXPORT_ROOT) in sys.path:
+        sys.path.remove(str(EXPORT_ROOT))
+    sys.path.insert(0, str(EXPORT_ROOT))
     module = import_module(case["module"])
     factory: Callable[..., Any] = getattr(module, case["factory"])
     output_dir = tmp_path / case["name"]

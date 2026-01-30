@@ -1448,8 +1448,8 @@ def process_object(
         result["placeholder_reason"] = "no_glb"
         return result
 
-    # Check if Particulate endpoint is configured
-    if not particulate_endpoint:
+    # Check if Particulate endpoint is configured (skip for mock mode)
+    if not particulate_endpoint and particulate_mode != PARTICULATE_MODE_MOCK:
         log("No Particulate endpoint configured, using static URDF", "WARNING", obj_name)
         result["status"] = "static"
 

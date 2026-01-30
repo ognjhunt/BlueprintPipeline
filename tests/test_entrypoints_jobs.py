@@ -305,8 +305,29 @@ def test_geniesim_submit_entrypoint_validates_bundle(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("EPISODES_PER_TASK", "7")
     monkeypatch.setenv("NUM_VARIATIONS", "2")
     monkeypatch.setenv("MIN_QUALITY_SCORE", "0.9")
+    monkeypatch.setenv("ALLOW_MISSING_ASSET_PROVENANCE", "1")
 
     monkeypatch.setattr(module, "run_geniesim_preflight_or_exit", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(module, "_run_geniesim_ik_gate", lambda **_k: True)
+    monkeypatch.setattr(module, "send_alert", lambda **_k: None)
+    monkeypatch.setattr(module, "_run_firebase_preflight", lambda **_k: None)
+    monkeypatch.setattr(module, "verify_blob_upload", lambda *_a, **_k: (True, None))
+    monkeypatch.setattr(module, "_run_geniesim_data_quality_gate", lambda **_k: True)
+
+    class _FakeMetrics:
+        def __init__(self):
+            self.backend = SimpleNamespace(value="test")
+        def get_stats(self):
+            return {}
+
+    monkeypatch.setattr(module, "get_metrics", lambda: _FakeMetrics())
+
+    # Stub firebase upload functions
+    class _FBErr(RuntimeError):
+        pass
+    monkeypatch.setattr(module, "FirebaseUploadError", _FBErr)
+    monkeypatch.setattr(module, "upload_episodes_to_firebase", lambda **_k: {"uploaded": 0, "failed": 0, "total_files": 0})
+    monkeypatch.setattr(module, "upload_firebase_files", lambda **_k: {"uploaded": 0, "failed": 0, "total_files": 0})
 
     def _fake_run_local(*args, **kwargs):
         return module.DataCollectionResult(

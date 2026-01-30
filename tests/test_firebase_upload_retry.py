@@ -109,11 +109,10 @@ def minimal_payloads() -> dict[str, object]:
 
 def _install_firebase_retry_stub(
     monkeypatch: pytest.MonkeyPatch,
+    submit_module: types.ModuleType,
     *,
     retry_calls: list[list[Path]],
 ) -> None:
-    fake_firebase = types.ModuleType("tools.firebase_upload")
-
     class FirebaseUploadError(RuntimeError):
         def __init__(self, summary: dict, message: str) -> None:
             super().__init__(message)
@@ -157,10 +156,9 @@ def _install_firebase_retry_stub(
             "verification_strategy": "sha256_metadata+md5_base64",
         }
 
-    fake_firebase.FirebaseUploadError = FirebaseUploadError
-    fake_firebase.upload_episodes_to_firebase = upload_episodes_to_firebase
-    fake_firebase.upload_firebase_files = upload_firebase_files
-    monkeypatch.setitem(sys.modules, "tools.firebase_upload", fake_firebase)
+    monkeypatch.setattr(submit_module, "FirebaseUploadError", FirebaseUploadError)
+    monkeypatch.setattr(submit_module, "upload_episodes_to_firebase", upload_episodes_to_firebase)
+    monkeypatch.setattr(submit_module, "upload_firebase_files", upload_firebase_files)
 
 
 def test_firebase_retry_second_pass(
@@ -194,6 +192,7 @@ def test_firebase_retry_second_pass(
         ),
     )
     monkeypatch.setattr(submit_module, "verify_blob_upload", lambda *_a, **_k: (True, None))
+    monkeypatch.setattr(submit_module, "_run_geniesim_data_quality_gate", lambda **_k: True)
 
     uploaded_paths: list[str] = []
 
@@ -213,7 +212,7 @@ def test_firebase_retry_second_pass(
     monkeypatch.setattr(submit_module, "get_metrics", lambda: FakeMetrics())
 
     retry_calls: list[list[Path]] = []
-    _install_firebase_retry_stub(monkeypatch, retry_calls=retry_calls)
+    _install_firebase_retry_stub(monkeypatch, submit_module, retry_calls=retry_calls)
 
     submit_module.main()
 
