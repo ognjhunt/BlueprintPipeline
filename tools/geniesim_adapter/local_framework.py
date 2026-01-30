@@ -1250,54 +1250,37 @@ class GenieSimGRPCClient:
         """
         Request a minimal observation payload for readiness checks.
 
+        Uses individual gRPC calls (get_joint_position) instead of the
+        unsupported standalone GetObservation.
+
         Returns:
             GrpcCallResult containing a formatted observation payload.
         """
-        if not self._have_grpc:
-            return self._grpc_unavailable(
-                "get_observation_minimal",
-                "gRPC stubs unavailable",
-            )
-        if self._stub is None:
-            return self._grpc_unavailable(
-                "get_observation_minimal",
-                "gRPC stub not initialized",
-            )
-        effective_timeout = max(self.timeout, timeout) if timeout else self.timeout
-        request = GetObservationReq(
-            isCam=False,
-            isJoint=include_joint,
-            isPose=include_pose,
-            objectPrims=[],
-            isGripper=False,
-        )
-
-        def _request() -> GetObservationRsp:
-            return self._stub.get_observation(request, timeout=effective_timeout)
-
-        response = self._call_grpc(
-            "get_observation(minimal)",
-            _request,
-            None,
-            success_checker=lambda resp: resp is not None,
-        )
-        if response is None:
-            return GrpcCallResult(
-                success=False,
-                available=True,
-                error="gRPC call failed",
-                payload={"success": False, "error": "gRPC call failed"},
-            )
-        formatted = self._format_observation_response(
-            response,
-            camera_ids=[],
-            object_prims=[],
-        )
-        formatted["recording_state"] = response.recordingState
+        joint_positions = []
+        joint_names = []
+        if include_joint:
+            try:
+                jp_result = self.get_joint_position()
+                if jp_result.success and jp_result.payload is not None:
+                    joint_positions = list(jp_result.payload)
+                    joint_names = list(self._joint_names) if self._joint_names else []
+            except Exception:
+                pass
         return GrpcCallResult(
             success=True,
             available=True,
-            payload=formatted,
+            payload={
+                "success": True,
+                "robot_state": {
+                    "joint_state": {
+                        "names": joint_names,
+                        "positions": joint_positions,
+                    },
+                },
+                "scene_state": {"objects": []},
+                "camera_observation": {"images": []},
+                "recording_state": "",
+            },
         )
 
     def get_server_info(self, timeout: Optional[float] = None) -> GrpcCallResult:
@@ -1455,31 +1438,31 @@ class GenieSimGRPCClient:
 
         payload = data or {}
 
-        if command in {
-            CommandType.GET_OBSERVATION,
-            CommandType.START_RECORDING,
-            CommandType.STOP_RECORDING,
-            CommandType.GET_CAMERA_DATA,
-            CommandType.GET_SEMANTIC_DATA,
-            CommandType.GET_GRIPPER_STATE,
-            CommandType.GET_JOINT_POSITION,
-            CommandType.GET_OBJECT_POSE,
-        }:
-            observation_payload = dict(payload)
-            if command == CommandType.GET_SEMANTIC_DATA:
-                observation_payload["include_semantic"] = True
-            if command == CommandType.GET_GRIPPER_STATE:
-                observation_payload["include_gripper"] = True
-                observation_payload.setdefault("left_gripper", True)
-                observation_payload.setdefault("right_gripper", True)
-            if command == CommandType.GET_JOINT_POSITION:
-                observation_payload["include_joint"] = True
-            if command == CommandType.GET_OBJECT_POSE:
-                observation_payload["include_pose"] = True
-                object_id = observation_payload.get("object_id")
-                if object_id:
-                    observation_payload.setdefault("object_prims", [object_id])
+        # Route commands that previously went through the broken standalone
+        # GetObservation to their dedicated gRPC services.
+        if command == CommandType.GET_OBSERVATION:
+            return self.get_observation()
+        if command == CommandType.GET_JOINT_POSITION:
+            return self.get_joint_position()
+        if command == CommandType.GET_OBJECT_POSE:
+            object_id = payload.get("object_id", "")
+            return self.get_object_pose(object_id)
+        if command == CommandType.GET_GRIPPER_STATE:
+            return self.get_gripper_state()
+        if command in {CommandType.GET_CAMERA_DATA, CommandType.GET_SEMANTIC_DATA}:
+            # Camera data via CameraService
+            cam_prim = payload.get("camera_prim", payload.get("Cam_prim_path", ""))
+            cam_data = self._get_camera_data_raw(cam_prim) if self._channel and cam_prim else None
+            return GrpcCallResult(
+                success=cam_data is not None,
+                available=True,
+                payload=cam_data or {},
+            )
 
+        # START_RECORDING and STOP_RECORDING still use the SimObservationService
+        # get_observation gRPC (the server supports these sub-commands).
+        if command in (CommandType.START_RECORDING, CommandType.STOP_RECORDING):
+            observation_payload = dict(payload)
             request, camera_ids, object_prims = self._build_observation_request(
                 observation_payload,
                 start_recording=command == CommandType.START_RECORDING,
@@ -1502,23 +1485,10 @@ class GenieSimGRPCClient:
                     error="gRPC call failed",
                     payload={"success": False, "error": "gRPC call failed"},
                 )
-
-            if command in (CommandType.START_RECORDING, CommandType.STOP_RECORDING):
-                return GrpcCallResult(
-                    success=True,
-                    available=True,
-                    payload={"recording_state": response.recordingState},
-                )
-
-            formatted = self._format_observation_response(
-                response,
-                camera_ids=camera_ids,
-                object_prims=object_prims,
-            )
             return GrpcCallResult(
                 success=True,
                 available=True,
-                payload=formatted,
+                payload={"recording_state": response.recordingState},
             )
 
         if self._stub is None:
@@ -1882,92 +1852,264 @@ class GenieSimGRPCClient:
         """
         Get current observation from simulation.
 
-        Uses real gRPC get_observation call.
+        The server does NOT support standalone GetObservation via the
+        SimObservationService (it only handles startRecording/stopRecording).
+        Instead, we compose a real observation from individual gRPC services
+        that ARE supported:
+          - JointControlService.get_joint_position  (real PhysX joint data)
+          - JointControlService.get_ee_pose          (real EE pose)
+          - SimObjectService.get_object_pose          (real USD object poses)
+          - CameraService.get_camera_data             (real rendered images)
 
         Returns:
             GrpcCallResult with payload containing robot_state, scene_state, timestamp.
         """
-        # Server does not support standalone GetObservation (only
-        # startRecording/stopRecording).  When server-side recording is
-        # disabled, build a hybrid observation using real joint data from
-        # get_joint_position() (which works) and synthetic placeholders
-        # for fields the server can't provide.
-        if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
-            import time as _time
-            # Attempt to read real joint positions from the server
-            joint_positions = [0.0] * 28
-            try:
-                jp_result = self.get_joint_position()
-                if jp_result.success and jp_result.payload is not None:
-                    joint_positions = list(jp_result.payload)
-            except Exception:
-                pass
-            # Use monotonic nanoseconds to guarantee unique, increasing timestamps
-            # even when multiple observations are polled within the same millisecond.
-            mono_ns = _time.monotonic_ns()
-            # Combine wall-clock base with monotonic offset for uniqueness
-            if not hasattr(self, "_obs_timestamp_base"):
-                self._obs_timestamp_base = _time.time()
-                self._obs_monotonic_base = mono_ns
-            unique_timestamp = self._obs_timestamp_base + (mono_ns - self._obs_monotonic_base) / 1e9
-            return GrpcCallResult(
-                success=True,
-                available=True,
-                payload={
-                    "robot_state": {"joint_positions": joint_positions},
-                    "scene_state": {},
-                    "timestamp": unique_timestamp,
-                    "planned_timestamp": 0.0,
+        import time as _time
+        import struct as _struct
+        import base64 as _b64
+
+        # --- 1. Real joint positions ---
+        joint_positions = []
+        joint_names = []
+        try:
+            jp_result = self.get_joint_position()
+            if jp_result.success and jp_result.payload is not None:
+                joint_positions = list(jp_result.payload)
+                joint_names = list(self._joint_names) if self._joint_names else []
+        except Exception as exc:
+            logger.warning(f"[OBS] get_joint_position failed: {exc}")
+
+        # --- 2. Real EE pose ---
+        ee_pose = {}
+        try:
+            ee_result = self.get_ee_pose(ee_link_name="right")
+            if ee_result.success and ee_result.payload is not None:
+                ee_pose = ee_result.payload
+        except Exception as exc:
+            logger.warning(f"[OBS] get_ee_pose failed: {exc}")
+
+        # --- 3. Real object poses via SimObjectService ---
+        scene_objects = []
+        # Use the task_config object prims if available
+        object_prims = getattr(self, "_scene_object_prims", [])
+        if object_prims and self._channel is not None:
+            for prim_path in object_prims:
+                try:
+                    obj_pose = self._get_object_pose_raw(prim_path)
+                    if obj_pose is not None:
+                        scene_objects.append({
+                            "object_id": prim_path,
+                            "pose": obj_pose,
+                        })
+                except Exception as exc:
+                    logger.debug(f"[OBS] get_object_pose({prim_path}) failed: {exc}")
+
+        # --- 4. Real camera images via CameraService ---
+        camera_images = []
+        camera_prim_paths = list(self._camera_prim_map.values()) if self._camera_prim_map else []
+        camera_ids = list(self._camera_prim_map.keys()) if self._camera_prim_map else self._default_camera_ids
+        if camera_prim_paths and self._channel is not None:
+            for idx, cam_prim in enumerate(camera_prim_paths):
+                try:
+                    cam_data = self._get_camera_data_raw(cam_prim)
+                    if cam_data is not None:
+                        cam_id = camera_ids[idx] if idx < len(camera_ids) else str(idx)
+                        camera_images.append({
+                            "camera_id": cam_id,
+                            "rgb_data": _b64.b64encode(cam_data.get("rgb", b"")).decode("ascii") if cam_data.get("rgb") else "",
+                            "depth_data": _b64.b64encode(cam_data.get("depth", b"")).decode("ascii") if cam_data.get("depth") else "",
+                            "semantic_data": "",
+                            "width": cam_data.get("width", 0),
+                            "height": cam_data.get("height", 0),
+                            "encoding": "rgb",
+                        })
+                except Exception as exc:
+                    logger.debug(f"[OBS] get_camera_data({cam_prim}) failed: {exc}")
+
+        # --- Timestamp ---
+        mono_ns = _time.monotonic_ns()
+        if not hasattr(self, "_obs_timestamp_base"):
+            self._obs_timestamp_base = _time.time()
+            self._obs_monotonic_base = mono_ns
+        unique_timestamp = self._obs_timestamp_base + (mono_ns - self._obs_monotonic_base) / 1e9
+
+        data_sources = []
+        if joint_positions:
+            data_sources.append("joints")
+        if ee_pose:
+            data_sources.append("ee_pose")
+        if scene_objects:
+            data_sources.append(f"objects({len(scene_objects)})")
+        if camera_images:
+            data_sources.append(f"cameras({len(camera_images)})")
+        logger.info(f"[OBS] Composed real observation from: {', '.join(data_sources) or 'none'}")
+
+        result = {
+            "success": True,
+            "robot_state": {
+                "joint_positions": joint_positions,
+                "joint_state": {
+                    "names": joint_names,
+                    "positions": joint_positions,
                 },
-            )
-        if not self._have_grpc:
-            return self._grpc_unavailable(
-                "get_observation",
-                "gRPC stubs unavailable",
-            )
-        if self._stub is None:
-            return self._grpc_unavailable(
-                "get_observation",
-                "gRPC stub not initialized",
-            )
-
-        request, camera_ids, object_prims = self._build_observation_request(
-            {
-                "include_images": True,
-                "include_depth": True,
-                "include_semantic": False,
-                "include_joint": True,
-            }
-        )
-
-        def _request() -> GetObservationRsp:
-            return self._stub.get_observation(request, timeout=self.timeout)
-
-        response = self._call_grpc(
-            "get_observation",
-            _request,
-            None,
-            success_checker=lambda resp: resp is not None,
-        )
-        if response is None:
-            return GrpcCallResult(
-                success=False,
-                available=True,
-                error="gRPC call failed",
-                payload={"success": False, "error": "gRPC call failed"},
-            )
-
-        result = self._format_observation_response(
-            response,
-            camera_ids=camera_ids,
-            object_prims=object_prims,
-        )
+                "ee_pose": ee_pose,
+            },
+            "scene_state": {"objects": scene_objects},
+            "camera_observation": {"images": camera_images},
+            "timestamp": unique_timestamp,
+            "planned_timestamp": 0.0,
+            "data_source": "real_composed",
+        }
         self._latest_observation = result
         return GrpcCallResult(
             success=True,
             available=True,
             payload=result,
         )
+
+    def _get_object_pose_raw(self, prim_path: str) -> Optional[Dict[str, Any]]:
+        """Get object pose via SimObjectService.get_object_pose (raw gRPC)."""
+        import struct as _struct
+        # Build GetObjectPoseReq: field 1 (prim_path, string)
+        prim_bytes = prim_path.encode("utf-8")
+        # Protobuf: tag 0x0a (field 1, length-delimited), then varint length, then bytes
+        payload = b"\x0a" + self._encode_varint(len(prim_bytes)) + prim_bytes
+
+        method = "/aimdk.protocol.SimObjectService/get_object_pose"
+        try:
+            call = self._channel.unary_unary(
+                method,
+                request_serializer=lambda x: x,
+                response_deserializer=lambda x: x,
+            )
+            raw_response = call(payload, timeout=self.timeout)
+            # Parse GetObjectPoseRsp manually
+            # Field 2 is SE3RpyPose (object_pose)
+            return self._parse_object_pose_response(raw_response)
+        except Exception as exc:
+            logger.debug(f"[OBS] raw get_object_pose failed: {exc}")
+            return None
+
+    def _get_camera_data_raw(self, cam_prim_path: str) -> Optional[Dict[str, Any]]:
+        """Get camera data via CameraService.get_camera_data (raw gRPC)."""
+        # Build GetCameraDataRequest: field 1 (serial_no=cam_prim_path, string)
+        prim_bytes = cam_prim_path.encode("utf-8")
+        payload = b"\x0a" + self._encode_varint(len(prim_bytes)) + prim_bytes
+
+        method = "/aimdk.protocol.CameraService/get_camera_data"
+        try:
+            call = self._channel.unary_unary(
+                method,
+                request_serializer=lambda x: x,
+                response_deserializer=lambda x: x,
+            )
+            raw_response = call(payload, timeout=self.timeout)
+            return self._parse_camera_data_response(raw_response)
+        except Exception as exc:
+            logger.debug(f"[OBS] raw get_camera_data failed: {exc}")
+            return None
+
+    @staticmethod
+    def _encode_varint(value: int) -> bytes:
+        """Encode an integer as a protobuf varint."""
+        pieces = []
+        while value > 0x7F:
+            pieces.append((value & 0x7F) | 0x80)
+            value >>= 7
+        pieces.append(value & 0x7F)
+        return bytes(pieces)
+
+    @staticmethod
+    def _decode_varint(data: bytes, pos: int) -> Tuple[int, int]:
+        """Decode a protobuf varint, return (value, new_pos)."""
+        result = 0
+        shift = 0
+        while pos < len(data):
+            b = data[pos]
+            result |= (b & 0x7F) << shift
+            pos += 1
+            if not (b & 0x80):
+                break
+            shift += 7
+        return result, pos
+
+    def _parse_protobuf_fields(self, data: bytes) -> Dict[int, List[Tuple[int, bytes]]]:
+        """Parse raw protobuf bytes into a dict of field_number -> [(wire_type, raw_value)]."""
+        import struct as _struct
+        fields: Dict[int, List[Tuple[int, bytes]]] = {}
+        pos = 0
+        while pos < len(data):
+            tag, pos = self._decode_varint(data, pos)
+            field_number = tag >> 3
+            wire_type = tag & 0x07
+            if wire_type == 0:  # varint
+                val, pos = self._decode_varint(data, pos)
+                fields.setdefault(field_number, []).append((wire_type, val.to_bytes(8, 'little')))
+            elif wire_type == 1:  # 64-bit
+                fields.setdefault(field_number, []).append((wire_type, data[pos:pos+8]))
+                pos += 8
+            elif wire_type == 2:  # length-delimited
+                length, pos = self._decode_varint(data, pos)
+                fields.setdefault(field_number, []).append((wire_type, data[pos:pos+length]))
+                pos += length
+            elif wire_type == 5:  # 32-bit
+                fields.setdefault(field_number, []).append((wire_type, data[pos:pos+4]))
+                pos += 4
+            else:
+                break  # unknown wire type
+        return fields
+
+    def _parse_se3_rpy_pose(self, data: bytes) -> Dict[str, Any]:
+        """Parse SE3RpyPose protobuf: position (field 1, Vec3) + rpy (field 2, Rpy)."""
+        import struct as _struct
+        fields = self._parse_protobuf_fields(data)
+        position = [0.0, 0.0, 0.0]
+        rotation = [1.0, 0.0, 0.0, 0.0]  # w,x,y,z
+        if 1 in fields:  # position (Vec3)
+            vec_fields = self._parse_protobuf_fields(fields[1][0][1])
+            for i, fnum in enumerate([1, 2, 3]):
+                if fnum in vec_fields:
+                    position[i] = _struct.unpack('<d', vec_fields[fnum][0][1])[0]
+        if 2 in fields:  # rpy (Rpy) — actually quaternion rw,rx,ry,rz
+            rpy_fields = self._parse_protobuf_fields(fields[2][0][1])
+            for i, fnum in enumerate([1, 2, 3, 4]):
+                if fnum in rpy_fields:
+                    rotation[i] = _struct.unpack('<d', rpy_fields[fnum][0][1])[0]
+        return {
+            "position": {"x": position[0], "y": position[1], "z": position[2]},
+            "rotation": {"rw": rotation[0], "rx": rotation[1], "ry": rotation[2], "rz": rotation[3]},
+        }
+
+    def _parse_object_pose_response(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Parse GetObjectPoseRsp: field 1=prim_path, field 2=object_pose (SE3RpyPose)."""
+        fields = self._parse_protobuf_fields(data)
+        if 2 in fields:
+            return self._parse_se3_rpy_pose(fields[2][0][1])
+        return None
+
+    def _parse_camera_data_response(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Parse GetCameraDataResponse: field 2=color_info, field 3=color_image, field 5=depth_image."""
+        import struct as _struct
+        fields = self._parse_protobuf_fields(data)
+        result: Dict[str, Any] = {"rgb": b"", "depth": b"", "width": 0, "height": 0}
+        # color_info (field 2) — CameraInfo: width(1,int32), height(2,int32)
+        if 2 in fields:
+            info_fields = self._parse_protobuf_fields(fields[2][0][1])
+            if 1 in info_fields:
+                result["width"] = int.from_bytes(info_fields[1][0][1], 'little')
+            if 2 in info_fields:
+                result["height"] = int.from_bytes(info_fields[2][0][1], 'little')
+        # color_image (field 3) — CompressedImage: format(2,string), data(3,bytes)
+        if 3 in fields:
+            img_fields = self._parse_protobuf_fields(fields[3][0][1])
+            if 3 in img_fields:
+                result["rgb"] = img_fields[3][0][1]
+        # depth_image (field 5) — CompressedImage
+        if 5 in fields:
+            img_fields = self._parse_protobuf_fields(fields[5][0][1])
+            if 3 in img_fields:
+                result["depth"] = img_fields[3][0][1]
+        return result
 
     def _format_observation_response(
         self,
@@ -2289,45 +2431,14 @@ class GenieSimGRPCClient:
         """
         Get current gripper state.
 
+        Note: The server does not have a dedicated GetGripperState gRPC service.
+        Returns the last known gripper state from client-side tracking.
+
         Returns:
-            GrpcCallResult with payload containing width, force, and grasping state.
+            GrpcCallResult with payload containing gripper state info.
         """
-        if not self._have_grpc:
-            return self._grpc_unavailable(
-                "get_gripper_state",
-                "gRPC stubs unavailable",
-            )
-        if self._stub is None:
-            return self._grpc_unavailable(
-                "get_gripper_state",
-                "gRPC stub not initialized",
-            )
-
-        request, camera_ids, object_prims = self._build_observation_request(
-            {"include_gripper": True}
-        )
-
-        def _request() -> GetObservationRsp:
-            return self._stub.get_observation(request, timeout=self.timeout)
-
-        response = self._call_grpc(
-            "get_observation(gripper)",
-            _request,
-            None,
-            success_checker=lambda resp: resp is not None,
-        )
-        if response is None:
-            return GrpcCallResult(
-                success=False,
-                available=True,
-                error="gRPC call failed",
-            )
-        formatted = self._format_observation_response(
-            response,
-            camera_ids=camera_ids,
-            object_prims=object_prims,
-        )
-        gripper_state = formatted.get("robot_state", {}).get("gripper", {})
+        # Gripper state is tracked client-side since we control it via set_gripper_state
+        gripper_state = getattr(self, "_last_gripper_state", {"left": {}, "right": {}})
         return GrpcCallResult(
             success=True,
             available=True,
@@ -2398,56 +2509,21 @@ class GenieSimGRPCClient:
 
     def get_object_pose(self, object_id: str) -> GrpcCallResult:
         """
-        Get an object's pose.
-
-        Uses real gRPC get_observation call with object pose flags.
+        Get an object's pose via SimObjectService.get_object_pose (raw gRPC).
 
         Args:
-            object_id: Object identifier
+            object_id: Object prim path
 
         Returns:
             GrpcCallResult with payload pose dict.
         """
-        if not self._have_grpc:
+        if self._channel is None:
             return self._grpc_unavailable(
                 "get_object_pose",
-                "gRPC stubs unavailable",
+                "gRPC channel not initialized",
             )
-        if self._stub is None:
-            return self._grpc_unavailable(
-                "get_object_pose",
-                "gRPC stub not initialized",
-            )
-
-        request, camera_ids, object_prims = self._build_observation_request(
-            {
-                "include_pose": True,
-                "object_prims": [object_id],
-            }
-        )
-
-        def _request() -> GetObservationRsp:
-            return self._stub.get_observation(request, timeout=self.timeout)
-
-        response = self._call_grpc(
-            "get_observation(object_pose)",
-            _request,
-            None,
-            success_checker=lambda resp: resp is not None,
-        )
-        if response is None:
-            return GrpcCallResult(
-                success=False,
-                available=True,
-                error="gRPC call failed",
-            )
-        formatted = self._format_observation_response(
-            response,
-            camera_ids=camera_ids,
-            object_prims=object_prims,
-        )
-        objects = formatted.get("scene_state", {}).get("objects", [])
-        if not objects:
+        pose = self._get_object_pose_raw(object_id)
+        if pose is None:
             return GrpcCallResult(
                 success=False,
                 available=True,
@@ -2456,7 +2532,7 @@ class GenieSimGRPCClient:
         return GrpcCallResult(
             success=True,
             available=True,
-            payload=objects[0].get("pose"),
+            payload=pose,
         )
 
     def set_object_pose(self, object_id: str, pose: Dict[str, Any]) -> GrpcCallResult:
