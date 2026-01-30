@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
-from tools.secrets.secret_manager import get_secret_or_env
+from tools.secret_store.secret_manager import get_secret_or_env
 
 from import_manifest_utils import compute_checksums_signature
 

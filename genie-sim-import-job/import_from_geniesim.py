@@ -158,7 +158,7 @@ from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.logging_config import init_logging
-from tools.secrets.secret_manager import get_secret_or_env
+from tools.secret_store.secret_manager import get_secret_or_env
 from tools.schema_migrations import (
     DATASET_INFO_SCHEMA_VERSION,
     SchemaMigrationError,

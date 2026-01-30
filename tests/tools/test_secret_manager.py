@@ -3,7 +3,7 @@ import types
 
 import pytest
 
-from tools.secrets import secret_manager
+from tools.secret_store import secret_manager
 
 pytestmark = pytest.mark.usefixtures("add_repo_to_path")
 

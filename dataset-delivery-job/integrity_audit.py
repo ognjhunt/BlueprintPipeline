@@ -28,7 +28,7 @@ if str(GENIE_SIM_IMPORT_PATH) not in sys.path:
 
 from tools.config.production_mode import resolve_production_mode
 from tools.metrics.pipeline_metrics import get_metrics
-from tools.secrets.secret_manager import SecretManagerError, get_secret_or_env
+from tools.secret_store.secret_manager import SecretManagerError, get_secret_or_env
 from import_manifest_utils import verify_checksums_signature
 
 GCS_ROOT = Path("/mnt/gcs")

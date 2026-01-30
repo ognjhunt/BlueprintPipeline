@@ -29,9 +29,9 @@ def _import_particulate_service(
     monkeypatch.syspath_prepend(str(service_dir))
 
     if get_secret_or_env is not None:
-        import tools.secrets
+        import tools.secret_store
 
-        monkeypatch.setattr(tools.secrets, "get_secret_or_env", get_secret_or_env)
+        monkeypatch.setattr(tools.secret_store, "get_secret_or_env", get_secret_or_env)
 
     sys.modules.pop("particulate_service", None)
     return importlib.import_module("particulate_service")

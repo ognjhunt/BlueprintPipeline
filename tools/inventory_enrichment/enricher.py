@@ -17,7 +17,7 @@ import jsonschema
 
 from tools.config.production_mode import resolve_production_mode
 from tools.error_handling.retry import NonRetryableError, RetryableError, retry_with_backoff
-from tools.secrets import get_secret_or_env, SecretIds
+from tools.secret_store import get_secret_or_env, SecretIds
 
 logger = logging.getLogger(__name__)
 

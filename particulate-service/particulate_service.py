@@ -71,7 +71,7 @@ from tools.config.env import parse_bool_env
 from tools.config.production_mode import resolve_production_mode
 
 try:
-    from tools.secrets import get_secret_or_env
+    from tools.secret_store import get_secret_or_env
     HAVE_SECRET_MANAGER = True
 except ImportError:  # pragma: no cover
     HAVE_SECRET_MANAGER = False

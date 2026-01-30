@@ -61,7 +61,7 @@ else:  # pragma: no cover
 
 # Secret Manager for secure API key storage
 try:
-    from tools.secrets import get_secret_or_env, SecretIds
+    from tools.secret_store import get_secret_or_env, SecretIds
     HAVE_SECRET_MANAGER = True
 except ImportError:  # pragma: no cover
     HAVE_SECRET_MANAGER = False
