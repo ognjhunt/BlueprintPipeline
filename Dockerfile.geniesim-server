@@ -1,0 +1,69 @@
+# =============================================================================
+# Pre-baked Genie Sim Server Image
+# =============================================================================
+# Extends the Isaac Sim base with Genie Sim, cuRobo, and all Python
+# dependencies pre-installed so the container starts in seconds, not minutes.
+#
+# Build:
+#   docker build -f Dockerfile.geniesim-server -t geniesim-server:latest .
+# =============================================================================
+
+ARG ISAAC_SIM_VERSION=4.5.0
+FROM nvcr.io/nvidia/isaac-sim:${ISAAC_SIM_VERSION}
+
+ENV ISAAC_SIM_PATH=/isaac-sim
+ENV GENIESIM_ROOT=/opt/geniesim
+
+USER root
+
+# Build tools needed for cuRobo compilation and native extensions
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends \
+       git build-essential cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# ----- Genie Sim repo -----
+ARG GENIESIM_REPO=https://github.com/AgibotTech/genie_sim.git
+ARG GENIESIM_REF
+COPY genie-sim-gpu-job/GENIESIM_REF /tmp/GENIESIM_REF
+
+RUN GENIESIM_REF=${GENIESIM_REF:-$(cat /tmp/GENIESIM_REF)} \
+    && git clone --no-checkout ${GENIESIM_REPO} ${GENIESIM_ROOT} \
+    && cd ${GENIESIM_ROOT} \
+    && git fetch --depth 1 origin ${GENIESIM_REF} \
+    && git checkout ${GENIESIM_REF}
+
+# ----- Python dependencies -----
+COPY genie-sim-local-job/requirements.txt /tmp/pipeline-requirements.txt
+COPY genie-sim-local-job/requirements.lock /tmp/pipeline-requirements.lock
+COPY genie-sim-gpu-job/requirements.geniesim.lock /tmp/requirements.geniesim.lock
+
+RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --upgrade pip \
+    && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir \
+       -r /tmp/pipeline-requirements.txt -c /tmp/pipeline-requirements.lock \
+    && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir \
+       -r ${GENIESIM_ROOT}/requirements.txt -c /tmp/requirements.geniesim.lock
+
+# ----- cuRobo from source -----
+RUN git clone --depth 1 https://github.com/NVlabs/curobo.git /opt/curobo \
+    && cd /opt/curobo \
+    && ${ISAAC_SIM_PATH}/python.sh -m pip install -e . --no-build-isolation \
+    && cd /
+
+# ----- ROS 2 environment for rclpy -----
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+# Mark that this is a pre-baked image (used by bootstrap fast-path)
+RUN touch /opt/.geniesim-prebaked
+
+WORKDIR /workspace/BlueprintPipeline
+
+COPY tools/ /workspace/BlueprintPipeline/tools/
+
+RUN chmod +x /workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/start_geniesim_server.sh
+
+ENV PYTHONUNBUFFERED=1
+ENV OMNI_KIT_ALLOW_ROOT=1
+
+ENTRYPOINT ["/bin/bash", "-lc"]
+CMD ["./tools/geniesim_adapter/deployment/start_geniesim_server.sh"]

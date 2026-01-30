@@ -18,6 +18,12 @@ if [ ! -x "${ISAAC_SIM_PATH}/python.sh" ]; then
   exit 1
 fi
 
+# Fast-path: if running in a pre-baked image, skip installation entirely
+if [ -f /opt/.geniesim-prebaked ]; then
+  echo "[geniesim] Pre-baked image detected — skipping installation"
+  exec "${SCRIPT_DIR}/start_geniesim_server.sh"
+fi
+
 "${SCRIPT_DIR}/install_geniesim.sh"
 
 # Install pipeline Python dependencies into Isaac Sim's Python

@@ -1002,6 +1002,10 @@ class GenieSimGRPCClient:
         self._stub = None
         self._joint_stub = None
         self._connected = False
+        # Serialize all gRPC calls — the server's blocking_start_server uses
+        # shared state and cannot handle concurrent commands.
+        import threading as _threading
+        self._grpc_lock = _threading.Lock()
         self._default_camera_ids = ["wrist", "overhead", "side"]
         # Map logical camera names to robot-specific USD prim paths.
         # Populated after init_robot from the robot config's camera dict.
@@ -1102,6 +1106,16 @@ class GenieSimGRPCClient:
         return code in self._grpc_retryable_codes
 
     def _call_grpc(
+        self,
+        action: str,
+        func: Callable[[], Any],
+        fallback: Any,
+        success_checker: Optional[Callable[[Any], bool]] = None,
+    ) -> Any:
+        with self._grpc_lock:
+            return self._call_grpc_inner(action, func, fallback, success_checker)
+
+    def _call_grpc_inner(
         self,
         action: str,
         func: Callable[[], Any],
@@ -5404,7 +5418,12 @@ class GenieSimLocalFramework:
                             _vn_rng = _rng_mod.Random(hash((episode_id, i, "vel")) & 0xFFFFFFFF)
                             _jv = _jv + np.array([_vn_rng.gauss(0, _jv_noise_std) for _ in range(_jv.size)])
                         # Clamp to Franka velocity limits (Fix 4)
-                        _vel_lim = _FRANKA_VEL_LIMITS[:_jv.size]
+                        if _jv.size <= len(_FRANKA_VEL_LIMITS):
+                            _vel_lim = _FRANKA_VEL_LIMITS[:_jv.size]
+                        else:
+                            # Pad with last limit value for extra joints
+                            _vel_lim = np.full(_jv.size, _FRANKA_VEL_LIMITS[-1])
+                            _vel_lim[:len(_FRANKA_VEL_LIMITS)] = _FRANKA_VEL_LIMITS
                         _jv_clamped = np.clip(_jv, -_vel_lim, _vel_lim)
                         if not np.allclose(_jv, _jv_clamped, atol=0.01):
                             logger.debug("Frame %d: joint velocity clamped (max exceeded)", i)
@@ -5417,7 +5436,11 @@ class GenieSimLocalFramework:
                         )
                         if _prev_jv.shape == _jv_clamped.shape and _prev_jv.size > 0:
                             _ja = (_jv_clamped - _prev_jv) / dt
-                            _acc_lim = _FRANKA_ACC_LIMITS[:_ja.size]
+                            if _ja.size <= len(_FRANKA_ACC_LIMITS):
+                                _acc_lim = _FRANKA_ACC_LIMITS[:_ja.size]
+                            else:
+                                _acc_lim = np.full(_ja.size, _FRANKA_ACC_LIMITS[-1])
+                                _acc_lim[:len(_FRANKA_ACC_LIMITS)] = _FRANKA_ACC_LIMITS
                             _ja = np.clip(_ja, -_acc_lim, _acc_lim)
                             obs_rs["joint_accelerations"] = _ja.tolist()
                         else:
@@ -5708,6 +5731,17 @@ class GenieSimLocalFramework:
             initial_joints = initial_joints_result.payload
         if initial_joints is None:
             initial_joints = [0.0] * 7  # Default for 7-DOF arm
+
+        # Truncate to expected DOF if server returns full-body joints (e.g. 34)
+        robot_config = ROBOT_CONFIGS.get(self.config.robot_type, ROBOT_CONFIGS.get("franka"))
+        if robot_config is not None:
+            expected_dof = len(robot_config.joint_limits_lower)
+            if len(initial_joints) > expected_dof:
+                logger.info(
+                    "Truncating initial joints from %d to %d (robot config DOF)",
+                    len(initial_joints), expected_dof,
+                )
+                initial_joints = initial_joints[:expected_dof]
 
         # Get scene obstacles for collision avoidance
         obstacles = self._get_scene_obstacles(task, initial_obs)
@@ -6267,6 +6301,16 @@ class GenieSimLocalFramework:
                 initial_joints = _fb.get("default_joint_positions", [0.0] * 7)
 
         initial_joints = np.array(initial_joints, dtype=float)
+
+        # Truncate to robot config DOF if server returns full-body joints
+        if robot_config is not None:
+            expected_dof = len(robot_config.joint_limits_lower)
+            if len(initial_joints) > expected_dof:
+                logger.info(
+                    "Truncating initial joints from %d to %d (robot config DOF)",
+                    len(initial_joints), expected_dof,
+                )
+                initial_joints = initial_joints[:expected_dof]
 
         if IK_PLANNING_AVAILABLE and robot_config is not None:
             self.log(
