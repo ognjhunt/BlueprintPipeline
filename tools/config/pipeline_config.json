@@ -10,7 +10,7 @@
       "enterprise": 2500,
       "foundation": 5000
     },
-    "episodes_per_task": 3,
+    "episodes_per_task": 1,
     "num_variations": 5,
     "max_parallel_episodes": 8,
     "episode_timeout_seconds": 300,

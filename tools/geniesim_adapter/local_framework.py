@@ -3011,8 +3011,8 @@ class GenieSimGRPCClient:
         # Server-side ROS recording requires --publish_ros and a scene with
         # OmniGraph.  Skip the gRPC call when the server doesn't support it;
         # episode data is captured client-side regardless.
-        if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
-            logger.info("[RECORDING] Skipping server-side start_recording (GENIESIM_SKIP_SERVER_RECORDING)")
+        if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", "") or os.environ.get("GENIESIM_SKIP_ROS_RECORDING", ""):
+            logger.info("[RECORDING] Skipping server-side start_recording (ROS recording disabled)")
             return GrpcCallResult(success=True, available=True)
         return self.send_command(
             CommandType.START_RECORDING,
@@ -3031,8 +3031,8 @@ class GenieSimGRPCClient:
         Returns:
             GrpcCallResult indicating success.
         """
-        if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
-            logger.info("[RECORDING] Skipping server-side stop_recording (GENIESIM_SKIP_SERVER_RECORDING)")
+        if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", "") or os.environ.get("GENIESIM_SKIP_ROS_RECORDING", ""):
+            logger.info("[RECORDING] Skipping server-side stop_recording (ROS recording disabled)")
             return GrpcCallResult(success=True, available=True)
         return self.send_command(
             CommandType.STOP_RECORDING,
@@ -5150,14 +5150,22 @@ class GenieSimLocalFramework:
             current_joint_state = waypoint_joints.copy()
 
             # End-effector Cartesian pose via FK (best-effort)
+            # FK returns position in robot-local frame; add base_position to
+            # transform into world frame so quality checks compare correctly.
+            _base_pos = np.array(
+                task.get("robot_config", {}).get("base_position", [0, 0, 0]),
+                dtype=float,
+            )
             try:
                 if fk_solver is not None:
                     ee_pos, ee_quat = fk_solver._forward_kinematics(waypoint_joints[:arm_dof])
-                    frame_data["ee_pos"] = ee_pos.tolist() if hasattr(ee_pos, 'tolist') else ee_pos
+                    _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
+                    frame_data["ee_pos"] = _ee
                     frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, 'tolist') else ee_quat
                 else:
                     ee_pos, ee_quat = _franka_fk(waypoint_joints[:arm_dof])
-                    frame_data["ee_pos"] = ee_pos
+                    _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
+                    frame_data["ee_pos"] = _ee
                     frame_data["ee_quat"] = ee_quat
             except Exception:
                 pass
