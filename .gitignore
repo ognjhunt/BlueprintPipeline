@@ -28,3 +28,24 @@ sim2real_demo/
 coverage.xml
 htmlcov/
 tests/pytest.log
+
+# Runtime pipeline data
+dead_letter/
+cost_data/
+
+# Test scene generated outputs
+test_scenes/scenes/*/episodes/
+test_scenes/scenes/*/.checkpoints/
+test_scenes/scenes/*/variation_assets/
+test_scenes/scenes/*/quality_gates/
+test_scenes/scenes/*/geniesim/
+test_scenes/scenes/*/usd/
+test_scenes/scenes/*/replicator/
+
+# Pipeline state files
+**/.circuit_breaker.json*
+**/*.bak
+
+# Pipeline completion markers
+**/.*_complete
+**/.*_submitted
