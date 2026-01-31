@@ -1014,6 +1014,8 @@ class GenieSimGRPCClient:
         self._joint_names: List[str] = []
         self._grpc_unavailable_logged: set[str] = set()
         self._camera_missing_logged: set[str] = set()
+        self._first_joint_call = True  # first set_joint_position uses longer timeout
+        self._first_call_timeout = float(os.environ.get("GENIESIM_FIRST_CALL_TIMEOUT_S", "180"))
         self._circuit_breaker = CircuitBreaker(
             f"geniesim-grpc-{self.host}:{self.port}",
             failure_threshold=get_geniesim_circuit_breaker_failure_threshold(),
@@ -1213,6 +1215,7 @@ class GenieSimGRPCClient:
                 grpc.channel_ready_future(self._channel).result(timeout=self.timeout)
                 self._connected = True
                 logger.info(f"✅ Connected to Genie Sim gRPC server at {self.host}:{self.port}")
+                self._warmup_motion_server()
                 return True
             except grpc.FutureTimeoutError:
                 logger.error(f"Connection timeout after {self.timeout}s")
@@ -1223,6 +1226,18 @@ class GenieSimGRPCClient:
             logger.error(f"Failed to connect to Genie Sim server: {e}")
             self._connected = False
             return False
+
+    def _warmup_motion_server(self) -> None:
+        """Send a get_joint_position with extended timeout to trigger server-side lazy init (cuRobo, etc.)."""
+        if self._joint_stub is None:
+            return
+        try:
+            logger.info("Warming up motion server (may trigger cuRobo init)...")
+            request = joint_channel_pb2.GetJointReq(serial_no="")
+            self._joint_stub.get_joint_position(request, timeout=self._first_call_timeout)
+            logger.info("Motion server warmup complete")
+        except Exception as e:
+            logger.warning(f"Motion server warmup call failed (non-fatal): {e}")
 
     def ping(self, timeout: Optional[float] = None) -> bool:
         """
@@ -2015,9 +2030,24 @@ class GenieSimGRPCClient:
             raw_response = call(payload, timeout=self.timeout)
             # Parse GetObjectPoseRsp manually
             # Field 2 is SE3RpyPose (object_pose)
-            return self._parse_object_pose_response(raw_response)
+            pose = self._parse_object_pose_response(raw_response)
+            if pose is None:
+                logger.warning(
+                    f"[OBS] get_object_pose({prim_path}): server returned response "
+                    f"({len(raw_response)} bytes) but no pose field — prim may not exist in server stage"
+                )
+            elif (
+                pose.get("position", {}).get("x", 0) == 0
+                and pose.get("position", {}).get("y", 0) == 0
+                and pose.get("position", {}).get("z", 0) == 0
+            ):
+                logger.warning(
+                    f"[OBS] get_object_pose({prim_path}): returned identity/zero pose — "
+                    f"object may not be loaded in simulation"
+                )
+            return pose
         except Exception as exc:
-            logger.debug(f"[OBS] raw get_object_pose failed: {exc}")
+            logger.warning(f"[OBS] raw get_object_pose({prim_path}) failed: {exc}")
             return None
 
     def _get_camera_data_raw(self, cam_prim_path: str) -> Optional[Dict[str, Any]]:
@@ -3083,9 +3113,16 @@ class GenieSimGRPCClient:
                 commands=commands,
                 is_trajectory=False,
             )
+            # Use extended timeout for the first joint command (server may
+            # still be doing lazy init even after warmup).
+            call_timeout = self.timeout
+            if self._first_joint_call:
+                call_timeout = max(self.timeout, self._first_call_timeout)
+                self._first_joint_call = False
+                logger.info(f"First set_joint_position call — using extended timeout {call_timeout}s")
             response = self._call_grpc(
                 "set_joint_position(trajectory)",
-                lambda: self._joint_stub.set_joint_position(request, timeout=self.timeout),
+                lambda: self._joint_stub.set_joint_position(request, timeout=call_timeout),
                 None,
                 success_checker=lambda resp: bool(resp.errmsg),
             )

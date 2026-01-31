@@ -26,6 +26,21 @@ fi
 
 "${SCRIPT_DIR}/install_geniesim.sh"
 
+# Apply server patches (camera handler, object pose, ee pose, omnigraph dedup)
+PATCHES_DIR="${SCRIPT_DIR}/patches"
+if [ -d "${PATCHES_DIR}" ]; then
+  echo "[geniesim] Applying server patches..."
+  for patch_script in \
+    "${PATCHES_DIR}/patch_omnigraph_dedup.py" \
+    "${PATCHES_DIR}/patch_camera_handler.py" \
+    "${PATCHES_DIR}/patch_object_pose_handler.py" \
+    "${PATCHES_DIR}/patch_ee_pose_handler.py"; do
+    if [ -f "${patch_script}" ]; then
+      "${ISAAC_SIM_PATH}/python.sh" "${patch_script}" || echo "[geniesim] WARNING: ${patch_script} failed (non-fatal)"
+    fi
+  done
+fi
+
 # Install pipeline Python dependencies into Isaac Sim's Python
 PIPELINE_REQS="${REPO_ROOT}/genie-sim-local-job/requirements.txt"
 if [ -f "${PIPELINE_REQS}" ]; then

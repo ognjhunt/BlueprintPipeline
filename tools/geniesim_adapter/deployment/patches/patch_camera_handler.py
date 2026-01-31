@@ -29,6 +29,11 @@ COMMAND_CONTROLLER = os.path.join(
 CAMERA_HANDLER = textwrap.dedent("""\
 
     # --- BEGIN BlueprintPipeline camera patch ---
+    _bp_render_products = {}   # cached per camera_prim_path
+    _bp_rgb_annotators = {}
+    _bp_depth_annotators = {}
+    _bp_warmup_done = set()
+
     def handle_get_camera_data(self):
         \"\"\"Handle GET_CAMERA_DATA (Command=1) — render current frame.
 
@@ -83,11 +88,32 @@ CAMERA_HANDLER = textwrap.dedent("""\
             if not camera_prim_path:
                 camera_prim_path = "/OmniverseKit_Persp"
 
-            rp = rep.create.render_product(camera_prim_path, (_w, _h))
-            rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
-            rgb_annot.attach([rp])
-            depth_annot = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
-            depth_annot.attach([rp])
+            # Cache render products and annotators across calls
+            cls = type(self)
+            if camera_prim_path not in cls._bp_render_products:
+                rp = rep.create.render_product(camera_prim_path, (_w, _h))
+                rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
+                rgb_annot.attach([rp])
+                depth_annot = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
+                depth_annot.attach([rp])
+                cls._bp_render_products[camera_prim_path] = rp
+                cls._bp_rgb_annotators[camera_prim_path] = rgb_annot
+                cls._bp_depth_annotators[camera_prim_path] = depth_annot
+                print(f"[PATCH] Created render product for {camera_prim_path}")
+
+            rp = cls._bp_render_products[camera_prim_path]
+            rgb_annot = cls._bp_rgb_annotators[camera_prim_path]
+            depth_annot = cls._bp_depth_annotators[camera_prim_path]
+
+            # Warm-up: Replicator annotators need several frames before
+            # returning valid data.  Run extra steps on first use.
+            if camera_prim_path not in cls._bp_warmup_done:
+                _warmup_steps = int(_os.environ.get("CAMERA_WARMUP_STEPS", "5"))
+                print(f"[PATCH] Warming up camera {camera_prim_path} ({_warmup_steps} frames)...")
+                for _ in range(_warmup_steps):
+                    rep.orchestrator.step()
+                cls._bp_warmup_done.add(camera_prim_path)
+                print(f"[PATCH] Camera warmup complete for {camera_prim_path}")
 
             rep.orchestrator.step()
 
@@ -106,9 +132,13 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     depth_data = depth_data.numpy()
                 result["depth"] = np.asarray(depth_data, dtype=np.float32)
 
-            rgb_annot.detach()
-            depth_annot.detach()
-            rp.destroy()
+            # Log data quality
+            _nonzero = int(np.count_nonzero(result["rgb"]))
+            _total = result["rgb"].size
+            if _nonzero == 0:
+                print(f"[PATCH] WARNING: Camera {camera_prim_path} returned all-zero RGB frame")
+            else:
+                print(f"[PATCH] Camera {camera_prim_path}: {result['rgb'].shape}, non-zero pixels: {_nonzero}/{_total}")
 
         except Exception as e:
             print(f"[PATCH] Camera capture failed (returning black frame): {e}")

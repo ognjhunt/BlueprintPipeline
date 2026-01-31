@@ -100,6 +100,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from dotenv import load_dotenv
+
+load_dotenv()  # auto-load .env (GEMINI_API_KEY, etc.) before any os.environ reads
+
 import numpy as np
 import yaml
 
