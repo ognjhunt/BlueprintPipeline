@@ -29,10 +29,11 @@ COMMAND_CONTROLLER = os.path.join(
 CAMERA_HANDLER = textwrap.dedent("""\
 
     # --- BEGIN BlueprintPipeline camera patch ---
-    def _handle_get_camera_data(self, command_data):
+    def handle_get_camera_data(self):
         \"\"\"Handle GET_CAMERA_DATA (Command=1) — render current frame.\"\"\"
         import numpy as np
 
+        command_data = self.data if self.data else {}
         camera_prim_path = ""
         render_depth = True
         if isinstance(command_data, dict):
@@ -152,16 +153,9 @@ CAMERA_HANDLER = textwrap.dedent("""\
         except Exception as e:
             print(f"[PATCH] Camera capture failed: {e}")
 
-        return result
+        self.data_to_send = result
     # --- END BlueprintPipeline camera patch ---
 """)
-
-# The dispatch line to add in on_command_step
-DISPATCH_LINE = (
-    "            # BlueprintPipeline camera patch\n"
-    "            if command == 1:  # GET_CAMERA_DATA\n"
-    "                return self._handle_get_camera_data(command_data)\n"
-)
 
 PATCH_MARKER = "BlueprintPipeline camera patch"
 
@@ -185,13 +179,8 @@ def patch_file():
     patched = content.rstrip() + "\n" + CAMERA_HANDLER
 
     # 2. Add dispatch in on_command_step
-    # Look for the on_command_step method and add our dispatch early
-    # The typical pattern is:
-    #   def on_command_step(self, command, command_data):
-    #       ...
-    #       if command == <some_number>:
-    #           ...
-    # We inject our handler at the top of the dispatch chain
+    # We inject our handler at the top of the dispatch chain.
+    # Detect the actual indentation used in the method body so we match it.
     on_cmd_pattern = re.compile(
         r"(def on_command_step\s*\(self.*?\):\s*\n(?:[ \t]*#[^\n]*\n|[ \t]*\"\"\"[\s\S]*?\"\"\"[ \t]*\n)?)",
         re.MULTILINE,
@@ -199,12 +188,27 @@ def patch_file():
     match = on_cmd_pattern.search(patched)
     if match:
         insert_pos = match.end()
-        patched = patched[:insert_pos] + DISPATCH_LINE + patched[insert_pos:]
+        # Detect indentation of the next non-empty line (the method body)
+        rest = patched[insert_pos:]
+        body_indent = "        "  # fallback: 8 spaces (2-level)
+        for line in rest.split("\n"):
+            stripped = line.lstrip()
+            if stripped:
+                body_indent = line[: len(line) - len(stripped)]
+                break
+        deeper = body_indent + "    "
+        dispatch = (
+            f"{body_indent}# BlueprintPipeline camera patch\n"
+            f"{body_indent}if self.Command == Command.GET_CAMERA_DATA:\n"
+            f"{deeper}self.handle_get_camera_data()\n"
+            f"{deeper}return\n"
+        )
+        patched = patched[:insert_pos] + dispatch + patched[insert_pos:]
         print("[PATCH] Injected GET_CAMERA_DATA dispatch in on_command_step")
     else:
         # Fallback: just prepend a note that manual wiring is needed
         print("[PATCH] WARNING: Could not find on_command_step — handler added but dispatch not wired")
-        print("[PATCH] You must manually add: if command == 1: return self._handle_get_camera_data(command_data)")
+        print("[PATCH] You must manually add: if self.Command == Command.GET_CAMERA_DATA: self.handle_get_camera_data(); return")
 
     with open(COMMAND_CONTROLLER, "w") as f:
         f.write(patched)
