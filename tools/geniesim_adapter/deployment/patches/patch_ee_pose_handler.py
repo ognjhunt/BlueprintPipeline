@@ -47,8 +47,8 @@ def patch_file():
     #   position, orientation = ...get_ee_pose(...)
     # and replace with safe unpacking that discards extra values.
     pattern = re.compile(
-        r"(\s*)(\w+)\s*,\s*(\w+)\s*=\s*(.*\.get_ee_pose\(.*?\))",
-        re.MULTILINE,
+        r"(\s*)(\w+)\s*,\s*(\w+)\s*=\s*(.*\.get_ee_pose\([^)]*\))",
+        re.MULTILINE | re.DOTALL,
     )
 
     match = pattern.search(content)
@@ -72,14 +72,26 @@ def patch_file():
         # Alternative: the handler might use a different pattern.
         # Try to find any "= ...get_ee_pose(" and add a safety wrapper.
         alt_pattern = re.compile(
-            r"(.*get_ee_pose\(.*?\))",
+            r"([ \t]+)(.*get_ee_pose\([^)]*\).*)",
             re.MULTILINE,
         )
         alt_match = alt_pattern.search(content)
         if alt_match:
-            print(f"[PATCH] WARNING: Found get_ee_pose call but in unexpected pattern:")
-            print(f"[PATCH]   {alt_match.group(0).strip()}")
-            print(f"[PATCH] Manual review may be needed")
+            indent = alt_match.group(1)
+            line_text = alt_match.group(0)
+            print(f"[PATCH] Found get_ee_pose call in unexpected pattern:")
+            print(f"[PATCH]   {line_text.strip()}")
+            # Wrap in try/except to handle unpacking errors gracefully
+            replacement = (
+                f"{indent}# {PATCH_MARKER} - safety wrapper\n"
+                f"{indent}try:\n"
+                f"    {line_text}\n"
+                f"{indent}except (ValueError, TypeError) as _ee_err:\n"
+                f"{indent}    print(f'[PATCH] get_ee_pose unpacking failed: {{_ee_err}}')\n"
+                f"{indent}    pos, rot = None, None"
+            )
+            content = content.replace(line_text, replacement)
+            print(f"[PATCH] Applied safety wrapper to get_ee_pose call")
         else:
             print("[PATCH] No get_ee_pose call found in command_controller.py")
             print("[PATCH] The server may handle ee_pose in a different file")

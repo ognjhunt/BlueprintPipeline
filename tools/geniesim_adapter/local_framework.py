@@ -1015,7 +1015,7 @@ class GenieSimGRPCClient:
         self._grpc_unavailable_logged: set[str] = set()
         self._camera_missing_logged: set[str] = set()
         self._first_joint_call = True  # first set_joint_position uses longer timeout
-        self._first_call_timeout = float(os.environ.get("GENIESIM_FIRST_CALL_TIMEOUT_S", "180"))
+        self._first_call_timeout = float(os.environ.get("GENIESIM_FIRST_CALL_TIMEOUT_S", "300"))
         self._circuit_breaker = CircuitBreaker(
             f"geniesim-grpc-{self.host}:{self.port}",
             failure_threshold=get_geniesim_circuit_breaker_failure_threshold(),
@@ -2317,6 +2317,12 @@ class GenieSimGRPCClient:
     def _resolve_joint_names(self, count: int) -> List[str]:
         if self._joint_names and len(self._joint_names) >= count:
             return list(self._joint_names[:count])
+        logger.warning(
+            "Using synthetic joint names (joint_0..joint_%d) — "
+            "get_joint_position should be called before set_joint_position "
+            "to populate real server joint names",
+            count - 1,
+        )
         return [f"joint_{index}" for index in range(count)]
 
     def stream_observations(
@@ -2370,12 +2376,20 @@ class GenieSimGRPCClient:
             for name, value in zip(joint_names, positions)
         ]
 
+        # Use extended timeout for the first joint command — server may
+        # still be doing lazy init (cuRobo, motion generation).
+        call_timeout = self.timeout
+        if self._first_joint_call:
+            call_timeout = max(self.timeout, self._first_call_timeout)
+            self._first_joint_call = False
+            logger.info("First set_joint_position call — using extended timeout %ss", call_timeout)
+
         def _request() -> joint_channel_pb2.SetJointRsp:
             request = joint_channel_pb2.SetJointReq(
                 commands=commands,
                 is_trajectory=False,
             )
-            return self._joint_stub.set_joint_position(request, timeout=self.timeout)
+            return self._joint_stub.set_joint_position(request, timeout=call_timeout)
 
         response = self._call_grpc(
             "set_joint_position",
@@ -3824,7 +3838,11 @@ class GenieSimLocalFramework:
                 "orientation": {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
             }
             self.log(f"Initializing robot: cfg_file={robot_cfg_file}, base_position={base_pos}")
-            scene_usd = os.environ.get("GENIESIM_SCENE_USD_PATH", "scenes/empty_scene.usda")
+            scene_usd = (
+                str(scene_usd_path) if scene_usd_path
+                else os.environ.get("GENIESIM_SCENE_USD_PATH", "scenes/empty_scene.usda")
+            )
+            self.log(f"Scene USD for init_robot: {scene_usd}")
             init_result = self._client.init_robot(
                 robot_type=robot_cfg_file,
                 base_pose=base_pose,
@@ -3849,6 +3867,20 @@ class GenieSimLocalFramework:
             else:
                 self.log(
                     f"Gripper init returned: {grip_result.error} (may be non-fatal)",
+                    "WARNING",
+                )
+
+            # Warmup: query joint positions to populate real joint names from
+            # the server before any set_joint_position call.  Without this,
+            # _resolve_joint_names() falls back to synthetic "joint_0" names
+            # that don't match the G1 robot's actual joint names, causing
+            # KeyError on the server and indefinite hangs.
+            warmup_jp = self._client.get_joint_position()
+            if warmup_jp.success and self._client._joint_names:
+                self.log(f"Joint names populated: {len(self._client._joint_names)} joints")
+            else:
+                self.log(
+                    "Joint name warmup failed — set_joint_position may use synthetic names",
                     "WARNING",
                 )
 

@@ -170,6 +170,14 @@ These are bugs in the upstream Genie Sim server code, not our pipeline:
 
 7. **ROS2 "No such file" errors**: Container uses `--publish_ros` but ROS2 Humble isn't installed in the base Isaac Sim 4.5 image. Non-fatal — only affects camera topic republishing.
 
+## Recent Fixes (2026-01-31)
+
+1. **Joint name warmup**: Added `get_joint_position()` warmup during robot init to populate real joint names before `set_joint_position`. Prevents synthetic `"joint_0"` names causing server `KeyError`.
+2. **Non-trajectory timeout**: Extended timeout logic now applies to both trajectory and non-trajectory `set_joint_position()` calls (was only trajectory before).
+3. **Scene USD path**: `init_robot()` now uses the actual scene USD from export instead of defaulting to `empty_scene.usda`. Fixes object poses returning zeros.
+4. **First-call timeout**: Increased default `GENIESIM_FIRST_CALL_TIMEOUT_S` from 180s to 300s.
+5. **EE pose patch**: Broadened regex to catch multi-line `get_ee_pose()` calls and added safety wrapper for unmatched patterns.
+
 ## Pipeline Step Names
 
 Use dashes, not underscores:
@@ -187,5 +195,5 @@ Full list: `regen3d, scale, interactive, simready, usd, inventory-enrichment, re
 | `GEMINI_API_KEY` | Gemini dimension estimation | `.env` file (auto-loaded via python-dotenv) |
 | `SKIP_QUALITY_GATES` | Skip blocking quality gates | Export before pipeline run |
 | `PYTHONPATH` | Module resolution | Must include `~/BlueprintPipeline` |
-| `GENIESIM_FIRST_CALL_TIMEOUT_S` | First joint call timeout (default 180) | Export before pipeline run |
+| `GENIESIM_FIRST_CALL_TIMEOUT_S` | First joint call timeout (default 300) | Export before pipeline run |
 | `GENIESIM_GRPC_TIMEOUT_S` | General gRPC timeout (default 60) | Export before pipeline run |
