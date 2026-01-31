@@ -43,7 +43,7 @@ test_scenes/scenes/*/usd/
 test_scenes/scenes/*/replicator/
 
 # Pipeline state files
-**/.circuit_breaker.json*
+**/.circuit_breaker*
 **/*.bak
 
 # Pipeline completion markers
