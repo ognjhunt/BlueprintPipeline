@@ -30,128 +30,88 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
     # --- BEGIN BlueprintPipeline camera patch ---
     def handle_get_camera_data(self):
-        \"\"\"Handle GET_CAMERA_DATA (Command=1) — render current frame.\"\"\"
+        \"\"\"Handle GET_CAMERA_DATA (Command=1) — render current frame.
+
+        Returns a dict matching grpc_server.py expectations:
+          - camera_info: dict with width, height, ppx, ppy, fx, fy
+          - rgb: numpy uint8 array (H, W, 3/4)
+          - depth: numpy float32 array (H, W)
+        \"\"\"
         import numpy as np
 
         command_data = self.data if self.data else {}
         camera_prim_path = ""
-        render_depth = True
         if isinstance(command_data, dict):
-            camera_prim_path = command_data.get("camera_prim", "")
-            render_depth = command_data.get("render_depth", True)
+            camera_prim_path = command_data.get("Cam_prim_path", "")
         elif hasattr(command_data, "serial_no"):
             camera_prim_path = command_data.serial_no
 
-        result = {}
+        # Default resolution
+        _w, _h = 1280, 720
+        import os as _os
+        _cam_res_str = _os.environ.get("CAMERA_RESOLUTION", "1280x720")
+        try:
+            _w, _h = (int(x) for x in _cam_res_str.split("x"))
+        except (ValueError, TypeError):
+            pass
+
+        # Default camera intrinsics (approximate)
+        _fx = _fy = float(_w)
+        _ppx, _ppy = float(_w) / 2.0, float(_h) / 2.0
+
+        # Fallback: black frame so gRPC never crashes
+        result = {
+            "camera_info": {
+                "width": _w, "height": _h,
+                "ppx": _ppx, "ppy": _ppy, "fx": _fx, "fy": _fy,
+            },
+            "rgb": np.zeros((_h, _w, 3), dtype=np.uint8),
+            "depth": np.zeros((_h, _w), dtype=np.float32),
+        }
 
         try:
-            # Try Replicator first (Isaac Sim 4.x preferred API)
             import omni.replicator.core as rep
-            from omni.isaac.core.utils.stage import get_stage
 
-            # If no specific camera requested, use the first available
             if not camera_prim_path:
-                stage = get_stage()
                 from pxr import UsdGeom
+                import omni.usd
+                stage = omni.usd.get_context().get_stage()
                 for prim in stage.Traverse():
                     if prim.IsA(UsdGeom.Camera):
                         camera_prim_path = str(prim.GetPath())
                         break
-
             if not camera_prim_path:
                 camera_prim_path = "/OmniverseKit_Persp"
 
-            # Create a render product for this camera
-            import os as _os
-            _cam_res_str = _os.environ.get("CAMERA_RESOLUTION", "1280x720")
-            try:
-                _cam_w, _cam_h = (int(x) for x in _cam_res_str.split("x"))
-            except (ValueError, TypeError):
-                _cam_w, _cam_h = 1280, 720
-            rp = rep.create.render_product(camera_prim_path, (_cam_w, _cam_h))
-
-            # Attach annotators
+            rp = rep.create.render_product(camera_prim_path, (_w, _h))
             rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
             rgb_annot.attach([rp])
+            depth_annot = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
+            depth_annot.attach([rp])
 
-            depth_annot = None
-            if render_depth:
-                depth_annot = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
-                depth_annot.attach([rp])
-
-            # Trigger a single render
             rep.orchestrator.step()
 
-            # Read back data
             rgb_data = rgb_annot.get_data()
             if rgb_data is not None:
                 if hasattr(rgb_data, "numpy"):
                     rgb_data = rgb_data.numpy()
-                rgb_array = np.asarray(rgb_data, dtype=np.uint8)
-                h, w = rgb_array.shape[:2]
-                result["rgb"] = {
-                    "width": int(w),
-                    "height": int(h),
-                    "data": rgb_array.tobytes(),
-                    "encoding": "raw_rgb",
-                    "channels": int(rgb_array.shape[2]) if rgb_array.ndim == 3 else 1,
-                }
-                result["camera_info"] = {"width": int(w), "height": int(h)}
+                result["rgb"] = np.asarray(rgb_data, dtype=np.uint8)
+                h, w = result["rgb"].shape[:2]
+                result["camera_info"]["width"] = w
+                result["camera_info"]["height"] = h
 
-            if depth_annot is not None:
-                depth_data = depth_annot.get_data()
-                if depth_data is not None:
-                    if hasattr(depth_data, "numpy"):
-                        depth_data = depth_data.numpy()
-                    depth_array = np.asarray(depth_data, dtype=np.float32)
-                    h, w = depth_array.shape[:2]
-                    result["depth"] = {
-                        "width": int(w),
-                        "height": int(h),
-                        "data": depth_array.tobytes(),
-                        "encoding": "raw_float32",
-                    }
+            depth_data = depth_annot.get_data()
+            if depth_data is not None:
+                if hasattr(depth_data, "numpy"):
+                    depth_data = depth_data.numpy()
+                result["depth"] = np.asarray(depth_data, dtype=np.float32)
 
-            # Clean up render product
             rgb_annot.detach()
-            if depth_annot:
-                depth_annot.detach()
+            depth_annot.detach()
             rp.destroy()
 
-        except ImportError:
-            # Fallback: try SyntheticData helper (older Isaac Sim versions)
-            try:
-                from omni.isaac.synthetic_utils import SyntheticDataHelper
-                sd = SyntheticDataHelper()
-                gt = sd.get_groundtruth(
-                    ["rgb", "depthLinear"] if render_depth else ["rgb"],
-                    viewport=None,
-                )
-                if "rgb" in gt:
-                    rgb_array = np.asarray(gt["rgb"], dtype=np.uint8)
-                    h, w = rgb_array.shape[:2]
-                    result["rgb"] = {
-                        "width": int(w),
-                        "height": int(h),
-                        "data": rgb_array.tobytes(),
-                        "encoding": "raw_rgb",
-                        "channels": int(rgb_array.shape[2]) if rgb_array.ndim == 3 else 1,
-                    }
-                    result["camera_info"] = {"width": int(w), "height": int(h)}
-                if render_depth and "depthLinear" in gt:
-                    depth_array = np.asarray(gt["depthLinear"], dtype=np.float32)
-                    h, w = depth_array.shape[:2]
-                    result["depth"] = {
-                        "width": int(w),
-                        "height": int(h),
-                        "data": depth_array.tobytes(),
-                        "encoding": "raw_float32",
-                    }
-            except Exception as e:
-                print(f"[PATCH] Camera fallback also failed: {e}")
-
         except Exception as e:
-            print(f"[PATCH] Camera capture failed: {e}")
+            print(f"[PATCH] Camera capture failed (returning black frame): {e}")
 
         self.data_to_send = result
     # --- END BlueprintPipeline camera patch ---
@@ -173,10 +133,21 @@ def patch_file():
         print("[PATCH] Camera handler already patched — skipping")
         sys.exit(0)
 
-    # 1. Add the handler method to the class
-    # Find the last method definition in the class and append after it
-    # We'll add it before the final lines of the file
-    patched = content.rstrip() + "\n" + CAMERA_HANDLER
+    # 1. Add the handler method inside the class.
+    # Detect the indentation used for method definitions (e.g. "    def ").
+    method_indent = "    "  # default 4 spaces
+    m = re.search(r"^([ \t]+)def \w+\(self", content, re.MULTILINE)
+    if m:
+        method_indent = m.group(1)
+
+    # Indent each line of CAMERA_HANDLER to match class method level.
+    indented_handler = "\n".join(
+        (method_indent + line) if line.strip() else line
+        for line in CAMERA_HANDLER.splitlines()
+    ) + "\n"
+
+    # Append inside the class (the class runs to end of file).
+    patched = content.rstrip() + "\n\n" + indented_handler
 
     # 2. Add dispatch in on_command_step
     # We inject our handler at the top of the dispatch chain.
