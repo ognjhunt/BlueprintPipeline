@@ -33,6 +33,88 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Provenance Metrics (GAP 1: Quality Gate Provenance Enforcement)
+# =============================================================================
+
+
+@dataclass
+class ProvenanceMetrics:
+    """Tracks provenance of data channels to enforce data realness requirements.
+
+    Used by quality gates to reject episodes with too much heuristic data.
+    """
+    data_realness_score: float = 0.0
+    heuristic_frame_ratio: float = 0.0
+    channel_provenance: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    real_channel_count: int = 0
+    total_channel_count: int = 0
+
+    @staticmethod
+    def compute_from_frames(
+        frames: List[Dict[str, Any]],
+        provenance_scoring: Dict[str, float],
+    ) -> "ProvenanceMetrics":
+        """Compute provenance metrics from per-frame provenance labels.
+
+        Args:
+            frames: List of frame dicts, each may contain a "provenance" key
+                mapping channel names to source labels.
+            provenance_scoring: Map from source label to realness score (0.0-1.0).
+                E.g. {"physx_server": 1.0, "gemini_estimated": 0.85, "heuristic": 0.3}
+
+        Returns:
+            ProvenanceMetrics with computed scores.
+        """
+        if not frames:
+            return ProvenanceMetrics()
+
+        channel_scores: Dict[str, List[float]] = {}
+        heuristic_count = 0
+        total_channel_frames = 0
+
+        for frame in frames:
+            prov = frame.get("provenance", {})
+            if not isinstance(prov, dict):
+                continue
+            for channel, source_label in prov.items():
+                score = provenance_scoring.get(source_label, 0.3)
+                channel_scores.setdefault(channel, []).append(score)
+                total_channel_frames += 1
+                if source_label in ("heuristic", "hardcoded_default", "input_fallback"):
+                    heuristic_count += 1
+
+        if not channel_scores:
+            return ProvenanceMetrics()
+
+        channel_provenance = {}
+        real_count = 0
+        for ch, scores in channel_scores.items():
+            avg = sum(scores) / len(scores)
+            channel_provenance[ch] = {
+                "mean_realness": round(avg, 4),
+                "frame_count": len(scores),
+            }
+            if avg >= 0.7:
+                real_count += 1
+
+        overall_realness = (
+            sum(s for scores in channel_scores.values() for s in scores)
+            / total_channel_frames
+            if total_channel_frames > 0
+            else 0.0
+        )
+        heuristic_ratio = heuristic_count / total_channel_frames if total_channel_frames > 0 else 0.0
+
+        return ProvenanceMetrics(
+            data_realness_score=round(overall_realness, 4),
+            heuristic_frame_ratio=round(heuristic_ratio, 4),
+            channel_provenance=channel_provenance,
+            real_channel_count=real_count,
+            total_channel_count=len(channel_scores),
+        )
+
 # Add parent to path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -282,6 +364,9 @@ class QualityCertificate:
     validation_passed: bool = False
     validation_warnings: List[str] = field(default_factory=list)
     validation_errors: List[str] = field(default_factory=list)
+
+    # Provenance metrics (GAP 1)
+    provenance_metrics: Optional[ProvenanceMetrics] = None
 
     # Data integrity
     data_hash: Optional[str] = None  # SHA256 of episode data

@@ -633,6 +633,12 @@ class JointTrajectory:
     # Source motion plan
     source_plan_id: Optional[str] = None
 
+    # Provenance metadata
+    provenance: Dict[str, str] = field(default_factory=lambda: {
+        "action_source": "cubic_spline_interpolation",
+        "velocity_source": "finite_difference",
+    })
+
     # Timing
     fps: float = 30.0
     total_duration: float = 0.0
@@ -663,6 +669,7 @@ class JointTrajectory:
             "num_frames": self.num_frames,
             "total_duration": self.total_duration,
             "source_plan_id": self.source_plan_id,
+            "provenance": self.provenance,
             "states": [s.to_dict() for s in self.states],
         }
 

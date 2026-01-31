@@ -5680,7 +5680,12 @@ class GenieSimLocalFramework:
                 elif frame_data.get("ee_pos") and step_idx > 0 and frames:
                     _prev_ee_z = frames[-1].get("ee_pos", [0, 0, 0])[2] if frames[-1].get("ee_pos") else 0
                     _curr_ee_z = frame_data.get("ee_pos", [0, 0, 0])[2]
-                    if not _lift_phase_started and _curr_ee_z > _prev_ee_z + 0.005:
+                    # GAP 7: Derive lift threshold from target object height
+                    _lift_thresh = 0.005  # default
+                    if _target_oid_for_subgoal and _object_poses:
+                        _tgt_h = _object_dims.get(_target_oid_for_subgoal, {}).get("height", 0.1) if hasattr(locals().get("_object_dims", None) or {}, "get") else 0.1
+                        _lift_thresh = max(0.002, _tgt_h * 0.05)
+                    if not _lift_phase_started and _curr_ee_z > _prev_ee_z + _lift_thresh:
                         _lift_phase_started = True
                         _current_phase = "lift"
                     elif _lift_phase_started:
@@ -5697,7 +5702,7 @@ class GenieSimLocalFramework:
                 _prev_phase_for_progress = _current_phase
             _phase_len = step_idx - _phase_start_frame + 1
             # Estimate phase duration as fraction of total trajectory
-            _est_phase_frames = max(1, len(trajectory) // 5)  # ~5 phases
+            _est_phase_frames = max(1, len(trajectory) // 6)  # 6 known phases: approach, grasp, lift, transport, place, retract
             frame_data["phase_progress"] = min(1.0, round(_phase_len / _est_phase_frames, 4))
 
             # Distance to subgoal: use target object pose for approach/transport, table for place

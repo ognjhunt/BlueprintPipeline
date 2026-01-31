@@ -139,9 +139,55 @@ class RewardConfig:
     max_expected_jerk: float = 500.0  # rad/s^3 (for smoothness computation)
     collision_penalty_per_event: float = 0.2  # penalty per collision
 
+    # Provenance tracking
+    reward_weights_source: str = "hardcoded_default"
+    reward_thresholds_source: str = "hardcoded_default"
+
     # Normalization
     normalize_rewards: bool = True
     reward_scale: float = 1.0
+
+    def calibrate_with_gemini(
+        self,
+        task_description: str = "",
+        object_dimensions: Optional[Dict[str, float]] = None,
+        object_category: str = "",
+    ) -> None:
+        """Calibrate weights and thresholds using Gemini.
+
+        Falls back to defaults if Gemini is unavailable.
+        """
+        try:
+            from tools.llm_client import get_llm_client
+            llm = get_llm_client()
+            if not llm:
+                return
+
+            # Calibrate weights
+            components = list(self.weights.keys())
+            prompt = (
+                f"For a robot manipulation task: '{task_description}', "
+                f"assign importance weights to these reward components: {components}. "
+                f"Return ONLY a JSON object mapping component name to float weight, summing to 1.0."
+            )
+            resp = llm.generate(prompt)
+            import json as _json
+            try:
+                new_weights = _json.loads(resp.strip())
+                if isinstance(new_weights, dict) and abs(sum(new_weights.values()) - 1.0) < 0.05:
+                    self.weights = {k: new_weights.get(k, v) for k, v in self.weights.items()}
+                    self.reward_weights_source = "gemini_calibrated"
+            except (ValueError, _json.JSONDecodeError):
+                pass
+
+            # Calibrate thresholds from object dimensions
+            if object_dimensions:
+                obj_size = max(object_dimensions.values()) if object_dimensions else 0.1
+                self.placement_accuracy_threshold = max(0.01, obj_size * 0.1)
+                self.gripper_close_threshold = max(0.005, min(object_dimensions.values()) * 0.5)
+                self.reward_thresholds_source = "gemini_calibrated"
+        except Exception:
+            pass  # Keep defaults
 
     @classmethod
     def from_environment(cls) -> "RewardConfig":

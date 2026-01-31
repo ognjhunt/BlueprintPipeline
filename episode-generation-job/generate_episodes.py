@@ -574,6 +574,10 @@ class EpisodeGenerationOutput:
     # Timing
     generation_time_seconds: float = 0.0
 
+    # Provenance aggregates (GAP 1)
+    avg_data_realness_score: Optional[float] = None
+    avg_heuristic_frame_ratio: Optional[float] = None
+
     # Errors
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -2576,7 +2580,27 @@ class EpisodeGenerator:
         )
 
         constraint_violations = joint_limit_violations + torque_limit_violations
-        constraint_satisfaction = 1.0 if constraint_violations == 0 else 0.5
+        # GAP 6: Graduated constraint satisfaction instead of binary heuristic
+        if constraint_violations == 0:
+            constraint_satisfaction = 1.0
+        else:
+            constraint_satisfaction = max(0.0, 1.0 - 0.1 * constraint_violations)
+            # Try Gemini evaluation if LLM client available
+            try:
+                from tools.llm_client import get_llm_client
+                llm = get_llm_client()
+                if llm:
+                    prompt = (
+                        f"Rate constraint satisfaction 0.0-1.0 for a robot episode with "
+                        f"{constraint_violations} violations ({joint_limit_violations} joint limit, "
+                        f"{torque_limit_violations} torque limit). Return ONLY a float."
+                    )
+                    resp = llm.generate(prompt)
+                    score = float(resp.strip())
+                    if 0.0 <= score <= 1.0:
+                        constraint_satisfaction = score
+            except Exception:
+                pass  # Use graduated formula fallback
         task_metrics = TaskQualityMetrics(
             goal_achievement_score=1.0 if validation_metrics and validation_metrics.task_success else 0.0,
             skill_segment_count=skill_segment_count,

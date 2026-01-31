@@ -186,10 +186,46 @@ class Regen3DAdapter:
 
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
+        self._llm_client = None
+        self._llm_init_attempted = False
+        self._dimension_cache: Dict[str, Dict[str, float]] = {}
 
     def log(self, msg: str) -> None:
         if self.verbose:
             print(f"[REGEN3D-ADAPTER] {msg}")
+
+    def _get_llm_client(self):
+        """Lazily initialize LLM client for Gemini estimation."""
+        if not self._llm_init_attempted:
+            self._llm_init_attempted = True
+            try:
+                from tools.llm_client import get_llm_client
+                self._llm_client = get_llm_client()
+            except Exception:
+                self._llm_client = None
+        return self._llm_client
+
+    def _estimate_dimensions_gemini(self, category: str) -> Optional[Dict[str, float]]:
+        """Estimate object dimensions using Gemini based on category."""
+        if category in self._dimension_cache:
+            return self._dimension_cache[category]
+        llm = self._get_llm_client()
+        if not llm:
+            return None
+        try:
+            prompt = (
+                f"Estimate the typical width, height, and depth in meters for a '{category}' object. "
+                f"Return ONLY a JSON object like: {{\"width\": 0.3, \"height\": 0.2, \"depth\": 0.3}}"
+            )
+            resp = llm.generate(prompt)
+            import json as _json
+            dims = _json.loads(resp.strip())
+            if isinstance(dims, dict) and all(k in dims for k in ("width", "height", "depth")):
+                self._dimension_cache[category] = dims
+                return dims
+        except Exception:
+            pass
+        return None
 
     def load_regen3d_output(self, regen3d_dir: Path) -> Regen3DOutput:
         """Load 3D-RE-GEN outputs from a directory.
@@ -464,11 +500,7 @@ class Regen3DAdapter:
                 "format": "glb",
                 "source": "3d-re-gen",
             },
-            "dimensions_est": {
-                "width": obj.bounds.get("size", [1, 1, 1])[0],
-                "height": obj.bounds.get("size", [1, 1, 1])[1],
-                "depth": obj.bounds.get("size", [1, 1, 1])[2],
-            },
+            "dimensions_est": self._compute_dimensions_est(obj),
             "semantics": {
                 "class": obj.category or "object",
                 "affordances": [],
@@ -490,6 +522,40 @@ class Regen3DAdapter:
             manifest_obj["physics_hints"]["metallic"] = obj.material.metallic
 
         return manifest_obj
+
+    def _compute_dimensions_est(self, obj: Regen3DObject) -> Dict[str, float]:
+        """Compute dimensions with Gemini fallback instead of silent [1,1,1] default.
+
+        Note: dimensions_source provenance is tracked in metadata.source_pipeline,
+        not in dimensions_est itself (schema has additionalProperties: false).
+        """
+        size = obj.bounds.get("size")
+        if size and size != [1, 1, 1] and any(s != 1.0 for s in size):
+            return {
+                "width": size[0],
+                "height": size[1],
+                "depth": size[2],
+            }
+
+        # Try Gemini estimation
+        category = obj.category or "object"
+        gemini_dims = self._estimate_dimensions_gemini(category)
+        if gemini_dims:
+            logger.info("Using Gemini-estimated dimensions for '%s' (%s)", obj.id, category)
+            return {
+                "width": gemini_dims["width"],
+                "height": gemini_dims["height"],
+                "depth": gemini_dims["depth"],
+            }
+
+        # Final fallback
+        logger.warning("Using heuristic default dimensions for '%s' - no bounds or Gemini available", obj.id)
+        default = obj.bounds.get("size", [1, 1, 1])
+        return {
+            "width": default[0],
+            "height": default[1],
+            "depth": default[2],
+        }
 
     def _decompose_transform(self, matrix: List[List[float]]) -> Dict[str, List[float]]:
         """Decompose a 4x4 transform matrix into translation, rotation, scale."""
@@ -523,7 +589,12 @@ class Regen3DAdapter:
                     auto_fix=not production_mode,
                 )
             except ValidationError as exc:
-                logger.warning("Rotation matrix validation failed: %s. Using identity.", exc)
+                if production_mode:
+                    raise ValueError(
+                        f"Rotation matrix validation failed in production: {exc}. "
+                        "Cannot use identity fallback for production data."
+                    )
+                logger.warning("Rotation matrix validation failed: %s. Using identity fallback.", exc)
                 rot = np.eye(3)
 
         # Convert rotation matrix to quaternion
@@ -578,8 +649,25 @@ class Regen3DAdapter:
             all_bounds.append(regen3d_output.background.bounds)
 
         if not all_bounds:
-            room_min = [-5.0, 0.0, -5.0]
-            room_max = [5.0, 3.0, 5.0]
+            # Try Gemini estimation for room bounds
+            llm = self._get_llm_client()
+            if llm:
+                try:
+                    prompt = (
+                        "Estimate typical room dimensions in meters for a simulation scene. "
+                        "Return ONLY JSON: {\"min\": [x,y,z], \"max\": [x,y,z]}"
+                    )
+                    import json as _json
+                    resp = llm.generate(prompt)
+                    room_data = _json.loads(resp.strip())
+                    room_min = room_data.get("min", [-5.0, 0.0, -5.0])
+                    room_max = room_data.get("max", [5.0, 3.0, 5.0])
+                except Exception:
+                    room_min = [-5.0, 0.0, -5.0]
+                    room_max = [5.0, 3.0, 5.0]
+            else:
+                room_min = [-5.0, 0.0, -5.0]
+                room_max = [5.0, 3.0, 5.0]
         else:
             # Compute union of all bounds
             mins = np.array([b.get("min", [-5, 0, -5]) for b in all_bounds])

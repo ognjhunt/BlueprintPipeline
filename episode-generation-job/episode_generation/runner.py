@@ -296,6 +296,8 @@ def run_episode_generation_job(
                 "passed_quality_filter": output.valid_episodes,
                 "average_quality_score": output.average_quality_score,
                 "collision_free_rate": collision_free_rate,
+                "data_realness_score": getattr(output, "avg_data_realness_score", None),
+                "heuristic_frame_ratio": getattr(output, "avg_heuristic_frame_ratio", None),
             }
 
             quality_gates = QualityGateRegistry(verbose=True)

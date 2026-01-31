@@ -1060,7 +1060,11 @@ class LeRobotExporter:
 
         if HAVE_REWARD_COMPUTATION and motion_plan is not None:
             try:
-                reward_computer = RewardComputer(verbose=False)
+                reward_config = RewardConfig.from_environment()
+                reward_config.calibrate_with_gemini(
+                    task_description=task_description,
+                )
+                reward_computer = RewardComputer(config=reward_config, verbose=False)
                 total_reward, components = reward_computer.compute_episode_reward(
                     trajectory=trajectory,
                     motion_plan=motion_plan,

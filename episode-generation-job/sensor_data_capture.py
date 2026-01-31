@@ -319,7 +319,7 @@ class SensorDataConfig:
     video_codec: str = "h264"  # For LeRobot video export
 
     # Resolution for all cameras (if not specified per-camera)
-    default_resolution: Tuple[int, int] = (640, 480)
+    default_resolution: Tuple[int, int] = (1280, 720)
 
     # FPS for video encoding
     fps: float = 30.0
@@ -828,9 +828,10 @@ class IsaacSimSensorCapture:
         # Check Isaac Sim availability upfront
         self._isaac_sim_available = is_isaac_sim_available()
         self._replicator_available = is_replicator_available()
-        self._require_contacts = parse_bool_env(os.getenv("REQUIRE_CONTACTS"), default=False)
+        _production = resolve_production_mode()
+        self._require_contacts = parse_bool_env(os.getenv("REQUIRE_CONTACTS"), default=_production)
         self._require_sim_object_poses = parse_bool_env(
-            os.getenv("REQUIRE_SIM_OBJECT_POSES"), default=False
+            os.getenv("REQUIRE_SIM_OBJECT_POSES"), default=_production
         )
 
     def log(self, msg: str, level: str = "INFO") -> None:

@@ -3381,6 +3381,60 @@ class QualityGateRegistry:
             notify_on_fail=True,
         ))
 
+        # QG-12b: Data Realness / Provenance Enforcement (GAP 1)
+        def check_data_realness(ctx: Dict[str, Any]) -> QualityGateResult:
+            episode_stats = ctx.get("episode_stats", {})
+            data_realness = episode_stats.get("data_realness_score")
+            heuristic_ratio = episode_stats.get("heuristic_frame_ratio")
+
+            import os as _os
+            min_realness = float(_os.getenv("MIN_DATA_REALNESS", "0.7"))
+            max_heuristic = float(_os.getenv("MAX_HEURISTIC_FRAME_RATIO", "0.3"))
+
+            if data_realness is None or heuristic_ratio is None:
+                return QualityGateResult(
+                    gate_id="qg-12b-data-realness",
+                    checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+                    passed=True,
+                    severity=QualityGateSeverity.WARNING,
+                    message="Provenance metrics not available - skipping data realness check",
+                    details={"reason": "no_provenance_metrics"},
+                    recommendations=["Enable provenance tracking in episode generation"],
+                )
+
+            passed = data_realness >= min_realness and heuristic_ratio <= max_heuristic
+            message = (
+                f"Data realness: {data_realness:.2f} (min: {min_realness}), "
+                f"Heuristic ratio: {heuristic_ratio:.2f} (max: {max_heuristic})"
+            )
+            return QualityGateResult(
+                gate_id="qg-12b-data-realness",
+                checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+                passed=passed,
+                severity=QualityGateSeverity.ERROR,
+                message=message,
+                details={
+                    "data_realness_score": data_realness,
+                    "heuristic_frame_ratio": heuristic_ratio,
+                    "min_realness_threshold": min_realness,
+                    "max_heuristic_threshold": max_heuristic,
+                },
+                recommendations=[
+                    "Replace heuristic data channels with PhysX simulation or Gemini estimation",
+                    "Review provenance labels for each data channel",
+                ] if not passed else [],
+            )
+
+        self.register(QualityGate(
+            id="qg-12b-data-realness",
+            name="Data Realness Enforcement",
+            checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
+            severity=QualityGateSeverity.ERROR,
+            description="Enforces minimum data realness score and maximum heuristic frame ratio",
+            check_fn=check_data_realness,
+            notify_on_fail=True,
+        ))
+
         # QG-12: DWM Conditioning Data Format
         def check_dwm_bundle(ctx: Dict[str, Any]) -> QualityGateResult:
             dwm_output_dir = ctx.get("dwm_output_dir")
