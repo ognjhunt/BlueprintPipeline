@@ -393,6 +393,17 @@ def compute_bounds(
         source = "gemini_estimated"
 
     if size is None:
+        # GAP 3: Try Gemini dimension estimation before hard fallback
+        try:
+            from tools.dimension_estimation import get_dimension_estimator
+            _dim_est = get_dimension_estimator()
+            _est_dims, _est_src = _dim_est.estimate_dimensions(obj)
+            if _est_src != "hardcoded_fallback":
+                size = _est_dims
+                source = _est_src
+        except Exception:
+            pass
+    if size is None:
         size = [0.10, 0.10, 0.10]  # 10cm cube fallback
         source = "default"
 
@@ -1641,29 +1652,42 @@ def build_physics_config(
     Returns:
         Complete physics configuration dict
     """
-    # Try Gemini-based estimation first unless deterministic is requested
+    # GAP 4: Try Gemini-based estimation with retry before falling back
+    _max_physics_retries = 2
     if not deterministic_physics and gemini_client is not None and have_gemini():
-        try:
-            physics_cfg = call_gemini_for_object(
-                client=gemini_client,
-                oid=obj.get("id"),
-                obj=obj,
-                bounds=bounds,
-                reference_image=reference_image,
-            )
-            physics_cfg["estimation_source"] = "gemini"
-            # Store mesh bounds info for catalog
-            if mesh_bounds:
-                physics_cfg["mesh_bounds"] = {
-                    "size": mesh_bounds,
-                    "center": mesh_center or [0.0, 0.0, 0.0],
-                }
-            return physics_cfg
-        except Exception as e:
-            logger.warning(
-                "[SIMREADY] Gemini physics estimation failed for obj %s: %s; falling back to heuristic physics.",
-                obj.get("id"),
-                e,
+        for _attempt in range(_max_physics_retries):
+            try:
+                physics_cfg = call_gemini_for_object(
+                    client=gemini_client,
+                    oid=obj.get("id"),
+                    obj=obj,
+                    bounds=bounds,
+                    reference_image=reference_image,
+                )
+                physics_cfg["estimation_source"] = "gemini"
+                physics_cfg["estimation_attempts"] = _attempt + 1
+                # Store mesh bounds info for catalog
+                if mesh_bounds:
+                    physics_cfg["mesh_bounds"] = {
+                        "size": mesh_bounds,
+                        "center": mesh_center or [0.0, 0.0, 0.0],
+                    }
+                return physics_cfg
+            except Exception as e:
+                logger.warning(
+                    "[SIMREADY] Gemini physics estimation attempt %d/%d failed for obj %s: %s",
+                    _attempt + 1, _max_physics_retries, obj.get("id"), e,
+                )
+                if _attempt < _max_physics_retries - 1:
+                    import time as _time
+                    _time.sleep(0.5 * (2 ** _attempt))
+        # All retries exhausted
+        _production = resolve_production_mode()
+        if _production:
+            logger.error(
+                "[SIMREADY] PRODUCTION: Gemini physics estimation failed after %d retries "
+                "for obj %s. Falling back to heuristic — data realness will be degraded.",
+                _max_physics_retries, obj.get("id"),
             )
 
     if deterministic_physics:

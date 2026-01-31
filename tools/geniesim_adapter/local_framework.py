@@ -5145,6 +5145,8 @@ class GenieSimLocalFramework:
                         "camera_capture_frames": f"{_camera_frame_count}/{len(frames)}",
                         "real_velocity_frames": f"{_real_velocity_count}/{len(frames)}",
                         "real_effort_frames": f"{_real_effort_count}/{len(frames)}",
+                        "diversity_calibration": _diversity_calibration_source,
+                        "object_property_provenance": dict(_object_property_provenance),
                     },
                     "channel_confidence": {
                         "joint_positions": 1.0,
@@ -5389,17 +5391,85 @@ class GenieSimLocalFramework:
         }
         _hardcoded_fallback_warned: set = set()
 
+        # --- Gemini object property estimation (GAP 1) ---
+        _gemini_prop_cache: Dict[str, Dict[str, Any]] = {}
+        _gemini_prop_llm = None
+        _gemini_prop_llm_attempted = False
+        _object_property_provenance: Dict[str, str] = {}
+
+        def _get_gemini_prop_client():
+            nonlocal _gemini_prop_llm, _gemini_prop_llm_attempted
+            if not _gemini_prop_llm_attempted:
+                _gemini_prop_llm_attempted = True
+                try:
+                    from tools.llm_client import create_llm_client as _create
+                    _gemini_prop_llm = _create()
+                except Exception:
+                    _gemini_prop_llm = None
+            return _gemini_prop_llm
+
+        def _estimate_obj_prop_gemini(obj_type: str, prop: str):
+            """Estimate a single object property via Gemini."""
+            cache_key = f"{obj_type.lower()}:{prop}"
+            if cache_key in _gemini_prop_cache:
+                return _gemini_prop_cache[cache_key]
+            llm = _get_gemini_prop_client()
+            if not llm:
+                return None
+            prop_prompts = {
+                "graspable_width": (
+                    f"Estimate the graspable width in meters for a '{obj_type}'. "
+                    f"Return ONLY JSON: {{\"value\": 0.06}}"
+                ),
+                "mass": (
+                    f"Estimate the mass in kilograms for a typical '{obj_type}'. "
+                    f"Return ONLY JSON: {{\"value\": 0.3}}"
+                ),
+                "height": (
+                    f"Estimate the height in meters for a typical '{obj_type}'. "
+                    f"Return ONLY JSON: {{\"value\": 0.12}}"
+                ),
+                "bbox": (
+                    f"Estimate bounding box [width, depth, height] in meters for a '{obj_type}'. "
+                    f"Return ONLY JSON: {{\"value\": [0.2, 0.2, 0.12]}}"
+                ),
+                "category": (
+                    f"Classify '{obj_type}' into one of: container, tableware, cookware, "
+                    f"appliance, furniture, tool, unknown. Return ONLY JSON: {{\"value\": \"container\"}}"
+                ),
+            }
+            prompt = prop_prompts.get(prop)
+            if not prompt:
+                return None
+            try:
+                resp = llm.generate(prompt, json_output=True, temperature=0.3)
+                data = resp.parse_json()
+                if isinstance(data, dict) and "value" in data:
+                    val = data["value"]
+                    _gemini_prop_cache[cache_key] = val
+                    logger.info("GEMINI_OBJ_PROP: %s.%s = %s", obj_type, prop, val)
+                    return val
+            except Exception as exc:
+                logger.debug("Gemini obj prop estimation failed for %s.%s: %s", obj_type, prop, exc)
+            return None
+
         # Unified property lookup: scene_graph → Gemini estimated → hardcoded fallback
         _obj_props = getattr(self, "_object_properties", {})
 
         def _get_obj_prop(obj_id_or_type: str, prop: str, default=None):
-            """Look up an object property, preferring scene_graph data."""
-            # Try exact match, then type-level match
+            """Look up an object property: scene_graph → Gemini → hardcoded."""
+            # 1. Try scene_graph (exact match, then type-level)
             for key in (obj_id_or_type, obj_id_or_type.lower()):
                 entry = _obj_props.get(key)
                 if entry and prop in entry:
+                    _object_property_provenance[f"{obj_id_or_type}:{prop}"] = "scene_graph"
                     return entry[prop]
-            # Hardcoded fallback with warning
+            # 2. Try Gemini estimation (GAP 1 fix)
+            _gemini_val = _estimate_obj_prop_gemini(obj_id_or_type, prop)
+            if _gemini_val is not None:
+                _object_property_provenance[f"{obj_id_or_type}:{prop}"] = "gemini_estimated"
+                return _gemini_val
+            # 3. Hardcoded fallback with warning
             _hc_tables = {
                 "graspable_width": _HARDCODED_OBJECT_SIZES,
                 "mass": _HARDCODED_OBJECT_MASSES,
@@ -5418,6 +5488,7 @@ class GenieSimLocalFramework:
                         "Run simready-job or provide scene_graph metadata.",
                         prop, obj_id_or_type,
                     )
+                _object_property_provenance[f"{obj_id_or_type}:{prop}"] = "hardcoded_fallback"
                 return _table[_key_lower]
             return default
 
@@ -7260,11 +7331,21 @@ class GenieSimLocalFramework:
 
         # Get obstacles from scene state in observation
         scene_state = initial_obs.get("scene_state", {})
+        try:
+            from tools.dimension_estimation import get_dimension_estimator as _get_dim_est
+            _dim_est = _get_dim_est()
+        except ImportError:
+            _dim_est = None
         for obj in scene_state.get("objects", []):
+            _raw_dims = obj.get("dimensions")
+            if _dim_est and (not _raw_dims or _raw_dims == [0.1, 0.1, 0.1]):
+                _est_dims, _est_src = _dim_est.estimate_dimensions(obj)
+            else:
+                _est_dims = _raw_dims if _raw_dims else [0.1, 0.1, 0.1]
             obstacles.append({
                 "id": obj.get("object_id", "unknown"),
                 "position": obj.get("pose", {}).get("position", [0, 0, 0]),
-                "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
+                "dimensions": _est_dims,
                 "category": obj.get("category", "object"),
             })
 
@@ -7847,6 +7928,35 @@ class GenieSimLocalFramework:
 
         frame_count_score = 1.0 if total_frames >= 10 else 0.5
 
+        # GAP 2: Diversity divisors — calibrate via Gemini per robot type
+        _diversity_calibration_source = "hardcoded_default"
+        _action_divisor = 0.05
+        _obs_divisor = 0.05
+        _robot_type = getattr(self.config, "robot_type", "franka") if hasattr(self, "config") else "franka"
+        try:
+            from tools.llm_client import create_llm_client as _create_div_llm
+            _div_llm = _create_div_llm()
+            if _div_llm:
+                _div_prompt = (
+                    f"For a {_robot_type} robot arm, estimate the typical per-step joint velocity "
+                    f"magnitude (in radians) that represents high action diversity during a "
+                    f"pick-and-place task. Return ONLY JSON: "
+                    f"{{\"action_divisor\": 0.05, \"obs_divisor\": 0.05}}"
+                )
+                _div_resp = _div_llm.generate(_div_prompt, json_output=True, temperature=0.3)
+                _div_data = _div_resp.parse_json()
+                if isinstance(_div_data, dict):
+                    if "action_divisor" in _div_data and "obs_divisor" in _div_data:
+                        _action_divisor = float(_div_data["action_divisor"])
+                        _obs_divisor = float(_div_data["obs_divisor"])
+                        _diversity_calibration_source = "gemini_calibrated"
+                        logger.info(
+                            "GEMINI_DIVERSITY: robot=%s action_div=%.4f obs_div=%.4f",
+                            _robot_type, _action_divisor, _obs_divisor,
+                        )
+        except Exception:
+            pass  # Keep defaults
+
         # Action diversity: measure how much the actions change across frames.
         # A trajectory where all actions are identical is low quality.
         action_diversity_score = 0.0
@@ -7861,8 +7971,7 @@ class GenieSimLocalFramework:
                 # Compute mean pairwise L2 distance between consecutive actions
                 diffs = np.diff(action_matrix, axis=0)
                 mean_diff = np.mean(np.linalg.norm(diffs, axis=1))
-                # Scale: 0.01 rad mean change = low, 0.1+ = high
-                action_diversity_score = min(1.0, mean_diff / 0.05)
+                action_diversity_score = min(1.0, mean_diff / _action_divisor)
 
         # Observation diversity: measure how much joint positions change
         obs_diversity_score = 0.0
@@ -7878,7 +7987,7 @@ class GenieSimLocalFramework:
                 obs_matrix = np.array(all_obs_joints)
                 obs_diffs = np.diff(obs_matrix, axis=0)
                 mean_obs_diff = np.mean(np.linalg.norm(obs_diffs, axis=1))
-                obs_diversity_score = min(1.0, mean_obs_diff / 0.05)
+                obs_diversity_score = min(1.0, mean_obs_diff / _obs_divisor)
 
         # Trajectory smoothness: penalize jerky motions (high acceleration)
         smoothness_score = 1.0

@@ -92,6 +92,23 @@ if str(REPO_ROOT) not in sys.path:
 
 from monitoring.alerting import send_alert
 from tools.config.env import parse_bool_env
+try:
+    from tools.dimension_estimation import get_dimension_estimator as _get_dim_estimator
+    _DIM_ESTIMATOR = _get_dim_estimator()
+except ImportError:
+    _DIM_ESTIMATOR = None
+
+
+def _est_dims(obj, fallback=None):
+    """Estimate dimensions for an object, using Gemini if available."""
+    if fallback is None:
+        fallback = [0.1, 0.1, 0.1]
+    if _DIM_ESTIMATOR and isinstance(obj, dict):
+        dims, _src = _DIM_ESTIMATOR.estimate_dimensions(obj, fallback)
+        return dims
+    if isinstance(obj, dict):
+        return obj.get("dimensions", obj.get("bbox", fallback))
+    return fallback
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import set_global_seed
@@ -878,7 +895,7 @@ class ManipulationTaskGenerator:
                 "description": episode.description,
                 "target_object_id": target_id,
                 "target_position": target_obj.get("position", workspace_center) if target_obj else workspace_center,
-                "target_dimensions": target_obj.get("dimensions", [0.1, 0.1, 0.1]) if target_obj else [0.1, 0.1, 0.1],
+                "target_dimensions": _est_dims(target_obj) if target_obj else [0.1, 0.1, 0.1],
                 "place_position": self._calculate_place_position(target_obj, manifest),
                 "is_articulated": episode.source_template.requires_articulation if episode.source_template else False,
             }
@@ -900,7 +917,7 @@ class ManipulationTaskGenerator:
             category = obj.get("category", "object").lower()
             obj_id = obj.get("id", obj.get("name", "unknown"))
             position = obj.get("position", workspace_center)
-            dimensions = obj.get("dimensions", obj.get("bbox", [0.1, 0.1, 0.1]))
+            dimensions = _est_dims(obj)
 
             # Find matching task templates
             for cat_key, task_templates in self.CATEGORY_TASKS.items():
@@ -962,7 +979,7 @@ class ManipulationTaskGenerator:
             base_id = base_obj.get("id", base_obj.get("name", "base"))
             top_id = top_obj.get("id", top_obj.get("name", "top"))
             base_position = base_obj.get("position", [0.5, 0.0, 0.85])
-            base_dims = base_obj.get("dimensions", base_obj.get("bbox", [0.1, 0.1, 0.1]))
+            base_dims = _est_dims(base_obj)
             stack_position = self._calculate_stack_position(base_position, base_dims)
 
             tasks.append({
@@ -998,9 +1015,9 @@ class ManipulationTaskGenerator:
             obj_b_id = obj_b.get("id", obj_b.get("name", "obj_b"))
             obj_c_id = obj_c.get("id", obj_c.get("name", "obj_c"))
             obj_b_position = obj_b.get("position", [0.5, 0.0, 0.85])
-            obj_b_dims = obj_b.get("dimensions", obj_b.get("bbox", [0.1, 0.1, 0.1]))
+            obj_b_dims = _est_dims(obj_b)
             obj_c_position = obj_c.get("position", [0.5, 0.0, 0.85])
-            obj_c_dims = obj_c.get("dimensions", obj_c.get("bbox", [0.1, 0.1, 0.1]))
+            obj_c_dims = _est_dims(obj_c)
 
             place_on_b = self._calculate_stack_position(obj_b_position, obj_b_dims)
             place_on_c = self._calculate_stack_position(obj_c_position, obj_c_dims)
@@ -1941,7 +1958,7 @@ class EpisodeGenerator:
                     object_metadata = {
                         obj.get("id", obj.get("name", "")): {
                             "category": obj.get("category", "object"),
-                            "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
+                            "dimensions": _est_dims(obj),
                             "position": obj.get("position", [0, 0, 0]),
                         }
                         for obj in scene_objects
@@ -2076,7 +2093,7 @@ class EpisodeGenerator:
                 object_metadata = {
                     obj.get("id", obj.get("name", "")): {
                         "category": obj.get("category", "object"),
-                        "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
+                        "dimensions": _est_dims(obj),
                         "position": obj.get("position", [0, 0, 0]),
                     }
                     for obj in scene_objects
@@ -2446,7 +2463,7 @@ class EpisodeGenerator:
             updated.append({
                 "id": obj_id,
                 "position": new_pos,
-                "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
+                "dimensions": _est_dims(obj),
             })
 
         return updated
