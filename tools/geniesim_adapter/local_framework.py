@@ -131,6 +131,7 @@ from tools.geniesim_adapter.config import (
     get_geniesim_host,
     get_geniesim_port,
     get_geniesim_readiness_timeout_s,
+    get_geniesim_trajectory_fps,
 )
 from tools.error_handling.retry import RetryConfig, calculate_delay
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
@@ -551,7 +552,7 @@ class GenieSimConfig(BaseModel):
     allow_linear_fallback: StrictBool = False
     allow_linear_fallback_in_production: StrictBool = False
     allow_ik_failure_fallback: StrictBool = False
-    stall_timeout_s: StrictFloat = 30.0
+    stall_timeout_s: StrictFloat = 90.0
     max_stalls: StrictInt = 2
     stall_backoff_s: StrictFloat = 5.0
     server_startup_timeout_s: StrictFloat = 120.0
@@ -6439,6 +6440,7 @@ class GenieSimLocalFramework:
             target_position=np.array(target_pos),
             place_position=np.array(place_pos) if place_pos else None,
             obstacles=obstacles,
+            fps=get_geniesim_trajectory_fps(),
         )
         if trajectory is not None:
             self.log(f"  ✅ IK fallback trajectory: {len(trajectory)} waypoints")
@@ -6806,7 +6808,7 @@ class GenieSimLocalFramework:
         target_position: np.ndarray,
         place_position: Optional[np.ndarray],
         obstacles: List[Dict[str, Any]],
-        fps: float = 30.0,
+        fps: float = 5.0,
     ) -> Optional[List[Dict[str, Any]]]:
         if not IK_PLANNING_AVAILABLE:
             self.log("  ❌ IK utilities unavailable; cannot build IK fallback trajectory.", "ERROR")
@@ -7344,7 +7346,11 @@ class GenieSimLocalFramework:
                 _est_dims = _raw_dims if _raw_dims else [0.1, 0.1, 0.1]
             obstacles.append({
                 "id": obj.get("object_id", "unknown"),
-                "position": obj.get("pose", {}).get("position", [0, 0, 0]),
+                "position": (
+                    [_p.get("x", 0), _p.get("y", 0), _p.get("z", 0)]
+                    if isinstance((_p := obj.get("pose", {}).get("position", [0, 0, 0])), dict)
+                    else _p
+                ),
                 "dimensions": _est_dims,
                 "category": obj.get("category", "object"),
             })

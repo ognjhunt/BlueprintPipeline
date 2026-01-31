@@ -73,12 +73,16 @@ RUN git clone --depth 1 https://github.com/NVlabs/curobo.git /opt/curobo \
 
 # ----- ROS 2 environment for rclpy -----
 ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# ROS 2 Humble is not installed in this image; skip recording to avoid
+# silent subprocess failures and wasted resources.
+ENV GENIESIM_SKIP_ROS_RECORDING=1
 
 # ----- BlueprintPipeline server patches -----
 # Patch the Genie Sim server to handle GET_CAMERA_DATA commands (prevents
 # server crash when CameraService.get_camera_data is called via gRPC).
 COPY tools/geniesim_adapter/deployment/patches/ /tmp/patches/
-RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_camera_handler.py \
+RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_camera_handler.py \
     && rm -rf /tmp/patches
 
 # Mark that this is a pre-baked image (used by bootstrap fast-path)
