@@ -27,6 +27,8 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="echo ready"
 for f in \
   tools/run_local_pipeline.py \
   tools/geniesim_adapter/local_framework.py \
+  tools/geniesim_adapter/asset_index.py \
+  tools/geniesim_adapter/scene_graph.py \
   tools/geniesim_adapter/deployment/patches/patch_camera_handler.py \
   tools/geniesim_adapter/deployment/patches/patch_ee_pose_handler.py \
   tools/geniesim_adapter/deployment/patches/patch_object_pose_handler.py \
@@ -34,6 +36,7 @@ for f in \
   tools/geniesim_adapter/deployment/patches/patch_grpc_server.py \
   tools/geniesim_adapter/deployment/patches/patch_stage_diagnostics.py \
   tools/geniesim_adapter/deployment/patches/patch_observation_cameras.py \
+  tools/geniesim_adapter/deployment/patches/_apply_safe_float.py \
   tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh \
   tools/geniesim_adapter/deployment/start_geniesim_server.sh \
   tools/geniesim_adapter/robot_configs/franka_panda.json \
@@ -97,7 +100,7 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="sudo docker log
 gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
   for p in patch_omnigraph_dedup patch_camera_handler patch_object_pose_handler \
            patch_ee_pose_handler patch_stage_diagnostics patch_observation_cameras \
-           patch_grpc_server; do
+           patch_grpc_server _apply_safe_float; do
     sudo docker cp ~/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/\${p}.py geniesim-server:/tmp/
     sudo docker exec geniesim-server /isaac-sim/python.sh /tmp/\${p}.py
   done
@@ -287,6 +290,10 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 14. **VM upgraded to g2-standard-32**: Running both Isaac Sim server + pipeline client in the same container OOM'd at 43/64GB RAM during trajectory execution. Upgraded to 128GB RAM.
 15. **Pipeline achieved `task_success=True`**: End-to-end flow works — IK fallback trajectory (17 waypoints), composed observations with joints, objects(6), cameras(1). cuRobo planner fails with `'TensorDeviceType' object has no attribute 'mesh'` (API version mismatch) but IK fallback works.
 16. **`could not convert string to float: 'm'`**: Some objects (CoffeeMachine006, variation_pot) return unusual prim data that fails `float()` conversion. Non-fatal — client handles gracefully.
+17. **CRITICAL: Pipeline stuck after task_success=True**: The monitoring loop detected task completion but didn't abort the trajectory execution thread, causing infinite DEADLINE_EXCEEDED retry loops. Fixed by: (a) threading `abort_event` into `execute_trajectory()` so the waypoint loop checks it between each waypoint and after each gRPC call; (b) setting `abort_event` and `execution_state["success"] = True` when task_success is detected; (c) using short 2s gRPC timeout when abort is already signaled.
+18. **Safe float parsing for unit-suffixed values**: Server-side `float(_pos[i])` fails when USD prim attributes contain unit suffixes like `"1.5 m"`. Injected `_bp_safe_float()` helper into `grpc_server.py` that strips non-numeric suffixes before conversion. Applied via `_apply_safe_float.py` patch.
+19. **Path translation always uses container paths**: Previously, `os.path.exists()` check meant the translation was skipped when running on the VM host (where the path exists locally). Now always translates absolute paths containing `BlueprintPipeline/` to `/workspace/BlueprintPipeline/...` container paths, since the server always runs in Docker.
+20. **Pipeline advances through multiple tasks**: With fixes 17-19, the pipeline successfully advanced from Task 1/7 through Task 3/7 before the server became UNAVAILABLE (server-side stability issue). Task 1 achieved `task_success=True` and completed in ~3.5 min instead of looping indefinitely.
 
 ## Running Pipeline Client Inside Container
 
@@ -325,9 +332,10 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
 ### Current data quality (as of 2026-01-31)
 - **Joint positions**: Working (real data from server)
 - **Camera images**: 1 camera working (wrist), returns frames via GET_CAMERA_DATA patch
-- **Object poses**: All return identity (0,0,0) — scene objects not loaded in simulation stage
+- **Object poses**: All return identity (0,0,0) — scene objects not loaded in simulation stage. Container path translation now correct but server still doesn't load scene objects.
 - **EE pose**: Server-side unpacking error (non-fatal, client uses fallback)
 - **Trajectory**: IK fallback works; cuRobo planner has API version mismatch
+- **Task progression**: Pipeline now advances through tasks (previously stuck on task 1 forever). Server becomes UNAVAILABLE after ~3 tasks due to Isaac Sim stability issues.
 
 ## Pipeline Step Names
 

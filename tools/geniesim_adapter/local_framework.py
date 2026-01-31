@@ -3103,7 +3103,11 @@ class GenieSimGRPCClient:
     def _is_png_data(data: bytes) -> bool:
         return data.startswith(b"\x89PNG\r\n\x1a\n")
 
-    def execute_trajectory(self, trajectory: List[Dict[str, Any]]) -> GrpcCallResult:
+    def execute_trajectory(
+        self,
+        trajectory: List[Dict[str, Any]],
+        abort_event: Optional[threading.Event] = None,
+    ) -> GrpcCallResult:
         """
         Execute a trajectory on the robot.
 
@@ -3111,6 +3115,7 @@ class GenieSimGRPCClient:
 
         Args:
             trajectory: List of waypoints with positions, velocities, timestamps
+            abort_event: Optional event to signal early termination (e.g. task success).
 
         Returns:
             GrpcCallResult indicating success.
@@ -3135,6 +3140,9 @@ class GenieSimGRPCClient:
 
         last_timestamp = None
         for waypoint in trajectory:
+            if abort_event is not None and abort_event.is_set():
+                logger.info("execute_trajectory: abort_event set, exiting early")
+                break
             joint_positions = waypoint.get("joint_positions") or []
             if not joint_positions:
                 continue
@@ -3149,10 +3157,14 @@ class GenieSimGRPCClient:
             )
             # Use extended timeout for the entire first trajectory (server
             # does cuRobo lazy init which can block any waypoint call).
-            call_timeout = self.timeout
-            if self._first_trajectory_call:
+            # Use short timeout if abort already signaled so we exit quickly.
+            if abort_event is not None and abort_event.is_set():
+                call_timeout = 2.0
+            elif self._first_trajectory_call:
                 call_timeout = max(self.timeout, self._first_call_timeout)
                 logger.info(f"First trajectory set_joint_position — using extended timeout {call_timeout}s")
+            else:
+                call_timeout = self.timeout
             _req = request
             _timeout = call_timeout
             response = self._call_grpc(
@@ -3161,6 +3173,10 @@ class GenieSimGRPCClient:
                 None,
                 success_checker=lambda resp: bool(resp.errmsg),
             )
+            # Check abort after gRPC call returns (may have been set while blocked)
+            if abort_event is not None and abort_event.is_set():
+                logger.info("execute_trajectory: abort_event set after gRPC call, exiting early")
+                break
             if response is None:
                 return GrpcCallResult(
                     success=False,
@@ -3172,6 +3188,9 @@ class GenieSimGRPCClient:
                 if last_timestamp is not None:
                     delay = max(0.0, float(timestamp) - float(last_timestamp))
                     if delay:
+                        if abort_event is not None and abort_event.is_set():
+                            logger.info("execute_trajectory: abort_event set during delay, exiting early")
+                            break
                         time.sleep(delay)
                 last_timestamp = float(timestamp)
 
@@ -3864,6 +3883,19 @@ class GenieSimLocalFramework:
                 str(scene_usd_path) if scene_usd_path
                 else os.environ.get("GENIESIM_SCENE_USD_PATH", "scenes/empty_scene.usda")
             )
+            # Always translate absolute paths to container paths.
+            # The server runs inside Docker where the repo is mounted at
+            # /workspace/BlueprintPipeline. Absolute host paths (whether from
+            # macOS /Users/... or VM /home/...) won't exist in the container.
+            if scene_usd and os.path.isabs(scene_usd):
+                _repo_marker = "BlueprintPipeline/"
+                _idx = scene_usd.find(_repo_marker)
+                if _idx >= 0:
+                    container_path = "/workspace/" + scene_usd[_idx:]
+                    self.log(
+                        f"Translating scene USD to container path: {container_path}"
+                    )
+                    scene_usd = container_path
             self.log(f"Scene USD for init_robot: {scene_usd}")
             init_result = self._client.init_robot(
                 robot_type=robot_cfg_file,
@@ -4600,7 +4632,9 @@ class GenieSimLocalFramework:
 
             def _execute_trajectory() -> None:
                 try:
-                    execution_result = self._client.execute_trajectory(timed_trajectory)
+                    execution_result = self._client.execute_trajectory(
+                        timed_trajectory, abort_event=abort_event
+                    )
                     if not execution_result.available:
                         execution_state["error"] = (
                             f"Trajectory execution unavailable: {execution_result.error}"
@@ -4669,17 +4703,18 @@ class GenieSimLocalFramework:
                             last_obs_timestamp = collector_state.get("last_observation_timestamp")
                             near_trajectory_end = _is_near_trajectory_end(last_obs_timestamp)
                             if task_success_flag or near_trajectory_end:
-                                if not collector_state.get("completion_signal_logged"):
-                                    self.log(
-                                        "Stall check skipped due to completion signal "
-                                        f"(task_success={task_success_flag}, "
-                                        f"near_trajectory_end={near_trajectory_end}, "
-                                        f"last_obs_timestamp={last_obs_timestamp}, "
-                                        f"trajectory_end={trajectory_end_time}, "
-                                        f"tolerance={end_time_tolerance_s:.2f}s).",
-                                        "INFO",
-                                    )
-                                    collector_state["completion_signal_logged"] = True
+                                self.log(
+                                    "Completion signal detected — aborting trajectory early "
+                                    f"(task_success={task_success_flag}, "
+                                    f"near_trajectory_end={near_trajectory_end}, "
+                                    f"last_obs_timestamp={last_obs_timestamp}, "
+                                    f"trajectory_end={trajectory_end_time}, "
+                                    f"tolerance={end_time_tolerance_s:.2f}s).",
+                                    "INFO",
+                                )
+                                execution_state["success"] = True
+                                abort_event.set()
+                                break
                             else:
                                 stall_detected = True
                                 stall_reason = "no_observation_progress"
@@ -8679,6 +8714,12 @@ def run_local_data_collection(
     # Load configs
     with open(scene_manifest_path) as f:
         scene_manifest = json.load(f)
+
+    # Resolve relative usd_path against manifest directory
+    _usd_path = scene_manifest.get("usd_path", "")
+    if _usd_path and not os.path.isabs(_usd_path):
+        _resolved = str(Path(scene_manifest_path).parent / _usd_path)
+        scene_manifest["usd_path"] = _resolved
 
     with open(task_config_path) as f:
         task_config = json.load(f)

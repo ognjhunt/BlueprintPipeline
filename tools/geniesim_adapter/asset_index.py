@@ -758,7 +758,12 @@ class AssetIndexBuilder:
             asset_data = obj.get("asset", {})
             usd_path = asset_data.get("path", "")
             if usd_base_path and usd_path and not usd_path.startswith("/"):
-                usd_path = f"{usd_base_path}/{usd_path}"
+                if usd_path.startswith("assets/"):
+                    # assets/ is a sibling of usd/, not inside it — go up
+                    # one level from usd_base_path before joining.
+                    usd_path = f"../{usd_path}"
+                else:
+                    usd_path = f"{usd_base_path}/{usd_path}"
 
             # Generate semantic description
             semantic_description = self.description_generator.generate(obj)

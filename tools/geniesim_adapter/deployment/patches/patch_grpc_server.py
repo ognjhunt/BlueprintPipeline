@@ -59,6 +59,29 @@ def patch_file():
 
     changes = 0
 
+    # Fix 0: Inject _safe_float helper at top of file (after imports)
+    safe_float_helper = (
+        "\n# " + PATCH_MARKER + " — safe float helper for unit-suffixed values\n"
+        "def _bp_safe_float(val, default=0.0):\n"
+        "    try:\n"
+        "        return float(val)\n"
+        "    except (ValueError, TypeError):\n"
+        "        if isinstance(val, str):\n"
+        "            import re as _re\n"
+        "            _m = _re.match(r'([+-]?\\d*\\.?\\d+)', val.strip())\n"
+        "            if _m:\n"
+        "                return float(_m.group(1))\n"
+        "        return default\n\n"
+    )
+    # Insert after the last import line
+    import_end = 0
+    for m in re.finditer(r'^(?:import |from )\S+.*$', content, re.MULTILINE):
+        import_end = m.end()
+    if import_end > 0:
+        content = content[:import_end] + "\n" + safe_float_helper + content[import_end:]
+        changes += 1
+        print("[PATCH] Injected _bp_safe_float helper")
+
     # Fix 1: object_pose unpacking in get_object_pose
     old = "position, rotation = object_pose"
     new = (
@@ -84,9 +107,9 @@ def patch_file():
     new_pos = (
         "# " + PATCH_MARKER + " — safe position assignment\n"
         "        _pos = list(position) if hasattr(position, '__iter__') else [0, 0, 0]\n"
-        "        rsp.object_pose.position.x = float(_pos[0]) if len(_pos) > 0 else 0.0\n"
-        "        rsp.object_pose.position.y = float(_pos[1]) if len(_pos) > 1 else 0.0\n"
-        "        rsp.object_pose.position.z = float(_pos[2]) if len(_pos) > 2 else 0.0"
+        "        rsp.object_pose.position.x = _bp_safe_float(_pos[0]) if len(_pos) > 0 else 0.0\n"
+        "        rsp.object_pose.position.y = _bp_safe_float(_pos[1]) if len(_pos) > 1 else 0.0\n"
+        "        rsp.object_pose.position.z = _bp_safe_float(_pos[2]) if len(_pos) > 2 else 0.0"
     )
     if old_pos in content:
         content = content.replace(old_pos, new_pos, 1)
@@ -104,10 +127,10 @@ def patch_file():
     new_rot = (
         "# " + PATCH_MARKER + " — safe rotation assignment\n"
         "        _rot = list(rotation) if hasattr(rotation, '__iter__') and rotation is not None else [1, 0, 0, 0]\n"
-        "        rsp.object_pose.rpy.rw = float(_rot[0]) if len(_rot) > 0 else 1.0\n"
-        "        rsp.object_pose.rpy.rx = float(_rot[1]) if len(_rot) > 1 else 0.0\n"
-        "        rsp.object_pose.rpy.ry = float(_rot[2]) if len(_rot) > 2 else 0.0\n"
-        "        rsp.object_pose.rpy.rz = float(_rot[3]) if len(_rot) > 3 else 0.0"
+        "        rsp.object_pose.rpy.rw = _bp_safe_float(_rot[0], 1.0) if len(_rot) > 0 else 1.0\n"
+        "        rsp.object_pose.rpy.rx = _bp_safe_float(_rot[1]) if len(_rot) > 1 else 0.0\n"
+        "        rsp.object_pose.rpy.ry = _bp_safe_float(_rot[2]) if len(_rot) > 2 else 0.0\n"
+        "        rsp.object_pose.rpy.rz = _bp_safe_float(_rot[3]) if len(_rot) > 3 else 0.0"
     )
     if old_rot in content:
         content = content.replace(old_rot, new_rot, 1)
