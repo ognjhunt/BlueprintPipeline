@@ -4211,37 +4211,91 @@ class GenieSimLocalFramework:
             task_success_episodes = 0
             task_success_info_episodes = 0
 
-            # Create output directory for this run
-            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_dir = self.config.recording_dir / f"run_{run_id}"
+            # Create output directory for this run.
+            # Use a stable hash so retries of the same scene+config reuse the
+            # same directory and can skip already-completed tasks.
+            import hashlib as _hl
+            _run_hash_src = json.dumps(
+                {
+                    "scene": str(scene_usd_path) if scene_usd_path else "",
+                    "tasks": [t.get("task_name", "") for t in tasks],
+                },
+                sort_keys=True,
+            )
+            _run_hash = _hl.sha256(_run_hash_src.encode()).hexdigest()[:12]
+            run_dir = self.config.recording_dir / f"run_{_run_hash}"
             run_dir.mkdir(parents=True, exist_ok=True)
 
+            # Load checkpoint of previously completed tasks (for retry resume)
+            _checkpoint_path = run_dir / "_completed_tasks.json"
+            _completed_task_names: set = set()
+            if _checkpoint_path.exists():
+                try:
+                    _completed_task_names = set(json.loads(_checkpoint_path.read_text()))
+                    if _completed_task_names:
+                        self.log(
+                            f"Resuming: {len(_completed_task_names)} tasks already completed, "
+                            f"skipping: {_completed_task_names}"
+                        )
+                except Exception:
+                    pass
+
             _inter_task_delay = float(os.environ.get("GENIESIM_INTER_TASK_DELAY_S", "5"))
+            _restart_every_n = int(os.environ.get("GENIESIM_RESTART_EVERY_N_TASKS", "0"))
 
             for task_idx, task in enumerate(tasks):
                 if _timeout_exceeded():
                     break
 
+                # Skip tasks already completed in a previous run (checkpoint resume)
+                _task_name_for_ckpt = task.get("task_name", f"task_{task_idx}")
+                if _task_name_for_ckpt in _completed_task_names:
+                    self.log(f"Skipping already-completed task {task_idx + 1}/{len(tasks)}: {_task_name_for_ckpt}")
+                    continue
+
                 # Inter-task delay with health probe (skip for first task)
                 if task_idx > 0 and _inter_task_delay > 0:
-                    self.log(f"Inter-task delay: {_inter_task_delay}s before task {task_idx + 1}")
-                    import time as _delay_time
-                    _delay_time.sleep(_inter_task_delay)
-                    # Lightweight health probe via gRPC client
-                    try:
-                        if hasattr(self, '_client') and self._client is not None:
-                            _probe = self._client.get_joint_position()
-                            if not _probe.available:
-                                self.log("Health probe: server unavailable — attempting restart", "WARNING")
-                                if hasattr(self._client, '_attempt_server_restart'):
-                                    self._client._attempt_server_restart()
-                    except Exception as _probe_err:
-                        self.log(f"Health probe failed: {_probe_err}", "WARNING")
+                    # Proactive server restart to prevent resource exhaustion
+                    if _restart_every_n > 0 and task_idx % _restart_every_n == 0:
+                        self.log(
+                            f"Proactive server restart before task {task_idx + 1} "
+                            f"(every {_restart_every_n} tasks)"
+                        )
+                        self.stop_server()
+                        if not self.start_server(scene_usd_path=scene_usd_path):
+                            result.errors.append("Proactive server restart failed")
+                            return result
+                        # Re-initialize robot after fresh server start
+                        _reinit = self._client.init_robot(
+                            robot_type=robot_cfg_file,
+                            base_pose=base_pose,
+                            scene_usd_path=scene_usd,
+                        )
+                        if not _reinit.success:
+                            self.log(f"Re-init robot after restart: {_reinit.error}", "WARNING")
+                        time.sleep(_inter_task_delay)
+                    else:
+                        self.log(f"Inter-task delay: {_inter_task_delay}s before task {task_idx + 1}")
+                        import time as _delay_time
+                        _delay_time.sleep(_inter_task_delay)
+                        # Lightweight health probe via gRPC client
+                        try:
+                            if hasattr(self, '_client') and self._client is not None:
+                                _probe = self._client.get_joint_position()
+                                if not _probe.available:
+                                    self.log("Health probe: server unavailable — attempting restart", "WARNING")
+                                    if hasattr(self._client, '_attempt_server_restart'):
+                                        self._client._attempt_server_restart()
+                        except Exception as _probe_err:
+                            self.log(f"Health probe failed: {_probe_err}", "WARNING")
 
                 task_name = task.get("task_name", f"task_{task_idx}")
                 if "task_name" not in task or not task.get("task_name"):
                     task["task_name"] = task_name
                 self.log(f"\nTask {task_idx + 1}/{len(tasks)}: {task_name}")
+
+                # Reset per-task stall budget so earlier stalls don't penalize later tasks
+                self._stall_count = 0
 
                 # Configure environment for task
                 self._configure_task(task, scene_config)
@@ -4257,18 +4311,30 @@ class GenieSimLocalFramework:
                     try:
                         # Reset environment
                         reset_result = self._client.reset_environment()
-                        if not reset_result.available:
-                            error_message = (
-                                f"Reset unavailable before episode: {reset_result.error}"
+                        if not reset_result.available or not reset_result.success:
+                            _reset_err = reset_result.error or "Reset failed"
+                            self.log(
+                                f"Reset failed before episode {ep_idx}: {_reset_err} — "
+                                "attempting server restart",
+                                "WARNING",
                             )
-                            result.errors.append(error_message)
-                            self.log(error_message, "ERROR")
-                            return result
-                        if not reset_result.success:
-                            error_message = reset_result.error or "Reset failed before episode."
-                            result.errors.append(error_message)
-                            self.log(error_message, "ERROR")
-                            return result
+                            result.warnings.append(f"Reset failed: {_reset_err}")
+                            self.stop_server()
+                            if not self.start_server(scene_usd_path=scene_usd_path):
+                                result.errors.append(
+                                    "Server restart failed after reset failure"
+                                )
+                                return result
+                            # Re-init robot on fresh server
+                            _reinit = self._client.init_robot(
+                                robot_type=robot_cfg_file,
+                                base_pose=base_pose,
+                                scene_usd_path=scene_usd,
+                            )
+                            if not _reinit.success:
+                                self.log(f"Re-init after reset recovery: {_reinit.error}", "WARNING")
+                            time.sleep(self.config.stall_backoff_s if self.config.stall_backoff_s > 0 else 5)
+                            continue  # retry this episode with fresh server
 
                         # Generate and execute trajectory
                         episode_result = self._run_single_episode(
@@ -4366,6 +4432,13 @@ class GenieSimLocalFramework:
                     except Exception as e:
                         result.warnings.append(f"Episode {ep_idx} of {task_name} error: {e}")
                         self.log(f"  Episode {ep_idx} error: {e}", "WARNING")
+
+                # Checkpoint: record this task as completed for retry resume
+                _completed_task_names.add(task_name)
+                try:
+                    _checkpoint_path.write_text(json.dumps(sorted(_completed_task_names)))
+                except Exception:
+                    pass
 
                 if timed_out:
                     break

@@ -298,6 +298,22 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 22. **Zero-pose objects excluded from observations**: `_get_object_pose_raw()` now returns `None` (instead of the zero-pose dict) when all position components are zero, preventing corrupted data from entering the dataset. The observation builder already handles `None` by skipping the object.
 23. **Server auto-restart on UNAVAILABLE**: Three-layer resilience: (a) `start_geniesim_server.sh` now has a restart loop (max `GENIESIM_MAX_SERVER_RESTARTS`, default 3) that automatically relaunches the server process if it crashes; (b) client-side `_attempt_server_restart()` runs `docker restart geniesim-server` when the circuit breaker opens (enabled by default, disable with `GENIESIM_AUTO_RESTART=0`), with 5-min cooldown and max `GENIESIM_MAX_RESTARTS` (default 3); (c) inter-task delay (`GENIESIM_INTER_TASK_DELAY_S`, default 5s) with health probe before each task — if probe fails, triggers restart.
 24. **EE pose patch broadened**: Primary regex now uses `.*?` (was `[^)]*`) to cross newlines and handles N-variable unpacking (`pos, rot, extra = ...`). Fallback catches all exceptions (was only ValueError/TypeError). Added monkey-patch wrapper on `robot.get_ee_pose` that always returns exactly 2 values, injected after `self.robot` assignment in `init_robot`.
+25. **Stall count reset per task**: `_stall_count` now resets to 0 at the start of each task, so stalls in earlier tasks don't consume the budget for later tasks.
+26. **Proactive server restart every N tasks**: Set `GENIESIM_RESTART_EVERY_N_TASKS=3` to automatically stop and restart the server (with robot re-init) every N tasks. Prevents GPU/RAM resource exhaustion that causes DEADLINE_EXCEEDED cascade on task 4+. Default `0` (disabled).
+27. **Resilient reset failure handling**: When `reset_environment()` fails or returns unavailable, the pipeline now attempts a server restart + robot re-init and retries the episode, instead of aborting all remaining tasks.
+28. **Camera re-warmup option**: Set `CAMERA_REWARMUP_ON_RESET=1` to re-run Replicator warmup frames on every camera capture call. Fixes intermittent camera data after the first observation (render pipeline may go stale after physics reset). Default `0` (disabled).
+29. **Task checkpoint/resume on retry**: Completed tasks are saved to `_completed_tasks.json` in the run directory. When the pipeline retries (via `_run_with_retry`), it reuses the same run directory (hash-based naming) and skips already-completed tasks instead of restarting from task 1.
+30. **Health probe bug confirmed fixed**: The inter-task health probe correctly uses `self._client.get_joint_position()` (not `self.get_joint_position()`). No change needed — was already correct in deployed code.
+
+## Remaining Known Issues
+
+1. **Object poses still all zeros**: The server returns identity poses for ALL objects. The fuzzy prim path matcher (fix 21) resolves paths correctly, but the underlying issue is that the Genie Sim server may not load scene objects from `scene_usd_path` into its simulation stage — it likely only loads the robot. **Next step**: Investigate how the upstream server's `init_robot` loads scene USD. May need a separate `load_scene` or `add_reference` API call, or a server-side patch to `_setup_scene()` in `command_controller.py`.
+
+2. **Server resource exhaustion on long runs**: After ~4 tasks (~25 min), the Isaac Sim process accumulates GPU/RAM usage and trajectory execution hits DEADLINE_EXCEEDED consistently. The server doesn't crash but becomes unresponsive. **Mitigation**: Use `GENIESIM_RESTART_EVERY_N_TASKS=3` (fix 26). **Next step**: Profile GPU/RAM with `nvidia-smi` and `/proc/meminfo` during a run to confirm resource exhaustion hypothesis.
+
+3. **Camera data intermittent after first observation**: First observation includes camera frames, subsequent ones may not. Likely caused by Replicator render pipeline going stale after trajectory reset. **Mitigation**: Set `CAMERA_REWARMUP_ON_RESET=1` (fix 28). **Next step**: Verify whether `rep.orchestrator.step()` needs to be called after physics resets to re-sync the render pipeline.
+
+4. **cuRobo API version mismatch**: cuRobo planner fails with `'TensorDeviceType' object has no attribute 'mesh'` (Isaac Sim 4.5 vs cuRobo version mismatch). IK fallback trajectory works as alternative. **Next step**: Pin cuRobo version compatible with Isaac Sim 4.5 in Dockerfile.
 
 ## Running Pipeline Client Inside Container
 
@@ -339,7 +355,7 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
 - **Object poses**: Improved fuzzy matching with multi-candidate scoring; zero-pose objects now excluded from observations (returned as None). Server-side prim resolution logs candidates. If objects still return zeros, check `[PATCH] Prim path` and `[DIAG]` log lines to compare requested paths vs actual stage contents.
 - **EE pose**: Monkey-patch wrapper ensures safe 2-value return; regex broadened for N-variable unpacking. Previously intermittent, should now be fully handled.
 - **Trajectory**: IK fallback works; cuRobo planner has API version mismatch
-- **Task progression**: Pipeline advances through tasks with auto-restart on server crash. Server startup script has restart loop (max 3). Client triggers `docker restart` when circuit breaker opens. Inter-task health probe detects failures early.
+- **Task progression**: Pipeline advances through tasks with auto-restart on server crash. Server startup script has restart loop (max 3). Client triggers `docker restart` when circuit breaker opens. Inter-task health probe detects failures early. Completed tasks are checkpointed so retries skip them. Stall budget resets per task. Proactive server restart available via `GENIESIM_RESTART_EVERY_N_TASKS`.
 
 ## Pipeline Step Names
 
@@ -373,3 +389,5 @@ Full list: `regen3d, scale, interactive, simready, usd, inventory-enrichment, re
 | `GENIESIM_INTER_TASK_DELAY_S` | Delay in seconds between tasks with health probe (default: `5`) | Export before pipeline run |
 | `GENIESIM_MAX_SERVER_RESTARTS` | Max server-side process restarts in startup script (default: `3`) | Dockerfile / export |
 | `GENIESIM_RESTART_CMD` | Command to restart server container (default: `sudo docker restart geniesim-server`) | Export before pipeline run |
+| `GENIESIM_RESTART_EVERY_N_TASKS` | Proactive server restart every N tasks to prevent resource exhaustion (default: `0` = disabled) | Export before pipeline run |
+| `CAMERA_REWARMUP_ON_RESET` | Re-run camera warmup frames on every capture (default: `0` = disabled) | Dockerfile / export |

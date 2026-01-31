@@ -116,6 +116,10 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
             # Warm-up: Replicator annotators need several frames before
             # returning valid data.  Run extra steps on first use.
+            # When CAMERA_REWARMUP_ON_RESET=1, re-warm cameras every call
+            # to handle render pipeline staleness after physics resets.
+            if _os.environ.get("CAMERA_REWARMUP_ON_RESET", "0") == "1":
+                cls._bp_warmup_done.discard(camera_prim_path)
             if camera_prim_path not in cls._bp_warmup_done:
                 _warmup_steps = int(_os.environ.get("CAMERA_WARMUP_STEPS", "5"))
                 print(f"[PATCH] Warming up camera {camera_prim_path} ({_warmup_steps} frames)...")
