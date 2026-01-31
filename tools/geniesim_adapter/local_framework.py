@@ -1868,14 +1868,19 @@ class GenieSimGRPCClient:
         import struct as _struct
         import base64 as _b64
 
-        # --- 1. Real joint positions ---
+        # --- 1. Real joint positions, velocities, and efforts ---
         joint_positions = []
         joint_names = []
+        joint_velocities = []
+        joint_efforts = []
         try:
             jp_result = self.get_joint_position()
             if jp_result.success and jp_result.payload is not None:
                 joint_positions = list(jp_result.payload)
                 joint_names = list(self._joint_names) if self._joint_names else []
+                # get_joint_position() now also stores velocities and efforts
+                joint_velocities = getattr(self, "_latest_joint_velocities", [])
+                joint_efforts = getattr(self, "_latest_joint_efforts", [])
         except Exception as exc:
             logger.warning(f"[OBS] get_joint_position failed: {exc}")
 
@@ -1918,24 +1923,33 @@ class GenieSimGRPCClient:
                     logger.warning(f"[OBS] No object pose for any variant of {prim_path} (tried: {_candidates})")
 
         # --- 4. Camera images ---
-        # The server's CameraService.get_camera_data dispatches to
-        # Command.GET_CAMERA_DATA (=1) which is NOT handled in on_command_step,
-        # causing a ValueError that kills the gRPC thread and the entire server.
-        # Camera capture requires either:
-        #   (a) Patching the Docker container's command_controller.py to handle
-        #       GET_CAMERA_DATA, or
-        #   (b) Starting the server with --publish_ros and subscribing to ROS
-        #       camera topics (requires ROS infrastructure on client).
-        # For now, camera_frames will be an empty dict; all frames get the key
-        # so quality checks don't fail on missing required observation fields.
+        # Requires patched server (see deployment/patches/patch_camera_handler.py).
+        # On unpatched servers, get_camera_data returns None and we fall back gracefully.
         camera_images = []
-        if not hasattr(self, "_camera_warning_logged"):
-            logger.warning(
-                "[OBS] Camera capture is DISABLED. To enable: "
-                "(1) patch Docker server to handle GET_CAMERA_DATA, or "
-                "(2) start server with --publish_ros and configure ROS subscriber."
-            )
-            self._camera_warning_logged = True
+        if self._channel is not None:
+            _cam_prims = list(self._camera_prim_map.values()) if self._camera_prim_map else []
+            if not _cam_prims:
+                _cam_prims = self._default_camera_ids  # logical names used as-is
+            for _cam_prim in _cam_prims:
+                try:
+                    cam_data = self._get_camera_data_raw(_cam_prim)
+                    if cam_data is not None:
+                        # Find logical name for this prim
+                        _cam_name = _cam_prim
+                        for _logical, _prim in self._camera_prim_map.items():
+                            if _prim == _cam_prim:
+                                _cam_name = _logical
+                                break
+                        camera_images.append({"camera_id": _cam_name, **cam_data})
+                except Exception as exc:
+                    if not hasattr(self, "_camera_warning_logged"):
+                        logger.warning(
+                            "[OBS] Camera capture failed for %s: %s. "
+                            "Server may need the camera handler patch "
+                            "(see deployment/patches/patch_camera_handler.py).",
+                            _cam_prim, exc,
+                        )
+                        self._camera_warning_logged = True
 
         # --- Timestamp ---
         mono_ns = _time.monotonic_ns()
@@ -1959,9 +1973,13 @@ class GenieSimGRPCClient:
             "success": True,
             "robot_state": {
                 "joint_positions": joint_positions,
+                "joint_velocities": joint_velocities,
+                "joint_efforts": joint_efforts,
                 "joint_state": {
                     "names": joint_names,
                     "positions": joint_positions,
+                    "velocities": joint_velocities,
+                    "efforts": joint_efforts,
                 },
                 "ee_pose": ee_pose,
             },
@@ -2383,8 +2401,13 @@ class GenieSimGRPCClient:
             )
         joint_names = [state.name for state in response.states]
         joint_positions = [state.position for state in response.states]
+        joint_velocities = [state.velocity for state in response.states]
+        joint_efforts = [state.effort for state in response.states]
         if joint_names:
             self._joint_names = joint_names
+        # Store velocities and efforts for use in observation composition
+        self._latest_joint_velocities = joint_velocities
+        self._latest_joint_efforts = joint_efforts
         return GrpcCallResult(
             success=bool(joint_positions),
             available=True,
@@ -3804,6 +3827,46 @@ class GenieSimLocalFramework:
                 self._client._camera_prim_map = _G1_CAMERA_MAP
             self.log(f"Camera prim map: {self._client._camera_prim_map}")
 
+            # Populate scene object prim paths for real object pose queries.
+            # Derive USD prim paths from scene_graph nodes or task_config objects.
+            _scene_obj_prims: List[str] = []
+            _sg_nodes = (scene_config or {}).get("nodes", [])
+            if not _sg_nodes:
+                _sg_nodes = task_config.get("nodes", [])
+            for _node in _sg_nodes:
+                _asset_id = _node.get("asset_id", "")
+                _usd_path = _node.get("usd_path", "")
+                # Derive USD stage prim path from asset file name
+                # e.g. ".../obj_Pot057/Pot057.usd" → "/World/Pot057"
+                if _usd_path:
+                    _stem = Path(_usd_path).stem  # "Pot057"
+                    _prim = f"/World/{_stem}"
+                elif _asset_id:
+                    # Strip scene prefix: "lightwheel_kitchen_obj_Pot057" → "Pot057"
+                    _parts = _asset_id.split("_obj_")
+                    _prim = f"/World/{_parts[-1]}" if len(_parts) > 1 else f"/World/{_asset_id}"
+                else:
+                    continue
+                _scene_obj_prims.append(_prim)
+            # Also add objects from task_config's suggested_tasks
+            for _t in task_config.get("suggested_tasks", []):
+                _target = _t.get("target_object", "")
+                if _target:
+                    _parts = _target.split("_obj_")
+                    _prim = f"/World/{_parts[-1]}" if len(_parts) > 1 else f"/World/{_target}"
+                    if _prim not in _scene_obj_prims:
+                        _scene_obj_prims.append(_prim)
+                _goal = _t.get("goal_region", "")
+                if _goal:
+                    _prim = f"/World/{_goal}"
+                    if _prim not in _scene_obj_prims:
+                        _scene_obj_prims.append(_prim)
+            self._client._scene_object_prims = _scene_obj_prims
+            if _scene_obj_prims:
+                self.log(f"Scene object prims for real pose queries: {_scene_obj_prims}")
+            else:
+                self.log("No scene object prims found — object poses will be synthetic", "WARNING")
+
             episodes_target = episodes_per_task or self.config.episodes_per_task
             tasks = task_config.get("suggested_tasks", [task_config])
             # Inject top-level config context into each task for enrichment fallbacks
@@ -4875,11 +4938,12 @@ class GenieSimLocalFramework:
                         "ee_pos": "isaac_sim_fk" if _server_ee_frame_count > 0 else "analytic_fk",
                         "ee_quat": "isaac_sim_fk" if _server_ee_frame_count > 0 else "analytic_fk",
                         "ee_rot6d": "derived_from_ee_quat",
-                        "joint_velocities": "finite_difference",
+                        "joint_velocities": "physx_server" if _real_velocity_count > 0 else "finite_difference",
                         "joint_accelerations": "finite_difference_smoothed",
+                        "joint_efforts": "physx_server" if _real_effort_count > 0 else "unavailable",
                         "ee_vel": "finite_difference",
                         "ee_acc": "finite_difference",
-                        "contact_forces": "heuristic_grasp_model_v1",
+                        "contact_forces": "physx_joint_effort" if _real_effort_count > 0 else "heuristic_grasp_model_v1",
                         "camera_frames": "isaac_sim_camera" if _camera_frame_count > 0 else "unavailable",
                         "task_description": "task_config_hint",
                         "scene_state": "physx_server" if _real_scene_state_count > 0 else "synthetic_from_task_config",
@@ -4888,14 +4952,17 @@ class GenieSimLocalFramework:
                         "server_ee_frames": f"{_server_ee_frame_count}/{len(frames)}",
                         "real_scene_state_frames": f"{_real_scene_state_count}/{len(frames)}",
                         "camera_capture_frames": f"{_camera_frame_count}/{len(frames)}",
+                        "real_velocity_frames": f"{_real_velocity_count}/{len(frames)}",
+                        "real_effort_frames": f"{_real_effort_count}/{len(frames)}",
                     },
                     "channel_confidence": {
                         "joint_positions": 1.0,
                         "ee_pos": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.7,
                         "ee_quat": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.7,
-                        "joint_velocities": 0.8,
+                        "joint_velocities": 0.98 if _real_velocity_count > 0 else 0.7,
                         "joint_accelerations": 0.6,
-                        "contact_forces": 0.2,
+                        "joint_efforts": 0.95 if _real_effort_count > 0 else 0.0,
+                        "contact_forces": 0.9 if _real_effort_count > 0 else 0.2,
                         "scene_state": 0.95 if _real_scene_state_count > 0 else 0.3,
                         "camera_frames": 0.95 if _camera_frame_count > 0 else 0.0,
                     },
@@ -5130,6 +5197,8 @@ class GenieSimLocalFramework:
         _server_ee_frame_count = 0  # Track how many frames used server EE pose
         _real_scene_state_count = 0  # Track how many frames had real scene state
         _camera_frame_count = 0  # Track how many frames had camera data
+        _real_velocity_count = 0  # Track how many frames had real PhysX velocities
+        _real_effort_count = 0  # Track how many frames had real PhysX joint efforts
         self._prev_server_ee_pos = None  # Reset for each episode
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
@@ -5315,6 +5384,12 @@ class GenieSimLocalFramework:
                 _real_scene_state_count += 1
             if obs.get("camera_frames"):
                 _camera_frame_count += 1
+            _rs_vel = robot_state.get("joint_velocities", [])
+            if _rs_vel and any(abs(v) > 1e-10 for v in _rs_vel):
+                _real_velocity_count += 1
+            _rs_eff = robot_state.get("joint_efforts", [])
+            if _rs_eff and any(abs(e) > 1e-6 for e in _rs_eff):
+                _real_effort_count += 1
 
             # Fix 6: Quaternion normalization, hemisphere continuity, and 6D rotation
             if frame_data.get("ee_quat"):
@@ -5446,26 +5521,48 @@ class GenieSimLocalFramework:
                             }
                             break
 
-                # Contact force estimation (Improvement J)
-                _obj_type = ""
-                for _obj in obs.get("scene_state", {}).get("objects", []):
-                    if _obj.get("object_id") == _attached_object_id:
-                        _obj_type = (_obj.get("object_type") or "").lower()
-                        break
-                _mass = _OBJECT_MASSES.get(_obj_type, 0.3)
-                _weight = _mass * 9.81
-                _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
-                frame_data["contact_forces"] = {
-                    "weight_force_N": round(_weight, 2),
-                    "grip_force_N": round(_grip_force, 2),
-                    "force_sufficient": _grip_force >= _weight,
-                    "grasped_object_id": _attached_object_id,
-                }
+                # Contact force estimation: prefer real joint efforts from PhysX
+                _real_efforts = robot_state.get("joint_efforts", [])
+                _has_real_efforts = (
+                    _real_efforts
+                    and len(_real_efforts) > arm_dof
+                    and any(abs(e) > 1e-6 for e in _real_efforts)
+                )
+                if _has_real_efforts:
+                    # Real PhysX joint torques available
+                    _gripper_efforts = _real_efforts[arm_dof:]  # gripper joint efforts
+                    _grip_force_real = sum(abs(e) for e in _gripper_efforts)
+                    _arm_efforts = _real_efforts[:arm_dof]
+                    frame_data["contact_forces"] = {
+                        "grip_force_N": round(_grip_force_real, 4),
+                        "arm_torques_Nm": [round(e, 4) for e in _arm_efforts],
+                        "gripper_efforts_N": [round(e, 4) for e in _gripper_efforts],
+                        "grasped_object_id": _attached_object_id,
+                        "force_sufficient": _grip_force_real > 0.5,
+                    }
+                else:
+                    # Fallback: heuristic grasp model
+                    _obj_type = ""
+                    for _obj in obs.get("scene_state", {}).get("objects", []):
+                        if _obj.get("object_id") == _attached_object_id:
+                            _obj_type = (_obj.get("object_type") or "").lower()
+                            break
+                    _mass = _OBJECT_MASSES.get(_obj_type, 0.3)
+                    _weight = _mass * 9.81
+                    _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
+                    frame_data["contact_forces"] = {
+                        "weight_force_N": round(_weight, 2),
+                        "grip_force_N": round(_grip_force, 2),
+                        "force_sufficient": _grip_force >= _weight,
+                        "grasped_object_id": _attached_object_id,
+                    }
 
             # Add provenance to contact forces
             if "contact_forces" in frame_data:
-                frame_data["contact_forces"]["provenance"] = "heuristic_grasp_model_v1"
-                frame_data["contact_forces"]["confidence"] = 0.2
+                _real_efforts = robot_state.get("joint_efforts", [])
+                _has_real = _real_efforts and any(abs(e) > 1e-6 for e in _real_efforts)
+                frame_data["contact_forces"]["provenance"] = "physx_joint_effort" if _has_real else "heuristic_grasp_model_v1"
+                frame_data["contact_forces"]["confidence"] = 0.9 if _has_real else 0.2
 
             # Detect release: gripper opens while holding object
             if frame_data.get("gripper_command") == "open" and _attached_object_id is not None:
@@ -5547,10 +5644,24 @@ class GenieSimLocalFramework:
         _FRANKA_ACC_LIMITS = np.array([15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0, 10.0, 10.0])
 
         # Second pass: compute joint velocities, accelerations, and EE velocities
+        # Prefer real PhysX velocities from server; fall back to finite difference.
+        _used_real_velocities = False
         for i, frame in enumerate(frames):
             obs_rs = frame.get("observation", {}).get("robot_state", {})
+            # Check if real velocities from PhysX are available in this frame
+            _real_vel = obs_rs.get("joint_velocities", [])
+            _has_real_vel = (
+                isinstance(_real_vel, list)
+                and len(_real_vel) > 0
+                and any(abs(v) > 1e-10 for v in _real_vel)
+            )
             if i == 0:
-                obs_rs["joint_velocities"] = [0.0] * len(obs_rs.get("joint_positions", []))
+                if _has_real_vel:
+                    # Use real velocities but still set zero for first frame
+                    obs_rs["joint_velocities"] = _real_vel
+                    _used_real_velocities = True
+                else:
+                    obs_rs["joint_velocities"] = [0.0] * len(obs_rs.get("joint_positions", []))
                 obs_rs["joint_accelerations"] = [0.0] * len(obs_rs.get("joint_positions", []))
                 if frame.get("ee_pos"):
                     frame["ee_vel"] = [0.0, 0.0, 0.0]
@@ -5558,7 +5669,19 @@ class GenieSimLocalFramework:
             else:
                 prev = frames[i - 1]
                 dt = frame["timestamp"] - prev["timestamp"]
-                if dt > 0:
+                if _has_real_vel:
+                    # Use real PhysX velocities directly
+                    _used_real_velocities = True
+                    _jv_clamped = np.array(_real_vel, dtype=float)
+                    # Still clamp to safety limits
+                    if _jv_clamped.size <= len(_FRANKA_VEL_LIMITS):
+                        _vel_lim = _FRANKA_VEL_LIMITS[:_jv_clamped.size]
+                    else:
+                        _vel_lim = np.full(_jv_clamped.size, _FRANKA_VEL_LIMITS[-1])
+                        _vel_lim[:len(_FRANKA_VEL_LIMITS)] = _FRANKA_VEL_LIMITS
+                    _jv_clamped = np.clip(_jv_clamped, -_vel_lim, _vel_lim)
+                    obs_rs["joint_velocities"] = _jv_clamped.tolist()
+                elif dt > 0:
                     jp_curr = np.array(obs_rs.get("joint_positions", []), dtype=float)
                     jp_prev = np.array(
                         prev.get("observation", {}).get("robot_state", {}).get("joint_positions", []),

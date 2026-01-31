@@ -74,6 +74,13 @@ RUN git clone --depth 1 https://github.com/NVlabs/curobo.git /opt/curobo \
 # ----- ROS 2 environment for rclpy -----
 ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
+# ----- BlueprintPipeline server patches -----
+# Patch the Genie Sim server to handle GET_CAMERA_DATA commands (prevents
+# server crash when CameraService.get_camera_data is called via gRPC).
+COPY tools/geniesim_adapter/deployment/patches/ /tmp/patches/
+RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_camera_handler.py \
+    && rm -rf /tmp/patches
+
 # Mark that this is a pre-baked image (used by bootstrap fast-path)
 RUN touch /opt/.geniesim-prebaked
 
