@@ -172,6 +172,8 @@ def patch_file():
             f"{body_indent}# BlueprintPipeline camera patch\n"
             f"{body_indent}if self.Command == Command.GET_CAMERA_DATA:\n"
             f"{deeper}self.handle_get_camera_data()\n"
+            f"{deeper}with self.condition:\n"
+            f"{deeper}    self.condition.notify_all()\n"
             f"{deeper}return\n"
         )
         patched = patched[:insert_pos] + dispatch + patched[insert_pos:]
