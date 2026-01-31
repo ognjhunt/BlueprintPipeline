@@ -294,6 +294,10 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 18. **Safe float parsing for unit-suffixed values**: Server-side `float(_pos[i])` fails when USD prim attributes contain unit suffixes like `"1.5 m"`. Injected `_bp_safe_float()` helper into `grpc_server.py` that strips non-numeric suffixes before conversion. Applied via `_apply_safe_float.py` patch.
 19. **Path translation always uses container paths**: Previously, `os.path.exists()` check meant the translation was skipped when running on the VM host (where the path exists locally). Now always translates absolute paths containing `BlueprintPipeline/` to `/workspace/BlueprintPipeline/...` container paths, since the server always runs in Docker.
 20. **Pipeline advances through multiple tasks**: With fixes 17-19, the pipeline successfully advanced from Task 1/7 through Task 3/7 before the server became UNAVAILABLE (server-side stability issue). Task 1 achieved `task_success=True` and completed in ~3.5 min instead of looping indefinitely.
+21. **Object pose fuzzy matcher improved**: `_bp_resolve_prim_path()` now collects ALL candidate prims with matching tail name and scores them: prefers `UsdGeom.Xformable` prims (+100), prims under `/World/` (+50), shorter paths. Falls back to case-insensitive substring matching if exact tail-name match fails. Client-side also tries `/Root/` prefix and stripped `/World/` prefix variants, with successful resolutions cached in `_resolved_prim_cache`.
+22. **Zero-pose objects excluded from observations**: `_get_object_pose_raw()` now returns `None` (instead of the zero-pose dict) when all position components are zero, preventing corrupted data from entering the dataset. The observation builder already handles `None` by skipping the object.
+23. **Server auto-restart on UNAVAILABLE**: Three-layer resilience: (a) `start_geniesim_server.sh` now has a restart loop (max `GENIESIM_MAX_SERVER_RESTARTS`, default 3) that automatically relaunches the server process if it crashes; (b) client-side `_attempt_server_restart()` runs `docker restart geniesim-server` when the circuit breaker opens (enabled by default, disable with `GENIESIM_AUTO_RESTART=0`), with 5-min cooldown and max `GENIESIM_MAX_RESTARTS` (default 3); (c) inter-task delay (`GENIESIM_INTER_TASK_DELAY_S`, default 5s) with health probe before each task — if probe fails, triggers restart.
+24. **EE pose patch broadened**: Primary regex now uses `.*?` (was `[^)]*`) to cross newlines and handles N-variable unpacking (`pos, rot, extra = ...`). Fallback catches all exceptions (was only ValueError/TypeError). Added monkey-patch wrapper on `robot.get_ee_pose` that always returns exactly 2 values, injected after `self.robot` assignment in `init_robot`.
 
 ## Running Pipeline Client Inside Container
 
@@ -332,10 +336,10 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
 ### Current data quality (as of 2026-01-31)
 - **Joint positions**: Working (real data from server)
 - **Camera images**: 1 camera working (wrist), returns frames via GET_CAMERA_DATA patch
-- **Object poses**: All return identity (0,0,0) — scene objects not loaded in simulation stage. Container path translation now correct but server still doesn't load scene objects.
-- **EE pose**: Server-side unpacking error (non-fatal, client uses fallback)
+- **Object poses**: Improved fuzzy matching with multi-candidate scoring; zero-pose objects now excluded from observations (returned as None). Server-side prim resolution logs candidates. If objects still return zeros, check `[PATCH] Prim path` and `[DIAG]` log lines to compare requested paths vs actual stage contents.
+- **EE pose**: Monkey-patch wrapper ensures safe 2-value return; regex broadened for N-variable unpacking. Previously intermittent, should now be fully handled.
 - **Trajectory**: IK fallback works; cuRobo planner has API version mismatch
-- **Task progression**: Pipeline now advances through tasks (previously stuck on task 1 forever). Server becomes UNAVAILABLE after ~3 tasks due to Isaac Sim stability issues.
+- **Task progression**: Pipeline advances through tasks with auto-restart on server crash. Server startup script has restart loop (max 3). Client triggers `docker restart` when circuit breaker opens. Inter-task health probe detects failures early.
 
 ## Pipeline Step Names
 
@@ -364,3 +368,8 @@ Full list: `regen3d, scale, interactive, simready, usd, inventory-enrichment, re
 | `GENIESIM_SKIP_ROS_RECORDING` | Set to `1` to skip `--publish_ros` (default in Docker) | Dockerfile / export |
 | `CAMERA_RESOLUTION` | Camera resolution `WxH` (default: `1280x720`) | Dockerfile / export |
 | `CAMERA_WARMUP_STEPS` | Replicator warmup frames before valid camera data (default: `5`) | Dockerfile / export |
+| `GENIESIM_AUTO_RESTART` | Auto-restart server on circuit breaker open (default: `1`, set `0` to disable) | Export before pipeline run |
+| `GENIESIM_MAX_RESTARTS` | Max client-side container restarts per session (default: `3`) | Export before pipeline run |
+| `GENIESIM_INTER_TASK_DELAY_S` | Delay in seconds between tasks with health probe (default: `5`) | Export before pipeline run |
+| `GENIESIM_MAX_SERVER_RESTARTS` | Max server-side process restarts in startup script (default: `3`) | Dockerfile / export |
+| `GENIESIM_RESTART_CMD` | Command to restart server container (default: `sudo docker restart geniesim-server`) | Export before pipeline run |

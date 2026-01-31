@@ -1069,6 +1069,9 @@ class GenieSimGRPCClient:
             self.host,
             self.port,
         )
+        # Auto-restart server container when circuit breaker opens
+        if os.environ.get("GENIESIM_AUTO_RESTART", "1") != "0":
+            self._attempt_server_restart()
 
     def _on_circuit_half_open(self, name: str) -> None:
         logger.info(
@@ -1085,6 +1088,73 @@ class GenieSimGRPCClient:
             self.host,
             self.port,
         )
+
+    def _attempt_server_restart(self) -> bool:
+        """Attempt to restart the Docker container running the Genie Sim server.
+
+        Returns True if restart succeeded and gRPC became available again.
+        Respects cooldown (5 min between restarts) and max restart count.
+        """
+        import time as _time
+        import subprocess as _sp
+
+        max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "3"))
+        cooldown_s = 300  # 5 minutes between restarts
+
+        if not hasattr(self, "_restart_count"):
+            self._restart_count = 0
+            self._last_restart_time = 0.0
+
+        if self._restart_count >= max_restarts:
+            logger.warning("[RESTART] Max client-side restarts (%d) reached — not restarting", max_restarts)
+            return False
+
+        now = _time.time()
+        if now - self._last_restart_time < cooldown_s:
+            logger.info("[RESTART] Cooldown active (%.0fs remaining) — skipping restart",
+                        cooldown_s - (now - self._last_restart_time))
+            return False
+
+        restart_cmd = os.environ.get(
+            "GENIESIM_RESTART_CMD",
+            "sudo docker restart geniesim-server",
+        )
+        logger.warning("[RESTART] Attempting server restart (#%d): %s", self._restart_count + 1, restart_cmd)
+
+        try:
+            result = _sp.run(restart_cmd, shell=True, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                logger.error("[RESTART] Restart command failed (rc=%d): %s", result.returncode, result.stderr.strip())
+                return False
+            logger.info("[RESTART] Container restart command succeeded")
+        except Exception as exc:
+            logger.error("[RESTART] Restart command exception: %s", exc)
+            return False
+
+        self._restart_count += 1
+        self._last_restart_time = _time.time()
+
+        # Poll for gRPC readiness (up to 90s)
+        logger.info("[RESTART] Waiting for gRPC to become available...")
+        for _attempt in range(18):  # 18 * 5s = 90s
+            _time.sleep(5)
+            try:
+                if self._channel is not None:
+                    self._channel.close()
+                self._channel = grpc.insecure_channel(f"{self.host}:{self.port}")
+                # Try a lightweight call
+                future = grpc.channel_ready_future(self._channel)
+                future.result(timeout=5)
+                logger.info("[RESTART] gRPC channel ready after restart")
+                # Reset circuit breaker
+                if hasattr(self._circuit_breaker, 'reset'):
+                    self._circuit_breaker.reset()
+                return True
+            except Exception:
+                continue
+
+        logger.error("[RESTART] gRPC not available after 90s — restart may have failed")
+        return False
 
     def _grpc_unavailable(self, method_name: str, reason: str) -> GrpcCallResult:
         if method_name not in self._grpc_unavailable_logged:
@@ -1931,12 +2001,23 @@ class GenieSimGRPCClient:
         object_prims = getattr(self, "_scene_object_prims", [])
         if object_prims and self._channel is not None:
             for prim_path in object_prims:
-                # Try the prim path as-is and with common prefixes
-                _candidates = [prim_path]
-                if not prim_path.startswith("/World/"):
-                    _candidates.append(f"/World/{prim_path}")
-                if not prim_path.startswith("/"):
-                    _candidates.append(f"/{prim_path}")
+                # Check resolved prim cache first
+                if not hasattr(self, "_resolved_prim_cache"):
+                    self._resolved_prim_cache: Dict[str, str] = {}
+                if prim_path in self._resolved_prim_cache:
+                    _candidates = [self._resolved_prim_cache[prim_path]]
+                else:
+                    # Try the prim path as-is and with common prefixes
+                    _candidates = [prim_path]
+                    if not prim_path.startswith("/World/"):
+                        _candidates.append(f"/World/{prim_path}")
+                    if prim_path.startswith("/World/"):
+                        # Strip /World/ prefix and try bare name
+                        _bare = prim_path[len("/World/"):]
+                        _candidates.append(f"/{_bare}")
+                        _candidates.append(f"/Root/{_bare}")
+                    if not prim_path.startswith("/"):
+                        _candidates.append(f"/{prim_path}")
                 _found = False
                 for _candidate in _candidates:
                     try:
@@ -1947,6 +2028,9 @@ class GenieSimGRPCClient:
                                 "pose": obj_pose,
                             })
                             _found = True
+                            # Cache successful resolution
+                            if _candidate != prim_path:
+                                self._resolved_prim_cache[prim_path] = _candidate
                             logger.info(f"[OBS] Got real object pose for {_candidate}: {obj_pose}")
                             break
                     except Exception as exc:
@@ -2059,8 +2143,9 @@ class GenieSimGRPCClient:
             ):
                 logger.warning(
                     f"[OBS] get_object_pose({prim_path}): returned identity/zero pose — "
-                    f"object may not be loaded in simulation"
+                    f"object may not be loaded in simulation (returning None)"
                 )
+                return None
             return pose
         except Exception as exc:
             logger.warning(f"[OBS] raw get_object_pose({prim_path}) failed: {exc}")
@@ -4131,9 +4216,28 @@ class GenieSimLocalFramework:
             run_dir = self.config.recording_dir / f"run_{run_id}"
             run_dir.mkdir(parents=True, exist_ok=True)
 
+            _inter_task_delay = float(os.environ.get("GENIESIM_INTER_TASK_DELAY_S", "5"))
+
             for task_idx, task in enumerate(tasks):
                 if _timeout_exceeded():
                     break
+
+                # Inter-task delay with health probe (skip for first task)
+                if task_idx > 0 and _inter_task_delay > 0:
+                    self.log(f"Inter-task delay: {_inter_task_delay}s before task {task_idx + 1}")
+                    import time as _delay_time
+                    _delay_time.sleep(_inter_task_delay)
+                    # Lightweight health probe via gRPC client
+                    try:
+                        if hasattr(self, '_client') and self._client is not None:
+                            _probe = self._client.get_joint_position()
+                            if not _probe.available:
+                                self.log("Health probe: server unavailable — attempting restart", "WARNING")
+                                if hasattr(self._client, '_attempt_server_restart'):
+                                    self._client._attempt_server_restart()
+                    except Exception as _probe_err:
+                        self.log(f"Health probe failed: {_probe_err}", "WARNING")
+
                 task_name = task.get("task_name", f"task_{task_idx}")
                 if "task_name" not in task or not task.get("task_name"):
                     task["task_name"] = task_name

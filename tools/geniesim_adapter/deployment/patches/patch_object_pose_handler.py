@@ -4,8 +4,9 @@ Patch the Genie Sim server's command_controller.py to fix GET_OBJECT_POSE.
 
 The upstream server's handle_get_object_pose returns empty/identity poses
 because the requested prim paths don't match the actual USD stage hierarchy.
-This patch adds fuzzy path matching: if the exact path isn't found, it
-searches the stage for a prim whose name suffix matches.
+This patch adds fuzzy path matching with multi-candidate scoring: if the
+exact path isn't found, it searches the stage for prims whose name suffix
+matches, then scores candidates preferring geometric prims under /World/.
 
 Usage (inside Docker build):
     python3 /tmp/patches/patch_object_pose_handler.py
@@ -30,11 +31,15 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
     def _bp_resolve_prim_path(self, requested_path):
         \"\"\"Resolve a prim path by fuzzy matching against the USD stage.
 
-        If the exact path exists, return it.  Otherwise, search for a prim
-        whose name (last path component) matches the requested path's name.
+        If the exact path exists, return it.  Otherwise, search for prims
+        whose name (last path component) matches the requested path's name,
+        then score candidates: prefer Xformable prims under /World/ with
+        shorter paths.  Falls back to substring matching if no exact name
+        match is found.
         \"\"\"
         try:
             import omni.usd
+            from pxr import UsdGeom
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 return requested_path
@@ -44,17 +49,52 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
             if prim and prim.IsValid():
                 return requested_path
 
-            # Fuzzy match: search by name suffix
+            # Extract target name (last path component)
             target_name = requested_path.rstrip("/").rsplit("/", 1)[-1]
             if not target_name:
                 return requested_path
 
+            target_lower = target_name.lower()
+
+            # Collect candidates: exact name match and substring match
+            exact_candidates = []
+            substring_candidates = []
+
             for prim in stage.Traverse():
-                prim_name = str(prim.GetPath()).rstrip("/").rsplit("/", 1)[-1]
+                prim_path = str(prim.GetPath())
+                prim_name = prim_path.rstrip("/").rsplit("/", 1)[-1]
+
                 if prim_name == target_name:
-                    resolved = str(prim.GetPath())
-                    print(f"[PATCH] Resolved prim path: {requested_path} -> {resolved}")
-                    return resolved
+                    exact_candidates.append((prim_path, prim))
+                elif target_lower in prim_name.lower():
+                    substring_candidates.append((prim_path, prim))
+
+            # Score and pick best from exact matches first, then substring
+            def _score(path, p):
+                s = 0
+                # Prefer geometric prims (Xformable includes Mesh, Xform, etc.)
+                try:
+                    if p.IsA(UsdGeom.Xformable):
+                        s += 100
+                except Exception:
+                    pass
+                # Prefer prims under /World/
+                if path.startswith("/World/"):
+                    s += 50
+                # Prefer shorter paths (less deeply nested)
+                s -= path.count("/")
+                return s
+
+            for candidates, label in [(exact_candidates, "exact"), (substring_candidates, "substring")]:
+                if not candidates:
+                    continue
+                scored = sorted(candidates, key=lambda c: _score(c[0], c[1]), reverse=True)
+                best_path = scored[0][0]
+                if len(scored) > 1:
+                    print(f"[PATCH] Prim path {label} candidates for '{target_name}': "
+                          f"{[c[0] for c in scored[:5]]}")
+                print(f"[PATCH] Resolved prim path ({label}): {requested_path} -> {best_path}")
+                return best_path
 
             print(f"[PATCH] WARNING: Could not resolve prim path {requested_path} in stage")
         except Exception as e:
