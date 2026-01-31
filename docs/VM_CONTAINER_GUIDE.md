@@ -170,6 +170,12 @@ These are bugs in the upstream Genie Sim server code, not our pipeline:
 
 7. **ROS2 "No such file" errors**: Container uses `--publish_ros` but ROS2 Humble isn't installed in the base Isaac Sim 4.5 image. Non-fatal — only affects camera topic republishing.
 
+8. **`get_object_pose` → "too many values to unpack"**: `grpc_server.py` line 327 does `position, rotation = object_pose` but the server returns 3+ values. Fixed by `patch_grpc_server.py`.
+
+9. **`reset` → "bad argument type for built-in operation"**: `blocking_start_server` returns non-string result, but `rsp.msg` expects string. Fixed by `patch_grpc_server.py`.
+
+10. **`get_observation` recordingState**: `rsp.recordingState = result` fails when result is a dict. Fixed by `patch_grpc_server.py`.
+
 ## Recent Fixes (2026-01-31)
 
 1. **Joint name warmup**: Added `get_joint_position()` warmup during robot init to populate real joint names before `set_joint_position`. Prevents synthetic `"joint_0"` names causing server `KeyError`.

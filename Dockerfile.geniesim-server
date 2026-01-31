@@ -85,6 +85,7 @@ RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_camera_handler.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_object_pose_handler.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_ee_pose_handler.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_grpc_server.py \
     && rm -rf /tmp/patches
 
 # Mark that this is a pre-baked image (used by bootstrap fast-path)

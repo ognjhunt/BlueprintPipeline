@@ -1015,6 +1015,7 @@ class GenieSimGRPCClient:
         self._grpc_unavailable_logged: set[str] = set()
         self._camera_missing_logged: set[str] = set()
         self._first_joint_call = True  # first set_joint_position uses longer timeout
+        self._first_trajectory_call = True  # first trajectory waypoint uses longer timeout
         self._first_call_timeout = float(os.environ.get("GENIESIM_FIRST_CALL_TIMEOUT_S", "300"))
         self._circuit_breaker = CircuitBreaker(
             f"geniesim-grpc-{self.host}:{self.port}",
@@ -1518,7 +1519,9 @@ class GenieSimGRPCClient:
             request = ResetReq(reset=bool(payload.get("reset", True)))
 
             def _request() -> ResetRsp:
-                return self._stub.reset(request, timeout=self.timeout)
+                return self._stub.reset(
+                    request, timeout=max(self.timeout, self._first_call_timeout)
+                )
 
             response = self._call_grpc(
                 "reset",
@@ -1628,7 +1631,9 @@ class GenieSimGRPCClient:
             )
 
             def _request() -> InitRobotRsp:
-                return self._stub.init_robot(request, timeout=self.timeout)
+                return self._stub.init_robot(
+                    request, timeout=max(self.timeout, self._first_call_timeout)
+                )
 
             response = self._call_grpc(
                 "init_robot",
@@ -2752,7 +2757,10 @@ class GenieSimGRPCClient:
                 robot_pose=pose_message,
                 joint_cmd=joint_cmds,
             )
-            return self._stub.init_robot(request, timeout=self.timeout)
+            # init_robot loads scene USD + robot — can take >60s on first call
+            return self._stub.init_robot(
+                request, timeout=max(self.timeout, self._first_call_timeout)
+            )
 
         response = self._call_grpc(
             "init_robot",
@@ -2807,7 +2815,8 @@ class GenieSimGRPCClient:
 
         def _request() -> ResetRsp:
             request = ResetReq(reset=True)
-            return self._stub.reset(request, timeout=self.timeout)
+            # reset can be slow when server re-initializes physics
+            return self._stub.reset(request, timeout=max(self.timeout, self._first_call_timeout))
 
         response = self._call_grpc(
             "reset",
@@ -3128,16 +3137,17 @@ class GenieSimGRPCClient:
                 commands=commands,
                 is_trajectory=False,
             )
-            # Use extended timeout for the first joint command (server may
-            # still be doing lazy init even after warmup).
+            # Use extended timeout for the entire first trajectory (server
+            # does cuRobo lazy init which can block any waypoint call).
             call_timeout = self.timeout
-            if self._first_joint_call:
+            if self._first_trajectory_call:
                 call_timeout = max(self.timeout, self._first_call_timeout)
-                self._first_joint_call = False
-                logger.info(f"First set_joint_position call — using extended timeout {call_timeout}s")
+                logger.info(f"First trajectory set_joint_position — using extended timeout {call_timeout}s")
+            _req = request
+            _timeout = call_timeout
             response = self._call_grpc(
                 "set_joint_position(trajectory)",
-                lambda: self._joint_stub.set_joint_position(request, timeout=call_timeout),
+                lambda _r=_req, _t=_timeout: self._joint_stub.set_joint_position(_r, timeout=_t),
                 None,
                 success_checker=lambda resp: bool(resp.errmsg),
             )
@@ -3155,6 +3165,8 @@ class GenieSimGRPCClient:
                         time.sleep(delay)
                 last_timestamp = float(timestamp)
 
+        if self._first_trajectory_call:
+            self._first_trajectory_call = False
         return GrpcCallResult(success=True, available=True)
 
     def start_recording(self, episode_id: str, output_dir: str) -> GrpcCallResult:
