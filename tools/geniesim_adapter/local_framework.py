@@ -1215,7 +1215,8 @@ class GenieSimGRPCClient:
                 grpc.channel_ready_future(self._channel).result(timeout=self.timeout)
                 self._connected = True
                 logger.info(f"✅ Connected to Genie Sim gRPC server at {self.host}:{self.port}")
-                self._warmup_motion_server()
+                # Note: warmup removed — server crashes if get_joint_position is called
+                # before init_robot. Extended first-call timeout handles the slow init.
                 return True
             except grpc.FutureTimeoutError:
                 logger.error(f"Connection timeout after {self.timeout}s")
@@ -8717,11 +8718,16 @@ def check_geniesim_availability(config: Optional[GenieSimConfig] = None) -> Dict
         status["server_running"] = True
 
     # Overall availability
+    # If a remote server is already running and gRPC is available, we don't
+    # need local Isaac Sim or Genie Sim installations (Docker-hosted server).
     local_server_allowed = status["geniesim_installed"] or mock_allowed
+    remote_server_ready = status["server_running"] and status["grpc_available"]
     status["available"] = (
-        status["isaac_sim_available"] and
-        (status["grpc_available"] or status["server_running"]) and
-        (status["server_running"] or local_server_allowed)
+        remote_server_ready or (
+            status["isaac_sim_available"] and
+            (status["grpc_available"] or status["server_running"]) and
+            (status["server_running"] or local_server_allowed)
+        )
     )
 
     return status
@@ -8746,7 +8752,13 @@ def build_geniesim_preflight_report(
         else get_geniesim_readiness_timeout_s()
     )
 
-    if not status.get("isaac_sim_available", False):
+    # If a remote server is already running with gRPC available, we don't
+    # need local Isaac Sim or Genie Sim installations (e.g. Docker-hosted server).
+    _remote_server_ready = (
+        status.get("server_running", False) and status.get("grpc_available", False)
+    )
+
+    if not _remote_server_ready and not status.get("isaac_sim_available", False):
         missing.append("Isaac Sim runtime (ISAAC_SIM_PATH)")
         remediation.append(
             f"Set ISAAC_SIM_PATH to your Isaac Sim install (found python.sh). "
@@ -8764,7 +8776,7 @@ def build_geniesim_preflight_report(
             "is available on PYTHONPATH."
         )
 
-    if not status.get("geniesim_installed", False) and not status.get("mock_server_allowed", False):
+    if not _remote_server_ready and not status.get("geniesim_installed", False) and not status.get("mock_server_allowed", False):
         missing.append("Genie Sim checkout (GENIESIM_ROOT)")
         remediation.append(
             "Run tools/geniesim_adapter/deployment/install_geniesim.sh or set GENIESIM_ROOT. "
